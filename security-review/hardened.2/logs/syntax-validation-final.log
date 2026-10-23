@@ -1,0 +1,8 @@
+TypeScript syntax/transpile OK (not full type-check): src/about-settings.ts
+TypeScript syntax/transpile OK (not full type-check): src/provider-settings.ts
+JavaScript syntax OK: scripts/release/build.mjs
+JavaScript syntax OK: scripts/release/updater-manifest.mjs
+JavaScript syntax OK: scripts/release/desktop-build.test.mjs
+JavaScript syntax OK: scripts/release/ci-startup-smoke.mjs
+JavaScript syntax OK: tests/install-policy.test.mjs
+JavaScript syntax OK: tests/open-source.test.mjs

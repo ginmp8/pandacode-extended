@@ -1,0 +1,355 @@
+[WebServer] npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+[WebServer] (node:20359) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 95 tests using 2 workers
+
+(node:20383) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20384) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 tests/agent-updates.spec.ts:34:3 › Hardened agent update policy › startup, elapsed time and focus never check or install updates (2.0s)
+  ✓   2 tests/agent-updates.spec.ts:45:3 › Hardened agent update policy › manual update entry explains policy without contacting a server (4.3s)
+  ✓   4 tests/bots-web.spec.ts:36:3 › bots web chat page › greets with suggestions and hides the token from the address bar (514ms)
+  ✓   5 tests/bots-web.spec.ts:49:3 › bots web chat page › replies render safe markdown and approvals answer with one click (915ms)
+  ✓   6 tests/bots-web.spec.ts:69:3 › bots web chat page › replies use the Enriched Markdown engine for tasks, notes, tables and math (656ms)
+  ✓   7 tests/bots-web.spec.ts:86:3 › bots web chat page › history, idle state and a revoked link (381ms)
+  ✓   3 tests/agent-updates.spec.ts:54:3 › Hardened agent update policy › an old enabled preference does not restore updates after reopening (4.8s)
+  ✓   9 tests/bots-web.spec.ts:106:3 › bots web chat page › without a token it explains how to open the page (326ms)
+  ✓   8 tests/bots-web.spec.ts:94:3 › bots web chat page › a link revoked while open stops polling and sending (1.2s)
+  ✓  10 tests/bots.spec.ts:57:3 › bots › the Bots bar switches the sidebar to the bots, each with its latest message (6.0s)
+  ✓  11 tests/bots.spec.ts:87:3 › bots › a new bot opens its conversation in the task view, with the bot in the header (5.4s)
+  ✓  13 tests/bots.spec.ts:142:3 › bots › the model can be changed in a bot conversation (9.5s)
+  ✓  12 tests/bots.spec.ts:123:3 › bots › chatting with a bot streams like any task and keeps its brief out of the transcript (10.4s)
+  ✓  14 tests/bots.spec.ts:158:3 › bots › GitHub Copilot is selectable in bot setup and appears in the bot chat model picker (3.4s)
+  ✓  15 tests/bots.spec.ts:183:3 › bots › the header pauses the bot and the welcome opens the right settings (4.1s)
+  ✓  16 tests/bots.spec.ts:200:3 › bots › memories can be added and forgotten (5.2s)
+  ✓  17 tests/bots.spec.ts:212:3 › bots › schedules show their timing and can be turned off, run and deleted (4.4s)
+  ✓  18 tests/bots.spec.ts:230:3 › bots › Telegram setup walks through BotFather, catches a bad token, and pairs the first sender (4.9s)
+  ✓  19 tests/bots.spec.ts:266:3 › bots › Slack setup creates the app from a prefilled manifest and spots swapped tokens (4.3s)
+  ✓  20 tests/bots.spec.ts:299:3 › bots › Discord setup offers the server invite and warns when Message Content is off (3.7s)
+  ✓  21 tests/bots.spec.ts:317:3 › bots › WhatsApp setup ends with copyable webhook details built from the tunnel address (4.6s)
+  ✓  23 tests/bots.spec.ts:369:3 › bots › rules validate patterns and list allow, ask and deny (3.5s)
+  ✓  22 tests/bots.spec.ts:344:3 › bots › web chat is one click, and phone access builds a private phone link (4.7s)
+  ✓  25 tests/bots.spec.ts:412:3 › bots › Open chat in settings returns to the conversation (4.2s)
+  ✓  24 tests/bots.spec.ts:383:3 › bots › settings: pause, profile, activity, reset and delete in the modal (5.2s)
+  ✓  26 tests/bots.spec.ts:423:3 › bots › bots are reachable from Go to anything (2.4s)
+  ✓  28 tests/browser.spec.ts:74:3 › browser workspace › file preview errors keep the file list usable (2.0s)
+  ✓  27 tests/browser.spec.ts:60:3 › browser workspace › file previews open HTML and SVG in the browser with a separate source action (4.5s)
+  ✓  30 tests/browser.spec.ts:99:3 › browser workspace › a delayed file preview does not take over a different task (2.1s)
+  ✓  31 tests/browser.spec.ts:111:3 › browser workspace › changing inspector tabs cancels a pending file preview (2.3s)
+  ✓  29 tests/browser.spec.ts:83:3 › browser workspace › response filenames open browser previews and source files in conversation and board (6.3s)
+  ✓  32 tests/browser.spec.ts:122:3 › browser workspace › opens local servers from both browser entry points and refreshes on demand (3.8s)
+  ✓  33 tests/browser.spec.ts:141:3 › browser workspace › normalizes addresses and keeps back and forward navigation in sync (4.0s)
+  ✓  34 tests/browser.spec.ts:159:3 › browser workspace › persistent browser visibility failures wait for an explicit reload instead of retrying continuously (4.3s)
+  ✓  35 tests/browser.spec.ts:175:3 › browser workspace › rejects executable URLs, local files, credentials, and invalid ports before native navigation (3.9s)
+  ✓  36 tests/browser.spec.ts:188:3 › browser workspace › attaches selected elements and screenshots to the composer and allows removal (4.0s)
+  ✓  37 tests/browser.spec.ts:207:3 › browser workspace › keeps an in-flight screenshot attached to its original task after switching tasks (4.2s)
+  ✓  38 tests/browser.spec.ts:223:3 › browser workspace › sends element context and captured image IDs with the selected task (4.3s)
+  ✓  40 tests/browser.spec.ts:278:3 › browser workspace › updates native guest bounds while the right sidebar is resized (3.7s)
+  ✓  39 tests/browser.spec.ts:246:3 › browser workspace › consumes sent screenshots after switching tasks during file loading and preserves newer attachments (7.4s)
+  ✓  41 tests/browser.spec.ts:310:3 › browser workspace › keeps the native guest visible while a non-overlapping composer slash menu opens and filters (4.3s)
+  ✓  42 tests/browser.spec.ts:336:3 › browser workspace › updates native guest visibility when an overlapping floating menu moves and resizes (4.3s)
+  ✓  44 tests/browser.spec.ts:388:3 › browser workspace › restores the guest when a dismissed menu remains in the DOM during a suspended fade (4.4s)
+  ✓  43 tests/browser.spec.ts:365:3 › browser workspace › closes the native guest when leaving the browser and hides it behind modal dialogs and Settings (5.1s)
+  ✓  46 tests/browser.spec.ts:432:3 › native element picker script › captures useful escaped metadata and prevents the selected element action (458ms)
+  ✓  47 tests/browser.spec.ts:449:3 › native element picker script › excludes form values, editable content, and hidden descendants from element context (443ms)
+  ✓  48 tests/browser.spec.ts:470:3 › native element picker script › bounds large DOM context and Escape cancels without affecting the page (1.1s)
+  ✓  45 tests/browser.spec.ts:414:3 › browser workspace › keeps manual URL opening available when local server discovery fails (4.4s)
+  ✓  49 tests/design-canvas.spec.ts:48:1 › renders artboards in sandboxed, script-free frames at their widths (3.9s)
+  ✓  50 tests/design-canvas.spec.ts:61:1 › comments on a clicked element, saves it and sends the prompt (5.0s)
+  ✓  51 tests/design-canvas.spec.ts:91:1 › reloads an artboard the agent rewrote, and pans and zooms (4.7s)
+  ✓  52 tests/generative-ui.spec.ts:30:1 › a table sorts, a chart draws and tabs switch with the keyboard (3.7s)
+  ✓  53 tests/generative-ui.spec.ts:54:1 › buttons and forms fill the composer for the user to send (3.6s)
+  ✓  54 tests/generative-ui.spec.ts:67:1 › custom views are sanitized, scoped and only fill the composer (3.2s)
+  ✓  55 tests/generative-ui.spec.ts:95:1 › invalid specs fall back to their source, unknown types to their data, open fences wait (3.6s)
+  ✓  56 tests/generative-ui.spec.ts:106:1 › stats, tree, diff, code and checklist render as labelled, copyable views (4.0s)
+  ✓  57 tests/generative-ui.spec.ts:128:1 › details collapse, follow-up directives become chips, code blocks copy and mermaid shows its source (4.1s)
+  ✓  58 tests/jev.spec.ts:84:1 › Jev settings persist opt-in and never return saved keys to inputs (11.7s)
+  ✓  59 tests/jev.spec.ts:112:1 › Jev setup remains editable after errors and shows installation progress (12.3s)
+  ✓  60 tests/jev.spec.ts:129:1 › browser entry prefills the current URL and mobile checks send exact options (6.3s)
+  ✓  61 tests/jev.spec.ts:152:1 › browser Jev popover anchors, dismisses, and preserves the form during live reports (5.4s)
+  ✓  62 tests/jev.spec.ts:187:1 › browser Jev popover fits a narrow light window and setup opens from its notice (4.9s)
+  ✓  63 tests/jev.spec.ts:209:3 › Jev popover fits long server lists and expanded options at 140% text size in 1440px (6.8s)
+  ✓  64 tests/jev.spec.ts:209:3 › Jev popover fits long server lists and expanded options at 160% text size in 480px (5.6s)
+  ✓  65 tests/jev.spec.ts:282:1 › Jev popover keeps its header and Run button reachable in a short enlarged window (4.8s)
+  ✓  66 tests/jev.spec.ts:313:1 › Jev popover keeps explanations behind accessible information buttons without losing the draft (5.2s)
+  ✓  67 tests/jev.spec.ts:365:1 › Jev popover uses translucent blur and respects reduced transparency preferences (3.5s)
+  ✓  68 tests/jev.spec.ts:396:1 › streaming preserves the draft DOM, isolates tasks, and never treats DONE as a verified pass (3.8s)
+  ✓  69 tests/jev.spec.ts:422:1 › completed reports attach concise observed evidence to the selected task prompt (3.7s)
+  ✓  70 tests/jev.spec.ts:434:1 › a saved test can open in the sidebar from its report modal (3.6s)
+  ✓  71 tests/jev.spec.ts:447:1 › runs are cancellable and live activity follows conversation and board detail (4.6s)
+  ✓  72 tests/jev.spec.ts:464:1 › closing or replacing settings clears draft credentials and ignores late work (4.2s)
+  ✓  73 tests/jev.spec.ts:484:1 › runtime errors recover and unsafe URLs never reach the native test runner (4.0s)
+  ✓  75 tests/markdown.spec.ts:23:3 › enriched markdown › renders CommonMark and GitHub extensions (1.2s)
+  ✓  76 tests/markdown.spec.ts:40:3 › enriched markdown › shows task lists, admonitions and aligned tables (1.2s)
+  ✓  74 tests/jev.spec.ts:499:1 › Jev panels stay inside a narrow viewport in both themes (4.4s)
+  ✓  78 tests/markdown.spec.ts:66:3 › enriched markdown › never turns agent text into markup, scripts or loaded media (1.3s)
+  ✓  77 tests/markdown.spec.ts:56:3 › enriched markdown › typesets inline and display math, but leaves prices alone (1.7s)
+  ✓  80 tests/markdown.spec.ts:83:3 › enriched markdown › the parser runs under the app CSP, which needs wasm-unsafe-eval (592ms)
+  ✓  79 tests/markdown.spec.ts:77:3 › enriched markdown › keeps local file links as workspace paths (1.2s)
+  ✓  81 tests/remote.spec.ts:13:1 › signs in with a device code, toggles remote control and lists devices (4.6s)
+  ✓  82 tests/remote.spec.ts:67:1 › the computer choice appears once signed in, one row per computer (4.5s)
+  ✓  83 tests/remote.spec.ts:85:1 › a new task starts on another computer and is an ordinary task with a locked computer (4.4s)
+  ✓  84 tests/remote.spec.ts:111:1 › GitHub behind this computer asks first: Cancel keeps the draft, Continue starts (4.9s)
+  ✓  86 tests/remote.spec.ts:146:1 › sign-in can be cancelled (3.4s)
+  ✓  85 tests/remote.spec.ts:133:1 › a project without a GitHub remote cannot start on another computer (4.9s)
+  ✓  87 tests/remote.spec.ts:158:1 › the trust toggle shows without host mode (5.1s)
+  ✓  88 tests/remote.spec.ts:171:1 › picking another computer limits the picker to its catalog, and local is restored (6.6s)
+  ✓  89 tests/remote.spec.ts:188:1 › a model missing on the chosen computer is swapped, with a notice (11.2s)
+  ✓  90 tests/remote.spec.ts:202:1 › a task running on another computer lists that computer’s catalog (11.7s)
+  ✘  91 tests/vm.spec.ts:54:1 › VM start does not install packages; Add a desktop remains an explicit action (20.4s)
+(node:35883) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  92 tests/vm.spec.ts:77:1 › clicks, drags, scrolls and typing reach the VM in screen pixels (20.5s)
+(node:36026) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  93 tests/vm.spec.ts:103:1 › shares the project read-only when asked, and a VM can be deleted (20.4s)
+(node:36179) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  94 tests/vm.spec.ts:138:1 › connecting a cloud provider checks the key and offers its machines (20.4s)
+  ✘  95 tests/vm.spec.ts:162:1 › a cloud desktop streams its screen and takes input; a commands-only sandbox explains itself (20.3s)
+
+
+  1) tests/vm.spec.ts:54:1 › VM start does not install packages; Add a desktop remains an explicit action 
+
+    Test timeout of 20000ms exceeded.
+
+    Error: locator.click: Test timeout of 20000ms exceeded.
+    Call log:
+      - waiting for locator('.inspector-tabs [data-action="tab-vm"]')
+        - locator resolved to <button hidden="" data-action="tab-vm" title="Virtual machines" aria-label="Virtual machines">…</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+          - waiting 100ms
+        35 × waiting for element to be visible, enabled and stable
+           - element is not visible
+         - retrying click action
+           - waiting 500ms
+
+
+      37 |   await expect(page.locator('#prompt')).toBeVisible();
+      38 |   if (!(await page.locator('#inspector').isVisible())) await page.locator('#inspector-toggle').click();
+    > 39 |   await page.locator('.inspector-tabs [data-action="tab-vm"]').click();
+         |                                                                ^
+      40 |   await expect(page.locator('#inspector-content')).toBeHidden();
+      41 |   await expect(panel(page)).toBeVisible();
+      42 | }
+        at open (/workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:39:64)
+        at /workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:55:3
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/vm-VM-start-does-not-insta-e7168--remains-an-explicit-action/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/vm-VM-start-does-not-insta-e7168--remains-an-explicit-action/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/vm-VM-start-does-not-insta-e7168--remains-an-explicit-action/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/vm-VM-start-does-not-insta-e7168--remains-an-explicit-action/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) tests/vm.spec.ts:77:1 › clicks, drags, scrolls and typing reach the VM in screen pixels ───────
+
+    Test timeout of 20000ms exceeded.
+
+    Error: locator.click: Test timeout of 20000ms exceeded.
+    Call log:
+      - waiting for locator('.inspector-tabs [data-action="tab-vm"]')
+        - locator resolved to <button hidden="" data-action="tab-vm" title="Virtual machines" aria-label="Virtual machines">…</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+          - waiting 100ms
+        35 × waiting for element to be visible, enabled and stable
+           - element is not visible
+         - retrying click action
+           - waiting 500ms
+
+
+      37 |   await expect(page.locator('#prompt')).toBeVisible();
+      38 |   if (!(await page.locator('#inspector').isVisible())) await page.locator('#inspector-toggle').click();
+    > 39 |   await page.locator('.inspector-tabs [data-action="tab-vm"]').click();
+         |                                                                ^
+      40 |   await expect(page.locator('#inspector-content')).toBeHidden();
+      41 |   await expect(panel(page)).toBeVisible();
+      42 | }
+        at open (/workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:39:64)
+        at /workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:78:3
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/vm-clicks-drags-scrolls-an-b940f-ach-the-VM-in-screen-pixels/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/vm-clicks-drags-scrolls-an-b940f-ach-the-VM-in-screen-pixels/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/vm-clicks-drags-scrolls-an-b940f-ach-the-VM-in-screen-pixels/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/vm-clicks-drags-scrolls-an-b940f-ach-the-VM-in-screen-pixels/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3) tests/vm.spec.ts:103:1 › shares the project read-only when asked, and a VM can be deleted ─────
+
+    Test timeout of 20000ms exceeded.
+
+    Error: locator.click: Test timeout of 20000ms exceeded.
+    Call log:
+      - waiting for locator('.inspector-tabs [data-action="tab-vm"]')
+        - locator resolved to <button hidden="" data-action="tab-vm" title="Virtual machines" aria-label="Virtual machines">…</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+          - waiting 100ms
+        34 × waiting for element to be visible, enabled and stable
+           - element is not visible
+         - retrying click action
+           - waiting 500ms
+
+
+      37 |   await expect(page.locator('#prompt')).toBeVisible();
+      38 |   if (!(await page.locator('#inspector').isVisible())) await page.locator('#inspector-toggle').click();
+    > 39 |   await page.locator('.inspector-tabs [data-action="tab-vm"]').click();
+         |                                                                ^
+      40 |   await expect(page.locator('#inspector-content')).toBeHidden();
+      41 |   await expect(panel(page)).toBeVisible();
+      42 | }
+        at open (/workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:39:64)
+        at /workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:104:3
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/vm-shares-the-project-read-054ba-ked-and-a-VM-can-be-deleted/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/vm-shares-the-project-read-054ba-ked-and-a-VM-can-be-deleted/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/vm-shares-the-project-read-054ba-ked-and-a-VM-can-be-deleted/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/vm-shares-the-project-read-054ba-ked-and-a-VM-can-be-deleted/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  4) tests/vm.spec.ts:138:1 › connecting a cloud provider checks the key and offers its machines ───
+
+    Test timeout of 20000ms exceeded.
+
+    Error: locator.click: Test timeout of 20000ms exceeded.
+    Call log:
+      - waiting for locator('.inspector-tabs [data-action="tab-vm"]')
+        - locator resolved to <button hidden="" data-action="tab-vm" title="Virtual machines" aria-label="Virtual machines">…</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+          - waiting 100ms
+        35 × waiting for element to be visible, enabled and stable
+           - element is not visible
+         - retrying click action
+           - waiting 500ms
+
+
+      37 |   await expect(page.locator('#prompt')).toBeVisible();
+      38 |   if (!(await page.locator('#inspector').isVisible())) await page.locator('#inspector-toggle').click();
+    > 39 |   await page.locator('.inspector-tabs [data-action="tab-vm"]').click();
+         |                                                                ^
+      40 |   await expect(page.locator('#inspector-content')).toBeHidden();
+      41 |   await expect(panel(page)).toBeVisible();
+      42 | }
+        at open (/workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:39:64)
+        at /workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:139:3
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/vm-connecting-a-cloud-prov-f6795-key-and-offers-its-machines/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/vm-connecting-a-cloud-prov-f6795-key-and-offers-its-machines/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/vm-connecting-a-cloud-prov-f6795-key-and-offers-its-machines/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/vm-connecting-a-cloud-prov-f6795-key-and-offers-its-machines/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  5) tests/vm.spec.ts:162:1 › a cloud desktop streams its screen and takes input; a commands-only sandbox explains itself 
+
+    Test timeout of 20000ms exceeded.
+
+    Error: locator.click: Test timeout of 20000ms exceeded.
+    Call log:
+      - waiting for locator('.inspector-tabs [data-action="tab-vm"]')
+        - locator resolved to <button hidden="" data-action="tab-vm" title="Virtual machines" aria-label="Virtual machines">…</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is not visible
+        - retrying click action
+          - waiting 100ms
+        35 × waiting for element to be visible, enabled and stable
+           - element is not visible
+         - retrying click action
+           - waiting 500ms
+
+
+      37 |   await expect(page.locator('#prompt')).toBeVisible();
+      38 |   if (!(await page.locator('#inspector').isVisible())) await page.locator('#inspector-toggle').click();
+    > 39 |   await page.locator('.inspector-tabs [data-action="tab-vm"]').click();
+         |                                                                ^
+      40 |   await expect(page.locator('#inspector-content')).toBeHidden();
+      41 |   await expect(panel(page)).toBeVisible();
+      42 | }
+        at open (/workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:39:64)
+        at /workspace/scratch/7bb22a8dc8ed/audit/pandacode-0.3.28-hardened/tests/vm.spec.ts:163:3
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/vm-a-cloud-desktop-streams-d179c-nly-sandbox-explains-itself/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/vm-a-cloud-desktop-streams-d179c-nly-sandbox-explains-itself/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/vm-a-cloud-desktop-streams-d179c-nly-sandbox-explains-itself/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/vm-a-cloud-desktop-streams-d179c-nly-sandbox-explains-itself/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  5 failed
+    tests/vm.spec.ts:54:1 › VM start does not install packages; Add a desktop remains an explicit action 
+    tests/vm.spec.ts:77:1 › clicks, drags, scrolls and typing reach the VM in screen pixels ────────
+    tests/vm.spec.ts:103:1 › shares the project read-only when asked, and a VM can be deleted ──────
+    tests/vm.spec.ts:138:1 › connecting a cloud provider checks the key and offers its machines ────
+    tests/vm.spec.ts:162:1 › a cloud desktop streams its screen and takes input; a commands-only sandbox explains itself 
+  90 passed (4.2m)

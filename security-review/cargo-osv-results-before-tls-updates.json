@@ -1,0 +1,1510 @@
+{
+  "checked_at": "2026-10-23T05:17:42.163378+00:00",
+  "lock_sha256": "acb4ae7f8936fa6dd39c181fd8283efa8449301be8b894c0e21dc1a4f7363db9",
+  "registry_packages": 593,
+  "matches": [
+    {
+      "name": "glib",
+      "version": "0.18.5",
+      "advisories": [
+        "GHSA-wrw7-89jp-8q8g",
+        "RUSTSEC-2024-0429"
+      ]
+    },
+    {
+      "name": "proc-macro-error",
+      "version": "1.0.4",
+      "advisories": [
+        "RUSTSEC-2024-0370"
+      ]
+    },
+    {
+      "name": "rustls",
+      "version": "0.23.45",
+      "advisories": [
+        "RUSTSEC-2026-0346",
+        "RUSTSEC-2026-0347",
+        "RUSTSEC-2026-0348",
+        "RUSTSEC-2026-0349"
+      ]
+    },
+    {
+      "name": "rustls-webpki",
+      "version": "0.103.15",
+      "advisories": [
+        "RUSTSEC-2026-0382"
+      ]
+    },
+    {
+      "name": "unic-char-property",
+      "version": "0.9.0",
+      "advisories": [
+        "RUSTSEC-2025-0081"
+      ]
+    },
+    {
+      "name": "unic-char-range",
+      "version": "0.9.0",
+      "advisories": [
+        "RUSTSEC-2025-0075"
+      ]
+    },
+    {
+      "name": "unic-common",
+      "version": "0.9.0",
+      "advisories": [
+        "RUSTSEC-2025-0080"
+      ]
+    },
+    {
+      "name": "unic-ucd-ident",
+      "version": "0.9.0",
+      "advisories": [
+        "RUSTSEC-2025-0100"
+      ]
+    },
+    {
+      "name": "unic-ucd-version",
+      "version": "0.9.0",
+      "advisories": [
+        "RUSTSEC-2025-0098"
+      ]
+    },
+    {
+      "name": "webpki-root-certs",
+      "version": "1.0.9",
+      "advisories": [
+        "RUSTSEC-2026-0383"
+      ]
+    },
+    {
+      "name": "webpki-roots",
+      "version": "1.0.9",
+      "advisories": [
+        "RUSTSEC-2026-0381"
+      ]
+    },
+    {
+      "name": "zbus_names",
+      "version": "3.0.0",
+      "advisories": [
+        "RUSTSEC-2026-0371"
+      ]
+    },
+    {
+      "name": "zip",
+      "version": "2.4.2",
+      "advisories": [
+        "RUSTSEC-2026-0367",
+        "RUSTSEC-2026-0368",
+        "RUSTSEC-2026-0369"
+      ]
+    },
+    {
+      "name": "zvariant",
+      "version": "4.2.0",
+      "advisories": [
+        "RUSTSEC-2026-0370"
+      ]
+    },
+    {
+      "name": "zvariant_derive",
+      "version": "4.2.0",
+      "advisories": [
+        "RUSTSEC-2026-0372"
+      ]
+    }
+  ],
+  "advisories": {
+    "GHSA-wrw7-89jp-8q8g": {
+      "id": "GHSA-wrw7-89jp-8q8g",
+      "summary": "Unsoundness in `Iterator` and `DoubleEndedIterator` impls for `glib::VariantStrIter`",
+      "details": "The `VariantStrIter::impl_get` function (called internally by implementations of the `Iterator` and `DoubleEndedIterator` traits for this type) was unsound, resulting in undefined behaviour.\n\nAn immutable reference `&p` to a `*mut libc::c_char` pointer initialized to `NULL` was passed as an argument to a C function that that mutates the pointer behind `&p` in-place (i.e. as an out-argument), which was unsound. After changes in recent versions of the Rust compiler, these unsound writes through `&p` now seem to be completely disregarded when building the `glib` crate with optimizations.\n\nThis subsequently caused all calls of `VariantStrIter::impl_get` to violate the safety requirements of the `std::ffi::CStr::from_ptr` function - which requires its argument to be a valid pointer to a C-style string - resulting in crashes due to `NULL` pointer dereferences.\n\nThis was fixed by passing the out-argument pointer explitly as `&mut p` instead of `&p`.\n\nThis issue has been present since this code was initially added in `glib` v0.15.0. The mismatch in mutability was likely missed (and not raised as an error by the compiler) because the C function wrapped by `VariantStrIter::impl_get` is variadic (`glib_sys::g_variant_get_child`), and the pointer in question is one of the variadic arguments.\n\n",
+      "aliases": [
+        "RUSTSEC-2024-0429"
+      ],
+      "modified": "2025-10-28T06:29:26.473225Z",
+      "published": "2024-12-23T20:19:24Z",
+      "database_specific": {
+        "github_reviewed_at": "2024-12-23T20:19:24Z",
+        "nvd_published_at": null,
+        "cwe_ids": [],
+        "severity": "MODERATE",
+        "github_reviewed": true
+      },
+      "references": [
+        {
+          "type": "WEB",
+          "url": "https://github.com/gtk-rs/gtk-rs-core/pull/1343"
+        },
+        {
+          "type": "PACKAGE",
+          "url": "https://github.com/gtk-rs/gtk-rs-core"
+        },
+        {
+          "type": "WEB",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2024-0429.html"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "glib",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/glib"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.15.0"
+                },
+                {
+                  "fixed": "0.20.0"
+                }
+              ]
+            }
+          ],
+          "database_specific": {
+            "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2024/12/GHSA-wrw7-89jp-8q8g/GHSA-wrw7-89jp-8q8g.json"
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V4",
+          "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N"
+        }
+      ]
+    },
+    "RUSTSEC-2024-0370": {
+      "id": "RUSTSEC-2024-0370",
+      "summary": "proc-macro-error is unmaintained",
+      "details": "proc-macro-error's maintainer seems to be unreachable, with no commits for 2 years, no releases pushed for 4 years, and no activity on the GitLab repo or response to email.\n\nproc-macro-error also depends on `syn 1.x`, which may be bringing duplicate dependencies into dependant build trees.\n\n## Possible Alternative(s)\n\n- [manyhow](https://crates.io/crates/manyhow)\n- [proc-macro2-diagnostics](https://github.com/SergioBenitez/proc-macro2-diagnostics)",
+      "modified": "2026-06-07T20:00:03.923932350Z",
+      "published": "2024-09-01T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/proc-macro-error"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2024-0370.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://gitlab.com/CreepySkeleton/proc-macro-error/-/issues/20"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "proc-macro-error",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/proc-macro-error"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "categories": [],
+            "cvss": null,
+            "informational": "unmaintained",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0370.json"
+          }
+        }
+      ],
+      "schema_version": "1.7.5"
+    },
+    "RUSTSEC-2024-0429": {
+      "id": "RUSTSEC-2024-0429",
+      "summary": "Unsoundness in `Iterator` and `DoubleEndedIterator` impls for `glib::VariantStrIter`",
+      "details": "The `VariantStrIter::impl_get` function (called internally by implementations of the `Iterator` and `DoubleEndedIterator` traits for this type) was unsound, resulting in undefined behaviour.\n\nAn immutable reference `&p` to a `*mut libc::c_char` pointer initialized to `NULL` was passed as an argument to a C function that that mutates the pointer behind `&p` in-place (i.e. as an out-argument), which was unsound. After changes in recent versions of the Rust compiler, these unsound writes through `&p` now seem to be completely disregarded when building the `glib` crate with optimizations.\n\nThis subsequently caused all calls of `VariantStrIter::impl_get` to violate the safety requirements of the `std::ffi::CStr::from_ptr` function - which requires its argument to be a valid pointer to a C-style string - resulting in crashes due to `NULL` pointer dereferences.\n\nThis was fixed by passing the out-argument pointer explitly as `&mut p` instead of `&p`.\n\nThis issue has been present since this code was initially added in `glib` v0.15.0. The mismatch in mutability was likely missed (and not raised as an error by the compiler) because the C function wrapped by `VariantStrIter::impl_get` is variadic (`glib_sys::g_variant_get_child`), and the pointer in question is one of the variadic arguments.",
+      "aliases": [
+        "GHSA-wrw7-89jp-8q8g"
+      ],
+      "modified": "2025-10-28T06:29:26.473225Z",
+      "published": "2024-03-30T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/glib"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2024-0429.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/gtk-rs/gtk-rs-core/pull/1343"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "glib",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/glib"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.15.0"
+                },
+                {
+                  "fixed": "0.20.0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "functions": [
+                "glib::VariantStrIter::last",
+                "glib::VariantStrIter::next",
+                "glib::VariantStrIter::next_back",
+                "glib::VariantStrIter::nth",
+                "glib::VariantStrIter::nth_back"
+              ],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "cvss": null,
+            "informational": "unsound",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0429.json",
+            "categories": []
+          }
+        }
+      ],
+      "schema_version": "1.7.3"
+    },
+    "RUSTSEC-2025-0075": {
+      "id": "RUSTSEC-2025-0075",
+      "summary": "`unic-char-range` is unmaintained",
+      "details": "All Unicode crates that are part of https://github.com/open-i18n/rust-unic are unmaintained.\n\n## Recommended alternatives\n\n- Since version [1.45.0](https://releases.rs/docs/1.45.0/#libraries) Rust [supports](https://github.com/rust-lang/rust/pull/72413/) using `char` with `ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo}` to iterate over a range of codepoints.",
+      "modified": "2025-10-22T14:41:04Z",
+      "published": "2025-10-18T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/unic-char-range"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2025-0075.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "unic-char-range",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/unic-char-range"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "functions": [],
+              "os": [],
+              "arch": []
+            }
+          },
+          "database_specific": {
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2025-0075.json",
+            "categories": [],
+            "cvss": null,
+            "informational": "unmaintained"
+          }
+        }
+      ],
+      "schema_version": "1.7.3"
+    },
+    "RUSTSEC-2025-0080": {
+      "id": "RUSTSEC-2025-0080",
+      "summary": "`unic-common` is unmaintained",
+      "details": "All Unicode crates that are part of https://github.com/open-i18n/rust-unic are unmaintained.",
+      "modified": "2025-10-21T11:12:59Z",
+      "published": "2025-10-18T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/unic-common"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2025-0080.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "unic-common",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/unic-common"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "functions": [],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "categories": [],
+            "cvss": null,
+            "informational": "unmaintained",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2025-0080.json"
+          }
+        }
+      ],
+      "schema_version": "1.7.3"
+    },
+    "RUSTSEC-2025-0081": {
+      "id": "RUSTSEC-2025-0081",
+      "summary": "`unic-char-property` is unmaintained",
+      "details": "All Unicode crates that are part of https://github.com/open-i18n/rust-unic are unmaintained.\n\n## Recommended alternatives\n\n- [`icu_properties`](https://crates.io/crates/icu_properties)",
+      "modified": "2025-10-21T11:12:59Z",
+      "published": "2025-10-18T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/unic-char-property"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2025-0081.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "unic-char-property",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/unic-char-property"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "functions": [],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "informational": "unmaintained",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2025-0081.json",
+            "categories": [],
+            "cvss": null
+          }
+        }
+      ],
+      "schema_version": "1.7.3"
+    },
+    "RUSTSEC-2025-0098": {
+      "id": "RUSTSEC-2025-0098",
+      "summary": "`unic-ucd-version` is unmaintained",
+      "details": "All Unicode crates that are part of https://github.com/open-i18n/rust-unic are unmaintained.",
+      "modified": "2025-10-21T11:12:59Z",
+      "published": "2025-10-18T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/unic-ucd-version"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2025-0098.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "unic-ucd-version",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/unic-ucd-version"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "functions": [],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "categories": [],
+            "cvss": null,
+            "informational": "unmaintained",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2025-0098.json"
+          }
+        }
+      ],
+      "schema_version": "1.7.3"
+    },
+    "RUSTSEC-2025-0100": {
+      "id": "RUSTSEC-2025-0100",
+      "summary": "`unic-ucd-ident` is unmaintained",
+      "details": "All Unicode crates that are part of https://github.com/open-i18n/rust-unic are unmaintained.\n\n## Recommended alternatives\n\n- [`icu_properties`](https://crates.io/crates/icu_properties)\n- [`unicode-ident`](https://crates.io/crates/unicode-ident)",
+      "modified": "2025-10-21T11:12:59Z",
+      "published": "2025-10-18T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/unic-ucd-ident"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2025-0100.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "unic-ucd-ident",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/unic-ucd-ident"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "functions": [],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "informational": "unmaintained",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2025-0100.json",
+            "categories": [],
+            "cvss": null
+          }
+        }
+      ],
+      "schema_version": "1.7.3"
+    },
+    "RUSTSEC-2026-0346": {
+      "id": "RUSTSEC-2026-0346",
+      "summary": "`Debug` impls for client session values expose TLS secrets",
+      "details": "The `Debug` implementations of `Tls12ClientSessionValue` and\n`Tls13ClientSessionValue` were derived, and so included the TLS 1.2 master\nsecret or TLS 1.3 resumption PSK in their output.\n\nCustom `ClientSessionStore` implementations that format these values with\n`Debug` (for example, when logging) could disclose these secrets to readers of\nthe logs. This conflicts with rustls's\n[key-material redaction policy](https://github.com/rustls/rustls/blob/99f2358cae2954837dbb866faf6727de75489ab9/SECURITY.md#boundary-public-api).\n\nOrdinary connection and built-in session cache `Debug` output is redacted and\nis not affected.",
+      "aliases": [
+        "GHSA-c8m5-c952-6cm4"
+      ],
+      "modified": "2026-10-14T13:30:02.480694744Z",
+      "published": "2026-10-14T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/rustls"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0346.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/rustls/pull/3299"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "rustls",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/rustls"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.21.0"
+                },
+                {
+                  "fixed": "0.23.46"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "os": [],
+              "functions": [],
+              "arch": []
+            }
+          },
+          "database_specific": {
+            "cvss": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "informational": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0346.json",
+            "categories": [
+              "crypto-failure"
+            ]
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N"
+        }
+      ]
+    },
+    "RUSTSEC-2026-0347": {
+      "id": "RUSTSEC-2026-0347",
+      "summary": "Buffered application data sent to outer server after ECH rejection",
+      "details": "When a server rejects Encrypted Client Hello (ECH), the client completes the\nhandshake using the outer ClientHello and authenticates the server against the\nECH config's `public_name`. At the end of that handshake, rustls encrypted and\nqueued any application data buffered via `ClientConnection::writer()` *before*\nqueueing the `ech_required` alert.\n\nThe application correctly receives\n`Error::PeerIncompatible(ServerRejectedEncryptedClientHello)`, but the next\n`write_tls()` call (needed to send the alert) also sends the buffered\napplication data. Plaintext meant for the inner server therefore goes to the\nclient-facing server named by `public_name`.\n\nThat server is authenticated, so this is not exploitable by an unauthenticated\nparty, but it violates RFC 9849 section 6.1.6, which requires the client to\nabort with `ech_required` \"before sending any application data to the server\".\n\nThis affects only clients that:\n\n- use `EchMode::Enable` (GREASE ECH is not affected),\n- write application data before the handshake completes, and\n- connect to a server that rejects their ECH config (for example, because it is stale).\n\nThe underlying ordering bug is older, but before 0.23.44 the client checked\nthe server certificate against the inner server name rather than `public_name`,\nso certificate verification failed first and no data was sent.",
+      "aliases": [
+        "GHSA-vp88-798v-h67f"
+      ],
+      "modified": "2026-10-14T13:30:02.472103370Z",
+      "published": "2026-10-14T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/rustls"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0347.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/rustls/pull/3300"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "rustls",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/rustls"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.23.44"
+                },
+                {
+                  "fixed": "0.23.46"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "os": [],
+              "functions": [],
+              "arch": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "cvss": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+            "informational": null,
+            "categories": [
+              "crypto-failure"
+            ],
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0347.json"
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N"
+        }
+      ]
+    },
+    "RUSTSEC-2026-0348": {
+      "id": "RUSTSEC-2026-0348",
+      "summary": "Brotli certificate decompression can allocate up to 1 GiB before authentication",
+      "details": "The built-in Brotli certificate decompressor (enabled by the non-default\n`brotli` crate feature) bounded the size of the decompressed output, but\naccepted a peer-selected history window. Brotli's large-window extension was\nenabled, so a five-byte header could cause an allocation of 1 GiB. A peer can\nabort a process whose allocator cannot satisfy that request.\n\nNo trusted certificate is required by the attacker. Affected configurations are:\n\n- clients that enable the `brotli` feature and connect to a malicious server, and\n- servers that enable the `brotli` feature and request client certificates.\n\nApplications that do not enable the `brotli` feature are not affected.",
+      "aliases": [
+        "GHSA-h2v8-394m-p7vv"
+      ],
+      "modified": "2026-10-14T13:30:02.480925286Z",
+      "published": "2026-10-14T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/rustls"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0348.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/rustls/pull/3297"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "rustls",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/rustls"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.23.9"
+                },
+                {
+                  "fixed": "0.23.46"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "functions": [],
+              "arch": [],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "informational": null,
+            "categories": [
+              "denial-of-service"
+            ],
+            "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0348.json"
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L"
+        }
+      ]
+    },
+    "RUSTSEC-2026-0349": {
+      "id": "RUSTSEC-2026-0349",
+      "summary": "Unauthenticated ServerHello can downgrade later connections to classical key exchange",
+      "details": "The client recorded the server-selected key exchange group for each server\nname when processing the ServerHello, before the server was authenticated.\nThis record is used to predict which key share to send in future ClientHellos\nto that server name.\n\nA network attacker can answer one connection attempt with a ServerHello\nselecting X25519, and then close the connection. Later ClientHellos for that\nname carry only an X25519 key share, while `supported_groups` still lists\nX25519MLKEM768 first. If the genuine server accepts that share rather than\nsending a HelloRetryRequest for its preferred hybrid group, the handshake\ncompletes with classical-only key exchange and no error. This persists for as\nlong as the entry stays in the client's session store.\n\nThe impact is loss of post-quantum confidentiality for affected connections\n(\"harvest now, decrypt later\"). There is no key compromise and no\nauthentication bypass.\n\nThe following are not affected:\n\n- connections to servers which send a HelloRetryRequest for their preferred group,\n- clients with resumption disabled (as nothing is stored), and\n- other server names.\n\nThis behaviour is discussed in\n[draft-ietf-tls-key-share-prediction](https://www.ietf.org/archive/id/draft-ietf-tls-key-share-prediction-01.html#name-security-considerations),\nso the practical impact depends largely on server policy.",
+      "aliases": [
+        "GHSA-w44r-93j7-qv28"
+      ],
+      "modified": "2026-10-14T13:30:02.475705129Z",
+      "published": "2026-10-14T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/rustls"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0349.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/rustls/pull/3355"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "rustls",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/rustls"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "0.23.46"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "informational": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0349.json",
+            "categories": [
+              "crypto-failure"
+            ]
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        }
+      ]
+    },
+    "RUSTSEC-2026-0367": {
+      "id": "RUSTSEC-2026-0367",
+      "summary": " Insecure Preservation of SUID/SGID Bits during ZIP Extraction Leading to Potential Privilege Escalation",
+      "details": "The `zip` crate preserves privileged Unix permission bits (SUID, SGID, and sticky bits) from ZIP `external_attributes` during extraction, instead of masking them to safe permission bits. If a privileged process (for example, `root` in an installer, CI/CD pipeline, or container build) extracts an attacker-controlled ZIP archive using `ZipArchive::extract()` or the stream extraction API, files can be created as setuid-root or setgid. This behavior allows the creation of SUID/SGID files during extraction, which can lead to local privilege escalation depending on the execution environment.\n\nFor further details see: https://github.com/zip-rs/zip2/security/advisories/GHSA-vv5m-jxxh-4627",
+      "aliases": [
+        "GHSA-vv5m-jxxh-4627"
+      ],
+      "modified": "2026-10-16T23:30:02.392172556Z",
+      "published": "2026-10-09T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/zip"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0367.html"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "zip",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/zip"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "9.0.0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "informational": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0367.json",
+            "categories": [
+              "privilege-escalation"
+            ],
+            "cvss": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H"
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H"
+        }
+      ]
+    },
+    "RUSTSEC-2026-0368": {
+      "id": "RUSTSEC-2026-0368",
+      "summary": "zip: `ZipArchive::extract` creates symbolic links whose attacker-controlled targets are outside the destination directory",
+      "details": "In `zip` 9.0.0-pre2, `ZipArchive::extract` creates a symbolic link from an archive entry after validating only the output entry path. The link target bytes are passed directly to the platform symlink API, so a malicious archive can create an entry inside the destination that resolves to an attacker-chosen path outside it. This behavior was verified on macOS and Linux. On either platform, a subsequent application read or write through that extracted entry accesses the external target with the extracting process's permissions.\n\nFor further details see: https://github.com/zip-rs/zip2/security/advisories/GHSA-4v9h-p7m9-rh26",
+      "aliases": [
+        "GHSA-4v9h-p7m9-rh26"
+      ],
+      "modified": "2026-10-16T23:30:02.383750571Z",
+      "published": "2026-10-09T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/zip"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0368.html"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "zip",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/zip"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "9.0.0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "functions": [],
+              "arch": [],
+              "os": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "categories": [
+              "privilege-escalation"
+            ],
+            "cvss": null,
+            "informational": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0368.json"
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    },
+    "RUSTSEC-2026-0369": {
+      "id": "RUSTSEC-2026-0369",
+      "summary": "ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target",
+      "details": "`ZipStreamReader::extract()` applies Unix permissions through extracted symlinks without validating the symlink target stays within the destination\n\nFor further details see: https://github.com/zip-rs/zip2/security/advisories/GHSA-4684-h2q9-2vcp",
+      "aliases": [
+        "GHSA-4684-h2q9-2vcp"
+      ],
+      "modified": "2026-10-16T23:30:02.387698467Z",
+      "published": "2026-10-10T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/zip"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0369.html"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "zip",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/zip"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "9.0.0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0369.json",
+            "categories": [
+              "privilege-escalation"
+            ],
+            "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "informational": null
+          }
+        }
+      ],
+      "schema_version": "1.9.0",
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H"
+        }
+      ]
+    },
+    "RUSTSEC-2026-0370": {
+      "id": "RUSTSEC-2026-0370",
+      "summary": "`zvariant` is unmaintained",
+      "details": "The `zvariant` crate is no longer maintained as a standalone crate.\n\nIt has been merged into [`zbus`](https://crates.io/crates/zbus) starting with version `6.0.0`, as its `wire` module.\n\nUsers should migrate to [`zbus`](https://crates.io/crates/zbus), with its default features disabled if they only need the D-Bus wire format. Users of the GVariant format should migrate to [`zgvariant`](https://crates.io/crates/zgvariant).",
+      "modified": "2026-10-17T15:30:02.390032532Z",
+      "published": "2026-10-16T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/zvariant"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0370.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/z-galaxy/zbus/issues/2043"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "zvariant",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/zvariant"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            }
+          },
+          "database_specific": {
+            "informational": "unmaintained",
+            "categories": [],
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0370.json",
+            "cvss": null
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    },
+    "RUSTSEC-2026-0371": {
+      "id": "RUSTSEC-2026-0371",
+      "summary": "`zbus_names` is unmaintained",
+      "details": "The `zbus_names` crate is no longer maintained as a standalone crate.\n\nIt has been merged into [`zbus`](https://crates.io/crates/zbus) starting with version `6.0.0`, as its `names` module.\n\nUsers should migrate to [`zbus`](https://crates.io/crates/zbus), with its default features disabled if they only need the D-Bus name types.",
+      "modified": "2026-10-17T15:30:02.407875527Z",
+      "published": "2026-10-16T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/zbus_names"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0371.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/z-galaxy/zbus/issues/2043"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "zbus_names",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/zbus_names"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "functions": [],
+              "arch": [],
+              "os": []
+            }
+          },
+          "database_specific": {
+            "informational": "unmaintained",
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0371.json",
+            "categories": [],
+            "cvss": null
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    },
+    "RUSTSEC-2026-0372": {
+      "id": "RUSTSEC-2026-0372",
+      "summary": "`zvariant_derive` is unmaintained",
+      "details": "The `zvariant_derive` crate is no longer maintained as a standalone crate.\n\nIts derive macros are provided by [`zbus`](https://crates.io/crates/zbus) starting with version `6.0.0`.\n\nUsers should migrate to [`zbus`](https://crates.io/crates/zbus), with its default features disabled if they only need the D-Bus wire format.",
+      "modified": "2026-10-17T15:30:02.394812511Z",
+      "published": "2026-10-16T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/zvariant_derive"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0372.html"
+        },
+        {
+          "type": "REPORT",
+          "url": "https://github.com/z-galaxy/zbus/issues/2043"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "zvariant_derive",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/zvariant_derive"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "functions": [],
+              "arch": [],
+              "os": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "informational": "unmaintained",
+            "categories": [],
+            "cvss": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0372.json"
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    },
+    "RUSTSEC-2026-0381": {
+      "id": "RUSTSEC-2026-0381",
+      "summary": "Bundled root certificates allow trust in distrusted emSign intermediates",
+      "details": "Affected versions include `emSign ECC Root CA - G3`, which can allow certificate\npaths through distrusted emSign intermediates.\n\nAffected versions may accept certificate paths containing distrusted emSign\nintermediate public keys. The private keys corresponding to these intermediates\nare now well known.\n\nVersion 1.0.10+ removes this root.\n\nThe `webpki-roots` 0.26.11 compatibility package contains no independent trust\nstore and re-exports the roots from its separately resolved 1.x dependency.\nThat parent dependency must resolve to 1.0.10 or newer; an older parent remains\naffected by this advisory.",
+      "aliases": [
+        "CVE-2026-111943",
+        "GO-2026-6809",
+        "RUSTSEC-2026-0382",
+        "RUSTSEC-2026-0383"
+      ],
+      "modified": "2026-10-21T06:30:02.818201920Z",
+      "published": "2026-10-19T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/webpki-roots"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0381.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/webpki-roots/pull/133"
+        },
+        {
+          "type": "WEB",
+          "url": "https://emudhra.we-have-a-problem.com/"
+        },
+        {
+          "type": "WEB",
+          "url": "https://bugzilla.mozilla.org/show_bug.cgi?id=2083449"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "webpki-roots",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/webpki-roots"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "0.26.11"
+                },
+                {
+                  "introduced": "0.26.12-0"
+                },
+                {
+                  "fixed": "1.0.10"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            }
+          },
+          "database_specific": {
+            "informational": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0381.json",
+            "categories": [
+              "crypto-failure"
+            ],
+            "cvss": null
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    },
+    "RUSTSEC-2026-0382": {
+      "id": "RUSTSEC-2026-0382",
+      "summary": "Certificate verification may accept distrusted intermediates",
+      "details": "Affected versions may accept certificate paths containing distrusted emSign\nintermediate public keys when the configured trust anchors allow such paths.\nThe private keys corresponding to these intermediates are now well known.\n\nVersions 0.103.16 and 0.104.0-alpha.8 reject paths containing these public keys.",
+      "aliases": [
+        "CVE-2026-111943",
+        "GO-2026-6809",
+        "RUSTSEC-2026-0381",
+        "RUSTSEC-2026-0383"
+      ],
+      "modified": "2026-10-21T00:55:56.763143468Z",
+      "published": "2026-10-20T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/rustls-webpki"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0382.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/webpki/pull/546"
+        },
+        {
+          "type": "WEB",
+          "url": "https://emudhra.we-have-a-problem.com/"
+        },
+        {
+          "type": "WEB",
+          "url": "https://bugzilla.mozilla.org/show_bug.cgi?id=2083449"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "rustls-webpki",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/rustls-webpki"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "0.103.16"
+                },
+                {
+                  "introduced": "0.104.0-alpha.1"
+                },
+                {
+                  "fixed": "0.104.0-alpha.8"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affected_functions": null,
+            "affects": {
+              "os": [],
+              "functions": [],
+              "arch": []
+            }
+          },
+          "database_specific": {
+            "informational": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0382.json",
+            "categories": [
+              "crypto-failure"
+            ],
+            "cvss": null
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    },
+    "RUSTSEC-2026-0383": {
+      "id": "RUSTSEC-2026-0383",
+      "summary": "Bundled root certificates allow trust in distrusted emSign intermediates",
+      "details": "Affected versions include `emSign ECC Root CA - G3`, which can allow certificate\npaths through distrusted emSign intermediates.\n\nAffected versions may accept certificate paths containing distrusted emSign\nintermediate public keys. The private keys corresponding to these intermediates\nare now well known.\n\nVersion 1.0.10+ removes this root.\n\nVersion 0.26.11 is a compatibility wrapper that re-exports\n`parent::TLS_SERVER_ROOT_CERTS` from its `webpki-root-certs` 1.x dependency; it\ncontains no separate root certificate list. Its resolved 1.x dependency must be\nupdated to 1.0.10 or later.",
+      "aliases": [
+        "CVE-2026-111943",
+        "GO-2026-6809",
+        "RUSTSEC-2026-0381",
+        "RUSTSEC-2026-0382"
+      ],
+      "modified": "2026-10-21T06:30:02.691648061Z",
+      "published": "2026-10-19T12:00:00Z",
+      "database_specific": {
+        "license": "CC0-1.0"
+      },
+      "references": [
+        {
+          "type": "PACKAGE",
+          "url": "https://crates.io/crates/webpki-root-certs"
+        },
+        {
+          "type": "ADVISORY",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0383.html"
+        },
+        {
+          "type": "WEB",
+          "url": "https://github.com/rustls/webpki-roots/pull/133"
+        },
+        {
+          "type": "WEB",
+          "url": "https://emudhra.we-have-a-problem.com/"
+        },
+        {
+          "type": "WEB",
+          "url": "https://bugzilla.mozilla.org/show_bug.cgi?id=2083449"
+        }
+      ],
+      "affected": [
+        {
+          "package": {
+            "name": "webpki-root-certs",
+            "ecosystem": "crates.io",
+            "purl": "pkg:cargo/webpki-root-certs"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0.0.0-0"
+                },
+                {
+                  "fixed": "0.26.11"
+                },
+                {
+                  "introduced": "0.26.12-0"
+                },
+                {
+                  "fixed": "1.0.10"
+                }
+              ]
+            }
+          ],
+          "ecosystem_specific": {
+            "affects": {
+              "arch": [],
+              "os": [],
+              "functions": []
+            },
+            "affected_functions": null
+          },
+          "database_specific": {
+            "informational": null,
+            "categories": [
+              "crypto-failure"
+            ],
+            "cvss": null,
+            "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0383.json"
+          }
+        }
+      ],
+      "schema_version": "1.9.0"
+    }
+  }
+}

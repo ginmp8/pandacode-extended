@@ -1,0 +1,52 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> pandacode@0.3.28 test:release
+> node --test scripts/release/*.test.mjs packages/npx/*.test.mjs
+
+✔ verifies a ED signature (3.932414ms)
+✔ verifies a Ed signature (0.734849ms)
+✔ rejects a tampered byte (0.866678ms)
+✔ rejects a different key id (0.59656ms)
+✔ rejects a tampered trusted comment (0.68915ms)
+✔ picks the asset per platform (0.215906ms)
+✔ writes a desktop entry (0.295315ms)
+✔ hardened installer refuses ordinary and dry-run remote downloads (0.270368ms)
+✔ removes only the Wayland libraries copied from the build host (1.309515ms)
+✔ reads the compression and block size from the squashfs superblock (0.759576ms)
+✔ mksquashfs keeps the original image settings (0.266412ms)
+✔ rebuilds the AppImage with the same runtime and without Wayland libraries (21.561302ms)
+✔ leaves an AppImage alone when it has no bundled Wayland libraries (4.04316ms)
+✔ reports a missing squashfs-tools installation (4.572269ms)
+✔ Linux starts Xvfb before the bus so portal services inherit the display (1.357418ms)
+✔ startup packages obey the same 200 MiB publisher size limit (0.5037ms)
+✔ busy Linux runtime cleanup never descends into a portal mount or masks the app failure (0.717282ms)
+✔ cleanup removes an owned empty-runtime fixture and rejects unrelated paths (38.601308ms)
+✔ file-removal errors are warnings even when the original operation succeeded (0.360224ms)
+✔ startup smoke refuses local, self-hosted, and mismatched systems (0.557691ms)
+✔ only the exact target/version package is launched (0.256868ms)
+✔ isolated app data and literal NSIS arguments do not inherit credentials (0.433414ms)
+✔ startup observation rejects early clean exits, crashes, and missing executables (550.05935ms)
+✔ startup observation stops a surviving fixture and bounds installer execution (1731.748462ms)
+✔ the startup check looks for the installer where the build leaves it (0.512396ms)
+✔ release versions cannot become paths, prereleases, or shell commands (1.481055ms)
+✔ only the published targets are accepted (0.654077ms)
+✔ release asset names are stable across versions (0.277349ms)
+✔ the host maps to its native target (0.358992ms)
+✔ missing variables fail without revealing other values (1.089154ms)
+✔ the Cargo.lock version is set with either line ending (0.485623ms)
+✔ the updater manifest points every signed platform at its release asset (1.074101ms)
+✔ builds require the native host and never forward old license keys or Apple variables to Windows and Linux (2.118826ms)
+✔ Windows installs per user, bootstraps WebView2 and links the C++ runtime statically (0.883002ms)
+✔ Linux bundles the external-link helper without changing Mac or Windows bundles (0.306612ms)
+✔ macOS falls back to an ad-hoc signature and drops partial Apple credentials (0.151909ms)
+✔ Developer ID signing requires a real identity and notarization credentials (0.29786ms)
+✔ the build selects the exact versioned bundle Tauri produced (0.531992ms)
+✔ checksum sidecars use the sha256sum format (0.224799ms)
+ℹ tests 39
+ℹ suites 0
+ℹ pass 39
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2398.776211

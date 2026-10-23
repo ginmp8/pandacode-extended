@@ -1,0 +1,17 @@
+[WebServer] npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+[WebServer] (node:36642) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 5 tests using 2 workers
+
+(node:36660) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:36661) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  2 tests/vm.spec.ts:79:1 › clicks, drags, scrolls and typing reach the VM in screen pixels (4.3s)
+  ✓  1 tests/vm.spec.ts:56:1 › VM start does not install packages; Add a desktop remains an explicit action (4.4s)
+  ✓  4 tests/vm.spec.ts:140:1 › connecting a cloud provider checks the key and offers its machines (3.8s)
+  ✓  3 tests/vm.spec.ts:105:1 › shares the project read-only when asked, and a VM can be deleted (3.9s)
+  ✓  5 tests/vm.spec.ts:164:1 › a cloud desktop streams its screen and takes input; a commands-only sandbox explains itself (3.8s)
+
+  5 passed (13.5s)

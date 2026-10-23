@@ -1,0 +1,4 @@
+git apply --check: PASS
+git apply onto a disposable copy of the original: PASS
+Exact per-file byte comparison against final candidate code/docs/tests: PASS
+Original files removed: 0

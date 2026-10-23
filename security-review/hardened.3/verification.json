@@ -1,0 +1,50 @@
+{
+  "revision": "hardened.3",
+  "date": "2026-10-23",
+  "scope": "Credential-shaped Slack test fixtures and release revision labeling",
+  "baseline_archive_sha256": "4863e1b47a0c6842a5b6490a50f5e9826be8233251495580a82f255924fa1d01",
+  "checks": [
+    {
+      "name": "Token-shaped scanner baseline red",
+      "status": "pass",
+      "details": "Two candidate strings reported in hardened.2 before patch; no token bytes printed"
+    },
+    {
+      "name": "Token-shaped scanner candidate green",
+      "status": "pass",
+      "details": "No Slack token-shaped strings across current source tree"
+    },
+    {
+      "name": "Scanner self-test negative fixture",
+      "status": "pass",
+      "details": "Constructed test-only token shape rejected without printing the secret"
+    },
+    {
+      "name": "Scanner self-test prefix-only fixture",
+      "status": "pass",
+      "details": "Short deliberately invalid prefixes accepted"
+    },
+    {
+      "name": "Rust Slack test code invariant",
+      "status": "pass",
+      "details": "Live test retains verification and expected error; format checks remain"
+    },
+    {
+      "name": "Revision label/static consistency",
+      "status": "pass",
+      "details": "Hardened.3 in release generation and app About UI"
+    },
+    {
+      "name": "Node syntax check scripts/release/build.mjs",
+      "status": "pass"
+    }
+  ],
+  "not_run": [
+    "Rust tests and Rust compilation: cargo/rustfmt unavailable in this sandbox",
+    "Ignored Slack external-integration test: would call a real external service",
+    "Windows NSIS installer / Tauri build and endpoint security scan",
+    "GitHub secret-scanning push protection for any existing local Git commit history"
+  ],
+  "source_files_touched": 12,
+  "packaging_note": "Historical hardened.1 and hardened.2 manifests remain frozen, as point-in-time evidence, and do not describe hardened.3."
+}

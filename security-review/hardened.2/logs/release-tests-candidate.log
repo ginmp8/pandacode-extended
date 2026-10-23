@@ -1,0 +1,251 @@
+Warning: disabling flag --expose_wasm due to conflicting flags
+TAP version 13
+# Warning: disabling flag --expose_wasm due to conflicting flags
+# Subtest: verifies a ED signature
+ok 1 - verifies a ED signature
+  ---
+  duration_ms: 5.286592
+  type: 'test'
+  ...
+# Subtest: verifies a Ed signature
+ok 2 - verifies a Ed signature
+  ---
+  duration_ms: 1.171388
+  type: 'test'
+  ...
+# Subtest: rejects a tampered byte
+ok 3 - rejects a tampered byte
+  ---
+  duration_ms: 1.248283
+  type: 'test'
+  ...
+# Subtest: rejects a different key id
+ok 4 - rejects a different key id
+  ---
+  duration_ms: 1.01316
+  type: 'test'
+  ...
+# Subtest: rejects a tampered trusted comment
+ok 5 - rejects a tampered trusted comment
+  ---
+  duration_ms: 1.122415
+  type: 'test'
+  ...
+# Subtest: picks the asset per platform
+ok 6 - picks the asset per platform
+  ---
+  duration_ms: 0.301493
+  type: 'test'
+  ...
+# Subtest: writes a desktop entry
+ok 7 - writes a desktop entry
+  ---
+  duration_ms: 0.277406
+  type: 'test'
+  ...
+# Subtest: hardened installer refuses ordinary and dry-run remote downloads
+ok 8 - hardened installer refuses ordinary and dry-run remote downloads
+  ---
+  duration_ms: 0.445949
+  type: 'test'
+  ...
+# Warning: disabling flag --expose_wasm due to conflicting flags
+# Subtest: removes only the Wayland libraries copied from the build host
+ok 9 - removes only the Wayland libraries copied from the build host
+  ---
+  duration_ms: 2.297708
+  type: 'test'
+  ...
+# Subtest: reads the compression and block size from the squashfs superblock
+ok 10 - reads the compression and block size from the squashfs superblock
+  ---
+  duration_ms: 0.790316
+  type: 'test'
+  ...
+# Subtest: mksquashfs keeps the original image settings
+ok 11 - mksquashfs keeps the original image settings
+  ---
+  duration_ms: 0.24685
+  type: 'test'
+  ...
+# Subtest: rebuilds the AppImage with the same runtime and without Wayland libraries
+ok 12 - rebuilds the AppImage with the same runtime and without Wayland libraries
+  ---
+  duration_ms: 20.643342
+  type: 'test'
+  ...
+# Subtest: leaves an AppImage alone when it has no bundled Wayland libraries
+ok 13 - leaves an AppImage alone when it has no bundled Wayland libraries
+  ---
+  duration_ms: 10.083131
+  type: 'test'
+  ...
+# Subtest: reports a missing squashfs-tools installation
+ok 14 - reports a missing squashfs-tools installation
+  ---
+  duration_ms: 4.530659
+  type: 'test'
+  ...
+# Warning: disabling flag --expose_wasm due to conflicting flags
+# Subtest: Linux starts Xvfb before the bus so portal services inherit the display
+ok 15 - Linux starts Xvfb before the bus so portal services inherit the display
+  ---
+  duration_ms: 2.190337
+  type: 'test'
+  ...
+# Subtest: startup packages obey the same 200 MiB publisher size limit
+ok 16 - startup packages obey the same 200 MiB publisher size limit
+  ---
+  duration_ms: 0.63316
+  type: 'test'
+  ...
+# Subtest: busy Linux runtime cleanup never descends into a portal mount or masks the app failure
+ok 17 - busy Linux runtime cleanup never descends into a portal mount or masks the app failure
+  ---
+  duration_ms: 0.645409
+  type: 'test'
+  ...
+# Subtest: cleanup removes an owned empty-runtime fixture and rejects unrelated paths
+ok 18 - cleanup removes an owned empty-runtime fixture and rejects unrelated paths
+  ---
+  duration_ms: 40.777981
+  type: 'test'
+  ...
+# Subtest: file-removal errors are warnings even when the original operation succeeded
+ok 19 - file-removal errors are warnings even when the original operation succeeded
+  ---
+  duration_ms: 0.305438
+  type: 'test'
+  ...
+# Subtest: startup smoke refuses local, self-hosted, and mismatched systems
+ok 20 - startup smoke refuses local, self-hosted, and mismatched systems
+  ---
+  duration_ms: 0.362173
+  type: 'test'
+  ...
+# Subtest: only the exact target/version package is launched
+ok 21 - only the exact target/version package is launched
+  ---
+  duration_ms: 0.206239
+  type: 'test'
+  ...
+# Subtest: isolated app data and literal NSIS arguments do not inherit credentials
+ok 22 - isolated app data and literal NSIS arguments do not inherit credentials
+  ---
+  duration_ms: 0.416575
+  type: 'test'
+  ...
+# Subtest: startup observation rejects early clean exits, crashes, and missing executables
+ok 23 - startup observation rejects early clean exits, crashes, and missing executables
+  ---
+  duration_ms: 554.917104
+  type: 'test'
+  ...
+# Subtest: startup observation stops a surviving fixture and bounds installer execution
+ok 24 - startup observation stops a surviving fixture and bounds installer execution
+  ---
+  duration_ms: 1730.997121
+  type: 'test'
+  ...
+# Subtest: the startup check looks for the installer where the build leaves it
+ok 25 - the startup check looks for the installer where the build leaves it
+  ---
+  duration_ms: 0.405639
+  type: 'test'
+  ...
+# Warning: disabling flag --expose_wasm due to conflicting flags
+# Subtest: release versions cannot become paths, prereleases, or shell commands
+ok 26 - release versions cannot become paths, prereleases, or shell commands
+  ---
+  duration_ms: 1.35305
+  type: 'test'
+  ...
+# Subtest: only the published targets are accepted
+ok 27 - only the published targets are accepted
+  ---
+  duration_ms: 1.996816
+  type: 'test'
+  ...
+# Subtest: release asset names are stable across versions
+ok 28 - release asset names are stable across versions
+  ---
+  duration_ms: 0.238979
+  type: 'test'
+  ...
+# Subtest: the host maps to its native target
+ok 29 - the host maps to its native target
+  ---
+  duration_ms: 0.464196
+  type: 'test'
+  ...
+# Subtest: missing variables fail without revealing other values
+ok 30 - missing variables fail without revealing other values
+  ---
+  duration_ms: 0.268823
+  type: 'test'
+  ...
+# Subtest: the Cargo.lock version is set with either line ending
+ok 31 - the Cargo.lock version is set with either line ending
+  ---
+  duration_ms: 0.414773
+  type: 'test'
+  ...
+# Subtest: the updater manifest points every signed platform at its release asset
+ok 32 - the updater manifest points every signed platform at its release asset
+  ---
+  duration_ms: 5.427204
+  type: 'test'
+  ...
+# Warning: disabling flag --expose_wasm due to conflicting flags
+# Subtest: builds require the native host and never forward old license keys or Apple variables to Windows and Linux
+ok 33 - builds require the native host and never forward old license keys or Apple variables to Windows and Linux
+  ---
+  duration_ms: 2.436636
+  type: 'test'
+  ...
+# Subtest: Windows installs per user without downloading WebView2 and links the C++ runtime statically
+ok 34 - Windows installs per user without downloading WebView2 and links the C++ runtime statically
+  ---
+  duration_ms: 1.267602
+  type: 'test'
+  ...
+# Subtest: Linux bundles the external-link helper without changing Mac or Windows bundles
+ok 35 - Linux bundles the external-link helper without changing Mac or Windows bundles
+  ---
+  duration_ms: 0.203776
+  type: 'test'
+  ...
+# Subtest: macOS falls back to an ad-hoc signature and drops partial Apple credentials
+ok 36 - macOS falls back to an ad-hoc signature and drops partial Apple credentials
+  ---
+  duration_ms: 0.12669
+  type: 'test'
+  ...
+# Subtest: Developer ID signing requires a real identity and notarization credentials
+ok 37 - Developer ID signing requires a real identity and notarization credentials
+  ---
+  duration_ms: 0.21361
+  type: 'test'
+  ...
+# Subtest: the build selects the exact versioned bundle Tauri produced
+ok 38 - the build selects the exact versioned bundle Tauri produced
+  ---
+  duration_ms: 0.334823
+  type: 'test'
+  ...
+# Subtest: checksum sidecars use the sha256sum format
+ok 39 - checksum sidecars use the sha256sum format
+  ---
+  duration_ms: 0.252209
+  type: 'test'
+  ...
+1..39
+# tests 39
+# suites 0
+# pass 39
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2427.631131
+Warning: disabling flag --expose_wasm due to conflicting flags

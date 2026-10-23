@@ -1,0 +1,902 @@
+TAP version 13
+# (node:44) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: the hardened build never restarts to install an external update
+ok 1 - the hardened build never restarts to install an external update
+  ---
+  duration_ms: 0.94102
+  type: 'test'
+  ...
+# Subtest: old automatic-update preferences and direct controller calls cannot enable networking
+ok 2 - old automatic-update preferences and direct controller calls cannot enable networking
+  ---
+  duration_ms: 6.092499
+  type: 'test'
+  ...
+# Subtest: About explains each state in one line
+ok 3 - About explains each state in one line
+  ---
+  duration_ms: 0.32716
+  type: 'test'
+  ...
+# Subtest: production entry stays below the 80 KiB compressed startup budget
+not ok 4 - production entry stays below the 80 KiB compressed startup budget
+  ---
+  duration_ms: 3.281007
+  type: 'test'
+  location: '/work/tests/bundle.test.mjs:6:1'
+  failureType: 'testCodeFailure'
+  error: "ENOENT: no such file or directory, open '/work/dist/index.html'"
+  code: 'ENOENT'
+  stack: |-
+    async open (node:internal/fs/promises:633:25)
+    async readFile (node:internal/fs/promises:1237:14)
+    async TestContext.<anonymous> (file:///work/tests/bundle.test.mjs:7:16)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: production entry does not eagerly initialize a terminal or a local HTTP server
+not ok 5 - production entry does not eagerly initialize a terminal or a local HTTP server
+  ---
+  duration_ms: 2.203151
+  type: 'test'
+  location: '/work/tests/bundle.test.mjs:15:1'
+  failureType: 'testCodeFailure'
+  error: "ENOENT: no such file or directory, open '/work/dist/index.html'"
+  code: 'ENOENT'
+  stack: |-
+    async open (node:internal/fs/promises:633:25)
+    async readFile (node:internal/fs/promises:1237:14)
+    async TestContext.<anonymous> (file:///work/tests/bundle.test.mjs:16:16)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: file icon chunk is not loaded or preloaded by the entry
+not ok 6 - file icon chunk is not loaded or preloaded by the entry
+  ---
+  duration_ms: 2.053787
+  type: 'test'
+  location: '/work/tests/bundle.test.mjs:27:1'
+  failureType: 'testCodeFailure'
+  error: "ENOENT: no such file or directory, open '/work/dist/index.html'"
+  code: 'ENOENT'
+  stack: |-
+    async open (node:internal/fs/promises:633:25)
+    async readFile (node:internal/fs/promises:1237:14)
+    async TestContext.<anonymous> (file:///work/tests/bundle.test.mjs:28:16)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# node:internal/modules/package_json_reader:256
+#   throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
+#         ^
+# Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'material-icon-theme' imported from /work/src/file-icons.ts
+#     at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)
+#     at packageResolve (node:internal/modules/esm/resolve:768:81)
+#     at moduleResolve (node:internal/modules/esm/resolve:854:18)
+#     at defaultResolve (node:internal/modules/esm/resolve:984:11)
+#     at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)
+#     at \#cachedDefaultResolve (node:internal/modules/esm/loader:704:25)
+#     at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)
+#     at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)
+#     at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {
+#   code: 'ERR_MODULE_NOT_FOUND'
+# }
+# Node.js v22.16.0
+# Subtest: /work/tests/file-icons.test.mjs
+not ok 3 - /work/tests/file-icons.test.mjs
+  ---
+  duration_ms: 163.459094
+  type: 'test'
+  location: '/work/tests/file-icons.test.mjs:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# (node:48) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: workspace filenames support line locations, spaces, absolute paths and Windows paths
+ok 8 - workspace filenames support line locations, spaces, absolute paths and Windows paths
+  ---
+  duration_ms: 10.084912
+  type: 'test'
+  ...
+# Subtest: network links, executable schemes and malformed references cannot become workspace actions
+ok 9 - network links, executable schemes and malformed references cannot become workspace actions
+  ---
+  duration_ms: 0.441852
+  type: 'test'
+  ...
+# Subtest: plain response references preserve punctuation and never extract partial paths from URLs
+ok 10 - plain response references preserve punctuation and never extract partial paths from URLs
+  ---
+  duration_ms: 10.765181
+  type: 'test'
+  ...
+# Subtest: only browser-renderable assets are previewable
+ok 11 - only browser-renderable assets are previewable
+  ---
+  duration_ms: 0.456344
+  type: 'test'
+  ...
+# (node:88) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: every documented type validates, and unknown types fall back instead of failing
+ok 12 - every documented type validates, and unknown types fall back instead of failing
+  ---
+  duration_ms: 18.543385
+  type: 'test'
+  ...
+# Subtest: specs are clipped to their limits and coerced to safe values
+ok 13 - specs are clipped to their limits and coerced to safe values
+  ---
+  duration_ms: 2.02899
+  type: 'test'
+  ...
+# Subtest: nesting and size are bounded
+ok 14 - nesting and size are bounded
+  ---
+  duration_ms: 0.559098
+  type: 'test'
+  ...
+# Subtest: custom CSS cannot load anything or escape its style element
+ok 15 - custom CSS cannot load anything or escape its style element
+  ---
+  duration_ms: 4.953983
+  type: 'test'
+  ...
+# Subtest: custom state keeps only simple keys and text values
+ok 16 - custom state keeps only simple keys and text values
+  ---
+  duration_ms: 16.531841
+  type: 'test'
+  ...
+# Subtest: forms turn answers into a prompt, never a request
+ok 17 - forms turn answers into a prompt, never a request
+  ---
+  duration_ms: 0.370014
+  type: 'test'
+  ...
+# Subtest: flat paths become a nested file tree
+ok 18 - flat paths become a nested file tree
+  ---
+  duration_ms: 0.282503
+  type: 'test'
+  ...
+# (node:99) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: every pull request action names the pull request, so its context is attached
+ok 19 - every pull request action names the pull request, so its context is attached
+  ---
+  duration_ms: 2.204793
+  type: 'test'
+  ...
+# Subtest: issues are solved on a branch, or opened with the prompt ready to finish
+ok 20 - issues are solved on a branch, or opened with the prompt ready to finish
+  ---
+  duration_ms: 0.213681
+  type: 'test'
+  ...
+# Subtest: thread titles say what the thread is for and fit the sidebar
+ok 21 - thread titles say what the thread is for and fit the sidebar
+  ---
+  duration_ms: 0.204537
+  type: 'test'
+  ...
+# Subtest: ages read like a tracker: minutes, hours, days
+ok 22 - ages read like a tracker: minutes, hours, days
+  ---
+  duration_ms: 0.170155
+  type: 'test'
+  ...
+# Subtest: the connect screen says what to do for the error gh gave
+ok 23 - the connect screen says what to do for the error gh gave
+  ---
+  duration_ms: 0.717725
+  type: 'test'
+  ...
+# Subtest: repositories pushed in the last 30 days are recent; older or undated ones go under Other
+ok 24 - repositories pushed in the last 30 days are recent; older or undated ones go under Other
+  ---
+  duration_ms: 0.40022
+  type: 'test'
+  ...
+# (node:110) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: agent update controller shows policy without checks, timers or installation
+ok 25 - agent update controller shows policy without checks, timers or installation
+  ---
+  duration_ms: 1.242942
+  type: 'test'
+  ...
+# Subtest: windows-x86_64: inherited update secrets cannot restore updater output and builds keep the lockfile
+ok 26 - windows-x86_64: inherited update secrets cannot restore updater output and builds keep the lockfile
+  ---
+  duration_ms: 8.996991
+  type: 'test'
+  ...
+# Subtest: windows-aarch64: inherited update secrets cannot restore updater output and builds keep the lockfile
+ok 27 - windows-aarch64: inherited update secrets cannot restore updater output and builds keep the lockfile
+  ---
+  duration_ms: 0.260481
+  type: 'test'
+  ...
+# Subtest: linux-x86_64: inherited update secrets cannot restore updater output and builds keep the lockfile
+ok 28 - linux-x86_64: inherited update secrets cannot restore updater output and builds keep the lockfile
+  ---
+  duration_ms: 0.161743
+  type: 'test'
+  ...
+# Subtest: linux-aarch64: inherited update secrets cannot restore updater output and builds keep the lockfile
+ok 29 - linux-aarch64: inherited update secrets cannot restore updater output and builds keep the lockfile
+  ---
+  duration_ms: 0.102484
+  type: 'test'
+  ...
+# Subtest: darwin-x86_64: inherited update secrets cannot restore updater output and builds keep the lockfile
+ok 30 - darwin-x86_64: inherited update secrets cannot restore updater output and builds keep the lockfile
+  ---
+  duration_ms: 0.352798
+  type: 'test'
+  ...
+# Subtest: darwin-aarch64: inherited update secrets cannot restore updater output and builds keep the lockfile
+ok 31 - darwin-aarch64: inherited update secrets cannot restore updater output and builds keep the lockfile
+  ---
+  duration_ms: 0.210415
+  type: 'test'
+  ...
+# Subtest: windows-x86_64: generated installer neither downloads WebView2 nor requests machine-wide installation
+ok 32 - windows-x86_64: generated installer neither downloads WebView2 nor requests machine-wide installation
+  ---
+  duration_ms: 0.137606
+  type: 'test'
+  ...
+# Subtest: windows-aarch64: generated installer neither downloads WebView2 nor requests machine-wide installation
+ok 33 - windows-aarch64: generated installer neither downloads WebView2 nor requests machine-wide installation
+  ---
+  duration_ms: 0.081171
+  type: 'test'
+  ...
+# Subtest: direct Tauri builds inherit the same no-download/no-updater installation policy
+ok 34 - direct Tauri builds inherit the same no-download/no-updater installation policy
+  ---
+  duration_ms: 7.979877
+  type: 'test'
+  ...
+# Subtest: the disabled manifest CLI cannot recreate latest.json, even with valid inputs
+ok 35 - the disabled manifest CLI cannot recreate latest.json, even with valid inputs
+  ---
+  duration_ms: 78.219235
+  type: 'test'
+  ...
+# Subtest: plain offline npm install honors repository policy and cannot execute a lifecycle payload
+ok 36 - plain offline npm install honors repository policy and cannot execute a lifecycle payload
+  ---
+  duration_ms: 534.432136
+  type: 'test'
+  ...
+# Subtest: no app source references the paid PandaCode service or the old support portal
+ok 37 - no app source references the paid PandaCode service or the old support portal
+  ---
+  duration_ms: 192.349064
+  type: 'test'
+  ...
+# Subtest: hardened builds expose no updater or process restart capability
+ok 38 - hardened builds expose no updater or process restart capability
+  ---
+  duration_ms: 3.032363
+  type: 'test'
+  ...
+# (node:133) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: OKLCH round-trips sRGB and keeps out-of-gamut colors in gamut
+ok 39 - OKLCH round-trips sRGB and keeps out-of-gamut colors in gamut
+  ---
+  duration_ms: 1.772987
+  type: 'test'
+  ...
+# Subtest: any accent hue yields readable buttons, links and selection in both modes
+ok 40 - any accent hue yields readable buttons, links and selection in both modes
+  ---
+  duration_ms: 4.47136
+  type: 'test'
+  ...
+# Subtest: real VS Code themes map to readable PandaCode surfaces and keep their own accent
+ok 41 - real VS Code themes map to readable PandaCode surfaces and keep their own accent
+  ---
+  duration_ms: 4.915525
+  type: 'test'
+  ...
+# Subtest: a wallpaper accent is its most present vivid hue, and gray scenes have none
+ok 42 - a wallpaper accent is its most present vivid hue, and gray scenes have none
+  ---
+  duration_ms: 10.938421
+  type: 'test'
+  ...
+# Subtest: every shipped wallpaper has an accent that makes readable buttons
+ok 43 - every shipped wallpaper has an accent that makes readable buttons
+  ---
+  duration_ms: 10.019273
+  type: 'test'
+  ...
+# Subtest: Pi standard mode asks before writes and commands; declines block tools
+ok 44 - Pi standard mode asks before writes and commands; declines block tools
+  ---
+  duration_ms: 5.097969
+  type: 'test'
+  ...
+# Subtest: Pi plan denies side effects, auto allows file edits, full allows commands
+ok 45 - Pi plan denies side effects, auto allows file edits, full allows commands
+  ---
+  duration_ms: 0.666789
+  type: 'test'
+  ...
+# Subtest: Pi blocks tools when permission UI fails
+ok 46 - Pi blocks tools when permission UI fails
+  ---
+  duration_ms: 1.080279
+  type: 'test'
+  ...
+# Subtest: Pi app tools use authenticated MCP and report tool failures
+ok 47 - Pi app tools use authenticated MCP and report tool failures
+  ---
+  duration_ms: 80.694844
+  type: 'test'
+  ...
+# Subtest: Pi removes the bridge token from the environment before any request
+ok 48 - Pi removes the bridge token from the environment before any request
+  ---
+  duration_ms: 0.388693
+  type: 'test'
+  ...
+# Subtest: Pi plan mode blocks app tools except read-only ones; other modes keep app tools
+ok 49 - Pi plan mode blocks app tools except read-only ones; other modes keep app tools
+  ---
+  duration_ms: 0.571817
+  type: 'test'
+  ...
+# (node:183) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: preview eligibility keeps dependencies queued until they complete
+ok 50 - preview eligibility keeps dependencies queued until they complete
+  ---
+  duration_ms: 1.24164
+  type: 'test'
+  ...
+# Subtest: preview eligibility reserves empty writer scopes and overlapping paths
+ok 51 - preview eligibility reserves empty writer scopes and overlapping paths
+  ---
+  duration_ms: 0.381451
+  type: 'test'
+  ...
+# Subtest: preview read-only assignments share scopes while honoring the worker limit
+ok 52 - preview read-only assignments share scopes while honoring the worker limit
+  ---
+  duration_ms: 0.169824
+  type: 'test'
+  ...
+# Subtest: architect preview validates setup and restores only owned configurations after reload
+ok 53 - architect preview validates setup and restores only owned configurations after reload
+  ---
+  duration_ms: 4.798419
+  type: 'test'
+  ...
+# Subtest: architect preview persists unlimited parallel workers and starts every assignment
+ok 54 - architect preview persists unlimited parallel workers and starts every assignment
+  ---
+  duration_ms: 6.229364
+  type: 'test'
+  ...
+# Subtest: architect preview streams separate workers under concurrency and assignment caps
+ok 55 - architect preview streams separate workers under concurrency and assignment caps
+  ---
+  duration_ms: 7.045878
+  type: 'test'
+  ...
+# Subtest: architect preview pause and stop cascade without stray timers or duplicate parent prompts
+ok 56 - architect preview pause and stop cascade without stray timers or duplicate parent prompts
+  ---
+  duration_ms: 2.922299
+  type: 'test'
+  ...
+# Subtest: architect preview rejects a concurrent goal and isolates returned snapshots from scheduler state
+ok 57 - architect preview rejects a concurrent goal and isolates returned snapshots from scheduler state
+  ---
+  duration_ms: 1.160899
+  type: 'test'
+  ...
+# Subtest: architect preview preserves earlier worker logs and enforces the lifetime assignment cap
+ok 58 - architect preview preserves earlier worker logs and enforces the lifetime assignment cap
+  ---
+  duration_ms: 3.551942
+  type: 'test'
+  ...
+# Subtest: architect preview bounds Unicode summaries by bytes without broken characters
+ok 59 - architect preview bounds Unicode summaries by bytes without broken characters
+  ---
+  duration_ms: 0.943624
+  type: 'test'
+  ...
+# Subtest: preview checkpoints survive interruption and team messages page without crossing tasks
+ok 60 - preview checkpoints survive interruption and team messages page without crossing tasks
+  ---
+  duration_ms: 2.359866
+  type: 'test'
+  ...
+# Subtest: team profiles save templates separately from applying and inheriting the default
+ok 61 - team profiles save templates separately from applying and inheriting the default
+  ---
+  duration_ms: 1.463533
+  type: 'test'
+  ...
+# Subtest: team profile update rename delete and single-agent choice preserve applied snapshots
+ok 62 - team profile update rename delete and single-agent choice preserve applied snapshots
+  ---
+  duration_ms: 1.035361
+  type: 'test'
+  ...
+# Subtest: team profiles validate ownership names cap and application atomically
+ok 63 - team profiles validate ownership names cap and application atomically
+  ---
+  duration_ms: 22.075288
+  type: 'test'
+  ...
+# Subtest: team defaults migrate the latest owned legacy config once and never overwrite explicit disable
+ok 64 - team defaults migrate the latest owned legacy config once and never overwrite explicit disable
+  ---
+  duration_ms: 0.641672
+  type: 'test'
+  ...
+# Subtest: used teams apply valid profile changes without losing history and reject invalid changes atomically
+ok 65 - used teams apply valid profile changes without losing history and reject invalid changes atomically
+  ---
+  duration_ms: 1.430574
+  type: 'test'
+  ...
+# Subtest: active team profile changes keep the latest pending setup and can cancel it without restarting workers
+ok 66 - active team profile changes keep the latest pending setup and can cancel it without restarting workers
+  ---
+  duration_ms: 2.406857
+  type: 'test'
+  ...
+# Subtest: architect preview carries lead guidance and rejects oversized guidance
+ok 67 - architect preview carries lead guidance and rejects oversized guidance
+  ---
+  duration_ms: 0.869823
+  type: 'test'
+  ...
+# Subtest: a guidance-only edit is a different team setup
+ok 68 - a guidance-only edit is a different team setup
+  ---
+  duration_ms: 0.298357
+  type: 'test'
+  ...
+# Subtest: named teams keep lead guidance and a separate effort per role
+ok 69 - named teams keep lead guidance and a separate effort per role
+  ---
+  duration_ms: 0.503885
+  type: 'test'
+  ...
+# (node:198) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: preview changes retain an immutable per-turn snapshot and enforce detail ownership
+ok 70 - preview changes retain an immutable per-turn snapshot and enforce detail ownership
+  ---
+  duration_ms: 13.835882
+  type: 'test'
+  ...
+# Subtest: preview change summaries and patches survive preview reload without reading current files
+ok 71 - preview change summaries and patches survive preview reload without reading current files
+  ---
+  duration_ms: 0.463485
+  type: 'test'
+  ...
+# Subtest: preview change storage is bounded and rejects unavailable snapshots explicitly
+ok 72 - preview change storage is bounded and rejects unavailable snapshots explicitly
+  ---
+  duration_ms: 10.541695
+  type: 'test'
+  ...
+# Subtest: preview changes attach to autonomous goal markers but not assistant prose
+ok 73 - preview changes attach to autonomous goal markers but not assistant prose
+  ---
+  duration_ms: 0.221572
+  type: 'test'
+  ...
+# (node:205) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: saved author metadata survives a page without its future handoff
+ok 74 - saved author metadata survives a page without its future handoff
+  ---
+  duration_ms: 1.057975
+  type: 'test'
+  ...
+# Subtest: legacy pages infer only handoffs belonging to the same task
+ok 75 - legacy pages infer only handoffs belonging to the same task
+  ---
+  duration_ms: 0.343235
+  type: 'test'
+  ...
+# Subtest: every release note has a changelog date
+ok 76 - every release note has a changelog date
+  ---
+  duration_ms: 8.036893
+  type: 'test'
+  ...
+# (node:226) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: folders with the newest work come first and keep their task order
+ok 77 - folders with the newest work come first and keep their task order
+  ---
+  duration_ms: 6.503846
+  type: 'test'
+  ...
+# Subtest: folders show six tasks and always include the selected one
+ok 78 - folders show six tasks and always include the selected one
+  ---
+  duration_ms: 0.474511
+  type: 'test'
+  ...
+# Subtest: collapsed folders survive bad stored values
+ok 79 - collapsed folders survive bad stored values
+  ---
+  duration_ms: 0.305067
+  type: 'test'
+  ...
+# (node:233) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: current devices get their own hardware and launch finishes
+ok 80 - current devices get their own hardware and launch finishes
+  ---
+  duration_ms: 1.516763
+  type: 'test'
+  ...
+# Subtest: Camera Control appears only on models that have it
+ok 81 - Camera Control appears only on models that have it
+  ---
+  duration_ms: 0.202894
+  type: 'test'
+  ...
+# Subtest: unknown device types fall back by family and every finish is a color
+ok 82 - unknown device types fall back by family and every finish is a color
+  ---
+  duration_ms: 0.520109
+  type: 'test'
+  ...
+# Subtest: Android emulator profiles get Pixel and generic Android hardware
+ok 83 - Android emulator profiles get Pixel and generic Android hardware
+  ---
+  duration_ms: 0.208011
+  type: 'test'
+  ...
+# Subtest: iPhone Duo is the foldable with its own finishes and camera
+ok 84 - iPhone Duo is the foldable with its own finishes and camera
+  ---
+  duration_ms: 1.710904
+  type: 'test'
+  ...
+# (node:253) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: guidance rides along when it changes and as a periodic reminder, never every message
+ok 85 - guidance rides along when it changes and as a periodic reminder, never every message
+  ---
+  duration_ms: 1.606447
+  type: 'test'
+  ...
+# Subtest: RTK guidance needs rtk installed, and packs combine in one block
+ok 86 - RTK guidance needs rtk installed, and packs combine in one block
+  ---
+  duration_ms: 0.317756
+  type: 'test'
+  ...
+# Subtest: threads start from the saved default and keep their own changes
+ok 87 - threads start from the saved default and keep their own changes
+  ---
+  duration_ms: 1.144155
+  type: 'test'
+  ...
+# Subtest: the estimate compounds, ignores unavailable tools, and stays plausible
+ok 88 - the estimate compounds, ignores unavailable tools, and stays plausible
+  ---
+  duration_ms: 0.264337
+  type: 'test'
+  ...
+# (node:264) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: decodes only supported, bounded tool records
+ok 89 - decodes only supported, bounded tool records
+  ---
+  duration_ms: 2.627097
+  type: 'test'
+  ...
+# Subtest: renders the command and recorded output with a stable disclosure key
+ok 90 - renders the command and recorded output with a stable disclosure key
+  ---
+  duration_ms: 1.825395
+  type: 'test'
+  ...
+# Subtest: tool payloads and keys cannot introduce HTML or delegated actions
+ok 91 - tool payloads and keys cannot introduce HTML or delegated actions
+  ---
+  duration_ms: 0.738336
+  type: 'test'
+  ...
+# Subtest: legacy disclosures avoid repeating their summary as the expanded body
+ok 92 - legacy disclosures avoid repeating their summary as the expanded body
+  ---
+  duration_ms: 0.435192
+  type: 'test'
+  ...
+# Subtest: status events have no empty disclosure and empty tool output is explained
+ok 93 - status events have no empty disclosure and empty tool output is explained
+  ---
+  duration_ms: 0.416575
+  type: 'test'
+  ...
+# Subtest: groups at most five consecutive calls without crossing narratives or statuses
+ok 94 - groups at most five consecutive calls without crossing narratives or statuses
+  ---
+  duration_ms: 0.483354
+  type: 'test'
+  ...
+# Subtest: group summaries count calls, expose running/failure states and escape tool keys
+ok 95 - group summaries count calls, expose running/failure states and escape tool keys
+  ---
+  duration_ms: 1.021962
+  type: 'test'
+  ...
+# (node:271) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: describes each kind as a verb, chip and object
+ok 96 - describes each kind as a verb, chip and object
+  ---
+  duration_ms: 14.406387
+  type: 'test'
+  ...
+# Subtest: running calls use present tense
+ok 97 - running calls use present tense
+  ---
+  duration_ms: 0.236113
+  type: 'test'
+  ...
+# Subtest: summaries pluralise, merge verbs and report running and failures
+ok 98 - summaries pluralise, merge verbs and report running and failures
+  ---
+  duration_ms: 0.5537
+  type: 'test'
+  ...
+# Subtest: cards show structured results
+ok 99 - cards show structured results
+  ---
+  duration_ms: 1.96823
+  type: 'test'
+  ...
+# Subtest: chips, objects and cards escape tool data
+ok 100 - chips, objects and cards escape tool data
+  ---
+  duration_ms: 0.532899
+  type: 'test'
+  ...
+# (node:286) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: app coordination starts a separate turn without becoming a user or assistant message
+ok 101 - app coordination starts a separate turn without becoming a user or assistant message
+  ---
+  duration_ms: 2.235299
+  type: 'test'
+  ...
+# Subtest: completed goal markers split autonomous turns and stay outside tool activity
+ok 102 - completed goal markers split autonomous turns and stay outside tool activity
+  ---
+  duration_ms: 0.574521
+  type: 'test'
+  ...
+# Subtest: ordinary completion uses saved user snapshot without inventing changes on old history
+ok 103 - ordinary completion uses saved user snapshot without inventing changes on old history
+  ---
+  duration_ms: 0.160401
+  type: 'test'
+  ...
+# Subtest: groups each user turn with ordered commentary and tools, keeping its final answer outside
+ok 104 - groups each user turn with ordered commentary and tools, keeping its final answer outside
+  ---
+  duration_ms: 0.353159
+  type: 'test'
+  ...
+# Subtest: legacy calls omit only redundant exact completion placeholders, preserving recorded output
+ok 105 - legacy calls omit only redundant exact completion placeholders, preserving recorded output
+  ---
+  duration_ms: 0.30704
+  type: 'test'
+  ...
+# Subtest: normalized tools provide the stable turn key even after earlier legacy activity
+ok 106 - normalized tools provide the stable turn key even after earlier legacy activity
+  ---
+  duration_ms: 0.329624
+  type: 'test'
+  ...
+# Subtest: a partial history page retains an unanchored turn without using the next user’s timestamp
+ok 107 - a partial history page retains an unanchored turn without using the next user’s timestamp
+  ---
+  duration_ms: 0.136484
+  type: 'test'
+  ...
+# Subtest: failures are always separate from collapsed activity and can end a timed turn without an answer
+ok 108 - failures are always separate from collapsed activity and can end a timed turn without an answer
+  ---
+  duration_ms: 0.139739
+  type: 'test'
+  ...
+# Subtest: exact zero duration is preserved and invalid exact timing falls back only to sensible timestamps
+ok 109 - exact zero duration is preserved and invalid exact timing falls back only to sensible timestamps
+  ---
+  duration_ms: 0.505167
+  type: 'test'
+  ...
+# Subtest: empty and pending turns do not invent activity or a duration
+ok 110 - empty and pending turns do not invent activity or a duration
+  ---
+  duration_ms: 0.381923
+  type: 'test'
+  ...
+# Subtest: formats whole elapsed seconds and labels estimates explicitly
+ok 111 - formats whole elapsed seconds and labels estimates explicitly
+  ---
+  duration_ms: 4.640562
+  type: 'test'
+  ...
+# Subtest: assistant updates remain before trailing tools and only a trailing answer becomes final
+ok 112 - assistant updates remain before trailing tools and only a trailing answer becomes final
+  ---
+  duration_ms: 0.211286
+  type: 'test'
+  ...
+# (node:293) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: the toggle stays off until the user turns it on
+ok 113 - the toggle stays off until the user turns it on
+  ---
+  duration_ms: 1.130855
+  type: 'test'
+  ...
+# Subtest: one repair per run: a queued repair, then silence until a manual send
+ok 114 - one repair per run: a queued repair, then silence until a manual send
+  ---
+  duration_ms: 10.881685
+  type: 'test'
+  ...
+# Subtest: guards: off, teams, bots, running tasks and occupied queues never run checks
+ok 115 - guards: off, teams, bots, running tasks and occupied queues never run checks
+  ---
+  duration_ms: 0.866909
+  type: 'test'
+  ...
+# Subtest: the repair prompt names the check and carries the native output tail
+ok 116 - the repair prompt names the check and carries the native output tail
+  ---
+  duration_ms: 0.413861
+  type: 'test'
+  ...
+# Subtest: shouldRepair is the pure gate behind the flow
+ok 117 - shouldRepair is the pure gate behind the flow
+  ---
+  duration_ms: 0.406159
+  type: 'test'
+  ...
+# Subtest: late results are dropped when the task moved on during the check
+ok 118 - late results are dropped when the task moved on during the check
+  ---
+  duration_ms: 9.084592
+  type: 'test'
+  ...
+# Subtest: plan and read-only tasks are never checked, including a mode change mid-check
+ok 119 - plan and read-only tasks are never checked, including a mode change mid-check
+  ---
+  duration_ms: 0.771426
+  type: 'test'
+  ...
+# (node:308) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: ranges cover whole local days ending today
+ok 120 - ranges cover whole local days ending today
+  ---
+  duration_ms: 2.272545
+  type: 'test'
+  ...
+# Subtest: a week sums cost, tokens, sessions and unpriced tokens only inside the range
+ok 121 - a week sums cost, tokens, sessions and unpriced tokens only inside the range
+  ---
+  duration_ms: 1.015662
+  type: 'test'
+  ...
+# Subtest: a year groups cost into weeks that end today
+ok 122 - a year groups cost into weeks that end today
+  ---
+  duration_ms: 1.714649
+  type: 'test'
+  ...
+# Subtest: calendars use log tokens, fall back to PandaCode prompts, and are absent without data
+ok 123 - calendars use log tokens, fall back to PandaCode prompts, and are absent without data
+  ---
+  duration_ms: 0.496214
+  type: 'test'
+  ...
+# Subtest: average limit ignores agents without a reported window
+ok 124 - average limit ignores agents without a reported window
+  ---
+  duration_ms: 0.191257
+  type: 'test'
+  ...
+# Subtest: money and shares format for small and zero values
+ok 125 - money and shares format for small and zero values
+  ---
+  duration_ms: 0.752177
+  type: 'test'
+  ...
+# Subtest: axis ticks are round and the smoothed line never dips below the baseline
+ok 126 - axis ticks are round and the smoothed line never dips below the baseline
+  ---
+  duration_ms: 0.824596
+  type: 'test'
+  ...
+# (node:314) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: wallpaper preferences default safely and validate persisted fields independently
+ok 127 - wallpaper preferences default safely and validate persisted fields independently
+  ---
+  duration_ms: 4.773823
+  type: 'test'
+  ...
+# Subtest: wallpaper blur defaults for earlier preferences and validates independently of scene and visibility
+ok 128 - wallpaper blur defaults for earlier preferences and validates independently of scene and visibility
+  ---
+  duration_ms: 0.389724
+  type: 'test'
+  ...
+# Subtest: wallpaper preferences accept only the bundled scene identifiers
+ok 129 - wallpaper preferences accept only the bundled scene identifiers
+  ---
+  duration_ms: 1.541119
+  type: 'test'
+  ...
+# Subtest: a selected wallpaper set follows local time while a pinned default remains fixed
+ok 130 - a selected wallpaper set follows local time while a pinned default remains fixed
+  ---
+  duration_ms: 2.999925
+  type: 'test'
+  ...
+# Subtest: selects all 21 weekday and time combinations using local calendar time
+ok 131 - selects all 21 weekday and time combinations using local calendar time
+  ---
+  duration_ms: 0.603094
+  type: 'test'
+  ...
+# Subtest: switches exactly at 6am, noon, 6pm, and midnight without changing the input date
+ok 132 - switches exactly at 6am, noon, 6pm, and midnight without changing the input date
+  ---
+  duration_ms: 0.207631
+  type: 'test'
+  ...
+# Subtest: uses local calendar boundaries through daylight saving changes
+ok 133 - uses local calendar boundaries through daylight saving changes
+  ---
+  duration_ms: 10.49765
+  type: 'test'
+  ...
+# Subtest: ships 21 distinct local WebP scenes within a five MiB collection budget
+ok 134 - ships 21 distinct local WebP scenes within a five MiB collection budget
+  ---
+  duration_ms: 28.572403
+  type: 'test'
+  ...
+1..134
+# tests 134
+# suites 0
+# pass 130
+# fail 4
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1781.522944

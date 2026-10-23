@@ -1,0 +1,106 @@
+{
+  "mode": "focused",
+  "not_a_full_independent_audit": true,
+  "findings": [
+    {
+      "id": "INST-01",
+      "title": "Unattended WebView2 prerequisite bootstrap",
+      "classification": "policy_gap_or_preventive_hardening",
+      "evidence_state": "supported_within_stated_scope",
+      "severity": null,
+      "files": [
+        "scripts/release/build.mjs",
+        "src-tauri/tauri.conf.json"
+      ],
+      "verification": [
+        "generated Windows build plans",
+        "direct Tauri configuration test"
+      ],
+      "implemented": true,
+      "caused_avast_alert": "unknown"
+    },
+    {
+      "id": "INST-02",
+      "title": "Residual updater artifact and manifest generation",
+      "classification": "policy_gap_or_preventive_hardening",
+      "evidence_state": "supported_within_stated_scope",
+      "severity": null,
+      "files": [
+        "scripts/release/build.mjs",
+        "scripts/release/updater-manifest.mjs"
+      ],
+      "verification": [
+        "six build target plans",
+        "manifest CLI no-output test"
+      ],
+      "implemented": true,
+      "caused_avast_alert": "unknown"
+    },
+    {
+      "id": "INST-03",
+      "title": "npm install lifecycle safety depended on CLI flag",
+      "classification": "policy_gap_or_preventive_hardening",
+      "evidence_state": "supported_within_stated_scope",
+      "severity": null,
+      "files": [
+        ".npmrc",
+        "package.json"
+      ],
+      "verification": [
+        "offline local lifecycle sentinel test"
+      ],
+      "implemented": true,
+      "caused_avast_alert": "unknown"
+    },
+    {
+      "id": "INST-04",
+      "title": "Release builds did not require frozen Cargo resolution",
+      "classification": "policy_gap_or_preventive_hardening",
+      "evidence_state": "supported_within_stated_scope",
+      "severity": null,
+      "files": [
+        "scripts/release/build.mjs",
+        "package.json"
+      ],
+      "verification": [
+        "six target plans with --locked"
+      ],
+      "implemented": true,
+      "caused_avast_alert": "unknown"
+    },
+    {
+      "id": "INST-05",
+      "title": "UI/documentation recommended remote pipe-to-shell installer",
+      "classification": "policy_gap_or_preventive_hardening",
+      "evidence_state": "supported_within_stated_scope",
+      "severity": null,
+      "files": [
+        "src/provider-settings.ts",
+        "docs/providers.md"
+      ],
+      "verification": [
+        "source comparison; syntax checks"
+      ],
+      "implemented": true,
+      "caused_avast_alert": "unknown"
+    },
+    {
+      "id": "INST-06",
+      "title": "Upstream publication infrastructure and ambiguous artifact identity",
+      "classification": "policy_gap_or_preventive_hardening",
+      "evidence_state": "supported_within_stated_scope",
+      "severity": null,
+      "files": [
+        ".github/workflows/release.yml",
+        "packages/npx/package.json",
+        "scripts/release/build.mjs"
+      ],
+      "verification": [
+        "source comparison; release regression suite"
+      ],
+      "implemented": true,
+      "caused_avast_alert": "unknown"
+    }
+  ],
+  "avast_cause": "unknown"
+}

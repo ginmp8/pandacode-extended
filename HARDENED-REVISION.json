@@ -1,0 +1,14 @@
+{
+  "project": "PandaCode",
+  "upstream_version": "0.3.28",
+  "security_revision": "hardened.3",
+  "review_date": "2026-10-23",
+  "original_archive_sha256": "4d74c67ab175967fa247852cd8d678e3908cb51de9d5a9292b1dd5dc6d500836",
+  "minimum_rust": "1.88",
+  "distribution": "reviewed source; not a signed native installer",
+  "automatic_updates": "disabled in application and native agent-update entrypoints",
+  "base_archive_sha256": "4863e1b47a0c6842a5b6490a50f5e9826be8233251495580a82f255924fa1d01",
+  "review_scope": "Credential-shaped Slack test fixture removal; inherited hardened.2 installation controls",
+  "windows_installation": "No WebView2 download; existing runtime required; current-user NSIS installer",
+  "validation_notice": "See security-review/hardened.3/README.md; no native Windows build, install or Avast test in this revision"
+}

@@ -2919,6 +2919,18 @@ async function openReviewTools(): Promise<void> {
       }
     },
     insertPrompt: async (id, text, expectedRequest, knownProviders) => {
+      const localTarget = () => {
+        const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+        if (!task || task.id !== id || deletedSessions.has(id) || task.archived || task.remoteDevice
+          || task.mode !== 'plan' || isRunning(id)
+          || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) {
+          throw new Error('Select the same fresh, idle, local project task in Read only (plan) mode.');
+        }
+        if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim()) throw new Error('The composer changed or contains a draft. Nothing was replaced.');
+        if (state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('Remove existing attachments before inserting this review prompt.');
+        return { task, prompt };
+      };
+      localTarget();
       // Recheck authoritative native state after the async model-catalog and message
       // reads. Changing models/teams on the same task ID must not reuse approval.
       const [{ reviewProblems }, latest, team, page] = await Promise.all([
@@ -2930,14 +2942,10 @@ async function openReviewTools(): Promise<void> {
       if (latest.id !== id || reviewProblems({ task: latest, team, providers: knownProviders, hasMessages: page.hasOlder || page.messages.length > 0 }, expectedRequest).length) {
         throw new Error('Task or review team settings changed. Refresh and prepare a new prompt.');
       }
-      const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-      if (!task || task.id !== id || deletedSessions.has(id) || task.archived || task.provider !== latest.provider
-        || task.model !== latest.model || task.mode !== 'plan' || isRunning(id)
-        || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) {
+      const { task, prompt } = localTarget();
+      if (task.provider !== latest.provider || task.model !== latest.model) {
         throw new Error('Select the same fresh, idle, local project task in Read only (plan) mode.');
       }
-      if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim()) throw new Error('The composer changed or contains a draft. Nothing was replaced.');
-      if (state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('Remove existing attachments before inserting this review prompt.');
       prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
     },
     copyText: text => navigator.clipboard.writeText(text),

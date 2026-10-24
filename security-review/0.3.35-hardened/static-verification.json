@@ -1,0 +1,267 @@
+{
+  "source_version": "0.3.35-hardened.1",
+  "input_archive_sha256": {
+    "pandacode-hardened-0.3.34.1.zip": {
+      "bytes": 8392584,
+      "sha256": "094d2e05af75c488c346205dacf08fae6e898ef04f9221d2701e701636819103"
+    },
+    "pandacode-0.3.35.zip": {
+      "bytes": 7169174,
+      "sha256": "fc668a66394a3390f78b44a2cd9187b027f383ad1492ddf9653dd00c3f2b1cdd"
+    }
+  },
+  "checks": [
+    {
+      "check": "allowed-edits-only",
+      "status": "pass",
+      "detail": "unexpected=[]"
+    },
+    {
+      "check": "allowed-additions-only",
+      "status": "pass",
+      "detail": "unexpected=[]"
+    },
+    {
+      "check": "no-deletions",
+      "status": "pass",
+      "detail": "unexpected=[]"
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/bots/gateway.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/bots/tests.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/cloud/deploy.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/cloud/cloudflare_worker/src/index.ts",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/cloud/cloudflare.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/providers/host_tools.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/providers/mcp_host.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/workspace.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/storage.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/secret_store.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/src/agent_updates.rs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src/app-updates.ts",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src/agent-updates.ts",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:src-tauri/capabilities/default.json",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "pin-change-only:src-tauri/Cargo.lock",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "pin-change-only:package-lock.json",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:packages/npx/installer.mjs",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:relay/src/limits.ts",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:relay/src/index.ts",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "protected-byte-identical:relay/package.json",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "pin-change-only:src-tauri/tauri.conf.json",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "version-sync",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "tray-least-privilege",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "tray-command-whitelist",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "native-navigation-bound",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "bounded-tray-memory",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "bounded-refresh",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "focus-workflow",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "separate-frontend-entry",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "escaped-user-facing-content",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "numeric-usage-sanitize",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "tray-ui-tests",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "no-updater-regression",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "no-install-regression",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "no-cloud-agent-import",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "npx-remote-install-still-disabled",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "lockfiles-retained",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "no-symlinks",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "check": "no-likely-credentials-in-new-code",
+      "status": "pass",
+      "detail": "paths-counts={}"
+    }
+  ],
+  "passed": 42,
+  "failed": 0,
+  "modified_files": [
+    "AGENTS.md",
+    "HARDENED-REVISION.json",
+    "README.md",
+    "package-lock.json",
+    "package.json",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/tray.rs",
+    "src-tauri/tauri.conf.json",
+    "src/entry.ts",
+    "src/preview.ts"
+  ],
+  "added_files": [
+    "security-review/0.3.35-hardened/README.md",
+    "security-review/0.3.35-hardened/changes.json",
+    "security-review/0.3.35-hardened/changes.patch",
+    "security-review/0.3.35-hardened/frozen-evaluation.json",
+    "security-review/0.3.35-hardened/source-manifest.json",
+    "security-review/0.3.35-hardened/static-verification.json",
+    "security-review/0.3.35-hardened/tamper-probe.json",
+    "security-review/0.3.35-hardened/verify-source.py",
+    "src-tauri/capabilities/tray.json",
+    "src/tray-popover.css",
+    "src/tray-popover.ts",
+    "tests/tray-popover.spec.ts"
+  ],
+  "removed_files": [],
+  "status": "static-pass",
+  "runtime": {
+    "cargo-check": "not-run (Rust toolchain unavailable)",
+    "cargo-test": "not-run (Rust toolchain unavailable and no approved target sandbox)",
+    "tsc-full": "attempted-blocked (62 baseline missing-dependency diagnostics, 63 candidate; one new diagnostic is an existing Tauri API module import unavailable without node_modules)",
+    "playwright": "not-run (browser dependencies and approved runtime unavailable)",
+    "runtime-IPC": "not-run",
+    "SCA": "not-run",
+    "credential-provider-verification": "not-run",
+    "cross-platform": "not-run"
+  }
+}

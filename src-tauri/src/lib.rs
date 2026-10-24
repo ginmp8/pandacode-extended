@@ -1953,7 +1953,7 @@ async fn launch_operation_admitted(
         } else {
             "Turn failed"
         };
-        tray::finished(&app, &session_id, was_stopped);
+        tray::finished(&app, &session_id, was_stopped, successful);
         let _ = app.emit("agent-event", event(&session_id, "done", done));
         remote::run_finished(&app, &session_id, successful, was_stopped, done);
         // Bot conversations reply on their channel and send their next queued message.
@@ -3102,6 +3102,19 @@ pub fn run() {
                     list_provider_models,
                     search_files,
                     open_external_url,
+                ];
+                return handler(invoke);
+            }
+            if invoke.message.webview_ref().label() == "tray" {
+                // The task popover has no workspace, file, CLI, bot or cloud commands.
+                let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                    tray::tray_snapshot,
+                    tray::tray_open,
+                    tray::tray_refresh_usage,
+                    tray::tray_show_app,
+                    tray::tray_hide,
+                    tray::tray_quit,
+                    tray::tray_resize,
                 ];
                 return handler(invoke);
             }

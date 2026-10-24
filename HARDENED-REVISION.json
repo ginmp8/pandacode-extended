@@ -8,19 +8,33 @@
   "distribution": "reviewed source; not a signed native installer",
   "automatic_updates": "disabled in application and native agent-update entrypoints",
   "base_archive_sha256": "94eb26152589a4292aa258b73b15769bcde7ae8ac8e656b2f0c11cd0a265a012",
-  "review_scope": "Selective source backport: bot image/avatar picker, bot settings layout and native tray; preserve hardening & pinned dependencies; cloud agents and macOS secret file migration excluded",
+  "review_scope": "Retain the 0.3.34.1-hardened source tree; backport only 0.3.35 tray popover and usage visualizations; preserve privileged code and pinned dependencies",
   "windows_installation": "No WebView2 download; existing runtime required; current-user NSIS installer",
-  "validation_notice": "Structural/static validation only; no Rust binary, app launch, isolated test runs, independent deployment evidence or live security certification. Read security-review/0.3.34.1/README.md",
-  "compared_upstream_version": "0.3.34",
-  "compared_upstream_sha256": "f01ecdcd1edfc0de3b52c40dfdb838e8486f5394286f4d1b4668a684366a4f79",
-  "release_display_version": "0.3.34.1.hardened",
-  "product_version": "0.3.34-hardened.1",
+  "validation_notice": "Static backport and syntax/invariant checks; native cross-platform build and runtime security validation not established. See security-review/0.3.35-hardened/README.md",
+  "compared_upstream_version": "0.3.35",
+  "compared_upstream_sha256": "fc668a66394a3390f78b44a2cd9187b027f383ad1492ddf9653dd00c3f2b1cdd",
+  "release_display_version": "0.3.35.hardened",
+  "product_version": "0.3.35-hardened.1",
   "source_base_upstream_version": "0.3.28",
   "repackaged_from_sha256": "2150f4c632538a0283aff6f65fbe09cb701102b6ffb483867ff0f4185b3c11b6",
   "feature_parity_with_upstream_0_3_30": false,
-  "version_policy": "0.3.34.hardened distribution label, 0.3.34-hardened package SemVer, hardened.4 historical lineage; no full upstream feature parity",
+  "version_policy": "0.3.35.hardened distribution label, 0.3.35-hardened.1 internal package SemVer; selective backport with inherited hardened controls, not full upstream parity",
   "feature_parity_with_upstream_0_3_34": false,
-  "base_version": "0.3.30.hardened",
-  "revision": "0.3.34.1",
-  "security_review_scope": "F01-F08 targeted remediation against 0.3.34-hardened; runtime verification not complete"
+  "base_version": "0.3.34.1-hardened",
+  "revision": "0.3.35-hardened.1",
+  "security_review_scope": "0.3.35 tray feature + preservation of historical 0.3.34.1 F01-F08 protections; native runtime/security gates not yet executed",
+  "selected_backport": [
+    "native menu bar popover with running/waiting/finished tasks",
+    "explicit-refresh plan usage bars and status indicators",
+    "tray keyboard navigation and limited IPC view"
+  ],
+  "excluded_upstream_areas": [
+    "cloud agent remote credential/checkout transport",
+    "updater and runtime agent installation",
+    "npx network bootstrap",
+    "macOS plaintext file secret-store migration",
+    "cloud provider integrations"
+  ],
+  "feature_parity_with_upstream_0_3_35": false,
+  "current_review_date": "2026-10-24"
 }

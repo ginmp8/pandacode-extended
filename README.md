@@ -1,6 +1,6 @@
-# PandaCode — 0.3.34.1.hardened
+# PandaCode — 0.3.35.hardened
 
-**Distribution label:** `0.3.34.1.hardened`; **internal SemVer:** `0.3.34-hardened.1` (Cargo, npm, Tauri). This source archive preserves the supplied 0.3.30 hardened fork and selectively backports reviewed 0.3.34 changes: bot icons/images, redesigned bot settings, and a native task tray. **It is not feature-equivalent to the upstream 0.3.34 release.** See [current security review](security-review/0.3.34.1/README.md) for the exact scope and verification limits.
+**Distribution label:** `0.3.35.hardened`; **internal SemVer:** `0.3.35-hardened.1` (Cargo, npm, Tauri). This revision retains the `0.3.34.1` hardened controls and selectively brings in the upstream `0.3.35` menu bar popover: task status, keyboard navigation and usage bars. It is **not** equivalent to upstream 0.3.35: cloud agents, installer/updater networking and credential-store changes were **not** merged. See [current security review](security-review/0.3.35-hardened/README.md) for verified and unverified scope.
 
 The hardened controls inherited from prior revisions remain in place, including native credential storage, replay protection, gated agent tools, restricted HTML previews and disabled automatic updates. Historical reports are kept in `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, and `security-review/hardened.3/` and `security-review/hardened.4/`. These reports do not attest that this new candidate passed runtime tests.
 

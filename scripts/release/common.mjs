@@ -47,8 +47,11 @@ export function required(name, env = process.env) {
 }
 
 export function version(value) {
-  // The private hardened distribution uses a pinned, non-executable SemVer prerelease suffix.
-  if (typeof value !== 'string' || value.length > 32 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-hardened)?$/.test(value) || value.replace(/-hardened$/, '').split('.').some(part => !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be X.Y.Z or X.Y.Z-hardened.');
+  // Accept only the private hardened revision suffix, not arbitrary prerelease identifiers.
+  const match = typeof value === 'string' && value.length <= 32
+    ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-hardened(?:\.([1-9]\d*))?)?$/.exec(value)
+    : null;
+  if (!match || match.slice(1).some(part => part !== undefined && !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be X.Y.Z, X.Y.Z-hardened, or X.Y.Z-hardened.N.');
   return value;
 }
 

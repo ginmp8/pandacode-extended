@@ -14,7 +14,7 @@
 .hardened-review .review-field{display:flex;flex-direction:column;gap:6px;min-width:0;font-weight:500}
 .hardened-review input:not([type=checkbox]),.hardened-review textarea,.hardened-review select{width:100%;min-width:0;max-width:100%;font-weight:400}
 .hardened-review textarea{resize:vertical;min-height:70px}
-.hardened-review .review-field:has(input[type=checkbox]){display:flex;flex-direction:row-reverse;justify-content:flex-end;align-items:flex-start;gap:10px;font-weight:400}
+.hardened-review .review-field:has(input[type=checkbox]){display:flex;flex-direction:row;justify-content:flex-start;align-items:flex-start;gap:10px;min-width:0;font-weight:400;overflow-wrap:anywhere}
 .hardened-review input[type=checkbox]{flex:none;margin-top:4px}
 .hardened-review .review-checks{margin:0;padding:10px 10px 10px 28px;border-left:2px solid var(--accent);background:color-mix(in srgb,var(--text) 3%,transparent);color:var(--muted)}
 .hardened-review .review-checks li+li{margin-top:4px}

@@ -19,7 +19,9 @@ export function mountWorkflowLibrary(root: HTMLElement, owner: WorkflowHost): ()
   const details = node('details'); details.open = true; details.append(node('summary', 'Exact prompt / recipe preview'));
   const preview = node('pre', '', 'review-preview'); details.append(preview);
   const confirm = node('input'); confirm.type = 'checkbox';
-  const confirmation = node('label', 'I reviewed this exact scope, expectations and information to be shared', 'review-field'); confirmation.append(confirm);
+  confirm.id = `workflow-confirm-${++serial}`;
+  const confirmation = node('div', '', 'review-field'), confirmationLabel = node('label', 'I reviewed this exact scope, expectations and information to be shared'); confirmationLabel.htmlFor = confirm.id;
+  confirmation.append(confirm, confirmationLabel);
   const actions = node('div', '', 'review-actions'); const buttons: HTMLButtonElement[] = [];
   const input = (): WorkflowInput => ({ kind: kind.value, goal: goal.value, scope: scope.value, acceptance: acceptance.value, origin: origin.value });
   const changed = () => { confirm.checked = false; try { const recipe = buildWorkflow(input()); preview.textContent = JSON.stringify(recipe, null, 2); } catch (error) { preview.textContent = error instanceof Error ? error.message : String(error); } origin.disabled = !workflows.find(w => w.id === kind.value)?.browser; };

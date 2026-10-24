@@ -51,6 +51,11 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     control.id = `${id}-field-${++fieldNumber}`;
     const wrap = el('label', label, 'review-field'); wrap.htmlFor = control.id; wrap.append(control); parent.append(wrap); return control;
   }
+  function checkboxField(parent: HTMLElement, label: string): HTMLInputElement {
+    const control = el('input'); control.type = 'checkbox'; control.id = `${id}-field-${++fieldNumber}`;
+    const wrap = el('div', '', 'review-field'), caption = el('label', label); caption.htmlFor = control.id;
+    wrap.append(control, caption); parent.append(wrap); return control;
+  }
   const note = el('p', 'Local tools for the existing PandaCode engine. Nothing starts automatically; approvals remain in the original controls.', 'review-note');
   const toolbar = el('div', '', 'review-toolbar');
   const refreshButton = button('Refresh snapshot', () => { void perform(refresh); });
@@ -127,10 +132,10 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     input.addEventListener('input', () => { confirmed.checked = false; paintHandoff(); }, { signal });
   }
   handoffFields.goal!.value = snapshot.task?.title ?? '';
-  const include = field(handoff, 'Include this task\'s worker checkpoints (agent-reported)', el('input')); include.type = 'checkbox';
+  const include = checkboxField(handoff, 'Include this task\'s worker checkpoints (agent-reported)');
   include.addEventListener('change', () => { confirmed.checked = false; paintHandoff(); }, { signal });
   const handoffPreview = field(handoff, 'Handoff preview', el('textarea')); handoffPreview.readOnly = true; handoffPreview.rows = 10; handoffPreview.className = 'review-preview';
-  const confirmed = field(handoff, 'I reviewed this preview for sensitive information.', el('input')); confirmed.type = 'checkbox';
+  const confirmed = checkboxField(handoff, 'I reviewed this preview for sensitive information.');
   const handoffError = el('p', '', 'review-note'); handoff.append(handoffError);
   const copyButton = button('Copy handoff', () => { void perform(async () => {
     if (changed()) throw new Error('The selected task changed. Close and reopen this panel before exporting.');

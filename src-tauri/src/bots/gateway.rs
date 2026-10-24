@@ -62,7 +62,7 @@ pub(crate) enum Command {
 }
 
 pub(crate) fn parse_command(text: &str, has_pending_approval: bool) -> Command {
-    let words = text.trim().split_whitespace().map(str::to_ascii_lowercase).collect::<Vec<_>>();
+    let words = text.split_whitespace().map(str::to_ascii_lowercase).collect::<Vec<_>>();
     if matches!(words.as_slice(), [word] if word == "/stop" || word == "stop!") {
         return Command::Stop;
     }

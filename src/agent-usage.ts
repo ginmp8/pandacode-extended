@@ -42,7 +42,7 @@ function peak(result: AgentUsage | undefined): number | null {
 }
 function pricingNote(ledger: Ledger): string {
   const when = ledger.pricing.fetchedAt ? new Date(ledger.pricing.fetchedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
-  return { live: `Prices: LiteLLM public price list, updated ${when}.`, saved: `Prices: saved LiteLLM price list from ${when}.`, bundled: 'Prices: the list bundled with PandaCode (offline).' }[ledger.pricing.source];
+  return { saved: `Prices: saved LiteLLM price list from ${when}.`, bundled: 'Prices: the list bundled with PandaCode (offline).' }[ledger.pricing.source];
 }
 
 /** Keeps keyboard focus on the same control when a section re-renders. */

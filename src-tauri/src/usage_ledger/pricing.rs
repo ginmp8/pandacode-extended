@@ -27,7 +27,6 @@ pub(crate) struct Price {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum Source {
-    Live,
     Saved,
     Bundled,
 }

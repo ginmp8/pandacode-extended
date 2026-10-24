@@ -9,7 +9,7 @@ const calls = (page: Page): Promise<{ provider: string; refresh: boolean }[]> =>
 const tab = (page: Page, name: string) => dialog(page).getByRole('tab', { name, exact: true });
 const hourOn = (daysBack: number, hour = 14) => { const now = new Date(); return Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysBack, hour).getTime() / 3_600_000); };
 const ledger = () => ({
-  scannedAt: Date.now(), pricing: { source: 'live', fetchedAt: Date.now() }, sources: [{ provider: 'claude', files: 3 }, { provider: 'codex', files: 2 }],
+  scannedAt: Date.now(), pricing: { source: 'bundled', fetchedAt: null }, sources: [{ provider: 'claude', files: 3 }, { provider: 'codex', files: 2 }],
   models: [{ provider: 'claude', name: 'claude-opus-5-5', priced: true }, { provider: 'codex', name: 'gpt-6-astra', priced: true }, { provider: 'codex', name: 'codex-auto-review', priced: false }],
   rows: [[hourOn(0), 0, 1000, 90_000, 2000, 7000, 4.25, 3.1], [hourOn(2), 1, 5000, 40_000, 0, 5000, 1.5, 0.4], [hourOn(2), 2, 9000, 0, 0, 1000, 0, 0], [hourOn(60), 0, 100, 100, 0, 100, 20, 0]],
   sessions: [{ provider: 'claude', first: hourOn(3), last: hourOn(0) }, { provider: 'codex', first: hourOn(2), last: hourOn(2) }, { provider: 'claude', first: hourOn(60), last: hourOn(60) }],

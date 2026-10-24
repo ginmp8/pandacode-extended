@@ -336,10 +336,10 @@ mod tests {
     #[test]
     fn user_data_file_is_removed_when_the_caller_fails() {
         let path = std::env::temp_dir().join(format!("pandacode-user-data-error-{}", uuid::Uuid::new_v4()));
-        let failed = (|| -> Result<(), String> {
+        let failed: Result<(), String> = {
             let _file = UserDataFile::create_at(path.clone(), "fixture-password").unwrap();
             Err("The simulated AWS request failed.".into())
-        })();
+        };
         assert!(failed.is_err());
         assert!(!path.exists());
     }

@@ -2259,7 +2259,7 @@ mod cancellation_regression_tests {
         std::thread::sleep(Duration::from_millis(100));
         canceled.store(true, Ordering::SeqCst);
         let result = join.join().unwrap();
-        assert!(result.unwrap_err().contains("indeterminate"));
+        assert!(matches!(result, Err(error) if error.contains("indeterminate")));
         std::thread::sleep(Duration::from_millis(2200));
         assert!(!marker.exists(), "canceled process wrote after cancellation");
     }

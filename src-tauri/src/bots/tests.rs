@@ -146,9 +146,9 @@ fn deny_beats_allow_and_dangerous_actions_always_ask() {
 
 #[test]
 fn approval_replies_only_count_while_something_is_waiting() {
-    assert_eq!(gateway::parse_command("yes", true), gateway::Command::Approve(true, false));
-    assert_eq!(gateway::parse_command("Always.", true), gateway::Command::Approve(true, true));
-    assert_eq!(gateway::parse_command("no", true), gateway::Command::Approve(false, false));
+    assert_eq!(gateway::parse_command("yes", true), gateway::Command::ApprovalIdRequired);
+    assert_eq!(gateway::parse_command("always", true), gateway::Command::ApprovalIdRequired);
+    assert_eq!(gateway::parse_command("no", true), gateway::Command::ApprovalIdRequired);
     assert_eq!(gateway::parse_command("yes", false), gateway::Command::Message);
     assert_eq!(gateway::parse_command("/STOP", false), gateway::Command::Stop);
     assert_eq!(gateway::parse_command("/new", false), gateway::Command::NewThread);

@@ -13,7 +13,7 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{mpsc, atomic::{AtomicBool, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -195,7 +195,7 @@ pub(crate) fn run_process(
     limit: usize,
     timeout: Duration,
 ) -> Result<GitOutput, String> {
-    run_bounded(command, tool, limit, 16 * 1024, timeout, None)
+    run_bounded(command, tool, limit, 16 * 1024, timeout, None, None)
 }
 
 /// Like `run_process`, but feeds `input` to stdin (from a thread, then closes it) and keeps
@@ -207,7 +207,19 @@ pub(crate) fn run_process_with_input(
     timeout: Duration,
     input: Option<&[u8]>,
 ) -> Result<GitOutput, String> {
-    run_bounded(command, tool, limit, limit, timeout, input)
+    run_bounded(command, tool, limit, limit, timeout, input, None)
+}
+
+/// Cancellation is observed from the blocking process supervisor. Dropping an
+/// async JoinHandle alone would leave a spawned OS process running.
+pub(crate) fn run_process_cancelable(
+    command: Command,
+    tool: &str,
+    limit: usize,
+    timeout: Duration,
+    canceled: &AtomicBool,
+) -> Result<GitOutput, String> {
+    run_bounded(command, tool, limit, 16 * 1024, timeout, None, Some(canceled))
 }
 
 fn run_bounded(
@@ -217,7 +229,11 @@ fn run_bounded(
     stderr_limit: usize,
     timeout: Duration,
     input: Option<&[u8]>,
+    canceled: Option<&AtomicBool>,
 ) -> Result<GitOutput, String> {
+    if canceled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Err(format!("{tool} canceled before start; no command launched."));
+    }
     crate::child_env::sanitize(&mut command);
     #[cfg(unix)]
     command.process_group(0);
@@ -258,6 +274,12 @@ fn run_bounded(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if canceled.is_some_and(|flag| flag.load(Ordering::SeqCst)) => {
+                stop_process_group(process_id);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{tool} canceled; external effects may already have happened. Outcome indeterminate: inspect before retrying."));
+            }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 stop_process_group(process_id);
@@ -2218,5 +2240,27 @@ mod tests {
             unrelated.to_str().unwrap(),
         ]);
         assert!(legacy_worktree_parent(&unrelated, std::slice::from_ref(&fixture.root)).is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod cancellation_regression_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+    #[test]
+    fn cancellation_stops_a_long_running_process_group() {
+        let marker = std::env::temp_dir().join(format!("pandacode-cancel-{}", uuid::Uuid::new_v4()));
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_flag = canceled.clone();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 2; touch "$1"").arg("sh").arg(marker.as_os_str());
+        let join = std::thread::spawn(move || run_process_cancelable(cmd, "stub", 1024, Duration::from_secs(5), &worker_flag));
+        std::thread::sleep(Duration::from_millis(100));
+        canceled.store(true, Ordering::SeqCst);
+        let result = join.join().unwrap();
+        assert!(result.unwrap_err().contains("indeterminate"));
+        std::thread::sleep(Duration::from_millis(2200));
+        assert!(!marker.exists(), "canceled process wrote after cancellation");
     }
 }

@@ -441,8 +441,9 @@ impl Context {
                 let result = tokio::select! {
                     result = async {
                         self.authorize(name, &args).await?;
-                        tokio::time::timeout(Duration::from_secs(60),(self.host.handler)(name.into(),args)).await
-                            .unwrap_or_else(|_|Err("PandaCode tool timed out".into()))
+                        let deadline = if name == "pandacode_cloud_cli" { Duration::from_secs(1860) } else { Duration::from_secs(60) };
+                        tokio::time::timeout(deadline,(self.host.handler)(name.into(),args)).await
+                            .unwrap_or_else(|_|Err("PandaCode tool timed out; outcome indeterminate. Inspect external state before retrying.".into()))
                     } => result,
                     _ = cancel.notified() => Err("Architect tool canceled".into()),
                 };

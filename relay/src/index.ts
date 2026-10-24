@@ -1,7 +1,7 @@
 import { Account } from "./account.ts";
 import { type Env, fail, json } from "./env.ts";
 import { githubUser } from "./github.ts";
-import { MAX_FRAME_BYTES } from "./limits.ts";
+import { MAX_FRAME_BYTES, readJsonLimited } from "./limits.ts";
 import { signToken, verifyToken } from "./token.ts";
 import { parseDevice } from "./validate.ts";
 
@@ -13,7 +13,9 @@ async function authGithub(request: Request, env: Env): Promise<Response> {
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
   if (!(await env.AUTH_LIMITER.limit({ key: ip })).success) return fail(429, "too many sign-in attempts");
   if (Number(request.headers.get("content-length") ?? 0) > MAX_FRAME_BYTES) return fail(413, "request too large");
-  const body = (await request.json().catch(() => null)) as { githubToken?: unknown; device?: unknown } | null;
+  const parsed = await readJsonLimited(request, MAX_FRAME_BYTES);
+  if (parsed.tooLarge) return fail(413, "request too large");
+  const body = parsed.value as { githubToken?: unknown; device?: unknown } | null;
   if (!body || typeof body.githubToken !== "string" || !body.githubToken || body.githubToken.length > 512) {
     return fail(400, "githubToken is required");
   }

@@ -1,0 +1,165 @@
+{
+  "audit": "PandaCode 0.3.34.1 hardened targeted static inspection",
+  "source_archive_sha256": "7cf9a99bbfd3e3753d542753c954551007290e42e14464c43163b7d066f1a412",
+  "release_version": "0.3.34-hardened.1",
+  "static_checks": [
+    {
+      "name": "F01-UUID-bound-single-use",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F01-regression-authored",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F02-default-ask",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F02-UI-paths",
+      "state": "pass",
+      "detail": "UI defaults reviewed; explicit user mode remains supported"
+    },
+    {
+      "name": "F02-architect-regression",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F03-cancelable-process",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F03-outer-deadline",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F04-timeout-action",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F05-no-runtime-install",
+      "state": "pass",
+      "detail": "No npm install command present"
+    },
+    {
+      "name": "F06-no-npx",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F07-bounded-stream",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F07-regression-authored",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "F08-fork-policy",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "semver-lock-synchronization",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "cargo-lock-external-unchanged",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "npm-lock-external-unchanged",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "preserve:src-tauri/src/token_saver.rs",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "preserve:src-tauri/src/providers/windows_job.rs",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "no-base-file-deletions",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "no-symlinks",
+      "state": "pass",
+      "detail": ""
+    },
+    {
+      "name": "typescript-syntax-8-files",
+      "state": "pass",
+      "detail": "PARSE_OK src-tauri/src/cloud/cloudflare_worker/src/index.ts\nPARSE_OK relay/src/limits.ts\nPARSE_OK relay/src/index.ts\nPARSE_OK relay/test/request-body-limit.test.ts\nPARSE_OK src/main.ts\nPARSE_OK src/github.ts\nPARSE_OK src/overlay-client.ts\nPARSE_OK src/preview.ts\nSYNTAX_ERRORS=0"
+    },
+    {
+      "name": "wrangler-wrapper-js-syntax",
+      "state": "pass",
+      "detail": ""
+    }
+  ],
+  "all_static_checks_passed": true,
+  "input_file_count": 1042,
+  "source_file_count_before_report": 1046,
+  "modified_files_before_report": [
+    "HARDENED-REVISION.json",
+    "README.md",
+    "SECURITY.md",
+    "package-lock.json",
+    "package.json",
+    "relay/README.md",
+    "relay/package.json",
+    "relay/src/index.ts",
+    "relay/src/limits.ts",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/src/architect/profiles/tests.rs",
+    "src-tauri/src/bots/gateway.rs",
+    "src-tauri/src/bots/tests.rs",
+    "src-tauri/src/cloud/cloudflare.rs",
+    "src-tauri/src/cloud/cloudflare_worker/src/index.ts",
+    "src-tauri/src/cloud/deploy.rs",
+    "src-tauri/src/overlay.rs",
+    "src-tauri/src/providers/host_tools.rs",
+    "src-tauri/src/providers/mcp_host.rs",
+    "src-tauri/src/storage.rs",
+    "src-tauri/src/workspace.rs",
+    "src-tauri/tauri.conf.json",
+    "src/github.ts",
+    "src/main.ts",
+    "src/overlay-client.ts",
+    "src/preview.ts"
+  ],
+  "added_files_before_report": [
+    "relay/.npmrc",
+    "relay/scripts/wrangler.mjs",
+    "relay/test/request-body-limit.test.ts",
+    "security-review/0.3.34.1/README.md"
+  ],
+  "removed_files_before_report": [],
+  "dynamic_checks": {
+    "cargo-check": "not-run (Rust toolchain unavailable)",
+    "cargo-test": "not-run (toolchain and OS sandbox unavailable)",
+    "npm-tests": "not-run (no verified isolation for target scripts)",
+    "tsc-typecheck": "not-run (dependencies unavailable; syntax parser only)",
+    "cloudflare-runtime": "not-run (no remote credentials/isolated runtime)",
+    "windows-installer": "not-run",
+    "security-external-advisory-scan": "not-run"
+  }
+}

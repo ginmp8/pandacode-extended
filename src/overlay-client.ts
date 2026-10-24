@@ -6,10 +6,10 @@ export interface OverlayTask { id: string; sessionId: string; kind: 'task' | 'wo
 export interface OverlaySnapshot { tasks: OverlayTask[]; projects: {id: string; name: string; path: string}[]; context: LaunchContext; activeCount: number; teamWorkerCount?: number }
 export interface OverlayThread { messages: Message[]; hasOlder: boolean; liveText: string; status: string; provider?: ProviderId; subagent?: SubagentActivity | null; historyVersion?: number; historyUnchanged?: boolean }
 export const nativeOverlay = '__TAURI_INTERNALS__' in window;
-const initial: OverlayPreferences = { enabled: true, shortcut: 'CommandOrControl+Shift+Space', context: {projectId: 'preview-project', provider: 'codex', model: 'default', mode: 'full'}, error: null };
+const initial: OverlayPreferences = { enabled: true, shortcut: 'CommandOrControl+Shift+Space', context: {projectId: 'preview-project', provider: 'codex', model: 'default', mode: 'ask'}, error: null };
 let previewPreferences = initial;
 try { previewPreferences = JSON.parse(localStorage.getItem('pandacode.overlay-preview') || 'null') || initial; } catch { /* Preview storage is optional. */ }
-function effectiveContext(): LaunchContext { return {...previewPreferences.context,...previewPreferences.modelSelection,mode:previewPreferences.context.mode ?? 'full'}; }
+function effectiveContext(): LaunchContext { return {...previewPreferences.context,...previewPreferences.modelSelection,mode:previewPreferences.context.mode ?? 'ask'}; }
 // Preview fixtures only. Native catalogs come from the installed harnesses.
 const previewCatalogs: Record<ProviderId, ProviderModel[]> = {
   pi:[{id:'anthropic/claude-sonnet-4-5',name:'Claude Sonnet 4.5',description:'Sample Pi model.'}],

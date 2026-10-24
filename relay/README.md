@@ -10,11 +10,13 @@ devices. It stores no task content. The contract is in [docs/remote-access.md](.
    Generate a client secret too: the relay uses it only to check that a sign-in token was issued to this app (`POST /applications/{client_id}/token`). The desktop app never sees it. The client ID also goes into the desktop build as `PANDACODE_GITHUB_CLIENT_ID`.
 2. From this folder:
    ```sh
-   npm install
-   openssl rand -base64 48 | npx wrangler secret put SESSION_SECRET
-   npx wrangler secret put GITHUB_CLIENT_ID
-   npx wrangler secret put GITHUB_CLIENT_SECRET
-   npx wrangler deploy
+   npm ci --ignore-scripts
+   # Install/review Wrangler 4.151.0 independently; do not use npx or npm install here.
+   export PANDACODE_WRANGLER_PATH=/absolute/path/to/reviewed/wrangler/bin/wrangler.js
+   openssl rand -base64 48 | node ./scripts/wrangler.mjs secret put SESSION_SECRET
+   node ./scripts/wrangler.mjs secret put GITHUB_CLIENT_ID
+   node ./scripts/wrangler.mjs secret put GITHUB_CLIENT_SECRET
+   npm run deploy
    ```
    Each `secret put` takes the secret's name and asks for its value (paste the OAuth App's client ID,
    then its client secret). Run them one line at a time.
@@ -38,7 +40,7 @@ Rotating `SESSION_SECRET` signs everyone out.
 ```sh
 npm run typecheck   # tsc for the Worker and for the tests
 npm test            # node --test (needs Node 22.18+ for TypeScript stripping)
-npx wrangler dev    # local; put SESSION_SECRET=... in .dev.vars
+npm run dev    # local; put SESSION_SECRET=... in .dev.vars; requires reviewed Wrangler
 ```
 
 | File | Job |

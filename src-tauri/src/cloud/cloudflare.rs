@@ -122,24 +122,28 @@ pub fn deploy(api_token: &str, account: &str, progress: &dyn Fn(&str)) -> Result
             std::fs::create_dir_all(target.parent().unwrap_or(&work)).map_err(|e| e.to_string())?;
             std::fs::write(&target, contents).map_err(|e| e.to_string())?;
         }
-        progress("Installing the Worker's packages…");
-        let mut install = Command::new(tool("npm")?);
-        install.args(["install", "--no-audit", "--no-fund", "--silent"]).current_dir(&work);
-        checked(run_process(install, "npm", 1 << 20, Duration::from_secs(600))?)?;
-        progress("Building the sandbox image and deploying (a few minutes)…");
-        let output = wrangler(&work, api_token, account, &["deploy"], None, Duration::from_secs(1800))?;
+        // Wrangler must be installed and reviewed outside PandaCode. No npm
+        // install, package hooks, npx fallback or ambient package download.
+        let cli = tool("wrangler")?;
+        let mut version = Command::new(&cli);
+        version.arg("--version");
+        let version = checked(run_process(version, "Wrangler version", 4096, Duration::from_secs(15))?)?;
+        if !String::from_utf8_lossy(&version.bytes).split_whitespace().any(|word| word == "4.151.0") {
+            return Err("Install the reviewed Wrangler 4.151.0 CLI manually before deploying; no automatic installation is permitted.".into());
+        }
+        progress("Building the sandbox image and deploying with preinstalled Wrangler…");
+        let output = wrangler(&work, &cli, api_token, account, &["deploy"], None, Duration::from_secs(1800))?;
         let url = deployed_url(&output).ok_or("The Worker deployed but its address was not reported. Check workers.dev is enabled for your account.")?;
         progress("Securing the Worker…");
         let secret = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        wrangler(&work, api_token, account, &["secret", "put", "PANDACODE_TOKEN"], Some(&secret), Duration::from_secs(300))?;
+        wrangler(&work, &cli, api_token, account, &["secret", "put", "PANDACODE_TOKEN"], Some(&secret), Duration::from_secs(300))?;
         Ok((url, secret))
     })();
     let _ = std::fs::remove_dir_all(&work);
     result
 }
-fn wrangler(work: &Path, api_token: &str, account: &str, args: &[&str], input: Option<&str>, timeout: Duration) -> Result<String, String> {
-    let wrangler = work.join(if cfg!(windows) { "node_modules/.bin/wrangler.cmd" } else { "node_modules/.bin/wrangler" });
-    let mut command = Command::new(&wrangler);
+fn wrangler(work: &Path, wrangler: &Path, api_token: &str, account: &str, args: &[&str], input: Option<&str>, timeout: Duration) -> Result<String, String> {
+    let mut command = Command::new(wrangler);
     command.args(args).current_dir(work)
         .env("CLOUDFLARE_API_TOKEN", api_token).env("CLOUDFLARE_ACCOUNT_ID", account)
         .env("WRANGLER_SEND_METRICS", "false").env("CI", "true");

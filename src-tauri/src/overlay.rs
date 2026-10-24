@@ -1737,8 +1737,8 @@ mod tests {
     }
 
     #[test]
-    fn launcher_defaults_to_full_but_keeps_saved_permission_choices() {
-        assert_eq!(LaunchContext::default().mode, "full");
+    fn launcher_defaults_to_ask_but_keeps_saved_permission_choices() {
+        assert_eq!(LaunchContext::default().mode, "ask");
         let store = storage::Store::open(Path::new(":memory:")).unwrap();
         let project = store.add_project(&std::env::temp_dir()).unwrap();
         for provider in [
@@ -1764,7 +1764,7 @@ mod tests {
                     saved["mode"] = serde_json::json!(mode);
                 }
                 let context: LaunchContext = serde_json::from_value(saved).unwrap();
-                assert_eq!(context.mode, mode.unwrap_or("full"));
+                assert_eq!(context.mode, mode.unwrap_or("ask"));
                 let created = create_launch_task(
                     &store,
                     &project.id,
@@ -1774,7 +1774,7 @@ mod tests {
                     "Build a feature",
                 )
                 .unwrap();
-                assert_eq!(created.mode, mode.unwrap_or("full"));
+                assert_eq!(created.mode, mode.unwrap_or("ask"));
             }
         }
     }

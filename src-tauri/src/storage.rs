@@ -20,7 +20,7 @@ pub fn valid_permission_mode(mode: &str) -> bool {
 
 // Only new user tasks use this default. Persisted tasks always retain their
 // selected mode, including restrictive modes chosen before this default changed.
-pub const DEFAULT_PERMISSION_MODE: &str = "full";
+pub const DEFAULT_PERMISSION_MODE: &str = "ask";
 
 pub const COMPLETED_ARCHIVE_DELAY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 

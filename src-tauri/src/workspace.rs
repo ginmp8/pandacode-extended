@@ -2254,7 +2254,7 @@ mod cancellation_regression_tests {
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_flag = canceled.clone();
         let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("sleep 2; touch "$1"").arg("sh").arg(marker.as_os_str());
+        cmd.arg("-c").arg("sleep 2; touch \"$1\"").arg("sh").arg(marker.as_os_str());
         let join = std::thread::spawn(move || run_process_cancelable(cmd, "stub", 1024, Duration::from_secs(5), &worker_flag));
         std::thread::sleep(Duration::from_millis(100));
         canceled.store(true, Ordering::SeqCst);

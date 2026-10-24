@@ -1,6 +1,7 @@
 Evidence index
 ==============
-Current source release: 0.3.30.hardened/README.md
+Current source release: 0.3.34.hardened/README.md
+Previous source release: 0.3.30.hardened/README.md
 Prior selective backport report: hardened.4/README.md
 Historical installation review: ../SECURITY-INSTALLATION-REVIEW.md
 Previous fixture follow-up: hardened.3/

@@ -25,6 +25,7 @@ import { renderTurnChanges, changeRequest, captureChangeCards, restoreChangeCard
 import { mountWallpapers } from './wallpapers';
 import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, ToolActivity, TurnChanges } from './types';
 import type { BrowserPanel } from './browser';
+import { botAvatarHtml } from './bot-avatars';
 import { call, chooseFolder, preview, subscribe } from './bridge';
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, markdown, morph } from './dom';
@@ -1048,11 +1049,10 @@ function botCrumb(bot: import('./bots').Bot): string {
 }
 /** An empty bot conversation: who it is, a few things to ask, and the settings that make it useful. */
 function botWelcome(bot: import('./bots').Bot): string {
-  const glyph = bot.avatar.trim() || bot.name.trim().slice(0, 1).toUpperCase();
   const asks = ['What can you help me with?', 'Remember that I prefer short, direct answers.', 'Every weekday at 9, send me a summary of what changed.'];
   const setup = ([['profile', 'edit', 'Instructions'], ['memory', 'leaf', 'Memory'], ['schedules', 'refresh', 'Schedules'], ['channels', 'globe', 'Channels']] as const)
     .map(([tab, glyphName, label]) => `<button data-action="bot-settings" data-bot="${escape(bot.id)}" data-tab="${tab}">${icon(glyphName)}${label}</button>`).join('');
-  return `<div class="new-task-welcome bot-welcome"><span class="bot-welcome-avatar" aria-hidden="true">${escape(glyph)}</span><h1>Chat with ${escape(bot.name)}</h1><p>${escape(bot.role || 'Your bot remembers, works on a schedule and answers you here or in your channels.')}</p><div class="prompt-suggestions">${asks.map(text => `<button data-action="suggest" data-text="${escape(text)}">${escape(text)} ${icon('chevron')}</button>`).join('')}</div><div class="bot-welcome-setup" role="group" aria-label="Set up ${escape(bot.name)}">${setup}</div></div>`;
+  return `<div class="new-task-welcome bot-welcome">${botAvatarHtml(bot.avatar, bot.name, 'bot-welcome-avatar')}<h1>Chat with ${escape(bot.name)}</h1><p>${escape(bot.role || 'Your bot remembers, works on a schedule and answers you here or in your channels.')}</p><div class="prompt-suggestions">${asks.map(text => `<button data-action="suggest" data-text="${escape(text)}">${escape(text)} ${icon('chevron')}</button>`).join('')}</div><div class="bot-welcome-setup" role="group" aria-label="Set up ${escape(bot.name)}">${setup}</div></div>`;
 }
 /** Where a turn's spawned workers appear: right after what the architect said in that turn. */
 function workerSlot(turn: { user?: Message; coordination?: Message }): string {
@@ -1801,6 +1801,8 @@ function rememberThread(id: string): void {
   if (threadPages.size > THREAD_PAGES) threadPages.delete(threadPages.keys().next().value as string);
 }
 const pageSignature = (messages: Message[]): string => messages.filter(message => message.id > 0).map(message => `${message.id}:${message.content.length}`).join(',');
+// Best-effort visual notification state, never an agent permission or authorization gate.
+function markTraySeen(sessionId: string): void { void call('tray_seen', { sessionId }).catch(() => undefined); }
 
 async function selectSession(id: string, focusComposer = false): Promise<void> {
   if (deletedSessions.has(id)) return;
@@ -1817,7 +1819,7 @@ async function selectSession(id: string, focusComposer = false): Promise<void> {
   // A bot's conversation lives in the Bots section; it never re-points the project filter.
   if (state.projectFilter && state.projectFilter !== s.projectId && !botProjects.has(s.projectId) && !chatTask(s)) setProjectFilter(s.projectId);
   if (state.collapsedFolders.delete(s.projectId)) saveCollapsedFolders();
-  state.sessionId = s.id; activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.archived = s.archived; state.attachments = [];
+  state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.archived = s.archived; state.attachments = [];
   const remembered = changingTask ? threadPages.get(id) : undefined;
   state.messages = remembered ? [...remembered.messages] : []; state.messagesLoading = !remembered; state.messagesError = ''; state.hasOlder = remembered?.hasOlder ?? false;
   const generation = ++state.generation;
@@ -3896,7 +3898,17 @@ async function boot(): Promise<void> {
   run(subscribe('vm-changed', event => { if (event && !Array.isArray(event) && event.show) openVm(); void vmPanel?.refresh(); }).then(() => undefined));
   // bridge.ts has no typed overload for this event yet.
   run((subscribe as (name: string, callback: () => void) => Promise<() => void>)('design-changed', () => void designPanel?.refresh()).then(() => undefined));
-  run(subscribe('agent-event', (event: AgentEvent) => { if (event.kind === 'done' && event.sessionId === state.sessionId) void designPanel?.refresh(); }).then(() => undefined));
+  run(subscribe('agent-event', (event: AgentEvent) => {
+    if (event.kind !== 'done' || event.sessionId !== state.sessionId) return;
+    void designPanel?.refresh();
+    if (document.hasFocus()) markTraySeen(event.sessionId);
+  }).then(() => undefined));
+  run(subscribe('tray-open-session', sessionId => run((async () => {
+    if (typeof sessionId !== 'string') return;
+    if (!state.sessions.some(s => s.id === sessionId)) await reloadSessions();
+    if (state.view !== 'conversation') state.boardPanel = true;
+    await selectSession(sessionId, true);
+  })())).then(() => undefined));
   run(subscribe('simulator-changed', event => { if (event?.show) openSimulator(); void simulatorPanel?.refresh(); }).then(() => undefined));
   run(subscribe('bots-changed', () => run((async () => { botProjectsLoad = reloadBotProjects(); await botProjectsLoad; botsView?.refresh(); })())).then(() => undefined));
   run(initRemote());

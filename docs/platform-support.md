@@ -1,19 +1,19 @@
 # Desktop platform support
 
 The retained build configuration describes six architecture targets across three
-operating systems. This source-only 0.3.30.hardened archive includes no installers.
+operating systems. This source-only 0.3.34.hardened archive includes no installers. Artifact filenames below are build targets, not proof of completed builds.
 Use the local packaging commands in [releasing](releasing.md); upstream releases
 do not include this fork's changes. Native platform support requires its own
 build and desktop checks and is not established by this installation review.
 
 | Target | Platform requirements | Release asset |
 | --- | --- | --- |
-| `darwin-aarch64` | Apple silicon, macOS 12 or later | `PandaCode-0.3.30.hardened-macOS-arm64.dmg` containing `PandaCode.app` |
-| `darwin-x86_64` | Intel Mac, macOS 12 or later | `PandaCode-0.3.30.hardened-macOS-x64.dmg` containing `PandaCode.app` |
-| `windows-x86_64` | x64 Windows 10 version 1809 or later, or Windows 11 | `PandaCode-0.3.30.hardened-Windows-x64-setup.exe` (current-user NSIS installer) |
-| `windows-aarch64` | Windows 11 on ARM (arm64) | `PandaCode-0.3.30.hardened-Windows-arm64-setup.exe` (current-user NSIS installer, native arm64) |
-| `linux-x86_64` | x64 Ubuntu 22.04 or a compatible newer distribution, glibc 2.35+, graphical X11 or XWayland session | `PandaCode-0.3.30.hardened-Linux-x86_64.AppImage` built on Ubuntu 22.04 |
-| `linux-aarch64` | arm64 Ubuntu 24.04 or a compatible newer distribution, glibc 2.39+, graphical X11 or XWayland session | `PandaCode-0.3.30.hardened-Linux-aarch64.AppImage` built on Ubuntu 24.04 |
+| `darwin-aarch64` | Apple silicon, macOS 12 or later | `PandaCode-0.3.34.hardened-macOS-arm64.dmg` containing `PandaCode.app` |
+| `darwin-x86_64` | Intel Mac, macOS 12 or later | `PandaCode-0.3.34.hardened-macOS-x64.dmg` containing `PandaCode.app` |
+| `windows-x86_64` | x64 Windows 10 version 1809 or later, or Windows 11 | `PandaCode-0.3.34.hardened-Windows-x64-setup.exe` (current-user NSIS installer) |
+| `windows-aarch64` | Windows 11 on ARM (arm64) | `PandaCode-0.3.34.hardened-Windows-arm64-setup.exe` (current-user NSIS installer, native arm64) |
+| `linux-x86_64` | x64 Ubuntu 22.04 or a compatible newer distribution, glibc 2.35+, graphical X11 or XWayland session | `PandaCode-0.3.34.hardened-Linux-x86_64.AppImage` built on Ubuntu 22.04 |
+| `linux-aarch64` | arm64 Ubuntu 24.04 or a compatible newer distribution, glibc 2.39+, graphical X11 or XWayland session | `PandaCode-0.3.34.hardened-Linux-aarch64.AppImage` built on Ubuntu 24.04 |
 
 Other architectures are not release targets, but you can try building them
 from source with `npm run package`.
@@ -59,8 +59,8 @@ also require FUSE 2 (`libfuse2` on Ubuntu 22.04). Where FUSE is unavailable,
 AppImage supports extract-and-run:
 
 ```sh
-chmod +x ./PandaCode-0.3.30.hardened-Linux-x86_64.AppImage   # or PandaCode-0.3.30.hardened-Linux-aarch64.AppImage
-APPIMAGE_EXTRACT_AND_RUN=1 ./PandaCode-0.3.30.hardened-Linux-x86_64.AppImage
+chmod +x ./PandaCode-0.3.34.hardened-Linux-x86_64.AppImage   # or PandaCode-0.3.34.hardened-Linux-aarch64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./PandaCode-0.3.34.hardened-Linux-x86_64.AppImage
 ```
 
 Linux GLM key storage requires an unlocked desktop Secret Service. If it is

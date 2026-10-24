@@ -72,5 +72,6 @@ test('unproven native containment cannot be presented as a running isolated revi
   assert.doesNotMatch(native, /Command::new\(|\.spawn\(|\.run\(|Server::start\(/);
   const ui = readFileSync(new URL('../src/hardened/review-panel.ts', import.meta.url), 'utf8');
   assert.match(ui, /No isolated start action is implemented/);
-  assert.match(ui, /Check isolation readiness/);
+  assert.match(ui, /containment_unproven means this review is NOT isolated/);
+  assert.match(ui, /Refresh containment status/);
 });

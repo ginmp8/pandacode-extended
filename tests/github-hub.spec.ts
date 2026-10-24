@@ -9,6 +9,45 @@ const tab = (page: Page, name: RegExp) => hub(page).getByRole('tab', { name });
 const row = (page: Page, number: number) => hub(page).locator(`.gh-item[data-gh-number="${number}"]`);
 /** A thread opened from GitHub: a side panel next to it, like the board's. */
 const side = (page: Page) => page.getByRole('region', { name: 'Task details', exact: true });
+type PreviewCall = { command: string; args: Record<string, unknown> };
+const forbiddenStarts = new Set(['send_message', 'architect_start', 'start_task', 'queue_add', 'queue_take']);
+/** Trace the preview IPC boundary and supply the PR context that the native app reads. */
+async function traceCoordinatedReview(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    (window as any).__reviewCalls = [];
+    (window as any).__reviewFixture = { stalePull: false, staleMapping: false };
+  });
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    await route.fulfill({ response, body: `${source}\n
+const __reviewOriginalInvoke = invoke;
+invoke = async function(command, args) {
+  window.__reviewCalls.push({ command, args });
+  if (command === 'github_repo_pull_review_context') {
+    const context = await __reviewOriginalInvoke(command, args);
+    return window.__reviewFixture.stalePull ? { ...context, title: 'Changed after opening' } : context;
+  }
+  if (command === 'github_resolve') {
+    const references = await __reviewOriginalInvoke(command, args);
+    return references.map(reference => ({ ...reference, body: 'review-context-body-sentinel' }));
+  }
+  if (command === 'github_project_repos' && window.__reviewFixture.staleMapping) return [];
+  return __reviewOriginalInvoke(command, args);
+};\n` });
+  });
+}
+const reviewCalls = (page: Page): Promise<PreviewCall[]> => page.evaluate(() => (window as any).__reviewCalls);
+const clearReviewCalls = (page: Page): Promise<void> => page.evaluate(() => { (window as any).__reviewCalls = []; });
+const reviewDialog = (page: Page) => page.getByRole('dialog', { name: 'Review with coordination' });
+async function openCoordinatedReview(page: Page): Promise<void> {
+  await openHub(page);
+  await tab(page, /Pull requests/).click();
+  await row(page, 130).hover();
+  await clearReviewCalls(page);
+  await row(page, 130).getByRole('button', { name: 'Review with coordination', exact: true }).click();
+  await expect(reviewDialog(page)).toBeVisible();
+}
 async function expectSideThread(page: Page): Promise<void> {
   await expect(hub(page)).toBeVisible();
   await expect(side(page)).toBeVisible();
@@ -21,7 +60,7 @@ async function openHub(page: Page): Promise<void> {
   await page.locator('#navigation .task-item').first().waitFor();
   await page.getByRole('button', { name: 'GitHub view' }).click();
   await expect(hub(page)).toBeVisible();
-  await expect(repoList(page).getByRole('option')).toHaveCount(4);
+  await expect(repoList(page).getByRole('option')).toHaveCount(4, { timeout: 15_000 });
 }
 
 test('lists repositories and shows the chosen one’s threads, pull requests and issues', async ({ page }) => {
@@ -88,7 +127,7 @@ test('pull requests open for review, or in a thread with the prompt ready', asyn
   await openHub(page);
   await tab(page, /Pull requests/).click();
   await row(page, 130).hover();
-  await row(page, 130).getByRole('button', { name: 'Review' }).click();
+  await row(page, 130).locator('button[data-gh-pull="review"]').click();
   await expect(page.locator('#transcript .user-message').last()).toContainText('Review pull request #130 (feat/instant-search → main)');
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Review #130');
   await expectSideThread(page);
@@ -102,6 +141,97 @@ test('pull requests open for review, or in a thread with the prompt ready', asyn
   await expect(page.locator('#prompt')).toBeFocused();
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
 });
+
+test('coordinated PR review shows its association and honest containment warning; Cancel creates nothing', async ({ page }) => {
+  await traceCoordinatedReview(page);
+  await openCoordinatedReview(page);
+  const dialog = reviewDialog(page);
+  await expect(dialog).toContainText('#130');
+  await expect(dialog).toContainText('Debounce library search and cache the index');
+  await expect(dialog).toContainText('containment_unproven');
+  await expect(dialog).toContainText(/not isolated|no isolation|cannot isolate/i);
+  await expect(dialog).not.toContainText(/isolated review (?:is )?(?:ready|active|protected)/i);
+  await expect(dialog).toContainText('Advisor');
+  await expect(dialog).toContainText('Committee');
+  await expect(dialog.getByRole('combobox', { name: /coordinator provider/i })).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: /coordinator model/i })).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: /reviewer 1 provider/i })).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: /reviewer 1 model/i })).toBeVisible();
+  await dialog.getByRole('combobox', { name: /preset/i }).selectOption('committee');
+  await expect(dialog.getByRole('combobox', { name: /reviewer 2 provider/i })).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: /reviewer 2 model/i })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toBeHidden();
+  const calls = await reviewCalls(page);
+  expect(calls.filter(call => ['create_session', 'create_board_task', 'architect_configure', 'set_task_link'].includes(call.command))).toEqual([]);
+  expect(calls.filter(call => forbiddenStarts.has(call.command))).toEqual([]);
+});
+
+test('Prepare task links a fresh plan task and seeds a PR-scoped draft without starting an agent', async ({ page }) => {
+  await traceCoordinatedReview(page);
+  await openCoordinatedReview(page);
+  const dialog = reviewDialog(page);
+  await dialog.getByRole('combobox', { name: /preset/i }).selectOption('committee');
+  await clearReviewCalls(page);
+  await dialog.getByRole('button', { name: 'Prepare task' }).click();
+  await expectSideThread(page);
+  const promptField = page.locator('#prompt:visible');
+  await expect(promptField).toHaveValue(/#130/);
+  const draft = await promptField.inputValue();
+  for (const part of ['#130', 'Debounce library search and cache the index',
+    'https://github.com/orbit-labs/orbit/pull/130', 'feat/instant-search', 'main', 'src/components/search.ts']) expect(draft).toContain(part);
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
+  const calls = await reviewCalls(page);
+  const created = calls.filter(call => call.command === 'create_session');
+  expect(created).toHaveLength(1);
+  expect(created[0].args).toMatchObject({ projectId: 'project-1', mode: 'plan' });
+  const linked = calls.filter(call => call.command === 'set_task_link');
+  expect(linked).toHaveLength(1);
+  expect(linked[0].args).toMatchObject({ kind: 'pull', link: { number: 130, url: 'https://github.com/orbit-labs/orbit/pull/130' } });
+  const configured = calls.filter(call => call.command === 'architect_configure');
+  expect(configured).toHaveLength(1);
+  expect(configured[0].args).toMatchObject({ config: { auto: true, rosterOnly: true, maxParallel: 2, maxAssignments: 2, maxRounds: 2 } });
+  expect(calls.filter(call => forbiddenStarts.has(call.command))).toEqual([]);
+  await promptField.press('Enter');
+  await expect(page.locator('#transcript .user-message')).toHaveCount(1);
+  await expect(page.locator('#transcript .user-message').last()).toContainText('Pull request · open');
+  await expect(page.locator('#transcript .user-message').last()).not.toContainText('review-context-body-sentinel');
+  const afterSend = await reviewCalls(page);
+  expect(afterSend.filter(call => call.command === 'architect_start')).toHaveLength(1);
+  expect(afterSend.filter(call => call.command === 'send_message')).toHaveLength(0);
+});
+
+test('a PR review roster saves as a reusable team profile without creating a task', async ({ page }) => {
+  await traceCoordinatedReview(page);
+  await openCoordinatedReview(page);
+  const dialog = reviewDialog(page);
+  await dialog.getByRole('combobox', { name: /preset/i }).selectOption('committee');
+  await clearReviewCalls(page);
+  await dialog.getByRole('button', { name: 'Save team profile' }).click();
+  await expect(dialog.locator('.review-status[aria-live="polite"]')).toContainText('Profile saved');
+  const calls = await reviewCalls(page);
+  const saved = calls.filter(call => call.command === 'architect_save_profile');
+  expect(saved).toHaveLength(1);
+  expect(saved[0].args).toMatchObject({ setup: { config: { auto: true, rosterOnly: true, workers: [{ id: 'correctness' }, { id: 'risk' }] } } });
+  expect(calls.filter(call => ['create_session', 'set_task_link', 'architect_start', 'send_message'].includes(call.command))).toEqual([]);
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+});
+
+for (const changed of ['pull', 'project mapping'] as const) {
+  test(`Prepare task refuses a changed ${changed} before creating or sending`, async ({ page }) => {
+    await traceCoordinatedReview(page);
+    await openCoordinatedReview(page);
+    const transcriptCount = await page.locator('#transcript .user-message').count();
+    await page.evaluate(kind => { (window as any).__reviewFixture[kind === 'pull' ? 'stalePull' : 'staleMapping'] = true; }, changed);
+    await clearReviewCalls(page);
+    await reviewDialog(page).getByRole('button', { name: 'Prepare task' }).click();
+    await expect(reviewDialog(page)).toBeVisible();
+    const calls = await reviewCalls(page);
+    expect(calls.filter(call => ['create_session', 'create_board_task', 'architect_configure', 'set_task_link'].includes(call.command))).toEqual([]);
+    expect(calls.filter(call => forbiddenStarts.has(call.command))).toEqual([]);
+    await expect(page.locator('#transcript .user-message')).toHaveCount(transcriptCount);
+  });
+}
 
 test('a thread starts from the Threads tab', async ({ page }) => {
   await openHub(page);

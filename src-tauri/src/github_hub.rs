@@ -236,6 +236,69 @@ pub fn pulls(repo: &str) -> Result<Vec<HubPull>, String> {
         .collect())
 }
 
+/// Fresh, minimal input for a review; repository content is never an instruction.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullReviewContext {
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    pub head: String,
+    pub base: String,
+    pub updated_at: String,
+    pub files: Vec<String>,
+}
+
+fn pull_review_context_of(repo: &str, number: i64, value: &serde_json::Value) -> Result<PullReviewContext, String> {
+    let repo = valid_repo(repo)?;
+    if number <= 0 {
+        return Err("Choose a positive pull request number.".into());
+    }
+    let url = text(value, "url");
+    if value.get("number").and_then(|v| v.as_i64()) != Some(number)
+        || !url.eq_ignore_ascii_case(&format!("https://github.com/{repo}/pull/{number}"))
+    {
+        return Err("GitHub returned a missing or mismatched pull request.".into());
+    }
+    if text(value, "state") != "OPEN" {
+        return Err("This pull request is no longer open. Refresh the repository and choose an open pull request.".into());
+    }
+    let required = |key| -> Result<String, String> {
+        let result = text(value, key);
+        if result.trim().is_empty() { Err(format!("GitHub returned a pull request without {key}.")) } else { Ok(result) }
+    };
+    let items = value.get("files").and_then(|v| v.as_array()).ok_or("GitHub did not return the changed files.")?;
+    let mut files = Vec::with_capacity(items.len());
+    for item in items {
+        let path = text(item, "path");
+        if path.is_empty() || files.contains(&path) {
+            return Err("GitHub returned an invalid changed-file list.".into());
+        }
+        files.push(path);
+    }
+    if value.get("changedFiles").and_then(|v| v.as_u64()) != Some(files.len() as u64) || files.is_empty() {
+        return Err("GitHub returned an incomplete or empty changed-file list. Refresh before reviewing.".into());
+    }
+    Ok(PullReviewContext {
+        number, title: required("title")?, url, state: state_of(value),
+        head: required("headRefName")?, base: required("baseRefName")?,
+        updated_at: required("updatedAt")?, files,
+    })
+}
+
+pub fn pull_review_context(repo: &str, number: i64) -> Result<PullReviewContext, String> {
+    let repo = valid_repo(repo)?;
+    if number <= 0 {
+        return Err("Choose a positive pull request number.".into());
+    }
+    let capture = run_gh(&account_root(), &[
+        "pr", "view", &number.to_string(), &format!("--repo={repo}"),
+        "--json=number,title,url,state,isDraft,headRefName,baseRefName,updatedAt,changedFiles,files",
+    ], TIMEOUT)?;
+    pull_review_context_of(&repo, number, &json(&capture)?)
+}
+
 pub fn issues(repo: &str) -> Result<Vec<HubIssue>, String> {
     let repo = valid_repo(repo)?;
     let capture = run_gh(&account_root(), &["issue", "list", &format!("--repo={repo}"), "--state=open", &format!("--limit={LIST_LIMIT}"), "--json=number,title,author,updatedAt,url,comments,labels,assignees"], TIMEOUT)?;
@@ -462,6 +525,41 @@ mod tests {
         assert!(valid_repo("owner/name/extra").is_err());
         assert!(valid_repo("owner/.hidden").is_err());
         assert!(valid_repo("own er/name").is_err());
+    }
+
+    #[test]
+    fn review_context_requires_matching_open_pr_and_complete_files() {
+        let value = json!({"number":42,"title":"Review me","url":"https://github.com/o/r/pull/42",
+            "state":"OPEN","isDraft":false,"headRefName":"feature","baseRefName":"main",
+            "updatedAt":"2026-10-24T12:00:00Z","changedFiles":2,
+            "files":[{"path":"src/a.rs"},{"path":"src/b.rs"}],
+            "body":"not returned","comments":["not returned"]});
+        let context = pull_review_context_of("O/R", 42, &value).unwrap();
+        assert_eq!(context.files, vec!["src/a.rs", "src/b.rs"]);
+        let output = serde_json::to_value(context).unwrap();
+        assert_eq!(output["updatedAt"], value["updatedAt"]);
+        assert_eq!(output.as_object().unwrap().len(), 8);
+        assert!(output.get("body").is_none());
+        assert!(output.get("comments").is_none());
+        for (repo, number) in [("o/r", 0), ("o/r", -1), ("o/r", 41), ("other/r", 42), ("--bad", 42)] {
+            assert!(pull_review_context_of(repo, number, &value).is_err());
+        }
+        for state in ["CLOSED", "MERGED", ""] {
+            let mut changed = value.clone();
+            changed["state"] = json!(state);
+            assert!(pull_review_context_of("o/r", 42, &changed).is_err());
+        }
+        for files in [serde_json::Value::Null, json!([]), json!([{"path":"src/a.rs"}]),
+            json!([{"path":"src/a.rs"},{"path":"src/a.rs"}]), json!([{"path":"src/a.rs"},{}])] {
+            let mut changed = value.clone();
+            changed["files"] = files;
+            assert!(pull_review_context_of("o/r", 42, &changed).is_err());
+        }
+        for key in ["number", "url", "title", "headRefName", "baseRefName", "updatedAt", "changedFiles"] {
+            let mut changed = value.clone();
+            changed.as_object_mut().unwrap().remove(key);
+            assert!(pull_review_context_of("o/r", 42, &changed).is_err(), "missing {key}");
+        }
     }
 
     #[test]

@@ -1,33 +1,33 @@
-> Nota de trabalho/evidência. O resultado consolidado de testes está em ../SECURITY-HARDENING.md e verification.json.
+> Work/evidence note. The consolidated test results are in ../SECURITY-HARDENING.md and verification.json.
 
-> Revisão independente anterior ao reforço final: o código final também recusa ledger existente truncado ou ausente. Ver notes-remote.md e os testes persistentes finais.
+> Independent review before the final hardening: the final code also rejects an existing ledger that is truncated or missing. See notes-remote.md and the final persistent-storage tests.
 
-# Revisão independente final — replay persistente Connect
+# Final Independent Review — Persistent Connect Replay Protection
 
-Revisão read-only de `src-tauri/src/remote/replay.rs`, inicialização em `remote.rs` e admissão em `remote/host.rs` e `remote/socket.rs`. Nenhuma alteração nesses arquivos, nenhum build ou cargo iniciado por este subagente.
+Read-only review of `src-tauri/src/remote/replay.rs`, initialization in `remote.rs`, and admission in `remote/host.rs` and `remote/socket.rs`. No changes were made to those files; this reviewer did not start a build or Cargo command.
 
-## Resultado
+## Result
 
-Não foi identificado bypass de replay ou regressão bloqueante na implementação examinada.
+No replay bypass or blocking regression was identified in the implementation examined.
 
-- `Replay::check` valida timestamp e formato/limite do nonce, abre transação SQLite IMMEDIATE, verifica duplicidade por SHA-256 do nonce e primary key, insere recibo e confirma a transação antes de devolver sucesso. O host só executa depois desse sucesso; socket só entrega respostas/eventos após admissão. IMMEDIATE também serializa duas conexões/processos com o mesmo banco.
-- Falha de abrir ou escrever SQLite permanece fail closed. `Replay::default` não é um cache efêmero: tem `db=None` e rejeita mensagens. Em erro de inserção/commit não há caminho que execute uma ação enquanto a API indica erro.
-- A janela permite diferença absoluta de até 60.000 ms. A remoção usa `ts < now-60000`, portanto o recibo no limite inclusivo ainda é conservado. O limite de 20.000 recibos recusa mensagens novas sem expulsar entradas ainda válidas. Também existe limite SQLite de 2.048 páginas.
-- Watermark `last_ms` e pruning são confirmados na mesma transação. Se o relógio recua, o gate bloqueia em vez de tornar novamente válido um ciphertext cujo recibo já foi removido. Transação falha não avança watermark nem confirma pruning parcial.
-- `host::handle` checa confiança da chave/remetente e host habilitado antes de consumir nonce. `socket::admit_delivery` exige chave atual confiável para res/event; requests não são consumidos ali e são admitidos no host antes do dispatch. Timestamp e nonce de res/event são incluídos no payload autenticado antes de selar.
-- Os testes presentes cobrem restart/segunda conexão, banco indisponível/read-only, rollback de pruning e watermark em falha de insert, capacidade/limite temporal e recuo de relógio após restart. Resultados de execução pertencem ao build central.
+- `Replay::check` validates the timestamp and nonce format/length, opens an SQLite IMMEDIATE transaction, checks for duplicates using the nonce's SHA-256 hash and primary key, inserts a receipt, and commits before returning success. The host executes only after this succeeds; the socket delivers responses/events only after admission. IMMEDIATE also serializes two connections/processes using the same database.
+- Failure to open or write SQLite remains fail closed. `Replay::default` is not an ephemeral cache: it has `db=None` and rejects messages. An insert/commit error has no path that executes an action while the API reports an error.
+- The window allows an absolute difference of up to 60,000 ms. Pruning uses `ts < now-60000`, so the receipt at the inclusive boundary is retained. The 20,000-receipt limit rejects new messages without evicting still-valid entries. SQLite is also limited to 2,048 pages.
+- The `last_ms` watermark and pruning are committed in the same transaction. If the clock moves backward, the gate blocks instead of making a ciphertext valid again after its receipt has been removed. A failed transaction neither advances the watermark nor commits partial pruning.
+- `host::handle` checks sender/key trust and whether hosting is enabled before consuming a nonce. `socket::admit_delivery` requires a currently trusted key for responses/events; requests are not consumed there and are admitted by the host before dispatch. Response/event timestamps and nonces are included in the authenticated payload before sealing.
+- Existing tests cover restart/second connection, unavailable/read-only database, pruning and watermark rollback on insert failure, capacity/time limits, and clock rollback after restart. Execution results belong to the main build.
 
-## Limites materiais
+## Material Limitations
 
-1. A garantia pressupõe continuidade do armazenamento privado. Excluir, truncar ou restaurar uma cópia antiga do SQLite pode recriar um histórico vazio/antigo; não é proteção contra rollback de disco por usuário/admin com acesso local. O relay remoto não obtém essa capacidade pela implementação revisada.
-2. Uma grande correção do relógio para trás após uma admissão com horário adiantado bloqueia novas mensagens até alcançar o watermark. É escolha de segurança que pode afetar disponibilidade.
-3. Se abrir o banco falhar no startup, o app mantém o gate indisponível nesta execução, imprime o erro e não tenta reabri-lo automaticamente. Reinício após resolver armazenamento/permissão é necessário. Respostas/eventos recebidos permanecem recusados; isso não significa bloqueio de toda conexão de rede/outbound do app.
-4. Permissões 0700/0600 e NOFOLLOW protegem os caminhos normais contra exposição/acesso de outro usuário, mas não pretendem impedir usuário/admin com controle do diretório de dados e do processo. Windows usa ACL herdada do app data.
+1. The guarantee assumes continuity of private storage. Deleting, truncating, or restoring an old SQLite copy can recreate an empty/old history; this does not protect against disk rollback by a local user/admin. The remote relay does not gain this capability from the reviewed implementation.
+2. A large backward clock correction after an admission with a future timestamp blocks new messages until the saved watermark is reached. This is a security choice that can affect availability.
+3. If the database cannot be opened at startup, the app keeps the gate unavailable for that run, logs the error, and does not retry automatically. Restart after fixing storage/permissions is required. Received responses/events remain rejected; this does not mean all app network/outbound connections are blocked.
+4. Permissions 0700/0600 and NOFOLLOW protect normal paths from exposure/access by another user, but are not intended to stop a user/admin who controls the data directory and process. Windows uses the inherited ACL on app data.
 
-## Varredura final de credenciais hardcoded
+## Final Hardcoded Credential Scan
 
-Scanner `Secure Code Review/scripts/scan_secrets.py` utilizado como biblioteca para não emitir seu campo evidence, que apenas trunca o conteúdo. Saída limitada a caminhos, linhas, regras e classificações em `secret-scan-sanitized.json`.
+The `Secure Code Review/scripts/scan_secrets.py` scanner was used as a library to avoid emitting its `evidence` field, which only truncates content. Output was limited to paths, lines, rules, and classifications in `secret-scan-sanitized.json`.
 
-Cobertura: 591 arquivos próprios, incluindo source/config/docs/scripts e extensões mjs/cjs/lock, excluindo node_modules/vendor, target/dist/build, fixtures esperados, arquivos de testes e módulos Rust `#[cfg(test)] mod tests`. Complemento verificou formatos modernos de tokens, JWTs, blocos PEM, URIs com credenciais e literais sensíveis com prefixo no nome da variável.
+Coverage: 591 first-party files, including source/config/docs/scripts and mjs/cjs/lock extensions, excluding node_modules/vendor, target/dist/build, expected fixtures, test files, and Rust `#[cfg(test)] mod tests` modules. An additional check covered modern token formats, JWTs, PEM blocks, credential-bearing URIs, and sensitive literals with name prefixes in variable names.
 
-Foram revisados 127 alertas do scanner (100 linhas e 27 duplicações por entropia) e 2 alertas suplementares. Eram expressões dinâmicas, tipos, nomes de entradas no cofre, marcadores/labels e uma fixture de preview. **Nenhuma credencial real hardcoded foi confirmada neste recorte.** Não foram emitidos valores de possíveis segredos. Isso não substitui a análise dos fluxos de runtime e não comprova inexistência de todo segredo ou de material ofuscado.
+The review examined 127 scanner alerts (100 lines and 27 entropy duplicates) plus two supplemental alerts. They were dynamic expressions, types, secret-store entry names, markers/labels, and a preview fixture. **No real hardcoded credential was confirmed in this scope.** Potential secret values were not emitted. This does not replace runtime-flow analysis or prove that no secret or obfuscated material exists.

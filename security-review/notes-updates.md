@@ -1,4 +1,4 @@
-> Nota de trabalho/evidência. O resultado consolidado de testes está em ../SECURITY-HARDENING.md e verification.json.
+> Work/evidence note. The consolidated test results are in ../SECURITY-HARDENING.md and verification.json.
 
 # PandaCode 0.3.28 — updates, installers, child environments, and Rust advisory review
 

@@ -13,6 +13,9 @@ use tauri::{Emitter, Manager, Webview};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod platform;
 
+#[path = "browser/review.rs"]
+mod review;
+
 const LABEL: &str = "browser-guest";
 const MAX_PNG: usize = 5 * 1024 * 1024;
 type Result<T> = std::result::Result<T, String>;
@@ -448,7 +451,7 @@ pub async fn browser_inspect(
 ) -> Result<serde_json::Value> {
     guard(&caller)?;
     let view = guest(&app)?;
-    if !matches!(action.as_str(), "read" | "click" | "type") {
+    if !matches!(action.as_str(), "read" | "click" | "type" | "review") {
         return Err("Unknown browser operation.".into());
     }
     let selector = selector.unwrap_or_default();
@@ -457,7 +460,9 @@ pub async fn browser_inspect(
         return Err("Browser input is too large.".into());
     }
     let args = serde_json::json!({"action":action,"selector":selector,"text":text});
-    let script = include_str!("browser_agent.js").replace("__PANDACODE_ARGS__", &args.to_string());
+    let script = if action == "review" { review::script(&text)? } else {
+        include_str!("browser_agent.js").replace("__PANDACODE_ARGS__", &args.to_string())
+    };
     let raw = evaluate(&view, script).await?;
     if raw.len() > 128 * 1024 {
         return Err("Browser result is too large.".into());

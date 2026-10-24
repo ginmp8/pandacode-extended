@@ -1,0 +1,38 @@
+{
+  "scope": "incremental functional patch from hardened.2; excludes version/doc/evidence-only changes",
+  "paths": [
+    "scripts/hardened-qa/browser-dom-checks.py",
+    "scripts/hardened-qa/browser-engine-checks.py",
+    "scripts/hardened-qa/compile-fixture.cjs",
+    "scripts/hardened-qa/ui-checks.py",
+    "src-tauri/src/agent_tools.rs",
+    "src-tauri/src/browser.rs",
+    "src-tauri/src/browser/review.js",
+    "src-tauri/src/browser/review.rs",
+    "src-tauri/src/browser/review_tools.rs",
+    "src/browser.ts",
+    "src/hardened/browser-flow.ts",
+    "src/hardened/browser-qa.css",
+    "src/hardened/browser-qa.ts",
+    "src/hardened/review-panel.ts",
+    "src/hardened/workflow-library.ts",
+    "src/hardened/workflow-panel.ts",
+    "src/main.ts",
+    "tests/hardened-browser-entrypoint.test.mjs",
+    "tests/hardened-browser-flow.test.mjs",
+    "tests/hardened-workflow-library.test.mjs"
+  ],
+  "sha256": "b63b6e396af9625cc4e955c6b274d30b32f44682d3af55cede03b2e53f3c5a09",
+  "checks": {
+    "baseline": {
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "upstream": {
+      "exit": 1,
+      "stdout": "",
+      "stderr": "error: src/hardened/review-panel.ts: No such file or directory\nerror: patch failed: src/main.ts:2913\nerror: src/main.ts: patch does not apply\n"
+    }
+  }
+}

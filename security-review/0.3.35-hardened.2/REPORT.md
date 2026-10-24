@@ -1,83 +1,83 @@
-# PandaCode 0.3.35-hardened.2 - implementação e verificação
+# PandaCode 0.3.35-hardened.2 — Implementation and Verification
 
-Data: 24/10/2026. Artefato: codigo-fonte, não instalador nativo assinado.
+Date: 2026-10-24. Artifact: source code, not a signed native installer.
 
-## Resultado
+## Result
 
-Implementadas as melhorias locais de baixo impacto inspiradas nos padrões de uso do Paseo: perfis de conselheiro e comitê limitado; pré-verificação; inspetor de dependencias/bloqueios; central de atenção baseada no estado carregado; handoff com prévia, limites e confirmação. O executor original continua sendo o único responsavel por agentes e tarefas.
+Implemented low-impact local improvements inspired by Paseo usage patterns: advisor and limited committee profiles; preflight checks; dependency/blocker inspector; attention center based on loaded state; handoff with preview, limits, and confirmation. The original executor remains the sole owner of agents and tasks.
 
-**Status da entrega:** implementação e verificações focadas aprovadas; **aprovação operacional nativa inconclusiva/bloqueada por evidências ausentes**. Nao ha afirmação de segurança integral, paridade completa com o Panda upstream, equivalencia com o Paseo ou ganho de CPU/RAM.
+**Delivery status:** implementation and focused checks passed; **native operational approval remains inconclusive/blocked by missing evidence**. No claim is made of comprehensive security, full parity with upstream Panda, Paseo equivalence, or CPU/RAM savings.
 
-## Base exata e versão
+## Exact Base and Version
 
-- Entrada: `pandacode-hardened-feature-hardening.zip`.
+- Input: `pandacode-hardened-feature-hardening.zip`.
 - SHA-256: `3e436d75508f2ee91f12dbca160faa56ca32f812aada5449f65e40ed7748171f`.
-- Versao declarada pela entrada: `0.3.35-hardened.1`; nova revisão: `0.3.35-hardened.2`.
-- A referência a `0.35.0` não foi usada para renumerar a linhagem do produto.
-- Os 1.060 arquivos originais foram preservados na base imutável. A linhagem histórica de backports seletivos permanece registrada em `HARDENED-REVISION.json`.
+- Input-declared version: `0.3.35-hardened.1`; new review: `0.3.35-hardened.2`.
+- The `0.35.0` reference was not used to renumber the product lineage.
+- All 1,060 original files were preserved in the immutable base. Selective-backport history remains in `HARDENED-REVISION.json`.
 
-## Mudança mínima
+## Minimal Change
 
-Somente **um arquivo original de código**, `src/main.ts`, recebeu integração funcional. Foram adicionados quatro arquivos de runtime sob `src/hardened/`, totalizando 35.894 bytes de fonte, sem contar o pequeno adaptador em `main.ts`. Isso não e uma medição do bundle final, binário, memória ou CPU.
+Only **one original code file**, `src/main.ts`, received functional integration. Four runtime files were added under `src/hardened/`, totaling 35,894 source bytes, excluding the small adapter in `main.ts`. This is not a measurement of final bundle, binary, memory, or CPU.
 
-Demais arquivos originais alterados: `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json` (somente versão); `HARDENED-REVISION.json` (linhagem/escopo); `README.md` (parágrafo da revisão). Foram acrescentados testes, ferramentas opcionais de desenvolvimento, documentacao, patch e evidências.
+Other changed original files: `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json` (version only); `HARDENED-REVISION.json` (lineage/scope); `README.md` (review paragraph). Tests, optional development tools, documentation, patch, and evidence were added.
 
-**Zero** novas dependências de runtime, serviços residentes, portas, comandos IPC, migrações de banco, caminhos de aprovação ou mecanismos de execução. Todos os arquivos Rust de implementação, os testes preexistentes, as capabilities, o CSP e os grafos de dependências permaneceram idênticos. A configuração do Tauri difere apenas na versão.
+**Zero** new runtime dependencies, resident services, ports, IPC commands, database migrations, approval paths, or execution mechanisms. All Rust implementation files, preexisting tests, capabilities, CSP, and dependency graphs remained identical. Tauri configuration differs only in version.
 
-O patch funcional aplicou com `git apply --check` ao `src/main.ts` do ZIP original PandaCode 0.3.35. Esta evidência e textual; não equivale a build ou compatibilidade comportamental e não garante merges futuros.
+The functional patch passed `git apply --check` against `src/main.ts` from the original PandaCode 0.3.35 ZIP. This is textual evidence; it is not a build or behavioral compatibility proof and does not guarantee future merges.
 
-## Funcionalidades e fronteiras
+## Features and Boundaries
 
-| Funcionalidade | Comportamento implementado | Limite deliberado |
+| Feature | Implemented behavior | Deliberate limit |
 |---|---|---|
-| Conselheiro | Perfil com um revisor e critério explícito | Preparo restrito a Codex plan; envio manual |
-| Comite | Dois revisores, duas atribuições, dois turnos do coordenador | Sem debate até convergir nem repetição ilimitada |
-| Pre-verificacao | Relê tarefa, histórico e equipe; valida modelo, modo e orçamento | Nao substitui autorização nativa durante a execução |
-| Inspetor | Dependencias, escopos, estados e motivos locais | Scheduler nativo e soberano; mostra limites de observacao |
-| Atencao | Pendências, falhas e bloqueios carregados; navegação deduplicada | Nao aprova, responde, tenta novamente ou retoma |
-| Handoff | Campos selecionados, checkpoints opcionais, prévia e cópia explícita | Redação de segredos e de melhor esforço; sem transcript completo |
+| Advisor | Profile with one reviewer and explicit criterion | Preparation restricted to Codex plan; manual send |
+| Committee | Two reviewers, two assignments, two coordinator turns | No debate to convergence or unlimited repetition |
+| Preflight | Re-reads task, history, and team; validates model, mode, and budget | Does not replace native authorization at execution time |
+| Inspector | Local dependencies, scopes, states, and reasons | Native scheduler remains authoritative; observation limits are shown |
+| Attention | Loaded pending items, failures, and blockers; deduplicated navigation | Does not approve, respond, retry, or resume |
+| Handoff | Selected fields, optional checkpoints, preview, and explicit copy | Best-effort secret redaction; no full transcript |
 
-Salvar um perfil usa a biblioteca existente sem aplicar a equipe ou mudar defaults. A seleção posterior no model picker conserva o comportamento preexistente de defaults do Panda. Inserir o prompt apenas preenche o composer vazio: não chama `send_message`, `architect_start`, `queue_add`, `architect_configure` ou comandos de aprovação. Anexos e rascunhos existentes provocam recusa, não substituição.
+Saving a profile uses the existing library without applying the team or changing defaults. Later model-picker selection retains Panda's preexisting default behavior. Inserting a prompt only fills an empty composer: it does not call `send_message`, `architect_start`, `queue_add`, `architect_configure`, or approval commands. Existing attachments/drafts cause refusal, not replacement.
 
-As consultas de refresh foram separadas de `reloadSessions`: o helper original também agenda retomadas automáticas. O novo painel não o chama. Fechar o painel remove os handlers e impede inserções tardias. Nomes, escopos e mensagens são renderizados como texto.
+Refresh queries were separated from `reloadSessions`: the original helper also schedules automatic resumes. The new panel does not call it. Closing the panel removes handlers and blocks late insertions. Names, scopes, and messages are rendered as text.
 
-## Verificacoes executadas
+## Checks Run
 
-| Verificacao | Base | Candidato | Interpretacao |
+| Check | Baseline | Candidate | Interpretation |
 |---|---:|---:|---|
-| Node completo, mesmos comandos/ambiente final | 134 aprovados / 4 falhas | 162 aprovados / 4 falhas | 28 novos casos aprovados; mesmas quatro pré-condições ausentes |
-| Casos focados originais | 37/37 | Preservados | Sem alteração de asserts/fixtures originais |
-| Browser do painel real com IPC sintetico | Nao existia | 15/15 | DOM, acoes, teclado, disposal, privacidade e layout |
-| TypeScript completo, ferramenta 5.8.3 | 63 diagnósticos | Os mesmos 63, byte a byte | Dependencias ausentes; compilação completa não aprovada |
-| Análise sintática de cinco módulos selecionados | - | Zero erros | Nao e typecheck completo nem build Vite |
-| Scanner de segredos, tres novos TS e `main.ts` | - | Zero candidatos; JSON validado | Cobertura delimitada; não e auditoria integral/historico |
-| Invariantes de diff e dependências | - | Aprovados | Backend, controles e testes originais preservados |
-| Patch no original 0.3.35 | - | Aprovado textualmente | Sem execução do upstream |
+| Full Node suite, same final commands/environment | 134 passed / 4 failed | 162 passed / 4 failed | 28 new cases passed; same four missing prerequisites |
+| Focused original cases | 37/37 | Preserved | No original assertions/fixtures changed |
+| Real panel browser tests with synthetic IPC | Not present | 15/15 | DOM, actions, keyboard, disposal, privacy, and layout |
+| Full TypeScript, tool 5.8.3 | 63 diagnostics | Same 63 byte-for-byte | Dependencies missing; full compile not approved |
+| Syntax analysis of five selected modules | — | Zero errors | Not full typecheck or Vite build |
+| Secret scanner, three new TS files and `main.ts` | — | Zero candidates; JSON validated | Bounded scope; not full/historical audit |
+| Diff/dependency invariants | — | Passed | Backend, controls, and original tests preserved |
+| Patch on original 0.3.35 | — | Textually passed | Upstream not executed |
 
-As quatro falhas comuns são tres testes de bundle que precisam de `dist/index.html` e um arquivo de testes que não consegue importar `material-icon-theme`. Nenhum teste foi desativado ou relaxado para obter esses resultados. Nao foram instaladas dependências para ocultar os bloqueios.
+The four shared failures are three bundle tests requiring `dist/index.html` and one test file unable to import `material-icon-theme`. No test was disabled or relaxed to obtain these results. Dependencies were not installed to hide blockers.
 
-O TypeScript disponível e 5.8.3, enquanto o projeto declara ^5.9.3. O resultado diferencial não substitui a verificação com a toolchain declarada. Nao foi executado build Vite, suite Playwright original completa, `test:release`, build Rust/Tauri, teste de providers reais nem benchmark. `cargo`/`rustc` não estavam disponíveis.
+Available TypeScript is 5.8.3 while the project declares ^5.9.3. Differential results do not replace checking with the declared toolchain. No Vite build, complete original Playwright suite, `test:release`, Rust/Tauri build, real provider test, or benchmark was run. `cargo`/`rustc` were unavailable.
 
-Os testes novos foram escritos e observados falhando antes da implementação correspondente. Regressões adicionais detectaram e corrigiram confirmação de handoff obsoleta, mudança do pedido durante espera assíncrona e exposição de bloco de chave truncado. A correção do fixture de navegação apenas omitiu um campo opcional `undefined` que o transporte Python convertia para `None`; nenhum critério de aprovação foi relaxado.
+New tests were written and observed failing before the corresponding implementation. Additional regressions caught and fixed stale handoff confirmation, request changes during async wait, and exposure of a truncated key block. The navigation fixture fix only omitted an optional `undefined` field that Python transport converted to `None`; no approval criterion was relaxed.
 
-## Isolamento e significado da evidência
+## Isolation and Meaning of Evidence
 
-Os testes Node e o typecheck rodaram em namespace Linux com rede externa indisponível, apenas loopback isolado para testes MCP locais, ambiente limpo, fonte e toolchain somente leitura, escrita em área temporária e limites de CPU, memória, processos, arquivos e tempo. `containment.json` registra probes executados. Nao foram acessadas credenciais reais nem APIs de modelos.
+Node tests and typecheck ran in a Linux namespace with external networking unavailable, loopback isolated for local MCP tests, clean environment, read-only source/toolchain, temporary writable area, and CPU/memory/process/file/time limits. `containment.json` records executed probes. No real credentials or model APIs were accessed.
 
-O browser executou os novos módulos reais em HTML em memória, com requests de rede abortados e IPC substituido na fronteira. Chromium precisou de `--no-sandbox` no container descartavel; isso está explicitado na ferramenta de teste e não altera o produto. Esses cenários não provam o comportamento do WebView/Tauri, um provider real ou o isolamento de processos nativos.
+The browser ran the real new modules in in-memory HTML, with network requests aborted and IPC replaced at the boundary. Chromium required `--no-sandbox` in the disposable container; this is explicit in the test tool and does not change the product. These scenarios do not prove WebView/Tauri behavior, a real provider, or native process isolation.
 
-## Revisao de segurança delimitada
+## Bounded Security Review
 
-- Nao foi adicionado transporte de codigo/credenciais, plugin remoto ou permissão de IPC.
-- IDs de workers são verificados contra a tarefa pai antes de navegar; não existe novo handler de aprovação.
-- O preflight exige Codex plan e um contexto novo. `readOnly: true` no assignment continua orientativo; a fronteira real depende do provider/native executor existente. A efetividade não foi demonstrada com tentativas reais de escrita nesta sessão.
-- Handoff limita campos/tamanho, não coleta credenciais e exige confirmação do texto atual. A redação não cobre todos os formatos de segredo; o clipboard pode ser persistido por software externo.
-- Nao houve auditoria atual de CVEs, auditoria integral de segredos, revisão independente de segurança ou prova de todas as plataformas. Relatórios anteriores permanecem históricos.
+- No code/credential transport, remote plugin, or IPC permission was added.
+- Worker IDs are checked against the parent task before navigation; no new approval handler exists.
+- Preflight requires Codex plan and a fresh context. `readOnly: true` in assignment remains advisory; the real boundary depends on the existing provider/native executor. Effectiveness was not demonstrated with real write attempts in this session.
+- Handoff limits fields/size, collects no credentials, and requires confirmation of current text. Redaction does not cover every secret format; external software may persist clipboard contents.
+- No current CVE audit, full secret audit, independent security review, or proof across all platforms was performed. Earlier reports remain historical.
 
-**Gate de assurance:** `blocked-critical-evidence` para aprovação operacional nativa, por ausência de build e validacao das fronteiras reais. Isso descreve uma lacuna de evidência, não uma vulnerabilidade confirmada.
+**Assurance gate:** `blocked-critical-evidence` for native operational approval because build and validation of real boundaries are missing. This describes an evidence gap, not a confirmed vulnerability.
 
-## Reproduzir e manter
+## Reproduction and Maintenance
 
-O guia `docs/HARDENED-REVIEW-TOOLS.md` documenta uso, comandos locais, ferramentas opcionais e rollback sem apagar dados. O patch em `patches/paseo-review-tools.patch` isola a extensao funcional. `source-manifest.json` fixa os bytes entregues fora desta pasta de evidências; `delta-receipt.json` identifica a base e as mudanças. O checksum externo identifica o ZIP inteiro.
+`docs/HARDENED-REVIEW-TOOLS.md` documents usage, local commands, optional tools, and rollback without deleting data. `patches/paseo-review-tools.patch` isolates the functional extension. `source-manifest.json` pins delivered bytes outside this evidence folder; `delta-receipt.json` identifies the base and changes. The external checksum identifies the full ZIP.
 
-Em um ambiente com as dependências e toolchains declaradas, ainda devem passar build frontend, testes originais, testes nativos e cenários reais de conselheiro/comite, inclusive negação de escrita. Nao usar apenas um merge textual limpo como critério de liberação.
+With declared dependencies/toolchains, frontend build, original tests, native tests, and real advisor/committee scenarios—including write denial—still need to pass. A clean textual merge alone is not a release criterion.

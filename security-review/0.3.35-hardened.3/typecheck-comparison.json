@@ -1,0 +1,8 @@
+{
+  "baseline_errors": 63,
+  "candidate_errors": 63,
+  "same_diagnostics_ignoring_line_columns": true,
+  "typescript": "5.8.3",
+  "project_typescript": "^5.9.3",
+  "build_passed": false
+}

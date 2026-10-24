@@ -1,0 +1,21 @@
+{
+  "scope": "textual feature-only application, not hardening parity or native build",
+  "checks": [
+    {
+      "patch": "paseo-review-tools.patch",
+      "check_exit": 0,
+      "stderr": ""
+    },
+    {
+      "patch": "paseo-browser-qa-hardened.3.patch",
+      "check_exit": 0,
+      "stderr": ""
+    },
+    {
+      "patch": "paseo-features-reference-0.3.35.patch",
+      "check_exit": 0,
+      "stderr": "",
+      "sha256": "f8b7196764aa170d0dbe85bee17237a46d3bf7f7b258fe6e2181911041f78627"
+    }
+  ]
+}

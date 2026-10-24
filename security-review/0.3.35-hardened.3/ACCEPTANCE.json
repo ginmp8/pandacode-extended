@@ -1,0 +1,8 @@
+{
+  "reference": "0.3.35", "baseline": "0.3.35-hardened.2", "candidate": "0.3.35-hardened.3",
+  "scope": ["bounded in-page browser QA without another engine", "native browser-review operation using existing IPC and agent approvals", "on-demand browser QA UI and finite scenario runner", "workflow library on existing recipes and composer", "coverage matrix for supplied Paseo feature families"],
+  "protected": ["original tests", "dependency graphs", "CSP and capabilities", "provider protocols", "scheduler", "databases and credentials", "historical evidence"],
+  "limits": {"new_runtime_dependencies":0,"new_servers":0,"new_ipc_commands":0,"new_schedulers":0,"original_runtime_files_max":5,"scenarios_steps_max":32,"scenario_deadline_ms":45000,"no_background_polling":true},
+  "required_checks": ["baseline and candidate Node tests same command", "real browser JS read/actions/stale refs/privacy/resource assertions", "scenario parsing/consent/cancel/origin/failed checks", "UI mounted with actual module, boundary-only IPC adapter", "Rust validator compile/test if toolchain available, otherwise blocked", "TypeScript typecheck and original delta", "dependency and permission invariants", "archive hash and file manifest"],
+  "exclusions": ["no generic evaluate", "no credentials/headers/body capture", "no persistent daemon", "no remote relay", "no automatic package install in product", "no guaranteed future merges", "no claim complete WCAG or full protocol parity"]
+}

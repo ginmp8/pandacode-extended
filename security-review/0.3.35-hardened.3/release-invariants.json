@@ -1,0 +1,53 @@
+{
+  "status": "pass",
+  "reference_upstream": "0.3.35",
+  "version": "0.3.35-hardened.3",
+  "changed_existing_runtime_files": [
+    "src/main.ts",
+    "src/browser.ts",
+    "src-tauri/src/agent_tools.rs",
+    "src-tauri/src/browser.rs",
+    "src/hardened/review-panel.ts"
+  ],
+  "changed_existing_files": [
+    "HARDENED-REVISION.json",
+    "README.md",
+    "package-lock.json",
+    "package.json",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/src/agent_tools.rs",
+    "src-tauri/src/browser.rs",
+    "src-tauri/tauri.conf.json",
+    "src/browser.ts",
+    "src/hardened/review-panel.ts",
+    "src/main.ts"
+  ],
+  "new_runtime_files": [
+    "src-tauri/src/browser/review.js",
+    "src-tauri/src/browser/review.rs",
+    "src-tauri/src/browser/review_tools.rs",
+    "src/hardened/browser-flow.ts",
+    "src/hardened/browser-qa.css",
+    "src/hardened/browser-qa.ts",
+    "src/hardened/workflow-library.ts",
+    "src/hardened/workflow-panel.ts"
+  ],
+  "new_runtime_source_bytes": 66822,
+  "new_runtime_source_lines": 646,
+  "removed_original_files": [],
+  "dependency_graph": "unchanged",
+  "capabilities_csp": "unchanged",
+  "scheduler_and_providers": "unchanged",
+  "new_ipc_commands": 0,
+  "new_agent_tool_catalog_entries": 2,
+  "original_test_files_unchanged": 103,
+  "mutation_checks_rejected": [
+    "capability drift",
+    "dependency drift",
+    "old test tamper",
+    "source removal",
+    "unexpected native change"
+  ],
+  "limitations": "Structural diff gates, not native behavioral equivalence or security clearance."
+}

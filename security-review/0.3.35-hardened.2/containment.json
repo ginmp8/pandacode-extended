@@ -1,0 +1,37 @@
+{
+  "/app/.containment-probe": true,
+  "/harness/.containment-probe": true,
+  "/tools/node/.containment-probe": true,
+  "/usr/.containment-probe": true,
+  "host_data_not_mounted": true,
+  "host_proc_not_mounted": true,
+  "clean_environment": true,
+  "external_network_denied": true,
+  "bounds": {
+    "RLIMIT_CPU": [
+      90,
+      90
+    ],
+    "RLIMIT_AS": [
+      8589934592,
+      8589934592
+    ],
+    "RLIMIT_NPROC": [
+      128,
+      128
+    ],
+    "RLIMIT_NOFILE": [
+      256,
+      256
+    ],
+    "RLIMIT_FSIZE": [
+      33554432,
+      33554432
+    ],
+    "RLIMIT_CORE": [
+      0,
+      0
+    ]
+  },
+  "scratch_writable": true
+}

@@ -47,11 +47,11 @@ export function required(name, env = process.env) {
 }
 
 export function version(value) {
-  // Accept only the private hardened revision suffix, not arbitrary prerelease identifiers.
+  // Accept the standard four-part hardened version, not arbitrary prerelease identifiers.
   const match = typeof value === 'string' && value.length <= 32
-    ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-hardened(?:\.([1-9]\d*))?)?$/.exec(value)
+    ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.([1-9]\d*)|-hardened(?:\.([1-9]\d*))?)?$/.exec(value)
     : null;
-  if (!match || match.slice(1).some(part => part !== undefined && !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be X.Y.Z, X.Y.Z-hardened, or X.Y.Z-hardened.N.');
+  if (!match || match.slice(1).some(part => part !== undefined && !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be X.Y.Z, X.Y.Z.N, X.Y.Z-hardened, or X.Y.Z-hardened.N.');
   return value;
 }
 

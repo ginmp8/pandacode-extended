@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPlan, builtArtifact, checksumLine, macosSigning } from './build.mjs';
+import { buildPlan, builtArtifact, checksumLine, macosSigning, releaseAssetName } from './build.mjs';
 import { appImageBundleOptions } from './common.mjs';
 
 const env = { PANDACODE_LICENSE_PUBLIC_KEY: 'stale', PANDACODE_UPDATE_PUBLIC_KEY: 'stale', TAURI_SIGNING_PRIVATE_KEY: 'stale', APPLE_ID: 'someone', APPLE_SIGNING_IDENTITY: 'Developer ID Application: Someone', PATH: 'test-path' };
@@ -67,6 +67,12 @@ test('the build selects the exact versioned bundle Tauri produced', () => {
     assert.equal(builtArtifact([file, file.replace('1.2.3', '1.2.2')], '1.2.3', target), file);
     assert.throws(() => builtArtifact([file], '1.2.4', target), /did not produce/);
   }
+});
+
+test('hardened release asset names preserve the existing folder convention', () => {
+  assert.equal(releaseAssetName('0.3.34-hardened', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-0.3.34.hardened-Windows-x64-setup.exe');
+  assert.equal(releaseAssetName('0.3.35-hardened.4', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-0.3.35.hardened.4-Windows-x64-setup.exe');
+  assert.equal(releaseAssetName('1.2.3', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-1.2.3-Windows-x64-setup.exe');
 });
 
 test('checksum sidecars use the sha256sum format', () => {

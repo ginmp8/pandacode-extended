@@ -1,0 +1,79 @@
+{
+  "source_archive": "pandacode-hardened-0.3.35.3.zip",
+  "source_sha256": "a973fc6f7d4f045e3861146ec2ad073cec34bc798b81dfa57c4cd1f0439fb041",
+  "target_version": "0.3.35.4",
+  "source_files": 1130,
+  "candidate_files_outside_current_evidence": 1136,
+  "changed": {
+    "HARDENED-REVISION.json": {
+      "previous": "37b44e4e0ba64c416bee84bab5df5c1784e0a9b2ba931e6ade4149e55249f8a1",
+      "current": "49c0441ef3815dba8536db38c76732aa52725fe962f083f1ca3961ef0e575983"
+    },
+    "README.md": {
+      "previous": "651a1f16705fe0a2a0745c1273993c75d07d34c4b8a8be19582bb9f38dc5b883",
+      "current": "f12c112cf8d2171ca3dea9c10441ab3f9562acf26cbb468578cf889ecad485ef"
+    },
+    "docs/HARDENED-REVIEW-TOOLS.md": {
+      "previous": "c99224eaa3f122d783b14165e4a8c7dfc3949b2da93ce210b906a0399fc761ec",
+      "current": "47520a05a9c37c3a8eec6c36fec584ac6c537a9b0374a3b1e6dc37f29ef9248e"
+    },
+    "package-lock.json": {
+      "previous": "de5d9864c8cb65a0b266ad66b90c519f998e26532e0660888ba1becc24c1f708",
+      "current": "f2c3935eaf12f6035064e7dda5fd481141075c1ae863c7929081f1609629889f"
+    },
+    "package.json": {
+      "previous": "98b030a6fb7fa130f9b793fbfdf2ff02e71a24b6980fb1125bf2c37b1ad73705",
+      "current": "0a113a37beee93f7e07abd857d157aac0dec13f0b17f6e1ff21c39dbebe39c11"
+    },
+    "scripts/hardened-review/compile-ui.mjs": {
+      "previous": "799c135a8c56ba617cd048a0d7edd25e2321d3098ec8adbf25a37a8d8966c53c",
+      "current": "29544e28c31040b1c55295215f9b69060980881d32807f4381c71559bb535ad8"
+    },
+    "src-tauri/Cargo.lock": {
+      "previous": "b3cfa444b51b1ee8227e6f424feb5fa15839366d8ad888cf2193d72fd9518e8d",
+      "current": "5297874fc44cd9630848f4565350a998a1b079878944c984f070aabe1effc6d1"
+    },
+    "src-tauri/Cargo.toml": {
+      "previous": "f44b6c31f430dfcaae12e2676a4dddb4f814ad9499617883583fc6e0b3b752e0",
+      "current": "a524b86f9fe7fd247508cb68f0442cc44bb8f82a258cf0ea0843f384b213c609"
+    },
+    "src-tauri/src/lib.rs": {
+      "previous": "f8bdc8a491a9dee96ffbc1178e6f534ea12dbd6c51a1ecd077427cd60c30d5c0",
+      "current": "e2cc54ae1a60ea65aca9e566388e3d7dbc03b6e39303593dabac5e0f269a8694"
+    },
+    "src-tauri/tauri.conf.json": {
+      "previous": "601e08a3e531414e9f063097d83c303ec0fd1d4dd04c38b40adbc91782e0313f",
+      "current": "5c5e5845fca47e9859742533dfa0969f2e02ba096b4c0886aa2e6a578cab6c3c"
+    },
+    "src/hardened/review-model.ts": {
+      "previous": "507c8967fd8f32ce9d5a43f76d739f33e8d07cf172f3d306521dd92e65c39ca0",
+      "current": "33d220c19ef799d844ab3dfe52b96d920e64c7cddbd989e6a734d82b7516a648"
+    },
+    "src/hardened/review-panel.ts": {
+      "previous": "aa6ec0ebc76f63f4a531ad8fe4ec782bab0b5d4d74b337e797041600e4efde10",
+      "current": "d953a7068447e252f0378cd14ddac5c9a6b9a6f449822f8bfc822b8d0bce805f"
+    },
+    "src/hardened/review-tools.css": {
+      "previous": "4869dde6d83ad203ba3c79a5e3ef5724d7295da748e354c622eb9204697f5151",
+      "current": "351f7ef9a42a000fef0cba836b550bc1b1d5a72f32efaa7921b57e99b9413e3d"
+    },
+    "src/main.ts": {
+      "previous": "8327e468a055cb571a9682ac85412104c098f2fd41459033f8418b0e642805be",
+      "current": "9127a41f815217a1c7e49dfabea51baa498c2476cd5c1d9b3556925594e5159c"
+    },
+    "website/src/data/release-dates.json": {
+      "previous": "2497656f639f1519b8ab5654e1945b5890ccb7975d32859ad36d017d81d4fa4f",
+      "current": "ab2397b813f55d3362b5e21200d57cc0e645c02273a5bc7f9d3152fa72604148"
+    }
+  },
+  "added": {
+    "patches/review-multi-harness-hardened.4.patch": "c694cd2046222fa93073195adf3af4c1e30f48cd9ffb649053376dc328533b8e",
+    "releases/0.3.35-hardened.4.md": "6f4956f206afd79275ec205c61f5656b19bbe2a235554efe92b07f770772377c",
+    "releases/0.3.35.4.md": "6f4956f206afd79275ec205c61f5656b19bbe2a235554efe92b07f770772377c",
+    "scripts/hardened-review/browser-0354.py": "7aa6a3fd86158d8c6f855fdad1e258f2ee3440d48b4fcf086d22c53bb6bd71ea",
+    "src-tauri/src/review.rs": "e87e99e0a99bcccaaa92d00fea6e3e9442027a7203476874ce49deef502ddc6b",
+    "tests/hardened-review-0354.test.mjs": "88bb880a70bb15bc70b02962fc08fa1fd12d13d0ea10913f11a060ff759edadb"
+  },
+  "removed": [],
+  "unchanged_count": 1115
+}

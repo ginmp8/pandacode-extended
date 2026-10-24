@@ -6,7 +6,7 @@ const [source, output] = process.argv.slice(2);
 if (!source || !output) throw new Error('Usage: node compile-ui.mjs ABSOLUTE_SOURCE_ROOT OUTPUT_DIR');
 const require = createRequire(join(source, 'package.json'));
 const ts = require('typescript');
-const files = ['src/hardened/review-model.ts', 'src/hardened/review-actions.ts', 'src/hardened/review-panel.ts', 'src/worker-scheduling.ts', 'src/team-mode.ts'];
+const files = ['src/hardened/review-model.ts', 'src/hardened/review-actions.ts', 'src/hardened/review-panel.ts', 'src/hardened/workflow-panel.ts', 'src/hardened/workflow-library.ts', 'src/hardened/browser-flow.ts', 'src/worker-scheduling.ts', 'src/team-mode.ts'];
 let errors = 0;
 for (const file of files) {
   if (!existsSync(join(source, file))) continue;

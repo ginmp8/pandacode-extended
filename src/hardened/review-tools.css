@@ -37,3 +37,10 @@
 .hardened-review :focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:3px}
 .hardened-review button:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:700px){.hardened-review .review-grid{grid-template-columns:1fr}.hardened-review .review-toolbar{align-items:flex-start}.hardened-review .review-tabs button{flex:1 1 42%}.hardened-review .review-attention li{grid-template-columns:minmax(0,1fr)}.hardened-review .review-attention button{grid-column:1;grid-row:auto;justify-self:start}}
+
+/* 0.3.35.4: native readiness is informational; manual roles never gain extra privileges. */
+.hardened-review .review-isolation{display:grid;gap:8px;padding:12px;border:1px solid var(--border);border-radius:4px}
+.hardened-review .review-isolation button{justify-self:start}
+.hardened-review .review-role{min-width:0;margin:0;padding:10px;border:1px solid var(--border);display:grid;gap:8px}
+.hardened-review .review-role legend{font-weight:600;padding:0 4px}
+.hardened-review .review-role .review-field{font-weight:400}

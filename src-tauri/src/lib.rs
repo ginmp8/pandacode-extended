@@ -48,6 +48,7 @@ mod providers;
 mod session_titles;
 mod slash_commands;
 mod recipes;
+mod review;
 mod storage;
 mod subagent_state;
 mod support;
@@ -3228,6 +3229,7 @@ pub fn run() {
                 provider_settings::provider_save_commandcode_key,
                 provider_settings::provider_remove_commandcode_key,
                 provider_settings::provider_set_mimo_endpoint,
+                review::review_readiness,
                 architect::profiles::architect_profiles,
                 architect::profiles::architect_set_lead_guidance,
                 architect::profiles::architect_save_profile,

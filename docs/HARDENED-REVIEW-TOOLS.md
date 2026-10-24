@@ -10,12 +10,14 @@ Opening or refreshing the dialog does not start an agent, approve a request, cha
 
 ## Advisor and committee
 
-These presets currently prepare **Codex Read only (plan)** tasks only. Other providers remain available in the original application; the inspector, attention view and manual handoff are not Codex-specific. Restricting the presets is intentional: a worker's `readOnly` assignment flag alone does not enforce filesystem permissions.
+**Since 0.3.35-hardened.4:** the *manual* Advisor and Committee presets let you choose a coordinator provider/model and, separately, the provider/model for each fixed reviewer slot. Only installed providers/models returned by the existing local catalog can be selected; no provider is silently substituted. This is a manual prompt/team workflow using the **original PandaCode scheduler**, not a native isolated review. It does **not** prove provider read-only semantics, nor deny filesystem/network/credential access. The previous Codex-only manual flow remains supported.
 
-1. Open **Review presets**, select Advisor or Committee and an installed Codex model. Enter the review question, optional relative file scopes, and acceptance criteria.
+The new **Isolated review — native security gate** area queries `review_readiness` and reports `containment_unproven` by default because there is no independently proven process/descendant confinement. This entrypoint never launches a CLI. There is no isolated start, review MCP, snapshot, proposal or patch-apply channel in this release. This satisfies a deny-by-default admission check, **not** the implementation plan's functional acceptance.
+
+1. Open **Review presets**, select Advisor or Committee and installed coordinator and reviewer models. Enter the review question, optional relative file scopes, and acceptance criteria.
 2. Use **Save team profile**. This saves a new named profile through the original API; it does not apply it or change task/default settings. An identical profile is reused. A different existing profile with the same name is never overwritten.
-3. Create a **new project task** using the original controls. In the original model picker select the saved profile. Select **Read only** using the original mode picker. Selecting a profile retains PandaCode's pre-existing global-default behavior; this extension does not silently configure those defaults.
-4. Reopen **Review & coordination**, choose the matching preset/model, enter the review request and review its prompt preview. Use **Insert prompt** when the preparation checks pass.
+3. Create a **new project task** using the original controls. In the original model picker select the saved profile. Select **Read only** using the original mode picker; provider-specific plan enforcement is **not** an OS jail. Selecting a profile retains PandaCode's pre-existing global-default behavior; this extension does not silently configure those defaults.
+4. Reopen **Review & coordination**, choose the matching preset and coordinator/reviewer models, enter the review request and review its prompt preview. Use **Insert prompt** when the preparation checks pass.
 5. Review the text in the original composer and use the normal **Send** control. Inserting text does not send or enqueue it.
 
 Use a new task without previous messages, a resumed context, previous worker assignments, or a pending team setup. Existing composer drafts and attachments are not overwritten or silently reused. Broader permission modes, remote tasks, unavailable models and mismatched team limits are refused. State is re-read before text preparation and the selected task/composer are checked again before insertion. These are preparation guards, not a replacement for native authorization.
@@ -27,7 +29,7 @@ Use a new task without previous messages, a resumed context, previous worker ass
 
 The existing scheduler enforces the configured budgets. The prompt requests one dispatch and a synthesis that preserves disagreements; it does not request repeated rounds until consensus. Model compliance and live provider behavior were not validated in this environment. Manual resume/configuration remains an original user capability and can change the limits later.
 
-File scopes are bounded relative paths, not a filesystem sandbox. The native Codex plan mapping requests read-only access with network access disabled; no live filesystem denial test was executed for this release. Do not represent this as a security certification or provider-independent isolation guarantee.
+File scopes are bounded relative paths, not a filesystem sandbox. The existing provider plan mapping may request read-only access; no native filesystem, network or credential denial test was executed for this release. Do not treat a manual provider mode as equivalent to OS confinement. Do not represent this as a security certification or provider-independent isolation guarantee.
 
 ## Team inspector
 
@@ -66,10 +68,20 @@ Before accepting a native release, run the complete frontend build, original bro
 
 ## Upstream maintenance and rollback
 
-Only `src/main.ts` was changed among original application-code files. It adds the sidebar entry, lazy mounting/cleanup, a narrow existing-API adapter, and action routing. The four new runtime files are under `src/hardened/`. Rust source, provider protocols, scheduler, capabilities, CSP, existing tests and dependency graphs are unchanged. Version metadata and one README paragraph were updated separately.
+In hardened.2, only `src/main.ts` was changed among original application-code files. In hardened.4, `src/main.ts` also exposes the new read-only native readiness IPC and rechecks the current task/team before insertion; `src-tauri/src/lib.rs` registers the new command and `src-tauri/src/review.rs` implements the deny-by-default response. It adds the sidebar entry, lazy mounting/cleanup, a narrow existing-API adapter, and action routing. The four new runtime files are under `src/hardened/`. Rust source, provider protocols, scheduler, capabilities, CSP, existing tests and dependency graphs are unchanged. Version metadata and one README paragraph were updated separately.
 
 `patches/paseo-review-tools.patch` contains only the runtime extension and its integration, without dependency or version changes. `git apply --check` succeeded against the supplied original PandaCode 0.3.35 `src/main.ts`; this is a textual check, not full runtime compatibility. Check against each new upstream revision, then build and test. Do not blindly apply the patch to an unreviewed future release.
 
 To remove the extension, reverse its integration patch on the exact matching tree, or remove the small sidebar/action/cleanup/helper additions and `src/hardened/` after reviewing your diff. Do not reset unrelated changes. Saved profiles are user data in the original profile library and should be removed through its original UI only when desired. No automatic database rollback or profile deletion is performed.
 
 See `security-review/0.3.35-hardened.2/REPORT.md` for evidence and limitations. Historical reports shipped with the baseline are retained as historical material, not renewed approvals.
+
+## 0.3.35-hardened.4: manual multi-harness and native admission status
+
+The manual coordinator/reviewer provider selectors appear in **Review & coordination → Review presets**. The coordinator selection must match the original task's provider and model; each reviewer selection is checked against the original local model catalog. The saved team retains `rosterOnly: true`, `auto: false`, at most two workers and two lead rounds. Selecting different providers **does not** activate an isolated review. The original task's `plan` mode is a provider policy request, not evidence of OS enforcement.
+
+**Check isolation readiness** queries one read-only Tauri command (`review_readiness`) from the trusted main webview. For this version it returns `containment_unproven`, with zero proven providers and no start operation. No `pandacode_review` MCP server, execution token, snapshot, patch proposal, approval or auto-fix path is implemented. A future implementation must satisfy `docs/HARDENED-REVIEW-TOOLS-PLAN.md` before exposing a start button.
+
+The complete source archive can be incrementally compared with the previous hardened.3 using `patches/review-multi-harness-hardened.4.patch`; that patch contains only changed feature/integration source (not version metadata or historic hardening). `git apply --check` passed on the exact hardened.3 source tree. The check does not prove runtime behavior or compatibility with future upstream commits.
+
+Validation evidence and blocked requirements are in `security-review/0.3.35-hardened.4/REPORT.md`.

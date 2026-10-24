@@ -1,6 +1,6 @@
-# PandaCode — 0.3.34.hardened
+# PandaCode — 0.3.34.1.hardened
 
-**Distribution label:** `0.3.34.hardened`; **internal SemVer:** `0.3.34-hardened` (Cargo, npm, Tauri). This source archive preserves the supplied 0.3.30 hardened fork and selectively backports reviewed 0.3.34 changes: bot icons/images, redesigned bot settings, and a native task tray. **It is not feature-equivalent to the upstream 0.3.34 release.** See [current security review](security-review/0.3.34.hardened/README.md) for the exact scope and verification limits.
+**Distribution label:** `0.3.34.1.hardened`; **internal SemVer:** `0.3.34-hardened.1` (Cargo, npm, Tauri). This source archive preserves the supplied 0.3.30 hardened fork and selectively backports reviewed 0.3.34 changes: bot icons/images, redesigned bot settings, and a native task tray. **It is not feature-equivalent to the upstream 0.3.34 release.** See [current security review](security-review/0.3.34.1/README.md) for the exact scope and verification limits.
 
 The hardened controls inherited from prior revisions remain in place, including native credential storage, replay protection, gated agent tools, restricted HTML previews and disabled automatic updates. Historical reports are kept in `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, and `security-review/hardened.3/` and `security-review/hardened.4/`. These reports do not attest that this new candidate passed runtime tests.
 
@@ -182,11 +182,11 @@ You need Node.js 22 or newer, stable Rust 1.88 or newer, and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```sh
-cd pandacode-0.3.34.hardened
+cd pandacode-0.3.34.1.hardened
 npm ci --ignore-scripts
 npm run build
 npm run package
-# For a Windows x64 installer with a distinct 0.3.34.hardened asset name:
+# For a Windows x64 installer with a distinct 0.3.34.1.hardened asset name:
 # npm run release:build -- windows-x86_64
 # For local development: npm run desktop
 ```

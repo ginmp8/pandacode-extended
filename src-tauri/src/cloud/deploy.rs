@@ -15,7 +15,7 @@ use std::{
 
 use crate::agent_tools::{spec, validate_spec};
 use crate::providers::ToolHost;
-use crate::workspace::run_process;
+use crate::workspace::run_process_cancelable;
 
 const OUTPUT: usize = 128 * 1024;
 
@@ -332,7 +332,8 @@ pub fn prepare(tool: &str, args: &[String]) -> Result<(Command, Vec<String>), St
     Ok((command, secrets))
 }
 
-fn run(checkout: &Path, args: &Value) -> Result<Value, String> {
+fn run(checkout: &Path, args: &Value, canceled: &AtomicBool) -> Result<Value, String> {
+    if canceled.load(Ordering::SeqCst) { return Err("Task was stopped before deploy.".into()); }
     let tool = args["tool"].as_str().unwrap_or_default();
     let words = shell_words::split(args["args"].as_str().unwrap_or_default()).map_err(|_| "args has an unclosed quote.".to_string())?;
     if words.iter().any(|w| matches!(w.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";")) {
@@ -352,7 +353,7 @@ fn run(checkout: &Path, args: &Value) -> Result<Value, String> {
     let timeout = Duration::from_secs(args["timeoutSeconds"].as_u64().unwrap_or(600).clamp(1, 1800));
     let (mut command, secrets) = prepare(tool, &words)?;
     command.current_dir(&directory);
-    let out = run_process(command, tool, OUTPUT, timeout)?;
+    let out = run_process_cancelable(command, tool, OUTPUT, timeout, canceled)?;
     let clean = |bytes: &[u8]| {
         let text = scrub(&String::from_utf8_lossy(bytes), &secrets);
         match tool { "aws" => scrub_aws(&text), "gcloud" => scrub_gcloud(&text), _ => text }
@@ -398,7 +399,7 @@ pub fn with_deploy(base: Option<ToolHost>, app: tauri::AppHandle, session_id: St
                     };
                 }
                 validate_spec(&catalog(), &name, &args)?;
-                crate::blocking(move || run(&checkout(&app, &session_id).ok_or("This task's folder is unknown.")?, &args)).await
+                crate::blocking(move || run(&checkout(&app, &session_id).ok_or("This task's folder is unknown.")?, &args, &stopped)).await
             })
         }),
     })
@@ -430,9 +431,9 @@ mod tests {
     #[test]
     fn refuses_shell_tricks_and_explicit_tokens() {
         let root = std::env::temp_dir();
-        assert!(run(&root, &json!({"tool":"vercel","args":"deploy | tee x"})).unwrap_err().contains("pipes"));
-        assert!(run(&root, &json!({"tool":"vercel","args":"deploy --token=abc"})).unwrap_err().contains("leave out --token"));
-        assert!(run(&root, &json!({"tool":"aws","args":"s3 ls 'unclosed"})).unwrap_err().contains("unclosed quote"));
+        assert!(run(&root, &json!({"tool":"vercel","args":"deploy | tee x"}), &AtomicBool::new(false)).unwrap_err().contains("pipes"));
+        assert!(run(&root, &json!({"tool":"vercel","args":"deploy --token=abc"}), &AtomicBool::new(false)).unwrap_err().contains("leave out --token"));
+        assert!(run(&root, &json!({"tool":"aws","args":"s3 ls 'unclosed"}), &AtomicBool::new(false)).unwrap_err().contains("unclosed quote"));
         assert!(validate_spec(&catalog(), "pandacode_cloud_cli", &json!({"tool":"heroku","args":"deploy"})).is_err());
     }
 
@@ -457,7 +458,7 @@ mod tests {
     fn refuses_aws_commands_that_print_credentials() {
         let root = std::env::temp_dir();
         for args in ["configure export-credentials", "--region us-east-1 --profile dev configure get aws_secret_access_key", "--output json sts get-session-token", "sts assume-role --role-arn x --role-session-name y", "--debug s3 ls"] {
-            assert!(run(&root, &json!({"tool":"aws","args":args})).is_err_and(|e| !e.contains("Connect AWS")), "{args}");
+            assert!(run(&root, &json!({"tool":"aws","args":args}), &AtomicBool::new(false)).is_err_and(|e| !e.contains("Connect AWS")), "{args}");
         }
         let words = |s: &str| shell_words::split(s).unwrap();
         assert!(aws_refusal(&words("--region us-east-1 sts get-caller-identity")).is_ok());
@@ -468,7 +469,7 @@ mod tests {
     fn refuses_railway_commands_outside_deploys() {
         let root = std::env::temp_dir();
         for args in ["login --browserless", "logout", "run printenv", "local printenv", "--json shell", "ssh", "connect postgres", "dev up", "develop", "api 'mutation { apiTokenCreate }'", "upgrade --yes", "ca", "code", "agent", "skills", "mcp", "telemetry disable"] {
-            assert!(run(&root, &json!({"tool":"railway","args":args})).is_err_and(|e| e.contains("not available")), "{args}");
+            assert!(run(&root, &json!({"tool":"railway","args":args}), &AtomicBool::new(false)).is_err_and(|e| e.contains("not available")), "{args}");
         }
         let words = |s: &str| shell_words::split(s).unwrap();
         assert!(railway_refusal(&words("up --ci --service web")).is_ok());
@@ -504,7 +505,7 @@ mod tests {
     fn refuses_gcloud_commands_that_print_or_create_credentials() {
         let root = std::env::temp_dir();
         for args in ["auth print-access-token", "auth print-identity-token", "auth application-default print-access-token", "config config-helper", "auth login", "auth activate-service-account --key-file k.json", "iam service-accounts keys create key.json --iam-account a@p.iam.gserviceaccount.com", "--project p auth print-access-token", "beta auth print-access-token", "--format json config config-helper", "config set core/log_http true", "run deploy app --source . --log-http", "run services list --flags-file=f.yaml", "iam service-accounts sign-jwt in out --iam-account a"] {
-            assert!(run(&root, &json!({"tool":"gcloud","args":args})).is_err_and(|e| e.contains("not available")), "{args}");
+            assert!(run(&root, &json!({"tool":"gcloud","args":args}), &AtomicBool::new(false)).is_err_and(|e| e.contains("not available")), "{args}");
         }
         let words = |s: &str| shell_words::split(s).unwrap();
         assert!(gcloud_refusal(&words("run deploy app --source . --region us-central1 --labels pandacode=deploy")).is_ok());

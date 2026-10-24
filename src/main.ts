@@ -1650,7 +1650,7 @@ async function saveBoardTaskForm(form: HTMLFormElement, data: FormData): Promise
   else {
     const harness = state.providers.find(p => p.id === state.defaultProvider && p.installed) ?? state.providers.find(p => p.installed) ?? state.providers[0];
     if (!harness) throw new Error('Open Settings to check your installed agents.');
-    saved = await call<Session>('create_board_task', { projectId: form.dataset.projectId, provider: harness.id, model: rememberedModel(harness.id), mode: 'full', title, description });
+    saved = await call<Session>('create_board_task', { projectId: form.dataset.projectId, provider: harness.id, model: rememberedModel(harness.id), mode: 'ask', title, description });
   }
   const index = state.sessions.findIndex(s => s.id === saved.id);
   if (index < 0) state.sessions.unshift(saved); else state.sessions[index] = saved;
@@ -3038,7 +3038,7 @@ async function createTask(projectId = state.projectId): Promise<void> {
   creatingTask = true;
   let created: Session;
   try {
-    created = await call<Session>('create_session', { projectId: active.id, provider: harness.id, model: rememberedModel(harness.id), mode: 'full', draft: true });
+    created = await call<Session>('create_session', { projectId: active.id, provider: harness.id, model: rememberedModel(harness.id), mode: 'ask', draft: true });
   } finally { creatingTask = false; }
   state.sessions.unshift(created);
   if (generation !== state.generation) { renderNavigation(); return; }
@@ -3056,7 +3056,7 @@ async function createChat(): Promise<void> {
   creatingTask = true;
   let created: Session;
   try {
-    created = await call<Session>('chat_create', { provider: harness.id, model: rememberedModel(harness.id), mode: 'full' });
+    created = await call<Session>('chat_create', { provider: harness.id, model: rememberedModel(harness.id), mode: 'ask' });
     state.projects = await call<Project[]>('list_projects');
   } finally { creatingTask = false; }
   state.sessions.unshift(created);

@@ -8,6 +8,7 @@ use crate::{message_queue, storage::Store, AppState, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 /// A message for a bot from the desktop, the web UI or a chat channel.
@@ -26,11 +27,27 @@ pub(crate) struct Inbound {
 pub(crate) const NOTHING: &str = "NOTHING_TO_REPORT";
 const MAX_INBOUND: usize = 32 * 1024;
 
-/// Approvals waiting on a reply, per task: (request ID, action) in arrival order.
-type Pending = Mutex<HashMap<String, Vec<(String, String)>>>;
+/// External approvals are bound to the exact provider request and a single-use
+/// nonce. Paired channel identity alone cannot bind a delayed `yes` to an action.
+const APPROVAL_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_PENDING_APPROVALS: usize = 32;
+struct PendingApproval {
+    request_id: String,
+    action: String,
+    reply_token: String,
+    created_at: Instant,
+}
+type Pending = Mutex<HashMap<String, Vec<PendingApproval>>>;
 fn pending() -> &'static Pending {
     static PENDING: std::sync::OnceLock<Pending> = std::sync::OnceLock::new();
     PENDING.get_or_init(Default::default)
+}
+
+/// Return only the specifically named request. Never skip stale requests and
+/// reuse the same reply against the next pending action.
+fn take_matching(list: &mut Vec<PendingApproval>, token: &str) -> Option<PendingApproval> {
+    let position = list.iter().position(|item| item.reply_token == token)?;
+    Some(list.remove(position))
 }
 
 /// What an inbound text asks for, before it is treated as a message to the agent.
@@ -39,24 +56,37 @@ pub(crate) enum Command {
     Stop,
     Help,
     NewThread,
-    Approve(bool, bool),
+    Approve(bool, bool, String),
+    ApprovalIdRequired,
     Message,
 }
 
 pub(crate) fn parse_command(text: &str, has_pending_approval: bool) -> Command {
-    let word = text.trim().trim_end_matches(['.', '!']).to_lowercase();
-    match word.as_str() {
-        "/stop" | "stop!" => Command::Stop,
-        "/help" => Command::Help,
-        "/new" | "/reset" => Command::NewThread,
-        "yes" | "y" | "approve" | "allow" | "ok" if has_pending_approval => Command::Approve(true, false),
-        "always" | "always allow" if has_pending_approval => Command::Approve(true, true),
-        "no" | "n" | "deny" | "reject" if has_pending_approval => Command::Approve(false, false),
-        _ => Command::Message,
+    let words = text.trim().split_whitespace().map(str::to_ascii_lowercase).collect::<Vec<_>>();
+    if matches!(words.as_slice(), [word] if word == "/stop" || word == "stop!") {
+        return Command::Stop;
     }
+    if matches!(words.as_slice(), [word] if word == "/help") { return Command::Help; }
+    if matches!(words.as_slice(), [word] if word == "/new" || word == "/reset") { return Command::NewThread; }
+    let (approved, always, token) = match words.as_slice() {
+        [action, token] if matches!(action.as_str(), "yes" | "y" | "approve" | "allow" | "ok") => (true, false, Some(token)),
+        [action, token] if matches!(action.as_str(), "no" | "n" | "deny" | "reject") => (false, false, Some(token)),
+        [action, token] if action == "always" => (true, true, Some(token)),
+        [first, second, token] if first == "always" && second == "allow" => (true, true, Some(token)),
+        [action] if has_pending_approval && matches!(action.as_str(), "yes" | "y" | "approve" | "allow" | "ok" | "no" | "n" | "deny" | "reject" | "always") => return Command::ApprovalIdRequired,
+        [first, second] if has_pending_approval && first == "always" && second == "allow" => return Command::ApprovalIdRequired,
+        _ => return Command::Message,
+    };
+    // A UUID is a unique request reference, not a replacement for channel pairing.
+    if let Some(token) = token {
+        if uuid::Uuid::parse_str(token).is_ok() {
+            return Command::Approve(approved, always, token.to_string());
+        }
+    }
+    Command::ApprovalIdRequired
 }
 
-const HELP: &str = "Message me and I'll work on it. Commands: /stop stops what I'm doing, /new starts a fresh conversation. When I ask for approval, reply yes, no or always.";
+const HELP: &str = "Message me and I'll work on it. Commands: /stop, /new. For approvals, reply yes <request-id>, no <request-id> or always <request-id>; each ID expires after 10 minutes.";
 
 fn channel_kind(store: &Store, channel_id: &str) -> String {
     match channel_id {
@@ -134,8 +164,13 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
             reply(app, &bot, &inbound.channel_id, &inbound.thread, "Starting a fresh conversation. What's next?").await;
             return Ok(session_id);
         }
-        Command::Approve(approved, always) => {
-            answer_approval(app, &bot, &session_id, approved, always).await?;
+        Command::Approve(approved, always, token) => {
+            answer_approval(app, &bot, &session_id, &token, approved, always).await?;
+            return Ok(session_id);
+        }
+        Command::ApprovalIdRequired => {
+            reply(app, &bot, &inbound.channel_id, &inbound.thread,
+                "Approval requires the exact request ID from its notice (example: yes <request-id>). A bare yes/no never approves a different action.").await;
             return Ok(session_id);
         }
         Command::Message => {}
@@ -289,43 +324,62 @@ pub(crate) async fn approval_requested(app: &tauri::AppHandle, session_id: &str,
         }
         _ => {}
     }
-    if let Ok(mut map) = pending().lock() {
-        map.entry(session_id.to_owned()).or_default().push((request_id.to_owned(), text.to_owned()));
+    let token = uuid::Uuid::new_v4().to_string();
+    let queued = match pending().lock() {
+        Ok(mut map) => {
+            let list = map.entry(session_id.to_owned()).or_default();
+            if list.len() >= MAX_PENDING_APPROVALS { false } else {
+                list.push(PendingApproval { request_id: request_id.into(), action: text.into(), reply_token: token.clone(), created_at: Instant::now() });
+                true
+            }
+        }
+        Err(_) => false,
+    };
+    if !queued {
+        // Never announce an approval that cannot be matched to its action.
+        let _ = answer(app, session_id, request_id, false).await;
+        return;
     }
     if let Ok(store) = state.store.lock() {
         let _ = super::log(&store, &bot.id, "approval", &format!("Asked: {}", text.chars().take(160).collect::<String>()), json!({"sessionId": session_id}));
     }
-    // The proposed action may itself contain secrets or source text. Do not leak
-    // its preview to a third-party chat service before the user can approve it.
-    let message = approval_notice();
+    // The proposed action may contain secrets/source code. Share only the
+    // one-time ID, not the preview, with the paired third-party channel.
+    let message = approval_notice(&token);
     match thread.channel_id.as_str() {
         super::DESKTOP => {}
-        "schedule" => { let _ = notify(app, &bot, message).await; }
-        channel => reply(app, &bot, channel, &thread.external_id, message).await,
+        "schedule" => { let _ = notify(app, &bot, &message).await; }
+        channel => reply(app, &bot, channel, &thread.external_id, &message).await,
     }
     let _ = app.emit("bots-changed", ());
 }
 
-async fn answer_approval(app: &tauri::AppHandle, bot: &Bot, session_id: &str, approved: bool, always: bool) -> Result<()> {
-    // Requests answered in the desktop app meanwhile are gone; skip to the oldest live one.
-    loop {
-        let next = pending().lock().map_err(|e| e.to_string())?.get_mut(session_id).and_then(|list| (!list.is_empty()).then(|| list.remove(0)));
-        let Some((request_id, text)) = next else { return Err("Nothing is waiting for approval.".into()) };
-        if answer(app, session_id, &request_id, approved).await.is_err() {
-            continue;
-        }
-        let always = always && !guard::dangerous(&text);
-        if always && approved {
-            let state = app.state::<AppState>();
-            let added = state.store.lock().map_err(|e| e.to_string()).and_then(|store| guard::add_rule(&store, &bot.id, &guard::pattern_for(&text), "allow"));
-            if let Err(error) = added {
-                super::note(app, &bot.id, "error", &format!("Could not save the rule: {error}"), json!({}));
-            }
-        }
-        let outcome = if !approved { "Denied" } else if always { "Always allowed" } else { "Approved" };
-        super::note(app, &bot.id, "approval", &format!("{outcome}: {}", text.chars().take(160).collect::<String>()), json!({"sessionId": session_id}));
-        return Ok(());
+async fn answer_approval(app: &tauri::AppHandle, bot: &Bot, session_id: &str, token: &str, approved: bool, always: bool) -> Result<()> {
+    let request = {
+        let mut map = pending().lock().map_err(|e| e.to_string())?;
+        let list = map.get_mut(session_id).ok_or("No matching approval is pending.")?;
+        let request = take_matching(list, token).ok_or("No matching approval is pending.")?;
+        if list.is_empty() { map.remove(session_id); }
+        request
+    };
+    if request.created_at.elapsed() > APPROVAL_TTL {
+        let _ = answer(app, session_id, &request.request_id, false).await;
+        return Err("This approval expired. Review the current action in PandaCode.".into());
     }
+    // If desktop already answered this request, do NOT reuse the decision for
+    // another pending request. The opaque ID is consumed exactly once.
+    answer(app, session_id, &request.request_id, approved).await?;
+    let always = always && !guard::dangerous(&request.action);
+    if always && approved {
+        let state = app.state::<AppState>();
+        let added = state.store.lock().map_err(|e| e.to_string()).and_then(|store| guard::add_rule(&store, &bot.id, &guard::pattern_for(&request.action), "allow"));
+        if let Err(error) = added {
+            super::note(app, &bot.id, "error", &format!("Could not save the rule: {error}"), json!({}));
+        }
+    }
+    let outcome = if !approved { "Denied" } else if always { "Always allowed" } else { "Approved" };
+    super::note(app, &bot.id, "approval", &format!("{outcome}: {}", request.action.chars().take(160).collect::<String>()), json!({"sessionId": session_id}));
+    Ok(())
 }
 
 /// Sends text to one thread, splitting it to fit the channel.
@@ -339,8 +393,8 @@ pub(crate) async fn reply(app: &tauri::AppHandle, bot: &Bot, channel_id: &str, t
     }
 }
 
-fn approval_notice() -> &'static str {
-    "An action is waiting for approval. Review the complete request in PandaCode on your computer, then reply yes or no for this action."
+fn approval_notice(token: &str) -> String {
+    format!("An action is waiting for approval. Review the full action in PandaCode, then reply 'yes {token}' or 'no {token}' for this exact request within 10 minutes. A bare yes/no does not authorize it.")
 }
 
 fn notify_local(app: &tauri::AppHandle, bot: &Bot, text: &str) {
@@ -393,5 +447,38 @@ mod tests {
             assert!(context.contains(part), "{part} missing from {context}");
         }
         assert_eq!(queued_prompt(&json!([])), (String::new(), vec![]));
+    }
+}
+
+#[cfg(test)]
+mod approval_binding_tests {
+    use super::*;
+
+    #[test]
+    fn a_late_approval_cannot_authorize_another_request() {
+        let mut list = vec![
+            PendingApproval { request_id: "A".into(), action: "read".into(), reply_token: uuid::Uuid::new_v4().to_string(), created_at: Instant::now() },
+            PendingApproval { request_id: "B".into(), action: "delete".into(), reply_token: uuid::Uuid::new_v4().to_string(), created_at: Instant::now() },
+        ];
+        let token_a = list[0].reply_token.clone();
+        let token_b = list[1].reply_token.clone();
+        // Desktop resolves A before its external chat reply arrives.
+        list.remove(0);
+        assert!(take_matching(&mut list, &token_a).is_none());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].request_id, "B");
+        assert_eq!(take_matching(&mut list, &token_b).unwrap().request_id, "B");
+        assert!(take_matching(&mut list, &token_b).is_none());
+    }
+
+    #[test]
+    fn ambiguous_approval_text_requires_an_id() {
+        assert_eq!(parse_command("yes", true), Command::ApprovalIdRequired);
+        assert_eq!(parse_command("always allow", true), Command::ApprovalIdRequired);
+        assert_eq!(parse_command("no", true), Command::ApprovalIdRequired);
+        let token = uuid::Uuid::new_v4().to_string();
+        assert_eq!(parse_command(&format!("yes {token}"), true), Command::Approve(true, false, token.clone()));
+        assert_eq!(parse_command(&format!("always allow {token}"), true), Command::Approve(true, true, token.clone()));
+        assert_eq!(parse_command(&format!("no {token}"), true), Command::Approve(false, false, token));
     }
 }

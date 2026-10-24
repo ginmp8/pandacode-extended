@@ -160,11 +160,15 @@ impl HostTools {
     pub fn launch(&self, call: Call, jobs: &mut tokio::task::JoinSet<(Value, Value)>) {
         let handler = self.host.handler.clone();
         jobs.spawn(async move {
-            let result = tokio::time::timeout(Duration::from_secs(60), async move {
+            // Cloud deploy owns a 1-1800 second OS process deadline and a
+            // stop-aware process-group terminator. The outer wait must not
+            // report failure after 60 seconds while that process still runs.
+            let wait = if call.tool == "pandacode_cloud_cli" { Duration::from_secs(1860) } else { Duration::from_secs(60) };
+            let result = tokio::time::timeout(wait, async move {
                 (handler)(call.tool, call.arguments).await
             })
             .await
-            .unwrap_or_else(|_| Err("Host tool timed out".into()));
+            .unwrap_or_else(|_| Err("Host tool timed out; outcome indeterminate. Verify external state before retrying.".into()));
             let response = reply(call.id.clone(), result);
             (call.id, response)
         });

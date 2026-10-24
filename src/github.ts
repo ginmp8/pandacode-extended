@@ -214,7 +214,7 @@ export function createGithub(host: GithubHost) {
     for (const number of numbers) {
       const issue = importIssues.find(item => item.number === number);
       if (!issue || linkedTask(projectId, number)) continue;
-      const created = await host.call<Session>('create_board_task', { projectId, provider: harness.provider, model: harness.model, mode: 'full', title: issue.title.slice(0, 200), description: issueDescription(issue) });
+      const created = await host.call<Session>('create_board_task', { projectId, provider: harness.provider, model: harness.model, mode: 'ask', title: issue.title.slice(0, 200), description: issueDescription(issue) });
       const linked = await host.call<Session>('set_task_link', { sessionId: created.id, kind: 'issue', link: { kind: 'issue', number: issue.number, url: issue.url, title: issue.title, state: issue.state, checkedAt: 0 } satisfies TaskLink });
       host.upsert(linked); imported++;
     }

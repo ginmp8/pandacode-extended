@@ -35,7 +35,7 @@ provision WebView2 separately before running the app; this installer will not
 download it. Keep antivirus protection enabled.
 
 ```sh
-cd pandacode-0.3.28-hardened
+cd pandacode-0.3.30.hardened
 npm ci --ignore-scripts
 npm run tauri dev      # or: npm run desktop
 ```

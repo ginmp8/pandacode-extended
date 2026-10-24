@@ -1,0 +1,25 @@
+{
+  "release": "0.3.28-hardened.4",
+  "baseline_sha256": "94eb26152589a4292aa258b73b15769bcde7ae8ac8e656b2f0c11cd0a265a012",
+  "compared_upstream_sha256": "893e571015787704584a8c6dae21b1e9188fa396192c496bb17891ffe91ebb00",
+  "changed_members": [
+    "HARDENED-REVISION.json",
+    "src-tauri/src/providers/pi.rs",
+    "src/main.ts",
+    "src/model-picker.ts"
+  ],
+  "added_members": [
+    "tests/inspector-new-task.spec.ts",
+    "security-review/hardened.4/README.md",
+    "security-review/hardened.4/manifest.json"
+  ],
+  "runtime_tests_executed": false,
+  "source_hashes": {
+    "HARDENED-REVISION.json": "09d453ff4b51fd2b79db666ca1967cbc57de9ea3150218c0189a408ccf3c042b",
+    "security-review/hardened.4/README.md": "8fe6318a4e9702d93fba1f8304576d25d27cd1f1774657ac80ef6df55eaf0214",
+    "src-tauri/src/providers/pi.rs": "49ceaa33770804426ac95ce2a42984fccf02e5a936058cb0adea3cb5f43f46d4",
+    "src/main.ts": "a42d45d9819bcfa146178c899716925031d82abc6a2edb2c55f542e70115327a",
+    "src/model-picker.ts": "0808b1e82e7f9ceed7a6f319af1f4efacd74f6f9fcbf792146e08815eee246ad",
+    "tests/inspector-new-task.spec.ts": "b65b395bef0256d335502cb77e66af621403bb7708018e63ff50ac346be4a569"
+  }
+}

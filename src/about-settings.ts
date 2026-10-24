@@ -16,7 +16,7 @@ const link = (label: string, url: string) =>
 /** The About group: app version, license, disabled update policy, and upstream links. */
 export function aboutSettingsHtml(): string {
   return `<div class="settings-group settings-about" aria-labelledby="settings-about-heading">
-    <div class="setting-row"><div><strong id="settings-about-heading">About PandaCode — hardened.3</strong><small class="settings-about-version">Version …</small></div></div>
+    <div class="setting-row"><div><strong id="settings-about-heading">About PandaCode — 0.3.30.hardened</strong><small class="settings-about-version">Version …</small></div></div>
     <div class="setting-row"><div><strong>License</strong><small>Open source (MIT-based). No account, no telemetry.</small></div>${link('PandaCode License', PROJECT_LINKS.license)}</div>
     <div class="setting-row settings-updates"><div><strong>Updates</strong><small class="settings-update-status" aria-live="polite">External updates are disabled in this hardened build. Install reviewed releases manually.</small></div><div class="settings-row-actions"><button type="button" class="secondary-button settings-update-action" hidden></button>${link('Upstream releases', PROJECT_LINKS.releases)}</div></div>
     <div class="setting-row settings-updates-auto" hidden><div><strong>Automatic updates disabled</strong><small>This build cannot download or install external app updates.</small></div><input type="checkbox" class="settings-switch" data-update-automatic aria-label="Install updates automatically" disabled></div>
@@ -36,7 +36,7 @@ export function mountAboutSettings(host: HTMLElement): () => void {
   const cleanupUpdates = mountUpdates(host);
   if (version) {
     appVersion()
-      .then(value => { if (!disposed) version.textContent = `Version ${value} · hardened.3`; })
+      .then(value => { if (!disposed) version.textContent = `Version ${value.replace(/-hardened$/, '.hardened')}`; })
       .catch(() => { if (!disposed) version.textContent = 'Version unavailable'; });
   }
   return () => { disposed = true; cleanupUpdates(); };

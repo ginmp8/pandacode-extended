@@ -1,4 +1,4 @@
-// Builds one desktop installer on its native OS into release/<version>/hardened.3/
+// Builds one desktop installer on its native OS into release/<version>/hardened/
 // with a SHA-256 sidecar. This local-only distribution never uploads a build.
 //
 //   node scripts/release/build.mjs [darwin-aarch64|darwin-x86_64|windows-x86_64|windows-aarch64|linux-x86_64|linux-aarch64]
@@ -134,8 +134,8 @@ async function main() {
     // Drop the build host's Wayland libraries (see appimage.mjs).
     await repackAppImage(source, { log: message => console.log(message) });
   }
-  const output = resolve(releaseDirectory(releaseVersion), 'hardened.3');
-  const asset = config.asset.replace('PandaCode-', 'PandaCode-hardened.3-');
+  const output = resolve(releaseDirectory(releaseVersion), 'hardened');
+  const asset = config.asset.replace('PandaCode-', `PandaCode-${releaseVersion.replace(/-hardened$/, '.hardened')}-`);
   await mkdir(output, { recursive: true });
   const destination = resolve(output, asset);
   await copyFile(source, destination);

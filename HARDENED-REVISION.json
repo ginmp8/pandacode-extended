@@ -1,14 +1,22 @@
 {
   "project": "PandaCode",
   "upstream_version": "0.3.28",
-  "security_revision": "hardened.3",
+  "security_revision": "hardened.4",
   "review_date": "2026-10-23",
   "original_archive_sha256": "4d74c67ab175967fa247852cd8d678e3908cb51de9d5a9292b1dd5dc6d500836",
   "minimum_rust": "1.88",
   "distribution": "reviewed source; not a signed native installer",
   "automatic_updates": "disabled in application and native agent-update entrypoints",
-  "base_archive_sha256": "4863e1b47a0c6842a5b6490a50f5e9826be8233251495580a82f255924fa1d01",
-  "review_scope": "Credential-shaped Slack test fixture removal; inherited hardened.2 installation controls",
+  "base_archive_sha256": "94eb26152589a4292aa258b73b15769bcde7ae8ac8e656b2f0c11cd0a265a012",
+  "review_scope": "Selective backport: inspector preference, allowlisted model catalog diagnostics and bounded Oh My Pi RPC v2 discovery; preserve all hardened.3 security controls",
   "windows_installation": "No WebView2 download; existing runtime required; current-user NSIS installer",
-  "validation_notice": "See security-review/hardened.3/README.md; no native Windows build, install or Avast test in this revision"
+  "validation_notice": "Static-only validation: Rust, TypeScript builds, Playwright and native install NOT run; see security-review/0.3.30.hardened/README.md",
+  "compared_upstream_version": "0.3.30",
+  "compared_upstream_sha256": "893e571015787704584a8c6dae21b1e9188fa396192c496bb17891ffe91ebb00",
+  "release_display_version": "0.3.30.hardened",
+  "product_version": "0.3.30-hardened",
+  "source_base_upstream_version": "0.3.28",
+  "repackaged_from_sha256": "9807b8958c00aeaf7ef1d07345878673ab94a669c248b19c793de11c16c5e977",
+  "feature_parity_with_upstream_0_3_30": false,
+  "version_policy": "0.3.30.hardened is a distribution label; 0.3.30-hardened is the SemVer package/app version; hardened.4 is the retained security-review lineage"
 }

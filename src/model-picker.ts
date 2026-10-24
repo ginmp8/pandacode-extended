@@ -44,11 +44,23 @@ function rememberRecent(provider: ProviderId, model: string): void {
 
 const optionKey = (button: HTMLElement) => `${button.dataset.connection ?? ''}|${button.dataset.provider}:${button.dataset.model}`;
 
+/** Treat provider/subprocess diagnostics as untrusted; never echo arbitrary text to the UI. */
+function catalogFailureReason(reason: unknown): string {
+  const message = (reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '').slice(0, 512).toLowerCase();
+  if (/(rpc|transport|frame).*(limit|large|exceed)|(limit|exceed).*(rpc|transport|frame)/.test(message)) return 'RPC transport limit';
+  if (/(catalog|output|response).*(limit|large|exceed)/.test(message)) return 'Model catalog too large';
+  if (/(auth|log[ -]?in|sign[ -]?in|unauthori[sz]ed|credential|401)/.test(message)) return 'Login required';
+  if (/(timed out|timeout|deadline)/.test(message)) return 'Timed out';
+  if (/(invalid|malformed).*(json|catalog|response)/.test(message)) return 'Invalid provider response';
+  if (/(could not start|enoent|not found|unavailable|exited)/.test(message)) return 'Provider unavailable';
+  return 'Check provider configuration';
+}
+
 /** A transient picker with local state and listeners released on dismissal. */
 export function openModelPicker(options: ModelPickerOptions): () => void {
   const { anchor, current, canSwitchProvider, onSelect, onEffortSelect, loadModels, onClose } = options;
   let providers = options.providers.map(provider => ({ ...provider, models: [...provider.models] }));
-  const catalogErrors = new Set<ProviderId>();
+  const catalogErrors = new Map<ProviderId, string>();
   const catalogLoading = new Set<ProviderId>();
   const particles = Array.from({ length: 12 }, (_, i) => `<i style="left:${4 + i * 8}%;top:${18 + i * 29 % 58}%;--drift-duration:${2.2 + i % 4 * .4}s;--drift-delay:${-i * .37}s"></i>`).join('');
   const panel = document.createElement('section');
@@ -294,7 +306,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     }
     list.querySelectorAll<HTMLElement>('[data-catalog-loading]').forEach(status => { status.hidden = !catalogLoading.has(status.dataset.catalogLoading as ProviderId); });
     catalogError.hidden = catalogErrors.size === 0;
-    catalogError.textContent = catalogErrors.size ? `Could not load models for ${providers.filter(provider => catalogErrors.has(provider.id)).map(provider => provider.name).join(', ')}. You can enter model IDs for agents that support custom models.` : '';
+    catalogError.textContent = catalogErrors.size ? `Could not load models for ${providers.filter(provider => catalogErrors.has(provider.id)).map(provider => `${provider.name} (${catalogErrors.get(provider.id)})`).join(', ')}. You can enter model IDs for agents that support custom models.` : '';
     updateControls();
     position();
   }
@@ -437,7 +449,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       void Promise.resolve().then(() => loadModels(provider.id)).then(models => {
         if (closed) return;
         provider.models = models;
-      }).catch(() => { if (!closed) catalogErrors.add(provider.id); }).finally(() => {
+      }).catch(reason => { if (!closed) catalogErrors.set(provider.id, catalogFailureReason(reason)); }).finally(() => {
         if (closed) return;
         catalogLoading.delete(provider.id);
         renderChoices();

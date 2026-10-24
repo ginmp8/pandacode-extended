@@ -1,7 +1,9 @@
 Evidence index
 ==============
-Current review: ../SECURITY-INSTALLATION-REVIEW.md
-Current focused fixture follow-up: hardened.3/
+Current source release: 0.3.30.hardened/README.md
+Prior selective backport report: hardened.4/README.md
+Historical installation review: ../SECURITY-INSTALLATION-REVIEW.md
+Previous fixture follow-up: hardened.3/
 Previous installation review: hardened.2/
 Historical hardened.1 manifest/verification/patch: hardened.1/
 Other logs and notes directly in this folder are inherited hardened.1 evidence.

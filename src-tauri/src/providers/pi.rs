@@ -104,6 +104,174 @@ pub(super) fn parse_models(data: &Value) -> Result<Vec<ModelInfo>, String> {
     Ok(models)
 }
 
+/// Aggregate stdout limit: bounds JSON lines and base64-encoded catalog chunks.
+const DISCOVERY_OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
+/// At most 12 MiB may be decoded from a 16 MiB base64-capped stream.
+const MAX_REASSEMBLED_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_DISCOVERY_CHUNKS: u64 = 512;
+/// A single rpc_chunk data field must be smaller than ~1.5 MiB encoded.
+const MAX_CHUNK_ENCODED_BYTES: usize = 1_500_000;
+
+fn models_request() -> Value {
+    json!({"type":"get_available_models","id":"pandacode-models"})
+}
+
+/// Map remote diagnostics to an allowlist; error text can contain credentials,
+/// local paths, or arbitrary model output and must not leave the native boundary.
+fn discovery_error_reason(name: &str, error: &Value) -> String {
+    let reason = error.as_str().unwrap_or_default();
+    let lower = reason.chars().take(512).collect::<String>().to_ascii_lowercase();
+    if lower.contains("transport limit") || lower.contains("frame limit") {
+        return format!("{name} model catalog exceeded the RPC transport limit");
+    }
+    if lower.contains("auth") || lower.contains("login") || lower.contains("sign in") || lower.contains("credential") {
+        return format!("{name} requires authentication");
+    }
+    if lower.contains("rate limit") || lower.contains("too many requests") {
+        return format!("{name} was rate limited");
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return format!("{name} model discovery timed out");
+    }
+    format!("{name} could not load models. Check its login and configuration.")
+}
+
+struct Chunks {
+    id: String,
+    count: u64,
+    length: u64,
+    next: u64,
+    bytes: Vec<u8>,
+}
+
+/// Model discovery on Pi (v1) and Oh My Pi (v1/v2). Only a successful
+/// protocol-v2 negotiation enables chunked responses.
+struct Discovery {
+    name: &'static str,
+    asked: bool,
+    negotiating: bool,
+    chunked: bool,
+    chunks: Option<Chunks>,
+}
+
+impl Discovery {
+    fn new(provider: &str) -> Self {
+        Self {
+            name: if provider == "omp" { "Oh My Pi" } else { "Pi" },
+            // Pi does not announce ready; send its request immediately.
+            asked: provider != "omp",
+            negotiating: false,
+            chunked: false,
+            chunks: None,
+        }
+    }
+
+    fn receive(&mut self, frame: Value) -> Result<(Vec<Value>, Option<Vec<ModelInfo>>), String> {
+        let Some(value) = self.reassemble(frame)? else {
+            return Ok((vec![], None));
+        };
+        match (field(&value, "type"), field(&value, "id")) {
+            ("ready", _) if !self.asked && !self.negotiating => {
+                let v2 = value["supportedProtocolVersions"]
+                    .as_array()
+                    .is_some_and(|versions| versions.contains(&json!(2)));
+                if v2 {
+                    self.negotiating = true;
+                    return Ok((vec![json!({"type":"negotiate_protocol","id":"pandacode-protocol","protocolVersion":2})], None));
+                }
+                self.asked = true;
+                Ok((vec![models_request()], None))
+            }
+            ("response", "pandacode-protocol") if self.negotiating => {
+                self.negotiating = false;
+                self.chunked = value["success"] == true && value["data"]["protocolVersion"] == 2;
+                self.asked = true;
+                Ok((vec![models_request()], None))
+            }
+            ("response", "pandacode-models") if self.asked => {
+                if value["success"] != true {
+                    return Err(discovery_error_reason(self.name, &value["error"]));
+                }
+                parse_models(&value["data"]).map(|models| (vec![], Some(models)))
+            }
+            _ => Ok((vec![], None)),
+        }
+    }
+
+    /// A chunk sequence must be strictly ordered, declared consistently, and
+    /// fully reconstructed before decoding its JSON response.
+    fn reassemble(&mut self, value: Value) -> Result<Option<Value>, String> {
+        if value["type"] != "rpc_chunk" {
+            if self.chunks.is_some() {
+                return Err(format!("{} interrupted a chunked response", self.name));
+            }
+            return Ok(Some(value));
+        }
+        let invalid = || format!("{} sent an invalid response chunk", self.name);
+        if !self.chunked || !self.asked {
+            return Err(invalid());
+        }
+        let id = field(&value, "chunkId");
+        let (Some(index), Some(count), Some(length), Some(encoded)) = (
+            value["index"].as_u64(),
+            value["count"].as_u64(),
+            value["byteLength"].as_u64(),
+            value["data"].as_str(),
+        ) else {
+            return Err(invalid());
+        };
+        if id.is_empty() || id.len() > 128 || count == 0 || count > MAX_DISCOVERY_CHUNKS
+            || index >= count || length == 0 || length > MAX_REASSEMBLED_BYTES
+            || encoded.is_empty() || encoded.len() > MAX_CHUNK_ENCODED_BYTES
+        {
+            return Err(invalid());
+        }
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| invalid())?;
+        if data.is_empty() || data.len() as u64 > length {
+            return Err(invalid());
+        }
+        if self.chunks.is_none() {
+            if index != 0 {
+                return Err(invalid());
+            }
+            self.chunks = Some(Chunks {
+                id: id.to_owned(),
+                count,
+                length,
+                next: 0,
+                bytes: Vec::new(),
+            });
+        }
+        let chunks = self.chunks.as_mut().ok_or_else(invalid)?;
+        if chunks.id != id || chunks.count != count || chunks.length != length || chunks.next != index {
+            return Err(invalid());
+        }
+        if chunks.bytes.len().checked_add(data.len()).is_none_or(|size| size as u64 > length) {
+            return Err(invalid());
+        }
+        chunks.bytes.extend_from_slice(&data);
+        chunks.next += 1;
+        if chunks.bytes.len() as u64 > length {
+            return Err(invalid());
+        }
+        if chunks.next < count {
+            return Ok(None);
+        }
+        let bytes = self.chunks.take().map(|c| c.bytes).unwrap_or_default();
+        if bytes.len() as u64 != length {
+            return Err(invalid());
+        }
+        let frame: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if !frame.is_object() || frame["type"] == "rpc_chunk" {
+            return Err(invalid());
+        }
+        Ok(Some(frame))
+    }
+}
+
 pub(super) async fn models(path: &Path, provider: &str) -> Result<Vec<ModelInfo>, String> {
     let mut command = super::command(path)?;
     command.args(["--mode", "rpc", "--no-session", "--no-extensions", "--no-skills"]);
@@ -124,25 +292,24 @@ pub(super) async fn models(path: &Path, provider: &str) -> Result<Vec<ModelInfo>
         .spawn()
         .map_err(|e| format!("Could not start Pi: {e}"))?;
     let group = ProcessGroup::register(child.id());
+    let mut discovery = Discovery::new(provider);
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         let mut stdin = child.stdin.take().ok_or("Pi stdin unavailable")?;
-        write_json(
-            &mut stdin,
-            &json!({"type":"get_available_models","id":"pandacode-models"}),
-        )
-        .await?;
+        if discovery.asked {
+            write_json(&mut stdin, &models_request()).await?;
+        }
         let mut stdout =
             tokio::io::BufReader::new(child.stdout.take().ok_or("Pi stdout unavailable")?)
-                .take(1024 * 1024 + 1);
-        let mut total = 0;
+                .take(DISCOVERY_OUTPUT_LIMIT + 1);
+        let mut total: u64 = 0;
         loop {
             let mut line = Vec::new();
             let count = stdout
                 .read_until(b'\n', &mut line)
                 .await
                 .map_err(|e| e.to_string())?;
-            total += count;
-            if total > 1024 * 1024 {
+            total += count as u64;
+            if total > DISCOVERY_OUTPUT_LIMIT {
                 return Err("Pi model catalog exceeded its output limit".into());
             }
             if count == 0 {
@@ -150,13 +317,12 @@ pub(super) async fn models(path: &Path, provider: &str) -> Result<Vec<ModelInfo>
             }
             let value: Value =
                 serde_json::from_slice(&line).map_err(|_| "Invalid Pi discovery JSON")?;
-            if value["type"] == "response" && value["id"] == "pandacode-models" {
-                if value["success"] != true {
-                    return Err(
-                        "Pi could not load models. Check its login and configuration.".into(),
-                    );
-                }
-                return parse_models(&value["data"]);
+            let (writes, models) = discovery.receive(value)?;
+            for frame in writes {
+                write_json(&mut stdin, &frame).await?;
+            }
+            if let Some(models) = models {
+                return Ok(models);
             }
         }
     })
@@ -725,6 +891,65 @@ mod tests {
         assert!(stop_settled("omp", &json!({"type":"prompt_result"})));
         assert!(stop_settled("pi", &json!({"type":"agent_settled"})));
         assert!(!stop_settled("pi", &json!({"type":"session_settled"})));
+    }
+
+    #[test]
+    fn omp_discovery_negotiates_v2_and_reassembles_chunks() {
+        use base64::Engine;
+        let mut discovery = Discovery::new("omp");
+        let (frames, _) = discovery.receive(json!({"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2]})).unwrap();
+        assert_eq!(frames, vec![json!({"type":"negotiate_protocol","id":"pandacode-protocol","protocolVersion":2})]);
+        assert!(!discovery.asked);
+        let (frames, _) = discovery.receive(json!({"type":"response","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
+        assert_eq!(frames, vec![models_request()]);
+        assert!(discovery.chunked);
+        let response = json!({"type":"response","id":"pandacode-models","success":true,"data":{"models":[{"provider":"anthropic","id":"sonnet"}]}}).to_string();
+        let (first, second) = response.as_bytes().split_at(40);
+        let chunk = |index: u64, data: &[u8]| json!({"type":"rpc_chunk","chunkId":"rpc-1","index":index,"count":2,"byteLength":response.len(),"data":base64::engine::general_purpose::STANDARD.encode(data)});
+        assert!(discovery.receive(chunk(0, first)).unwrap().1.is_none());
+        let models = discovery.receive(chunk(1, second)).unwrap().1.unwrap();
+        assert_eq!(models[1].id, "anthropic/sonnet");
+    }
+
+    #[test]
+    fn discovery_rejects_untrusted_chunks() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(br#"{"type":"response"}"#);
+        let chunk = |index: u64| json!({"type":"rpc_chunk","chunkId":"rpc-1","index":index,"count":2,"byteLength":19,"data":b64});
+        assert!(Discovery::new("omp").receive(chunk(0)).is_err(), "unsolicited chunks must fail");
+        let mut discovery = Discovery::new("omp");
+        discovery.receive(json!({"type":"ready","supportedProtocolVersions":[1,2]})).unwrap();
+        discovery.receive(json!({"type":"response","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
+        assert!(discovery.receive(chunk(1)).is_err(), "out-of-order chunks must fail");
+        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"x","index":0,"count":MAX_DISCOVERY_CHUNKS + 1,"byteLength":10,"data":"YQ=="})).is_err());
+        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"x","index":0,"count":1,"byteLength":MAX_REASSEMBLED_BYTES + 1,"data":"YQ=="})).is_err());
+        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"x","index":0,"count":1,"byteLength":1,"data":"not base64"})).is_err());
+        let mut discovery = Discovery::new("omp");
+        discovery.receive(json!({"type":"ready","supportedProtocolVersions":[1,2]})).unwrap();
+        discovery.receive(json!({"type":"response","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
+        let first = json!({"type":"rpc_chunk","chunkId":"a","index":0,"count":2,"byteLength":10,"data":"YQ=="});
+        discovery.receive(first).unwrap();
+        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"b","index":1,"count":2,"byteLength":10,"data":"YQ=="})).is_err(), "changed ID must fail");
+        assert!(discovery.receive(json!({"type":"ready"})).is_err(), "interrupted chunks must fail");
+    }
+
+    #[test]
+    fn discovery_handles_v1_and_sanitizes_errors() {
+        let mut pi = Discovery::new("pi");
+        assert!(pi.asked);
+        assert!(!pi.chunked);
+        assert!(pi.receive(json!({"type":"response","id":"pandacode-models","success":true,"data":{"models":[]}})).unwrap().1.is_some());
+        let mut omp = Discovery::new("omp");
+        assert_eq!(omp.receive(json!({"type":"ready","protocolVersion":1})).unwrap().0, vec![models_request()]);
+        assert!(!omp.chunked);
+        let secret = "token=redacted-but-secret";
+        let error = omp.receive(json!({"type":"response","id":"pandacode-models","success":false,"error":format!("rpc transport limit {secret}")})).unwrap_err();
+        assert!(error.contains("transport limit"));
+        assert!(!error.contains(secret));
+        let mut refused = Discovery::new("omp");
+        refused.receive(json!({"type":"ready","supportedProtocolVersions":[1,2]})).unwrap();
+        assert_eq!(refused.receive(json!({"type":"response","id":"pandacode-protocol","success":false})).unwrap().0, vec![models_request()]);
+        assert!(!refused.chunked);
     }
 
     #[tokio::test]

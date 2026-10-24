@@ -7,7 +7,7 @@ packaging is preserved in `scripts/release/build.mjs`.
 
 Use `npm run release:build -- <native-target>` on the matching operating system
 and CPU architecture. Supported target names remain in `scripts/release/common.mjs`.
-The output goes to `release/<version>/hardened.3/` with a distinct hardened.3
+The output goes to `release/<version>/hardened/` with a distinct hardened
 filename and SHA-256 sidecar. No output is uploaded.
 
 All local release plans pass `--locked` to Cargo, disable updater artifacts,

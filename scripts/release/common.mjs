@@ -47,7 +47,8 @@ export function required(name, env = process.env) {
 }
 
 export function version(value) {
-  if (typeof value !== 'string' || value.length > 32 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value) || value.split('.').some(part => !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be a stable SemVer such as 0.3.0.');
+  // The private hardened distribution uses a pinned, non-executable SemVer prerelease suffix.
+  if (typeof value !== 'string' || value.length > 32 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-hardened)?$/.test(value) || value.replace(/-hardened$/, '').split('.').some(part => !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be X.Y.Z or X.Y.Z-hardened.');
   return value;
 }
 

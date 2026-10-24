@@ -1,10 +1,10 @@
-# PandaCode — hardened.3
+# PandaCode — 0.3.30.hardened
 
-**hardened.3 security fixture fix:** replaces credential-shaped Slack literals in an ignored integration test with prefix-only placeholders; retains credential validation. The historical hardened.2 installation review remains in `SECURITY-INSTALLATION-REVIEW.md`; see `security-review/hardened.3/README.md` for the precise change and checks. This change does not remove already committed values from Git history: rewrite affected commits before pushing.
+**Distribution label:** `0.3.30.hardened`; **internal SemVer:** `0.3.30-hardened` (Cargo, npm, Tauri). This source archive builds on the `0.3.28-hardened.3` fork and selectively backports reviewed 0.3.30 improvements. **It is not a full functional port of upstream 0.3.30.** See [current release notes](security-review/0.3.30.hardened/README.md) for the exact scope and verification limits.
 
-This is a fork of [PandaCode](https://github.com/aicodeking/pandacode), based on the supplied 0.3.28 source archive. This security revision preserves the original application and attribution. See [SECURITY-INSTALLATION-REVIEW.md](SECURITY-INSTALLATION-REVIEW.md) for this revision and its verification limits. [SECURITY-HARDENING.md](SECURITY-HARDENING.md) is the historical hardened.1 report.
+The hardened controls inherited from prior revisions remain in place, including native credential storage, replay protection, gated agent tools, restricted HTML previews and disabled automatic updates. Historical reports are kept in `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, and `security-review/hardened.3/` and `security-review/hardened.4/`. These reports do not attest that this new candidate passed runtime tests.
 
-**Build this source to use these changes. Official upstream installers, Homebrew and the public `npx pandacode` package do not contain this revision. Automatic application and agent updates are disabled in code.**
+This is a fork of [PandaCode](https://github.com/aicodeking/pandacode), based on the supplied 0.3.28 source archive and selected 0.3.30 code. Its license and original attribution are preserved. Official upstream installers, Homebrew and the public `npx pandacode` package do not contain this revision. **Build this reviewed source; automatic application and agent updates remain disabled.**
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding
@@ -155,8 +155,9 @@ still require network access.
 
 Updates are a deliberate manual operation: review the new source, reproduce
 these protections, build it, and then replace the installed application. The
-original numeric version remains 0.3.28 for compatibility; `hardened.3` identifies
-this source distribution, not an official upstream release.
+package version is `0.3.30-hardened` (displayed as `0.3.30.hardened`); this is
+an independently labeled fork distribution, not an official upstream release.
+Back up application data before replacing a previous installation.
 
 Then install Git and at least one coding CLI and sign in with its normal login.
 PandaCode does not include provider plans or usage.
@@ -180,11 +181,11 @@ You need Node.js 22 or newer, stable Rust 1.88 or newer, and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```sh
-cd pandacode-0.3.28-hardened
+cd pandacode-0.3.30.hardened
 npm ci --ignore-scripts
 npm run build
 npm run package
-# For a Windows x64 installer with a distinct hardened.3 asset name:
+# For a Windows x64 installer with a distinct 0.3.30.hardened asset name:
 # npm run release:build -- windows-x86_64
 # For local development: npm run desktop
 ```

@@ -15,7 +15,7 @@ use std::{
 
 use crate::agent_tools::{spec, validate_spec};
 use crate::providers::ToolHost;
-use crate::workspace::run_process_cancelable;
+use crate::workspace::{run_process, run_process_cancelable};
 
 const OUTPUT: usize = 128 * 1024;
 

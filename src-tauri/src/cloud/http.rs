@@ -146,7 +146,19 @@ mod tests {
             let (mut socket, _) = listener.accept().unwrap();
             socket.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).unwrap();
+            let mut received = 0;
+            loop {
+                let count = socket.read(&mut request[received..]).unwrap();
+                assert_ne!(count, 0, "Fixture client disconnected before request headers");
+                received += count;
+                if request[..received]
+                    .windows(4)
+                    .any(|window| window == b"\r\n\r\n")
+                {
+                    break;
+                }
+                assert!(received < request.len(), "Fixture request headers are too large");
+            }
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
             let chunk = vec![b' '; 32 * 1024];
             for _ in 0..(LIMIT / chunk.len() + 2) {

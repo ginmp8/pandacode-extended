@@ -5,7 +5,7 @@ import type { ProviderId } from './types';
 export type LedgerRow = [number, number, number, number, number, number, number, number];
 export interface Ledger {
   scannedAt: number;
-  pricing: { source: 'live' | 'saved' | 'bundled'; fetchedAt: number | null };
+  pricing: { source: 'saved' | 'bundled'; fetchedAt: number | null };
   sources: { provider: ProviderId; files: number }[];
   models: { provider: ProviderId; name: string; priced: boolean }[];
   rows: LedgerRow[];

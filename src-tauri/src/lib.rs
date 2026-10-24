@@ -39,6 +39,7 @@ mod jev_decisions;
 mod local_servers;
 mod local_signing;
 mod message_queue;
+mod message_attachments;
 mod moodboards;
 mod prompt_attachments;
 mod overlay;
@@ -190,6 +191,8 @@ fn save_approval(
 
 #[cfg(test)]
 mod concurrent_task_tests;
+#[cfg(test)]
+mod skills_admission_tests;
 
 /// A provider can finish while the database is temporarily unable to write its
 /// final status. The process registry remains authoritative for whether work is
@@ -693,7 +696,9 @@ async fn configure_session(
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its project, provider, or model.".into());
     }
-    state.store.lock().map_err(|e| e.to_string())?.configure(
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    remote::check_current_request(&store.session(&session_id)?.mode)?;
+    store.configure(
         &session_id,
         &provider,
         &model,
@@ -714,11 +719,9 @@ async fn set_reasoning_effort(
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its reasoning effort.".into());
     }
-    state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .set_reasoning_effort(&session_id, reasoning_effort.as_deref())
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    remote::check_current_request(&store.session(&session_id)?.mode)?;
+    store.set_reasoning_effort(&session_id, reasoning_effort.as_deref())
 }
 #[tauri::command]
 async fn update_session(
@@ -751,11 +754,10 @@ async fn update_session(
     if (model.is_some() || mode.is_some()) && agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its model or permissions.".into());
     }
-    state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .update(&session_id, title, archived, model, mode)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let task = store.session(&session_id)?;
+    remote::check_current_request(mode.as_deref().unwrap_or(&task.mode))?;
+    store.update(&session_id, title, archived, model, mode)
 }
 #[tauri::command]
 async fn get_messages(
@@ -1198,6 +1200,7 @@ async fn start_task(
 #[derive(Default)]
 struct RunAdmission<'a> {
     expected_project: Option<&'a str>,
+    skills: Option<&'a skills::Library>,
     command: Option<PreparedCommand>,
     goal: Option<goal_state::GoalRequest>,
     team: Option<architect::Admission>,
@@ -1257,7 +1260,8 @@ fn prepare_task_run_in_project(
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
     architect::validate_admission(&store, &session_id, admission.team.as_ref())?;
-    let session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    let mut session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    remote::check_current_request(&session.mode)?;
     if admission.goal.is_some() && session.provider != "codex" {
         return Err(
             "Goals require the Codex harness. The task provider changed before it started.".into(),
@@ -1318,7 +1322,6 @@ fn prepare_task_run_in_project(
         }
         None => (text.clone(), None, false),
     };
-    let needs_context = context_recovery::pending(&store, &session)?;
     let goal_control = matches!(
         admission.goal,
         Some(
@@ -1327,12 +1330,22 @@ fn prepare_task_run_in_project(
                 | goal_state::GoalRequest::Clear
         )
     );
+    let selected_skills = if !goal_control {
+        if let Some(library) = admission.skills {
+            let selected = skills::scoped::task(library, &store, &session, &cwd)?;
+            library.synchronize_context(&store, &mut session, &selected)?;
+            Some(selected)
+        } else { None }
+    } else { None };
+    let needs_context = context_recovery::pending(&store, &session)?;
+    let fork_brief = if goal_control { None } else { bots::fork_task_brief(&store, &session, session.resume_id.is_none() || needs_context)? };
     if needs_context
         && ((!goal_control && admission.goal.is_some())
             || slash_commands::split_command(&prompt).is_some())
     {
         return Err(context_recovery::RECOVERY_REQUIRED.into());
     }
+    let prompt = match fork_brief { Some(brief) => format!("{prompt}{brief}"), None => prompt };
     let (prompt, context_handoff) = if goal_control {
         if needs_context {
             context_recovery::queue(&store, &session_id)?;
@@ -1341,6 +1354,9 @@ fn prepare_task_run_in_project(
     } else {
         context_recovery::prepare(&store, &session, &prompt)?
     };
+    let prompt = if !goal_control && !maintenance {
+        if let Some(selected) = selected_skills { format!("{prompt}{}", selected.text) } else { prompt }
+    } else { prompt };
     let turn_started = std::time::Instant::now();
     let turn_message_id = if admission.goal.is_some() {
         if matches!(admission.goal, Some(goal_state::GoalRequest::Set { .. })) {
@@ -1539,6 +1555,7 @@ async fn launch_operation_admitted(
         .collect::<Result<Vec<_>>>()?;
     let (tx, rx) = unbounded_channel();
     let stopped = Arc::new(AtomicBool::new(false));
+    let skill_library = skills::library(&app)?;
     let PreparedRun {
         mut config,
         restore_stage,
@@ -1560,6 +1577,7 @@ async fn launch_operation_admitted(
         stopped.clone(),
         RunAdmission {
             expected_project: expected_project.as_deref(),
+            skills: Some(&skill_library),
             command,
             goal: goal_request,
             team: team_admission,
@@ -1979,16 +1997,20 @@ async fn launch_operation_admitted(
                 [&session_id],
                 |row| row.get::<_, bool>(0),
             ).ok()).unwrap_or(false);
-            let task = store.lock().ok().filter(|_| replied).and_then(|db| db.session(&session_id).ok());
-            if let Some(task) = task {
+            let task = store.lock().ok().filter(|_| replied).and_then(|db| db.session(&session_id).ok().map(|task| {
+                let connection = connections::warm_key(&session_id, &task.provider);
+                (task, connection)
+            }));
+            if let Some((task, connection)) = task {
                 next.resume_id = task.resume_id;
                 next.model = task.model;
                 next.mode = task.mode;
                 next.reasoning_effort = task.reasoning_effort;
                 next.prompt.clear();
                 next.images.clear();
+                let warm_store = store.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = providers::prewarm_agent(next, tools, approvals, launch).await;
+                    let _ = providers::prewarm_agent(next, tools, approvals, launch, warm_store, connection).await;
                 });
             }
         }
@@ -2038,6 +2060,8 @@ async fn respond_approval(
     let tx = agents
         .get(&session_id)
         .ok_or("This agent is no longer running.")?;
+    let mode = state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.mode;
+    remote::check_current_request(if approved { &mode } else { "ask" })?;
     tx.respond_approval(&state.store, &session_id, request_id, approved)
 }
 #[tauri::command]
@@ -2090,6 +2114,7 @@ async fn respond_user_input(
         let agent = agents
             .get(&session_id)
             .ok_or("This agent is no longer running.")?;
+        remote::check_current_request(&state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.mode)?;
         let pending = agent.approvals.lock().map_err(|e| e.to_string())?;
         if agent.stopped.load(Ordering::SeqCst) || !pending.contains(&request_id) {
             return Err("This question is no longer pending.".into());
@@ -3162,6 +3187,7 @@ pub fn run() {
                 remote::remote_sign_in_cancel,
                 remote::remote_sign_out,
                 remote::remote_set_host_enabled,
+                remote::remote_set_full_access,
                 remote::remote_devices,
                 remote::remote_revoke_device,
                 remote::remote_set_trusted,
@@ -3377,8 +3403,18 @@ pub fn run() {
                 skills::skills_matrix,
                 skills::skills_scan,
                 skills::skills_remove,
+                skills::skills_catalogs,
+                skills::skills_catalog_add,
+                skills::skills_catalog_refresh,
+                skills::skills_catalog_state,
+                skills::skills_catalog_import,
+                skills::skills_scope_get,
+                skills::skills_scope_set,
+                skills::skills_task_resolve,
                 set_task_link,
                 import_prompt_image,
+                message_attachments::message_attachment_image,
+                message_attachments::reveal_message_attachment,
                 read_document,
                 describe_folder,
                 list_files,

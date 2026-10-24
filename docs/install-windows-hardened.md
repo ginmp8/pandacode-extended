@@ -1,4 +1,4 @@
-# Windows: Build and Install 0.3.35-hardened.4
+# Windows: Build and Install 0.3.41-hardened
 
 This package contains source code, not a prebuilt Windows installer. The executable must be built on Windows with the Tauri prerequisites, Node.js, Rust/MSVC, and the Microsoft WebView2 runtime already installed. The installer does not download WebView2. The application will not run without the runtime.
 
@@ -17,8 +17,8 @@ For Windows ARM64, use `windows-aarch64` on a compatible ARM64 host. The build e
 Expected x64 output:
 
 ```text
-release/0.3.35-hardened.4/hardened/PandaCode-0.3.35.hardened.4-Windows-x64-setup.exe
-release/0.3.35-hardened.4/hardened/PandaCode-0.3.35.hardened.4-Windows-x64-setup.exe.sha256
+release/0.3.41-hardened/hardened/PandaCode-0.3.41.hardened-Windows-x64-setup.exe
+release/0.3.41-hardened/hardened/PandaCode-0.3.41.hardened-Windows-x64-setup.exe.sha256
 ```
 
 Review the produced binary, tool origins, and antivirus alerts before running it. Do not disable Avast, add a PowerShell exception, or ignore a new detection to continue installation. The hash verifies identity, not safety. The absence of an Authenticode signature cannot be fixed with an invented certificate.
@@ -29,6 +29,6 @@ Do not use `npx pandacode`, Homebrew, upstream release links, or a previously do
 
 ## Limitations
 
-The native identifier was preserved and the product version is `0.3.35-hardened.4`. Back up existing data before replacing an installation. The application still runs authorized AI commands and may open PowerShell; this configuration does not impose a firewall on agent processes. Microsoft-managed Windows/WebView2 updates were not changed.
+The native identifier was preserved and the product version is `0.3.41-hardened`. Back up existing data before replacing an installation. The application still runs authorized AI commands and may open PowerShell; this configuration does not impose a firewall on agent processes. Microsoft-managed Windows/WebView2 updates were not changed.
 
 References: [Tauri Windows installation](https://v2.tauri.app/distribute/windows-installer/), [prerequisites](https://v2.tauri.app/start/prerequisites/), [npm configuration](https://docs.npmjs.com/cli/v10/using-npm/config/).

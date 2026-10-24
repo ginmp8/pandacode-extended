@@ -33,9 +33,10 @@ fn decode_public(text: &str) -> Option<[u8; 32]> {
     STANDARD.decode(text.trim()).ok()?.try_into().ok()
 }
 
-/// First 8 bytes of SHA-256 of the raw public key, hex.
+/// First 16 bytes (128 bits) of SHA-256 of the raw public key, hex.
+/// This is display-only: authentication continues comparing pinned public keys.
 pub(crate) fn fingerprint(public: &str) -> String {
-    decode_public(public).map(|raw| Sha256::digest(raw)[..8].iter().map(|b| format!("{b:02x}")).collect()).unwrap_or_default()
+    decode_public(public).map(|raw| Sha256::digest(raw)[..16].iter().map(|b| format!("{b:02x}")).collect()).unwrap_or_default()
 }
 
 /// HKDF-SHA256 over the X25519 secret, salted with the sorted device ids.
@@ -110,9 +111,25 @@ mod tests {
         let restored = decode_secret(&encode_secret(&secret)).unwrap();
         assert_eq!(public_key(&restored), public_key(&secret));
         let print = fingerprint(&public_key(&secret));
-        assert_eq!(print.len(), 16);
+        assert_eq!(print.len(), 32);
         assert!(print.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(fingerprint("nope"), "");
         assert!(pair_key(&secret, "a", &STANDARD.encode([0u8; 32]), "b").is_err());
+    }
+
+    #[test]
+    fn a_longer_fingerprint_preserves_the_registered_public_key() {
+        let key = public_key(&StaticSecret::from([7u8; 32]));
+        let raw = decode_public(&key).unwrap();
+        let legacy: String = Sha256::digest(raw)[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let current = fingerprint(&key);
+        assert_eq!(current.len(), 32);
+        assert!(current.starts_with(&legacy));
+        let settings = super::super::config::Settings {
+            trusted: std::collections::BTreeMap::from([("peer".into(), key.clone())]),
+            ..Default::default()
+        };
+        assert!(settings.is_trusted("peer", &key));
+        assert!(!settings.is_trusted("peer", &current), "the display is never an authentication key");
     }
 }

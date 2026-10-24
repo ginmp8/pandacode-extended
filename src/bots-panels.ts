@@ -36,7 +36,9 @@ function conversationsPanel(detail: BotDetail, context: PanelContext): string {
   const threads = [...detail.threads].sort((a, b) => Number(b.channelId === 'desktop') - Number(a.channelId === 'desktop') || b.updatedAt - a.updatedAt);
   const web = detail.channels.find(item => item.kind === 'web' && item.enabled);
   const row = (thread: BotDetail['threads'][number]) => `<li><span class="bots-item-main"><b>${escape(threadLabel(detail, thread.channelId, thread.externalId))}</b><small>${context.running(thread.sessionId) ? 'Working…' : escape(age(thread.updatedAt))}</small></span><button type="button" class="secondary-button" data-open-task="${escape(thread.sessionId)}">Open</button></li>`;
+  const independent = detail.independentTasks ?? [];
   return `${threads.length ? `<ul class="bots-items">${threads.map(row).join('')}</ul>` : '<p class="bots-empty-note">No conversations yet. Open chat to start one.</p>'}
+    ${independent.length ? `<h3>Independent tasks</h3><p class="bots-empty-note">Edited messages and conversation forks. These tasks keep their own history.</p><ul class="bots-items bots-independent-tasks">${independent.map(task => `<li><span class="bots-item-main"><b>${escape(task.title)}</b><small>${context.running(task.id) ? 'Working…' : escape(age(task.updatedAt))}</small></span><button type="button" class="secondary-button" data-open-task="${escape(task.id)}">Open</button></li>`).join('')}</ul>` : ''}
     ${web ? `<div class="bots-callout">${icon('globe')}<span>Also chat from any browser on this computer.</span><button type="button" class="secondary-button" data-web-open="${escape(web.id)}">Open web chat</button></div>` : ''}`;
 }
 

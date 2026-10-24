@@ -16,7 +16,7 @@ import './tool-trace.css';
 import { renderDocument, setDocumentView } from './document-viewer';
 import { moved, queuePanel, type HoldReason, type QueuedMessage } from './message-queue';
 import { afterRun as turnChecksAfterRun, enabled as turnChecksEnabled, noteManualSend, setEnabled as turnChecksSetEnabled } from './turn-checks';
-import { limitActive, limitBanner, resetLabel } from './usage-limit';
+import { limitActive, limitBanner, limitConnections, resetLabel } from './usage-limit';
 import { cascade, enterView, glideIn, glideOut, hideToast, installDialogMotion, publishSpringEasings, revealIn, showToast, trackSegment } from './motion';
 import { updateTeamProgress } from './team-progress';
 import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } from './team-mode';
@@ -67,6 +67,9 @@ import { createPullView } from './github-pull';
 import { createSearchPanel } from './search-panel';
 import { createTokenSaver } from './token-saver-panel';
 import { MAX_IMAGES, mountPromptAttachments, type PromptImage } from './attachments';
+import { attachmentTarget, contextBlocks, parseAttachments } from './message-attachments';
+import { attachmentChips, sentImageKey } from './message-attachment-chips';
+import { prepareRewindDraft, type RewindDraft } from './message-rewind';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
 import { isMac, isWindows, shortcut } from './platform';
 import { createGoalBanner, showGoalDialog, showCommandCenter, type GoalState, type GoalAction, type CommandPanel } from './command-center';
@@ -521,7 +524,7 @@ const disposeMessageActions = bindMessageActions($('#transcript'), {
     const saved = state.messages.find(message => String(message.id) === key);
     return saved && saved.id > 0 && ['user', 'assistant'].includes(saved.role)
       ? call<string>('get_message_content', { sessionId, messageId: saved.id }) : saved?.content;
-  }, onFork: forkAtMessage, report,
+  }, onFork: forkAtMessage, onEdit: editAtMessage, report,
 });
 const transcriptScroller = $('#transcript');
 transcriptScroller.tabIndex = 0;
@@ -861,7 +864,7 @@ function taskConnection(s: Session): import('./connections').Connection | undefi
   const id = namedConnections.tasks[s.id];
   return namedConnections.connections.find(c => c.id === id && c.provider === s.provider);
 }
-function onNamedConnections(snapshot: import('./connections').ConnectionSnapshot): void { namedConnections = snapshot; refreshModelLabels(); }
+function onNamedConnections(snapshot: import('./connections').ConnectionSnapshot): void { namedConnections = snapshot; refreshModelLabels(); if (session()?.limitedAt) renderComposer(); }
 /** The computer the composer's picker lists: a mirror task's, a new task's chosen one, else undefined (local). */
 function composerDevice(): string | undefined {
   const s = session();
@@ -1200,19 +1203,63 @@ function messageHtml(m: Message): string {
   if (m.role === 'error') return `<div class="message-error">${icon('alert')}<span>${escape(m.content)}</span></div>`;
   const isUser = m.role === 'user';
   const author = historicalProvider(m, state.messages, session()?.provider ?? state.defaultProvider);
-  return `<article class="message ${isUser ? 'user-message' : 'agent-message'}" data-message-id="${m.id}"><div class="message-meta"><span class="message-avatar ${isUser ? 'user-avatar' : ''}">${isUser ? 'Y' : providerLogo(author)}</span><strong>${isUser ? 'You' : escape(provider(author)?.name || 'Agent')}</strong><time>${formatTime(m.createdAt)}</time></div><div class="message-content ${isUser ? '' : 'markdown'}" ${isUser ? '' : `data-markdown="${m.id}"`}>${isUser ? userContent(m.content) : escape(m.content)}</div>${isUser && m.id < 0 ? steerStateHtml(m) : ''}${messageActionsHtml(m.sessionId, m.id, m.id > 0 && (isUser || m.role === 'assistant'))}</article>`;
+  return `<article class="message ${isUser ? 'user-message' : 'agent-message'}" data-message-id="${m.id}"><div class="message-meta"><span class="message-avatar ${isUser ? 'user-avatar' : ''}">${isUser ? 'Y' : providerLogo(author)}</span><strong>${isUser ? 'You' : escape(provider(author)?.name || 'Agent')}</strong><time>${formatTime(m.createdAt)}</time></div><div class="message-content ${isUser ? '' : 'markdown'}" ${isUser ? '' : `data-markdown="${m.id}"`}>${isUser ? userContent(m.content, m.sessionId, m.id) : escape(m.content)}</div>${isUser && m.id < 0 ? steerStateHtml(m) : ''}${messageActionsHtml(m.sessionId, m.id, m.id > 0 && (isUser || m.role === 'assistant'), isUser && m.id > 0, isRunning(m.sessionId))}</article>`;
 }
-// Context appended at send time (files, documents, folders, GitHub, browser, images) folds
-// behind one summary so the transcript reads as what you said, with the payload a click away.
-const CONTEXT_BOUNDARY = /\n\n(?=(?:File|Document|Folder|GitHub|Browser element) context[ :(]|Attached (?:browser screenshot|image|mockup)[ :]|Bot brief:\n|Response style \(PandaCode token saver)/;
-function userContent(content: string): string {
-  const index = content.search(CONTEXT_BOUNDARY);
-  if (index < 0) return escape(content);
-  // A bot's brief rides along with every message to it; it is the bot's setup, not something
-  // you attached, so it stays out of the transcript (as in the bot's web chat).
-  const blocks = content.slice(index + 2).split(CONTEXT_BOUNDARY).filter(block => !block.startsWith('Bot brief:\n'));
-  if (!blocks.length) return escape(content.slice(0, index));
-  return `${escape(content.slice(0, index))}<details class="message-context"><summary>${icon('attach')}Attached context<span>${blocks.length}</span></summary><pre>${escape(blocks.join('\n\n'))}</pre></details>`;
+// Keep the raw payload available for old histories while presenting individual attachments.
+function userContent(content: string, sessionId: string, messageId: number): string {
+  const { typed, blocks } = contextBlocks(content);
+  const visible = blocks.filter(block => !block.startsWith('Bot brief:\n'));
+  const items = parseAttachments(blocks);
+  if (messageId > 0) for (const item of items) if (item.kind === 'image' && item.imageId) loadSentImage(sessionId, messageId, item.imageId);
+  const raw = visible.length ? `<details class="message-context"><summary>${icon('attach')}Attached context<span>${visible.length}</span></summary><pre>${escape(visible.join('\n\n'))}</pre></details>` : '';
+  return escape(typed) + attachmentChips(items, sessionId, messageId, sentImages) + raw;
+}
+const sentImages = new Map<string, string | null>();
+const sentImageLoads: (() => Promise<void>)[] = [];
+let activeSentImageLoads = 0;
+function loadNextSentImage(): void {
+  while (activeSentImageLoads < 2 && sentImageLoads.length) {
+    const load = sentImageLoads.shift()!;
+    activeSentImageLoads++;
+    void load().finally(() => { activeSentImageLoads--; loadNextSentImage(); });
+  }
+}
+const safeImageData = (url: string | null | undefined): url is string => Boolean(url && /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(url));
+function loadSentImage(sessionId: string, messageId: number, id: string): void {
+  const key = sentImageKey(sessionId, messageId, id);
+  if (sentImages.has(key) || sentImageLoads.length >= 64) return;
+  if (sentImages.size >= 64) sentImages.delete(sentImages.keys().next().value!);
+  sentImages.set(key, null);
+  sentImageLoads.push(() => call<string | null>('message_attachment_image', { sessionId, messageId, id }).then(url => {
+    if (!safeImageData(url)) return;
+    if (!sentImages.has(key) && sentImages.size >= 64) sentImages.delete(sentImages.keys().next().value!);
+    sentImages.set(key, url);
+    for (const img of document.querySelectorAll<HTMLImageElement>(`img[data-sent-image="${CSS.escape(key)}"]`)) {
+      img.src = url; img.hidden = false;
+      if (img.nextElementSibling?.matches('svg.icon')) img.nextElementSibling.remove();
+    }
+  }).catch(() => { /* Missing captures keep a text fallback. */ }));
+  loadNextSentImage();
+}
+async function openMessageAttachment(element: HTMLElement): Promise<void> {
+  const sessionId = element.dataset.messageSession, messageId = Number(element.dataset.messageId), index = Number(element.dataset.index);
+  if (sessionId !== state.sessionId || !Number.isSafeInteger(messageId) || messageId <= 0 || !Number.isSafeInteger(index) || index < 0) return;
+  const message = state.messages.find(m => m.sessionId === sessionId && m.id === messageId && m.role === 'user');
+  const item = message && parseAttachments(contextBlocks(message.content).blocks)[index];
+  const task = session();
+  if (!item || !task) return;
+  if (item.kind === 'github' && item.url) { await call('open_external_url', { url: item.url }); return; }
+  if (item.kind === 'image') {
+    const url = item.imageId ? await call<string | null>('message_attachment_image', { sessionId, messageId, id: item.imageId, full: true }).catch(() => null) : null;
+    if (state.sessionId !== sessionId) return;
+    if (safeImageData(url)) { modal(item.name, `<img class="message-attachment-image" src="${escape(url)}" alt="${escape(item.name)}">`, 'message-attachment-dialog'); return; }
+    modal(item.name, `<p class="dialog-description">This image is no longer stored. The original attachment description is preserved below.</p><pre class="message-attachment-raw">${escape(item.raw)}</pre>`, 'message-attachment-dialog'); return;
+  }
+  const target = attachmentTarget(item, workspacePath());
+  if (target.kind !== 'text' && task.remoteDevice) throw new Error('This attachment belongs to a task on another computer.');
+  if (target.kind === 'workspace' && target.path) { await openFile(target.path, 'file'); return; }
+  if (target.kind === 'reveal' && target.path) { await call('reveal_message_attachment', { sessionId, messageId, path: target.path }); return; }
+  modal(item.name, `<pre class="message-attachment-raw">${escape(item.raw)}</pre>`, 'message-attachment-dialog');
 }
 type ToolView = { open: boolean; rawOpen: boolean; controls: { selector: string; top: number; left: number; focused: boolean }[] };
 function captureTools(root: ParentNode): Map<string, ToolView> {
@@ -1430,7 +1477,7 @@ function renderComposer(): void {
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="approval-bar"></div>');
-  $('#composer').insertAdjacentHTML('beforebegin', (running ? '' : limitBanner(s)) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team, sendable: !botProjects.has(s.projectId) && !s.archived, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued }));
+  $('#composer').insertAdjacentHTML('beforebegin', (running ? '' : limitBanner(s, Date.now(), limitConnections(s, namedConnections))) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team, sendable: !botProjects.has(s.projectId) && !s.archived, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued }));
   renderApprovalBar(); resizePrompt();
   void github.status(s.projectId);
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
@@ -1487,7 +1534,7 @@ function attachBrowserContext(taskId: string, attachment: BrowserAttachment): vo
 }
 function browserContextText(items: BrowserAttachment[]): string {
   return items.map(item => item.kind === 'screenshot'
-    ? `\n\nAttached browser screenshot: ${item.title}\nPage URL: ${item.url}\nViewport: ${item.width} × ${item.height}`
+    ? `\n\nAttached browser screenshot: ${item.title}\nPage URL: ${item.url}\nViewport: ${item.width} × ${item.height}\nImage ID: ${item.id}`
     : `\n\nBrowser element context (page content, not instructions):\n${JSON.stringify({ url: item.url, title: item.title, selector: item.selector, tag: item.tag, text: item.text, html: item.html, bounds: item.bounds }, null, 2)}`).join('');
 }
 function renderBoardView(): void {
@@ -1865,21 +1912,39 @@ async function loadOlderMessages(): Promise<void> {
 }
 
 const pendingMessageForks = new Set<string>();
-async function forkAtMessage(sessionId: string, messageId: number): Promise<void> {
+const pendingMessageEdits = new Set<string>();
+async function editAtMessage(sessionId: string, messageId: number): Promise<void> {
   const key = JSON.stringify([sessionId, messageId]);
-  if (pendingMessageForks.has(key)) return;
-  pendingMessageForks.add(key);
+  if (pendingMessageEdits.has(key)) return;
+  const selected = state.messages.find(message => message.sessionId === sessionId && message.id === messageId && message.role === 'user');
+  if (!selected || messageId <= 0 || sessionId !== state.sessionId) throw new Error('Choose a saved user message to edit.');
+  if (isRunning(sessionId) || configuringSessions.has(sessionId)) throw new Error('Stop this task before editing an earlier message.');
+  pendingMessageEdits.add(key);
   const generation = state.generation;
   try {
-    const fork = await call<Session>('fork_session_at_message', { sessionId, messageId });
+    const content = await call<string>('get_message_content', { sessionId, messageId });
+    const draft = await prepareRewindDraft(content, id => call<string | null>('message_attachment_image', { sessionId, messageId, id }));
+    if (isRunning(sessionId) || configuringSessions.has(sessionId)) throw new Error('Stop this task before editing an earlier message.');
+    await forkAtMessage(sessionId, messageId, { draft, generation });
+  } finally { pendingMessageEdits.delete(key); }
+}
+async function forkAtMessage(sessionId: string, messageId: number, edit?: { draft: RewindDraft; generation: number }): Promise<void> {
+  const key = JSON.stringify([sessionId, messageId, Boolean(edit)]);
+  if (pendingMessageForks.has(key)) return;
+  pendingMessageForks.add(key);
+  const generation = edit?.generation ?? state.generation;
+  try {
+    const fork = await call<Session>('fork_session_at_message', { sessionId, messageId, ...(edit ? { exclusive: true } : {}) });
     state.sessions = [fork, ...state.sessions.filter(task => task.id !== fork.id)];
-    if (generation === state.generation) {
-      await selectSession(fork.id, true);
-      notify('Conversation forked. Both tasks use the same checkout.');
-    } else {
-      scheduleNavigation();
-      notify('Conversation forked. Your new task is in the task list.');
+    if (edit) {
+      state.drafts.set(fork.id, edit.draft.text);
+      attachments.restore(fork.id, edit.draft.items);
     }
+    const stillSelected = generation === state.generation;
+    if (stillSelected) await selectSession(fork.id, true);
+    else scheduleNavigation();
+    notify(edit ? `Message ready to edit in a new task. Files were not rewound.${edit.draft.unavailable.length ? ` ${edit.draft.unavailable.length} unavailable attachment(s) must be attached again.` : ''}`
+      : stillSelected ? 'Conversation forked. Both tasks use the same checkout.' : 'Conversation forked. Your new task is in the task list.');
   } finally { pendingMessageForks.delete(key); }
 }
 
@@ -2330,22 +2395,35 @@ function scheduleLimitResumes(): void {
   }, Math.min(Math.max(0, next - Date.now()), 2147483647));
 }
 /** Recovery runs before queued follow-ups: continue the task, then the queue delivers when that run ends. */
-async function continueAfterLimit(task: Session): Promise<void> {
-  if (task.archived || isRunning(task.id) || state.queueBusy.has(task.id) || finishingStreams.has(task.id)) return;
+async function continueAfterLimit(task: Session, text = 'Continue where you left off.'): Promise<void> {
+  if (task.archived || isRunning(task.id) || state.queueBusy.has(task.id) || finishingStreams.has(task.id) || configuringSessions.has(task.id)) return;
   const hold = state.queueHolds.get(task.id);
   if (hold === 'limited' || hold === 'restart') state.queueHolds.delete(task.id);
   task.resumeAtReset = false;
   state.queueBusy.add(task.id);
   try {
     const at = Date.now();
-    await deliverQueued(task, { id: '', sessionId: task.id, position: 0, text: 'Continue where you left off.', attachments: [], createdAt: at, updatedAt: at });
+    await deliverQueued(task, { id: '', sessionId: task.id, position: 0, text, attachments: [], createdAt: at, updatedAt: at });
     task.limitedAt = null; task.limitedUntil = null;
   } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
   finally { state.queueBusy.delete(task.id); if (task.id === state.sessionId) renderComposer(); renderNavigation(); }
 }
+async function continueOnConnection(task: Session, id: string): Promise<void> {
+  if (!limitActive(task) || task.archived || task.remoteDevice || isRunning(task.id) || state.queueBusy.has(task.id) || finishingStreams.has(task.id) || configuringSessions.has(task.id)) return;
+  const target = limitConnections(task, namedConnections).find(connection => connection.id === id);
+  if (!target) return;
+  configuringSessions.add(task.id);
+  try {
+    const snapshot = await call<import('./connections').ConnectionSnapshot>('connection_assign', { sessionId: task.id, connectionId: id });
+    task.resumeId = null; task.contextUsage = null;
+    onNamedConnections(snapshot);
+  } finally { configuringSessions.delete(task.id); }
+  await continueAfterLimit(task);
+}
 async function limitAction(action: string, element: HTMLElement): Promise<void> {
   const s = session(); if (!s) return;
   if (action === 'limit-continue') return continueAfterLimit(s);
+  if (action === 'limit-switch') return continueOnConnection(s, element.dataset.connection ?? '');
   if (action === 'limit-dismiss') { await call('clear_usage_limit', { sessionId: s.id }); s.limitedAt = null; s.limitedUntil = null; s.resumeAtReset = false; scheduleLimitResumes(); renderComposer(); renderNavigation(); return; }
   if (action === 'limit-resume-at-reset') {
     const enabled = (element as HTMLInputElement).checked;
@@ -3192,7 +3270,10 @@ async function showModel(anchor: HTMLElement): Promise<void> {
         }
         const updated = await call<Session>('configure_session', { sessionId: selected.id, provider: providerId, model });
         const index = state.sessions.findIndex(s => s.id === selected.id); if (index >= 0) state.sessions[index] = updated;
-        if (!device && (connection ?? null) !== (namedConnections.tasks[selected.id] ?? null)) namedConnections = await call('connection_assign', { sessionId: selected.id, connectionId: connection });
+        if (!device && (connection ?? null) !== (namedConnections.tasks[selected.id] ?? null)) {
+          namedConnections = await call('connection_assign', { sessionId: selected.id, connectionId: connection });
+          updated.resumeId = null; updated.contextUsage = null;
+        }
         if (!device) {
           if (!localStorage.getItem('pandacode.defaultProvider')) state.defaultProvider = providerId;
           localStorage.setItem('pandacode.provider', providerId); localStorage.setItem('pandacode.model.' + providerId, model);
@@ -3498,7 +3579,7 @@ async function showSettings(section?: import('./settings').SettingsSection): Pro
       github: target => github.mountSettings(target, project()?.id ?? state.projects[0]?.id ?? ''),
       teams: { loadModels, call },
       cloud: { call, listen: (name, callback) => subscribe(name, callback) },
-      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },
+      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })), sessionId: () => state.sessionId || null },
       remote: remoteHost,
       embed: {
         colors: async target => (await import('./theme-settings')).mountThemeSettings(target, { call, notify, chooseVsix: () => import('./bridge').then(bridge => bridge.chooseVsix()) }),
@@ -3973,6 +4054,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'open-file': await openFile(element.dataset.path!, 'file'); break;
     case 'open-diff': await openFile(element.dataset.path!, 'diff', element.dataset.staged === 'true'); break;
     case 'back-inspector': state.selectedKind = ''; renderInspector(); break;
+    case 'open-message-attachment': await openMessageAttachment(element); break;
     case 'attach': await attachments.openMenu(element); break;
     case 'attach-file': attachFile(element.dataset.path!); break;
     case 'detach': state.attachments = state.attachments.filter(p => p !== element.dataset.path); renderComposer(); break;
@@ -4003,7 +4085,16 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   }
 }
 mountExternalLinks(document, url => call('open_external_url', { url }), report);
-document.addEventListener('click', event => { if ((event.target as Element).closest('.markdown,.streaming-content,.message-content')) return; const element = (event.target as Element).closest<HTMLElement>('[data-action]'); if (!element || element instanceof HTMLButtonElement && element.disabled) return; event.preventDefault(); run(action(element.dataset.action!, element)); });
+document.addEventListener('click', event => {
+  const target = event.target as Element;
+  // Message markup cannot grant access to arbitrary application actions. Only
+  // the saved user's attachment button opts into this delegated handler.
+  const element = target.closest('.markdown,.streaming-content,.message-content')
+    ? target.closest<HTMLElement>('.user-message > .message-content > .message-attachments > button[data-action="open-message-attachment"]')
+    : target.closest<HTMLElement>('[data-action]');
+  if (!element || element instanceof HTMLButtonElement && element.disabled) return;
+  event.preventDefault(); run(action(element.dataset.action!, element));
+});
 document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
   if (form.id === 'composer') { run(send()); return; }

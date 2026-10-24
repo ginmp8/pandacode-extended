@@ -236,7 +236,10 @@ pub fn start_harness(
 
 fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, String> {
     let args = harness_arguments(context)?;
-    let executable = crate::providers::executable(context.provider)
+    let connection = crate::connections::for_task(context.session_id, context.provider)
+        .map(|connection| crate::connections::launch(&connection)).transpose()?;
+    let executable = connection.as_ref().and_then(|connection| connection.executable.clone())
+        .or_else(|| crate::providers::executable(context.provider))
         .ok_or("Install this harness before opening its console.")?;
     let mut cmd = crate::providers::pty_command(&executable)?;
     for name in crate::providers::claude_auth::removed_environment(context.provider) { cmd.env_remove(name); }
@@ -272,7 +275,15 @@ fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, Strin
             crate::providers::opencode_configuration(context.mode),
         );
     }
+    if let Some(connection) = &connection {
+        apply_connection(&mut cmd, connection);
+    }
     Ok(cmd)
+}
+
+fn apply_connection(command: &mut CommandBuilder, connection: &crate::connections::Launch) {
+    command.args(&connection.args);
+    for (name, value) in &connection.env { command.env(name, value); }
 }
 
 fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String> {
@@ -897,6 +908,24 @@ pub fn close(terms: &Terminals, id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn a_harness_console_uses_the_named_connections_config_and_environment() {
+        let connection = crate::connections::Launch {
+            executable: None,
+            args: vec!["--verbose".into()],
+            env: vec![("CODEX_HOME".into(), "/fixture/second-account".into()), ("FIXTURE_VALUE".into(), "named-profile".into())],
+            secrets: vec![],
+        };
+        let mut command = CommandBuilder::new("fixture-harness");
+        command.arg("resume");
+        command.arg("native-session");
+        command.env("CODEX_HOME", "/fixture/default-account");
+        apply_connection(&mut command, &connection);
+        assert_eq!(command.get_env("CODEX_HOME").unwrap(), std::ffi::OsStr::new("/fixture/second-account"));
+        assert_eq!(command.get_env("FIXTURE_VALUE").unwrap(), std::ffi::OsStr::new("named-profile"));
+        assert_eq!(command.get_argv(), &["fixture-harness", "resume", "native-session", "--verbose"]);
+    }
 
     #[test]
     fn harness_console_uses_literal_resume_arguments_and_never_a_prompt() {

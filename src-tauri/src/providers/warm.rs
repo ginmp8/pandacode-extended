@@ -101,28 +101,29 @@ pub fn discard(session_id: &str) {
 
 /// Start the next turn's agent for a task. `tools` is the catalog its last turn used; the
 /// placeholder server answers the agent's startup listing and is rebound on adoption.
-pub async fn prewarm(config: RunConfig, tools: Vec<Value>, approval_tools: HashSet<String>, launch: u64) -> Result<(), String> {
-    let result = start(config, tools, approval_tools, launch).await;
+pub async fn prewarm(config: RunConfig, tools: Vec<Value>, approval_tools: HashSet<String>, launch: u64, store: Arc<Mutex<crate::storage::Store>>, connection_key: String) -> Result<(), String> {
+    let result = start(config, tools, approval_tools, launch, store, connection_key).await;
     if let Err(error) = &result {
         eprintln!("Could not prepare a warm Claude agent: {error}");
     }
     result
 }
 
-async fn start(mut config: RunConfig, tools: Vec<Value>, approval_tools: HashSet<String>, launch: u64) -> Result<(), String> {
+async fn start(mut config: RunConfig, tools: Vec<Value>, approval_tools: HashSet<String>, launch: u64, store: Arc<Mutex<crate::storage::Store>>, connection_key: String) -> Result<(), String> {
     if !supported(&config) {
         return Ok(());
     }
-    let connection = crate::connections::for_task(&config.session_id, &config.provider)
-        .map(|connection| crate::connections::launch(&connection))
-        .transpose()?;
+    let connection = crate::connections::for_task(&config.session_id, &config.provider);
+    let selected_key = connection.as_ref().map(|c| format!("{}#{}", c.id, c.revision)).unwrap_or_default();
+    if selected_key != connection_key { return Ok(()); }
+    let connection = connection.map(|connection| crate::connections::launch(&connection)).transpose()?;
     let path = connection
         .as_ref()
         .and_then(|connection| connection.executable.clone())
         .or_else(|| executable(&config.provider))
         .ok_or("Claude Code is not installed")?;
     config.cwd = external_path(&config.cwd);
-    let key = key(&config, &tools);
+    let key = key_with(&config, &tools, &connection_key);
     let mut command = command(&path)?;
     configure_command(&mut command, &config);
     if let Some(connection) = &connection {
@@ -149,7 +150,20 @@ async fn start(mut config: RunConfig, tools: Vec<Value>, approval_tools: HashSet
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let child = command.spawn().map_err(|e| format!("Could not start Claude Code: {e}"))?;
+    let child = {
+        // A prewarm is not in the running-agent registry. Serialize its final
+        // identity check and spawn with connection mutations, which hold store
+        // while clearing resume IDs and replacing credentials/assignments.
+        let store = store.lock().map_err(|e| e.to_string())?;
+        let task = store.session(&config.session_id)?;
+        if !context_matches(&config, &task)
+            || crate::connections::warm_key(&config.session_id, &config.provider) != connection_key
+            || epoch(&config.session_id) != launch
+        {
+            return Ok(());
+        }
+        command.spawn().map_err(|e| format!("Could not start Claude Code: {e}"))?
+    };
     let group = ProcessGroup::register(child.id());
     let born = std::time::Instant::now();
     let session_id = config.session_id.clone();
@@ -177,6 +191,16 @@ async fn start(mut config: RunConfig, tools: Vec<Value>, approval_tools: HashSet
     Ok(())
 }
 
+fn context_matches(config: &RunConfig, task: &crate::storage::Session) -> bool {
+    task.remote_device.is_none()
+        && !matches!(task.status.as_str(), "running" | "waiting")
+        && task.provider == config.provider
+        && task.model == config.model
+        && task.mode == config.mode
+        && task.reasoning_effort == config.reasoning_effort
+        && task.resume_id == config.resume_id
+}
+
 #[cfg(test)]
 pub(super) fn waiting(session_id: &str) -> bool {
     spares().contains_key(session_id)
@@ -185,6 +209,37 @@ pub(super) fn waiting(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prewarm_rechecks_the_saved_native_context_before_spawning() {
+        let store = crate::storage::Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "ask").unwrap();
+        let mut config = crate::providers::tests::config("claude");
+        config.session_id = task.id.clone();
+        config.model = task.model.clone();
+        config.mode = task.mode.clone();
+        config.reasoning_effort = task.reasoning_effort.clone();
+        config.resume_id = Some("account-a-session".into());
+        store.resume(&task.id, "account-a-session").unwrap();
+        let original = store.session(&task.id).unwrap();
+        assert!(context_matches(&config, &original));
+        let mut changed = original.clone();
+        changed.resume_id = None;
+        assert!(!context_matches(&config, &changed), "connection change invalidates a prepared warm resume");
+        changed = original.clone();
+        changed.resume_id = Some("account-b-session".into());
+        assert!(!context_matches(&config, &changed));
+        changed = original.clone();
+        changed.provider = "codex".into();
+        assert!(!context_matches(&config, &changed));
+        changed = original.clone();
+        changed.status = "running".into();
+        assert!(!context_matches(&config, &changed), "a new run owns the session now");
+        changed = original;
+        changed.mode = "plan".into();
+        assert!(!context_matches(&config, &changed));
+    }
 
     #[test]
     fn a_warm_agent_is_used_only_for_the_exact_launch_it_was_started_for() {

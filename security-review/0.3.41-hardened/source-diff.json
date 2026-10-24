@@ -1,0 +1,452 @@
+{
+  "baseline_files": 1139,
+  "removed": [],
+  "modified": [
+    {
+      "path": "HARDENED-REVISION.json",
+      "before_sha256": "49c0441ef3815dba8536db38c76732aa52725fe962f083f1ca3961ef0e575983",
+      "after_sha256": "787e770172d7239761327b1a86bfc7c9fa57f80bf946f60213e9aa5738f96755",
+      "bytes": 8091
+    },
+    {
+      "path": "README.md",
+      "before_sha256": "f12c112cf8d2171ca3dea9c10441ab3f9562acf26cbb468578cf889ecad485ef",
+      "after_sha256": "ca8d85fb019f8b5260bb1f7dffca87217f98b213b6a784761e7ee3bd3f680066",
+      "bytes": 21517
+    },
+    {
+      "path": "SECURITY-HARDENING.md",
+      "before_sha256": "84e21b26bf8f6d5282627a7d9995db48ff08042618b6ade472279aaef027a6b6",
+      "after_sha256": "1744ff530d1f73c762817e6c1c7e2d639372b3b1eb0d90b2dad7b05fd443132b",
+      "bytes": 22728
+    },
+    {
+      "path": "docs/agent-usage.md",
+      "before_sha256": "ae4bb15854e14450f2f004dbedd374c055e137e9b6222496be7962b65c90ce49",
+      "after_sha256": "e6a88d93bb79f0dbacb551956b90c7789f55ebb4dbee6e91d4d4d53c9b93728b",
+      "bytes": 12770
+    },
+    {
+      "path": "docs/install-windows-hardened.md",
+      "before_sha256": "066e571acd7808447766e69bb3b5a6603545921607f844f8db742820c05d5ba6",
+      "after_sha256": "def624aa0ec47f17f9649adc02cf55b23ad65d72820417f11bff50c1cf3bdd7a",
+      "bytes": 2313
+    },
+    {
+      "path": "docs/remote-access.md",
+      "before_sha256": "69e5a9559d9abfa5230243c8df6996080989dc5e76c6e263d2b2c3286166e3c9",
+      "after_sha256": "450172674b9785989c17d4d15a66452ee39923226821c9788a2e174f52fa0356",
+      "bytes": 23194
+    },
+    {
+      "path": "docs/skills-library.md",
+      "before_sha256": "272366c411efc62b88490075b2607b3a722c62c533bacd4da3468676b5663d15",
+      "after_sha256": "0514a8a790dca99b7cbdb1a89c38ed847b40713fc7f844cbb5c7a4c6456a2e10",
+      "bytes": 9080
+    },
+    {
+      "path": "package-lock.json",
+      "before_sha256": "a40568485422d5b051aa3c6fc4335353eab5bb0d8e12846a2661733ed97b1a93",
+      "after_sha256": "df233c2fe5af88d667d6e8ac22bd8a03f6de6654a3cc89c0a25a7fbb8235acd1",
+      "bytes": 75878
+    },
+    {
+      "path": "package.json",
+      "before_sha256": "efe38543c9131f8770f3af23246918d400b8a167186f7bacf9c2ab1ea1b921c2",
+      "after_sha256": "800bcaad90499e65de714681963a2857cad10cc1c8a2d81d180109f01f639730",
+      "bytes": 1995
+    },
+    {
+      "path": "playwright.config.ts",
+      "before_sha256": "eee39c72a9406b7088fe2bb4037dab88ccf991ba14662d261821b4dd98554c13",
+      "after_sha256": "5bdbd5999e4b33ab6c5323af318baaf043976e5343ce40c38279dd7ebcfde87a",
+      "bytes": 2653
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "before_sha256": "4a5f4d78cdc56149c625e3cb98086fc2264336df71604297230f5ecff03fdd8b",
+      "after_sha256": "3952b299d98ed25869f48627143be10d338427e59376f5398348bbc093f57b2f",
+      "bytes": 152958
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "before_sha256": "ea5fab1e5c3450c8a7e04ffaa537da90389248430e2521a9545d374ddba2e7f5",
+      "after_sha256": "541577a55a45ec41969a5d6bba615c7139b78421d95a0559349371ff10366a69",
+      "bytes": 3756
+    },
+    {
+      "path": "src-tauri/src/agent_usage.rs",
+      "before_sha256": "801e0ff5bce8b2e4a6433e8d79447720f1e012dbf221976fd3aacb7dcb15dac9",
+      "after_sha256": "590c8014beafae1f09d790b21cd24a4d4a163e29d6b51aba6aeb36218c34edc5",
+      "bytes": 44027
+    },
+    {
+      "path": "src-tauri/src/bots.rs",
+      "before_sha256": "094e7d438216f2efc640dd297fbdae6a44ab162e31fddc1a1e4dbfa246bfcd99",
+      "after_sha256": "1f55f1241c19b1fc6780ebf88f04c8b59b7c5df024e43c33be6da9baaa2a75d6",
+      "bytes": 36002
+    },
+    {
+      "path": "src-tauri/src/bots/tests.rs",
+      "before_sha256": "7f6d43282f1f55d7e08b8c37904d8de42f2a1c49d2d7976d84f6aaef8f53c16c",
+      "after_sha256": "73aef077dd177237522891eb5227a17d8ca67efa11f84603c4b777b2c4e53d51",
+      "bytes": 28848
+    },
+    {
+      "path": "src-tauri/src/connections.rs",
+      "before_sha256": "8d8166314f2a37347a3d917fcd654a18f047f01d4bceea460d79c360beb2a3d0",
+      "after_sha256": "92cd7545d595f3113acfb6274a039cd13b169a3afb706398fd709782a69e0f9c",
+      "bytes": 30497
+    },
+    {
+      "path": "src-tauri/src/conversation_fork.rs",
+      "before_sha256": "494d765bbece29a60b6d707ccf175b24288e6c69f4022f33f9c75390f68fed1b",
+      "after_sha256": "929a8c8dd2b3db18af26d42c96866529d89b80c1d4823bf91d192039d8db36fd",
+      "bytes": 6346
+    },
+    {
+      "path": "src-tauri/src/conversation_fork/tests.rs",
+      "before_sha256": "e31220e91af11cfa08e2ad2ec8df0f3ab1e4329aad5dd8c10cadac697c5ad3bc",
+      "after_sha256": "466df9539bd53da04fcd45ce4d8c6d4c77bdb0235a3af1664c06c73dc65043ff",
+      "bytes": 20211
+    },
+    {
+      "path": "src-tauri/src/integrations.rs",
+      "before_sha256": "620041485d3230e26b73d0375145765b02b511fe2f9066187f6e57dd5ae4811b",
+      "after_sha256": "a4e454a7aaef23e9dfcc7d7a8e6c825901e4b39265c496b25ff3270d477bf8fd",
+      "bytes": 34482
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "before_sha256": "fc4c88f0c2ef7a42a3e0769cd376e09a7dc0071e7adc5cf2978e4e3cdf1a4628",
+      "after_sha256": "0a02b58a0965b683df7cbd7423121efdda275a909eb694c5c83e13f0d73592e7",
+      "bytes": 139609
+    },
+    {
+      "path": "src-tauri/src/message_queue.rs",
+      "before_sha256": "d5a45ac4c300619a0745fc7755a035cb28aceaada01dd7f93bfb98a8ef93ea0d",
+      "after_sha256": "600dc9955e69499e84fc9d6d25322290e019126dfe6f6de31be2e0a0fc5e7f30",
+      "bytes": 14102
+    },
+    {
+      "path": "src-tauri/src/prompt_attachments.rs",
+      "before_sha256": "4b97ce8e3bce6ac5475e07993e51e5d34afc8e805ade4518c6a175a017d591f8",
+      "after_sha256": "83ee96bc03778236a9855d337170168a0c1baa43630f77b0f812a3269479b024",
+      "bytes": 28895
+    },
+    {
+      "path": "src-tauri/src/providers/warm.rs",
+      "before_sha256": "70195c999d1ebd528c4ae5da751dd57326616a36e3a55315a76aafd0e89900ad",
+      "after_sha256": "a98f39957507f25c0612e65dd51bebc1ecfbf140820ff84a21f24c25ae8e37e7",
+      "bytes": 14432
+    },
+    {
+      "path": "src-tauri/src/remote.rs",
+      "before_sha256": "2cb7a535d71aa66424f5edc9faa401bff381371bd8c5d254db802256491b25f0",
+      "after_sha256": "8bca4da7ebc778c0351ae699419a52aa936421b886e98bb5ea97db6f4e3c8b80",
+      "bytes": 28471
+    },
+    {
+      "path": "src-tauri/src/remote/config.rs",
+      "before_sha256": "b01b24942f015647f055f1fba32adc176e4401caab076d636a3406671342efb7",
+      "after_sha256": "385e05f140e8c7adf1e47cbe59ef772d05158da16280b48210a8525bcdfd56a7",
+      "bytes": 17030
+    },
+    {
+      "path": "src-tauri/src/remote/crypto.rs",
+      "before_sha256": "f1f4ad6552124d7afbb8a431aee5f7858d79d756f6eeba904edaf083b0e1eac5",
+      "after_sha256": "9d1751cf756b9e690129236196447ed08da4e0acc92f017889250bc9684aa242",
+      "bytes": 5680
+    },
+    {
+      "path": "src-tauri/src/remote/host.rs",
+      "before_sha256": "11cf6533660ac1aaf019a1ab474519e7999888b91fbf5cb0267216b7c891a8e9",
+      "after_sha256": "44440fbe156e07579310f2cab1e086103e3c9559e04f6e7b9973ae5525c9b65f",
+      "bytes": 38921
+    },
+    {
+      "path": "src-tauri/src/remote/start.rs",
+      "before_sha256": "d96e79ef367d39c9dc2ee7db04873d63879d8ca33ac06395be850f9f2766a4ab",
+      "after_sha256": "5fbf75c788f34db84c1a5aaac78115c73ff322fb9bcff13f9a71977f39b880bd",
+      "bytes": 16566
+    },
+    {
+      "path": "src-tauri/src/skills.rs",
+      "before_sha256": "d6c339cf5dd87239afe25eba0dfee763c6a4f4562abf01c9bc5fc0120e02bf8a",
+      "after_sha256": "c77c97ed91863048e7d609cf22621ec92555b9a4b2ae6d61332a919e56806826",
+      "bytes": 35795
+    },
+    {
+      "path": "src-tauri/src/skills/github.rs",
+      "before_sha256": "ab0ffa2ceb1be34cd4cf5784418f8b561caebf79caadc378530f7d4ba2f049f6",
+      "after_sha256": "d8125468d191a91ab98a3167514bd24092262361e18742fad7b21f94d6f8a428",
+      "bytes": 5244
+    },
+    {
+      "path": "src-tauri/src/skills/tests.rs",
+      "before_sha256": "599c33748c9426227f515d88d00dde26665e18f7401e3f74b77419d3862e3af6",
+      "after_sha256": "63987dae4c78f680c8a02fe0f75e38aa5604808a6979428bfd59ba46c4b7f03c",
+      "bytes": 11641
+    },
+    {
+      "path": "src-tauri/src/task_controls.rs",
+      "before_sha256": "f01e47b363153d10595420bbef8bbf7f31c0ed49ed487313165d093950fa4aba",
+      "after_sha256": "58c784527bb5fd48f72470fd83ff87993abde9d0a54c42fae5733e736b5ba672",
+      "bytes": 33249
+    },
+    {
+      "path": "src-tauri/src/terminal.rs",
+      "before_sha256": "af22429a0eadf4da1110defadc4b59e4c7945530800b02d8ec2e29cb350c9f2b",
+      "after_sha256": "af044036bc52fa9c09c271110ef608be76810da8ecacc73af1a431c306ed8d63",
+      "bytes": 55858
+    },
+    {
+      "path": "src-tauri/tauri.conf.json",
+      "before_sha256": "a4cd3e675779b24bdd57bc9ad00087ac556022757c19a5ad45fc965348a4cac8",
+      "after_sha256": "00a7a75aa332963430ba303958137db2611b5d3c74c48149bd357471aa52500a",
+      "bytes": 1878
+    },
+    {
+      "path": "src/agent-usage.css",
+      "before_sha256": "3252de952bec5a672c8f0f10d2c8c69f55a04c18dd6015f5705ea021a201c033",
+      "after_sha256": "bcb7718fe2c459dd41d955f2c35f877f059222d855caf372c4df14d48a1b506e",
+      "bytes": 14762
+    },
+    {
+      "path": "src/agent-usage.ts",
+      "before_sha256": "599a725c649b18b6643c7456c7c90109b698c0c79094c3dd464fcdcfbefda818",
+      "after_sha256": "b3724935e95c3fb8252ed0b6a6f16badb146175f7d1344e9b94857d134a882b7",
+      "bytes": 20631
+    },
+    {
+      "path": "src/attachments.css",
+      "before_sha256": "aded7f00aecb5689c0ae411a5dd17b4ca6d1a4e74b01f5afa4e7cb9ffd23ec6a",
+      "after_sha256": "3f8a3d7a65d4c09dcb16d9ed116fc6365012b771c521e20f2b9748cb73d29f45",
+      "bytes": 3844
+    },
+    {
+      "path": "src/attachments.ts",
+      "before_sha256": "610e2c99f15ecf5cb41f490f2cc9fc3d3925781513edd4bbdcb8e0e54ff0d6e7",
+      "after_sha256": "8288869778f88c58a85b454d0328184d4bf5c2423061f2db9ad9508110f8b197",
+      "bytes": 16167
+    },
+    {
+      "path": "src/bots-panels.ts",
+      "before_sha256": "7f3cd7acc61780695d193683af350bc0e48ea7ab57da63cbe400e8541e6fd6b4",
+      "after_sha256": "628ddec84e405e63e36c373e58b4b3f163e621a949342a422fd8ba18ea4b287f",
+      "bytes": 18616
+    },
+    {
+      "path": "src/bots.ts",
+      "before_sha256": "0316396002c445748853c6457866bf4782212f8ceec9408dfe791b2cbf55ecb8",
+      "after_sha256": "c640ca139b1c42cec51f80834a7ff12db45c9a659a79ac725ceae9bb3bd6460e",
+      "bytes": 32468
+    },
+    {
+      "path": "src/main.ts",
+      "before_sha256": "2901e565a5317934bfac3a02ce61f62b6a5c86bb0e34bb99f91347165a14a1cc",
+      "after_sha256": "e08b898e82950e59500ee6f03ee635f6ff60920c9cc891b50b028041fcb62ba7",
+      "bytes": 325358
+    },
+    {
+      "path": "src/message-actions.css",
+      "before_sha256": "33d741a7bbaeb42010744f8a953544a0a2e9094e157a8ff110aef2ea83734291",
+      "after_sha256": "197eca5f009d1782670e8200cb7ee8c5e7a907abde685473bf85b7beb9108695",
+      "bytes": 2056
+    },
+    {
+      "path": "src/message-actions.ts",
+      "before_sha256": "1ad5722a013d8e95bf3dbbe05f0e68f57d4f6e4017db0801b4f0b984dc87b395",
+      "after_sha256": "d01aad0738edf91d699d1174cb624bd8e4ad93f94c6209a328e092bd9788665e",
+      "bytes": 6484
+    },
+    {
+      "path": "src/model-picker.ts",
+      "before_sha256": "0808b1e82e7f9ceed7a6f319af1f4efacd74f6f9fcbf792146e08815eee246ad",
+      "after_sha256": "8538d916e879b748dae1a682efe3e8a7840f22af047c25c48829270288c6f74b",
+      "bytes": 28509
+    },
+    {
+      "path": "src/preview-bots.ts",
+      "before_sha256": "0ccbdbf4aa12c6287d070df7025f7ef6b1014b078acf8cf5f47298b415a2db50",
+      "after_sha256": "06b3fb0a9a3160541f2060ea894aaffe5253af3347f4aee673a2746297af36d8",
+      "bytes": 19732
+    },
+    {
+      "path": "src/preview-remote.ts",
+      "before_sha256": "1c11ad235b6a9f5b312dbe55903aba22d8b3f1232065f53763c2bc7d93759996",
+      "after_sha256": "c3c150a6765da377bb69d0d50225de2e6fd69b7338261c9ab95a259a7070211f",
+      "bytes": 4269
+    },
+    {
+      "path": "src/preview-skills.ts",
+      "before_sha256": "e8f88635a46c402c4a6d2dffbbd831697addae07d4b3ee55a29d210c2e8dbcc0",
+      "after_sha256": "d1ae0d97f2c5380c56023cbc7c13b1e2a7f572b99549d55efcc4468edf20abb9",
+      "bytes": 15207
+    },
+    {
+      "path": "src/preview.ts",
+      "before_sha256": "9ce9ad524743b66e1ec72a37148e10b188c7b204d91e831309a4e841f26bb2e7",
+      "after_sha256": "4e0bd096ff586a68392e247ddb02c5b98d6a199fc0dd78001a08604284195126",
+      "bytes": 138902
+    },
+    {
+      "path": "src/remote-settings.ts",
+      "before_sha256": "76f9fbc1af9f2bbc629f4c920d5af40b8a57d9c3e2a80a00dfa89994f5eef5af",
+      "after_sha256": "69021ab50b5b9795b7b3e742456c601eb524df0519d95347c3839537244c0878",
+      "bytes": 8359
+    },
+    {
+      "path": "src/remote-types.ts",
+      "before_sha256": "82a59f09097f1adb20ccf67525ea88902bb3a759ebdc05c4185b71d6514dbb45",
+      "after_sha256": "9829411e010332e11d565e05b98084566ef34916618ed98fdcf81041d5cb5d62",
+      "bytes": 1268
+    },
+    {
+      "path": "src/skills-library.css",
+      "before_sha256": "f15eb7009bcb2c7b35d42ed834cbde79dc99e57f41372c8648b455da1c3e196c",
+      "after_sha256": "dc1e45d208d954adef40688ffa4a8f6089a4271399adb4885894d746aa788525",
+      "bytes": 3543
+    },
+    {
+      "path": "src/skills-library.ts",
+      "before_sha256": "3cf0cc910758a7f24342e289b70b34644a58237fe7acae6f63e8d1f5ce77ffe4",
+      "after_sha256": "751005dc0fa4a64e4e353115fd00a52e480a9c9878dee9752344a093b2e81016",
+      "bytes": 15981
+    },
+    {
+      "path": "src/usage-limit.ts",
+      "before_sha256": "b312fe6a3961b3683846d747ed6b733c37925e517e2345aa0a7819817fe5fff0",
+      "after_sha256": "193a39dcb8e3212dcc35c0bf2710d8aa3de73a8c9e8187221d2ebadb78a052e3",
+      "bytes": 2789
+    },
+    {
+      "path": "tests/bots.spec.ts",
+      "before_sha256": "4519006263917f1c865eb767da2f55b8841de328cd90985061dc31e86680ce09",
+      "after_sha256": "58596d088a81fd994a92bb601b95bf1dab3f25a9ba209a2949873aa5c5529bcb",
+      "bytes": 27489
+    },
+    {
+      "path": "tests/provider-settings.spec.ts",
+      "before_sha256": "bed0c7ab1840c7e543d52a57951fffd4da9dcf0681dcc26b8d0c9a6171b3b1c2",
+      "after_sha256": "f5644794d6223e854ff7388fbab90254f2059d641c6e87cd25e4867018aad253",
+      "bytes": 24853
+    },
+    {
+      "path": "tests/remote.spec.ts",
+      "before_sha256": "c0cbd041d16443e44ca3edf1368fe3df50f0dbe53992535bef7a95175a2fafe2",
+      "after_sha256": "98d2187934a29c460c2a8380d7d2d3f6425100d75160c7a5954e04c803792fde",
+      "bytes": 12828
+    },
+    {
+      "path": "tests/skills-library.spec.ts",
+      "before_sha256": "5a22061e1b7548987d17b7e919fae349f1fe8981c257ee785d83f1477360bd2d",
+      "after_sha256": "f8ab44b16370da69b95f10c6d5d2750296241fa2f1ef2599930df4cd6319a7c2",
+      "bytes": 12243
+    },
+    {
+      "path": "website/src/data/release-dates.json",
+      "before_sha256": "ab2397b813f55d3362b5e21200d57cc0e645c02273a5bc7f9d3152fa72604148",
+      "after_sha256": "16f67ee706323be38ba0e6da14220b2450e2a9d7b9f204872b7d458f789166a8",
+      "bytes": 2102
+    }
+  ],
+  "added": [
+    {
+      "path": "docs/HARDENED-0.3.41-GUIDE.pt-BR.md",
+      "sha256": "d422af49c794a7b10adb09f65d9c0d94c7e8d8c28c25a6e95bc7a822ed6521b2",
+      "bytes": 11550
+    },
+    {
+      "path": "docs/connection-session-safety.md",
+      "sha256": "696ce8fd2fd955ce58c2eab1bfcfbe6d156f73aebbca24e420ac40365af00836",
+      "bytes": 2791
+    },
+    {
+      "path": "docs/message-attachments.md",
+      "sha256": "a66ffbff3765781154497828830efaadd59c64711c91b7b01d87b09b177eae37",
+      "bytes": 1763
+    },
+    {
+      "path": "docs/rewind.md",
+      "sha256": "413ea7e90ef0e404cbd3bf0ff4a2f739265bd3971f5c52fd4c55c3da8d7aa7ca",
+      "bytes": 1983
+    },
+    {
+      "path": "releases/0.3.41-hardened.md",
+      "sha256": "0e1fdb1e031887013a52c27f0d409348a07b5cbf286625e832838d82f898aec4",
+      "bytes": 2237
+    },
+    {
+      "path": "src-tauri/src/message_attachments.rs",
+      "sha256": "8bc3d0dacc331d834fbec12cb957c5ea3e469661b5118b861459dd90d64d5b7b",
+      "bytes": 14766
+    },
+    {
+      "path": "src-tauri/src/remote/permissions.rs",
+      "sha256": "0c3a681ca460826de33dfd582e55e35dfbac9a1945257b52340cf01b8f8052e3",
+      "bytes": 2554
+    },
+    {
+      "path": "src-tauri/src/skills/catalog.rs",
+      "sha256": "966dfc6285dbe6e07dc1abceb444afe6dc31e0f8b58d66463a32d87f860b112a",
+      "bytes": 14458
+    },
+    {
+      "path": "src-tauri/src/skills/catalog_tests.rs",
+      "sha256": "221f8ae13d3cb6660e8436a6b69effb06d082b50bc4dae295f403c1a58a05227",
+      "bytes": 9304
+    },
+    {
+      "path": "src-tauri/src/skills/scoped.rs",
+      "sha256": "06bf39ad2244d319ed7fe5e106ea3d303f436f0751b5e9e35362ec60c3df3ee3",
+      "bytes": 25727
+    },
+    {
+      "path": "src-tauri/src/skills_admission_tests.rs",
+      "sha256": "51902c13e31c383666519ef83a9cd9795b5ec7dc72835c961c4f1d664b9ad0fb",
+      "bytes": 7756
+    },
+    {
+      "path": "src/message-attachment-chips.ts",
+      "sha256": "bf2ed9c081b71835b31542a9e321d75ef9a2f9a790288f59c241e365e3ebec55",
+      "bytes": 1570
+    },
+    {
+      "path": "src/message-attachments.ts",
+      "sha256": "b719944c32750d124b5e912e506474490429b04273226fa461dd4cb2575b9fef",
+      "bytes": 6368
+    },
+    {
+      "path": "src/message-rewind.ts",
+      "sha256": "92799e49aad48141f5f110d3f073e9a055a4b175fb93cd1954ffd033dca90c71",
+      "bytes": 1802
+    },
+    {
+      "path": "src/skills-catalog.ts",
+      "sha256": "74856a4cb289f9d9fb1766c78314ca13f47c004780e6e6de854ae5dc9e356955",
+      "bytes": 7660
+    },
+    {
+      "path": "src/skills-scope.ts",
+      "sha256": "4e988a41f0ce4803e5b09384fc7f920afff9142f0e0763bd8a58f2ce4a03ad77",
+      "bytes": 6815
+    },
+    {
+      "path": "tests/hardened-041-connections.spec.ts",
+      "sha256": "def4e21c2a69a490b64a43e0b67e9b80729810cdc8c4afd79ee437c02c3cfcc2",
+      "bytes": 5122
+    },
+    {
+      "path": "tests/history-upgrade.spec.ts",
+      "sha256": "2f604979da68de6f8ee2977dda89e93812fae06381d17ffb55b280b39cf67eee",
+      "bytes": 12617
+    },
+    {
+      "path": "tests/message-attachments.test.mjs",
+      "sha256": "162e2642569fa070e53d033cba6590b00565748dc42ce43c6d10d482f085d48a",
+      "bytes": 7837
+    }
+  ],
+  "scope": "Source, configuration, docs and tests; new evidence directory excluded from this diff."
+}

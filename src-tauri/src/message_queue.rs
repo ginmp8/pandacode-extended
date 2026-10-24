@@ -207,6 +207,7 @@ pub async fn steer_task(app: tauri::AppHandle, state: State<'_, AppState>, sessi
     let reply = {
         let agents = state.agents.lock().map_err(|e| e.to_string())?;
         let agent = agents.get(&session_id).ok_or("The agent is not running; the message stays queued.")?;
+        crate::remote::check_current_request(&state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.mode)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let id = uuid::Uuid::new_v4().to_string();
         agent.send(RunInput::Steer { id, text: text.clone(), reply: tx }).map_err(|_| "The agent has stopped.".to_string())?;

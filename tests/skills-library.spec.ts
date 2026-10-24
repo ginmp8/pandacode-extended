@@ -12,7 +12,7 @@ async function open(page: Page): Promise<void> {
         const skills = createPreviewSkills();
         window.__skills = skills;
         const call = async (command, args = {}) => skills.call(command, args);
-        mountSkillsLibrary(document.getElementById('host'), { call, projects: () => [{ id: 'orbit', name: 'Orbit' }] });
+        mountSkillsLibrary(document.getElementById('host'), { call, projects: () => [{ id: 'orbit', name: 'Orbit' }], sessionId: () => 'fixture-task' });
       </script></body></html>`,
   }));
   await page.goto('/skills-library-harness.html');
@@ -67,4 +67,99 @@ test('GitHub import validates the repository and records the commit', async ({ p
   await page.getByRole('button', { name: 'Import' }).click();
   await expect(item(page, 'pdf')).toContainText('GitHub · acme/skills/skills/pdf @ a1b2c3d');
   await expect(page.getByRole('textbox', { name: 'Repository', exact: true })).toHaveValue('');
+});
+
+test('catalog discovery is explicit and imports selected nested packages without activation', async ({ page }) => {
+  await open(page);
+  await page.getByRole('textbox', { name: 'Catalog repository', exact: true }).fill('acme/skills');
+  await page.getByRole('button', { name: 'Add catalog', exact: true }).click();
+  const catalog = page.locator('.skills-catalog');
+  await expect(catalog).toContainText('skills/nested/review');
+  await expect(page.getByRole('list', { name: 'Library', exact: true })).not.toContainText('Catalog review');
+  await page.getByRole('checkbox', { name: 'Select Catalog review from acme/skills', exact: true }).check();
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  await expect(item(page, 'Catalog review')).toContainText('acme/skills/skills/nested/review @ aaaaaaa');
+  await expect(item(page, 'Catalog review').getByRole('checkbox', { name: 'Catalog review: Claude Code · User' })).not.toBeChecked();
+  await expect(page.getByRole('list', { name: 'Library', exact: true })).not.toContainText('Catalog test plan');
+});
+
+test('catalog refresh marks updates; disabled sources do not import; removal preserves imported copies', async ({ page }) => {
+  await open(page);
+  await page.getByRole('textbox', { name: 'Catalog repository', exact: true }).fill('acme/skills');
+  await page.getByRole('button', { name: 'Add catalog', exact: true }).click();
+  await page.getByRole('button', { name: 'Select all', exact: true }).click();
+  await page.getByRole('button', { name: 'Import selected (2)', exact: true }).click();
+  await expect(item(page, 'Catalog review')).toBeVisible();
+  await page.getByRole('button', { name: 'Refresh catalog', exact: true }).click();
+  await expect(page.locator('.skills-catalog')).toContainText('Update available');
+  await page.getByRole('combobox', { name: 'State of acme/skills' }).selectOption('disabled');
+  await expect(page.getByRole('button', { name: 'Select all', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Remove catalog', exact: true }).click();
+  await expect(page.locator('.skills-catalog')).toHaveCount(0);
+  await expect(item(page, 'Catalog review')).toBeVisible();
+});
+
+test('bot and project selections are separate, persisted, and require review after import updates', async ({ page }) => {
+  await open(page);
+  const panel = page.locator('.skills-scopes');
+  await panel.getByRole('checkbox', { name: 'Assign Release notes', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save skill selection', exact: true }).click();
+  await expect(panel).toContainText('Selection saved for future turns');
+  await panel.getByRole('combobox', { name: 'Skill assignment scope' }).selectOption('bot');
+  await expect(panel.getByRole('checkbox', { name: 'Assign Release notes', exact: true })).not.toBeChecked();
+  await panel.getByRole('checkbox', { name: 'Assign Release notes', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save skill selection', exact: true }).click();
+  await expect(panel).toContainText('Selection saved for future turns');
+  await expect(item(page, 'Release notes').getByRole('checkbox', { name: 'Release notes: Claude Code · User' })).not.toBeChecked();
+  await panel.getByRole('combobox', { name: 'Skill assignment scope' }).selectOption('project');
+  await expect(panel.getByRole('checkbox', { name: 'Assign Release notes', exact: true })).toBeChecked();
+  const pins = await page.evaluate(() => (window as any).__skills.call('skills_scope_get', { target: 'project', targetId: 'orbit' }));
+  expect(pins).toHaveLength(1); expect(pins[0].sha256).toHaveLength(64);
+});
+
+test('scope safety findings require explicit acknowledgement and edited imports stay untouched', async ({ page }) => {
+  await open(page);
+  await page.getByRole('textbox', { name: 'Folder or file path' }).fill('/Users/you/skills/setup');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  const panel = page.locator('.skills-scopes');
+  await panel.getByRole('checkbox', { name: 'Assign setup', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save skill selection', exact: true }).click();
+  await expect(panel.getByRole('alert')).toContainText('Review the safety findings');
+  await panel.getByRole('checkbox', { name: 'Assign setup', exact: true }).check();
+  await panel.getByRole('checkbox', { name: 'I reviewed and accept the safety findings of the selected versions', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save skill selection', exact: true }).click();
+  await expect(panel).toContainText('Selection saved for future turns');
+  await page.getByRole('textbox', { name: 'Catalog repository', exact: true }).fill('acme/skills');
+  await page.getByRole('button', { name: 'Add catalog', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select Catalog review from acme/skills', exact: true }).check();
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  await expect(item(page, 'Catalog review')).toBeVisible();
+  await page.evaluate(() => (window as any).__skills.editLibrary('catalog-review'));
+  await page.getByRole('checkbox', { name: 'Select Catalog review from acme/skills', exact: true }).check();
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  await expect(page.locator('.skills-catalogs')).toContainText('edited library files; not overwritten');
+});
+
+test('a catalog update leaves the selected hash stale until the user saves the new version', async ({ page }) => {
+  await open(page);
+  await page.getByRole('textbox', { name: 'Catalog repository', exact: true }).fill('acme/skills');
+  await page.getByRole('button', { name: 'Add catalog', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select Catalog review from acme/skills', exact: true }).check();
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  const panel = page.locator('.skills-scopes');
+  await panel.getByRole('checkbox', { name: 'Assign Catalog review', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save skill selection', exact: true }).click();
+  await expect(panel.getByRole('list', { name: 'Effective skills' })).toContainText('project · prompt');
+  const before = await page.evaluate(() => (window as any).__skills.call('skills_scope_get', { target: 'project', targetId: 'orbit' }));
+  await page.getByRole('button', { name: 'Refresh catalog', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select Catalog review from acme/skills', exact: true }).check();
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  await expect(panel).toContainText('New version needs review and Save');
+  await expect(panel.getByRole('list', { name: 'Effective skills' })).toContainText('skipped');
+  const unchanged = await page.evaluate(() => (window as any).__skills.call('skills_scope_get', { target: 'project', targetId: 'orbit' }));
+  expect(unchanged).toEqual(before);
+  await panel.getByRole('button', { name: 'Save skill selection', exact: true }).click();
+  await expect(panel.getByRole('list', { name: 'Effective skills' })).toContainText('project · prompt');
+  const after = await page.evaluate(() => (window as any).__skills.call('skills_scope_get', { target: 'project', targetId: 'orbit' }));
+  expect(after[0].sha256).not.toEqual(before[0].sha256);
 });

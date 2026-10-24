@@ -1,0 +1,4345 @@
+{
+  "config": {
+    "argv": [
+      "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node",
+      "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/node_modules/.bin/playwright",
+      "test",
+      "tests/hardened-041-connections.spec.ts",
+      "tests/history-upgrade.spec.ts",
+      "tests/skills-library.spec.ts",
+      "tests/remote.spec.ts",
+      "tests/connections.spec.ts",
+      "tests/message-actions.spec.ts",
+      "tests/attachments.spec.ts",
+      "tests/token-saver.spec.ts",
+      "tests/usage-limit.spec.ts",
+      "tests/agent-usage.spec.ts",
+      "tests/bots.spec.ts",
+      "tests/bots-web.spec.ts",
+      "tests/provider-settings.spec.ts",
+      "--reporter=json",
+      "--output",
+      "/workspace/scratch/e9e75faa56eb/evidence/browser-json-results"
+    ],
+    "configFile": "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/playwright.config.ts",
+    "rootDir": "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 4
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/workspace/scratch/e9e75faa56eb/evidence/browser-json-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 4
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/hardened-041-*.spec.ts",
+          "**/external-links.spec.ts",
+          "**/remove-project.spec.ts",
+          "**/run-project.spec.ts",
+          "**/terminal.spec.ts",
+          "**/thread-order.spec.ts",
+          "**/thread-panels.spec.ts",
+          "**/agent-updates.spec.ts",
+          "**/thread-deletion.spec.ts",
+          "**/agent-usage.spec.ts",
+          "**/grok.spec.ts",
+          "**/compact-menus.spec.ts",
+          "**/attachments.spec.ts",
+          "**/sketch.spec.ts",
+          "**/worktrees.spec.ts",
+          "**/github.spec.ts",
+          "**/github-hub.spec.ts",
+          "**/remote.spec.ts",
+          "**/simulator.spec.ts",
+          "**/colors.spec.ts",
+          "**/token-saver.spec.ts",
+          "**/support.spec.ts",
+          "**/jev-live.spec.ts",
+          "**/jev-assist.spec.ts",
+          "**/jev.spec.ts",
+          "**/message-actions.spec.ts",
+          "**/history-upgrade.spec.ts",
+          "**/opencode-models.spec.ts",
+          "**/overlay.spec.ts",
+          "**/moodboards.spec.ts",
+          "**/provider-settings.spec.ts",
+          "**/ui.spec.ts",
+          "**/browser.spec.ts",
+          "**/board.spec.ts",
+          "**/streaming.spec.ts",
+          "**/concurrency.spec.ts",
+          "**/subagents.spec.ts",
+          "**/architect.spec.ts",
+          "**/team-profiles.spec.ts",
+          "**/agent-teams.spec.ts",
+          "**/vm.spec.ts",
+          "**/deploy.spec.ts",
+          "**/turn-changes.spec.ts",
+          "**/wallpapers.spec.ts",
+          "**/wallpaper-settings.spec.ts",
+          "**/settings.spec.ts",
+          "**/layout-preferences.spec.ts",
+          "**/agent-input.spec.ts",
+          "**/agent-tools.spec.ts",
+          "**/slash-commands.spec.ts",
+          "**/file-mentions.spec.ts",
+          "**/command-center.spec.ts",
+          "**/goal-workflow.spec.ts",
+          "**/conversation-import.spec.ts",
+          "**/message-queue.spec.ts",
+          "**/steering.spec.ts",
+          "**/usage-limit.spec.ts",
+          "**/bots.spec.ts",
+          "**/bots-web.spec.ts",
+          "**/markdown.spec.ts",
+          "**/document-viewer.spec.ts",
+          "**/generative-ui.spec.ts",
+          "**/search-panel.spec.ts",
+          "**/design-canvas.spec.ts",
+          "**/skills-library.spec.ts",
+          "**/jj.spec.ts",
+          "**/capabilities.spec.ts",
+          "**/recipes.spec.ts",
+          "**/github-hub-keyboard.spec.ts",
+          "**/chats.spec.ts",
+          "**/connections.spec.ts"
+        ],
+        "timeout": 20000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 4,
+    "webServer": {
+      "command": "npm run dev",
+      "url": "http://127.0.0.1:1420",
+      "reuseExistingServer": true,
+      "timeout": 30000
+    }
+  },
+  "suites": [
+    {
+      "title": "agent-usage.spec.ts",
+      "file": "agent-usage.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "Agent usage loads only on opening and reopening, with explicit used percentages and no polling",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 8364,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:36.015Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-e2a0fd4604acc26b021c",
+          "file": "agent-usage.spec.ts",
+          "line": 94,
+          "column": 1
+        },
+        {
+          "title": "Agent usage shows successful and unavailable cards while a different provider is still loading",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 7059,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:36.016Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-5d5d9ed35042e2123bfa",
+          "file": "agent-usage.spec.ts",
+          "line": 136,
+          "column": 1
+        },
+        {
+          "title": "Agent usage refresh bypasses cached results and stays disabled until every provider settles",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 7338,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:36.097Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-66a4b313cfae4aa1597d",
+          "file": "agent-usage.spec.ts",
+          "line": 156,
+          "column": 1
+        },
+        {
+          "title": "Agent usage isolates a failed IPC request and recovers on refresh",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 7494,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:36.016Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-58e63c937264827249e9",
+          "file": "agent-usage.spec.ts",
+          "line": 185,
+          "column": 1
+        },
+        {
+          "title": "Agent usage ignores responses from a closed panel after a new panel has loaded",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6271,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:43.497Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-1f4a685340ae4f1ccecb",
+          "file": "agent-usage.spec.ts",
+          "line": 203,
+          "column": 1
+        },
+        {
+          "title": "Agent usage remains reachable in the sidebar, collapsed header, and board at 140% text size",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 7152,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:43.756Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-a7385f866720341c65a0",
+          "file": "agent-usage.spec.ts",
+          "line": 231,
+          "column": 1
+        },
+        {
+          "title": "Agent usage estimates API cost by range, agent, model, and day from local logs",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 7004,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:43.937Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-192bcf467c65326d2e4c",
+          "file": "agent-usage.spec.ts",
+          "line": 271,
+          "column": 1
+        },
+        {
+          "title": "Agent usage keeps limits working when local logs cannot be read",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 5063,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:44.721Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "cd31a01a1a32cbe30e79-263a9a7f7cbb202ab93b",
+          "file": "agent-usage.spec.ts",
+          "line": 314,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "attachments.spec.ts",
+      "file": "attachments.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "the attach menu offers files, a folder, project files and a sketch, and attaches picker results as chips",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6879,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:49.834Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-1314a86540aaf3e7e98b",
+          "file": "attachments.spec.ts",
+          "line": 40,
+          "column": 1
+        },
+        {
+          "title": "project files stays reachable from the menu and opens the Files tab",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6088,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:49.833Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-a28ba1bfb2dcb5b2bfee",
+          "file": "attachments.spec.ts",
+          "line": 72,
+          "column": 1
+        },
+        {
+          "title": "pasting an image into the prompt attaches it, and images share the four-image cap with screenshots",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 3443,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:50.935Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-18fe4dda3912497ca920",
+          "file": "attachments.spec.ts",
+          "line": 83,
+          "column": 1
+        },
+        {
+          "title": "dropping files on the window attaches images and text documents",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 2922,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:51.004Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-8298076efecf65cbec80",
+          "file": "attachments.spec.ts",
+          "line": 102,
+          "column": 1
+        },
+        {
+          "title": "sending carries image ids and folds documents and folders into context blocks",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6118,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:53.959Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-561ea2bea53ed65ab498",
+          "file": "attachments.spec.ts",
+          "line": 118,
+          "column": 1
+        },
+        {
+          "title": "a failed send restores the attachments to the composer",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 5535,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:54.397Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-a3a20e158e35c5b4bd64",
+          "file": "attachments.spec.ts",
+          "line": 143,
+          "column": 1
+        },
+        {
+          "title": "folders appear in the @ mention picker and insert a trailing slash",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2781,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:55.946Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-08f5fa0f4e8fe0501edb",
+          "file": "attachments.spec.ts",
+          "line": 156,
+          "column": 1
+        },
+        {
+          "title": "attachments stay with their task while you switch tasks",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6123,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:03:56.739Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0bca597356bd05b88a9c-44a9ff0441df73990f77",
+          "file": "attachments.spec.ts",
+          "line": 168,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "bots-web.spec.ts",
+      "file": "bots-web.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "bots web chat page",
+          "file": "bots-web.spec.ts",
+          "line": 35,
+          "column": 6,
+          "specs": [
+            {
+              "title": "greets with suggestions and hides the token from the address bar",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 834,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:03:58.759Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "dd9bf8af46e3a108faad-f76de25fe63373307765",
+              "file": "bots-web.spec.ts",
+              "line": 36,
+              "column": 3
+            },
+            {
+              "title": "replies render safe markdown and approvals answer with one click",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 982,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:03:59.621Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "dd9bf8af46e3a108faad-a6d84a084a480686c527",
+              "file": "bots-web.spec.ts",
+              "line": 49,
+              "column": 3
+            },
+            {
+              "title": "replies use the Enriched Markdown engine for tasks, notes, tables and math",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 1005,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:03:59.974Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "dd9bf8af46e3a108faad-5d8608c3733104ea14c1",
+              "file": "bots-web.spec.ts",
+              "line": 69,
+              "column": 3
+            },
+            {
+              "title": "history, idle state and a revoked link",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 540,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:00.126Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "dd9bf8af46e3a108faad-03a169967d0b04199dcb",
+              "file": "bots-web.spec.ts",
+              "line": 86,
+              "column": 3
+            },
+            {
+              "title": "a link revoked while open stops polling and sending",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1481,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:00.630Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "dd9bf8af46e3a108faad-854d417ca496dfe7b822",
+              "file": "bots-web.spec.ts",
+              "line": 94,
+              "column": 3
+            },
+            {
+              "title": "without a token it explains how to open the page",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 568,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:00.694Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "dd9bf8af46e3a108faad-655a46bb8dde3ddb128a",
+              "file": "bots-web.spec.ts",
+              "line": 106,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "bots.spec.ts",
+      "file": "bots.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "bots",
+          "file": "bots.spec.ts",
+          "line": 56,
+          "column": 6,
+          "specs": [
+            {
+              "title": "the Bots bar switches the sidebar to the bots, each with its latest message",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 7721,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:01.035Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-22aef689725b0e413d94",
+              "file": "bots.spec.ts",
+              "line": 57,
+              "column": 3
+            },
+            {
+              "title": "a new bot opens its conversation in the task view, with the bot in the header",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 6122,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:01.314Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-b0e2ddeff35849d0be10",
+              "file": "bots.spec.ts",
+              "line": 87,
+              "column": 3
+            },
+            {
+              "title": "chatting with a bot streams like any task and keeps its brief out of the transcript",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 6686,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:02.142Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-5113ca547ce3a2109a0c",
+              "file": "bots.spec.ts",
+              "line": 123,
+              "column": 3
+            },
+            {
+              "title": "the model can be changed in a bot conversation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 5406,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:02.916Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-117fc6b7e28e72a338c0",
+              "file": "bots.spec.ts",
+              "line": 142,
+              "column": 3
+            },
+            {
+              "title": "GitHub Copilot is selectable in bot setup and appears in the bot chat model picker",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 5878,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:07.453Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-b3240602426eb2997d68",
+              "file": "bots.spec.ts",
+              "line": 158,
+              "column": 3
+            },
+            {
+              "title": "the header pauses the bot and the welcome opens the right settings",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 6608,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:08.352Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-09abc357586d5abd38dd",
+              "file": "bots.spec.ts",
+              "line": 183,
+              "column": 3
+            },
+            {
+              "title": "memories can be added and forgotten",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 6124,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:08.795Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-febc47b5d0017cc1154e",
+              "file": "bots.spec.ts",
+              "line": 200,
+              "column": 3
+            },
+            {
+              "title": "schedules show their timing and can be turned off, run and deleted",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 7003,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:08.878Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-407ef5192eb22a30631d",
+              "file": "bots.spec.ts",
+              "line": 212,
+              "column": 3
+            },
+            {
+              "title": "Telegram setup walks through BotFather, catches a bad token, and pairs the first sender",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 7686,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:13.356Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-044b33a1e8b9f881b9a4",
+              "file": "bots.spec.ts",
+              "line": 230,
+              "column": 3
+            },
+            {
+              "title": "Slack setup creates the app from a prefilled manifest and spots swapped tokens",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 7248,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:14.938Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-6aefe40ade925c45b275",
+              "file": "bots.spec.ts",
+              "line": 266,
+              "column": 3
+            },
+            {
+              "title": "Discord setup offers the server invite and warns when Message Content is off",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 6587,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:14.979Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-dd7676ce7d1d12b0d62f",
+              "file": "bots.spec.ts",
+              "line": 299,
+              "column": 3
+            },
+            {
+              "title": "WhatsApp setup ends with copyable webhook details built from the tunnel address",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 11667,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' })\nExpected pattern: \u001b[32m/^https:\\/\\/quiet-river\\.trycloudflare\\.com\\/whatsapp\\/[0-9a-f-]{36}$/\u001b[39m\nTimeout: 5000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' }) with timeout 5000ms\u001b[22m\n\u001b[2m  - waiting for getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' })\u001b[22m\n",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' })\nExpected pattern: \u001b[32m/^https:\\/\\/quiet-river\\.trycloudflare\\.com\\/whatsapp\\/[0-9a-f-]{36}$/\u001b[39m\nTimeout: 5000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' }) with timeout 5000ms\u001b[22m\n\u001b[2m  - waiting for getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' })\u001b[22m\n\n    at /workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests/bots.spec.ts:341:28",
+                        "location": {
+                          "file": "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests/bots.spec.ts",
+                          "column": 28,
+                          "line": 341
+                        },
+                        "snippet": "  339 |     await guide.getByRole('button', { name: 'Save' }).click();\n  340 |     const callback = guide.locator('code', { hasText: '/whatsapp/' });\n> 341 |     await expect(callback).toHaveText(/^https:\\/\\/quiet-river\\.trycloudflare\\.com\\/whatsapp\\/[0-9a-f-]{36}$/);\n      |                            ^\n  342 |   });\n  343 |\n  344 |   test('web chat is one click, and phone access builds a private phone link', async ({ page }) => {"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests/bots.spec.ts",
+                            "column": 28,
+                            "line": 341
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' })\nExpected pattern: \u001b[32m/^https:\\/\\/quiet-river\\.trycloudflare\\.com\\/whatsapp\\/[0-9a-f-]{36}$/\u001b[39m\nTimeout: 5000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' }) with timeout 5000ms\u001b[22m\n\u001b[2m  - waiting for getByRole('dialog', { name: 'Scout settings' }).locator('.bots-channel .bots-guide').locator('code').filter({ hasText: '/whatsapp/' })\u001b[22m\n\n\n  339 |     await guide.getByRole('button', { name: 'Save' }).click();\n  340 |     const callback = guide.locator('code', { hasText: '/whatsapp/' });\n> 341 |     await expect(callback).toHaveText(/^https:\\/\\/quiet-river\\.trycloudflare\\.com\\/whatsapp\\/[0-9a-f-]{36}$/);\n      |                            ^\n  342 |   });\n  343 |\n  344 |   test('web chat is one click, and phone access builds a private phone link', async ({ page }) => {\n    at /workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests/bots.spec.ts:341:28"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:15.913Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/workspace/scratch/e9e75faa56eb/evidence/browser-json-results/bots-bots-WhatsApp-setup-e-2c5ff-ilt-from-the-tunnel-address/test-failed-1.png"
+                        },
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/workspace/scratch/e9e75faa56eb/evidence/browser-json-results/bots-bots-WhatsApp-setup-e-2c5ff-ilt-from-the-tunnel-address/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/workspace/scratch/e9e75faa56eb/evidence/browser-json-results/bots-bots-WhatsApp-setup-e-2c5ff-ilt-from-the-tunnel-address/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/workspace/scratch/e9e75faa56eb/pandacode-hardened-0.3.41/tests/bots.spec.ts",
+                        "column": 28,
+                        "line": 341
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-24b2ea75971bf862127b",
+              "file": "bots.spec.ts",
+              "line": 317,
+              "column": 3
+            },
+            {
+              "title": "web chat is one click, and phone access builds a private phone link",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 6083,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:21.068Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-498dbdcc6cdcc7acb59f",
+              "file": "bots.spec.ts",
+              "line": 344,
+              "column": 3
+            },
+            {
+              "title": "rules validate patterns and list allow, ask and deny",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 5485,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:21.583Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-583206273831d0bafcf5",
+              "file": "bots.spec.ts",
+              "line": 370,
+              "column": 3
+            },
+            {
+              "title": "settings: pause, profile, activity, reset and delete in the modal",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 6545,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:22.201Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-cdffd78435930312ea80",
+              "file": "bots.spec.ts",
+              "line": 385,
+              "column": 3
+            },
+            {
+              "title": "Open chat in settings returns to the conversation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 6351,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:27.079Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-6c15f01baab28846850c",
+              "file": "bots.spec.ts",
+              "line": 414,
+              "column": 3
+            },
+            {
+              "title": "bots are reachable from Go to anything",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 1962,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:27.169Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "186337d26b5ef0ab544c-124bd0310350d806f44e",
+              "file": "bots.spec.ts",
+              "line": 425,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "connections.spec.ts",
+      "file": "connections.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "a named connection is added in Settings, chosen for a task in the model picker, and kept",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 7937,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:28.662Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "b748afb17871306c20bc-43b7b7a0e3f6fc66c062",
+          "file": "connections.spec.ts",
+          "line": 3,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "hardened-041-connections.spec.ts",
+      "file": "hardened-041-connections.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "usage displays a named connection separately from default account limits",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 5900,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:28.772Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0820a41e6484b68ecf56-eaaaf7855c4d8a240722",
+          "file": "hardened-041-connections.spec.ts",
+          "line": 29,
+          "column": 1
+        },
+        {
+          "title": "an account identifier mismatch cannot render another account limits",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 5637,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:29.164Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0820a41e6484b68ecf56-f6f41313f1be7e681c0e",
+          "file": "hardened-041-connections.spec.ts",
+          "line": 40,
+          "column": 1
+        },
+        {
+          "title": "a limit offers only compatible connections and switches before sending explicitly",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 2387,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:33.460Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0820a41e6484b68ecf56-245fe8ba4094b5799465",
+          "file": "hardened-041-connections.spec.ts",
+          "line": 50,
+          "column": 1
+        },
+        {
+          "title": "uninstalled noncurrent providers are absent from the model picker",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 5688,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:34.682Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0820a41e6484b68ecf56-bb7822adabd3740088b0",
+          "file": "hardened-041-connections.spec.ts",
+          "line": 63,
+          "column": 1
+        },
+        {
+          "title": "an uninstalled current provider remains visible and cannot be selected",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6027,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:34.827Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0820a41e6484b68ecf56-29e1f1c90a167eea181d",
+          "file": "hardened-041-connections.spec.ts",
+          "line": 71,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "history-upgrade.spec.ts",
+      "file": "history-upgrade.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "Edit forks before the prompt, restores text and snapshots, and sends only after confirmation",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 3575,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:35.906Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-927fdd0b43b06853e320",
+          "file": "history-upgrade.spec.ts",
+          "line": 53,
+          "column": 1
+        },
+        {
+          "title": "only saved user messages offer Edit and the first prompt forks empty history",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2876,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:36.981Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-2ae9a5c667df659b76e0",
+          "file": "history-upgrade.spec.ts",
+          "line": 75,
+          "column": 1
+        },
+        {
+          "title": "an active run discovered during content loading prevents editing",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 2548,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:39.505Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-4dbdb44c0af73f11d5a9",
+          "file": "history-upgrade.spec.ts",
+          "line": 84,
+          "column": 1
+        },
+        {
+          "title": "native edit failure leaves the source and draft intact",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2821,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:39.874Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-72c835c5155e2af88b4f",
+          "file": "history-upgrade.spec.ts",
+          "line": 95,
+          "column": 1
+        },
+        {
+          "title": "history chips open project tabs, reveal external files, and enlarge images",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 3374,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:40.412Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-e3faffa833acd4628898",
+          "file": "history-upgrade.spec.ts",
+          "line": 105,
+          "column": 1
+        },
+        {
+          "title": "a pruned image stays readable and Edit warns that reattachment is needed",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 3145,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:40.884Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-7d16d92b59246b0fa889",
+          "file": "history-upgrade.spec.ts",
+          "line": 118,
+          "column": 1
+        },
+        {
+          "title": "a bot prompt Edit sends to the new fork instead of changing the bot desktop conversation",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 7209,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:42.069Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-99d0ed9b1563a2383ded",
+          "file": "history-upgrade.spec.ts",
+          "line": 129,
+          "column": 1
+        },
+        {
+          "title": "editing fenced attachment examples preserves their snapshot and never opens a cached image",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 3655,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:42.715Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-1fad69cc536e19271dda",
+          "file": "history-upgrade.spec.ts",
+          "line": 149,
+          "column": 1
+        },
+        {
+          "title": "message markup cannot imitate an attachment container to dispatch other application actions",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 3346,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:43.798Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "06ddf8b54c0e6f5cea76-80df745ee1c2b26a79c9",
+          "file": "history-upgrade.spec.ts",
+          "line": 164,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "message-actions.spec.ts",
+      "file": "message-actions.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "older history and forks preserve authors when the later harness switch is outside the page",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6712,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:44.060Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f1dc65e4764e472479a7-382350afb4c65aaf6915",
+          "file": "message-actions.spec.ts",
+          "line": 100,
+          "column": 1
+        },
+        {
+          "title": "user bubbles align to the column's right edge at 1600px",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 3028,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:54.033Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f1dc65e4764e472479a7-7a44f9f30cfbe13dbe4e",
+          "file": "message-actions.spec.ts",
+          "line": 300,
+          "column": 3
+        },
+        {
+          "title": "user bubbles align to the column's right edge at 1000px",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 2452,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:55.174Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f1dc65e4764e472479a7-023d1f164cd7df1b3253",
+          "file": "message-actions.spec.ts",
+          "line": 300,
+          "column": 3
+        }
+      ],
+      "suites": [
+        {
+          "title": "conversation message actions",
+          "file": "message-actions.spec.ts",
+          "line": 137,
+          "column": 6,
+          "specs": [
+            {
+              "title": "copies the original user text and Markdown, including earlier activity responses, using keyboard controls",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 4,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 4128,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:46.405Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-4fbc487a49017236f0ef",
+              "file": "message-actions.spec.ts",
+              "line": 138,
+              "column": 3
+            },
+            {
+              "title": "forks at a selected response with an independent saved prefix and leaves the source unchanged",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 3535,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:47.185Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-7743eab4eb247e9f132b",
+              "file": "message-actions.spec.ts",
+              "line": 151,
+              "column": 3
+            },
+            {
+              "title": "starts a ClipboardItem write during the click and copies full stored text after the database responds",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 2740,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:49.337Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-89e6e31fb90eafadbf6d",
+              "file": "message-actions.spec.ts",
+              "line": 172,
+              "column": 3
+            },
+            {
+              "title": "uses a clipboard fallback when permission is denied and reports failure if no copy method succeeds",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 4,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3474,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:50.547Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-ba26a4b378bd42b11af6",
+              "file": "message-actions.spec.ts",
+              "line": 200,
+              "column": 3
+            },
+            {
+              "title": "forks at the first user message inside the board without opening the general conversation view",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 2,
+                      "status": "passed",
+                      "duration": 4444,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:50.743Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-c0ac60a25cc3ad9457e8",
+              "file": "message-actions.spec.ts",
+              "line": 225,
+              "column": 3
+            },
+            {
+              "title": "copies the latest streaming response without replacing its controls or offering an unsaved fork",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "passed",
+                      "duration": 4345,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:50.799Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-73abfc92ac41ed9954ef",
+              "file": "message-actions.spec.ts",
+              "line": 242,
+              "column": 3
+            },
+            {
+              "title": "keeps the source on a failed fork and prevents duplicate requests while a retry is pending",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 20000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 3868,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-24T23:04:52.101Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f1dc65e4764e472479a7-d54489b5169a17d94d0d",
+              "file": "message-actions.spec.ts",
+              "line": 274,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "provider-settings.spec.ts",
+      "file": "provider-settings.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "provider connections show Claude credential conflicts and let users prefer the saved login",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 6980,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:55.245Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-812bb97b5588eee0810b",
+          "file": "provider-settings.spec.ts",
+          "line": 3,
+          "column": 1
+        },
+        {
+          "title": "provider connections preserve other drafts and edits made during a save",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 7186,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:56.014Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-a3a3087a0a74b9a8d41c",
+          "file": "provider-settings.spec.ts",
+          "line": 61,
+          "column": 1
+        },
+        {
+          "title": "provider connections ignore a late initial configuration after a successful save",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6327,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:57.099Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-b1617ccd46828111e6ef",
+          "file": "provider-settings.spec.ts",
+          "line": 89,
+          "column": 1
+        },
+        {
+          "title": "provider connections are grouped in Providers and never accept secrets in browser preview",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 5111,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:04:57.671Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-0f8637e53b54e6790787",
+          "file": "provider-settings.spec.ts",
+          "line": 103,
+          "column": 1
+        },
+        {
+          "title": "the MiMo Token Plan card offers the documented clusters and keeps the key native-only",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 5041,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:02.239Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-2fff8950ff2ba05fbc6f",
+          "file": "provider-settings.spec.ts",
+          "line": 128,
+          "column": 1
+        },
+        {
+          "title": "a delayed configuration fills the saved MiMo cluster and its URL",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6415,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:02.800Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-be30e1fd9237c38b40c4",
+          "file": "provider-settings.spec.ts",
+          "line": 150,
+          "column": 1
+        },
+        {
+          "title": "provider connections expose every installed harness and real GLM model names",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 5996,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:03.224Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-cfde5a48c19598e2c813",
+          "file": "provider-settings.spec.ts",
+          "line": 158,
+          "column": 1
+        },
+        {
+          "title": "provider connections start claude tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6564,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:03.454Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-50f805617a7aeeb4aa7e",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start codex tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 6677,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:07.303Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-e7721aef9d8a8e994d4b",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start kimi tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6488,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:09.231Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-9ee6baf7c587e99bae73",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start opencode tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 7089,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:09.248Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-52e08ea097045341e28f",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start glm tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6804,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:10.055Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-2d0a961bdc12afaed052",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start antigravity tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 6455,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:14.002Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-61239a08c87d9939ba36",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start grok tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6056,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:15.757Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-a9f82cbefd4f0ca1c3fe",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start mimo tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6023,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:16.358Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-136ebc221c8ca2976fb8",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start pi tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6266,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:16.874Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-33c12e75e44b0e59b8f0",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start deepseek tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 6429,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:20.478Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-4f6bb27ce9e1cfb9216e",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start commandcode tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6665,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:21.837Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-2e7044578e618f25cbb4",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start cline tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6360,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:22.406Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-bd78bf16700362b354e3",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start omp tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6521,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:23.160Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-7c55b216029ed5b9fff7",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start github-copilot tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 6757,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:26.924Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-9249edd2d88b02b1d41b",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "provider connections start muse tasks with Standard permissions and retain explicit restrictions when switching",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 6099,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:28.540Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-87dd2373d5b04529a2aa",
+          "file": "provider-settings.spec.ts",
+          "line": 182,
+          "column": 3
+        },
+        {
+          "title": "GitHub Copilot CLI has CLI sign-in guidance, a path override, Default model, and advertised modes",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6378,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:28.800Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-7530e0bf816f6601432a",
+          "file": "provider-settings.spec.ts",
+          "line": 217,
+          "column": 1
+        },
+        {
+          "title": "GitHub Copilot model discovery does not crash the picker in an existing chat",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 4767,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:29.706Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-ca5786064efcd2a9c191",
+          "file": "provider-settings.spec.ts",
+          "line": 257,
+          "column": 1
+        },
+        {
+          "title": "Pi offers four approval modes with Accept edits",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 4697,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:33.698Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-7b6c02cff022a791ef0a",
+          "file": "provider-settings.spec.ts",
+          "line": 270,
+          "column": 1
+        },
+        {
+          "title": "settings organization supports Pi models and executable settings",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 5730,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:34.493Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-fd976c7354abb82432a5",
+          "file": "provider-settings.spec.ts",
+          "line": 280,
+          "column": 1
+        },
+        {
+          "title": "DeepSeek has a key card, four approval modes and effort levels",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 5038,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:34.656Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-0cc8a161db56d0c68daf",
+          "file": "provider-settings.spec.ts",
+          "line": 301,
+          "column": 1
+        },
+        {
+          "title": "Command Code has a key card, four approval modes and its own model list",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 5204,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:35.189Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-179ebf496dfa59b56af1",
+          "file": "provider-settings.spec.ts",
+          "line": 319,
+          "column": 1
+        },
+        {
+          "title": "Cline has a sign-in card, four approval modes and thinking levels",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 5569,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:38.413Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "7f96c5231d280a26598c-cefdf0f50d1bfee0e092",
+          "file": "provider-settings.spec.ts",
+          "line": 337,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "remote.spec.ts",
+      "file": "remote.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "signs in with a device code, toggles remote control and lists devices",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 7498,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:39.741Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-b3200d76829c72b26c91",
+          "file": "remote.spec.ts",
+          "line": 13,
+          "column": 1
+        },
+        {
+          "title": "the computer choice appears once signed in, one row per computer",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6673,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:40.253Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-b0dae4b82543384464cc",
+          "file": "remote.spec.ts",
+          "line": 78,
+          "column": 1
+        },
+        {
+          "title": "a new task starts on another computer and is an ordinary task with a locked computer",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 6535,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:40.424Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-57d4cd947ff73e8b1708",
+          "file": "remote.spec.ts",
+          "line": 96,
+          "column": 1
+        },
+        {
+          "title": "GitHub behind this computer asks first: Cancel keeps the draft, Continue starts",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 6206,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:44.012Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-f69a82dc2cd056b139c3",
+          "file": "remote.spec.ts",
+          "line": 122,
+          "column": 1
+        },
+        {
+          "title": "a project without a GitHub remote cannot start on another computer",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6086,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:46.950Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-6df179f12208270f6916",
+          "file": "remote.spec.ts",
+          "line": 144,
+          "column": 1
+        },
+        {
+          "title": "sign-in can be cancelled",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 4976,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:46.973Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-2d08e9dc49db905beeab",
+          "file": "remote.spec.ts",
+          "line": 157,
+          "column": 1
+        },
+        {
+          "title": "the trust toggle shows without host mode",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 5715,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:47.253Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-12fe8384d8b60483d635",
+          "file": "remote.spec.ts",
+          "line": 169,
+          "column": 1
+        },
+        {
+          "title": "picking another computer limits the picker to its catalog, and local is restored",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 5870,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:50.240Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-4d6b1fdf405598dad127",
+          "file": "remote.spec.ts",
+          "line": 182,
+          "column": 1
+        },
+        {
+          "title": "a model missing on the chosen computer is swapped, with a notice",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 5708,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:51.978Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-3824ba4d3b86868c4ff8",
+          "file": "remote.spec.ts",
+          "line": 199,
+          "column": 1
+        },
+        {
+          "title": "a task running on another computer lists that computer’s catalog",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 7198,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:52.987Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f93c19e99fb531cfc4f3-a601287c165c00a03a79",
+          "file": "remote.spec.ts",
+          "line": 213,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "skills-library.spec.ts",
+      "file": "skills-library.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "activating a skill for Claude Code and Codex shows in the matrix, and drift is reported",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1208,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:53.061Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-086dbda23dc223a28b53",
+          "file": "skills-library.spec.ts",
+          "line": 24,
+          "column": 1
+        },
+        {
+          "title": "project-scope rules and safety findings need acknowledgement before activation",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1130,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:54.295Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-cbbaf91a8e031172b747",
+          "file": "skills-library.spec.ts",
+          "line": 43,
+          "column": 1
+        },
+        {
+          "title": "GitHub import validates the repository and records the commit",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1150,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:55.447Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-410841bd6041f86e9c2d",
+          "file": "skills-library.spec.ts",
+          "line": 60,
+          "column": 1
+        },
+        {
+          "title": "catalog discovery is explicit and imports selected nested packages without activation",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 794,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:56.145Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-46e39ef48c7346272a6f",
+          "file": "skills-library.spec.ts",
+          "line": 72,
+          "column": 1
+        },
+        {
+          "title": "catalog refresh marks updates; disabled sources do not import; removal preserves imported copies",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 903,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:56.618Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-e1fc3a13776874378600",
+          "file": "skills-library.spec.ts",
+          "line": 86,
+          "column": 1
+        },
+        {
+          "title": "bot and project selections are separate, persisted, and require review after import updates",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 780,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:56.948Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-d29126aaaf22b7ae03bf",
+          "file": "skills-library.spec.ts",
+          "line": 102,
+          "column": 1
+        },
+        {
+          "title": "scope safety findings require explicit acknowledgement and edited imports stay untouched",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1503,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:57.532Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-05f0f13c22e720bbe027",
+          "file": "skills-library.spec.ts",
+          "line": 120,
+          "column": 1
+        },
+        {
+          "title": "a catalog update leaves the selected hash stale until the user saves the new version",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 1580,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:57.715Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "20d370efc0ef6251d866-be994d2f9a47d9c2790a",
+          "file": "skills-library.spec.ts",
+          "line": 143,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "token-saver.spec.ts",
+      "file": "token-saver.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "packs ride along once, fold in the transcript, and the switch-off is said once",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 7783,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:57.749Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "918b1dd65ef1f26cf543-f7f37d023f87bdc9c3f7",
+          "file": "token-saver.spec.ts",
+          "line": 30,
+          "column": 1
+        },
+        {
+          "title": "turning on a missing tool installs it, and a thread can become the default",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 4573,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:59.069Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "918b1dd65ef1f26cf543-4a47e73c55f4eba5f379",
+          "file": "token-saver.spec.ts",
+          "line": 69,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "usage-limit.spec.ts",
+      "file": "usage-limit.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "a usage limit holds the queue, marks the task, and Continue now recovers before queued work",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 4352,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:05:59.325Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "8a9924c6e03e1b96c7c9-27e49613c6ac0a399d45",
+          "file": "usage-limit.spec.ts",
+          "line": 43,
+          "column": 1
+        },
+        {
+          "title": "Resume at reset continues the task when the limit resets",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 3621,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:06:00.214Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "8a9924c6e03e1b96c7c9-e2ec90b94c8e12fdbd42",
+          "file": "usage-limit.spec.ts",
+          "line": 60,
+          "column": 1
+        },
+        {
+          "title": "an overdue resume continues right after a restart",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 4,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2306,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:06:03.664Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "8a9924c6e03e1b96c7c9-3953ddd875fae555235e",
+          "file": "usage-limit.spec.ts",
+          "line": 77,
+          "column": 1
+        },
+        {
+          "title": "an unknown reset time is shown honestly and cannot be scheduled",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 3024,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:06:03.705Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "8a9924c6e03e1b96c7c9-1649fef890414b39294f",
+          "file": "usage-limit.spec.ts",
+          "line": 82,
+          "column": 1
+        },
+        {
+          "title": "a message saved as the run hits a limit stays held instead of being sent",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 20000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 4310,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T23:06:03.859Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "8a9924c6e03e1b96c7c9-efc6455d20bc54934e13",
+          "file": "usage-limit.spec.ts",
+          "line": 94,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-24T23:03:34.808Z",
+    "duration": 153504.378,
+    "expected": 117,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

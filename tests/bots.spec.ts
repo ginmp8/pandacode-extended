@@ -135,7 +135,7 @@ test.describe('bots', () => {
     // It went through the bot, so the bot logged it.
     await openSettings(page, 'Activity');
     await expect(panel(page).locator('.bots-activity')).toContainText('You (desktop): What can you help me with?');
-    await tab(page, 'Conversations').click();
+    await expect(panel(page).getByRole('heading', { name: 'Conversations', exact: true })).toBeVisible();
     await expect(panel(page).locator('.bots-items')).toContainText('This app');
   });
 
@@ -362,13 +362,15 @@ test.describe('bots', () => {
     await panel(page).getByRole('alertdialog', { name: 'Create a new web chat link?' }).getByRole('button', { name: 'New link' }).click();
     await expect(page.locator('#toast')).toHaveText('New link copied');
     await expect(tab(page, 'Channels')).toContainText('1');
-    await tab(page, 'Conversations').click();
+    await tab(page, 'Activity').click();
+    await expect(panel(page).getByRole('heading', { name: 'Conversations', exact: true })).toBeVisible();
     await expect(panel(page).getByRole('button', { name: 'Open web chat' })).toBeVisible();
   });
 
   test('rules validate patterns and list allow, ask and deny', async ({ page }) => {
     await newBot(page);
-    await openSettings(page, 'Rules');
+    await openSettings(page, 'Activity');
+    await expect(panel(page).getByRole('heading', { name: /^Rules(?: |$)/ })).toBeVisible();
     await panel(page).getByRole('textbox', { name: 'Pattern' }).fill('*');
     await panel(page).getByRole('button', { name: 'Add rule' }).click();
     await expect(panel(page).getByRole('alert')).toContainText('at least two characters');

@@ -50,8 +50,12 @@ async function delayedConnections(page: Page): Promise<void> {
   await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('region', { name: 'Settings', exact: true }).getByRole('tab', { name: 'Providers', exact: true }).click();
-  await expect(page.locator('#settings-panel-providers details summary')).toHaveCount(9);
-  for (const summary of await page.locator('#settings-panel-providers details summary').all()) await summary.click();
+  // These scenarios edit two executable forms; unrelated provider cards may grow.
+  for (const provider of ['opencode', 'antigravity']) {
+    const details = page.locator('#settings-panel-providers details').filter({ has: page.locator(`form[data-provider="${provider}"]`) });
+    await expect(details).toHaveCount(1);
+    await details.locator('summary').click();
+  }
 }
 
 test('provider connections preserve other drafts and edits made during a save', async ({ page }) => {
@@ -151,7 +155,16 @@ test('a delayed configuration fills the saved MiMo cluster and its URL', async (
   await expect(card.locator('#mimo-endpoint-hint')).toHaveText('https://token-plan-ams.xiaomimimo.com/anthropic');
 });
 
-test('provider connections expose all harnesses and real GLM model names', async ({ page }) => {
+test('provider connections expose every installed harness and real GLM model names', async ({ page }) => {
+  // The hardened picker hides unavailable harnesses. This catalog scenario
+  // explicitly supplies installed harnesses; availability filtering has its own tests.
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    await route.fulfill({ response, body: source.replace(/switch\s*\(command\)\s*\{/, `
+      if (command === 'list_providers') return structuredClone(providers.map(provider => ({...provider, installed:true})));
+      switch (command) {`) });
+  });
   await page.goto('/');
   await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
   await page.getByRole('button', { name: 'Choose harness and model', exact: true }).click();
@@ -166,7 +179,7 @@ test('provider connections expose all harnesses and real GLM model names', async
 });
 
 for (const providerId of ['claude', 'codex', 'kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'omp', 'github-copilot', 'muse']) {
-  test(`provider connections start ${providerId} tasks with Full access and retain explicit restrictions when switching`, async ({ page }) => {
+  test(`provider connections start ${providerId} tasks with Standard permissions and retain explicit restrictions when switching`, async ({ page }) => {
     await page.addInitScript(provider => localStorage.setItem('pandacode.provider', provider), providerId);
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
@@ -181,12 +194,12 @@ for (const providerId of ['claude', 'codex', 'kimi', 'opencode', 'glm', 'antigra
     // An already saved task retains its approval setting.
     await expect(permissions).toHaveText('Standard');
     await page.locator('.new-task-button').click();
-    await expect(permissions).toHaveText('Full access');
+    await expect(permissions).toHaveText('Standard');
     const readTask = () => page.evaluate(async () => {
       const sessionId = (document.querySelector('#prompt') as HTMLElement).dataset.sessionId;
       return (window as any).__approvalPreview('get_task', {sessionId});
     });
-    await expect.poll(readTask).toMatchObject({provider:providerId, mode:'full'});
+    await expect.poll(readTask).toMatchObject({provider:providerId, mode:'ask'});
     await permissions.click();
     await page.getByRole('dialog', {name:'Permissions',exact:true}).getByRole('menuitemradio', {name:providerId === 'codex' ? 'Read only' : 'Plan mode',exact:true}).click();
     await expect.poll(readTask).toMatchObject({mode:'plan'});
@@ -196,8 +209,8 @@ for (const providerId of ['claude', 'codex', 'kimi', 'opencode', 'glm', 'antigra
     await expect.poll(readTask).toMatchObject({provider:next, mode:'plan'});
     await expect(permissions).toHaveText(next === 'codex' ? 'Read only' : 'Plan mode');
     await page.locator('.new-task-button').click();
-    await expect(permissions).toHaveText('Full access');
-    await expect.poll(readTask).toMatchObject({provider:next, mode:'full'});
+    await expect(permissions).toHaveText('Standard');
+    await expect.poll(readTask).toMatchObject({provider:next, mode:'ask'});
   });
 }
 

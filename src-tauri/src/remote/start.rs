@@ -162,15 +162,20 @@ pub(crate) async fn require_installed(provider: &str) -> Result<()> {
 }
 
 pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start) -> Result<Value> {
+    super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
     require_installed(&start.provider).await?;
-    super::host::require_authorized(app, from, authenticated_key)?;
+    super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
     let handle = app.clone();
+    let (device, key, mode) = (from.to_owned(), authenticated_key.to_owned(), start.mode.clone());
     let (repo, wanted, worktree) = (start.repo.clone(), start.branch.clone(), start.worktree);
     let (project, branch) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, String)> {
         let state = handle.state::<AppState>();
+        super::host::check_start_mode(&handle, &device, &key, mode.as_deref())?;
         let (project, cloned) = project_for(&state, &repo)?;
+        super::host::check_start_mode(&handle, &device, &key, mode.as_deref())?;
         let root = PathBuf::from(&project.path);
         let branch = pick_branch(&root, wanted.as_deref())?;
+        super::host::check_start_mode(&handle, &device, &key, mode.as_deref())?;
         if !worktree {
             if cloned {
                 checkout(&root, &branch)?;
@@ -182,7 +187,7 @@ pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &
     })
     .await
     .map_err(|e| e.to_string())??;
-    super::host::require_authorized(app, from, authenticated_key)?;
+    super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
     let state = app.state::<AppState>();
     let task = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -192,6 +197,10 @@ pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &
         }
         task
     };
+    if let Err(error) = super::host::check_current_request(&task.mode) {
+        let _ = crate::task_deletion::delete_state(&state, &task.id);
+        return Err(error);
+    }
     if worktree {
         let store = state.store.clone();
         let (id, root) = (task.id.clone(), PathBuf::from(&project.path));
@@ -207,7 +216,7 @@ pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &
             return Err(error);
         }
     }
-    if let Err(error) = super::host::require_authorized(app, from, authenticated_key) {
+    if let Err(error) = super::host::check_current_request(&task.mode) {
         let _ = crate::task_deletion::delete_state(&state, &task.id);
         return Err(error);
     }

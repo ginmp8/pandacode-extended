@@ -1,3 +1,11 @@
+# Current revision: 0.3.41-hardened
+
+The current source release extends the supplied `0.3.35-hardened.4` selectively. See [current validation and limits](security-review/0.3.41-hardened/REPORT.md), [connection/session safeguards](docs/connection-session-safety.md), and the [Portuguese feature guide](docs/HARDENED-0.3.41-GUIDE.pt-BR.md). The sections below are historical records; their findings, test counts and environment limitations must not be read as the results of this revision.
+
+This revision adds native account-bound session invalidation, a separate remote Full access gate (default off), commit/hash-pinned Skills imports and scope resolution, and validated historical attachment actions. It preserves secure credential storage, device trust/revocation, replay checks, disabled automatic updates and the existing fail-closed isolated-review admission. Dependency versions are unchanged.
+
+---
+
 > **Historical report for hardened.1.** It does not describe tests from the current review. Later reviews are in `SECURITY-INSTALLATION-REVIEW.md` (hardened.2) and `security-review/hardened.3/README.md` (hardened.3). The hardened.2 installation review, fixes, and limitations are in [SECURITY-INSTALLATION-REVIEW.md](SECURITY-INSTALLATION-REVIEW.md). Older manifests, patch, and verification summary are in `security-review/hardened.1/`; other historical logs remain under `security-review/`.
 
 # Security Review — PandaCode 0.3.28 / hardened.1

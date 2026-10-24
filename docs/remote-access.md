@@ -6,6 +6,16 @@ turned on. The task stays an ordinary task in the local sidebar and conversation
 same streaming, composer, approvals and model picker as a local one; there is no separate remote
 view. Nothing is sent anywhere until the user signs in.
 
+**Full access for remote tasks** is a separate switch in Settings → Remote access,
+off for new installs and existing settings. A trusted device cannot start, send to,
+steer, approve, answer agent questions, or configure a Full access task until this
+computer grants that option locally. It can still stop the task or change its mode
+to an approving mode. Remote calls cannot change the option. Omitting a start mode
+uses `ask` even when the option is on; enabling it never upgrades a task implicitly.
+Native admission checks the current grant, hosting state and pinned caller key
+again after asynchronous preparation. Revocation blocks new actions and does not
+undo work already admitted.
+
 ## Pieces
 
 | Piece | Where | Job |
@@ -156,7 +166,9 @@ registered with the device. For a pair of devices:
 `body = base64(nonce24 || XChaCha20-Poly1305(key, nonce24, plaintext, aad = from + "|" + to))`.
 Pair keys are cached by `(deviceId, publicKey)`, so a key change derives a new one.
 The relay sees only device ids and ciphertext. Settings shows each device's key fingerprint (first
-8 bytes of SHA-256 of the public key, hex) so the user can compare them.
+16 bytes / 128 bits of SHA-256 of the public key, 32 hex characters) so the user can
+compare them. Existing device IDs, key pairs and pinned public keys are unchanged;
+the longer display requires no re-pairing and is never used as an authentication key.
 
 ### Trust (key pinning)
 
@@ -213,7 +225,7 @@ more power than local ones.
 | `providers.models` | `{ provider, force?: boolean }` | the host's `list_provider_models` result: `[{ id, name, description, reasoningEfforts, defaultReasoningEffort, contextWindow }]`, its tail dropped to fit one reply. `provider` must be a known harness id (`Unknown provider.`). |
 | `task.start` | `{ repo: "owner/name", branch?, worktree, prompt, provider, model, mode?, effort? }` | `{ sessionId }` |
 | `task.messages` | `{ sessionId, afterId }` | `{ messages: [{ id, role, content, createdAt, turnDurationMs }], hasMore, title }` |
-| `task.send` | `{ sessionId, text }` | `{ queued: boolean }`. Queued if the task is running, like Enter. If the run ended between the check and the queue add, the host takes the entry back and sends it. |
+| `task.send` | `{ sessionId, text }` | `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
 | `task.stop` | `{ sessionId }` | `{}` |
 | `task.steer` | `{ sessionId, text }` | `{}` (as `steer_task`) |
 | `task.configure` | `{ sessionId, provider?, model?, effort?, mode? }` | `{}`. `provider` and `model` together (a provider not installed there is refused as in `task.start`); `effort: null` clears it; `mode` changes permissions. |
@@ -302,12 +314,13 @@ Requests from one peer are answered in order, except `task.start` (above).
 
 | Command | Args | Returns |
 |---|---|---|
-| `remote_status` | | `{ configured, signedIn, account?: { login, avatarUrl }, device: { id, name, fingerprint }, hostEnabled, connected }` |
+| `remote_status` | | `{ configured, signedIn, account?: { login, avatarUrl }, device: { id, name, fingerprint }, hostEnabled, allowFullAccess, connected }` |
 | `remote_sign_in_start` | | `{ userCode, verificationUri, expiresIn }` |
 | `remote_sign_in_finish` | | status (waits for the device flow, error on expiry, denial or cancel) |
 | `remote_sign_in_cancel` | | status. Stops the device-flow poll. |
 | `remote_sign_out` | | status |
 | `remote_set_host_enabled` | `{ enabled }` | status |
+| `remote_set_full_access` | `{ enabled }` | status. Local settings IPC only; not a remote RPC method. |
 | `remote_devices` | | `[{ id, name, platform, fingerprint, host, online, lastSeen, current, trusted }]`, from presence (fetched only before the first presence frame) |
 | `remote_set_trusted` | `{ deviceId, trusted }` | the `remote_devices` list. Pins the device's current key for both directions, or removes the pin. |
 | `remote_revoke_device` | `{ deviceId }` | `{}` |

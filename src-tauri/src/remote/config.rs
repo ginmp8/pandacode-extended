@@ -120,6 +120,9 @@ pub(crate) struct Settings {
     pub device_id: String,
     #[serde(default)]
     pub host_enabled: bool,
+    /// Independent local-only grant. Old settings and new installs both default off.
+    #[serde(default)]
+    pub allow_full_access: bool,
     #[serde(default)]
     pub account: Option<Account>,
     /// Devices allowed to drive this one: device id → the public key pinned when trusted.
@@ -341,10 +344,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = load(&dir);
         assert!(!first.host_enabled);
+        assert!(!first.allow_full_access);
         assert!(first.account.is_none());
         assert_eq!(load(&dir).device_id, first.device_id);
         let parsed: Settings = serde_json::from_str(r#"{"deviceId":"x","hostEnabled":true,"account":{"id":"gh:1","login":"a","avatarUrl":"u"}}"#).unwrap();
         assert!(parsed.host_enabled);
+        assert!(!parsed.allow_full_access, "legacy remote control does not grant Full access");
         assert_eq!(parsed.account.unwrap().avatar_url, "u");
         assert!(parsed.trusted.is_empty());
         let _ = std::fs::remove_dir_all(dir);

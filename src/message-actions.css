@@ -3,6 +3,8 @@
 .message-actions .icon{width:15px;height:15px;flex:none}
 .message>.message-actions{padding-left:31px}
 .turn-activity-body .message>.message-actions{padding-left:0}
+/* Floating actions need their own gap before the next tool row, including side threads. */
+html .turn-activity-body .message:has(>.message-actions){margin-bottom:28px}
 .activity-commentary-message{margin-bottom:10px}
 .activity-commentary-message>.activity-commentary{margin-bottom:0}
 .message-actions button:hover{color:var(--text);background:color-mix(in srgb,currentColor 9%,transparent)}

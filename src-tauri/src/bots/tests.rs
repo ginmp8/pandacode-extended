@@ -46,6 +46,33 @@ fn creates_a_bot_with_its_own_workspace_project() {
 }
 
 #[test]
+fn edited_bot_task_keeps_current_brief_without_adopting_the_source_thread() {
+    let f = fixture();
+    let bot = bot(&f);
+    remember(&f.store, &bot.id, "Use metric units", "user").unwrap();
+    let (source_id, _) = thread_session(&f.store, &bot, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    f.store.message(&source_id, "user", "Original prompt").unwrap();
+    let message_id = f.store.db.last_insert_rowid();
+    let source = f.store.session(&source_id).unwrap();
+    let fork = crate::conversation_fork::before_message(&f.store, &source_id, message_id).unwrap();
+    assert!(owner_of(&f.store, &fork.id).unwrap().is_none());
+    let brief = fork_task_brief(&f.store, &fork, true).unwrap().unwrap();
+    assert!(brief.contains("Scout") && brief.contains("Be brief.") && brief.contains("Use metric units"));
+    assert!(fork_task_brief(&f.store, &source, true).unwrap().is_none());
+    assert!(fork_task_brief(&f.store, &fork, false).unwrap().is_none());
+    assert_eq!(threads(&f.store, &bot.id).unwrap().len(), 1);
+    let independent = independent_tasks(&f.store, &bot.id).unwrap();
+    assert_eq!(independent.len(), 1);
+    assert_eq!(independent[0].id, fork.id);
+    let other = create(&f.store, &input("Other bot"), &f.root).unwrap();
+    assert!(independent_tasks(&f.store, &other.id).unwrap().is_empty());
+    assert_eq!(f.store.messages(&source_id, None).unwrap().len(), 1);
+    assert!(f.store.messages(&fork.id, None).unwrap().is_empty());
+    f.store.db.execute("UPDATE bots SET paused=1 WHERE id=?1", [&bot.id]).unwrap();
+    assert!(fork_task_brief(&f.store, &fork, false).is_err());
+}
+
+#[test]
 fn rejects_invalid_bot_settings() {
     let f = fixture();
     assert!(create(&f.store, &input("  "), &f.root).is_err());

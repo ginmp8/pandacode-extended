@@ -23,12 +23,23 @@ test('signs in with a device code, toggles remote control and lists devices', as
   await expect(toggle).not.toBeChecked();
   await toggle.check();
   await expect(toggle).toBeChecked();
+  const fullAccess = panel.getByRole('checkbox', { name: 'Full access for remote tasks', exact: true });
+  await expect(fullAccess).not.toBeChecked();
+  await fullAccess.check();
+  await expect(fullAccess).toBeChecked();
+  await toggle.uncheck();
+  await expect(fullAccess).toBeChecked();
+  await toggle.check();
+  await fullAccess.uncheck();
+  await expect(fullAccess).not.toBeChecked();
+  await expect(toggle).toBeChecked();
   await expect(panel.locator('.remote-device[data-device="dev-this"]')).toContainText('This computer');
   await expect(panel.locator('.remote-device[data-device="dev-this"]')).toContainText('remote control on');
 
   const studio = panel.locator('.remote-device[data-device="dev-studio"]');
   await expect(studio).toContainText('Studio iMac');
   await expect(studio).toContainText('9b02e4aa71c3d605');
+  await expect(studio.locator('code')).toHaveText(/^[0-9a-f]{32}$/);
   await expect(studio.getByRole('img', { name: 'Online' })).toBeVisible();
   await expect(panel.locator('.remote-device[data-device="dev-laptop"]').getByRole('img', { name: 'Offline' })).toBeVisible();
 

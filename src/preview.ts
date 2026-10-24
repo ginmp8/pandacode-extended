@@ -1,3 +1,4 @@
+import { contextBlocks, parseAttachments, IMAGE_ID } from './message-attachments';
 import { previewHub, previewRepos } from './preview-github-hub';
 import type { AgentEvent, BrowserStatus, FileEntry, GitStatus, Message, MessagePage, Project, Provider, ProviderId, ProviderModel, Session, TaskStage, ToolActivity } from './types';
 import { fallbackModel } from './model-catalog';
@@ -715,8 +716,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'prompt_activity': result = sampleUsageLedger().rows.filter((_, i) => i % 3 === 0).map(row => [row[0], i2p(row[1]), 1 + (row[0] % 7)]); break;
     case 'agent_usage': {
       const provider = String(args.provider);
-      const supported = ['claude', 'codex', 'kimi', 'glm', 'opencode'].includes(provider);
-      result = { provider, status: supported ? 'ready' : 'unsupported', checkedAt: Date.now(), stale: false,
+      const connection = args.connection ? previewConnections.connections.find(c => c.id === args.connection && c.provider === provider) : null;
+      if (args.connection && !connection) throw new Error('This connection no longer exists.');
+      const supported = connection ? ['claude', 'codex'].includes(provider) && !connection.executable && !connection.args.length : ['claude', 'codex', 'kimi', 'glm', 'opencode'].includes(provider);
+      result = { provider, ...(connection ? { connectionId: connection.id } : {}), status: supported ? 'ready' : 'unsupported', checkedAt: Date.now(), stale: false,
         plan: provider === 'codex' ? 'Pro' : provider === 'opencode' ? 'Go' : null,
         windows: supported ? [
           { label: provider === 'opencode' ? 'Go rolling window' : '5-hour window', usedPercent: provider === 'codex' ? 38 : 22, resetsAt: new Date(Date.now() + 7200000).toISOString() },
@@ -794,10 +797,12 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'fork_session_at_message': {
       const source = session(args.sessionId), history = messages[source.id] ?? [];
       const boundary = history.findIndex(message => message.id === args.messageId);
+      if (args.exclusive) { assertIdle(source); if (source.remoteDevice) throw new Error('This task runs on another computer.'); }
       if (!Number.isSafeInteger(args.messageId) || args.messageId <= 0 || boundary < 0 || !['user', 'assistant'].includes(history[boundary].role)) throw new Error('Choose a saved user message or assistant response to fork.');
+      if (args.exclusive && history[boundary].role !== 'user') throw new Error('Only saved user messages can be edited.');
       const boundaryProvider = historicalProvider(history[boundary], history, source.provider);
       const created: Session = { ...structuredClone(source), id: crypto.randomUUID(), pinned: false, sidebarOrder: null, title: [...source.title].slice(0, 193).join('') + ' (fork)', resumeId: null, status: 'idle', archived: false, goalState: null, contextUsage: null, taskStage: 'in_progress', completedAt: null, lastResponseAt: null, lastPromptAt: null, createdAt: Date.now(), updatedAt: Date.now() };
-      const copied: Message[] = history.slice(0, boundary + 1).filter(message => !['internal', 'changes'].includes(message.role)).map(message => {
+      const copied: Message[] = history.slice(0, boundary + (args.exclusive ? 0 : 1)).filter(message => !['internal', 'changes'].includes(message.role)).map(message => {
         let content = message.content;
         if (message.role === 'tool') {
           try {
@@ -1296,6 +1301,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'design_save_comments': result = previewDesign.saveComments(args.comments); break;
     case 'skills_list': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
     case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
+    case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import':
+    case 'skills_scope_get': case 'skills_scope_set': case 'skills_task_resolve':
       result = previewSkills.call(command, args); break;
     case 'simulator_status': result = previewSimulator.status(); break;
     case 'simulator_pose': result = await previewSimulator.pose(args.udid, args.pose); break;
@@ -1336,6 +1343,17 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         return { path, matches };
       }).filter(file => file.matches.length);
       result = { files, truncated: false };
+      break;
+    }
+    case 'message_attachment_image': {
+      const task = session(args.sessionId), message = (messages[task.id] ?? []).find(message => message.id === args.messageId && message.role === 'user');
+      if (task.remoteDevice || !message || !IMAGE_ID.test(String(args.id)) || !parseAttachments(contextBlocks(message.content).blocks).some(item => item.kind === 'image' && item.imageId === args.id)) throw new Error('This image does not belong to the selected message.');
+      result = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='; break;
+    }
+    case 'reveal_message_attachment': {
+      const task = session(args.sessionId), message = (messages[task.id] ?? []).find(message => message.id === args.messageId && message.role === 'user');
+      const path = String(args.path ?? '');
+      if (task.remoteDevice || !message || !/^(?:\/|[A-Za-z]:[\\/])/.test(path) || /[\u0000-\u001f\u007f]/.test(path) || /^(?:\\\\|\/\/)/.test(path) || path.split(/[\\/]/).includes('..') || !parseAttachments(contextBlocks(message.content).blocks).some(item => item.path === path)) throw new Error('This path does not belong to the selected message.');
       break;
     }
     case 'import_prompt_image': {

@@ -9,13 +9,37 @@ use rusqlite::params;
 /// deliberately shares the checkout, as the existing whole-task fork does; it
 /// neither rewinds files nor creates another Git branch or project.
 pub(crate) fn at_message(store: &Store, source_id: &str, message_id: i64) -> Result<Session> {
+    copy(store, source_id, message_id, false)
+}
+
+/// Edit creates an independent transcript before a saved human prompt. The
+/// checkout is shared and its current files are never changed by this operation.
+pub(crate) fn before_message(store: &Store, source_id: &str, message_id: i64) -> Result<Session> {
+    copy(store, source_id, message_id, true)
+}
+
+fn copy(store: &Store, source_id: &str, message_id: i64, exclusive: bool) -> Result<Session> {
     let transaction = store
         .db
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
     let source = store.session(source_id)?;
     store.message_content(source_id, message_id)?;
-    let boundary_provider = store.provider_at_message(source_id, message_id)?;
+    if exclusive {
+        if matches!(source.status.as_str(), "running" | "waiting") {
+            return Err("Stop this task before editing an earlier message.".into());
+        }
+        let is_user: bool = store.db.query_row(
+            "SELECT role='user' FROM messages WHERE session_id=?1 AND id=?2",
+            params![source_id, message_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !is_user {
+            return Err("Only saved user messages can be edited.".into());
+        }
+    }
+    let cutoff = message_id.checked_sub(i64::from(exclusive))
+        .ok_or("Invalid message boundary.")?;
+    let boundary_provider = store.provider_at_message(source_id, cutoff)?;
     // Resolve before writing so a missing worktree never becomes a main-folder
     // task. Team workers may also fork, but receive no team execution identity.
     store.workspace_root(&source.project_id, Some(source_id))?;
@@ -41,7 +65,7 @@ pub(crate) fn at_message(store: &Store, source_id: &str, message_id: i64) -> Res
             "SELECT id,role,content,created_at FROM messages WHERE session_id=?1 AND id<=?2 AND role NOT IN ('internal','changes') ORDER BY id",
         ).map_err(|e| e.to_string())?;
         let rows = query
-            .query_map(params![source_id, message_id], |row| {
+            .query_map(params![source_id, cutoff], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,

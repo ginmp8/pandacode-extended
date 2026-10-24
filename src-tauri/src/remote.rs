@@ -7,12 +7,14 @@ mod client;
 mod config;
 mod crypto;
 mod host;
+mod permissions;
 pub(crate) mod mirror;
 mod replay;
 mod socket;
 mod start;
 
 pub(crate) use mirror::{route, Mirror};
+pub(crate) use host::check_current_request;
 
 use crate::{secret_store, Result};
 use serde::{Deserialize, Serialize};
@@ -172,8 +174,11 @@ impl Remote {
         self.key.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn save(&self, settings: &config::Settings) {
-        if let Err(error) = config::save(&self.dir, settings) {
+    fn save(&self, _settings: &config::Settings) {
+        // Mutations can interleave before they persist. Save the current state
+        // under its lock so an older snapshot cannot restore a revoked grant.
+        let inner = self.lock();
+        if let Err(error) = config::save(&self.dir, &inner.settings) {
             eprintln!("{error}");
         }
     }
@@ -214,6 +219,7 @@ impl Remote {
             "signedIn": inner.token.is_some() || inner.unreadable,
             "device": {"id": inner.settings.device_id, "name": config::device_name(), "fingerprint": fingerprint},
             "hostEnabled": inner.settings.host_enabled,
+            "allowFullAccess": inner.settings.allow_full_access,
             "connected": inner.connected,
         });
         if let Some(account) = &inner.settings.account {
@@ -486,6 +492,24 @@ pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Re
         inner.settings.clone()
     };
     state.save(&settings);
+    emit_status(&app);
+    Ok(state.status())
+}
+
+/// Local IPC only: never part of the remote host RPC method allowlist.
+#[tauri::command]
+pub async fn remote_set_full_access(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
+    let state = remote(&app);
+    {
+        let mut inner = state.lock();
+        let mut settings = inner.settings.clone();
+        settings.allow_full_access = enabled;
+        // Do not claim a successful grant if it cannot be persisted. A failed
+        // revocation still takes effect in this running process.
+        if !enabled { inner.settings.allow_full_access = false; }
+        config::save(&state.dir, &settings)?;
+        inner.settings = settings;
+    }
     emit_status(&app);
     Ok(state.status())
 }

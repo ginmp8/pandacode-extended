@@ -482,6 +482,21 @@ pub(crate) fn threads(store: &Store, bot_id: &str) -> Result<Vec<Thread>> {
     rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
 }
 
+/// Transcript forks share the bot workspace without inheriting a channel identity.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndependentTask {
+    id: String,
+    title: String,
+    updated_at: i64,
+}
+
+fn independent_tasks(store: &Store, bot_id: &str) -> Result<Vec<IndependentTask>> {
+    let mut statement = store.db.prepare("SELECT s.id,s.title,s.updated_at FROM sessions s JOIN bots b ON b.project_id=s.project_id WHERE b.id=?1 AND s.draft=0 AND NOT EXISTS(SELECT 1 FROM bot_threads t WHERE t.session_id=s.id) AND NOT EXISTS(SELECT 1 FROM architect_workers w WHERE w.session_id=s.id) ORDER BY s.updated_at DESC LIMIT 500").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([bot_id], |r| Ok(IndependentTask { id: r.get(0)?, title: r.get(1)?, updated_at: r.get(2)? })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
+}
+
 /// The bot that owns a task, if the task is a bot conversation.
 pub(crate) fn owner_of(store: &Store, session_id: &str) -> Result<Option<(Bot, Thread)>> {
     let found: Option<(String, Thread)> = store
@@ -495,6 +510,25 @@ pub(crate) fn owner_of(store: &Store, session_id: &str) -> Result<Option<(Bot, T
         Some((bot, thread)) => Ok(Some((get(store, &bot)?, thread))),
         None => Ok(None),
     }
+}
+
+/// A transcript fork keeps the bot workspace and its context, but never adopts
+/// the source channel/thread identity or its notification destination.
+pub(crate) fn fork_task_brief(store: &Store, task: &crate::storage::Session, refresh: bool) -> Result<Option<String>> {
+    if owner_of(store, &task.id)?.is_some() { return Ok(None); }
+    let id: Option<String> = store.db.query_row("SELECT id FROM bots WHERE project_id=?1 LIMIT 1", [&task.project_id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    let Some(id) = id else { return Ok(None); };
+    let bot = get(store, &id)?;
+    if bot.paused { return Err("This bot is paused. Resume it before continuing this task.".into()); }
+    if !refresh { return Ok(None); }
+    let mut text = brief::compose(&bot, &memories(store, &bot.id)?, "desktop", "You");
+    if text.len() > 32 * 1024 {
+        let mut end = 32 * 1024;
+        while !text.is_char_boundary(end) { end -= 1; }
+        text.truncate(end);
+        text.push_str("\n[Bot context truncated at 32 KiB.]\n");
+    }
+    Ok(Some(text))
 }
 
 /// The task for a conversation thread, created on first use in the bot's workspace.
@@ -554,6 +588,7 @@ pub struct BotDetail {
     channels: Vec<channels::Channel>,
     pairings: Vec<channels::Pairing>,
     threads: Vec<Thread>,
+    independent_tasks: Vec<IndependentTask>,
     rules: Vec<guard::Rule>,
     /// The local server's port, for web chat links and the WhatsApp webhook URL.
     server_port: u16,
@@ -656,6 +691,7 @@ pub async fn bot_detail(state: State<'_, AppState>, bot_id: String) -> Result<Bo
         channels: channels::list(&store, &bot_id)?,
         pairings: channels::pairings(&store, &bot_id)?,
         threads: threads(&store, &bot_id)?,
+        independent_tasks: independent_tasks(&store, &bot_id)?,
         rules: guard::rules(&store, &bot_id)?,
         server_port: channels::http::port(),
     })

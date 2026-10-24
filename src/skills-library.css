@@ -32,3 +32,13 @@
 .skills-subheading{margin:.9rem 0 .4rem;font-size:.8rem}
 .skills-unmanaged{margin:0;padding-left:1rem;font-size:.76rem;display:flex;flex-direction:column;gap:6px}
 .skills-unmanaged span{color:var(--muted)}
+
+.skills-catalogs, .skills-scopes { padding: 16px; }
+.skills-catalog { margin: 16px 0; border-top: 1px solid var(--border); padding-top: 12px; }
+.skills-catalog summary { cursor: pointer; }
+.skills-catalog-list { list-style: none; padding: 0; margin: 12px 0; max-height: 340px; overflow: auto; }
+.skills-catalog-list li { padding: 7px 0; }
+.skills-catalog-list .skills-toggle { align-items: flex-start; }
+.skills-catalog-list small { display: block; overflow-wrap: anywhere; }
+.skills-catalog .skills-source { overflow-wrap: anywhere; }
+.skills-scopes form > button { margin-top: 12px; }

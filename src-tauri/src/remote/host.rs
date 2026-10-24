@@ -2,7 +2,7 @@
 //! "Allow remote control" is on and only from computers trusted here (their key pinned),
 //! and pushes the agent events of the tasks they mirror. Remote prompts run under the
 //! same approval policy as local ones.
-use super::{remote, socket, start, Subscriber};
+use super::{permissions, remote, socket, start, Subscriber};
 use crate::{message_queue, providers::AgentEvent, AppState, Result};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -50,6 +50,42 @@ pub(crate) fn require_authorized(app: &tauri::AppHandle, from: &str, authenticat
     let state = remote(app);
     let inner = state.lock();
     gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())
+}
+
+/// Authenticated request provenance survives asynchronous provider discovery but
+/// is never supplied by a webview parameter. Local commands have no such scope.
+struct RequestOrigin {
+    app: tauri::AppHandle,
+    device: String,
+    key: String,
+}
+
+tokio::task_local! {
+    static REQUEST_ORIGIN: RequestOrigin;
+}
+
+fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: &str) -> Result<()> {
+    let state = remote(app);
+    let inner = state.lock();
+    authorize_mode(&inner, from, authenticated_key, mode)
+}
+
+fn authorize_mode(inner: &super::Inner, from: &str, authenticated_key: &str, mode: &str) -> Result<()> {
+    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
+    permissions::allow_mode(inner.settings.allow_full_access, mode)
+}
+
+/// Rechecked by native mutation/launch paths after their awaits, using the task's
+/// current mode under the ordinary agents/store admission locks.
+pub(crate) fn check_current_request(mode: &str) -> Result<()> {
+    REQUEST_ORIGIN.try_with(|origin| require_mode(&origin.app, &origin.device, &origin.key, mode)).unwrap_or(Ok(()))
+}
+
+pub(crate) fn check_start_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: Option<&str>) -> Result<()> {
+    let state = remote(app);
+    let inner = state.lock();
+    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
+    permissions::start_mode(mode, inner.settings.allow_full_access).map(|_| ())
 }
 
 /// Ids are UUIDs or provider request ids: short, printable, no spaces.
@@ -166,7 +202,10 @@ pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, 
         gate(enabled, trusted, &name).and_then(|_| inner.replay.check(message["ts"].as_i64(), message["nonce"].as_str(), now_ms)).map(|_| enabled)
     };
     let result = match admitted.and_then(|enabled| parse(enabled, message["method"].as_str().unwrap_or_default(), &message["params"])) {
-        Ok(call) => run(app, from, authenticated_key, call).await,
+        Ok(call) => REQUEST_ORIGIN.scope(
+            RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned() },
+            run(app, from, authenticated_key, call),
+        ).await,
         Err(error) => Err(error),
     };
     Some(match result {
@@ -176,15 +215,16 @@ pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, 
 }
 
 /// The task must exist here; a mirror never forwards a second hop.
-fn local_task(state: &AppState, session_id: &str) -> Result<()> {
+fn local_task(state: &AppState, session_id: &str) -> Result<crate::storage::Session> {
     let task = state.store.lock().map_err(|e| e.to_string())?.session(session_id)?;
     if task.remote_device.is_some() {
         return Err("That task runs on another computer.".into());
     }
-    Ok(())
+    Ok(task)
 }
 
 async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
+    require_authorized(app, from, authenticated_key)?;
     let state = app.state::<AppState>();
     match call {
         Call::Subscribe { session_ids } => {
@@ -213,24 +253,22 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
             }
             Ok(models)
         }
-        Call::Start(request) => start::run(app, from, authenticated_key, request).await,
+        Call::Start(request) => {
+            check_start_mode(app, from, authenticated_key, request.mode.as_deref())?;
+            start::run(app, from, authenticated_key, request).await
+        }
         Call::Messages { session_id, after_id } => {
             local_task(&state, &session_id)?;
             let store = state.store.lock().map_err(|e| e.to_string())?;
             messages_page(&store.db, &session_id, after_id)
         }
         Call::Send { session_id, text } => {
-            local_task(&state, &session_id)?;
-            // Like Enter in the composer: a running task queues the message.
-            let busy = || state.agents.lock().map(|agents| agents.contains_key(&session_id)).map_err(|e| e.to_string());
-            if busy()? {
-                let entry = message_queue::add(&*state.store.lock().map_err(|e| e.to_string())?, &session_id, &text, &json!([]))?;
-                // If the run ended between the check and the add, nothing would deliver the
-                // entry: take it back (unless a run end already did) and send it now.
-                if busy()? || message_queue::take(&*state.store.lock().map_err(|e| e.to_string())?, &entry.id).is_err() {
-                    let _ = app.emit("queue-changed", json!({"sessionId": session_id}));
-                    return Ok(json!({"queued": true}));
-                }
+            check_current_request(&local_task(&state, &session_id)?.mode)?;
+            // A host-side anonymous queue would lose the authenticated origin and
+            // could execute after trust/Full access was revoked. The viewer keeps
+            // its ordinary queue; a busy host accepts explicit steering instead.
+            if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
+                return Err("This remote task is running. Keep the message queued on this computer, or use Steer.".into());
             }
             crate::send_message(app.clone(), state, session_id, text, None, None).await?;
             let _ = app.emit("sessions-changed", ());
@@ -242,11 +280,17 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
             Ok(json!({}))
         }
         Call::Steer { session_id, text } => {
-            local_task(&state, &session_id)?;
+            check_current_request(&local_task(&state, &session_id)?.mode)?;
             message_queue::steer_task(app.clone(), state, session_id, text).await
         }
         Call::Configure { session_id, model, effort, mode } => {
-            local_task(&state, &session_id)?;
+            let task = local_task(&state, &session_id)?;
+            {
+                let remote = remote(app);
+                let inner = remote.lock();
+                let effective = permissions::configure_mode(&task.mode, mode.as_deref(), inner.settings.allow_full_access)?;
+                authorize_mode(&inner, from, authenticated_key, effective)?;
+            }
             if let Some((provider, _)) = &model {
                 start::require_installed(provider).await?;
             }
@@ -264,7 +308,9 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
             Ok(json!({}))
         }
         Call::Approve { session_id, request_id, approve } => {
-            local_task(&state, &session_id)?;
+            let task = local_task(&state, &session_id)?;
+            if approve { check_current_request(&task.mode)?; }
+            else { require_authorized(app, from, authenticated_key)?; }
             crate::respond_approval(app.clone(), state, session_id.clone(), request_id.clone(), approve).await?;
             // Clear the card in this computer's window, as bot approvals do.
             let event = AgentEvent { session_id, kind: "approval_cancelled".into(), text: String::new(), request_id: Some(request_id), data: None, tool: None };
@@ -272,7 +318,7 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
             Ok(json!({}))
         }
         Call::Answer { session_id, request_id, response } => {
-            local_task(&state, &session_id)?;
+            check_current_request(&local_task(&state, &session_id)?.mode)?;
             crate::respond_user_input(app.clone(), state, session_id, request_id, response).await?;
             Ok(json!({}))
         }
@@ -504,6 +550,45 @@ mod tests {
             assert_eq!(parse(false, method, &json!({"sessionId": "s", "text": "hi", "requestId": "r", "approve": true})), Err(OFF.to_string()));
         }
         assert_eq!(parse(false, "nope", &json!({})), Err(OFF.to_string()));
+    }
+
+    #[test]
+    fn execution_rechecks_trust_hosting_and_full_access_after_admission() {
+        let mut inner = super::super::Inner::default();
+        inner.devices.push(super::super::Device {
+            id: "peer".into(), name: "Peer".into(), platform: "test".into(),
+            public_key: "pinned-key".into(), host: true, online: true, last_seen: Value::Null,
+        });
+        inner.settings.trusted.insert("peer".into(), "pinned-key".into());
+        inner.settings.host_enabled = true;
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_ok());
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
+        inner.settings.allow_full_access = true;
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_ok());
+        // No cached grant survives revocation while a request awaits discovery.
+        inner.settings.allow_full_access = false;
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
+        inner.settings.allow_full_access = true;
+        inner.settings.host_enabled = false;
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
+        inner.settings.host_enabled = true;
+        inner.settings.trusted.remove("peer");
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_err());
+        inner.settings.trusted.insert("peer".into(), "new-key".into());
+        inner.devices[0].public_key = "new-key".into();
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_err());
+        assert!(authorize_mode(&inner, "peer", "new-key", "ask").is_ok());
+        inner.devices.clear();
+        assert!(authorize_mode(&inner, "peer", "new-key", "ask").is_err());
+    }
+
+    #[test]
+    fn remote_callers_cannot_change_the_full_access_grant_or_other_settings() {
+        for method in ["remote_set_full_access", "remote_set_host_enabled", "remote_set_trusted", "settings.update"] {
+            assert!(!METHODS.contains(&method));
+            assert!(parse(true, method, &json!({"enabled": true})).is_err());
+        }
+        assert!(check_current_request("full").is_ok(), "local execution has no remote policy scope");
     }
 
     #[test]

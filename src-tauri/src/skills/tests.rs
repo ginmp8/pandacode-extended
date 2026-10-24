@@ -1,20 +1,20 @@
 use super::*;
 use std::process::Command;
 
-struct Fixture {
-    base: PathBuf,
-    library: Library,
-    home: PathBuf,
+pub(super) struct Fixture {
+    pub(super) base: PathBuf,
+    pub(super) library: Library,
+    pub(super) home: PathBuf,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let base = std::env::temp_dir().join(format!("pandacode-skills-{}", uuid::Uuid::new_v4()));
         let home = base.join("home");
         fs::create_dir_all(home.join(".claude")).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         Self { library: Library::new(base.join("library"), home.clone()), home, base }
     }
-    fn folder(&self, name: &str, files: &[(&str, &str)]) -> PathBuf {
+    pub(super) fn folder(&self, name: &str, files: &[(&str, &str)]) -> PathBuf {
         let dir = self.base.join("source").join(name);
         for (path, text) in files {
             let path = dir.join(path);
@@ -23,12 +23,12 @@ impl Fixture {
         }
         dir
     }
-    fn import(&self, kind: Kind, path: &Path) -> Item {
+    pub(super) fn import(&self, kind: Kind, path: &Path) -> Item {
         let files = read_local(path).unwrap();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         self.library.import(kind, files, &name, Source { kind: "folder".into(), location: path.to_string_lossy().into_owned(), git_ref: None, commit: None }).unwrap()
     }
-    fn repo(&self) -> PathBuf {
+    pub(super) fn repo(&self) -> PathBuf {
         let root = self.base.join("repo");
         fs::create_dir_all(&root).unwrap();
         assert!(Command::new("git").arg("init").arg("-q").current_dir(&root).status().unwrap().success());
@@ -187,4 +187,19 @@ fn normalizes_names_and_frontmatter() {
     assert_eq!((name.as_deref(), description.as_deref(), body), (Some("x"), Some("y"), "body"));
     assert!(normalize(Kind::Skill, vec![("a.txt".into(), vec![])]).is_err());
     assert!(normalize(Kind::Rule, vec![("a.md".into(), vec![]), ("b.md".into(), vec![])]).is_err());
+}
+
+#[test]
+fn frontmatter_understands_plain_folded_and_literal_descriptions() {
+    for marker in [">", ">-", ">+"] {
+        let source = format!("---\r\nname: Review\r\ndescription: {marker}\r\n  Review code\r\n  and tests.\r\nmetadata: ignored\r\n---\r\nBody");
+        let (name, description, body) = frontmatter(&source);
+        assert_eq!(name.as_deref(), Some("Review"));
+        assert_eq!(description.as_deref(), Some("Review code and tests.")); assert_eq!(body, "Body");
+    }
+    for marker in ["|", "|-", "|+"] {
+        let source = format!("---\nname: Review\ndescription: {marker}\n  First line\n  Second line\n---\nBody");
+        assert_eq!(frontmatter(&source).1.as_deref(), Some("First line\nSecond line"));
+    }
+    assert_eq!(frontmatter("---\nname: x\n---not-a-boundary\ncontent").0, None);
 }

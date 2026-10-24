@@ -10,7 +10,15 @@ The panel opens on **Overview**:
 
 Each agent has a tab with its limit windows, its cost for the period and a year activity calendar.
 
-The browser preview uses labeled sample limits and costs. The desktop reads the current account configured by each harness; this is not an all-account switcher. Limits may include usage from the same account in other applications.
+The browser preview uses labeled sample limits and costs. The desktop reads the default account and, in each installed harness's tab, separately lists its saved named connections. Limits may include usage from the same account in other applications.
+
+## Named connections in 0.3.41-hardened
+
+Create connections in **Settings → Providers**, then open **Agent usage** and choose the harness tab. **Default setup** and each named connection have separate subscription-limit results. Named Claude Code and Codex connections use their own configuration directory and environment. A changed/deleted connection invalidates the result; the frontend also checks the returned connection id. Unsupported harnesses and connections with a custom executable or extra CLI arguments show **Not exposed** rather than querying a different account. API-key setups do not inherit another account's subscription limits.
+
+Refresh remains explicit. Per-connection caches use the connection id and revision, with a bounded number of entries. No credentials are returned to the frontend. The **Estimated API cost** ledger is still aggregated by harness; this revision does not assign historical dollar costs to named connections.
+
+When a task reaches a reported limit, its banner can offer **Continue on…** for another saved connection of the same harness. This is an explicit action: the backend validates the connection, invalidates the old native resume id, preserves the transcript and recovers context before the next message. It never switches automatically. The banner offers compatible saved choices; it does not promise that an alternative has spare quota. See [connection/session safeguards](connection-session-safety.md) for recovery bounds and native-control limitations.
 
 ## Estimated API cost
 

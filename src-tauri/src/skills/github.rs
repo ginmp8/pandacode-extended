@@ -6,21 +6,28 @@ use super::{Files, MAX_BYTES, MAX_FILES};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-fn valid_repo(repo: &str) -> bool {
+pub(super) fn valid_repo(repo: &str) -> bool {
     let mut parts = repo.split('/');
     let ok = |part: Option<&str>| part.is_some_and(|p| !p.is_empty() && !p.starts_with(['.', '-']) && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)));
     ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
 }
-fn valid_path(path: &str) -> bool {
+/// GitHub owner/repository names are case-insensitive; paths inside a repo are not.
+pub(super) fn same_location(a: &str, b: &str) -> bool {
+    let a: Vec<_> = a.splitn(3, '/').collect();
+    let b: Vec<_> = b.splitn(3, '/').collect();
+    a.len() >= 2 && b.len() >= 2 && a[0].eq_ignore_ascii_case(b[0]) && a[1].eq_ignore_ascii_case(b[1]) && a.get(2) == b.get(2)
+}
+
+pub(super) fn valid_path(path: &str) -> bool {
     path.split('/').all(|part| !part.is_empty() && part != "." && part != ".." && part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_. ".contains(&b)))
 }
-fn valid_ref(git_ref: &str) -> bool {
+pub(super) fn valid_ref(git_ref: &str) -> bool {
     !git_ref.is_empty() && !git_ref.starts_with('-') && !git_ref.contains("..") && git_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
 }
 
-fn api(endpoint: &str) -> Result<serde_json::Value, String> {
+pub(super) fn api(endpoint: &str) -> Result<serde_json::Value, String> {
     let home = crate::agent_usage_providers::home().unwrap_or_else(std::env::temp_dir);
-    let capture = crate::github::run_gh(&home, &["api", endpoint], TIMEOUT)?;
+    let capture = crate::github::run_gh(&home, &["api", "--hostname", "github.com", endpoint], TIMEOUT)?;
     crate::github::json(&capture)
 }
 

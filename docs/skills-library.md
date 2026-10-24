@@ -1,103 +1,141 @@
-# Skills library and rules registry
+# Skills library, GitHub catalogs and scoped selections
 
-Issues #15 (skills) and #45 (rules). This is a small first version. It lets you import a skill or rule once, turn it on for each harness and scope, and see what each installed harness actually has.
+The existing **Settings → Skills & rules** page owns all three flows. Imports are inert.
+A skill reaches a harness only after the user activates it or saves a bot/project selection.
+No discovery step runs a repository script, installs a package, changes permissions, or starts an agent.
 
-## Storage
+## Where to use it
 
-Everything is files under the app data folder. There is no schema migration.
+1. **Library** imports a local skill/rule or a specific GitHub path and retains the existing
+   user/project activation matrix for each harness.
+2. **GitHub catalogs** scans an explicitly named `owner/repository`, including nested
+   `SKILL.md` folders. Select one or several packages and choose **Import selected**.
+3. **Bot & project skills** selects a bot or project and pins the current versions with
+   **Save skill selection**. Review any findings before accepting them.
+4. **Current task: effective skills** shows the union used by the current task, with
+   `bot`, `project`, `both`, or existing `user` provenance and `native`, `prompt`, or
+   `skipped` delivery. Refresh the preview after changing a file-based activation.
 
-```
-<app data>/skills/<id>/SKILL.md     skill (the folder keeps its other files)
-<app data>/skills/<id>/RULE.md      rule (one Markdown file)
-<app data>/skills/<id>.json         Meta: source (folder path or owner/name/path, ref, commit),
-                                    content SHA-256, acknowledged hash, activations
-```
+Bot selections apply to that bot's conversations and other tasks in its own workspace.
+Project selections apply to tasks whose current project id matches the selection. A task's
+actual bot/project is resolved natively during execution admission; frontend-provided
+context does not choose another task's skills. Unrelated projects receive no bot additions.
 
-Each activation records the harness, scope, project checkout, surface, the library hash it wrote, the SHA-256 of every file or block it wrote, and any `.git/info/exclude` lines it added.
+## Catalogs and provenance
 
-## Adapters (`src-tauri/src/skills/adapter.rs`)
+Catalog registration and refresh use the already installed GitHub CLI and its existing
+GitHub.com login. The user initiates each read. A catalog records repository, optional ref,
+immutable 40-hex commit, scan time, package paths, frontmatter, file counts and byte counts.
+An import reads the exact indexed commit, records `owner/repository/path`, ref, commit and
+the library's full SHA-256 content hash, and runs the ordinary safety scan.
+
+A repository tree may have at most 20,000 entries and 128 skills. A package may have at
+most 64 files / 1 MiB. Description reads and one import batch have an 8 MiB aggregate
+budget. Each underlying GitHub call is bounded by the existing runner; operations check
+a 60-second budget between calls. Truncated trees, invalid object ids, invalid paths,
+symlinks, submodules, unsupported encodings and inconsistent blob lengths are rejected or
+excluded before packaging. A nested skill is a separate package: its files do not leak
+into its parent skill's import.
+
+**Refresh catalog** only updates the index. A different imported commit appears as
+**Update available**; no library copy, native activation or scope selection is updated
+in the background. **Disabled** and **Ignored** catalogs cannot refresh or import.
+**Remove catalog** removes only the index; imported copies remain in the library.
+
+Name conflicts are shown per package. Importing a different source under an existing id
+is refused. The library also refuses to overwrite a changed local hash, an unmanaged
+folder, a symlink or added hidden content. Batch import reports each imported/skipped
+package separately; partial success is visible. Ordinary same-source reimports retain
+activations but leave them outdated until the user explicitly activates the new version.
+
+## Native folders and scoped fallback
 
 | Harness | Skill, user | Skill, project | Rule, user | Rule, project |
 |---|---|---|---|---|
 | Claude Code | `~/.claude/skills/<id>/` | `<checkout>/.claude/skills/<id>/` | block in `~/.claude/CLAUDE.md` | block in `<checkout>/CLAUDE.md` |
 | Codex | `~/.codex/skills/<id>/` | `<checkout>/.codex/skills/<id>/` | block in `~/.codex/AGENTS.md` | block in `<checkout>/AGENTS.md` |
-| Others | `prompt` | `prompt` | `prompt` | `prompt` |
+| Other registered harnesses | bounded prompt | bounded prompt | bounded prompt | bounded prompt |
 
-- A rule block is wrapped in `<!-- pandacode:rule:<id> -->` … `<!-- /pandacode:rule:<id> -->`. Text outside the block is never changed.
-- PandaCode never writes into a skill folder it did not create, never overwrites a file or block whose hash differs from what it wrote, and on deactivation leaves edited files in place (`Change.kept`).
-- In a Git checkout, project scope adds the skill folder (and a rule file, but only when PandaCode created that file) to `info/exclude`. The path comes from `git rev-parse --git-path info/exclude`, so worktrees work too. Passing `sessionId` scopes the activation to that task's worktree.
-- Harnesses marked `prompt` only record the activation. Nothing injects these items into prompts yet (see Not yet).
+The existing adapters retain their protections against overwriting unmanaged/edited
+files. Project activations still use the explicit checkout/worktree supplied to the
+existing activation command, and managed Git exclusions remain unchanged.
 
-## Matrix and safety
+Bot/project selections are an additional, harness-independent choice. They carry only
+approved main-file text in the current turn's prompt, without writing files into shared
+checkouts. If the same current hash already has a healthy native activation for this
+harness and checkout, the native folder is used and no duplicate text is injected. A
+native activation with another version or changed files is reported for review instead
+of injecting a competing version. Its files are never silently replaced.
 
-- `skills_matrix` lists each installed file harness (its CLI is on PATH or `~/.<harness>` exists), plus any prompt harness in use. Each cell is `active`, `outdated` (a newer library version is not activated yet), `drifted`, `missing`, `prompt` or `off`. It also lists skill folders PandaCode does not manage, unknown PandaCode blocks, and instruction files with text PandaCode does not manage.
-- Importing again updates the library only. Harnesses keep the old version and show `outdated` until you activate again.
-- The safety scan (`skills/safety.rs`) flags secret-shaped tokens and named secrets, instructions that turn off approvals or the sandbox, and downloads piped into a shell. If an item has findings, activation fails until the user calls it with `acknowledge: true`. That acknowledgement is stored per content hash.
-- GitHub import uses `gh api` through `github::run_gh` (`workspace::run_process`). Limits: 64 files and 1 MB.
+The fallback has an 8 KiB per-item budget and a 32 KiB aggregate context budget (including its
+short heading). Truncated text says it was truncated. Items that do not fit are reported
+as skipped. Supporting files remain available in the library/native activation but are
+not automatically read outside the project or copied for a bot-specific selection.
+This means a skill that depends on supporting files may require explicit native project
+activation; the fallback does not claim full native skill-directory behavior.
+
+The final prompt is assembled under the native task-admission lock before saving the
+new user turn. User history retains the user's original text. A per-task fingerprint invalidates the native resume id when effective skill versions
+change, disappear or become unavailable. The existing history recovery then restores
+user/assistant messages without restoring the old synthetic skill block. Changes during
+a running turn apply at the next admission. Tasks using the text fallback must continue
+through chat: the interactive console cannot deliver that context, and even a native
+resume id does not prove a previous prompt was delivered. Healthy native file activations
+can use the console after an ordinary chat turn has refreshed any changed skill context. Permission mode, tool
+approval, remote authorization and the execution backend remain unchanged. Maintenance
+and goal-control operations do not receive these additions.
+
+## Versions, safety and storage
+
+Storage stays under the existing app data directory; no SQLite migration is required:
+
+- `skills/<id>/SKILL.md` or `RULE.md`, plus supporting regular files.
+- `skills/<id>.json`: source, content SHA-256, findings acknowledgement and activations.
+- `skills/.catalogs.json`: explicit catalog sources and scanned indexes.
+- `skills/.scopes.json`: bot/project selections as `{id, sha256}` pins.
+- `skills/.task-contexts/<hashed-session-id>`: effective-skill fingerprint for resume safety.
+
+A new import never silently changes a selected pin. Missing items, modified library
+content, unacknowledged findings, mismatched selected hashes or conflicting bot/project
+versions are reported as skipped. Save the reviewed selection again to approve a new
+version. Removal is refused while any native/prompt activation or existing bot/project
+selection still refers to that skill. An explicit library removal first clears selections
+whose bot/project ids are confirmed absent from the database. Existing targets keep their
+selections even if a workspace folder is unavailable; database/read/write errors abort
+cleanup and removal. Scope writes and cleanup hold the Store lock before the library lock,
+so a target cannot be deleted between validation and saving a selection.
+
+The safety scan flags secret-shaped values, attempts to disable approvals/sandboxing,
+and downloads piped into a shell. Acknowledgement is explicit and specific to the
+content hash. It is an inspection aid, not proof that a skill is safe.
 
 ## Commands
 
-`skills_list()`, `skills_import_folder({ path, kind })`, `skills_import_github({ repo, path, gitRef?, kind })`, `skills_activate({ id, harness, scope, projectId?, sessionId?, acknowledge? })`, `skills_deactivate({ id, harness, scope, projectId?, sessionId? })`, `skills_matrix({ projectId?, sessionId? })`, `skills_scan({ id })`, `skills_remove({ id })`. Here `kind` is `skill` or `rule`, and `scope` is `user` or `project`. Activate and deactivate return `{ items, kept }`.
+Existing commands remain available: `skills_list`, `skills_import_folder`,
+`skills_import_github`, `skills_activate`, `skills_deactivate`, `skills_matrix`,
+`skills_scan` and `skills_remove`.
 
-## Not yet
+New commands:
 
-Prompt injection for prompt harnesses (that belongs with the token saver's send-time block), role and task scopes beyond a session worktree, version diffs with promote/skip/pin, folding the Token saver packs into the library, GitLab, conflict detection between rules.
+| Command | Purpose |
+|---|---|
+| `skills_catalogs()` | Read catalog indexes without network access |
+| `skills_catalog_add({repo, gitRef?})` | Explicit discovery/registration |
+| `skills_catalog_refresh({repo})` | Refresh index only |
+| `skills_catalog_state({repo, state})` | Enable/disable/ignore; `null` removes index |
+| `skills_catalog_import({repo, paths})` | Import exactly the selected paths |
+| `skills_scope_get({target, targetId})` | Read bot/project hash pins |
+| `skills_scope_set({target, targetId, ids, acknowledge?})` | Explicitly save reviewed versions |
+| `skills_task_resolve({sessionId})` | Read effective provenance/delivery and skip reasons |
 
-## Wiring
+Catalog mutation/network reads and scoped selection writes require the main local
+window. New commands are not exposed through remote control, bot channels or the tray.
 
-These hunks fall outside the module's files.
+## Validation and limits
 
-`src-tauri/src/lib.rs`, module list (next to `mod token_saver;`):
-
-```rust
-mod skills;
-```
-
-`src-tauri/src/lib.rs`, `generate_handler!` (after `token_saver::token_saver_install,`):
-
-```rust
-                skills::skills_list,
-                skills::skills_import_folder,
-                skills::skills_import_github,
-                skills::skills_activate,
-                skills::skills_deactivate,
-                skills::skills_matrix,
-                skills::skills_scan,
-                skills::skills_remove,
-```
-
-`src/settings.ts`:
-
-```ts
-import { mountSkillsLibrary, type SkillsLibraryHost } from './skills-library';
-// SettingsSection union: add 'skills'
-export type SettingsSection = 'general' | 'appearance' | 'agents' | 'providers' | 'teams' | 'tools' | 'skills' | 'cloud' | 'remote' | 'github' | 'about';
-// SettingsOptions:
-  /** Skills library and rules registry. */
-  skills?: SkillsLibraryHost;
-// SECTIONS, after 'tools':
-  { id: 'skills', label: 'Skills & rules', icon: 'widget', description: 'Import skills and rules once, turn them on per harness, and check for drift.' },
-// sectionHtml():
-    case 'skills': return '<div id="skills-library"></div>';
-// mountSection():
-    if (id === 'skills' && options.skills) cleanups.push(mountSkillsLibrary(panel.querySelector<HTMLElement>('#skills-library')!, options.skills));
-```
-
-`src/main.ts`, in the `mountSettings` options next to `cloud: { call, … }`:
-
-```ts
-      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },
-```
-
-`src/preview.ts`:
-
-```ts
-import { createPreviewSkills } from './preview-skills';
-const previewSkills = createPreviewSkills();
-// in invoke()'s switch, before `default:`
-    case 'skills_list': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
-    case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
-      result = previewSkills.call(command, args); break;
-```
-
-`playwright.config.ts`, `testMatch`: add `'**/skills-library.spec.ts'`. The spec mounts the section on its own page, so it passes before or after the Settings wiring.
+Fixture tests exercise nested discovery, pinned imports, disabled/ignored sources,
+source collisions, library edits, unsafe paths, truncated trees, size limits, scoped
+provenance, stale versions, explicit safety consent, bounded context and real native
+execution admission. Browser tests exercise the existing library and new catalog/scope
+controls through the preview IPC layer. Live GitHub and real provider execution require
+an installed authenticated CLI and are separate integration checks.

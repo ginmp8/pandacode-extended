@@ -20,8 +20,8 @@ const MAX_ARG_LEN: usize = 1024;
 const MAX_ENV: usize = 64;
 const MAX_ENV_VALUE: usize = 4096;
 const MAX_NAME: usize = 60;
-// ponytail: assignments of deleted tasks stay until the cap trims them; prune
-// on task deletion if this ever matters.
+// Never evict an assignment to make room: that would silently change credentials
+// while a task still owns the previous connection's native session ID.
 const MAX_TASKS: usize = 5000;
 const PROVIDERS: &[&str] = &[
     "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "omp", "github-copilot", "muse",
@@ -101,6 +101,12 @@ pub fn for_task(session_id: &str, provider: &str) -> Option<Connection> {
     let runtime = CONFIG.get()?.lock().ok()?;
     let id = runtime.data.tasks.get(session_id)?;
     runtime.data.connections.iter().find(|c| &c.id == id && c.provider == provider).cloned()
+}
+
+/// Current non-secret connection configuration, for explicit per-account usage.
+pub fn get(id: &str) -> Option<Connection> {
+    let runtime = CONFIG.get()?.lock().ok()?;
+    runtime.data.connections.iter().find(|connection| connection.id == id).cloned()
 }
 
 /// The folder variable each harness reads for its own config and login.
@@ -286,8 +292,13 @@ pub async fn connections_list() -> Result<Snapshot> {
 }
 
 #[tauri::command]
-pub async fn connection_save(connection: Input) -> Result<Snapshot> {
+pub async fn connection_save(state: tauri::State<'_, crate::AppState>, connection: Input) -> Result<Snapshot> {
+    let (agents, store, terminals) = (state.agents.clone(), state.store.clone(), state.terminals.clone());
     crate::blocking(move || {
+        // The admission path uses this lock order too. A task cannot start while
+        // its credentials and native context are being changed.
+        let agents = agents.lock().map_err(|e| e.to_string())?;
+        let store = store.lock().map_err(|e| e.to_string())?;
         let mut runtime = runtime()?;
         let index = match &connection.id {
             Some(id) => Some(runtime.data.connections.iter().position(|c| &c.id == id).ok_or("This connection no longer exists.")?),
@@ -296,6 +307,12 @@ pub async fn connection_save(connection: Input) -> Result<Snapshot> {
         };
         let previous = index.map(|i| runtime.data.connections[i].clone());
         let (saved, secrets) = validated(connection, previous.as_ref())?;
+        let affected: Vec<String> = runtime.data.tasks.iter().filter(|(_, id)| **id == saved.id).map(|(sid, _)| sid.clone()).collect();
+        ensure_idle(&store, &affected, |sid| Ok(agents.contains_key(sid) || crate::terminal::harness_running(&terminals, sid)?))?;
+        // Commit invalidation BEFORE touching secrets or the JSON assignment.
+        // A failed later write can require a fresh session on the old connection;
+        // it can never resume an old account's session under new credentials.
+        fresh_contexts(&store, &affected)?;
         for (name, value) in &secrets {
             crate::secret_store::set(SERVICE, &secret_account(&saved.id, name), value)?;
         }
@@ -314,8 +331,11 @@ pub async fn connection_save(connection: Input) -> Result<Snapshot> {
 }
 
 #[tauri::command]
-pub async fn connection_delete(id: String) -> Result<Snapshot> {
+pub async fn connection_delete(state: tauri::State<'_, crate::AppState>, id: String) -> Result<Snapshot> {
+    let (agents, store, terminals) = (state.agents.clone(), state.store.clone(), state.terminals.clone());
     crate::blocking(move || {
+        let agents = agents.lock().map_err(|e| e.to_string())?;
+        let store = store.lock().map_err(|e| e.to_string())?;
         let mut runtime = runtime()?;
         let Some(removed) = runtime.data.connections.iter().find(|c| c.id == id).cloned() else {
             return Ok(runtime.data.clone());
@@ -323,6 +343,9 @@ pub async fn connection_delete(id: String) -> Result<Snapshot> {
         let mut next = runtime.data.clone();
         next.connections.retain(|c| c.id != id);
         next.tasks.retain(|_, connection| *connection != id);
+        let affected: Vec<String> = runtime.data.tasks.iter().filter(|(_, connection)| **connection == id).map(|(sid, _)| sid.clone()).collect();
+        ensure_idle(&store, &affected, |sid| Ok(agents.contains_key(sid) || crate::terminal::harness_running(&terminals, sid)?))?;
+        fresh_contexts(&store, &affected)?;
         persist(&mut runtime, next)?;
         for name in &removed.secret_env {
             crate::secret_store::remove(SERVICE, &secret_account(&removed.id, name));
@@ -339,20 +362,73 @@ pub async fn connection_assign(
     session_id: String,
     connection_id: Option<String>,
 ) -> Result<Snapshot> {
-    if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
-        return Err("Stop the agent before changing its connection.".into());
-    }
     if session_id.is_empty() || session_id.len() > 128 {
         return Err("Unknown task.".into());
     }
+    let (agents, store, terminals) = (state.agents.clone(), state.store.clone(), state.terminals.clone());
     crate::blocking(move || {
+        let agents = agents.lock().map_err(|e| e.to_string())?;
+        let store = store.lock().map_err(|e| e.to_string())?;
         let mut runtime = runtime()?;
-        let mut next = runtime.data.clone();
-        assign(&mut next, session_id, connection_id)?;
-        persist(&mut runtime, next)?;
+        ensure_idle(&store, std::slice::from_ref(&session_id), |sid| Ok(agents.contains_key(sid) || crate::terminal::harness_running(&terminals, sid)?))?;
+        assign_task(&store, &mut runtime, session_id, connection_id)?;
         Ok(runtime.data.clone())
     })
     .await
+}
+
+fn assign_task(store: &crate::storage::Store, runtime: &mut Runtime, session_id: String, connection_id: Option<String>) -> Result<()> {
+    let task = store.session(&session_id)?;
+    if task.remote_device.is_some() {
+        return Err("Connections for remote tasks are managed on their host.".into());
+    }
+    crate::architect::check_manual(store, &session_id)?;
+    if let Some(id) = &connection_id {
+        let selected = runtime.data.connections.iter().find(|c| &c.id == id).ok_or("This connection no longer exists.")?;
+        if selected.provider != task.provider {
+            return Err("Choose a connection for this task's harness.".into());
+        }
+    }
+    if runtime.data.tasks.get(&session_id) == connection_id.as_ref() {
+        return Ok(());
+    }
+    let mut next = runtime.data.clone();
+    assign(&mut next, session_id.clone(), connection_id)?;
+    fresh_contexts(store, &[session_id])?;
+    persist(runtime, next)
+}
+
+/// Validate every affected task before changing any context. Deleted task IDs
+/// are harmless stale mappings; database errors must not be mistaken for deletion.
+fn ensure_idle(store: &crate::storage::Store, ids: &[String], running: impl Fn(&str) -> Result<bool>) -> Result<()> {
+    for id in ids {
+        if running(id)? {
+            return Err("Stop the agent or harness console before changing its connection.".into());
+        }
+        let exists: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)", [id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if exists && matches!(store.session(id)?.status.as_str(), "running" | "waiting") {
+            return Err("Stop the agent before changing its connection.".into());
+        }
+    }
+    Ok(())
+}
+
+/// Replace all affected native contexts as one SQLite transaction. The transcript
+/// stays intact and the existing bounded recovery carries it into the new session.
+fn fresh_contexts(store: &crate::storage::Store, ids: &[String]) -> Result<()> {
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    for id in ids {
+        let exists: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)", [id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if !exists { continue; }
+        crate::context_recovery::queue(store, id)?;
+        store.db.execute(
+            "UPDATE sessions SET resume_id=NULL,goal_state=NULL,codex_settings=NULL,context_used_tokens=NULL,context_window=NULL,limited_at=NULL,limited_until=NULL,resume_at_reset=0 WHERE id=?1",
+            [id],
+        ).map_err(|e| e.to_string())?;
+    }
+    transaction.commit().map_err(|e| e.to_string())?;
+    for id in ids { crate::providers::discard_warm_agent(id); }
+    Ok(())
 }
 
 fn assign(data: &mut Snapshot, session_id: String, connection_id: Option<String>) -> Result<()> {
@@ -362,10 +438,7 @@ fn assign(data: &mut Snapshot, session_id: String, connection_id: Option<String>
                 return Err("This connection no longer exists.".into());
             }
             if !data.tasks.contains_key(&session_id) && data.tasks.len() >= MAX_TASKS {
-                let oldest = data.tasks.keys().next().cloned();
-                if let Some(oldest) = oldest {
-                    data.tasks.remove(&oldest);
-                }
+                return Err(format!("Up to {MAX_TASKS} tasks can have named connections. Clear an unused assignment first."));
             }
             data.tasks.insert(session_id, id);
         }
@@ -463,5 +536,103 @@ mod tests {
         assert_eq!(data.tasks["t1"], "c1");
         assign(&mut data, "t1".into(), None).unwrap();
         assert!(data.tasks.is_empty());
+    }
+
+    fn context_fixture() -> (crate::storage::Store, String) {
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "ask").unwrap();
+        store.message(&task.id, "user", "Earlier request").unwrap();
+        store.message(&task.id, "assistant", "Earlier answer").unwrap();
+        store.resume(&task.id, "session-on-account-a").unwrap();
+        (store, task.id)
+    }
+
+    fn runtime_fixture(id: &str, path: PathBuf) -> Runtime {
+        Runtime { path, data: Snapshot {
+            connections: vec![
+                Connection { id: "a".into(), provider: "claude".into(), ..Default::default() },
+                Connection { id: "b".into(), provider: "claude".into(), ..Default::default() },
+                Connection { id: "c".into(), provider: "codex".into(), ..Default::default() },
+            ], tasks: BTreeMap::from([(id.to_owned(), "a".into())]),
+        } }
+    }
+
+    #[test]
+    fn switching_connection_preserves_history_and_recovers_it_in_a_fresh_session() {
+        let (store, id) = context_fixture();
+        let dir = std::env::temp_dir().join(format!("pandacode-connections-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut runtime = runtime_fixture(&id, dir.join("connections.json"));
+        assign_task(&store, &mut runtime, id.clone(), Some("b".into())).unwrap();
+        let task = store.session(&id).unwrap();
+        assert!(task.resume_id.is_none());
+        assert_eq!(runtime.data.tasks[&id], "b");
+        assert_eq!(store.messages(&id, None).unwrap().len(), 2);
+        let (prompt, through) = crate::context_recovery::prepare(&store, &task, "Continue").unwrap();
+        assert!(through.is_some());
+        assert!(prompt.contains("Earlier request") && prompt.contains("Earlier answer") && prompt.contains("Continue"));
+        // Returning to the default connection must invalidate a newer native ID too.
+        store.resume(&id, "session-on-account-b").unwrap();
+        assign_task(&store, &mut runtime, id.clone(), None).unwrap();
+        assert!(store.session(&id).unwrap().resume_id.is_none());
+        assert!(!runtime.data.tasks.contains_key(&id));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn same_or_invalid_assignment_never_replaces_native_context() {
+        let (store, id) = context_fixture();
+        let mut runtime = runtime_fixture(&id, PathBuf::from("not-written.json"));
+        assign_task(&store, &mut runtime, id.clone(), Some("a".into())).unwrap();
+        for bad in ["missing", "c"] {
+            assert!(assign_task(&store, &mut runtime, id.clone(), Some(bad.into())).is_err());
+        }
+        assert!(assign_task(&store, &mut runtime, "unknown-task".into(), Some("b".into())).is_err());
+        assert_eq!(runtime.data.tasks[&id], "a");
+        assert_eq!(store.session(&id).unwrap().resume_id.as_deref(), Some("session-on-account-a"));
+    }
+
+    #[test]
+    fn failed_assignment_persistence_never_keeps_old_native_id_with_new_account() {
+        let (store, id) = context_fixture();
+        let missing = std::env::temp_dir().join(format!("pandacode-missing-{}", uuid::Uuid::new_v4())).join("connections.json");
+        let mut runtime = runtime_fixture(&id, missing);
+        assert!(assign_task(&store, &mut runtime, id.clone(), Some("b".into())).is_err());
+        assert_eq!(runtime.data.tasks[&id], "a", "failed JSON update retains the old assignment");
+        assert!(store.session(&id).unwrap().resume_id.is_none(), "crash-safe ordering forces a fresh context");
+        assert_eq!(store.messages(&id, None).unwrap().len(), 2);
+        assert!(crate::context_recovery::pending(&store, &store.session(&id).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn context_invalidation_rolls_back_all_tasks_when_storage_fails() {
+        let (store, first) = context_fixture();
+        let task = store.session(&first).unwrap();
+        let second = store.create_session(&task.project_id, "claude", "sonnet", "ask").unwrap();
+        store.resume(&second.id, "second-native-id").unwrap();
+        store.db.execute_batch("CREATE TRIGGER reject_context_reset BEFORE UPDATE OF resume_id ON sessions WHEN OLD.resume_id='second-native-id' BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;").unwrap();
+        assert!(fresh_contexts(&store, &[first.clone(), second.id.clone()]).is_err());
+        assert_eq!(store.session(&first).unwrap().resume_id.as_deref(), Some("session-on-account-a"));
+        assert_eq!(store.session(&second.id).unwrap().resume_id.as_deref(), Some("second-native-id"));
+        assert!(!crate::context_recovery::pending(&store, &store.session(&first).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn active_task_or_console_blocks_connection_mutation() {
+        let (store, id) = context_fixture();
+        assert!(ensure_idle(&store, std::slice::from_ref(&id), |_| Ok(true)).is_err());
+        store.status(&id, "waiting").unwrap();
+        assert!(ensure_idle(&store, std::slice::from_ref(&id), |_| Ok(false)).is_err());
+        store.status(&id, "idle").unwrap();
+        assert!(ensure_idle(&store, &[id, "deleted-task".into()], |_| Ok(false)).is_ok());
+    }
+
+    #[test]
+    fn assignment_capacity_never_silently_switches_another_task_to_default() {
+        let mut data = Snapshot { connections: vec![Connection { id: "a".into(), ..Default::default() }], tasks: (0..MAX_TASKS).map(|n| (format!("t{n}"), "a".into())).collect() };
+        let before = data.tasks.clone();
+        assert!(assign(&mut data, "new".into(), Some("a".into())).is_err());
+        assert_eq!(data.tasks, before);
     }
 }

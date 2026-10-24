@@ -3,6 +3,8 @@
  * (`skills_*` commands in src-tauri/src/skills.rs); this view only draws and asks. */
 import './skills-library.css';
 import { escape } from './dom';
+import { mountSkillCatalogs } from './skills-catalog';
+import { mountSkillScopes } from './skills-scope';
 
 export type SkillKind = 'skill' | 'rule';
 export type SkillScope = 'user' | 'project';
@@ -22,6 +24,8 @@ export type SkillsLibraryHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   /** Projects offered for project scope. */
   projects?(): { id: string; name: string }[];
+  /** Current task, used only for the effective-skill preview. */
+  sessionId?(): string | null;
 };
 
 const HARNESS_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', glm: 'GLM', mimo: 'MiMo', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', omp: 'OMP', pi: 'Pi', muse: 'Muse Code' };
@@ -31,6 +35,21 @@ const STATUS_LABELS: Record<SkillCell['status'], string> = { active: 'Active', o
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost): () => void {
+  host.innerHTML = '<div data-skills-library></div><div data-skills-catalog></div><div data-skills-scopes></div>';
+  const libraryHost = host.querySelector<HTMLElement>('[data-skills-library]')!;
+  const scopesHost = host.querySelector<HTMLElement>('[data-skills-scopes]')!;
+  const library = mountLibraryCore(libraryHost, options);
+  let scopes = mountSkillScopes(scopesHost, options);
+  const refreshScopes = () => { scopes(); scopes = mountSkillScopes(scopesHost, options); };
+  libraryHost.addEventListener('skills-items-changed', refreshScopes);
+  const catalog = mountSkillCatalogs(host.querySelector<HTMLElement>('[data-skills-catalog]')!, options, () => {
+    libraryHost.dispatchEvent(new Event('skills-refresh'));
+    refreshScopes();
+  });
+  return () => { library(); catalog(); scopes(); libraryHost.removeEventListener('skills-items-changed', refreshScopes); };
+}
+
+function mountLibraryCore(host: HTMLElement, options: SkillsLibraryHost): () => void {
   let items: SkillItem[] = [];
   let matrix: SkillMatrix = { project: null, harnesses: [] };
   let projectId = '';
@@ -157,7 +176,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
       const item = source === 'folder'
         ? await options.call<SkillItem>('skills_import_folder', { path: text('path'), kind })
         : await options.call<SkillItem>('skills_import_github', { repo: text('repo'), path: text('repoPath'), gitRef: text('ref') || null, kind });
-      clearFields = true;
+      clearFields = true; host.dispatchEvent(new Event('skills-items-changed'));
       return `Imported ${item.name}.${item.findings.length ? ` ${item.findings.length} safety finding${item.findings.length === 1 ? '' : 's'} to review.` : ''}`;
     });
   }
@@ -166,7 +185,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
     if (!button) return;
     const id = button.closest<HTMLElement>('.skills-item')?.dataset.id;
-    if (button.dataset.action === 'remove' && id) void run(async () => { await options.call('skills_remove', { id }); return 'Removed.'; });
+    if (button.dataset.action === 'remove' && id) void run(async () => { await options.call('skills_remove', { id }); host.dispatchEvent(new Event('skills-items-changed')); return 'Removed.'; });
     if (button.dataset.action === 'acknowledge' && pending) void activate(pending.id, pending.harness, pending.scope, true);
     if (button.dataset.action === 'cancel') { pending = null; draw(); }
   };
@@ -177,6 +196,8 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     if (target instanceof HTMLSelectElement && target.name === 'project') { projectId = target.value; pending = null; void refresh(); }
   };
   const onSubmit = (event: Event) => { event.preventDefault(); importItem(event.target as HTMLFormElement); };
+  const onRefresh = () => { void refresh(); };
+  host.addEventListener('skills-refresh', onRefresh);
   host.addEventListener('click', onClick);
   host.addEventListener('change', onChange);
   host.addEventListener('submit', onSubmit);
@@ -184,6 +205,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   void refresh();
   return () => {
     disposed = true;
+    host.removeEventListener('skills-refresh', onRefresh);
     host.removeEventListener('click', onClick);
     host.removeEventListener('change', onChange);
     host.removeEventListener('submit', onSubmit);

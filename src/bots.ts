@@ -27,7 +27,7 @@ export interface Pairing { channelId: string; senderId: string; senderName: stri
 export interface Thread { channelId: string; externalId: string; sessionId: string; updatedAt: number; }
 export interface Rule { id: string; pattern: string; decision: 'allow' | 'ask' | 'deny'; createdAt: number; }
 export interface Activity { id: number; kind: string; summary: string; detail: Record<string, unknown>; at: number; }
-export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; }
+export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; independentTasks?: { id: string; title: string; updatedAt: number }[]; rules: Rule[]; serverPort: number; }
 
 export interface BotsOptions {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;

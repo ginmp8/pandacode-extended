@@ -106,7 +106,12 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     })); break;
     case 'bot_desktop_thread': { const entry = store(args.botId); const known = entry.threads.length; result = (await desktopThread(host, entry)).sessionId; if (entry.threads.length !== known) { host.emit('sessions-changed', null); changed(); } break; }
     case 'bot_project_ids': result = [...bots.values()].map(entry => entry.bot.projectId); break;
-    case 'bot_detail': result = detail(store(args.botId)); break;
+    case 'bot_detail': {
+      const entry = store(args.botId), tasks = await host.invoke<Session[]>('list_sessions', {});
+      const owned = new Set(entry.threads.map(thread => thread.sessionId));
+      result = { ...detail(entry), independentTasks: tasks.filter(task => task.projectId === entry.bot.projectId && !owned.has(task.id) && !task.draft).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 500).map(({ id, title, updatedAt }) => ({ id, title, updatedAt })) };
+      break;
+    }
     case 'bot_create': {
       const input = validate(args.input);
       const id = crypto.randomUUID(), now = Date.now();

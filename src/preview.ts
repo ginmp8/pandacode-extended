@@ -236,7 +236,7 @@ const previewGithub = (() => {
     { projectId: 'project-1', number: 131, title: 'Keyboard shortcut cheat sheet', body: 'Add a `?` overlay listing shortcuts.', state: 'open', labels: ['enhancement'], assignees: [], updatedAt: new Date(now - 86400_000).toISOString(), author: 'devon' },
     { projectId: 'project-1', number: 97, title: 'Dark mode contrast for muted text', body: 'Muted text fails WCAG AA on the charcoal surfaces.', state: 'open', labels: ['design'], assignees: ['you'], updatedAt: new Date(now - 2 * 86400_000).toISOString(), author: 'you' },
   ];
-  const pulls: { projectId: string; number: number; title: string; body: string; base: string; head: string }[] = [{ projectId: 'project-1', number: 130, title: 'Debounce library search', body: '', base: 'main', head: 'feat/debounce' }];
+  const pulls: { projectId: string; number: number; title: string; body: string; base: string; head: string }[] = [{ projectId: 'project-1', number: 130, title: 'Debounce library search and cache the index', body: '', base: 'main', head: 'feat/instant-search' }];
   let next = 200;
   const url = (projectId: string, kind: 'issue' | 'pull', number: number) => `${repos[projectId]?.url}/${kind === 'pull' ? 'pull' : 'issues'}/${number}`;
   return {
@@ -739,6 +739,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'turn_change_diff': result = turnChanges.diff(args.sessionId, args.changeId, args.path); break;
     case 'architect_get': result = architect.get(args.sessionId); break;
+    case 'review_readiness': result = { ready: false, status: 'containment_unproven', provenProviders: [], note: 'No verified filesystem, network and credential confinement for the CLI process tree.' }; break;
     case 'architect_configure': result = architect.configure(args.sessionId, args.config, args.architect, args.profileId); break;
     case 'architect_profiles': result = architect.profiles(); break;
     case 'architect_set_lead_guidance': result = architect.setLeadGuidance(args.guidance); break;
@@ -1183,6 +1184,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     // The sample orbit project has an app icon; others show the sidebar's default.
     case 'project_icon': result = args.projectId === 'project-1' ? 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAzMiAzMic+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSdnJyB4MT0nMCcgeTE9JzAnIHgyPScxJyB5Mj0nMSc+PHN0b3Agb2Zmc2V0PScwJyBzdG9wLWNvbG9yPScjN2M5Y2ZmJy8+PHN0b3Agb2Zmc2V0PScxJyBzdG9wLWNvbG9yPScjNWI1YmQ2Jy8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9JzMyJyBoZWlnaHQ9JzMyJyByeD0nOCcgZmlsbD0ndXJsKCNnKScvPjxjaXJjbGUgY3g9JzE2JyBjeT0nMTYnIHI9JzcnIGZpbGw9J25vbmUnIHN0cm9rZT0nd2hpdGUnIHN0cm9rZS13aWR0aD0nMycvPjxjaXJjbGUgY3g9JzIzJyBjeT0nOScgcj0nMi41JyBmaWxsPSd3aGl0ZScvPjwvc3ZnPg==' : null; break;
     case 'github_repo_pulls': result = previewHub.pulls(String(args.repo)); break;
+    case 'github_repo_pull_review_context': {
+      const pull = previewHub.pulls(String(args.repo)).find(item => item.number === Number(args.number));
+      if (!pull) throw new Error('The pull request is unavailable. Refresh the repository and try again.');
+      result = { number: pull.number, title: pull.title, url: pull.url, state: pull.state, head: pull.head, base: pull.base, updatedAt: pull.updatedAt,
+        files: pull.number === 130 ? ['src/components/search.ts', 'tests/search.test.ts'] : ['src/main.ts'] };
+      break;
+    }
     case 'github_repo_issues': result = previewHub.issues(String(args.repo)); break;
     case 'github_repo_runs': result = previewHub.runs(String(args.repo)); break;
     case 'github_run_details': result = previewHub.runDetails(String(args.repo), Number(args.id)); break;

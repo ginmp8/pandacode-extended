@@ -23,7 +23,7 @@ import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } fro
 import { renderCoordination } from './coordination-message';
 import { renderTurnChanges, changeRequest, captureChangeCards, restoreChangeCards } from './turn-changes';
 import { mountWallpapers } from './wallpapers';
-import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, ToolActivity, TurnChanges } from './types';
+import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubReference, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, ToolActivity, TurnChanges } from './types';
 import type { BrowserPanel } from './browser';
 import { botAvatarHtml } from './bot-avatars';
 import { call, chooseFolder, preview, subscribe } from './bridge';
@@ -75,6 +75,7 @@ import type { ArchitectView } from './architect';
 import { syncOverlayContext } from './overlay-client';
 import { initializeAgentUpdates } from './agent-updates';
 import { isChatProject, NO_PROJECT } from './chats';
+import type { PullReviewContext, ReviewRequest } from './hardened/review-model';
 
 /* Visual thesis: calm surfaces, system typography, yellow selection, and bamboo details.
  * Content: project navigation → conversation → contextual source review.
@@ -1534,6 +1535,7 @@ function syncGithubHub(shown: boolean): void {
       call, projects: () => userProjects(), sessions: () => listedSessions(), running: id => isRunning(id),
       openTask: id => run(openHubTask(id)),
       startTask: input => startHubTask(input),
+      reviewPull: context => openReviewTools(context),
       showChoices: (anchor, options) => showChoices(anchor, options),
       chooseFolder, notify,
       projectsChanged: async () => { state.projects = await call<Project[]>('list_projects'); renderNavigation(); },
@@ -1565,6 +1567,98 @@ async function startHubTask({ projectId, prompt, title, link, send: start }: { p
   field.focus();
   field.setSelectionRange(prompt.length, prompt.length);
   if (start) await send();
+}
+async function prepareHubReviewTask(target: PullReviewContext, request: ReviewRequest, providers: Provider[], active: () => boolean): Promise<void> {
+  const { buildPullReview } = await import('./hardened/review-model');
+  const plan = buildPullReview(request, target);
+  const selections = [plan.setup.architect, ...plan.setup.config.workers];
+  if (selections.some(choice => !providers.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)))) {
+    throw new Error('Refresh the local catalog and choose available provider models for every role.');
+  }
+  if (!active()) throw new Error('The review setup closed. No task was created.');
+
+  const verifyTarget = async (): Promise<void> => {
+    const [mappings, pull] = await Promise.all([
+      call<{ projectId: string; repo: string }[]>('github_project_repos'),
+      call<Omit<PullReviewContext, 'projectId' | 'repo'>>('github_repo_pull_review_context', { repo: target.repo, number: target.number }),
+    ]);
+    const matches = mappings.filter(item => item.repo.toLowerCase() === target.repo.toLowerCase());
+    const project = state.projects.find(item => item.id === target.projectId);
+    if (matches.length !== 1 || matches[0].projectId !== target.projectId || !project
+      || isChatProject(project) || botProjects.has(project.id)) {
+      throw new Error('The repository is no longer uniquely associated with this local project. Open the matching project or clone the repository again.');
+    }
+    if (pull.number !== target.number || pull.title !== target.title || pull.url !== target.url || pull.state !== target.state
+      || pull.head !== target.head || pull.base !== target.base || pull.updatedAt !== target.updatedAt
+      || pull.files.length !== target.files.length || pull.files.some((path, i) => path !== target.files[i])) {
+      throw new Error(`Pull request #${target.number} changed during preparation. Refresh GitHub and prepare it again.`);
+    }
+    const status = await github.status(target.projectId, true);
+    if (!status?.installed || !status.authenticated || status.repo?.nameWithOwner.toLowerCase() !== target.repo.toLowerCase()) {
+      throw new Error(`GitHub context for ${target.repo} is unavailable. Reconnect GitHub or refresh the pull request, then try again.`);
+    }
+    let references: GithubReference[];
+    try { references = await call<GithubReference[]>('github_resolve', { projectId: target.projectId, numbers: [target.number] }); }
+    catch (cause) { throw new Error(`Could not load GitHub context for #${target.number}: ${cause instanceof Error ? cause.message : String(cause)}. Refresh GitHub and try again.`); }
+    const reference = references.find(item => item.number === target.number && item.kind === 'pull');
+    if (!reference || reference.url !== target.url || reference.title !== target.title) {
+      throw new Error(`GitHub could not confirm pull request #${target.number} in ${target.repo}. Refresh GitHub and try again.`);
+    }
+    if (!active()) throw new Error('The review setup closed. No task was created.');
+  };
+
+  await verifyTarget();
+  if (creatingTask) throw new Error('Another task is being prepared. Try again when it finishes.');
+  const previousSessionId = state.sessionId;
+  let created: Session | undefined;
+  creatingTask = true;
+  try {
+    created = await call<Session>('create_session', {
+      projectId: target.projectId, provider: plan.setup.architect.provider, model: plan.setup.architect.model, mode: 'plan', draft: true,
+    });
+    if (!created.id || created.projectId !== target.projectId || !created.draft) throw new Error('PandaCode did not create the expected local draft task.');
+    state.sessions.unshift(created);
+    const team = await call<TeamSnapshot | null>('architect_configure', {
+      sessionId: created.id, config: plan.setup.config, architect: plan.setup.architect, profileId: null,
+    });
+    if (!team || team.sessionId !== created.id || team.config.rosterOnly !== true) throw new Error('PandaCode did not save the selected bounded review roster.');
+    onArchitect(team);
+    const link: TaskLink = { kind: 'pull', number: target.number, url: target.url, title: target.title, state: target.state, checkedAt: Date.now() };
+    const linked = await call<Session>('set_task_link', { sessionId: created.id, kind: 'pull', link });
+    if (linked.id !== created.id || linked.projectId !== target.projectId || linked.pullRequest?.number !== target.number || linked.pullRequest.url !== target.url) {
+      throw new Error('PandaCode could not bind the new task to the selected pull request.');
+    }
+    const titled = await call<Session>('update_session', { sessionId: created.id, title: `Review #${target.number}: ${target.title}`.slice(0, 120) });
+    Object.assign(created, titled);
+    await verifyTarget();
+    if (!active()) throw new Error('The review setup closed. No task was created.');
+    closeModal(); state.query = '';
+    state.boardPanel = true;
+    await selectSession(created.id, true);
+    renderBoardView();
+    if (state.sessionId !== created.id) throw new Error('The selected task changed before its prompt was prepared.');
+    const field = document.querySelector<HTMLTextAreaElement>('#prompt');
+    if (!field || field.dataset.sessionId !== created.id) throw new Error('The linked task opened without its composer. No prompt was inserted.');
+    field.value = plan.prompt; state.drafts.set(created.id, plan.prompt);
+    field.dispatchEvent(new Event('input', { bubbles: true })); field.focus(); field.setSelectionRange(plan.prompt.length, plan.prompt.length);
+    notify(`Review task for #${target.number} prepared. The prompt was not sent; review it in the composer and use Send when ready. The review is NOT isolated.`);
+  } catch (cause) {
+    if (created) {
+      try {
+        const discarded = await call<boolean>('discard_draft', { sessionId: created.id });
+        if (discarded) {
+          deletedSessions.add(created.id); teams.delete(created.id); state.drafts.delete(created.id);
+          state.sessions = state.sessions.filter(item => item.id !== created!.id);
+          if (state.sessionId === created.id) {
+            state.sessionId = '';
+            if (previousSessionId && state.sessions.some(item => item.id === previousSessionId)) await selectSession(previousSessionId, true);
+          }
+          renderNavigation();
+        } else notify(`The empty review draft ${created.id} could not be discarded. No prompt was sent.`);
+      } catch { notify('The review setup failed after task creation. Its unsent draft could not be removed; check the task list.'); }
+    }
+    throw cause;
+  } finally { creatingTask = false; }
 }
 function renderSidebarVisibility(): void {
   // The board and the GitHub view are full-width; both hide the task sidebar.
@@ -2311,7 +2405,7 @@ async function send(): Promise<void> {
   try {
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
     // Mentioned issues and pull requests travel with the message, so every harness can read them.
-    const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
+    const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text, Boolean(s.pullRequest)) + tokenSaver.contextFor(s.id);
     const sentIds = new Set(browserItems.map(item => item.id));
     const remaining = (state.browserAttachments.get(s.id) ?? []).filter(item => !sentIds.has(item.id));
     if (remaining.length) state.browserAttachments.set(s.id, remaining); else state.browserAttachments.delete(s.id);
@@ -2866,9 +2960,10 @@ const LONG_DESCRIPTION = 90;
 function closeModal(): void { closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
 /** Optional local presentation over existing commands. Never use reloadSessions here:
  * that helper also schedules automatic limit resumes in the original application. */
-async function openReviewTools(): Promise<void> {
-  const dialog = modal('Review & coordination', '<div id="hardened-review-root"><p role="status">Loading local tools...</p></div>', 'hardened-review-dialog');
+async function openReviewTools(pullReview?: PullReviewContext): Promise<void> {
+  const dialog = modal(pullReview ? 'Review with coordination' : 'Review & coordination', '<div id="hardened-review-root"><p role="status">Loading local tools...</p></div>', 'hardened-review-dialog');
   const root = dialog.querySelector<HTMLElement>('#hardened-review-root')!;
+  const openingGeneration = state.generation;
   const { mountReviewTools } = await import('./hardened/review-panel');
   if (!dialog.open || !root.isConnected) return;
   let observedTask = session() ?? null, observedTeam = teams.get(state.sessionId) ?? null;
@@ -2949,6 +3044,9 @@ async function openReviewTools(): Promise<void> {
       prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
     },
     copyText: text => navigator.clipboard.writeText(text),
+    ...(pullReview ? { preparePullReview: (target: PullReviewContext, request: ReviewRequest, providers: Provider[]) =>
+      prepareHubReviewTask(target, request, providers, () => dialog.open && root.isConnected && state.generation === openingGeneration) } : {}),
+    cancelReview: () => closeModal(),
     workflow: {
       call,
       current: () => { const task = session(); return task && !deletedSessions.has(task.id) && !isChatProject(state.projects.find(p => p.id === task.projectId)) && !botProjects.has(task.projectId) ? task : null; },
@@ -2966,7 +3064,7 @@ async function openReviewTools(): Promise<void> {
         else { inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'browser'; state.selectedKind = ''; renderInspector(); }
       },
     },
-  });
+  }, pullReview);
 }
 
 async function showTurnDiff(element: HTMLElement): Promise<void> {
@@ -3688,7 +3786,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     const prompt = () => document.querySelector<HTMLTextAreaElement>('#prompt');
     if (state.sessionId !== s.id || prompt()?.value !== draft) throw new Error('Your task or message changed. Send it again.');
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
-    const content = text + contexts.join('') + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
+    const content = text + contexts.join('') + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text, Boolean(s.pullRequest)) + tokenSaver.contextFor(s.id);
     const { sessionId } = await call<{ sessionId: string }>('remote_start_task', {
       // The empty New task draft becomes the mirror, so no stray draft is left behind.
       sessionId: s.id, deviceId: target.deviceId, projectId: s.projectId, prompt: content, provider: s.provider, model: s.model, mode: s.mode,

@@ -2492,6 +2492,10 @@ async fn github_repo_pulls(repo: String) -> Result<Vec<github_hub::HubPull>> {
     blocking(move || github_hub::pulls(&repo)).await
 }
 #[tauri::command]
+async fn github_repo_pull_review_context(repo: String, number: i64) -> Result<github_hub::PullReviewContext> {
+    blocking(move || github_hub::pull_review_context(&repo, number)).await
+}
+#[tauri::command]
 async fn github_repo_issues(repo: String) -> Result<Vec<github_hub::HubIssue>> {
     blocking(move || github_hub::issues(&repo)).await
 }
@@ -3316,6 +3320,7 @@ pub fn run() {
                 github_repos,
                 project_icon,
                 github_repo_pulls,
+                github_repo_pull_review_context,
                 github_repo_issues,
                 github_repo_runs,
                 github_run_details,

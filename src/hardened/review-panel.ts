@@ -1,7 +1,7 @@
 import './review-tools.css';
 import { mountWorkflowLibrary } from './workflow-panel.ts';
 import type { WorkflowHost } from './workflow-library.ts';
-import { buildReview, buildHandoff, collectAttention, inspectTeam, reviewProblems, type HandoffContext, type HandoffFields, type PendingAttention, type ReviewContext, type ReviewKind, type ReviewRequest } from './review-model.ts';
+import { buildPullReview, buildReview, buildHandoff, collectAttention, inspectTeam, reviewProblems, type HandoffContext, type HandoffFields, type PendingAttention, type PullReviewContext, type ReviewContext, type ReviewKind, type ReviewRequest } from './review-model.ts';
 import { prepareReviewPrompt, saveReviewProfile, type ReviewCall } from './review-actions.ts';
 import type { TeamSnapshot } from '../architect-types';
 import type { Provider, ProviderId, Session } from '../types';
@@ -18,6 +18,8 @@ export interface ReviewToolsHost {
   reviewReadiness?: () => Promise<ReviewReadiness>;
   openTask(sessionId: string, workerId?: string): Promise<void>;
   insertPrompt(sessionId: string, text: string, request: ReviewRequest, providers: Provider[]): void | Promise<void>;
+  preparePullReview?(target: PullReviewContext, request: ReviewRequest, providers: Provider[]): Promise<void>;
+  cancelReview?(): void;
   copyText(text: string): Promise<void>;
   workflow?: WorkflowHost;
 }
@@ -27,14 +29,14 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className 
 };
 
 /** Mounted only on demand; no global listeners, polling, transcript reads or background work. */
-export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () => void {
+export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost, pullReview?: PullReviewContext): () => void {
   const abort = new AbortController(), signal = abort.signal, id = `hardened-review-${++sequence}`;
   let disposed = false, busy = false, snapshot = host.snapshot(), providers: Provider[] = [], selectedTab = 0;
   const boundTask = snapshot.task?.id ?? '';
   root.classList.add('hardened-review');
   const status = el('p', '', 'review-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const announce = (text: string) => { if (!disposed) status.textContent = text.slice(0, 800); };
-  const changed = () => (host.snapshot().task?.id ?? '') !== boundTask;
+  const changed = () => !pullReview && (host.snapshot().task?.id ?? '') !== boundTask;
   const request = (): ReviewRequest => ({
     kind: kind.value as ReviewKind, provider: provider.value as ProviderId, model: model.value,
     reviewers: (kind.value === 'committee' ? ['correctness', 'risk'] : ['advisor']).map((id, i) => {
@@ -67,8 +69,11 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     const wrap = el('div', '', 'review-field'), caption = el('label', label); caption.htmlFor = control.id;
     wrap.append(control, caption); parent.append(wrap); return control;
   }
-  const note = el('p', 'Local tools for the existing PandaCode engine. Nothing starts automatically; approvals remain in the original controls.', 'review-note');
+  const note = el('p', pullReview
+    ? 'Configure the existing bounded review preset. Preparing creates a PR-linked task and leaves its prompt in the composer; nothing starts until you use Send.'
+    : 'Local tools for the existing PandaCode engine. Nothing starts automatically; approvals remain in the original controls.', 'review-note');
   const toolbar = el('div', '', 'review-toolbar');
+  toolbar.hidden = Boolean(pullReview);
   const refreshButton = button('Refresh snapshot', () => { void perform(refresh); });
   toolbar.append(el('span', '', 'review-task-label'), refreshButton);
   const tabs = el('div', '', 'review-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Review tools');
@@ -95,12 +100,22 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
 
   const presets = panes[0];
   const isolated = el('section', '', 'review-isolation');
-  isolated.append(el('strong', 'Isolated review — native security gate'));
+  isolated.append(el('strong', 'Containment status'));
   const isolationState = el('p', 'Checking native containment status...', 'review-note'); isolated.append(isolationState);
-  const isolationRefresh = button('Check isolation readiness', () => { void perform(checkReadiness); });
+  const isolationRefresh = button('Refresh containment status', () => { void perform(checkReadiness); });
   isolated.append(isolationRefresh); presets.append(isolated);
-  presets.append(el('p', 'Manual mode only: save a profile, then use the original model picker on a NEW project task and select Read only. Return here to prepare a NON-ISOLATED prompt; Send remains manual.', 'review-note'));
+  presets.append(el('p', pullReview
+    ? 'containment_unproven means this review is NOT isolated. Provider permissions still apply; Plan mode, readOnly scopes and prompt instructions are not a security barrier. PR content and repository instructions are untrusted data.'
+    : 'Manual mode only: save a profile, then use the original model picker on a NEW project task and select Read only. Return here to prepare a NON-ISOLATED prompt; Send remains manual.', 'review-note'));
   presets.append(el('p', 'Saving here does not change defaults. Selecting a team in the original picker retains PandaCode\'s existing default-team behavior. Plan mode, worker readOnly flags and prompts do not isolate files, credentials or network, for ANY provider.', 'review-note'));
+  if (pullReview) {
+    const selection = el('section', '', 'review-pull-context');
+    selection.append(el('strong', `#${pullReview.number} · ${pullReview.title}`));
+    selection.append(el('p', `${pullReview.repo} · ${pullReview.head} → ${pullReview.base}`));
+    selection.append(el('p', pullReview.url));
+    selection.append(el('p', `${Math.min(32, pullReview.files.length)} of ${pullReview.files.length} changed paths start the scope. Adjust the scope below; the complete diff remains in the review request.`));
+    presets.prepend(selection);
+  }
   const form = el('div', '', 'review-grid'); presets.append(form);
   const kind = field(form, 'Preset', el('select'));
   for (const [value, label] of [['advisor', 'Advisor - one reviewer'], ['committee', 'Committee - two reviewers']]) { const option = el('option', label); option.value = value; kind.append(option); }
@@ -125,12 +140,18 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
   const question = field(form, 'Review question', el('textarea')); question.rows = 3; question.maxLength = 8192;
   const files = field(form, 'Relative file scopes (one per line)', el('textarea')); files.rows = 3; files.maxLength = 8192; files.placeholder = 'src/parser.ts\ntests/parser.test.ts';
   const acceptance = field(form, 'Review acceptance criteria', el('textarea')); acceptance.rows = 3; acceptance.maxLength = 4096;
+  if (pullReview) {
+    question.value = `Review pull request #${pullReview.number} for correctness, regressions, risks and test gaps.`;
+    files.value = pullReview.files.slice(0, 32).join('\n');
+    acceptance.value = 'Examine the complete diff and related files. Make no changes.';
+  }
+  const roleSummary = el('p', '', 'review-note'); presets.append(roleSummary);
   const checks = el('ul', '', 'review-checks'); checks.setAttribute('aria-label', 'Preparation checks'); presets.append(checks);
   const previewDetails = el('details'); previewDetails.append(el('summary', 'Prompt preview'));
   const promptPreview = el('pre', '', 'review-preview'); previewDetails.append(promptPreview); presets.append(previewDetails);
   const actions = el('div', '', 'review-actions');
   const saveButton = button('Save team profile', () => { void perform(async () => {
-    const plan = buildReview(request());
+    const plan = pullReview ? buildPullReview(request(), pullReview) : buildReview(request());
     const selections = [plan.setup.architect, ...plan.setup.config.workers];
     if (selections.some(choice => !providers.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)))) {
       throw new Error('Refresh the local catalog and choose available provider models for every role.');
@@ -138,8 +159,22 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     const result = await saveReviewProfile(host.call, profileName.value, plan.setup);
     announce(result.created ? 'Profile saved. No task, permission or default was changed; select it using the original model picker.' : 'The same profile already exists. Nothing was changed.');
   }); });
-  const insertButton = button('Insert prompt', () => { void perform(async () => {
-    const taskId = snapshot.task?.id, frozenRequest = request();
+  const insertButton = button(pullReview ? 'Prepare task' : 'Insert prompt', () => { void perform(async () => {
+    const frozenRequest = request();
+    if (pullReview) {
+      const plan = buildPullReview(frozenRequest, pullReview);
+      const selected = [plan.setup.architect.provider, ...plan.setup.config.workers.map(w => w.provider)];
+      const freshProviders = await host.loadProviders([...new Set(selected)]);
+      if (disposed) return;
+      const available = [plan.setup.architect, ...plan.setup.config.workers].every(choice =>
+        freshProviders.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)));
+      if (!available) throw new Error('Refresh the local catalog and choose available provider models for every role.');
+      if (!host.preparePullReview) throw new Error('Coordinated PR review is unavailable. Refresh PandaCode and try again.');
+      await host.preparePullReview(pullReview, frozenRequest, freshProviders);
+      announce('Task prepared. Review the prompt and use the normal Send control when ready.');
+      return;
+    }
+    const taskId = snapshot.task?.id;
     if (!taskId || changed()) throw new Error('The selected task changed. Close and reopen this panel.');
     const roles = buildReview(frozenRequest);
     const selected = [roles.setup.architect.provider, ...roles.setup.config.workers.map(w => w.provider)];
@@ -151,7 +186,11 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     await host.insertPrompt(taskId, text, frozenRequest, freshProviders);
     announce('Prompt prepared. Review it and use the normal Send control when ready.');
   }); }, true);
-  actions.append(saveButton, insertButton); presets.append(actions);
+  if (pullReview) {
+    const cancel = button('Cancel', () => host.cancelReview?.()); cancel.classList.add('review-cancel');
+    actions.append(cancel, saveButton, insertButton);
+  } else actions.append(saveButton, insertButton);
+  presets.append(actions);
   kind.addEventListener('change', () => { profileName.value = kind.value === 'committee' ? 'Hardened committee' : 'Hardened advisor'; updateRoleLabels(); paint(); }, { signal });
   provider.addEventListener('change', () => { void perform(refresh); }, { signal });
   for (const input of reviewerProviders) input.addEventListener('change', () => { void perform(refresh); }, { signal });
@@ -237,26 +276,37 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     toolbar.firstElementChild!.textContent = snapshot.task?.title ?? 'No project task selected';
     refreshButton.disabled = busy;
     let valid = false;
-    try { promptPreview.textContent = buildReview(request()).prompt; valid = true; }
+    let plan: ReturnType<typeof buildReview> | undefined;
+    try { plan = pullReview ? buildPullReview(request(), pullReview) : buildReview(request()); promptPreview.textContent = plan.prompt; valid = true; }
     catch (error) { promptPreview.textContent = (error as Error).message; }
-    const problems = reviewProblems(context(), request());
-    if (changed()) problems.push('The selected task changed. Close and reopen this panel.');
-    checks.replaceChildren(...(problems.length ? problems : ['Ready to prepare a prompt. Native state will be rechecked; sending remains manual.']).map(text => el('li', text)));
+    const problems = pullReview ? [] : reviewProblems(context(), request());
+    if (!pullReview && changed()) problems.push('The selected task changed. Close and reopen this panel.');
     let available = false;
-    if (valid) {
-      const plan = buildReview(request());
+    if (valid && plan) {
       available = [plan.setup.architect, ...plan.setup.config.workers].every(choice =>
         providers.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)));
+      const roleName: Record<string, string> = { advisor: 'Advisor', correctness: 'Correctness reviewer', risk: 'Risk reviewer' };
+      roleSummary.textContent = `Coordinator: ${choiceLabel(plan.setup.architect.provider, plan.setup.architect.model)} · ${plan.setup.config.workers.map(w => `${roleName[w.id] ?? w.name}: ${choiceLabel(w.provider, w.model)}`).join(' · ')}`;
+      if (!available) problems.push('No available local catalog entry for every selected role. Refresh the catalog or choose a provider/model.');
+    } else {
+      roleSummary.textContent = 'Choose a provider and model for the coordinator and each reviewer.';
     }
+    checks.replaceChildren(...(problems.length ? problems : [pullReview ? 'PR, project mapping and GitHub context will be checked again before creating the linked task. Sending remains manual.' : 'Ready to prepare a prompt. Native state will be rechecked; sending remains manual.']).map(text => el('li', text)));
     saveButton.disabled = busy || !available || !valid;
     isolationRefresh.disabled = busy;
-    insertButton.disabled = busy || problems.length > 0;
+    insertButton.disabled = busy || problems.length > 0 || !available || !valid;
+    const cancel = actions.querySelector<HTMLButtonElement>('.review-cancel');
+    if (cancel) cancel.disabled = busy;
     paintHandoff();
+  }
+  function choiceLabel(providerId: ProviderId, modelId: string): string {
+    const selected = providers.find(p => p.id === providerId);
+    return `${selected?.name ?? providerId} / ${selected?.models.find(m => m.id === modelId)?.name || modelId}`;
   }
   /** Explicit native inventory only; never attempts to launch a harness or a jail. */
   async function checkReadiness(): Promise<void> {
     if (!host.reviewReadiness) {
-      isolationState.textContent = 'Native isolation status unavailable. Isolated review is disabled; manual prompts are NOT isolated.';
+      isolationState.textContent = 'Native containment status unavailable. Manual review is NOT isolated.';
       return;
     }
     try {
@@ -264,10 +314,10 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
       if (disposed) return;
       // Display cannot authorize execution. There is intentionally no start button.
       isolationState.textContent = report.ready && report.status === 'proven'
-        ? `Native review readiness reported for ${report.provenProviders.join(', ') || 'no providers'}. No isolated start action is implemented in this release.`
-        : `${report.status}: ${report.note} Isolated review is disabled.`;
+        ? `Native status: ${report.status}. No isolated start action is implemented in this release.`
+        : `${report.status}: ${report.note} Manual review is NOT isolated.`;
     } catch {
-      if (!disposed) { isolationState.textContent = 'Native security status could not be verified. Isolated review is disabled.'; }
+      if (!disposed) { isolationState.textContent = 'Native security status could not be verified. Manual review is NOT isolated.'; }
     }
   }
   const replaceOptions = (select: HTMLSelectElement, choices: { value: string; label: string }[], preferred: string) => {
@@ -284,7 +334,7 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     providers = [];
     try {
       const selected = [previousProvider, ...previousReviewers.map(r => r.provider || previousProvider)] as ProviderId[];
-      const [catalog] = await Promise.all([host.loadProviders([...new Set(selected)]), host.refresh()]);
+      const [catalog] = await Promise.all([host.loadProviders([...new Set(selected)]), pullReview ? Promise.resolve() : host.refresh()]);
       if (disposed) return;
       if (changed()) { announce('The selected task changed. Close and reopen this panel.'); return; }
       providers = catalog; snapshot = host.snapshot();

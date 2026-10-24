@@ -45,3 +45,5 @@
 .hardened-review .review-role{min-width:0;margin:0;padding:10px;border:1px solid var(--border);display:grid;gap:8px}
 .hardened-review .review-role legend{font-weight:600;padding:0 4px}
 .hardened-review .review-role .review-field{font-weight:400}
+.hardened-review .review-pull-context{display:grid;gap:6px;padding:12px;border:1px solid var(--border);border-radius:4px;overflow-wrap:anywhere}
+.hardened-review .review-pull-context p{color:var(--muted);font-size:.9rem}

@@ -279,7 +279,7 @@ $app.innerHTML = `<div class="workspace">
     <div id="sidebar-note" class="sidebar-note" hidden></div>
     <section id="sidebar-bots-panel" class="bots-panel" aria-label="Bots"></section>
     <div id="sidebar-bots" class="sidebar-bots"></div>
-    <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}<button data-action="archive-view" id="archive-toggle" title="Archived tasks" aria-label="Archived tasks">${icon('archive')}</button><button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button><button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
+    <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}${button('hardened-tools', 'Review & coordination', 'worktree', '', 'id="hardened-tools-button"')}<button data-action="archive-view" id="archive-toggle" title="Archived tasks" aria-label="Archived tasks">${icon('archive')}</button><button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button><button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
   </aside>
   <main class="main-pane">
     <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}<button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button><div class="view-switch" role="group" aria-label="Workspace view"><button data-action="conversation-view" aria-label="Conversation view" aria-pressed="true">${icon('chat')}<span>Conversation</span></button><button data-action="board-view" aria-label="Board view" aria-pressed="false">${icon('board')}<span>Board</span></button><button data-action="github-view" aria-label="GitHub view" aria-pressed="false">${icon('github')}<span>GitHub</span></button></div><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}<span class="header-divider" aria-hidden="true"></span>${button('moodboards', 'Project moodboards', 'images')}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('terminal', `Toggle terminal (${shortcut('J')})`, 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false"')}<span class="header-divider" aria-hidden="true"></span>${button('toggle-inspector', `Toggle inspector (${shortcut('B', true)})`, 'panel', 'active', 'id="inspector-toggle"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div></header>
@@ -2799,6 +2799,7 @@ async function stage(paths: string[], staged: boolean): Promise<void> {
 let previousFocus: HTMLElement | null = null;
 let wallpaperSettingsCleanup: (() => void) | undefined;
 let changeReviewCleanup: (() => void) | undefined;
+let reviewToolsCleanup: (() => void) | undefined;
 let providerSettingsCleanup: (() => void) | undefined;
 let agentUsageCleanup: (() => void) | undefined;
 let conversationImportCleanup: (() => void) | undefined;
@@ -2806,6 +2807,7 @@ let openCodeModelsCleanup: (() => void) | undefined;
 let moodboardsCleanup: (() => void) | undefined;
 let botsView: import('./bots').BotsView | undefined;
 function disposeSettingsViews(): void {
+  reviewToolsCleanup?.(); reviewToolsCleanup = undefined;
   botsView?.dispose(); botsView = undefined;
   boardMentionPicker?.dispose(); boardMentionPicker = undefined;
   agentUsageCleanup?.(); agentUsageCleanup = undefined;
@@ -2853,6 +2855,67 @@ function modal(title: string, body: string, cls = ''): HTMLDialogElement {
 const LONG_DESCRIPTION = 90;
 // Close before disposing so the departing dialog still shows its content while it fades.
 function closeModal(): void { closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
+/** Optional local presentation over existing commands. Never use reloadSessions here:
+ * that helper also schedules automatic limit resumes in the original application. */
+async function openReviewTools(): Promise<void> {
+  const dialog = modal('Review & coordination', '<div id="hardened-review-root"><p role="status">Loading local tools...</p></div>', 'hardened-review-dialog');
+  const root = dialog.querySelector<HTMLElement>('#hardened-review-root')!;
+  const { mountReviewTools } = await import('./hardened/review-panel');
+  if (!dialog.open || !root.isConnected) return;
+  let observedTask = session() ?? null, observedTeam = teams.get(state.sessionId) ?? null;
+  reviewToolsCleanup = mountReviewTools(root, {
+    call,
+    snapshot: () => {
+      const selected = session() ?? null;
+      const task = selected?.id === observedTask?.id ? observedTask : selected;
+      const team = task?.id === observedTask?.id ? observedTeam : teams.get(task?.id ?? '') ?? null;
+      return {
+        task, team, providers: state.providers,
+        projectName: state.projects.find(p => p.id === task?.projectId)?.name ?? '',
+        hasMessages: state.messagesLoading || Boolean(state.messagesError) || state.messages.length > 0 || state.hasOlder,
+        sessions: state.sessions.filter(s => !deletedSessions.has(s.id)),
+        teams: [...teams.values()].filter((t): t is TeamSnapshot => Boolean(t) && t!.sessionId !== team?.sessionId).concat(team ? [team] : []),
+        pending: [...state.streams].map(([sessionId, stream]) => ({ sessionId, approvals: stream.approvals.size, questions: stream.inputs.size })),
+      };
+    },
+    refresh: async () => {
+      const id = state.sessionId;
+      if (!id) { observedTask = null; observedTeam = null; return; }
+      const before = teams.get(id), known = teams.has(id);
+      const [task, team] = await Promise.all([call<Session>('get_task', { sessionId: id }), call<TeamSnapshot | null>('architect_get', { sessionId: id })]);
+      if (!dialog.open || !root.isConnected || state.sessionId !== id || deletedSessions.has(id)) return;
+      if (task.id !== id || team && team.sessionId !== id) throw new Error('Task identity changed. Reopen the tools.');
+      observedTask = task;
+      observedTeam = teams.has(id) !== known || teams.get(id) !== before ? teams.get(id) ?? null : team;
+    },
+    loadProviders: async () => {
+      const catalog = await call<Provider[]>('list_providers');
+      if (!catalog.some(p => p.id === 'codex' && p.installed)) return catalog;
+      const models = await call<ProviderModel[]>('list_provider_models', { provider: 'codex' });
+      return catalog.map(p => p.id === 'codex' ? { ...p, models } : p);
+    },
+    openTask: async (id, workerId) => {
+      if (deletedSessions.has(id) || !state.sessions.some(s => s.id === id)) throw new Error('Task is no longer available. Refresh the original task list.');
+      const team = teams.get(id) ?? (observedTeam?.sessionId === id ? observedTeam : null);
+      if (workerId && !team?.workers.some(w => w.id === workerId)) throw new Error('This worker does not belong to the selected task. Refresh first.');
+      closeModal(); await selectSession(id, true);
+      if (workerId && state.sessionId === id && !deletedSessions.has(id)) {
+        const view = await ensureArchitectView();
+        if (state.sessionId === id && teams.get(id)?.workers.some(w => w.id === workerId)) view.openWorker(workerId);
+      }
+    },
+    insertPrompt: (id, text) => {
+      const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+      if (!task || task.id !== id || deletedSessions.has(id) || task.archived || task.provider !== 'codex' || task.mode !== 'plan' || isRunning(id)
+        || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) throw new Error('Select a fresh, idle project task in Codex Read only mode.');
+      if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim()) throw new Error('The composer changed or contains a draft. Nothing was replaced.');
+      if (state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('Remove existing attachments before inserting this review prompt.');
+      prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
+    },
+    copyText: text => navigator.clipboard.writeText(text),
+  });
+}
+
 async function showTurnDiff(element: HTMLElement): Promise<void> {
   const request = changeRequest(element); if (!request) return;
   await openSavedDiff(request.sessionId, request.changes, request.path);
@@ -3661,6 +3724,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   if (name.startsWith('limit-')) { await limitAction(name, element); return; }
   switch (name) {
     case 'support': await openSupport(); break;
+    case 'hardened-tools': await openReviewTools(); break;
     case 'new-task': if (state.view === 'board') showBoardTaskForm(); else await createTask(); break;
     case 'new-chat': if (state.view !== 'conversation') setWorkspaceView('conversation'); await createChat(); break;
     case 'board-view': setWorkspaceView('board'); break;

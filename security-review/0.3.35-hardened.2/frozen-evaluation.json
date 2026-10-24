@@ -1,0 +1,30 @@
+{
+  "mode": "feature",
+  "baseline_archive_sha256": "3e436d75508f2ee91f12dbca160faa56ca32f812aada5449f65e40ed7748171f",
+  "baseline_version": "0.3.35-hardened.1",
+  "intended_version": "0.3.35-hardened.2",
+  "baseline_focused_tests": {
+    "pass": 37,
+    "fail": 0,
+    "log": "logs/baseline-focused.tap"
+  },
+  "acceptance": [
+    "No runtime dependency/service/port/database change",
+    "Native Rust and existing test files remain byte-identical except release version metadata",
+    "One isolated lazy-loaded review panel with profiles, preflight, inspector, attention, explicit handoff",
+    "No automatic agent execution, queue dispatch, approvals, permission change or global team defaults",
+    "Readonly-native-current-state recheck before inserting a prompt into an empty selected composer",
+    "Bounded team budgets and context; no cross-task checkpoint export; common secret redaction plus explicit preview",
+    "Existing focused tests and new unit/action/browser tests pass; no weakening of existing tests",
+    "Full build/native checks recorded honestly if unavailable"
+  ],
+  "test_sha256": "e5d6a548f2669e5edc6aaab3f268100789b864b7aaef3b652a61d6cf2c1c075e",
+  "max_candidate_attempts": 3,
+  "scope_exclusions": [
+    "Paseo runtime/SDK/plugin system",
+    "Native scheduler changes",
+    "Remote/multi-device workflows",
+    "Streaming changes without measurements"
+  ],
+  "evidence_notice": "IPC doubles test frontend action contracts; they do not prove native enforcement."
+}

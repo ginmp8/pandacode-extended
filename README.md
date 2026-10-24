@@ -1,6 +1,6 @@
 # PandaCode — 0.3.35.hardened
 
-**Distribution label:** `0.3.35.hardened`; **internal SemVer:** `0.3.35-hardened.1` (Cargo, npm, Tauri). This revision retains the `0.3.34.1` hardened controls and selectively brings in the upstream `0.3.35` menu bar popover: task status, keyboard navigation and usage bars. It is **not** equivalent to upstream 0.3.35: cloud agents, installer/updater networking and credential-store changes were **not** merged. See [current security review](security-review/0.3.35-hardened/README.md) for verified and unverified scope.
+**Current hardened revision:** `0.3.35-hardened.2`, based on the supplied `0.3.35-hardened.1` feature-hardening tree. Adds optional local review and coordination tools without changing the native executor, dependencies or permissions. Open **Review & coordination** in the sidebar. See the [usage and upgrade guide](docs/HARDENED-REVIEW-TOOLS.md) and [current verification report](security-review/0.3.35-hardened.2/REPORT.md). This remains a selective hardened backport, not full parity with upstream PandaCode or Paseo.
 
 The hardened controls inherited from prior revisions remain in place, including native credential storage, replay protection, gated agent tools, restricted HTML previews and disabled automatic updates. Historical reports are kept in `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, and `security-review/hardened.3/` and `security-review/hardened.4/`. These reports do not attest that this new candidate passed runtime tests.
 

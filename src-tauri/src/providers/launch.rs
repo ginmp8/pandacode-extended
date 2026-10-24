@@ -320,6 +320,7 @@ fn search_directories(windows: bool, env: &impl Fn(&str) -> Option<OsString>) ->
             .or_else(|| home.as_ref().map(|home| home.join("AppData/Local")))
         {
             dirs.push(local.join("Microsoft/WinGet/Links"));
+            dirs.push(local.join("Programs/OpenAI/Codex/bin"));
             // The standalone Node the pi.dev installer can add.
             dirs.push(local.join("pi-node/current"));
         }
@@ -744,6 +745,23 @@ mod tests {
         assert_eq!(
             node_manager_dirs(true, &env, None),
             [PathBuf::from("C:/nvm4w/nodejs"), f.0.join("nvm/v22.11.0")]
+        );
+    }
+
+    #[test]
+    fn codex_standalone_install_is_found_without_path_entry() {
+        let f = Fixture::new();
+        let codex = f.file("local/Programs/OpenAI/Codex/bin/codex.exe", "");
+        let local = f.0.join("local").into_os_string();
+        let home = f.0.join("home").into_os_string();
+        let env = |key: &str| match key {
+            "LOCALAPPDATA" => Some(local.clone()),
+            "USERPROFILE" => Some(home.clone()),
+            _ => None,
+        };
+        assert_eq!(
+            find_in_directories("codex", search_directories(true, &env), true),
+            Some(codex)
         );
     }
 

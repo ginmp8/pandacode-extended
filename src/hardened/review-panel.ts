@@ -4,8 +4,9 @@ import type { WorkflowHost } from './workflow-library.ts';
 import { buildReview, buildHandoff, collectAttention, inspectTeam, reviewProblems, type HandoffContext, type HandoffFields, type PendingAttention, type ReviewContext, type ReviewKind, type ReviewRequest } from './review-model.ts';
 import { prepareReviewPrompt, saveReviewProfile, type ReviewCall } from './review-actions.ts';
 import type { TeamSnapshot } from '../architect-types';
-import type { Provider, Session } from '../types';
+import type { Provider, ProviderId, Session } from '../types';
 
+export interface ReviewReadiness { status: 'containment_unproven' | 'capability_missing' | 'proven'; ready: boolean; provenProviders: ProviderId[]; note: string }
 export interface ReviewSnapshot extends ReviewContext, HandoffContext {
   sessions: Session[]; teams: TeamSnapshot[]; pending: PendingAttention[];
 }
@@ -13,9 +14,10 @@ export interface ReviewToolsHost {
   call: ReviewCall;
   snapshot(): ReviewSnapshot;
   refresh(): Promise<void>;
-  loadProviders(): Promise<Provider[]>;
+  loadProviders(selected?: ProviderId[]): Promise<Provider[]>;
+  reviewReadiness?: () => Promise<ReviewReadiness>;
   openTask(sessionId: string, workerId?: string): Promise<void>;
-  insertPrompt(sessionId: string, text: string): void | Promise<void>;
+  insertPrompt(sessionId: string, text: string, request: ReviewRequest, providers: Provider[]): void | Promise<void>;
   copyText(text: string): Promise<void>;
   workflow?: WorkflowHost;
 }
@@ -33,7 +35,15 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
   const status = el('p', '', 'review-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const announce = (text: string) => { if (!disposed) status.textContent = text.slice(0, 800); };
   const changed = () => (host.snapshot().task?.id ?? '') !== boundTask;
-  const request = (): ReviewRequest => ({ kind: kind.value as ReviewKind, model: model.value, question: question.value, files: files.value, acceptance: acceptance.value });
+  const request = (): ReviewRequest => ({
+    kind: kind.value as ReviewKind, provider: provider.value as ProviderId, model: model.value,
+    reviewers: (kind.value === 'committee' ? ['correctness', 'risk'] : ['advisor']).map((id, i) => {
+      const chosenProvider = (reviewerProviders[i].value || provider.value) as ProviderId;
+      return { id: id as 'advisor' | 'correctness' | 'risk', provider: chosenProvider,
+        model: reviewerModels[i].value || (chosenProvider === provider.value ? model.value : '') };
+    }),
+    question: question.value, files: files.value, acceptance: acceptance.value,
+  });
   const context = (): ReviewContext => ({ ...snapshot, providers });
   async function perform(operation: () => Promise<void>): Promise<void> {
     if (disposed || busy) return;
@@ -49,7 +59,8 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
   let fieldNumber = 0;
   function field<T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(parent: HTMLElement, label: string, control: T): T {
     control.id = `${id}-field-${++fieldNumber}`;
-    const wrap = el('label', label, 'review-field'); wrap.htmlFor = control.id; wrap.append(control); parent.append(wrap); return control;
+    const wrap = el('div', '', 'review-field'), caption = el('label', label);
+    caption.htmlFor = control.id; wrap.append(caption, control); parent.append(wrap); return control;
   }
   function checkboxField(parent: HTMLElement, label: string): HTMLInputElement {
     const control = el('input'); control.type = 'checkbox'; control.id = `${id}-field-${++fieldNumber}`;
@@ -83,12 +94,33 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
   root.append(note, toolbar, tabs, ...panes, status);
 
   const presets = panes[0];
-  presets.append(el('p', 'Save a profile, then use the original model picker on a NEW project task and select Read only. Return here to prepare the prompt; use the normal Send control to run it.', 'review-note'));
-  presets.append(el('p', 'Saving here does not change defaults. Selecting a team in the original picker retains PandaCode\'s existing default-team behavior. Codex plan is the requested native mode, not an independently verified sandbox guarantee.', 'review-note'));
+  const isolated = el('section', '', 'review-isolation');
+  isolated.append(el('strong', 'Isolated review — native security gate'));
+  const isolationState = el('p', 'Checking native containment status...', 'review-note'); isolated.append(isolationState);
+  const isolationRefresh = button('Check isolation readiness', () => { void perform(checkReadiness); });
+  isolated.append(isolationRefresh); presets.append(isolated);
+  presets.append(el('p', 'Manual mode only: save a profile, then use the original model picker on a NEW project task and select Read only. Return here to prepare a NON-ISOLATED prompt; Send remains manual.', 'review-note'));
+  presets.append(el('p', 'Saving here does not change defaults. Selecting a team in the original picker retains PandaCode\'s existing default-team behavior. Plan mode, worker readOnly flags and prompts do not isolate files, credentials or network, for ANY provider.', 'review-note'));
   const form = el('div', '', 'review-grid'); presets.append(form);
   const kind = field(form, 'Preset', el('select'));
   for (const [value, label] of [['advisor', 'Advisor - one reviewer'], ['committee', 'Committee - two reviewers']]) { const option = el('option', label); option.value = value; kind.append(option); }
-  const model = field(form, 'Codex model', el('select'));
+  const provider = field(form, 'Coordinator provider', el('select'));
+  const model = field(form, 'Coordinator model', el('select'));
+  const reviewerProviders: HTMLSelectElement[] = [], reviewerModels: HTMLSelectElement[] = [];
+  const reviewerFields: HTMLElement[] = [];
+  for (const i of [0, 1]) {
+    const group = el('fieldset', '', 'review-role');
+    const legend = el('legend', i === 0 ? 'Reviewer 1' : 'Reviewer 2'); group.append(legend);
+    reviewerProviders[i] = field(group, `Reviewer ${i + 1} provider`, el('select'));
+    reviewerModels[i] = field(group, `Reviewer ${i + 1} model`, el('select'));
+    reviewerFields[i] = group; form.append(group);
+  }
+  const updateRoleLabels = () => {
+    reviewerFields[1].hidden = kind.value !== 'committee';
+    (reviewerFields[0].querySelector('legend')!).textContent = kind.value === 'committee' ? 'Correctness reviewer' : 'Advisor';
+    (reviewerFields[1].querySelector('legend')!).textContent = 'Risk reviewer';
+  };
+  updateRoleLabels();
   const profileName = field(form, 'Saved profile name', el('input')); profileName.maxLength = 80; profileName.value = 'Hardened advisor';
   const question = field(form, 'Review question', el('textarea')); question.rows = 3; question.maxLength = 8192;
   const files = field(form, 'Relative file scopes (one per line)', el('textarea')); files.rows = 3; files.maxLength = 8192; files.placeholder = 'src/parser.ts\ntests/parser.test.ts';
@@ -99,24 +131,31 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
   const actions = el('div', '', 'review-actions');
   const saveButton = button('Save team profile', () => { void perform(async () => {
     const plan = buildReview(request());
-    if (!providers.some(p => p.id === 'codex' && p.installed && p.models.some(m => m.id === model.value))) throw new Error('Refresh and choose an available Codex model.');
+    const selections = [plan.setup.architect, ...plan.setup.config.workers];
+    if (selections.some(choice => !providers.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)))) {
+      throw new Error('Refresh the local catalog and choose available provider models for every role.');
+    }
     const result = await saveReviewProfile(host.call, profileName.value, plan.setup);
     announce(result.created ? 'Profile saved. No task, permission or default was changed; select it using the original model picker.' : 'The same profile already exists. Nothing was changed.');
   }); });
   const insertButton = button('Insert prompt', () => { void perform(async () => {
     const taskId = snapshot.task?.id, frozenRequest = request();
     if (!taskId || changed()) throw new Error('The selected task changed. Close and reopen this panel.');
-    const freshProviders = await host.loadProviders();
+    const roles = buildReview(frozenRequest);
+    const selected = [roles.setup.architect.provider, ...roles.setup.config.workers.map(w => w.provider)];
+    const freshProviders = await host.loadProviders([...new Set(selected)]);
     if (disposed || changed()) return;
     const text = await prepareReviewPrompt(host.call, taskId, freshProviders, frozenRequest);
     if (disposed) return;
     if (changed()) throw new Error('The selected task changed. Nothing was inserted.');
-    await host.insertPrompt(taskId, text);
+    await host.insertPrompt(taskId, text, frozenRequest, freshProviders);
     announce('Prompt prepared. Review it and use the normal Send control when ready.');
   }); }, true);
   actions.append(saveButton, insertButton); presets.append(actions);
-  kind.addEventListener('change', () => { profileName.value = kind.value === 'committee' ? 'Hardened committee' : 'Hardened advisor'; paint(); }, { signal });
-  for (const input of [model, question, files, acceptance]) input.addEventListener('input', () => paint(), { signal });
+  kind.addEventListener('change', () => { profileName.value = kind.value === 'committee' ? 'Hardened committee' : 'Hardened advisor'; updateRoleLabels(); paint(); }, { signal });
+  provider.addEventListener('change', () => { void perform(refresh); }, { signal });
+  for (const input of reviewerProviders) input.addEventListener('change', () => { void perform(refresh); }, { signal });
+  for (const input of [model, ...reviewerModels, question, files, acceptance]) input.addEventListener('input', () => paint(), { signal });
 
   const inspector = panes[1], attention = panes[2];
   for (const pane of [inspector, attention]) pane.addEventListener('click', event => {
@@ -203,27 +242,74 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
     const problems = reviewProblems(context(), request());
     if (changed()) problems.push('The selected task changed. Close and reopen this panel.');
     checks.replaceChildren(...(problems.length ? problems : ['Ready to prepare a prompt. Native state will be rechecked; sending remains manual.']).map(text => el('li', text)));
-    const available = providers.some(p => p.id === 'codex' && p.installed && p.models.some(m => m.id === model.value));
+    let available = false;
+    if (valid) {
+      const plan = buildReview(request());
+      available = [plan.setup.architect, ...plan.setup.config.workers].every(choice =>
+        providers.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)));
+    }
     saveButton.disabled = busy || !available || !valid;
+    isolationRefresh.disabled = busy;
     insertButton.disabled = busy || problems.length > 0;
     paintHandoff();
   }
-  async function refresh(): Promise<void> {
-    const previousModel = model.value;
-    providers = []; confirmed.checked = false;
+  /** Explicit native inventory only; never attempts to launch a harness or a jail. */
+  async function checkReadiness(): Promise<void> {
+    if (!host.reviewReadiness) {
+      isolationState.textContent = 'Native isolation status unavailable. Isolated review is disabled; manual prompts are NOT isolated.';
+      return;
+    }
     try {
-      const [catalog] = await Promise.all([host.loadProviders(), host.refresh()]);
+      const report = await host.reviewReadiness();
+      if (disposed) return;
+      // Display cannot authorize execution. There is intentionally no start button.
+      isolationState.textContent = report.ready && report.status === 'proven'
+        ? `Native review readiness reported for ${report.provenProviders.join(', ') || 'no providers'}. No isolated start action is implemented in this release.`
+        : `${report.status}: ${report.note} Isolated review is disabled.`;
+    } catch {
+      if (!disposed) { isolationState.textContent = 'Native security status could not be verified. Isolated review is disabled.'; }
+    }
+  }
+  const replaceOptions = (select: HTMLSelectElement, choices: { value: string; label: string }[], preferred: string) => {
+    select.replaceChildren();
+    for (const choice of choices) {
+      const option = el('option', choice.label); option.value = choice.value; select.append(option);
+    }
+    if (choices.some(choice => choice.value === preferred)) select.value = preferred;
+  };
+  async function refresh(): Promise<void> {
+    const previousProvider = provider.value || snapshot.task?.provider || 'codex';
+    const previousModel = model.value || snapshot.task?.model || '';
+    const previousReviewers = reviewerProviders.map((p, i) => ({ provider: p.value, model: reviewerModels[i].value }));
+    providers = [];
+    try {
+      const selected = [previousProvider, ...previousReviewers.map(r => r.provider || previousProvider)] as ProviderId[];
+      const [catalog] = await Promise.all([host.loadProviders([...new Set(selected)]), host.refresh()]);
       if (disposed) return;
       if (changed()) { announce('The selected task changed. Close and reopen this panel.'); return; }
       providers = catalog; snapshot = host.snapshot();
-      model.replaceChildren();
-      for (const m of providers.find(p => p.id === 'codex' && p.installed)?.models ?? []) { const option = el('option', m.name || m.id); option.value = m.id; model.append(option); }
-      const preferred = previousModel || (snapshot.task?.provider === 'codex' ? snapshot.task.model : '');
-      if ([...model.options].some(o => o.value === preferred)) model.value = preferred;
-      if (!model.options.length) { const empty = el('option', 'No available Codex model'); empty.value = ''; model.append(empty); }
-      announce('Snapshot refreshed. No agent was started.');
+      replaceOptions(provider, catalog.filter(p => p.installed).map(p => ({ value: p.id, label: p.name })), previousProvider);
+      if (!provider.options.length) replaceOptions(provider, [{ value: '', label: 'No installed providers' }], '');
+      const lead = catalog.find(p => p.id === provider.value && p.installed);
+      replaceOptions(model, (lead?.models ?? []).map(m => ({ value: m.id, label: m.name || m.id })), previousModel);
+      if (!model.options.length) replaceOptions(model, [{ value: '', label: 'No available model for coordinator' }], '');
+      for (const i of [0, 1]) {
+        const old = previousReviewers[i];
+        const options = [{ value: '', label: 'Same as coordinator' },
+          ...catalog.filter(p => p.installed).map(p => ({ value: p.id, label: p.name }))];
+        replaceOptions(reviewerProviders[i], options, old.provider);
+        const selectedProvider = reviewerProviders[i].value || provider.value;
+        const models = catalog.find(p => p.id === selectedProvider && p.installed)?.models ?? [];
+        replaceOptions(reviewerModels[i], [
+          ...(selectedProvider === provider.value ? [{ value: '', label: 'Same as coordinator model' }] : []),
+          ...models.map(m => ({ value: m.id, label: m.name || m.id })),
+        ], old.model);
+        if (!reviewerModels[i].options.length) replaceOptions(reviewerModels[i], [{ value: '', label: 'No available reviewer model' }], '');
+      }
+      announce('Local provider/model catalog refreshed. No agent was started.');
     } finally { if (!disposed) { paint(); paintSnapshots(); } }
   }
+  void checkReadiness();
   const workflowSection = el('details'); workflowSection.className = 'workflow-library'; workflowSection.append(el('summary', 'Workflow library: visual, integration and code review'));
   const workflowRoot = el('section'); workflowSection.append(workflowRoot); presets.append(workflowSection);
   const workflowCleanup = host.workflow ? mountWorkflowLibrary(workflowRoot, host.workflow) : undefined;

@@ -65,6 +65,11 @@ export function builtArtifact(names, releaseVersion, releaseTarget) {
   return expected;
 }
 
+export function releaseAssetName(releaseVersion, asset) {
+  const displayVersion = version(releaseVersion).replace(/-hardened(\.\d+)?$/, (_, revision = '') => `.hardened${revision}`);
+  return asset.replace('PandaCode-', `PandaCode-${displayVersion}-`);
+}
+
 export function checksumLine(sha256, filename) {
   if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid SHA-256 digest.');
   return `${sha256}  ${filename}\n`;
@@ -135,7 +140,7 @@ async function main() {
     await repackAppImage(source, { log: message => console.log(message) });
   }
   const output = resolve(releaseDirectory(releaseVersion), 'hardened');
-  const asset = config.asset.replace('PandaCode-', `PandaCode-${releaseVersion.replace(/-hardened$/, '.hardened')}-`);
+  const asset = releaseAssetName(releaseVersion, config.asset);
   await mkdir(output, { recursive: true });
   const destination = resolve(output, asset);
   await copyFile(source, destination);

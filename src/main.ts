@@ -2897,12 +2897,17 @@ async function openReviewTools(): Promise<void> {
       observedTask = task;
       observedTeam = teams.has(id) !== known || teams.get(id) !== before ? teams.get(id) ?? null : team;
     },
-    loadProviders: async () => {
+    loadProviders: async (selected = ['codex']) => {
       const catalog = await call<Provider[]>('list_providers');
-      if (!catalog.some(p => p.id === 'codex' && p.installed)) return catalog;
-      const models = await call<ProviderModel[]>('list_provider_models', { provider: 'codex' });
-      return catalog.map(p => p.id === 'codex' ? { ...p, models } : p);
+      // Only explicitly selected providers undergo model discovery. Never launch all CLIs
+      // merely because a user opens the panel; the original command remains authoritative.
+      const ids = [...new Set(selected)].filter(id => catalog.some(p => p.id === id && p.installed));
+      const discovered = await Promise.all(ids.map(async id => [id,
+        await call<ProviderModel[]>('list_provider_models', { provider: id })] as const));
+      const modelsByProvider = new Map(discovered);
+      return catalog.map(p => modelsByProvider.has(p.id) ? { ...p, models: modelsByProvider.get(p.id)! } : p);
     },
+    reviewReadiness: () => call('review_readiness'),
     openTask: async (id, workerId) => {
       if (deletedSessions.has(id) || !state.sessions.some(s => s.id === id)) throw new Error('Task is no longer available. Refresh the original task list.');
       const team = teams.get(id) ?? (observedTeam?.sessionId === id ? observedTeam : null);
@@ -2913,10 +2918,24 @@ async function openReviewTools(): Promise<void> {
         if (state.sessionId === id && teams.get(id)?.workers.some(w => w.id === workerId)) view.openWorker(workerId);
       }
     },
-    insertPrompt: (id, text) => {
+    insertPrompt: async (id, text, expectedRequest, knownProviders) => {
+      // Recheck authoritative native state after the async model-catalog and message
+      // reads. Changing models/teams on the same task ID must not reuse approval.
+      const [{ reviewProblems }, latest, team, page] = await Promise.all([
+        import('./hardened/review-model'),
+        call<Session>('get_task', { sessionId: id }),
+        call<TeamSnapshot | null>('architect_get', { sessionId: id }),
+        call<MessagePage>('get_messages', { sessionId: id }),
+      ]);
+      if (latest.id !== id || reviewProblems({ task: latest, team, providers: knownProviders, hasMessages: page.hasOlder || page.messages.length > 0 }, expectedRequest).length) {
+        throw new Error('Task or review team settings changed. Refresh and prepare a new prompt.');
+      }
       const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-      if (!task || task.id !== id || deletedSessions.has(id) || task.archived || task.provider !== 'codex' || task.mode !== 'plan' || isRunning(id)
-        || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) throw new Error('Select a fresh, idle project task in Codex Read only mode.');
+      if (!task || task.id !== id || deletedSessions.has(id) || task.archived || task.provider !== latest.provider
+        || task.model !== latest.model || task.mode !== 'plan' || isRunning(id)
+        || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) {
+        throw new Error('Select the same fresh, idle, local project task in Read only (plan) mode.');
+      }
       if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim()) throw new Error('The composer changed or contains a draft. Nothing was replaced.');
       if (state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('Remove existing attachments before inserting this review prompt.');
       prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();

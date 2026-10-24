@@ -902,3 +902,15 @@ html[data-theme="dark"] body .dialog-plate{box-shadow:0 40px 100px -30px rgb(0 0
 /* PandaCode is instant: no transitions anywhere. Looping status indicators (spinners,
    working pulses) are animations, not transitions, so they keep running. */
 *,*::before,*::after{transition:none!important}
+
+/* 0.3.34.hardened: data-only avatar art; no remote image loads. */
+.bot-avatar.has-art{padding:0;overflow:hidden;background:none;box-shadow:none}
+.bot-avatar.has-art>:is(svg,img),.avatar-swatch>:is(svg,img){display:block;width:100%;height:100%;border-radius:50%;object-fit:cover}
+.avatar-picker{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.avatar-swatch{flex:none;width:34px;height:34px;padding:0;border-radius:50%;--press:1}
+.avatar-swatch:hover{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 45%,transparent)}
+.avatar-swatch[aria-pressed=true]{box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--accent)}
+.avatar-swatch:focus-visible,.avatar-upload:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+.avatar-upload{padding:6px 12px;border-radius:999px;border:1px solid var(--border);color:var(--muted);font-size:.8rem}
+.avatar-upload:hover{color:var(--text);border-color:color-mix(in srgb,var(--accent) 70%,var(--border))}
+.avatar-error{flex-basis:100%;color:var(--danger);font-size:.78rem}

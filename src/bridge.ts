@@ -26,6 +26,7 @@ export async function subscribe(name: 'simulator-changed', callback: (event: { u
 export async function subscribe(name: 'remote://status', callback: (event: import('./remote-types').RemoteStatus) => void): Promise<() => void>;
 export async function subscribe(name: 'remote://presence', callback: (event: import('./remote-types').RemoteDevice[]) => void): Promise<() => void>;
 export async function subscribe(name: 'agent-event', callback: (event: AgentEvent) => void): Promise<() => void>;
+export async function subscribe(name: 'tray-open-session', callback: (sessionId: string) => void): Promise<() => void>;
 export async function subscribe(name: 'terminal-event', callback: (event: TerminalEvent) => void): Promise<() => void>;
 export async function subscribe(name: 'browser-state', callback: (event: BrowserStatus) => void): Promise<() => void>;
 export async function subscribe(name: 'browser-element', callback: (event: BrowserElement) => void): Promise<() => void>;

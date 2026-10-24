@@ -239,12 +239,71 @@ fn validate(input: &BotInput) -> Result<BotInput> {
         role: clean(&input.role, 200),
         instructions: clean(&input.instructions, MAX_TEXT),
         goals: clean(&input.goals, MAX_TEXT),
-        avatar: input.avatar.chars().take(4).collect(),
+        avatar: validate_avatar(&input.avatar)?,
         provider: input.provider.clone(),
         model: input.model.clone(),
         mode: input.mode.clone(),
         heartbeat_minutes: input.heartbeat_minutes,
     })
+}
+
+/// Only preset IDs or bounded 128px PNG thumbnails can be persisted as image avatars.
+/// Uploaded formats are converted to PNG by the UI; reject arbitrary data: URLs at IPC.
+const MAX_AVATAR_URL: usize = 300_000;
+fn validate_avatar(value: &str) -> Result<String> {
+    if value.len() > MAX_AVATAR_URL { return Err("Bot icon is too large.".into()); }
+    if let Some(n) = value.strip_prefix("panda:") {
+        return if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() {
+            Ok(value.to_owned())
+        } else { Err("Invalid panda icon.".into()) };
+    }
+    if let Some(encoded) = value.strip_prefix("data:image/png;base64,") {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| "Invalid bot image encoding.")?;
+        // PNG magic + IHDR dimensions. No SVG/HTML or unbounded image data is accepted.
+        if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || &bytes[12..16] != b"IHDR" {
+            return Err("Bot icon must be a PNG image.".into());
+        }
+        let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        if width != 128 || height != 128 {
+            return Err("Bot icon dimensions exceed the limit.".into());
+        }
+        return Ok(value.to_owned());
+    }
+    if value.starts_with("data:") { return Err("Unsupported bot icon format.".into()); }
+    Ok(value.chars().take(4).collect())
+}
+
+#[cfg(test)]
+mod avatar_security_tests {
+    use super::validate_avatar;
+    use base64::Engine as _;
+    #[test]
+    fn preset_and_glyphs_are_bounded() {
+        assert_eq!(validate_avatar("panda:9").unwrap(), "panda:9");
+        assert!(validate_avatar("panda:10").is_err());
+        assert_eq!(validate_avatar("🐼🐼🐼🐼🐼").unwrap(), "🐼🐼🐼🐼");
+        assert!(validate_avatar("data:image/svg+xml;base64,PHN2Zz4=").is_err());
+        assert!(validate_avatar("data:image/png;base64,<script>").is_err());
+        assert!(validate_avatar(&"X".repeat(300_001)).is_err());
+    }
+    #[test]
+    fn png_header_and_dimensions_are_checked() {
+        let mut header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+        header.extend_from_slice(&128_u32.to_be_bytes());
+        header.extend_from_slice(&128_u32.to_be_bytes());
+        let valid = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&header));
+        assert_eq!(validate_avatar(&valid).unwrap(), valid);
+        let bad = valid.replace("iVBOR", "AAAAA");
+        assert!(validate_avatar(&bad).is_err());
+        let mut huge = header;
+        huge[16..20].copy_from_slice(&9000_u32.to_be_bytes());
+        let invalid = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&huge));
+        assert!(validate_avatar(&invalid).is_err());
+    }
 }
 
 /// Folder name for a bot workspace: readable, unique per bot.

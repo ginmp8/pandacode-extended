@@ -6,6 +6,7 @@ test('release versions cannot become paths, arbitrary prereleases, or shell comm
   for (const input of ['../secret', '1.0.0;echo x', 'v1.0.0', '01.0.0', '1.0.0-beta', undefined]) assert.throws(() => version(input));
   assert.equal(version('0.3.0'), '0.3.0');
   assert.equal(version('0.3.30-hardened'), '0.3.30-hardened');
+  assert.equal(version('0.3.34-hardened'), '0.3.34-hardened');
   for (const input of ['0.3.30-hardened.1', '0.3.30-hardened/../etc', '0.3.30-beta', '0.3.30-hardened+other']) assert.throws(() => version(input));
   assert.match(releaseDirectory('1.2.3'), /release[\\/]1\.2\.3$/);
 });

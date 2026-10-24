@@ -1,0 +1,139 @@
+{
+  "checks": [
+    {
+      "id": "npm-version-consistency",
+      "status": "pass",
+      "detail": "app and lock root version"
+    },
+    {
+      "id": "npm-dependency-graph-preserved",
+      "status": "pass",
+      "detail": "byte-normalized parsed lockfile unchanged except app version"
+    },
+    {
+      "id": "version-consistency",
+      "status": "pass",
+      "detail": "tauri config and Cargo manifest"
+    },
+    {
+      "id": "cargo-root-lock",
+      "status": "pass",
+      "detail": "Cargo.lock root version"
+    },
+    {
+      "id": "cargo-dependency-graph-preserved",
+      "status": "pass",
+      "detail": "Cargo.lock graph unchanged apart from root version"
+    },
+    {
+      "id": "pinned-tauri",
+      "status": "pass",
+      "detail": "Native tray feature on hardened pinned Tauri"
+    },
+    {
+      "id": "preserve:.npmrc",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src/app-updates.ts",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src/agent-updates.ts",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src-tauri/src/agent_updates.rs",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src-tauri/src/usage_keychain.rs",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src-tauri/src/secret_store.rs",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src-tauri/src/remote.rs",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src-tauri/src/bots/guard.rs",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "preserve:src-tauri/src/bots/gateway.rs",
+      "status": "pass",
+      "detail": "old hardened bytes unchanged"
+    },
+    {
+      "id": "no-new-cloud-code",
+      "status": "pass",
+      "detail": "existing cloud/vm unchanged"
+    },
+    {
+      "id": "native-tray-registered",
+      "status": "pass",
+      "detail": "native wiring static presence"
+    },
+    {
+      "id": "avatar-ipc-guard",
+      "status": "pass",
+      "detail": "bot input server validation"
+    },
+    {
+      "id": "user-initiated-plan-usage",
+      "status": "pass",
+      "detail": "quota refresh attached to click or explicit refresh menu item"
+    },
+    {
+      "id": "no-upstream-updater-capability",
+      "status": "pass",
+      "detail": "no automatic Tauri updater added"
+    },
+    {
+      "id": "no symlinks",
+      "status": "pass",
+      "detail": "no symlink in packaged source"
+    },
+    {
+      "id": "no-corrupt-version",
+      "status": "pass",
+      "detail": "new package identity only"
+    },
+    {
+      "id": "no-new-credential-patterns",
+      "status": "pass",
+      "detail": "prefix scanner output identical to hardened baseline; redacted candidate counts: {\"github_token\": 1, \"aws_access_key\": 2, \"private_key_block\": 1}"
+    }
+  ],
+  "credential_scan_locations": {
+    "github_token": [
+      "src-tauri/src/skills/safety.rs"
+    ],
+    "aws_access_key": [
+      "src-tauri/src/cloud/deploy.rs",
+      "src-tauri/src/skills/safety.rs"
+    ],
+    "private_key_block": [
+      "src-tauri/src/skills/safety.rs"
+    ]
+  },
+  "credential_scan_interpretation": "Signals belong to unchanged source-controlled examples/test fixtures, not externally validated live credentials. No Git history, binary or runtime/CI log scan.",
+  "out_of_scope": [
+    "Native Rust compilation and unit tests (cargo/rustc unavailable)",
+    "Full TypeScript typecheck (dependency install disallowed)",
+    "Electron/Tauri GUI runtime tests (untrusted target execution prohibited)",
+    "Offline/online CVE and OS-specific signing checks (not performed)",
+    "Git histories and external secret revocation (not present in supplied archives)"
+  ]
+}

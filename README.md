@@ -1,6 +1,6 @@
-# PandaCode — 0.3.30.hardened
+# PandaCode — 0.3.34.hardened
 
-**Distribution label:** `0.3.30.hardened`; **internal SemVer:** `0.3.30-hardened` (Cargo, npm, Tauri). This source archive builds on the `0.3.28-hardened.3` fork and selectively backports reviewed 0.3.30 improvements. **It is not a full functional port of upstream 0.3.30.** See [current release notes](security-review/0.3.30.hardened/README.md) for the exact scope and verification limits.
+**Distribution label:** `0.3.34.hardened`; **internal SemVer:** `0.3.34-hardened` (Cargo, npm, Tauri). This source archive preserves the supplied 0.3.30 hardened fork and selectively backports reviewed 0.3.34 changes: bot icons/images, redesigned bot settings, and a native task tray. **It is not feature-equivalent to the upstream 0.3.34 release.** See [current security review](security-review/0.3.34.hardened/README.md) for the exact scope and verification limits.
 
 The hardened controls inherited from prior revisions remain in place, including native credential storage, replay protection, gated agent tools, restricted HTML previews and disabled automatic updates. Historical reports are kept in `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, and `security-review/hardened.3/` and `security-review/hardened.4/`. These reports do not attest that this new candidate passed runtime tests.
 
@@ -41,7 +41,8 @@ embedded editor engine.
   line in the turn that started it; click it to open the worker.
 - **Bots.** Put an agent behind Telegram, Slack, Discord, WhatsApp or a local web
   chat; each conversation is an ordinary task. The sidebar's **Bots** view lists
-  every bot with its latest message. See [bots](docs/bots.md).
+  every bot with its latest message. This fork adds ten built-in panda icons, local image uploads cropped to 128px PNG, and reorganized bot settings. See [bots](docs/bots.md).
+- **Native system tray.** Optional OS tray menu lists running, waiting and recently finished tasks; plan usage is refreshed only when the menu is opened or its refresh action is used.
 - **Local VMs and cloud sandboxes.** Headless macOS/Linux VMs on Apple silicon
   (Tart), and Daytona, Cloudflare and AWS sandboxes that agents can drive.
 - **Simulators.** iOS Simulator and Android emulator tools for agents.
@@ -181,11 +182,11 @@ You need Node.js 22 or newer, stable Rust 1.88 or newer, and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```sh
-cd pandacode-0.3.30.hardened
+cd pandacode-0.3.34.hardened
 npm ci --ignore-scripts
 npm run build
 npm run package
-# For a Windows x64 installer with a distinct 0.3.30.hardened asset name:
+# For a Windows x64 installer with a distinct 0.3.34.hardened asset name:
 # npm run release:build -- windows-x86_64
 # For local development: npm run desktop
 ```

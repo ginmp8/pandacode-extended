@@ -1,4 +1,4 @@
-# Windows: compilar e instalar 0.3.30.hardened
+# Windows: compilar e instalar 0.3.34.hardened
 
 Este pacote contém código-fonte, não um instalador Windows pré-compilado.
 O executável precisa ser produzido no Windows com os pré-requisitos do Tauri,
@@ -24,8 +24,8 @@ A compilação pode baixar dependências/ferramentas públicas; não é um build
 Saída x64 esperada do script, ainda não produzida nesta revisão Linux:
 
 ```text
-release/0.3.30-hardened/hardened/PandaCode-0.3.30.hardened-Windows-x64-setup.exe
-release/0.3.30-hardened/hardened/PandaCode-0.3.30.hardened-Windows-x64-setup.exe.sha256
+release/0.3.34-hardened/hardened/PandaCode-0.3.34.hardened-Windows-x64-setup.exe
+release/0.3.34-hardened/hardened/PandaCode-0.3.34.hardened-Windows-x64-setup.exe.sha256
 ```
 
 Revise o binário produzido, a origem das ferramentas e os alertas do antivírus antes de executá-lo.
@@ -42,8 +42,8 @@ canalizados para um interpretador como atalho de instalação.
 
 ## Limites
 
-O identificador nativo foi preservado e a versão interna agora é `0.3.30-hardened`. Faça backup dos
-dados existentes antes de substituir uma instalação. A tela About mostra 0.3.30.hardened.
+O identificador nativo foi preservado e a versão interna agora é `0.3.34-hardened`. Faça backup dos
+dados existentes antes de substituir uma instalação. A tela About mostra 0.3.34.hardened.
 O aplicativo continua executando comandos de IA autorizados e pode abrir o PowerShell;
 a configuração não impõe um firewall aos processos dos agentes.
 As atualizações do Windows/WebView2 administradas pela Microsoft não foram alteradas.

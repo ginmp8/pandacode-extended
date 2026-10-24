@@ -1,0 +1,152 @@
+[
+  {
+    "path": "src/browser.ts",
+    "needle": "const nativeReview",
+    "lines": [
+      150
+    ],
+    "sha256": "fe5c570ba39536f9c6c5509d4daf22b818d0fca087ff2433fd9a779d183a5210",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/browser.ts",
+    "needle": "async function ensureQA",
+    "lines": [
+      154
+    ],
+    "sha256": "fe5c570ba39536f9c6c5509d4daf22b818d0fca087ff2433fd9a779d183a5210",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/browser.ts",
+    "needle": "resizeReview",
+    "lines": [
+      8,
+      249
+    ],
+    "sha256": "fe5c570ba39536f9c6c5509d4daf22b818d0fca087ff2433fd9a779d183a5210",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/main.ts",
+    "needle": "action === 'browser_review'",
+    "lines": [
+      2674,
+      2677
+    ],
+    "sha256": "8327e468a055cb571a9682ac85412104c098f2fd41459033f8418b0e642805be",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/main.ts",
+    "needle": "workflow: {",
+    "lines": [
+      2925
+    ],
+    "sha256": "8327e468a055cb571a9682ac85412104c098f2fd41459033f8418b0e642805be",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/browser.rs",
+    "needle": "mod review;",
+    "lines": [
+      17
+    ],
+    "sha256": "afc8e63e4df2347a712fb1570b29514d7269c529c2e33c282bb2cda5e5796246",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/browser.rs",
+    "needle": "action.as_str()",
+    "lines": [
+      390,
+      402,
+      419,
+      454
+    ],
+    "sha256": "afc8e63e4df2347a712fb1570b29514d7269c529c2e33c282bb2cda5e5796246",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/browser.rs",
+    "needle": "review::script",
+    "lines": [
+      463
+    ],
+    "sha256": "afc8e63e4df2347a712fb1570b29514d7269c529c2e33c282bb2cda5e5796246",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/agent_tools.rs",
+    "needle": "tools.extend(review_tools::catalog())",
+    "lines": [
+      361
+    ],
+    "sha256": "ad4675e545f0e89316c5c9e20fe5916412c548cd2160e47f7dc8b168c226413e",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/agent_tools.rs",
+    "needle": "let approval_tools = tools",
+    "lines": [
+      369
+    ],
+    "sha256": "ad4675e545f0e89316c5c9e20fe5916412c548cd2160e47f7dc8b168c226413e",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/agent_tools.rs",
+    "needle": "return request_ui(",
+    "lines": [
+      790
+    ],
+    "sha256": "ad4675e545f0e89316c5c9e20fe5916412c548cd2160e47f7dc8b168c226413e",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/hardened/review-panel.ts",
+    "needle": "mountWorkflowLibrary",
+    "lines": [
+      2,
+      224
+    ],
+    "sha256": "823fd376d4041a421794b0d766b653d9b6625baf8a0463a441f5ea7a108a4f84",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src-tauri/src/browser/review.rs",
+    "needle": "pub(super) fn script",
+    "lines": [
+      9
+    ],
+    "sha256": "9455e91193e734ccb3700dcb6d6778ec535cbdc5afc3e048f3579b64daa62335",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/hardened/browser-flow.ts",
+    "needle": "export async function runFlow",
+    "lines": [
+      53
+    ],
+    "sha256": "1e31e80f98ae052637c5b921089fb8b5627396a50dc950a2b5dce9e68e7068c6",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/hardened/workflow-library.ts",
+    "needle": "export async function prepareWorkflow",
+    "lines": [
+      39
+    ],
+    "sha256": "c45ef838ccee2ee35cf7343705b99b83b10d4938c9dd115f7d8422df43f92473",
+    "evidence": "static source, not native runtime"
+  },
+  {
+    "path": "src/hardened/workflow-library.ts",
+    "needle": "export async function saveWorkflow",
+    "lines": [
+      51
+    ],
+    "sha256": "c45ef838ccee2ee35cf7343705b99b83b10d4938c9dd115f7d8422df43f92473",
+    "evidence": "static source, not native runtime"
+  }
+]

@@ -1,13 +1,10 @@
-# Windows: compilar e instalar 0.3.34.hardened
+# Windows: Build and Install 0.3.34.hardened
 
-Este pacote contém código-fonte, não um instalador Windows pré-compilado.
-O executável precisa ser produzido no Windows com os pré-requisitos do Tauri,
-Node.js, Rust/MSVC e o runtime Microsoft WebView2 já instalados. O instalador
-não baixa WebView2. Sem o runtime, o aplicativo não funciona.
+This package contains source code, not a prebuilt Windows installer. The executable must be built on Windows with the Tauri prerequisites, Node.js, Rust/MSVC, and the Microsoft WebView2 runtime already installed. The installer does not download WebView2. The application will not run without the runtime.
 
-## Comandos locais
+## Local Commands
 
-No diretório deste projeto, sem elevar o terminal a administrador:
+From this project directory, without elevating the terminal to administrator:
 
 ```text
 npm ci --ignore-scripts
@@ -15,39 +12,23 @@ npm run test:install-security
 npm run release:build -- windows-x86_64
 ```
 
-Para Windows ARM64, use `windows-aarch64` em um host ARM64 compatível.
-O build executa explicitamente TypeScript/Vite, Cargo e o empacotador Tauri.
-`--ignore-scripts` bloqueia os scripts de instalação do npm, não esses
-comandos deliberados nem os `build.rs` das dependências Rust.
-A compilação pode baixar dependências/ferramentas públicas; não é um build offline.
+For Windows ARM64, use `windows-aarch64` on a compatible ARM64 host. The build explicitly runs TypeScript/Vite, Cargo, and the Tauri packager. `--ignore-scripts` blocks npm install scripts; it does not block these deliberate commands or Rust dependencies' `build.rs` scripts. The build may download public dependencies and tools; it is not an offline build.
 
-Saída x64 esperada do script, ainda não produzida nesta revisão Linux:
+Expected x64 output from the script, not yet produced in this Linux review:
 
 ```text
 release/0.3.34-hardened/hardened/PandaCode-0.3.34.hardened-Windows-x64-setup.exe
 release/0.3.34-hardened/hardened/PandaCode-0.3.34.hardened-Windows-x64-setup.exe.sha256
 ```
 
-Revise o binário produzido, a origem das ferramentas e os alertas do antivírus antes de executá-lo.
-Não desative o Avast, não adicione exceção para PowerShell e não ignore uma
-nova detecção para continuar a instalação. O hash verifica identidade, não inocuidade.
-A ausência de assinatura Authenticode não pode ser corrigida com um certificado inventado.
+Review the produced binary, tool origins, and antivirus alerts before running it. Do not disable Avast, add a PowerShell exception, or ignore a new detection to continue installation. The hash verifies identity, not safety. The absence of an Authenticode signature cannot be fixed with an invented certificate.
 
-## O que não usar
+## Do Not Use
 
-Não use `npx pandacode`, Homebrew, links da release upstream ou um instalador
-previamente baixado para obter estas correções. Eles são outros artefatos.
-Não use `ExecutionPolicy Bypass`, exclusões de antivírus ou comandos remotos
-canalizados para um interpretador como atalho de instalação.
+Do not use `npx pandacode`, Homebrew, upstream release links, or a previously downloaded installer to obtain these fixes. They are different artifacts. Do not use `ExecutionPolicy Bypass`, antivirus exclusions, or remote commands piped into an interpreter as installation shortcuts.
 
-## Limites
+## Limitations
 
-O identificador nativo foi preservado e a versão interna agora é `0.3.34-hardened`. Faça backup dos
-dados existentes antes de substituir uma instalação. A tela About mostra 0.3.34.hardened.
-O aplicativo continua executando comandos de IA autorizados e pode abrir o PowerShell;
-a configuração não impõe um firewall aos processos dos agentes.
-As atualizações do Windows/WebView2 administradas pela Microsoft não foram alteradas.
+The native identifier was preserved and the internal version is now `0.3.34-hardened`. Back up existing data before replacing an installation. The About screen displays 0.3.34.hardened. The application still runs authorized AI commands and may open PowerShell; this configuration does not impose a firewall on agent processes. Microsoft-managed Windows/WebView2 updates were not changed.
 
-Referências: [instalação Windows do Tauri](https://v2.tauri.app/distribute/windows-installer/),
-[pré-requisitos](https://v2.tauri.app/start/prerequisites/),
-[configuração npm](https://docs.npmjs.com/cli/v10/using-npm/config/).
+References: [Tauri Windows installation](https://v2.tauri.app/distribute/windows-installer/), [prerequisites](https://v2.tauri.app/start/prerequisites/), [npm configuration](https://docs.npmjs.com/cli/v10/using-npm/config/).

@@ -1,90 +1,90 @@
-# PandaCode 0.3.35 hardened — revisão de backport e segurança
+# PandaCode 0.3.35 hardened — Backport and Security Review
 
-**Data da revisão:** 2026-10-24  
-**Identificação do produto:** `0.3.35-hardened.1` / pacote-fonte `pandacode-0.3.35-hardened.zip`  
-**Estado da evidência:** `STATIC_BACKPORT_VERIFIED` para o backport; **`review_status=blocked-critical-evidence`** para liberação operacional, porque execução e autorização runtime não foram provadas.  
-**Base:** `pandacode-hardened-0.3.34.1.zip` — SHA-256 `094d2e05af75c488c346205dacf08fae6e898ef04f9221d2701e701636819103`.  
-**Comparação:** `pandacode-0.3.35.zip` — SHA-256 `fc668a66394a3390f78b44a2cd9187b027f383ad1492ddf9653dd00c3f2b1cdd`.
+**Review date:** 2026-10-24
+**Product:** `0.3.35-hardened.1` / source package `pandacode-0.3.35-hardened.zip`
+**Evidence status:** `STATIC_BACKPORT_VERIFIED` for the backport; **`review_status=blocked-critical-evidence`** for operational release because runtime behavior and authorization were not proven.
+**Base:** `pandacode-hardened-0.3.34.1.zip` — SHA-256 `094d2e05af75c488c346205dacf08fae6e898ef04f9221d2701e701636819103`.
+**Comparison:** `pandacode-0.3.35.zip` — SHA-256 `fc668a66394a3390f78b44a2cd9187b027f383ad1492ddf9653dd00c3f2b1cdd`.
 
-## Decisão de escopo
+## Scope Decision
 
-A 0.3.34.1 hardened já possui **menu nativo** com tarefas e consumo de agentes. A inovação pontual documentada no release upstream 0.3.35 é o **painel visual da bandeja/menu bar**. Adotado como backport limitado; **não há equivalência funcional geral com a 0.3.35 original**.
+PandaCode 0.3.34.1 hardened already has a **native menu** with tasks and agent usage. The focused innovation documented in upstream 0.3.35 is the **visual tray/menu bar panel**. It was adopted as a limited backport; **there is no general functional equivalence with original 0.3.35**.
 
-**Implementado no código-fonte:**
+**Implemented in source:**
 
-- Painel sob o ícone com tarefas `running`, `waiting` e concluídas (incluindo distinção entre sucesso e falha), vínculo a agente/projeto, acesso ao task, navegação por setas e Enter.
-- Barra visual dos limites de plano com percentual, estado 80%/95%, horário de reset, informação de cache antigo e refresh somente mediante abertura ou ação do usuário.
-- Webview `tray` dedicada com capability de evento mínima; IPC Rust possui lista explícita de sete comandos `tray_*`, separada dos comandos do workspace e do launcher. Navegação permitida somente dentro do aplicativo com `view=tray`.
-- Salvaguardas adicionais na adaptação: máximo de 1.024 tarefas concluídas ainda não vistas, 32 provedores consultáveis no painel por rodada, uma rodada de consultas de uso por vez, rejeição de percentuais não finitos para CSS, limite/validação da altura do painel existente no upstream.
-- Mock de prévia e teste Playwright do upstream para o painel, sem executar testes de navegação no sandbox atual.
+- Panel under the icon with `running`, `waiting`, and completed tasks (including success/failure distinction), agent/project association, task access, arrow-key and Enter navigation.
+- Visual plan-limit bar with percentage, 80%/95% state, reset time, stale-cache information, and refresh only when opened or explicitly requested by the user.
+- Dedicated `tray` webview with minimal event capability; Rust IPC has an explicit list of seven `tray_*` commands, separate from workspace/launcher commands. Navigation is allowed only inside the app with `view=tray`.
+- Additional adaptation safeguards: at most 1,024 unseen completed tasks; 32 provider queries per panel refresh; one usage-query round at a time; reject non-finite CSS percentages; retain upstream panel-height limit/validation.
+- Upstream preview mock and Playwright panel test, but no navigation tests were run in the current sandbox.
 
-**Não incluído, intencionalmente:**
+**Intentionally excluded:**
 
-- Agentes em nuvem (`cloud_agents`), setup de ferramentas em máquinas remotas, upload de código e tokens/credenciais e sincronização automática: mudanças invasivas nos limites de confiança, nova autorização/telemetria e testes OS/rede seriam necessários.
-- Novos provedores cloud/VM, scripts de deploy, armazenamento em arquivo plano de segredos no macOS, permissões ampliadas e fluxos de instalação remota. Na versão hardened, chaves continuam no mecanismo protegido preexistente.
-- Updater do app e dos agentes, permissões de processo/restart, instalador `npx` remoto. A política de atualização manual do hardened anterior permanece intocada.
-- Mudanças de dependências não necessárias, scripts de release, locks do upstream, alterações amplas em bots, HTTP/relay, Cloudflare, Connect, arquivos do workspace ou ferramentas MCP.
+- Cloud agents (`cloud_agents`), remote-machine tool setup, code/token/credential upload, and automatic sync. These would change trust boundaries, require new authorization/telemetry, and need OS/network testing.
+- New cloud/VM providers, deploy scripts, plaintext macOS secret storage, expanded permissions, and remote installation flows. Hardened version continues to use the preexisting protected key store.
+- App/agent updater, process/restart permissions, and remote `npx` installer. The prior hardened manual-update policy remains unchanged.
+- Unneeded dependency changes, release scripts, upstream locks, broad changes to bots, HTTP/relay, Cloudflare, Connect, workspace files, or MCP tools.
 
-**Importante:** O código herdado já traz bloqueios e compensações de segurança que não são revalidados apenas por permanecem byte a byte idênticos. Os registros anteriores (`security-review/0.3.34.1/`) continuam com suas ressalvas de execução pendente.
+**Important:** inherited code already has security controls and compensating measures that are not revalidated merely because their bytes remain identical. Earlier records (`security-review/0.3.34.1/`) retain their pending-execution caveats.
 
-## Evidências realizadas
+## Evidence Collected
 
-| Verificação | Resultado | Limite |
-| --- | --- | --- |
-| Inventário ZIP, trajetos, links e duplicatas | Aprovado: ambas entradas seguras para a extração controlada (1141 e 934 entradas) | Não atesta ausência de código malicioso |
-| Baseline congelado com hash de ambos os ZIPs, 21 arquivos críticos e escopo fixo | Realizado; `frozen-evaluation.json` | Hash prova identidade, não comportamento |
-| Regressão estática dos controles protegidos, comandos IPC, versões e lockfiles | Aprovado, `static-verification.json`; script reproduzível `verify-source.py` | Inspeção sintática/estrutural, sem runtime |
-| Parser TypeScript sobre `src/tray-popover.ts`, `src/entry.ts`, `src/preview.ts`, `tests/tray-popover.spec.ts` | **4/4 sem erros sintáticos** | Parser, não typechecker completo |
-| Verificação sintática `node --check` do instalador npx preservado | Aprovado | Não executa instalador |
-| `tsc --noEmit` em baseline e candidato | **Bloqueado por dependências não instaladas**: baseline 62 diagnósticos, candidato 63. Único novo diagnóstico: módulo já declarado em `package.json`, `@tauri-apps/api/event`, não encontrado no ambiente. | Não é compilação aprovada nem reprovação específica do código novo |
-| Controle negativo do verificador (alteração byte-a-byte em arquivo crítico de cópia descartável) | Reprovado como esperado: escopo e SHA-256; `tamper-probe.json` | Demonstra sensibilidade do checker, não segurança do runtime |
-| `cargo check --locked`, `cargo test --locked` | Não executados: Cargo/Rust indisponíveis | Sintaxe/compilação Rust não verificadas |
-| Node suite, Playwright, aplicativo Tauri | Não executados: dependências/browser indisponíveis e isolamento completo para código não confiável não verificado | UX real, eventos do tray e integração nativa não verificadas |
-| SCA atualizada, instalação, assinatura, Windows/macOS/Linux | Não executados | Não certifica segurança do produto nem da distribuição |
+| Check | Result | Limit |
+|---|---|---|
+| ZIP inventory, paths, links, duplicates | Passed: both inputs safe for controlled extraction (1,141 and 934 entries) | Does not attest to absence of malicious code |
+| Frozen baseline with hashes for both ZIPs, 21 critical files, and fixed scope | Recorded in `frozen-evaluation.json` | Hash proves identity, not behavior |
+| Static regression of protected controls, IPC commands, versions, and lockfiles | Passed, `static-verification.json`; reproducible `verify-source.py` | Syntax/structure inspection, no runtime |
+| TypeScript parser on `src/tray-popover.ts`, `src/entry.ts`, `src/preview.ts`, `tests/tray-popover.spec.ts` | **4/4 syntax-clean** | Parser, not full typechecker |
+| `node --check` on preserved npx installer | Passed | Installer not executed |
+| `tsc --noEmit` on baseline/candidate | **Blocked by missing dependencies:** 62 baseline diagnostics, 63 candidate. Only new diagnostic: declared `@tauri-apps/api/event` module unavailable in environment. | Neither approved compilation nor a candidate-specific failure |
+| Verifier negative control (byte-level tamper in disposable copy of critical file) | Failed as expected on scope/SHA-256; `tamper-probe.json` | Shows checker sensitivity, not runtime security |
+| `cargo check --locked`, `cargo test --locked` | Not run: Cargo/Rust unavailable | Rust syntax/compilation unverified |
+| Node suite, Playwright, Tauri app | Not run: dependencies/browser unavailable and full isolation for untrusted code unverified | Real UX, tray events, native integration unverified |
+| Current SCA, installation, signing, Windows/macOS/Linux | Not run | Does not certify product or distribution security |
 
-A separação de namespace de rede e mount read-only para o diretório-fonte foi observada; a tentativa de garantir **toda a raiz de filesystem somente leitura** falhou no sandbox disponível. Assim, não executamos scripts controlados pelo projeto nem testes de aplicação com acesso potencial ao host. Isso não é um resultado de falha do produto; é limitação de validação.
+Network namespace separation and read-only mount for source were observed; the available sandbox failed to guarantee **the entire filesystem root was read-only**. Therefore, project-controlled scripts and app tests with potential host access were not run. This is a validation limitation, not a product failure.
 
-## Revisão de risco e governança (SGR-2.0)
+## Risk and Governance Review (SGR-2.0)
 
-| Item | Classificação | Evidência estática | Risco e decisão |
-| --- | --- | --- | --- |
-| R01 — IPC do novo painel | `needs-verification` / alta / confiança média | `lib.rs` roteia `tray` antes de `main`; `capabilities/tray.json` só habilita eventos; `tray.rs` restringe navegação. | A superfície adicional parece limitada; testar em runtime que nenhuma chamada de workspace/CLI/arquivo pode ser disparada pela janela `tray`. Não afirmar isolamento comprovado até o teste. |
-| R02 — Renderização de títulos/percentuais | `needs-verification` / média / confiança média | `tray-popover.ts` utiliza `escape` nos dados dinâmicos, URLs de marca locais e valores percentuais finitos. | Testar payloads HTML/atributos malformados e valores extremos em runtime, com CSP real. Não identificado sink direto sem escape nos novos campos. |
-| R03 — Consultas de consumo | `needs-verification` / baixa / confiança alta no código | Uso de `query_usage` preexistente; acionado ao abrir painel ou apertar refresh; limitador de solicitações simultâneas. | Consultas podem depender da CLI/provider e não são garantia de ausência de tráfego; documentar e testar consentimento, caches e limites. |
-| R04 — Agentes cloud upstream | `not-applicable` / informativa / confiança alta | Arquivos de transporte/sync/credenciais não foram trazidos; `mod cloud_agents` ausente. | Evitou-se um novo fluxo de transferência de código e credenciais; não confundir com auditoria de quaisquer integrações cloud já existentes. |
-| R05 — Hardening histórico F01–F08 | `needs-verification` / alta (gate de validação) / confiança alta na ausência de teste | Hashes iguais nos principais limites: bots, MCP/deploy, Cloudflare, instalações, HTTP relay. | Sem regressão textual nos arquivos protegidos, mas as lacunas de teste/runtime da 0.3.34.1 permanecem abertas. |
-| R06 — Supply chain/atualizadores | `governance-risk` / média / confiança alta na lacuna de evidência | Dependências e versões fixadas preservadas; sem novo updater/instalador habilitado. | Ausência de SCA contemporânea, binário assinado e testes do instalador impede autorização ampla para distribuição operacional. |
+| Item | Classification | Static evidence | Risk and decision |
+|---|---|---|---|
+| R01 — New panel IPC | `needs-verification` / high / medium confidence | `lib.rs` routes `tray` before `main`; `capabilities/tray.json` enables events only; `tray.rs` restricts navigation. | Added surface appears limited; runtime-test that tray window cannot invoke workspace/CLI/file calls. Do not claim isolation until tested. |
+| R02 — Title/percentage rendering | `needs-verification` / medium / medium confidence | `tray-popover.ts` escapes dynamic data, uses local brand URLs and finite percentages. | Test malformed HTML/attributes and extreme values at runtime with real CSP. No direct unescaped sink found for new fields. |
+| R03 — Usage queries | `needs-verification` / low / high code confidence | Uses existing `query_usage`; triggered on panel open or user refresh; concurrent-request limiter. | Queries may depend on CLI/provider and do not guarantee no traffic; document/test consent, caching, and limits. |
+| R04 — Upstream cloud agents | `not-applicable` / informational / high confidence | Transport/sync/credential files were not imported; `mod cloud_agents` absent. | Avoids a new code/credential transfer flow; not an audit of existing cloud integrations. |
+| R05 — Historical F01–F08 hardening | `needs-verification` / high (validation gate) / high confidence that tests are absent | Hashes match across key boundaries: bots, MCP/deploy, Cloudflare, installation, HTTP relay. | No textual regression in protected files, but 0.3.34.1 runtime/test gaps remain open. |
+| R06 — Supply chain/updaters | `governance-risk` / medium / high confidence in evidence gap | Pinned dependencies/versions preserved; no new updater/installer enabled. | No current SCA, signed binary, or installer tests; insufficient for broad operational distribution approval. |
 
-Não houve tentativa de autenticação com credenciais, execução de ferramentas de agentes, instalação de pacotes, acesso a provedores de nuvem, envio de arquivos para APIs ou testes invasivos. O teste estático de strings em **novos arquivos de código** não identificou padrões usuais de segredos. Isso **não** significa que a distribuição completa e o histórico estejam livres de segredos.
+No credential authentication, agent-tool execution, package installation, cloud-provider access, file upload to APIs, or invasive tests were attempted. Static string checks on **new code files** found no common secret patterns. This does **not** mean the entire distribution and its history are free of secrets.
 
-## Matriz de autoridade da nova webview
+## Authority Matrix for the New Webview
 
-| Ação originada da webview `tray` | Escopo | Origem da autorização | Efeito/falha |
-| --- | --- | --- | --- |
-| `tray_snapshot` | Leitura de tarefas visíveis, nomes de projeto e percentuais cacheados | Janela local `tray` definida em capability dedicada e allowlist Rust | Erro de storage retorna falha, não executa tarefas |
-| `tray_refresh_usage` | Consulta dos limites de até 32 CLIs/provider ids já configurados | Clique do usuário em Refresh ou abertura do painel | Sem bypass de instalação; possível consulta de conta existente deve ser validada em runtime |
-| `tray_open`, `tray_show_app`, `tray_hide`, `tray_resize` | Navegação e apresentação locais | Cliques/teclado na janela limitada | Sem execução de CLI/workspace/deploy no handler |
-| `tray_quit` | Encerramento local do processo | Clique em Quit da UI ou menu nativo | Sem rollback de tarefas remotas preexistentes, já limitação do produto |
-| Comandos gerais (arquivos, secrets, agent tools, bots, MCP, deploy) | **Sem permissão para webview `tray`** | Enforced pelo roteamento por label no código fonte | A negação efetiva exige teste de IPC nativo |
+| Action from `tray` webview | Scope | Authorization source | Effect/failure behavior |
+|---|---|---|---|
+| `tray_snapshot` | Read visible tasks, project names, cached percentages | Local `tray` window in dedicated capability and Rust allowlist | Storage error returns failure; does not execute tasks |
+| `tray_refresh_usage` | Query limits for up to 32 configured CLI/provider IDs | User clicks Refresh or opens panel | No installation bypass; querying an existing account must be validated at runtime |
+| `tray_open`, `tray_show_app`, `tray_hide`, `tray_resize` | Local navigation/presentation | Clicks/keyboard in restricted window | Handler does not execute CLI/workspace/deploy |
+| `tray_quit` | Local process exit | UI or native-menu Quit | Does not roll back preexisting remote tasks; existing product limitation |
+| General commands (files, secrets, agent tools, bots, MCP, deploy) | **Not permitted to `tray` webview** | Enforced by source-code label routing | Effective denial requires native IPC test |
 
-O novo painel não recebe permissões de workspace em `capabilities/default.json` e não cria execução remota. A separação de comando em `lib.rs` e a consulta explícita de refresh devem ser verificadas no aplicativo real, não apenas por inspeção.
+The new panel has no workspace permissions in `capabilities/default.json` and creates no remote execution. Command separation in `lib.rs` and explicit refresh queries must be checked in the real application, not by inspection alone.
 
-## Critérios ainda exigidos antes de uso operacional
+## Remaining Criteria Before Operational Use
 
-1. Em ambiente isolado com Rust e dependências já provisionados, executar `cargo check --locked --offline` e `cargo test --locked --offline` no projeto `src-tauri/`; verificar `tray_position_centers_under_icon_and_clamps` e regressões de segurança históricas.
-2. Com node_modules gerado a partir do lockfile sem scripts de instalação não aprovados, executar `./node_modules/.bin/tsc --noEmit`, a suíte Node e o teste `tests/tray-popover.spec.ts` usando o navegador local aprovado.
-3. Testar as três plataformas: clique esquerdo/direito, abrir/fechar/foco da janela transparente, layout, teclado, conclusão/falha de tasks, refresh, URLs de navegação, erro de rede/provedor e fechamento da aplicação.
-4. Tentar invocar comandos de alto privilégio (`run`, arquivos, bot, MCP, cloud, terminal) pela webview `tray` e comprovar negação; verificar que `tray_snapshot` retorna só os dados previstos e que os outros webviews não herdam as permissões do painel.
-5. Verificar integrações/segredos e CVEs contra versões efetivamente fixadas, operações de cancelamento, HTTP/body, aprovação de bots e origem de pacotes; tratar riscos ainda abertos na 0.3.34.1.
-6. Verificar o binário final, assinatura/reputação do instalador e integridade em máquinas-alvo. Após isso realizar revisão independente ligada aos hashes do ZIP e dos testes.
+1. In an isolated environment with Rust and dependencies pre-provisioned, run `cargo check --locked --offline` and `cargo test --locked --offline` in `src-tauri/`; verify `tray_position_centers_under_icon_and_clamps` and historical security regressions.
+2. With `node_modules` generated from the lockfile without unapproved install scripts, run `./node_modules/.bin/tsc --noEmit`, Node suite, and `tests/tray-popover.spec.ts` using an approved local browser.
+3. Test all three platforms: left/right click, transparent-window open/close/focus, layout, keyboard, task completion/failure, refresh, navigation URLs, network/provider errors, and app close.
+4. Attempt high-privilege commands (run, files, bot, MCP, cloud, terminal) from `tray` webview and prove denial; verify `tray_snapshot` returns only expected data and other webviews do not inherit panel permissions.
+5. Check integrations/secrets and CVEs against actually pinned versions, cancellation, HTTP/body limits, bot approvals, and package origin; address risks still open in 0.3.34.1.
+6. Verify final binary, installer reputation/signature, and integrity on target machines. Then conduct independent review tied to ZIP and test hashes.
 
-**Veredito:** backport-fonte entregue e **aprovado somente em critérios estáticos**; `review_status=blocked-critical-evidence` para execução/distribuição operacional pela ausência de evidência dinâmica. Não é certificado de ausência de vulnerabilidades ou de compatibilidade total com a versão upstream.
+**Verdict:** source backport delivered and **approved on static criteria only**; `review_status=blocked-critical-evidence` for operational execution/distribution because dynamic evidence is absent. This is not a certificate of vulnerability-free status or complete upstream compatibility.
 
-## Material de auditoria
+## Audit Artifacts
 
-- `changes.json` — listagem exata de arquivos alterados/adicionados; `changes.patch` — diff do backport com contexto, sem a árvore recursiva de evidências.
-- `frozen-evaluation.json` — limites, entradas e hashes protegidos congelados antes da implementação.
-- `verify-source.py` — verificador de invariantes textual e hash; `static-verification.json` — recibo da execução.
-- `source-manifest.json` — SHA-256 de cada arquivo do ZIP, exceto o próprio manifesto.
+- `changes.json` — exact changed/added file list; `changes.patch` — contextual backport diff, excluding recursive evidence tree.
+- `frozen-evaluation.json` — scope, inputs, and protected hashes frozen before implementation.
+- `verify-source.py` — textual/hash invariant checker; `static-verification.json` — execution receipt.
+- `source-manifest.json` — SHA-256 for each ZIP file except the manifest itself.
 
-Os arquivos desta revisão são documentação de uma candidata fonte. A presença de logs antigos dentro da árvore não transforma testes históricos em testes atuais.
+These files document a source candidate. Old logs in the tree do not turn historical tests into current tests.

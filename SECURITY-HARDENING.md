@@ -1,150 +1,146 @@
-> **Relatório histórico de hardened.1.** Não representa os testes da revisão atual.
-> As revisões seguintes estão em `SECURITY-INSTALLATION-REVIEW.md` (hardened.2) e `security-review/hardened.3/README.md` (hardened.3).
-> A revisão de instalação, as correções e os limites de hardened.2 estão em
-> [SECURITY-INSTALLATION-REVIEW.md](SECURITY-INSTALLATION-REVIEW.md).
-> Os antigos manifestos, patch e resumo de verificação estão em `security-review/hardened.1/`; os demais logs antigos permanecem em `security-review/`.
+> **Historical report for hardened.1.** It does not describe tests from the current review. Later reviews are in `SECURITY-INSTALLATION-REVIEW.md` (hardened.2) and `security-review/hardened.3/README.md` (hardened.3). The hardened.2 installation review, fixes, and limitations are in [SECURITY-INSTALLATION-REVIEW.md](SECURITY-INSTALLATION-REVIEW.md). Older manifests, patch, and verification summary are in `security-review/hardened.1/`; other historical logs remain under `security-review/`.
 
-# Revisão de segurança — PandaCode 0.3.28 / hardened.1
+# Security Review — PandaCode 0.3.28 / hardened.1
 
-Data: 23 de outubro de 2026. Idioma do relatório: português brasileiro.
+Date: October 23, 2026. Report language: English.
 
-This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). A licença, os créditos, a arquitetura e os recursos do projeto original foram preservados. `hardened.1` identifica esta distribuição revisada; o número interno 0.3.28 permanece para compatibilidade.
+This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The original project's license, credits, architecture, and features were preserved. `hardened.1` identifies this reviewed distribution; internal version 0.3.28 remains for compatibility.
 
-## Resultado
+## Result
 
-**A cópia original não atende ao requisito de evitar atualizações externas automáticas e reduzir saídas de dados sem autorização específica.** Foram encontrados caminhos concretos de envio prematuro por bots, problemas de revogação/repetição remota, armazenamento inadequado de chaves opcionais, instalação automática com credenciais no ambiente e dependências com correções de segurança disponíveis. Alguns comportamentos eram funcionalidades documentadas; não são, por si, prova de malware.
+**The original copy does not meet the requirement to avoid automatic external updates and reduce data egress without specific authorization.** Concrete paths were found for premature bot data transmission, remote revocation/replay issues, inadequate storage of optional keys, automatic installation with credentials in the environment, and dependencies with available security fixes. Some behaviors were documented features; they are not, by themselves, proof of malware.
 
-As correções estão nesta própria árvore, baseada no ZIP recebido. A revisão não encontrou uma instrução interna oculta que ordenasse à IA roubar código, chaves ou dados para um servidor de coleta separado. Também não confirmou credencial real embutida nos arquivos próprios examinados. Esses resultados descrevem o escopo analisado e não constituem certificação de ausência de malware ou de vulnerabilidades desconhecidas.
+Corrections are in this tree, based on the supplied ZIP. The review found no hidden internal instruction directing AI to steal code, keys, or data for a separate collection server. It also did not confirm real embedded credentials in the first-party files examined. These findings describe the reviewed scope and are not certification that the project is free of malware or unknown vulnerabilities.
 
-O uso dos modelos escolhidos, a execução de comandos, Git, equipes, tarefas, terminal, deploys explícitos e integrações opcionais foram preservados. A distribuição não é um firewall nem um sandbox adicional para todo comando que a IA possa executar.
+Use of selected models, command execution, Git, teams, tasks, terminal, explicit deployments, and optional integrations was preserved. This distribution is not a firewall or an additional sandbox for every command an AI may run.
 
-## Origem e escopo
+## Origin and Scope
 
-| Item | Registro |
+| Item | Record |
 | --- | --- |
-| Arquivo recebido | `pandacode-0.3.28.zip` |
-| SHA-256 original | `4d74c67ab175967fa247852cd8d678e3908cb51de9d5a9292b1dd5dc6d500836` |
-| Inventário original | 888 entradas no ZIP, 820 arquivos; extração sem caminhos de fuga ou links simbólicos |
-| Projeto | Aplicativo desktop Tauri 2/Rust, frontend TypeScript/Vite; fontes do relay, website e instaladores incluídas |
-| Revisão | Fluxos de credenciais, prompts internos, chamadas externas, atualização/instalação, IPC, navegador e prévias, Connect, bots/webhooks, nuvem, limites de recursos e dependências fixadas |
-| Registro de mudanças | `security-review/hardened.1/changes.patch` e `security-review/hardened.1/manifest.json` |
-| Evidências | `security-review/hardened.1/verification.json`, logs e notas detalhadas por subsistema |
+| Supplied file | `pandacode-0.3.28.zip` |
+| Original SHA-256 | `4d74c67ab175967fa247852cd8d678e3908cb51de9d5a9292b1dd5dc6d500836` |
+| Original inventory | 888 ZIP entries, 820 files; extraction had no path traversal or symlinks |
+| Project | Tauri 2/Rust desktop app, TypeScript/Vite frontend; relay, website, and installer sources included |
+| Review | Credential flows, internal prompts, external calls, updates/installation, IPC, browser/previews, Connect, bots/webhooks, cloud, resource limits, and pinned dependencies |
+| Change record | `security-review/hardened.1/changes.patch` and `security-review/hardened.1/manifest.json` |
+| Evidence | `security-review/hardened.1/verification.json`, logs, and subsystem notes |
 
-A análise combinou inspeção de código, comparação com uma cópia imutável, consultas a advisories oficiais, regressões executáveis, testes existentes e revisão independente das mudanças de maior risco. As consultas de dependências enviaram somente nomes e versões públicos; o repositório e as credenciais do usuário não foram enviados a scanners externos. Não foram conectadas contas pessoais nem usados modelos pagos para os testes.
+Analysis combined source inspection, comparison against an immutable copy, official advisory lookups, executable regressions, existing tests, and an independent review of the highest-risk changes. Dependency queries sent only public package names and versions; repository contents and user credentials were not sent to external scanners. No personal accounts were connected and no paid models were used for testing.
 
-## Problemas encontrados e tratamento
+## Findings and Treatment
 
-As gravidades abaixo consideram condições reais de uso. “Alta condicional” significa que é necessário ativar uma integração ou abrir conteúdo específico; não significa acesso remoto anônimo disponível na instalação padrão.
+Severity reflects real-use conditions. “Conditional high” means an integration must be enabled or specific content opened; it does not mean anonymous remote access is available by default.
 
-| Área / gravidade | Evidência no original e consequência | Tratamento nesta revisão |
+| Area / severity | Original evidence and consequence | Treatment in this review |
 | --- | --- | --- |
-| Atualização do app — requisito de privacidade | `src/app-updates.ts` iniciava checks, download e instalação automática; `tauri.conf.json` e capabilities expunham updater/restart. Havia opção de desligar na UI, mas dependia da preferência. | Controlador inerte; plugin, dependências, registro nativo, endpoint e capacidades removidos. Preferências antigas não reativam o mecanismo. |
-| Atualização dos agentes — requisito de privacidade | Controlador fazia verificações periódicas; comandos nativos ofereciam instalação/atualização. | Polling e instalação desativados no frontend e nos pontos de entrada nativos. Opt-outs documentados são passados aos CLIs que os suportam. |
-| npx / continuidade da versão — requisito de privacidade | O instalador incluído baixava e instalava a versão upstream mais recente. Isso substituiria as correções desta distribuição. | A cópia incluída recusa download, instalação e execução, inclusive em dry-run. Instalação desta revisão exige build do código fornecido. |
-| Dependência Tauri — alta | `Cargo.lock` fixava Tauri 2.11.5, abrangido pelo GHSA-w28w-mhc8-qvjv: isolamento insuficiente na recuperação de mensagens de canal entre webviews. | Tauri fixado em 2.11.6, versão corrigida. O guest continua sem permissões de IPC do aplicativo. |
-| Prévia HTML — alta condicional | `file_preview.rs` servia HTML/JS do workspace com CSP somente de frame-ancestors. Um arquivo aberto podia executar scripts, ler recursos permitidos daquela origem e tentar transmiti-los. O bloqueio de `.env` não cobria todo arquivo potencialmente confidencial. | Arquivos recebem sandbox sem scripts; fetch, workers, forms, frames, objetos e rede externa são bloqueados. Navegação do guest fica restrita à origem da prévia. HTML/CSS/imagens locais continuam visíveis. |
-| Revogação Connect — alta condicional | A fila conservava confiança antiga; operações lentas podiam prosseguir depois da revogação. Havia janela de troca de chave e envio após perda de confiança. | Revalidar chave autenticadora, pin, confiança e hosting ao despachar, após preparação lenta e antes de respostas/eventos. |
-| Replay Connect — média/alta condicional | Timestamp extremo podia causar overflow; responses/events não tinham metadata antirrepetição; cache de requests era volátil. | Aritmética segura; ts/nonce dentro de todos os corpos cifrados; recibos persistentes antes da admissão, com fail-closed e proteção contra relógio retrocedido. |
-| Notify de bot — alta condicional | `pandacode_bot_notify` era self-scoped e podia mandar texto proativo sem uma aprovação específica, inclusive em Full access. | Notify sempre pede aprovação; regras amplas e “always” não tornam a autorização permanente. |
-| Pedido de aprovação externo — alta condicional | `bots/gateway.rs` enviava ao canal os primeiros 600 caracteres da ação antes de o usuário aprová-la. | O canal recebe aviso fixo, sem argumentos/conteúdo da ação. Detalhes permanecem no desktop. |
-| Resultados agendados — preferência de privacidade | Resultado de agenda era encaminhado automaticamente ao último canal externo. Era comportamento funcional, não instrução maliciosa. | Resumo fica no desktop. Envio externo proativo usa a ferramenta com aprovação. |
-| Canal/link revogado — média | Eventos já coletados e long polls podiam continuar depois de desabilitar canal ou renovar token. | Revalidar canal, propriedade e token na admissão, na espera e antes de cada parte enviada. Falha não informa falso sucesso. |
-| WhatsApp — média | Webhook assinado não tinha deduplicação persistente, idade e vínculo ao número configurado suficientes. | Conferir phone_number_id, ID e timestamp, gravar recibo antes da admissão e falhar fechado em capacidade excedida. |
-| Jev — média, credencial local | Chaves opcionais eram serializadas em `jev/settings.json`; permissão privada não equivalia a cofre. | Migrar para o cofre do sistema com referência UUID, commit atômico e rollback. Falha preserva recuperação e bloqueia uso/salvamento destrutivo. |
-| CLI de deploy — alta condicional | Se ausente, Vercel/Wrangler/Railway eram executados via `npx --yes` já com tokens no ambiente. Código baixado e scripts herdariam os tokens. | Exigir CLI previamente instalada; remover download automático dessa ponte privilegiada. |
-| Endpoint/credencial cloud — alta condicional | Argumentos como Vercel `--api` e AWS `--endpoint-url`/`--no-verify-ssl` permitiam redirecionar uso das credenciais ou retirar proteção TLS. | Bloquear opções sensíveis, operações de credenciais e abreviações AWS; ignorar endpoints AWS herdados da configuração. |
-| Limites HTTP — média, disponibilidade | Alguns corpos eram limitados depois de `bytes()`, permitindo alocação excessiva em resposta chunked; HTTP de bots aceitava framing ambíguo. | Limitar durante streaming; teto de mensagem WebSocket e conexões HTTP; rejeitar duplicação de cabeçalhos e framing não suportado. |
-| AWS user-data — média condicional | `set -eux` expunha a senha VNC em trace; arquivo temporário local era criado sem exclusividade/permissão explícita. | Desligar xtrace antes de segredos; arquivo exclusivo, 0600 em Unix, guard de limpeza no sucesso/erro, recusa de symlink/preexistente. |
-| TightVNC no guest AWS — média condicional | MSI externo era executado sem verificar assinatura/publisher. | Staging privado; Authenticode válido e publisher GlavSoft esperado antes do msiexec; sem redirects; cleanup e verificação de exit code. |
-| Desktop de VM — preferência de instalação | Criar/iniciar Linux VM podia instalar desktop/pacotes em background. | Instalação somente pela ação explícita Add a desktop. |
-| Preços e DNS — redução de tráfego | Estimativa fazia GET diário da tabela pública; links podiam permitir DNS especulativo dependendo do motor. | Usar preços salvos/embutidos, sem refresh; DNS prefetch desativado no app e na prévia. |
+| App updates — privacy requirement | `src/app-updates.ts` started checks, downloads, and automatic installation; Tauri config/capabilities exposed updater/restart. UI opt-out depended on user preference. | Inert controller; removed plugin, dependencies, native registration, endpoint, and capabilities. Old preferences cannot re-enable it. |
+| Agent updates — privacy requirement | Periodic checks and native install/update commands. | Disabled polling and installation in frontend and native entrypoints. Documented opt-outs are passed to CLIs that support them. |
+| npx / version continuity — privacy requirement | Included installer downloaded and installed latest upstream, replacing this distribution's fixes. | Included copy refuses download, installation, and execution, including dry-run. This revision must be built from supplied source. |
+| Tauri dependency — high | `Cargo.lock` pinned Tauri 2.11.5, affected by GHSA-w28w-mhc8-qvjv (insufficient channel-message isolation between webviews). | Pinned corrected Tauri 2.11.6. Guest still has no application IPC permissions. |
+| HTML preview — conditional high | `file_preview.rs` served workspace HTML/JS with only frame-ancestors CSP. Opened files could run scripts, read same-origin permitted resources, and attempt transmission. Blocking `.env` did not cover all potentially sensitive files. | Sandboxed files without scripts; blocked fetch, workers, forms, frames, objects, and external networking. Guest navigation restricted to preview origin. Local HTML/CSS/images remain visible. |
+| Connect revocation — conditional high | Queue retained stale trust; slow operations could continue after revocation. Key-change and send-after-trust-loss windows existed. | Revalidate authenticating key, pin, trust, and hosting during dispatch, after slow preparation, and before responses/events. |
+| Connect replay — conditional medium/high | Extreme timestamp could overflow; responses/events lacked anti-replay metadata; request cache was volatile. | Safe arithmetic; timestamp/nonce in all encrypted bodies; persistent receipts before admission, fail-closed and resistant to clock rollback. |
+| Bot notify — conditional high | `pandacode_bot_notify` was self-scoped and could proactively send text without specific approval, including Full access. | Notify always requires approval; broad/“always” rules do not make authorization permanent. |
+| External bot approval request — conditional high | `bots/gateway.rs` sent the first 600 action characters to the channel before user approval. | Channel receives a fixed notice without action arguments/content. Details remain on desktop. |
+| Scheduled results — privacy preference | Results automatically went to the last external channel. This was functional behavior, not a malicious instruction. | Summary stays on desktop. Proactive external delivery requires an approved tool call. |
+| Revoked channel/link — medium | Collected events and long polls could continue after disabling a channel or renewing a token. | Revalidate channel, ownership, and token at admission, during waits, and before each sent part. Failures do not report false success. |
+| WhatsApp — medium | Signed webhook lacked sufficient persistent deduplication, age checks, and binding to configured phone number. | Check `phone_number_id`, ID, and timestamp; persist receipt before admission; fail closed at capacity. |
+| Jev — medium, local credential | Optional keys were serialized in `jev/settings.json`; private permissions were not equivalent to a system vault. | Migrate to system vault with UUID reference, atomic commit, and rollback. Failure preserves recovery and blocks destructive use/save. |
+| Deploy CLI — conditional high | If missing, Vercel/Wrangler/Railway ran via `npx --yes` with tokens in the environment. Downloaded code/scripts inherited tokens. | Require a preinstalled CLI; remove automatic download from this privileged bridge. |
+| Cloud endpoint/credentials — conditional high | Vercel `--api` and AWS `--endpoint-url`/`--no-verify-ssl` could redirect credential use or remove TLS checks. | Block sensitive options, credential operations, and AWS abbreviations; ignore inherited AWS endpoints. |
+| HTTP limits — medium availability | Some bodies were limited only after `bytes()`, enabling large allocation for chunked responses; bot HTTP accepted ambiguous framing. | Limit while streaming; cap WebSocket messages and HTTP connections; reject duplicate headers and unsupported framing. |
+| AWS user data — conditional medium | `set -eux` could expose VNC password in trace; local temp file lacked exclusive creation/explicit permissions. | Disable xtrace before secrets; exclusive file, 0600 on Unix, cleanup guard on success/error, reject symlink/preexisting file. |
+| TightVNC in AWS guest — conditional medium | External MSI ran without signature/publisher verification. | Private staging; require valid Authenticode and expected GlavSoft publisher before msiexec; no redirects; cleanup and exit-code check. |
+| VM desktop — installation preference | Creating/starting a Linux VM could install desktop/packages in background. | Install only through explicit Add a desktop action. |
+| Prices and DNS — traffic reduction | Cost estimate fetched public price table daily; links could allow speculative DNS depending on engine. | Use saved/embedded prices, no refresh; disable DNS prefetch in app and preview. |
 
-As notas `notes-egress.md`, `notes-remote.md` e `notes-updates.md` registram arquivos, linhas originais, funções, condições, testes e decisões com mais detalhe. São notas de trabalho; a tabela de validação abaixo é o resultado consolidado final.
+`notes-egress.md`, `notes-remote.md`, and `notes-updates.md` record original files/lines, functions, conditions, tests, and decisions in more detail. They are working notes; the validation table below is the consolidated final result.
 
-### Por que apenas desligar opções da UI não bastava
+### Why Disabling UI Options Alone Was Not Enough
 
-Desligar o updater do app e deixar Connect, Jev ou canais desconectados evitaria parte dos caminhos opcionais. Isso não corrigiria a biblioteca Tauri vulnerável, a prévia ativa de arquivos, os limites de leitura nem os defeitos que aparecem quando as integrações são usadas. Por isso foi gerada uma versão corrigida, em vez de classificar o ZIP original como seguro sem alterações.
+Turning off app updates and leaving Connect, Jev, or channels disconnected would avoid some optional paths. It would not fix the vulnerable Tauri library, active file previews, body limits, or defects that arise when integrations are used. A corrected version was therefore prepared instead of declaring the original ZIP safe without changes.
 
-## Dependências e proveniência
+## Dependencies and Provenance
 
-| Componente | Original | Nesta revisão | Motivo / evidência |
+| Component | Original | This review | Reason / evidence |
 | --- | --- | --- | --- |
-| Tauri | 2.11.5 | 2.11.6 | GHSA-w28w-mhc8-qvjv, isolamento entre webviews |
-| DOMPurify | 3.4.15 no lock | 3.4.17 | GHSA-mrv2-3pqr-j5jr e GHSA-cg2g-xh64-v4q7; condições específicas não demonstradas no app, atualização preventiva |
-| KaTeX | 0.16.47 | 0.18.2 | GHSA-238p-pmpm-9mq7; exploração exige poluição prévia de protótipo, não demonstrada aqui |
-| Vite | 7.3.6 | 7.3.7 | Correções da linha 7 para servidor de desenvolvimento/Windows; não confundir dev server com servidor exposto por padrão |
-| source-map-js | 1.2.1 | 1.2.2 | GHSA-68fv-2mgg-jv7q, consumo de CPU com source map malicioso |
-| rustls | 0.23.45 | 0.23.46 | RUSTSEC-2026-0346 a 0349; várias condições específicas não habilitadas nesta configuração |
-| rustls-webpki | 0.103.15 | 0.103.16 | RUSTSEC-2026-0382, recusa de intermediários emSign desautorizados |
-| webpki-roots / root-certs | 1.0.9 | 1.0.10 | RUSTSEC-2026-0381/0383, trust store; wrapper 0.26.11 resolve o pai corrigido |
-| zip | 2.4.2 | 9.0.0 | RUSTSEC-2026-0367/0368/0369; APIs de extração não usadas pelo app, mas o código vulnerável também foi retirado da árvore resolvida |
-| glib | 0.18.5 | 0.18.5 + backport local | RUSTSEC-2024-0429: duas linhas da correção oficial, mantendo tipos GTK3 compatíveis |
+| Tauri | 2.11.5 | 2.11.6 | GHSA-w28w-mhc8-qvjv, isolation between webviews |
+| DOMPurify | 3.4.15 in lock | 3.4.17 | GHSA-mrv2-3pqr-j5jr and GHSA-cg2g-xh64-v4q7; specific conditions not demonstrated in app, preventive update |
+| KaTeX | 0.16.47 | 0.18.2 | GHSA-238p-pmpm-9mq7; exploitation requires prior prototype pollution, not demonstrated here |
+| Vite | 7.3.6 | 7.3.7 | Fixes in 7.x for dev server/Windows; do not confuse dev server with a server exposed by default |
+| source-map-js | 1.2.1 | 1.2.2 | GHSA-68fv-2mgg-jv7q, CPU exhaustion with malicious source map |
+| rustls | 0.23.45 | 0.23.46 | RUSTSEC-2026-0346 through 0349; several specific conditions are not enabled here |
+| rustls-webpki | 0.103.15 | 0.103.16 | RUSTSEC-2026-0382, rejection of distrusted emSign intermediates |
+| webpki-roots / root-certs | 1.0.9 | 1.0.10 | RUSTSEC-2026-0381/0383, trust store; wrapper 0.26.11 resolves the corrected parent |
+| zip | 2.4.2 | 9.0.0 | RUSTSEC-2026-0367/0368/0369; extraction code also removed from resolved tree |
+| glib | 0.18.5 | 0.18.5 + local backport | RUSTSEC-2024-0429: two lines from official fix, GTK3-compatible types retained |
 
-O backport GLib preserva licença e versão autêntica, com hashes e verificador em `src-tauri/vendor/glib/BACKPORT.md` e `BACKPORT_PROVENANCE.json`. A versão não foi falsificada para silenciar ferramentas. O teste otimizado de iteração cobre o comportamento que originou o advisory. A mudança ZIP mantém o consumidor VSIX e exige Rust 1.88 ou superior.
+The GLib backport preserves the authentic license/version, with hashes and verifier in `src-tauri/vendor/glib/BACKPORT.md` and `BACKPORT_PROVENANCE.json`. The version was not falsified to silence tools. The optimized iterator test covers the behavior behind the advisory. The ZIP update retains the VSIX consumer and requires Rust 1.88 or later.
 
-**npm:** a consulta final do lock raiz retornou zero vulnerabilidades conhecidas. O resultado não cobre automaticamente pacotes que o usuário instalar depois, CLIs externos nem todos os projetos opcionais em subpastas.
+**npm:** the final root lockfile query returned zero known vulnerabilities. This does not automatically cover packages users install later, external CLIs, or every optional subproject.
 
-**Rust:** foram consultados 591 pacotes de registry e o GLib local pelo nome/versão, totalizando 592 consultas. Os advisories de TLS e ZIP deixaram de aparecer. O número GLib ainda é sinalizado pelo banco público e está resolvido pelo backport verificável. Permanecem nove avisos de manutenção: `proc-macro-error`, `unic-char-property`, `unic-char-range`, `unic-common`, `unic-ucd-ident`, `unic-ucd-version`, `zbus_names`, `zvariant` e `zvariant_derive`. São dívida de manutenção de dependências transitivas; não foram reclassificados como exploits comprovados nem escondidos.
+**Rust:** OSV was queried for 591 registry packages and local GLib by name/version, 592 queries total. TLS and ZIP advisories no longer appeared. The public database still flags GLib; the issue is addressed by the verifiable backport. Nine maintenance notices remain: `proc-macro-error`, `unic-char-property`, `unic-char-range`, `unic-common`, `unic-ucd-ident`, `unic-ucd-version`, `zbus_names`, `zvariant`, and `zvariant_derive`. These are transitive dependency maintenance debt; they were not reclassified as proven exploits or hidden.
 
-## Validação realizada
+## Validation Performed
 
-Ambiente: Linux x86_64, Node 24.19.0, Rust/Cargo 1.99.1, bibliotecas GTK/WebKit e navegadores de teste isolados. As dependências npm foram instaladas com scripts de instalação desabilitados. Os testes de UI usam dados locais simulados. Os testes HTTP relevantes usam loopback.
+Environment: Linux x86_64, Node 24.19.0, Rust/Cargo 1.99.1, GTK/WebKit libraries, and isolated test browsers. npm dependencies were installed with install scripts disabled. UI tests use local simulated data. Relevant HTTP tests use loopback.
 
-| Verificação | Resultado consolidado |
+| Check | Consolidated result |
 | --- | --- |
-| TypeScript + bundle de produção | Passou: TypeScript e bundle final Vite |
-| Testes Node do app | 126 passaram; zero falhas |
-| Testes dos scripts de release / instalador npx | 39 passaram; zero falhas |
-| Backend Rust completo | 1.189 passaram; zero falhas; 39 ignorados explicitamente |
-| UI Chromium, dez arquivos afetados | 95 cenários aprovados em duas execuções: 90 na suíte inicial e os cinco de VM após corrigir a plataforma simulada do fixture (MacIntel para Tart); zero falhas remanescentes |
-| Servidor nativo de prévias + Chromium/WebKit | Passou: um fixture nativo executou ambos os motores, incluindo scripts/fetch bloqueados, HTML/CSS/SVG, cookies, reload e restauração |
-| GLib + compatibilidade ZIP, otimização release | 6 passaram; zero falhas |
-| Recibos remotos persistentes, módulo de produção isolado | 4 passaram; zero falhas; também integrados à suíte nativa |
-| Provas comparativas de parser/timestamp | Original falha, correção passa; overflow também exercitado com otimização |
-| Proveniência GLib | 121 arquivos upstream verificados; somente o arquivo do patch diverge nas duas linhas documentadas |
-| Segredos hardcoded | 591 arquivos próprios; zero credenciais reais confirmadas após triagem; relatório sanitizado incluído |
-| npm audit / OSV | Resultados JSON incluídos, com as ressalvas acima |
+| TypeScript + production bundle | Passed: TypeScript and final Vite bundle |
+| App Node tests | 126 passed; zero failures |
+| Release-script / npx installer tests | 39 passed; zero failures |
+| Full Rust backend | 1,189 passed; zero failures; 39 explicitly ignored |
+| Chromium UI, ten affected files | 95 scenarios passed across two runs: 90 in initial suite and five VM cases after correcting the fixture's simulated platform (MacIntel to Tart); no remaining failures |
+| Native preview server + Chromium/WebKit | Passed: one native fixture ran both engines, including blocked scripts/fetch, HTML/CSS/SVG, cookies, reload, and restore |
+| GLib + ZIP compatibility, release optimization | 6 passed; zero failures |
+| Persistent remote receipts, isolated production module | 4 passed; zero failures; also integrated into native suite |
+| Parser/timestamp comparative proofs | Original fails, fix passes; overflow also exercised with optimization |
+| GLib provenance | 121 upstream files verified; only the patch file differs in the two documented lines |
+| Hardcoded secrets | 591 first-party files; no real credentials confirmed after triage; sanitized report included |
+| npm audit / OSV | JSON results included, subject to caveats above |
 
-Os testes ignorados não foram contados como sucesso. Incluem integrações que dependem de CLIs autenticadas, plataformas ou serviços externos. A prévia real de arquivos foi exercitada separadamente de forma explícita quando indicada na tabela. Os logs, comandos e resultados estão em `security-review/`; não basta a presença de um teste no código para que ele seja tratado como executado.
+Ignored tests were not counted as successes. They include integrations requiring authenticated CLIs, platforms, or external services. Real file preview was explicitly exercised separately where indicated. Logs, commands, and results are in `security-review/`; a test's mere presence in source does not mean it ran.
 
-## Comportamento e compatibilidade
+## Behavior and Compatibility
 
-### Saídas de dados que continuam existindo por escolha do usuário
+### Data Egress That Remains by User Choice
 
-| Recurso escolhido | Dados/destino | Como evitar quando não desejado |
+| Selected feature | Data/destination | How to avoid it when unwanted |
 | --- | --- | --- |
-| Provedor de IA/CLI | Prompt, anexos, contexto e resultados de ferramentas ao provedor configurado | Escolher o provedor/endpoint e limitar contexto/permissões conforme a tarefa |
-| Jev | Objetivo/texto visível e, na assistência, trechos selecionados/diffs a TypeSafe e ao modelo configurado | Manter os recursos Jev desligados |
-| Connect | Login GitHub entrega token ao relay configurado para troca; depois relay encaminha tráfego cifrado entre dispositivos | Não entrar; se conectado, usar Sign out |
-| Bots/canais | Resposta à conversa externa escolhida segue para o canal; notify proativo pede aprovação | Desabilitar/remover canal e renovar link quando necessário |
-| Deploy/nuvem | Código/artefatos e credenciais de uso ao serviço escolhido, sob aprovação | Não conectar/provisionar/deployar o serviço |
-| Navegador, Git/GitHub, shell | Tráfego dos sites, repositórios e comandos explicitamente utilizados | Controlar essas ações na tarefa; são funções preservadas do orquestrador |
+| AI provider/CLI | Prompt, attachments, context, and tool results go to configured provider | Choose provider/endpoint and limit context/permissions for the task |
+| Jev | Visible goal/text and, during assistance, selected snippets/diffs go to TypeSafe and configured model | Keep Jev features disabled |
+| Connect | GitHub login sends token to configured relay for exchange; relay then forwards encrypted traffic between devices | Do not sign in; if connected, sign out |
+| Bots/channels | Reply to selected external conversation goes to the channel; proactive notify requires approval | Disable/remove channel and renew link as needed |
+| Deploy/cloud | Code/artifacts and credentials go to selected service, subject to approval | Do not connect/provision/deploy the service |
+| Browser, Git/GitHub, shell | Traffic from explicitly used sites, repositories, and commands | Control these actions in the task; they are retained orchestrator features |
 
-O app não substitui nem altera as credenciais do provedor por um endpoint de coleta. A revisão não promete que código enviado intencionalmente ao modelo ficará exclusivamente no PC.
+The app does not replace provider credentials with a collection endpoint. This review does not promise that code intentionally sent to a model remains exclusively on the PC.
 
-### Mudanças intencionais de conveniência
+### Intentional Convenience Changes
 
-- Atualizações do app/agentes e o instalador npx incluído ficam desativados no código, sem interruptor para reativar.
-- Estimativas usam preços locais, que podem estar desatualizados.
-- Prévia de arquivo não executa JavaScript. Para testar um app interativo, abrir explicitamente seu servidor de desenvolvimento no navegador continua possível.
-- Resumos agendados não são enviados automaticamente a canais externos; notify pede uma nova aprovação.
-- CLIs de deploy precisam ser instalados manualmente antes do uso; desktop Linux de VM requer ação explícita.
-- Connect requer hardened.1 nos dois computadores. Frames antigos sem metadata são recusados.
+- App/agent updates and included npx installer are disabled in code, with no switch to re-enable them.
+- Estimates use local prices, which may be outdated.
+- File preview does not execute JavaScript. To test an interactive app, explicitly open its development server in a browser.
+- Scheduled summaries are not automatically sent to external channels; notify requires new approval.
+- Deploy CLIs must be installed manually before use; Linux VM desktop installation requires an explicit action.
+- Connect requires hardened.1 on both computers. Older frames without metadata are rejected.
 
-## Limites materiais
+## Material Limitations
 
-1. **Plataformas:** foi compilado/testado o backend Linux e o frontend. Não foi produzido nem validado um instalador Windows/macOS nesta revisão. O fluxo PowerShell/AuthentiCode do guest AWS e os cofres reais das três plataformas não foram testados em seus sistemas nativos; os testes de cofre usam a implementação de teste do projeto.
-2. **CLIs externos:** flags/variáveis de opt-out não são bloqueio de rede. Um CLI, plugin, configuração própria ou comando autorizado pode fazer downloads/envios. Configurações internas do fornecedor podem sobrepor variáveis herdadas. Os executáveis externos não estão contidos nem foram integralmente auditados neste ZIP.
-3. **Armazenamento de chaves:** chaves necessárias ao runtime existem em RAM. Migração Jev com cofre indisponível preserva o arquivo legado, inclusive plaintext, para recuperação e bloqueia uso. Backups antigos não são apagados retroativamente.
-4. **Connect:** queda após gravar recibo e antes de executar pode perder uma mensagem; a prioridade é não executar duas vezes. Relógio que retrocede bloqueia até o watermark. Falha ao abrir o ledger requer correção/reinício. A proteção não resiste à restauração deliberada de todo o diretório de dados por seu proprietário/admin, nem impede atraso/descarte/reordenação da primeira entrega pelo relay. Revogar acesso não desfaz trabalho já iniciado.
-5. **AWS opcional:** senha do guest aparece em user-data e o Windows guest usa autologon/DefaultPassword no registro; o MSI recebe a senha VNC na instalação. Isso não significa criptografia geral dos segredos do guest. VNC fica em loopback e usa SSM, mas o security group padrão da conta continua determinando outros ingressos. O download MSI oficial não foi obtido como binário válido neste ambiente; por isso foi exigida assinatura/publisher em runtime, sem inventar um checksum.
-6. **Escopo de segurança:** não houve detonação de instaladores Windows, auditoria de cada pacote externo, prova formal de ausência de exfiltração ou avaliação completa de serviços de terceiros. O resultado é uma revisão com correções e evidência reproduzível dos riscos identificados.
+1. **Platforms:** Linux backend and frontend were built/tested. No Windows/macOS installer was produced or validated in this review. AWS guest PowerShell/Authenticode flow and real vaults on all three platforms were not tested natively; vault tests use the project's test implementation.
+2. **External CLIs:** opt-out flags/variables are not network blocks. A CLI, plugin, custom configuration, or authorized command can download/send data. Provider settings may override inherited variables. External executables are not contained or fully audited in this ZIP.
+3. **Key storage:** runtime-required keys exist in RAM. Jev migration with unavailable vault preserves the legacy file, including plaintext, for recovery and blocks use. Old backups are not retroactively deleted.
+4. **Connect:** a crash after receipt commit but before execution can lose a message; avoiding duplicate execution takes priority. A backward clock blocks until the watermark. Failure to open the ledger requires repair/restart. Protection does not resist deliberate restoration of the entire local data directory by its owner/admin, nor does it prevent relay delay/drop/reordering of first delivery. Revocation does not undo work already started.
+5. **Optional AWS:** guest password appears in user data and Windows guest uses autologon/DefaultPassword in the registry; MSI receives the VNC password during installation. This is not general encryption of guest secrets. VNC is loopback-only and uses SSM, but the account's default security group still determines other ingress. The official MSI download was not obtained as a valid binary in this environment; runtime signature/publisher verification was therefore required without inventing a checksum.
+6. **Security scope:** no Windows installer detonation, audit of every external package, formal proof of no exfiltration, or full assessment of third-party services was performed. This is a review with fixes and reproducible evidence for identified risks.
 
-## Compilar e usar esta revisão
+## Build and Use This Review
 
-O ZIP é uma distribuição de **código-fonte**, com o projeto existente completo, patch, lockfiles e evidências. Para obter os controles desta revisão, compilar esta árvore no sistema de destino. Downloads upstream, Homebrew e o pacote público `npx pandacode` não incorporam automaticamente estas alterações.
+The ZIP is a **source-code** distribution containing the complete existing project, patch, lockfiles, and evidence. To obtain these controls, build this tree on the target system. Upstream downloads, Homebrew, and public `npx pandacode` do not automatically include these changes.
 
-Instalar Node 22+, Rust estável 1.88+ e os [pré-requisitos oficiais do Tauri](https://v2.tauri.app/start/prerequisites/) para o sistema. No Windows, seguir a seção Windows para MSVC e WebView2. Esses downloads são etapas manuais de preparação do build.
+Install Node 22+, stable Rust 1.88+, and the system's [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). On Windows, follow the Windows section for MSVC and WebView2. These downloads are manual build-preparation steps.
 
 ```sh
 cd pandacode-0.3.28-hardened
@@ -155,31 +151,31 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 npm run tauri -- build -- --locked
 ```
 
-Para desenvolvimento local, `npm run desktop`. O identificador do aplicativo foi preservado para compatibilidade: um build local pode abrir/migrar os dados de uma instalação anterior com esse identificador. A migração Jev foi projetada para preservar segredos em caso de falha. A interface About identifica `hardened.1`.
+For local development, run `npm run desktop`. The app identifier was retained for compatibility: a local build may open/migrate data from a previous installation with that identifier. Jev migration is designed to preserve secrets on failure. The About interface identifies `hardened.1`.
 
-Reproduzir a verificação independente do backport/ZIP:
+Reproduce independent backport/ZIP verification:
 
 ```sh
 python src-tauri/vendor/glib/verify-backport.py
 cargo test --release --locked --manifest-path src-tauri/security-tests/Cargo.toml
 ```
 
-Atualizações futuras devem ser uma operação manual deliberada, com revisão do diff e manutenção destes controles. As fontes de website, documentação histórica e automações upstream foram preservadas para manter o projeto; não representam um instalador desta revisão.
+Future updates should be deliberate manual operations, with diff review and maintenance of these controls. Website sources, historical documentation, and upstream automation were preserved to maintain the project; they do not represent an installer for this review.
 
-## Fontes primárias consultadas
+## Primary Sources Consulted
 
 - [Tauri: GHSA-w28w-mhc8-qvjv](https://github.com/tauri-apps/tauri/security/advisories/GHSA-w28w-mhc8-qvjv).
-- [DOMPurify: GHSA-mrv2-3pqr-j5jr](https://github.com/cure53/DOMPurify/security/advisories/GHSA-mrv2-3pqr-j5jr) e [GHSA-cg2g-xh64-v4q7](https://github.com/cure53/DOMPurify/security/advisories/GHSA-cg2g-xh64-v4q7).
-- [Vite: GHSA-rq7h-c2jc-7f22](https://github.com/vitejs/vite/security/advisories/GHSA-rq7h-c2jc-7f22); demais IDs no JSON npm original.
+- [DOMPurify: GHSA-mrv2-3pqr-j5jr](https://github.com/cure53/DOMPurify/security/advisories/GHSA-mrv2-3pqr-j5jr) and [GHSA-cg2g-xh64-v4q7](https://github.com/cure53/DOMPurify/security/advisories/GHSA-cg2g-xh64-v4q7).
+- [Vite: GHSA-rq7h-c2jc-7f22](https://github.com/vitejs/vite/security/advisories/GHSA-rq7h-c2jc-7f22); other IDs are in the original npm JSON.
 - [KaTeX: GHSA-238p-pmpm-9mq7](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7).
 - [source-map-js 1.2.2](https://github.com/7rulnik/source-map-js/releases/tag/v1.2.2).
-- [RustSec 0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html), [0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html), [0383](https://rustsec.org/advisories/RUSTSEC-2026-0383.html) e [ZIP 0367](https://rustsec.org/advisories/RUSTSEC-2026-0367.html). O JSON OSV inclui os demais avisos e referências.
-- [Patch oficial GLib](https://github.com/gtk-rs/gtk-rs-core/pull/1343), commit `b5a4071e439bef2b5eea76c3aa25e5ae84839e34`.
-- [Claude: variáveis e precedência](https://code.claude.com/docs/en/env-vars), [Kimi: variáveis](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars), [OpenCode: CLI](https://opencode.ai/docs/cli/).
-- [AWS: endpoints](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-endpoints.html) e [opções abreviadas](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-troubleshooting.html).
-- [Vercel: opções globais](https://vercel.com/docs/cli/global-options), [Wrangler: comandos gerais](https://developers.cloudflare.com/workers/wrangler/commands/general/).
-- [TightVNC: distribuição oficial](https://www.tightvnc.com/download/), [orientação do mantenedor sobre assinatura](https://sourceforge.net/p/vnc-tight/mailman/vnc-tight-list/?limit=25&page=7), [Microsoft: Get-AuthenticodeSignature](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-authenticodesignature).
+- [RustSec 0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html), [0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html), [0383](https://rustsec.org/advisories/RUSTSEC-2026-0383.html), and [ZIP 0367](https://rustsec.org/advisories/RUSTSEC-2026-0367.html). OSV JSON includes other notices and references.
+- [Official GLib patch](https://github.com/gtk-rs/gtk-rs-core/pull/1343), commit `b5a4071e439bef2b5eea76c3aa25e5ae84839e34`.
+- [Claude: environment variables and precedence](https://code.claude.com/docs/en/env-vars), [Kimi: variables](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars), [OpenCode: CLI](https://opencode.ai/docs/cli/).
+- [AWS: endpoints](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-endpoints.html) and [abbreviated options](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-troubleshooting.html).
+- [Vercel: global options](https://vercel.com/docs/cli/global-options), [Wrangler: general commands](https://developers.cloudflare.com/workers/wrangler/commands/general/).
+- [TightVNC: official distribution](https://www.tightvnc.com/download/), [maintainer guidance on signing](https://sourceforge.net/p/vnc-tight/mailman/vnc-tight-list/?limit=25&page=7), [Microsoft: Get-AuthenticodeSignature](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-authenticodesignature).
 
-O fixture de VM simula macOS dentro do navegador Linux; isso não equivale a testar Tart em um Mac real. A execução inicial e a repetição dos cinco casos estão preservadas nos logs. Warnings de estilo/lifetime do GLib, a variante de preços Live não utilizada e tamanho de chunks do Vite não foram ocultados; não impediram compilação/testes.
+The VM fixture simulates macOS in a Linux browser; this is not equivalent to testing Tart on a real Mac. Initial and repeated runs of the five cases are preserved in logs. GLib style/lifetime warnings, the unused Live pricing variant, and Vite chunk-size warnings were not hidden; they did not prevent build/tests.
 
-As evidências locais do comportamento do projeto são os arquivos originais identificados pelo hash, o patch e os testes incluídos. Links externos documentam advisories e contratos de fornecedores; não substituem essas evidências locais.
+Local evidence of project behavior consists of original files identified by hash, the patch, and included tests. External links document advisories and vendor contracts; they do not replace this local evidence.

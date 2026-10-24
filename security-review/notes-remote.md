@@ -1,110 +1,110 @@
-> Nota de trabalho/evidência. O resultado consolidado de testes está em ../SECURITY-HARDENING.md e verification.json.
+> Work/evidence note. Consolidated test results are in ../SECURITY-HARDENING.md and verification.json.
 
-# PandaCode 0.3.28 — revisão de acesso remoto e canais
+# PandaCode 0.3.28 — Remote Access and Channel Review
 
-## Escopo e base
+## Scope and Base
 
-Fonte original: `audit/original/pandacode-0.3.28`, extraída do ZIP fornecido; SHA-256 do ZIP `4d74c67ab175967fa247852cd8d678e3908cb51de9d5a9292b1dd5dc6d500836`.
-Candidato: `audit/pandacode-0.3.28-hardened`.
-Arquivos revisados: `remote.rs`, `remote/*`, `relay/src/*`, `bots/channels/*`, `bots/gateway.rs` (interfaces de admissão/envio), `providers/mcp_host.rs`, `local_servers.rs`, configurações e documentação relacionadas.
-Os números de linha abaixo referem-se ao original. Não houve execução do aplicativo original, detonação de amostras ou envio de conteúdo privado à rede. As provas isoladas executam exclusivamente funções puras extraídas dos arquivos.
+Original source: `audit/original/pandacode-0.3.28`, extracted from the supplied ZIP; ZIP SHA-256 `4d74c67ab175967fa247852cd8d678e3908cb51de9d5a9292b1dd5dc6d500836`.
+Candidate: `audit/pandacode-0.3.28-hardened`.
+Reviewed files: `remote.rs`, `remote/*`, `relay/src/*`, `bots/channels/*`, `bots/gateway.rs` (admission/send interfaces), `providers/mcp_host.rs`, `local_servers.rs`, and related configuration/documentation.
+Line numbers below refer to the original. The original application was not run, samples were not detonated, and private content was not sent over the network. Isolated proofs execute only pure functions extracted from source files.
 
-## Achados corrigidos
+## Fixed Findings
 
-### R-01 — Alta: autorização remota continuava válida após revogação
+### R-01 — High: Remote Authorization Remained Valid After Revocation
 
-**Evidência:** `src-tauri/src/remote/socket.rs:205-237,292-297` armazenava `(mensagem, chave, trusted: bool)` na fila. `remote/host.rs:176-188` verificava esse booleano capturado, sem consultar novamente o pin atual. A fila sequencial pode aguardar outras chamadas. `remote/start.rs:163-215` faz descoberta de provedores, clone e worktree antes de iniciar o agente, sem nova consulta à autorização.
+**Evidence:** `src-tauri/src/remote/socket.rs:205-237,292-297` queued `(message, key, trusted: bool)`. `remote/host.rs:176-188` checked this captured boolean without rechecking the current pin. The sequential queue may wait for other calls. `remote/start.rs:163-215` discovers providers, clones, and creates a worktree before starting the agent, without another authorization check.
 
-**Falha:** um dispositivo anteriormente confiável podia continuar executando solicitações enfileiradas depois que o usuário removesse sua confiança ou a chave mudasse. Um preparo demorado podia iniciar uma nova execução depois da revogação.
+**Failure:** A previously trusted device could continue executing queued requests after the user removed its trust or the key changed. Slow preparation could start a new execution after revocation.
 
-**Correção:** a fila carrega a chave pública que autenticou a mensagem. A execução consulta a lista e o pin atuais; preparação demorada consulta novamente antes das novas ações e antes do lançamento do agente. Revogação não desfaz ações que já tinham sido executadas.
+**Fix:** The queue carries the public key that authenticated the message. Execution checks the current list and pin; slow preparation checks again before new actions and before launching the agent. Revocation does not undo actions already performed.
 
-**Teste:** `remote::tests::queued_messages_recheck_the_authenticated_key_after_revocation_or_replacement` cobre remover confiança, mudar chave listada, confiar em uma nova chave e remover dispositivo. Teste Rust completo deve constar da validação geral do projeto.
+**Test:** `remote::tests::queued_messages_recheck_the_authenticated_key_after_revocation_or_replacement` covers removing trust, changing the listed key, trusting a new key, and removing a device. The full Rust test must be included in overall project validation.
 
-### R-02 — Alta: janela de troca de chave e entrega posterior à revogação
+### R-02 — High: Key-Swap Window and Delivery After Revocation
 
-**Evidência:** `remote/socket.rs:402-405` chamava `callable()` e depois obtinha uma chave por `peer_key`, mas ignorava o segundo resultado `trusted`. A lista de presença podia mudar entre essas operações. `answer` enviava o resultado após uma chamada assíncrona usando a chave obtida anteriormente, sem confirmar confiança/hosting; eventos extraídos para envio também não reconfirmavam `host_enabled` no último ponto.
+**Evidence:** `remote/socket.rs:402-405` called `callable()` and then fetched a key through `peer_key`, but ignored the second result's `trusted` status. Presence could change between these operations. `answer` sent results after an async call using a previously obtained key, without rechecking trust/hosting; events extracted for sending also did not recheck `host_enabled` at the final point.
 
-**Falha:** em uma condição de corrida, conteúdo de tarefas podia ser cifrado para uma chave substituída não confiável, ou continuar sendo enviado a um destinatário cuja confiança acabara de ser revogada. Exige Connect configurado e cenário de revogação ou controle/comprometimento do relay; não é acesso remoto anônimo por padrão.
+**Failure:** In a race, task content could be encrypted to a replaced, untrusted key, or continue to a recipient whose trust was just revoked. Requires configured Connect and a revocation or relay-control/compromise scenario; this is not anonymous remote access by default.
 
-**Correção:** a mesma chave pública usada na criptografia deve continuar listada e fixada no momento de inserir o frame na saída, com estado protegido pelo mutex. Respostas e eventos de host também exigem hosting ligado. Após revogação somente uma recusa genérica pode ser enviada à chave antiga, sem conteúdo de tarefa.
+**Fix:** The same public key used for encryption must remain listed and pinned when the frame is added to the outgoing queue, with state protected by the mutex. Host responses/events also require hosting to remain enabled. After revocation, only a generic refusal may be sent to the old key, without task content.
 
-### R-03 — Média: overflow permitia furar a janela contra repetição
+### R-03 — Medium: Overflow Bypassed Replay Window
 
-**Evidência:** `remote/host.rs:65` usava `(now_ms - ts).abs() > WINDOW_MS` em inteiros `i64`. Com `ts = now.wrapping_add(i64::MIN)`, a subtração/valor absoluto pode continuar negativo em compilação otimizada sem overflow checks; o teste temporal aceita esse valor. O registro antigo é elegível para descarte imediato na limpeza de nonces.
+**Evidence:** `remote/host.rs:65` used `(now_ms - ts).abs()` on `i64`. With `ts = now.wrapping_add(i64::MIN)`, subtraction/absolute value can remain negative in optimized builds without overflow checks; the timestamp test accepts it. The old receipt is eligible for immediate pruning during nonce cleanup.
 
-**Falha:** timestamp artificial de uma mensagem autenticada pode escapar da janela de ±60 segundos. Em modo com overflow checks ocorre panic. Isso não permite forjar a criptografia/autenticação de um dispositivo.
+**Failure:** An artificial timestamp in an authenticated message can bypass the ±60-second window. Builds with overflow checks panic. This does not allow forging device encryption/authentication.
 
-**Correção:** diferença absoluta não sinalizada por `abs_diff`, mais subtração saturada na retenção. A implementação final fica em `remote/replay.rs` e persiste a admissão antes de despachar, conforme R-08.
+**Fix:** Use unsigned `abs_diff` and saturating subtraction for retention. Final implementation is in `remote/replay.rs` and persists admission before dispatch, as described in R-08.
 
-**Prova executada:** função original extraída e compilada com `rustc --test -C opt-level=2 -C overflow-checks=off` falha o teste que exige rejeitar o timestamp; implementação corrigida passa. Também há prova em compilação debug. Evidência: `audit/remote-regression/original-release-tests.log` e `hardened-release-tests.log`.
+**Proof run:** The extracted original function, compiled with `rustc --test -C opt-level=2 -C overflow-checks=off`, fails the test requiring rejection of the timestamp; the fix passes. A debug-build proof also exists. Evidence: `audit/remote-regression/original-release-tests.log` and `hardened-release-tests.log`.
 
-### R-04 — Média: desligar canal ou invalidar link não interrompia todas as entregas pendentes
+### R-04 — Medium: Disabling a Channel or Revoking a Link Did Not Stop All Pending Delivery
 
-**Evidência:** `bots/channels/mod.rs:330-340` enviava mensagens sem verificar `channel.enabled`. `bots/channels/web.rs:134-165` autorizava uma vez e aguardava até 25 segundos antes de retornar eventos, sem consultar novamente token, habilitação e permissão de acesso pelo túnel.
+**Evidence:** `bots/channels/mod.rs:330-340` sent messages without checking `channel.enabled`. `bots/channels/web.rs:134-165` authorized once and waited up to 25 seconds before returning events, without rechecking token, enabled state, and tunnel access permission.
 
-**Falha:** resposta de agente que terminasse depois do desligamento continuava indo ao Telegram/Slack/Discord/WhatsApp. Um poll autenticado antes de renovar o link podia receber novas respostas após a revogação.
+**Failure:** An agent reply finishing after disable could still go to Telegram/Slack/Discord/WhatsApp. A poll authenticated before link renewal could receive new responses after revocation.
 
-**Correção:** consultar habilitação antes de cada parte de envio; o poll revalida token, canal e acesso remoto antes de cada leitura/entrega. A admissão do gateway é tratada separadamente pelo agente responsável por segredos/egresso.
+**Fix:** Check enabled state before each sent part; poll revalidates token, channel, and remote access before every read/delivery. Gateway admission is handled separately by the agent responsible for secrets/egress.
 
-### R-05 — Média: webhook de WhatsApp sem proteção contra repetição nem vínculo ao número
+### R-05 — Medium: WhatsApp Webhook Lacked Replay Protection and Number Binding
 
-**Evidência:** `bots/channels/whatsapp.rs:26-45,67-75` verificava HMAC do corpo, mas descartava `message.id`, `timestamp` e `metadata.phone_number_id`. Toda entrega válida iniciava trabalho novamente.
+**Evidence:** `bots/channels/whatsapp.rs:26-45,67-75` verified body HMAC but discarded `message.id`, `timestamp`, and `metadata.phone_number_id`. Every valid delivery started work again.
 
-**Falha:** repetição de um webhook assinado, inclusive reenvio do provedor, podia repetir comandos ou aprovações. Se uma aplicação Meta servisse vários números com o mesmo segredo, o corpo de um número podia ser aceito pelo canal de outro. Exige um canal WhatsApp explicitamente configurado e mensagem assinada; não é uma ausência de autenticação pública.
+**Failure:** Replaying a signed webhook, including provider retry, could repeat commands or approvals. If a Meta app served multiple numbers with the same secret, one number's body could be accepted by another number's channel. Requires an explicitly configured WhatsApp channel and signed message; this is not absence of public authentication.
 
-**Correção:** conferir número do canal; exigir ID e timestamp válidos; persistir recibo do ID/canal no `bot_activity` existente antes de despachar. A consulta e gravação usam o mutex de Store. Recibos sobrevivem à reabertura do banco. Timestamp mais antigo que 24h ou mais de 5min no futuro é recusado. O marcador de reset invalida mensagens anteriores caso o usuário tenha apagado o histórico do bot. Se houver 4000 ou mais eventos recentes, a admissão falha de forma fechada antes do limite de retenção de 5000 registros poder apagar a evidência. Não foi criada migração de schema.
+**Fix:** Check channel number; require valid ID and timestamp; persist receipt for ID/channel in existing `bot_activity` before dispatch. Read/write use the Store mutex. Receipts survive database reopen. Reject timestamps older than 24 hours or more than 5 minutes in the future. A reset marker invalidates messages from before the user erased bot history. At 4,000 or more recent events, admission fails closed before the 5,000-record retention limit could erase evidence. No schema migration was added.
 
-**Tradeoffs:** comandos muito atrasados são ignorados; alto volume pode receber HTTP 503 para tentar depois. A garantia é admissão no máximo uma vez, não execução transacional exatamente uma vez: uma queda entre persistir o recibo e iniciar o trabalho pode perder uma entrega. Nenhum efeito já executado é desfeito.
+**Tradeoffs:** Very delayed commands are ignored; high volume may receive HTTP 503 for retry. The guarantee is at-most-once admission, not exactly-once transactional execution: a crash between receipt persistence and starting work can lose a delivery. Already executed effects are not undone.
 
-**Testes adicionados:** banco reaberto e ID duplicado; idade/futuro/reset; capacidade; identificação do número, ausência de ID e overflow de timestamp. O teste preexistente de HMAC/payload foi atualizado com metadados válidos.
+**Tests added:** reopened database and duplicate ID; age/future/reset; capacity; number binding, missing ID, and timestamp overflow. The existing HMAC/payload test was updated with valid metadata.
 
-### R-06 — Média/robustez: limites de rede aplicados tarde e conexões de bot sem teto
+### R-06 — Medium/Robustness: Network Limits Applied Too Late and Bot Connections Were Unbounded
 
-**Evidência:** `remote/auth.rs:91-97` chamava `.bytes()` antes de conferir 1 MiB; o socket usava limites padrão da biblioteca em vez do teto de 256 KiB do protocolo. `bots/channels/http.rs:182-199` criava uma tarefa de até 40s por conexão sem limite de simultaneidade.
+**Evidence:** `remote/auth.rs:91-97` called `.bytes()` before checking 1 MiB; socket used library defaults rather than the protocol's 256 KiB ceiling. `bots/channels/http.rs:182-199` created one task per connection for up to 40 seconds without a concurrency limit.
 
-**Falha:** endpoint comprometido/resposta sem Content-Length podia consumir memória antes da recusa; muitos clientes locais ou por um túnel configurado podiam acumular tarefas. Não foi demonstrada execução de código por essas condições.
+**Failure:** A compromised endpoint/response without Content-Length could consume memory before rejection; many local clients or clients through a configured tunnel could accumulate tasks. No code execution was demonstrated.
 
-**Correção:** ler a resposta em partes e interromper antes de ultrapassar 1 MiB; limitar mensagem/frame WebSocket a 256 KiB; limitar a 64 conexões concorrentes no servidor de bots.
+**Fix:** Read the response in chunks and stop before exceeding 1 MiB; cap WebSocket message/frame at 256 KiB; limit bot-server concurrency to 64 connections.
 
-### R-07 — Baixa/defesa adicional: parser HTTP aceitava ambiguidades
+### R-07 — Low/Defense in Depth: HTTP Parser Accepted Ambiguity
 
-**Evidência:** `bots/channels/http.rs:105-121` aceitava cabeçalhos repetidos com prevalência do último; não rejeitava `Transfer-Encoding`/`Expect`, versões e linhas iniciais ambíguas. Limite de cabeçalho podia ser ultrapassado no bloco que chegasse contendo o terminador.
+**Evidence:** `bots/channels/http.rs:105-121` accepted duplicate headers using the last value; it did not reject `Transfer-Encoding`/`Expect`, ambiguous versions/start lines. Header limit could be exceeded by a block that also contained the terminator.
 
-**Correção:** recusar cabeçalhos duplicados, framing não suportado, linha inicial inválida, Content-Length não decimal e bytes de requisição adicionais; conferir tamanho antes de interpretar. Isso reduz divergências quando existe um túnel/proxy; a auditoria não demonstrou bypass isolado do bearer token por duplicação.
+**Fix:** Reject duplicate headers, unsupported framing, invalid start line, nondecimal Content-Length, and extra request bytes; check size before parsing. This reduces discrepancies when a tunnel/proxy is present; the audit did not demonstrate standalone bearer-token bypass from duplication.
 
-**Prova executada:** o teste de parser com Host/Authorization/Content-Length duplicados e caminhos inválidos falha no original e passa no corrigido, usando as funções reais extraídas sem dependências externas.
+**Proof run:** Parser test with duplicate Host/Authorization/Content-Length and invalid paths fails on original and passes on corrected implementation, using extracted real functions without external dependencies.
 
-### R-08 — Média: eventos cifrados podiam ser repetidos pelo relay
+### R-08 — Medium: Encrypted Events Could Be Replayed by Relay
 
-**Evidência:** `remote/socket.rs:239-242` entregava responses/events autenticados diretamente ao cliente/mirror, sem timestamp ou nonce. Somente requests passavam por `Replay`. `remote/mirror.rs:112-162` atualiza o status do mirror com eventos e aceita `run.finished` para qualquer turno ativo da mesma sessão remota.
+**Evidence:** `remote/socket.rs:239-242` delivered authenticated responses/events directly to client/mirror without timestamp or nonce. Only requests passed through `Replay`. `remote/mirror.rs:112-162` updates mirror status from events and accepts `run.finished` for any active turn in the same remote session.
 
-**Falha:** um relay comprometido podia reapresentar um ciphertext válido de `agent.events`/`run.finished` de um turno anterior, alterando estado visível ou encerrando prematuramente o turno local. A criptografia garante autenticidade, mas não impede repetição por si só. Respostas já dependem de IDs aleatórios de chamadas pendentes, o que restringe o impacto da repetição de respostas; a falha mais direta é nos eventos.
+**Failure:** A compromised relay could replay a valid `agent.events`/`run.finished` ciphertext from an earlier turn, changing visible state or prematurely ending the local turn. Encryption provides authenticity but does not itself prevent replay. Responses already depend on random pending-call IDs, limiting replay impact for responses; the direct issue is events.
 
-**Correção:** respostas e eventos recebem `ts` e nonce novo dentro do corpo cifrado no envio. A recepção verifica pin atual, janela de ±60s e nonce não recebido antes de despachar para o mirror. Mensagens legadas sem esses metadados são recusadas. Requests continuam sendo verificados na admissão do host, sem consumir o nonce duas vezes.
+**Fix:** Responses/events receive a new `ts` and nonce inside the encrypted body when sent. Reception checks current pin, ±60-second window, and nonce freshness before dispatch to mirror. Legacy messages without this metadata are rejected. Requests remain checked at host admission, without consuming the nonce twice.
 
-**Persistência adicional:** o cache original de requests também era perdido ao reiniciar o programa, permitindo reapresentar uma captura ainda dentro da janela temporal. A versão final usa `<diretório de dados>/connect-replay/receipts.sqlite`, separado do banco principal, para requests, responses e events. Armazena somente hash SHA-256 do nonce, timestamp e um marcador temporal. A transação SQLite `IMMEDIATE`, com `synchronous=EXTRA`, confirma o recibo antes da admissão e serializa duas instâncias no mesmo diretório. O diretório é 0700 e o arquivo 0600 em Unix; Windows usa a ACL herdada do diretório de dados do usuário. Não há fallback em memória nem recriação automática de banco corrompido. Arquivo truncado ou ausente em um diretório de recibos já existente também é recusado. Falha de abertura, gravação ou commit impede admissão. O limite é 20.000 recibos vivos, removendo apenas timestamps expirados; atingir capacidade recusa novas mensagens. O marcador temporal também impede que um ajuste do relógio para trás torne válida uma captura cujo recibo já tenha expirado e sido removido.
+**Additional persistence:** The original request cache was lost on restart, allowing replay of a capture still within the time window. Final version uses `<data directory>/connect-replay/receipts.sqlite`, separate from the main database, for requests, responses, and events. It stores only nonce SHA-256 hash, timestamp, and a time marker. SQLite `IMMEDIATE` transaction with `synchronous=EXTRA` commits receipt before admission and serializes two instances in the same directory. On Unix, directory is 0700 and file 0600; Windows uses inherited ACL of the user's data directory. There is no in-memory fallback or automatic recreation of a corrupt database. A truncated or missing file in an existing receipt directory is also rejected. Open/write/commit failure prevents admission. Limit is 20,000 live receipts; only expired timestamps are pruned; at capacity, new messages are refused. Time marker also prevents clock rollback from making a capture valid after its receipt has expired and been pruned.
 
-**Compatibilidade e limites operacionais:** os dois computadores precisam da versão corrigida; um peer 0.3.28 original não fornece a metadata exigida nas respostas/eventos. Se o relógio voltar para antes do último horário de admissão, Connect recusa novas mensagens até ele alcançar o marcador salvo. Esta correção não promete ordenação de eventos nem impede um relay de atrasar ou descartar uma primeira entrega. Para não depender de um relay, permanecer desconectado do Connect encerra essa superfície.
+**Compatibility and operational limits:** Both computers need the corrected version; an original 0.3.28 peer does not provide required response/event metadata. If the clock goes before the last admission time, Connect rejects new messages until it reaches the saved marker. This fix does not promise event ordering or prevent a relay from delaying/dropping first delivery. To avoid relay dependency, remain signed out of Connect.
 
-**Regressões adicionadas:** `remote::socket::tests::responses_and_events_need_fresh_unique_authenticated_metadata` verifica primeiro recebimento, repetição, ausência de metadata, idade, futuro, chave substituída e preservação da admissão dos requests. Quatro testes em `remote::replay::tests` verificam reabrir o banco/segunda conexão, dados gravados como hash, permissões Unix, storage indisponível ou sem escrita, rollback de transação após falha de inserção, capacidade/expiração e relógio retrocedendo após reinício. Os testes temporais anteriores usam a mesma implementação SQLite por um construtor em memória exclusivo de `cfg(test)`.
+**Regressions added:** `remote::socket::tests::responses_and_events_need_fresh_unique_authenticated_metadata` checks first receipt, replay, missing metadata, age, future timestamps, replaced key, and continued request admission. Four tests in `remote::replay::tests` check database reopen/second connection, hashed stored data, Unix permissions, unavailable/read-only storage, transaction rollback after insert failure, capacity/expiry, and clock rollback after restart. Earlier time tests use the same SQLite implementation through a `cfg(test)`-only in-memory constructor.
 
-## Comportamentos opcionais que não são malware comprovado
+## Optional Behaviors That Are Not Proven Malware
 
-- Connect é opt-in: `remote/config.rs` declara `host_enabled` falso por padrão. `remote.rs:235-253` abre o socket quando já existe login e configuração. Sem login não há esse tráfego. **Desligar Allow remote control não encerra a sessão no relay; Sign out é a ação que encerra o tráfego de Connect.**
-- Em `remote/auth.rs:33,72-74`, login usa OAuth device flow com scope vazio e envia o token GitHub ao relay configurado para trocá-lo por token próprio. Isso é uma transferência explícita de credencial no fluxo de Connect, não um segredo embutido nem instrução escondida no prompt. Quem não quer confiar nesse serviço deve permanecer desconectado. A URL do relay vem de variáveis de build/ambiente; o arquivo-fonte sozinho não prova qual endpoint foi embutido num instalador publicado.
-- A criptografia usa X25519/HKDF/XChaCha20-Poly1305, com pin por dispositivo; o relay do ZIP encaminha corpos cifrados e contém verificação do token de login contra o app OAuth configurado. Não foi localizada instrução oculta para exportar arquivos nesse subsistema.
-- Canais de chat só funcionam após configuração e pareamento do remetente. Respostas comuns a uma conversa aberta por canal externo continuam saindo por esse canal, comportamento que precisa permanecer explícito ao usuário.
-- MCP do agente escuta apenas IPv4 loopback em porta efêmera, exige Host literal e bearer por servidor, rejeita Origin e cabeçalhos ambíguos, impõe limites. `providers/mcp_host.rs:82-94,300-343`. Não foi identificado acesso anônimo ao host MCP nessas rotas.
-- `local_servers.rs` enumera listeners locais e não os publica na rede; abrir a URL é ação explícita.
+- Connect is opt-in: `remote/config.rs` sets `host_enabled` false by default. `remote.rs:235-253` opens the socket when login/configuration already exist. Without login, that traffic does not occur. **Turning off Allow remote control does not end the relay session; Sign out ends Connect traffic.**
+- In `remote/auth.rs:33,72-74`, login uses OAuth device flow with empty scope and sends the GitHub token to the configured relay to exchange it for its own token. This is an explicit credential transfer in Connect, not an embedded secret or hidden prompt instruction. Users who do not trust the service should stay signed out. Relay URL comes from build/environment variables; source alone cannot prove which endpoint was embedded in a published installer.
+- Encryption uses X25519/HKDF/XChaCha20-Poly1305, with per-device pinning; ZIP relay forwards encrypted bodies and verifies login token against configured OAuth app. No hidden file-export instruction was found in this subsystem.
+- Chat channels work only after configuration and sender pairing. Ordinary replies to a conversation initiated through an external channel still go through that channel; this behavior must remain explicit to users.
+- Agent MCP listens only on IPv4 loopback at an ephemeral port, requires literal Host and per-server bearer, rejects Origin and ambiguous headers, and enforces limits. `providers/mcp_host.rs:82-94,300-343`. No anonymous access to MCP host was identified on these routes.
+- `local_servers.rs` enumerates local listeners and does not publish them to the network; opening a URL is an explicit action.
 
-## Validação desta etapa
+## Validation for This Stage
 
-- 2 testes isolados contra código original: 2 falhas esperadas, mostrando parser permissivo e overflow.
-- Os mesmos 2 testes isolados contra candidato: 2 aprovados.
-- Reexecução do caso de timestamp em modo otimizado, com overflow checks desligados: original falha; candidato passa.
-- Os testes isolados compilam trechos completos das funções de produção, sem reimplementar a lógica em outra linguagem; não substituem a compilação e a suíte Rust integrada.
-- O módulo final `remote/replay.rs` foi incluído diretamente em um harness `rustc --test`, com as dependências Rust já compiladas para o projeto: **4 testes aprovados, 0 falhas**, incluindo as últimas verificações de ledger truncado/ausente. Não houve execução de cargo em paralelo. Logs: `audit/remote-regression/persistent-replay-compile.log` e `persistent-replay-tests.log`; o harness é `persistent-replay.rs`. Esse teste usa o módulo completo de produção, sem copiar/reimplementar sua lógica.
-- Revisão independente por outro agente não encontrou defeito bloqueante de atomicidade, retenção, restart, clock ou uso da admissão no host/socket. Essa revisão foi somente por leitura. A proteção não constitui defesa contra um usuário/admin que restaure deliberadamente uma versão antiga de todo o armazenamento local; falha de abertura fica fechada naquela execução até reiniciar com o problema de armazenamento resolvido.
-- A primeira suíte Rust integrada do fluxo principal (`audit/cargo-tests.log`) executou com êxito os sete testes novos de R-01/R-03/R-05/R-07 e o fixture WhatsApp atualizado; resultado global 1178 aprovados, 1 falha em expectativa de `file_preview`, 39 ignorados. Essa compilação antecede as regressões de R-08 e persistência, cujos resultados devem ser incluídos na validação final do fluxo principal. A etapa remota agora adiciona 12 testes ao total original.
-- Regressões de UI, eventual reexecução da suíte e empacotamento pertencem ao fluxo principal. Registrar seu resultado efetivo antes de afirmar que passaram.
+- Two isolated tests against original code: two expected failures demonstrating permissive parser and overflow.
+- Same two isolated tests against candidate: two passed.
+- Re-ran timestamp case optimized with overflow checks disabled: original fails; candidate passes.
+- Isolated tests compile complete source functions without reimplementing logic in another language; they do not replace integrated Rust build/suite.
+- Final `remote/replay.rs` was included directly in a `rustc --test` harness using project-compiled Rust dependencies: **4 passed, 0 failures**, including final truncated/missing-ledger checks. No parallel Cargo run. Logs: `audit/remote-regression/persistent-replay-compile.log` and `persistent-replay-tests.log`; harness: `persistent-replay.rs`. It uses the complete production module, without copying/reimplementing logic.
+- Independent read-only review by another agent found no blocking defect in atomicity, retention, restart, clock, or host/socket admission. Protection does not defend against a user/admin deliberately restoring an old version of all local storage; open failure stays closed for that run until storage is fixed and the app restarted.
+- First integrated Rust suite for main flow (`audit/cargo-tests.log`) successfully ran seven new R-01/R-03/R-05/R-07 tests and updated WhatsApp fixture; overall: 1,178 passed, one `file_preview` expectation failure, 39 ignored. This build predates R-08/persistence regressions, which must be included in final main-flow validation. Remote work adds 12 tests to original total.
+- UI regressions, any suite rerun, and packaging belong to main flow. Record actual result before claiming they passed.

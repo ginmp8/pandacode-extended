@@ -1,160 +1,158 @@
-> Nota de trabalho/evidência. O resultado consolidado de testes está em ../SECURITY-HARDENING.md e verification.json.
+> Work/evidence note. Consolidated test results are in ../SECURITY-HARDENING.md and verification.json.
 
-# PandaCode 0.3.28 — credenciais, saídas de dados e aprovação de bots
+# PandaCode 0.3.28 — Credentials, Data Egress, and Bot Approval
 
-## Escopo e estado
+## Scope and Status
 
-Revisão da cópia imutável `audit/original/pandacode-0.3.28`, com correções pontuais em `audit/pandacode-0.3.28-hardened`. Foram examinados os prompts internos, integração Jev, ponte de CLIs de cloud, armazenamento de segredos, ferramentas e gateway dos bots, gates dos providers, HTTP compartilhado e, em segunda revisão independente, o preview de arquivos/navegador alterado pelo agente principal e as superfícies de UI rica.
+Review of immutable `audit/original/pandacode-0.3.28` with scoped fixes in `audit/pandacode-0.3.28-hardened`. Examined internal prompts, Jev integration, cloud CLI bridge, secret storage, bot tools/gateway, provider gates, shared HTTP, and—during a second independent review—the main agent's file/browser preview changes and rich UI surfaces.
 
-Esta nota separa vulnerabilidade confirmada, endurecimento deliberado para a preferência de privacidade do usuário e limitações remanescentes. Não se encontrou um prompt interno destinado a roubar código/chaves ou um servidor oculto de coleta neste escopo. Isso não constitui garantia de ausência de malware em todo o projeto/dependências.
+This note distinguishes confirmed vulnerabilities, deliberate hardening for the user's privacy preference, and remaining limits. No internal prompt directing theft of code/keys or hidden collection server was found in scope. This does not guarantee the entire project/dependency tree is free of malware.
 
-Os testes Rust descritos abaixo foram adicionados ao código, mas **não foram executados por este subagente**. O agente principal está responsável pelo build/testes nativos e seus resultados finais substituem este estado intermediário. Não houve envio do código/credenciais a scanners ou execução de payloads maliciosos.
+Rust tests described below were added but **were not run by this subagent**. The main agent owns native builds/tests and final results supersede this intermediate state. No code/credentials were sent to scanners, and no malicious payloads were run.
 
-## Achados e correções
+## Findings and Fixes
 
-### EGR-01 — Chaves Jev persistidas em JSON legível (médio; credenciais locais)
+### EGR-01 — Jev Keys Persisted in Readable JSON (Medium; Local Credentials)
 
-**Evidência original:** `src-tauri/src/jev.rs:56–65` inclui `typesafe_key` e `text_key` em `Saved`, com `Serialize`. `jev_save_configuration`, linhas 497–499, serializa integralmente `next` para `jev/settings.json`. A UI original, `src/jev.ts:155`, dizia expressamente que as chaves eram salvas fora do keychain. O chmod privado reduz acesso de outros usuários em Unix; não transforma o arquivo em cofre do sistema e não protege cópias/backups ou processos com o mesmo usuário.
+**Original evidence:** `src-tauri/src/jev.rs:56–65` included `typesafe_key` and `text_key` in serializable `Saved`. `jev_save_configuration`, lines 497–499, serialized all of `next` to `jev/settings.json`. Original UI `src/jev.ts:155` explicitly said keys were stored outside keychain. Private chmod reduces other Unix users' access but is not a system vault and does not protect copies/backups or same-user processes.
 
-**Pré-condição:** usuário salva ao menos uma chave Jev. Os dois recursos Jev vêm desativados por padrão (`Settings::default`, linhas 47–48). Desativar o recurso não remove uma chave já salva. A UI tem botão Remove por chave (`src/jev.ts:185–190, 233–234`), então é possível evitar o recurso e apagar os segredos manualmente.
+**Precondition:** user saves at least one Jev key. Both Jev features are off by default (`Settings::default`, lines 47–48); disabling a feature does not remove a saved key. UI has per-key Remove (`src/jev.ts:185–190, 233–234`).
 
-**Correção:** `typesafe_key`/`text_key` mantêm desserialização legada, porém nunca são serializados. O JSON passa a conter somente referência UUID e flags de presença; valores ficam no `secret_store` existente, serviço `app.pandacode.jev`. Cada salvamento cria uma geração nova no cofre; a substituição atômica do JSON é o ponto de commit. Só depois do commit remove-se a geração anterior. Falha parcial de cofre ou arquivo limpa a geração nova, preservando a anterior.
+**Fix:** `typesafe_key`/`text_key` retain legacy deserialization but are never serialized. JSON now stores only UUID reference and presence flags; values live in existing `secret_store`, service `app.pandacode.jev`. Each save creates a new vault generation; atomic JSON replacement is commit point; old generation is removed only afterward. Partial vault/file failure cleans the new generation and preserves old one. Loading migrates legacy JSON. If vault is locked/unavailable, integration is disabled and original file remains recoverable. A later Save first attempts reload/migration and fails without changing original if secrets remain unavailable.
 
-O carregamento migra o JSON legado. Se o cofre estiver bloqueado/indisponível, a integração fica desativada e o arquivo original permanece recuperável. Uma proteção adicional impede que um Save posterior sobrescreva o arquivo de recuperação com defaults vazios: primeiro tenta recarregar/migrar, falhando sem modificar o original caso os segredos ainda estejam indisponíveis.
+**Tests added:** `legacy_credentials_move_to_the_vault_and_restart_without_plaintext`; `failed_vault_or_settings_write_preserves_previous_credential_generation`; `saving_after_unavailable_vault_preserves_the_recovery_file`; `clearing_credentials_commits_empty_refs_before_removing_old_vault_entries`.
 
-**Testes adicionados:** `legacy_credentials_move_to_the_vault_and_restart_without_plaintext`; `failed_vault_or_settings_write_preserves_previous_credential_generation`; `saving_after_unavailable_vault_preserves_the_recovery_file`; `clearing_credentials_commits_empty_refs_before_removing_old_vault_entries`.
+**Limits:** tests use the project's existing in-memory vault under `cfg(test)`; they do not prove real Keychain/Secret Service/Credential Manager integration. Entry removal is best effort in the current API. Runtime `Saved` retains values in RAM; public `Configuration` returns booleans, not keys. Failed migration leaves legacy plaintext intact for recovery and disables use. Do not claim guaranteed removal of old copies/backups or absence of plaintext in RAM.
 
-**Limites honestos:** os testes usam o cofre em memória já adotado pelo projeto sob `cfg(test)`, não demonstram integração real com Keychain/Secret Service/Credential Manager. A remoção de entradas é best effort na API existente. A cópia de runtime `Saved` conserva os valores em RAM para a integração; a API pública `Configuration` só devolve booleans, não as chaves. Uma falha na migração deixa o arquivo legado intacto (inclusive seu plaintext) para evitar perda de segredo e desativa seu uso. Não afirmar remoção garantida de cópias antigas/backups nem ausência de plaintext em RAM.
+### EGR-02 — Automatic CLI Download/Execution with Credentials in Environment (Conditional High; Supply Chain)
 
-### EGR-02 — Download/execução automática de CLI com credenciais já no ambiente (alto condicional; supply chain)
+**Original evidence:** `src-tauri/src/cloud/deploy.rs:240–267`: if Vercel/Wrangler/Railway was missing, `prepare` used `npx --yes` with package versions pinned at lines 20–22. Tokens were added to the same subprocess environment at lines 248, 258, 265; npx dependency/install scripts inherited it.
 
-**Evidência original:** `src-tauri/src/cloud/deploy.rs:240–267`: se Vercel/Wrangler/Railway não estivessem instalados, `prepare` usava `npx --yes` com pacotes fixados nas constantes das linhas 20–22. Os tokens eram anexados ao ambiente desse mesmo subprocesso nas linhas 248, 258 e 265. Dependências/scripts de instalação executados por npx herdariam esse ambiente.
+**Precondition:** cloud connected, user approved deploy tool, CLI absent. Pinning reduces accidental version drift but does not prevent downloaded code, transitive dependencies, or scripts from accessing credentials; this is not evidence of malicious package in ZIP.
 
-**Pré-condição:** cloud conectado, usuário aprovou a ferramenta de deploy e a CLI estava ausente. Versão fixada reduz mudança acidental, mas não elimina execução de código baixado, dependências transitivas ou scripts com acesso às credenciais. Não é evidência de pacote malicioso presente no ZIP.
+**Fix:** removed all npx fallbacks. Tool accepts only preinstalled CLI and otherwise instructs manual installation of a reviewed version. App fallback downloads nothing. Cloud remains optional; deploy approval retained.
 
-**Correção:** removidas todas essas alternativas npx. A ferramenta só aceita CLI previamente instalada; ausente, retorna instrução de instalação manual de versão revisada. Nada é baixado pelo fallback da aplicação. Cloud continua opcional e a aprovação de deploy é mantida.
+### EGR-03 — Destination Overrides and Credential Operations in Cloud Bridge (Conditional High)
 
-### EGR-03 — Overrides de destino e operações de credencial na ponte cloud (alto condicional)
+**Original evidence:** `pandacode_cloud_cli` args reached Vercel/Wrangler through `command.args(args)` (`deploy.rs:248,258`) while vault token was in environment; no filter existed for these commands. Vercel documents `--api` to change API base URL. Original AWS protection, lines 88–106, blocked only `--debug` and some credential-return commands; `--endpoint-url`, `--no-verify-ssl`, and endpoints from environment/config remained allowed.
 
-**Evidência original:** os argumentos de `pandacode_cloud_cli` chegavam a Vercel/Wrangler em `command.args(args)` (`deploy.rs:248,258`) com token do cofre no ambiente; não havia filtro específico para esses dois comandos. Vercel documenta `--api` para trocar o API base URL. A proteção AWS original, linhas 88–106, só vedava `--debug` e alguns comandos de retorno de credenciais; permitia `--endpoint-url`, `--no-verify-ssl` e endpoints do ambiente/configuração.
+**Impact:** credentials kept out of prompt could be used by CLI against a destination specified in args. AWS signs requests and may transmit session token; do not claim signing secret access key is always sent as plaintext. `vercel tokens` and `wrangler auth token` also conflict with promise not to expose credentials to agent; literal redaction does not cover newly created credentials.
 
-**Impacto:** credenciais mantidas fora do prompt podiam ser usadas por uma CLI contra destino indicado nos argumentos. AWS assina requests e pode transmitir o session token; não afirmar que a secret access key de assinatura é enviada como texto em todos os casos. Operações como `vercel tokens` e `wrangler auth token` também conflitam com a promessa de não trazer credenciais ao agente; a redaction literal não cobre credenciais recém-criadas.
+**Fix:** `keyed_cli_refusal` blocks API/config/directory overrides, debug, authentication/token operations, and recognized local execution in Vercel/Wrangler; normal deployments remain allowed. AWS blocks debug, arbitrary endpoint, TLS disable—including long argparse abbreviations such as `--endpoint`, `--endp=`, `--no-verify`, `--debu`—and sets `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true`. Generic redactor removes all nonempty secrets, including values under eight characters.
 
-**Correção:** `keyed_cli_refusal` veta override de API/config/diretório, debug e operações de autenticação/token e execução local reconhecidas em Vercel/Wrangler. Deploys usuais continuam permitidos. AWS veta debug, endpoint arbitrário e desligamento de TLS, inclusive abreviações longas aceitas por argparse (`--endpoint`, `--endp=`, `--no-verify`, `--debu`); define `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true`. O redactor genérico passa a remover todo segredo não vazio, inclusive com menos de oito caracteres.
+**Test:** `credential_bridge_refuses_endpoint_and_credential_operations` covers `=`, attached short flags, AWS abbreviations, credential commands, allowed deploy examples; existing scrub test includes short key.
 
-**Teste:** `credential_bridge_refuses_endpoint_and_credential_operations` inclui formas com `=`, flags curtas anexadas, abreviações AWS, comandos de credenciais e exemplos de deploy mantidos; teste existente de scrub inclui chave curta.
+**Limit:** restriction applies to privileged bridge, not a complete CLI sandbox. Installed CLIs, user login/config, and local hooks from authorized builds remain trust dependencies. An agent with unrestricted shell may try other network mechanisms; user's choice to preserve full local command execution remains. This review cannot guarantee all future CLI behavior is constrained by a flag list.
 
-**Limite:** isso é restrição da ponte privilegiada, não um sandbox completo de CLIs. CLIs instaladas, login/configuração do usuário e hooks locais de builds autorizados permanecem dependências de confiança. Um agente com execução irrestrita de shell pode tentar outros mecanismos de rede; a escolha do usuário por comandos locais completos foi preservada. A revisão não garante que todo comportamento de versões futuras de CLIs possa ser limitado por uma lista de flags.
+### EGR-04 — Bot Could Proactively Send Without Approval (Conditional High)
 
-### EGR-04 — Bot podia transmitir mensagem proativa sem aprovação (alto condicional)
+**Original evidence:** `bots/tools.rs:29–30` treated all registered bot tools, including `pandacode_bot_notify`, as `self_scoped`. `with_bot:44–48` did not add notify to approval list. Dispatcher lines 73–74 called `gateway::notify`, which sent to last external channel (`gateway.rs:326–329`). `providers/mcp_host.rs:494` and `providers/host_tools.rs:255` protected only cloud tool in full mode.
 
-**Evidência original:** `bots/tools.rs:29–30` tratava todas as ferramentas registradas de bot, incluindo `pandacode_bot_notify`, como `self_scoped`. `with_bot:44–48` não acrescentava notify à lista de aprovação. O dispatcher, linhas 73–74, chamava `gateway::notify`, que enviava ao último canal externo (`gateway.rs:326–329`). Além disso, `providers/mcp_host.rs:494` e `providers/host_tools.rs:255` só protegiam a ferramenta cloud no modo full.
+**Precondition:** bot with external destination/last channel and a task. Creating/pairing channel expresses communication intent but should not approve every later code/key send. Disabling channels in UI is possible but did not fix approval enforcement when used.
 
-**Pré-condição:** bot com destino externo configurado/último canal e execução de tarefa. Criar/parear um canal é intenção de comunicação, mas não deve tornar qualquer envio futuro de código/chave automaticamente aprovado. É possível manter canais desativados na UI, mas esse controle não corrigia o caminho de aprovação ao usá-los.
+**Fix:** notify removed from `self_scoped`, added to `approval_tools` and `ALWAYS_ASK`; both hosts require approval even in full mode. Bot guard prevents broad rules or “always” replies from permanently remembering notify/cloud_cli permission. Bot memory/local operations retained. Send failure now returns error rather than `sent=true`.
 
-**Correção:** notify sai de `self_scoped`, entra em `approval_tools` e em `ALWAYS_ASK`; ambos os hosts exigem aprovação inclusive em full. Guard de bot não permite que uma regra ampla ou uma resposta “always” memorize permissão permanente para notify/cloud_cli. Memória e operações locais do bot preservadas. Falha de transmissão passa a retornar erro ao chamador, em vez de informar `sent=true`.
+**Tests:** `outbound_tools_ask_even_in_full_mode` in MCP and host_tools verifies handler not called before decision; MCP denial does not execute. `outbound_bot_tools_cannot_be_covered_by_broad_allow_rules` tests protected precedence. `only_registered_bot_tools_skip_approval` updated for new boundary.
 
-**Testes:** `outbound_tools_ask_even_in_full_mode` em MCP e host_tools verifica handler não chamado antes da decisão; negativa MCP não executa. `outbound_bot_tools_cannot_be_covered_by_broad_allow_rules` verifica precedência da proteção. O teste `only_registered_bot_tools_skip_approval` foi ajustado para a nova fronteira.
+### EGR-05 — Approval Request Sent Sensitive Content Before Authorization (Conditional High)
 
-### EGR-05 — Aprovação mandava o conteúdo sensível antes da autorização (alto condicional)
+**Original evidence:** `bots/gateway.rs:284–288` sent first 600 chars of `text` (action description/arguments) to external channel as approval request. A command/text containing a secret would leave the PC before denial could stop the action.
 
-**Evidência original:** `bots/gateway.rs:284–288` envia os primeiros 600 caracteres de `text` (descrição/argumentos da ação) ao canal externo como pedido de aprovação. Um comando/texto contendo segredo já sairia do PC antes que uma recusa pudesse impedir a ação.
+**Fix:** external approval message is fixed and excludes name/arguments/payload; asks user to review full action on desktop and answer yes/no for that action. Local UI retains decision details. Results for an externally initiated conversation still work.
 
-**Correção:** mensagem externa de aprovação agora é fixa e sem nome/argumentos/payload: solicita revisar a ação completa no desktop e responder sim/não para aquela ação. A UI local conserva os detalhes para decisão. As mensagens de resultado de uma conversa externa iniciada pelo usuário continuam funcionando.
+### EGR-06 — Scheduled Results Were Forwarded Automatically (Deliberate Privacy Change)
 
-### EGR-06 — Resultados agendados eram encaminhados automaticamente (mudança de privacidade deliberada)
+**Original evidence:** `bots/gateway.rs:194–200` called `notify` with final scheduled-work text, sent to last external channel. This was documented behavior, not malware evidence.
 
-**Evidência original:** `bots/gateway.rs:194–200` chamava `notify` com o texto final de trabalho agendado; notify o mandava ao último canal externo. Era um comportamento funcional documentado, não indício de malware.
+**Fix:** scheduled summary appears on desktop via `notify_local`. Proactive external transmission uses notify with explicit approval. Schedules/local execution retained. Generic pending-action notice may still go to channel without action content.
 
-**Correção alinhada ao pedido:** resumo agendado aparece no desktop, via `notify_local`. Para transmissão externa proativa usa-se notify com aprovação explícita. Preservadas agendas e execução local. Notificação genérica de ação pendente pode continuar indo ao canal, sem o conteúdo da ação.
+### EGR-07 — Gateway Did Not Revalidate Revoked Channel (Conditional Medium/High)
 
-### EGR-07 — Canal revogado não era revalidado pelo gateway (médio/alto condicional)
+**Original evidence:** `bots/gateway.rs:91–101` checked sender pairing but not `channel.enabled` or channel ownership by bot. An event already obtained by poller could be admitted after revocation.
 
-**Evidência original:** `bots/gateway.rs:91–101` verificava pairing do remetente, mas não `channel.enabled` e associação do canal ao bot. Um evento já obtido pelo poller podia ser admitido depois da revogação.
+**Fix:** `validate_channel` checks existence, enabled state, and ownership at ingress and again before composing/enqueuing task. Desktop and internal scheduled tasks have explicit treatment. Remote agent separately implemented immediate validation in `channels::send`; errors propagate through notify, avoiding false success. In-flight network packet cannot be withdrawn after revocation.
 
-**Correção:** `validate_channel` verifica existência, enabled e propriedade no ingresso e de novo antes de compor/enfileirar a tarefa. Desktop e agendamento internos têm tratamento explícito. Agente de remote implementou em paralelo a verificação imediata em `channels::send`; o erro se propaga por notify, evitando falso sucesso. Controle de rede em trânsito não pode retirar um pacote já enviado antes da revogação.
+**Test:** `bot_admission_rechecks_channel_revocation_and_ownership` covers enabled channel, different bot, disabled channel, and desktop.
 
-**Teste:** `bot_admission_rechecks_channel_revocation_and_ownership` cobre canal habilitado, bot diferente, disable e desktop.
+### EGR-08 — HTTP Body Limit Checked After Full Allocation (Medium; Availability)
 
-### EGR-08 — Limite HTTP verificado após alocar corpo completo (médio; disponibilidade)
+**Original evidence:** `cloud/http.rs:40–45` checked Content-Length if present but called `response.bytes()` before actual-size check. A configured endpoint or malicious chunked response without Content-Length could cause excessive allocation.
 
-**Evidência original:** `cloud/http.rs:40–45` verifica Content-Length quando presente, mas chama `response.bytes()` antes de verificar tamanho real. Um endpoint configurado ou resposta maliciosa chunked sem Content-Length podia induzir alocação excessiva.
+**Fix:** read through `response.chunk()`, compare saturating total against 16 MiB before extending buffer. Preliminary Content-Length check retained.
 
-**Correção:** leitura por `response.chunk()`, conferindo soma saturada contra 16 MiB antes de estender o buffer. Mantém verificação preliminar de Content-Length.
+**Test:** `rejects_oversized_chunked_responses_without_content_length` uses loopback-only server with oversized chunked body and requires rejection; no external server.
 
-**Teste:** `rejects_oversized_chunked_responses_without_content_length`, servidor exclusivamente loopback, envia corpo chunked excessivo e exige recusa. Não usa servidor externo.
+## Primary CLI Documentation
 
-## Fontes primárias para características de CLIs
+- Vercel global options: https://vercel.com/docs/cli/global-options and https://github.com/vercel/vercel/blob/main/skills/vercel-cli/references/global-options.md (`--api`, config/cwd/debug).
+- Vercel tokens: https://vercel.com/docs/cli/tokens.
+- Cloudflare Wrangler general commands: https://developers.cloudflare.com/workers/wrangler/commands/general/ (`auth token` and `--json`).
+- AWS endpoints: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-endpoints.html.
+- AWS abbreviated options: https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-troubleshooting.html, incomplete parameter names/argparse `allow_abbrev` section.
+- Claude environment variables (forwarded to updates agent): https://code.claude.com/docs/en/env-vars.
 
-- Vercel global options: https://vercel.com/docs/cli/global-options e referência oficial https://github.com/vercel/vercel/blob/main/skills/vercel-cli/references/global-options.md (`--api`, config/cwd/debug).
-- Vercel tokens: https://vercel.com/docs/cli/tokens .
-- Cloudflare Wrangler comandos gerais: https://developers.cloudflare.com/workers/wrangler/commands/general/ (`auth token` e `--json`).
-- AWS endpoints: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-endpoints.html .
-- AWS opções abreviadas: https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-troubleshooting.html , seção sobre incomplete parameter names/argparse `allow_abbrev`.
-- Claude env vars (recomendação encaminhada ao agente de updates): https://code.claude.com/docs/en/env-vars .
+## Examined Flows Not Classified as Hidden Collection
 
-## Fluxos examinados que não foram classificados como coleta oculta
+- `lib.rs:447–459` and helper prompts guide title, run scripts, change summaries, and rich UI. No instruction to send data to a secret domain was found.
+- `bots/brief.rs:47–50` requires approval before external send, prohibits revealing tokens/keys, and says treat pages/files as data. Confirmed issue was enforcement, not malicious prompt text.
+- Selected providers (including GLM/MiMo) and Jev text model are explicit AI integrations; sending context to selected provider is expected. Jev text/model base is configurable with HTTPS validation; user choice is not a hidden endpoint.
+- `support.rs:6` links to GitHub issues; opening is user initiated and prepared details are version/platform/architecture, not silent repository upload.
+- `code_search.rs:46–49` runs local codedb with `--no-telemetry`, `CODEDB_NO_TELEMETRY=1`, and `CODEDB_NO_CLI_DAEMON=1`.
+- Existing cloud keys use `secret_store`; Jev finding should not be generalized incorrectly to every application credential.
 
-- `lib.rs:447–459` e prompts auxiliares orientam título, run scripts, resumo de mudanças e UI rica. Não foram encontradas instruções de envio a domínio secreto nesses prompts.
-- `bots/brief.rs:47–50` pede aprovação antes de envio externo, proíbe revelar tokens/chaves e manda tratar páginas/arquivos como dados. O problema confirmado estava em enforcement, não em instrução maliciosa nesse texto.
-- Provedores selecionados (incluindo GLM/MiMo) e modelo textual Jev são integrações de IA explícitas; tráfego de contexto ao provedor escolhido é esperado pelo usuário. O texto/modelo-base Jev é configurável, com validação HTTPS; não confundir uma escolha do usuário com endpoint oculto.
-- `support.rs:6` aponta para issues do GitHub; abertura é iniciada pelo usuário e os detalhes preparados são versão/plataforma/arquitetura, não upload silencioso do repositório.
-- `code_search.rs:46–49` executa codedb local com `--no-telemetry`, `CODEDB_NO_TELEMETRY=1` e `CODEDB_NO_CLI_DAEMON=1`.
-- Chaves cloud existentes usam `secret_store`; a descoberta de Jev não deve ser generalizada incorretamente para todas as credenciais da aplicação.
+## Independent Second Review of Preview and Rich UI
 
-## Segunda revisão independente do preview e UI rica
+Reviewed main agent's changes to `file_preview.rs` and `browser.rs` without editing those files.
 
-Estado revisado: `file_preview.rs` e `browser.rs` alterados pelo agente principal, sem editar esses arquivos.
+- `file_preview.rs:23–25`: separate CSP for files/bootstrap. Files use `script-src 'none'`, `sandbox allow-same-origin`, block external connect/worker/object/frame/form. Bootstrap allows only its generated JS for Strict cookie acquisition and redirect.
+- `file_preview.rs:559–568`: path reconstructed from URL and serialized path in JSON; body does not interpolate workspace HTML. Search/hash appended at runtime as strings. No filename injection into script identified in this implementation.
+- Headers include nosniff, no-store, CORP same-origin, X-Frame-Options DENY, no-referrer, and `X-DNS-Prefetch-Control: off`. Host/Origin/Fetch-Metadata/referrer and cookie remain controlled; symlinks canonicalized inside workspace.
+- `browser.rs:47–56,257–279`: `preview_origin` set by trusted UI `browser_open`; `on_navigation` rejects origin change while preview is open. Popups/downloads remain denied. Static inspection found no blocking security regression; real coverage depends on native engines and main agent tests.
+- Rich markdown/HTML uses DOMPurify; HTML removes link/meta/base; custom views remove resources and sanitize CSS. Native UI CSP restricts SVG/CSS URLs not removed by sanitizer. Design canvas uses raw srcdoc in sandboxed iframe without scripts and inherits app CSP. No other high-severity egress was confirmed in these flows.
+- Suggested to main agent as additional defense, without claiming reproduced leakage: add early `x-dns-prefetch-control=off` meta in main HTML to prevent speculative link/Design DNS resolution in engines that enable it. Chromium source: https://www.chromium.org/developers/design-documents/dns-prefetching/.
 
-- `file_preview.rs:23–25`: CSP distinto para arquivos e bootstrap. Arquivos têm `script-src 'none'`, `sandbox allow-same-origin`, connect/worker/object/frame/form externos bloqueados. O bootstrap permite só o próprio JS gerado para adquirir o cookie Strict e redirecionar.
-- `file_preview.rs:559–568`: caminho é reconstruído por URL e seu path serializado em JSON; o corpo não interpola HTML de workspace. Busca/hash são concatenados no runtime como strings. Não foi identificada injeção no script por nome de arquivo nessa implementação.
-- Headers incluem nosniff, no-store, CORP same-origin, X-Frame-Options DENY, no-referrer e `X-DNS-Prefetch-Control: off`. Host/Origin/Fetch-Metadata/referrer e cookie continuam controlados; symlinks são canonicalizados dentro do workspace.
-- `browser.rs:47–56,257–279`: `preview_origin` é ajustado pela chamada UI confiável `browser_open`, e `on_navigation` rejeita mudança de origem enquanto preview estiver aberto. Popups e downloads seguem negados. Não foi encontrada regressão de segurança bloqueante por inspeção estática; cobertura real depende dos motores nativos e dos testes do agente principal.
-- Rich markdown/HTML usa DOMPurify; HTML retira link/meta/base; custom views retiram recursos e sanitizam CSS. UI nativa CSP restringe URLs de SVG/CSS que não forem eliminadas pelo sanitizador. Design canvas usa srcdoc bruto com iframe sandbox sem scripts e herda CSP da aplicação. Não se confirmou outro egress de alta severidade nesses fluxos.
-- Sugerido ao principal, como defesa adicional sem alegar reprodução de vazamento: meta `x-dns-prefetch-control=off` cedo no HTML principal para impedir resolução especulativa de links/Design em motores que a habilitem. Fonte primária Chromium: https://www.chromium.org/developers/design-documents/dns-prefetching/ .
+## Files Modified by This Subagent
 
-## Arquivos modificados por este subagente
+`src-tauri/src/jev.rs`; `src-tauri/src/cloud/deploy.rs`; `src-tauri/src/cloud/http.rs`; `src-tauri/src/bots/tools.rs`; `src-tauri/src/bots/gateway.rs`; `src-tauri/src/bots/guard.rs`; parts of `src-tauri/src/bots/tests.rs`; specific gates/tests in `src-tauri/src/providers/mcp_host.rs` and `src-tauri/src/providers/host_tools.rs`.
 
-`src-tauri/src/jev.rs`; `src-tauri/src/cloud/deploy.rs`; `src-tauri/src/cloud/http.rs`; `src-tauri/src/bots/tools.rs`; `src-tauri/src/bots/gateway.rs`; `src-tauri/src/bots/guard.rs`; trechos de `src-tauri/src/bots/tests.rs`; gates/testes específicos de `src-tauri/src/providers/mcp_host.rs` e `src-tauri/src/providers/host_tools.rs`.
+Channel/remote changes, child_env/updaters, Jev frontend, browser/preview, dependencies, and final documentation belong to other agents. This subagent created no commit or remote submission.
 
-Mudanças de canais/remote, child_env/updaters, frontend Jev, navegador/preview, dependências e documentação final pertencem aos outros agentes. Nenhum commit ou envio remoto foi criado por este subagente.
+## Requested Addendum: AWS Provisioning and Speculative DNS
 
-## Complemento solicitado: provisionamento AWS e DNS especulativo
+Main agent added `src-tauri/src/cloud/aws.rs` and the `index.html` DNS meta tag to scope after review above.
 
-O agente principal acrescentou `src-tauri/src/cloud/aws.rs` e o meta DNS de `index.html` ao escopo depois da revisão acima.
+### EGR-09 — Guest Password in Tracing and Permissive Temporary File (Medium; Optional VM Secret)
 
-### EGR-09 — Senha do guest em tracing e arquivo temporário permissivo (médio; segredo de VM opcional)
+**Original evidence:** `cloud/aws.rs:51` emitted `set -eux`. Line 56's `printf` included password as shell argument, printed to stderr/cloud-init log by `-x`. `create:178–179` wrote user data (containing password) through `std::fs::write` in temp directory: file creation depended on umask and could truncate an existing path. Removal after `self.call` covered ordinary success/error, but no lifetime guard guaranteed cleanup on other returns/unwind.
 
-**Evidência original:** `cloud/aws.rs:51` emitia `set -eux`. O `printf` da linha 56 incluía o password em argumento de shell, que `-x` imprime no stderr/log cloud-init. `create:178–179` escrevia user-data (contendo o password) por `std::fs::write` em diretório temporário: criação dependia do umask e poderia truncar um caminho preexistente. A remoção após `self.call` já ocorria para o resultado comum de sucesso/erro; faltava um objeto de duração que garantisse tentativa de limpeza nos demais retornos/unwind.
+**Fix:** Linux prologue uses `set +x` before secret, then `set -euo pipefail`. `umask 077` is applied after apt installation, protecting VNC files without changing system package file creation. `UserDataFile` creates with `create_new(true)` and Unix mode `0o600` before writing, syncs and closes handle. Guard is built only after successful creation; a collision/symlink is neither overwritten nor removed. `Drop` removes file after use, including AWS call error; caller also drops explicitly immediately after `call`.
 
-**Correção:** prologue Linux usa `set +x` antes do segredo, depois `set -euo pipefail`. `umask 077` entra depois da instalação apt, para proteger os arquivos VNC sem alterar a criação de arquivos pelos pacotes do sistema. `UserDataFile` cria o arquivo com `create_new(true)` e `mode(0o600)` em Unix antes de escrever, sincroniza e fecha o handle. Só constrói o guard depois da criação bem-sucedida, portanto uma colisão/symlink não é sobrescrita nem removida. `Drop` remove o arquivo após uso, inclusive no caminho de erro da chamada AWS; o chamador também dá drop explicitamente logo após `call`.
+Internal AWS provisioning command also sets `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true`, as deploy bridge does, so user-data upload cannot be silently redirected by inherited CLI endpoint config.
 
-O comando AWS interno de provisionamento também define `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true`, como a ponte de deploy: o upload de user-data não deve ser redirecionado silenciosamente por endpoints herdados do ambiente/configuração da CLI.
+**Tests added:** `user_data_file_is_private_exclusive_and_removed_after_use`, `user_data_file_is_removed_when_the_caller_fails`, `user_data_file_never_follows_or_removes_an_existing_symlink` (Unix), `linux_user_data_disables_inherited_tracing_before_secrets` (Unix). Last test runs only generated prologue and a fixture printf to `/dev/null` under `bash -x`, without apt/network/provisioning, and requires fixture secret absent from stderr.
 
-**Testes adicionados:** `user_data_file_is_private_exclusive_and_removed_after_use`, `user_data_file_is_removed_when_the_caller_fails`, `user_data_file_never_follows_or_removes_an_existing_symlink` (Unix), `linux_user_data_disables_inherited_tracing_before_secrets` (Unix). O último executa só o prologue gerado mais um printf para `/dev/null` sob `bash -x`, sem apt, rede ou provisionamento, e exige ausência do segredo no stderr.
+**Limits:** guard attempts cleanup during normal flow/unwind; no guarantee after abrupt crash/kill/power loss or forensic disk erasure. Windows inherits user's temp-directory ACL; 0600 change is Unix-only. EC2 user data still carries secret to guest user explicitly provisioned. This is not encryption of user data, VM, or AWS backups.
 
-**Limites:** o guard tenta remoção durante fluxo normal/unwind; não promete limpeza após crash abrupto/kill/power loss nem apagamento forense de disco. Em Windows, herda as ACLs do diretório temporário do usuário; a mudança 0600 é específica Unix. User-data EC2 ainda leva o segredo ao guest que o usuário explicitamente mandou provisionar. Não é criptografia de user-data, da VM ou de backups AWS.
+### EGR-10 — TightVNC MSI Ran Without Signature Validation (Conditional High; Windows VM)
 
-### EGR-10 — MSI TightVNC era executado sem validar assinatura (alto condicional; VM Windows)
+**Original evidence:** `cloud/aws.rs:92–94` downloaded `tightvnc-2.8.90-gpl-setup-64bit.msi` and immediately ran msiexec as admin without hash/signature; used fixed TEMP name and did not remove installer. Administrator password/autologon were set before confirming install worked.
 
-**Evidência original:** `cloud/aws.rs:92–94` baixava `tightvnc-2.8.90-gpl-setup-64bit.msi` e imediatamente executava msiexec como administrador, sem hash/assinatura; usava nome fixo no TEMP e não removia o instalador. A senha Administrator e o autologon eram definidos antes de saber se a instalação funcionaria.
+**Research/choice:** Current official page confirms version 2.8.90 and x64 installer size 2,543,616 bytes: https://www.tightvnc.com/download/. A verifiable binary could not be obtained in audit environment: earlier main-agent attempt received error HTML; this subagent attempt was blocked by sandbox network. No hash of error page or aggregator was used as anchor. Maintainer Constantin Kaplinsky advises checking valid signature from “GlavSoft LLC” or “GlavSoft OOO” rather than checksum: https://sourceforge.net/p/vnc-tight/mailman/vnc-tight-list/?limit=25&page=7, “Re: Checksums for latest installers?”, 2021-03-23. Official page https://www.tightvnc.com/announce-2.0beta2.php also identifies GlavSoft LLC signing.
 
-**Pesquisa e escolha:** a página oficial atual confirma a versão 2.8.90 e instalador x64 de 2.543.616 bytes, https://www.tightvnc.com/download/ . Não foi possível obter um binário verificável do ambiente da auditoria: a tentativa anterior do principal recebeu HTML de erro; a deste subagente foi impedida pela rede do sandbox. Não se usou hash de página de erro ou hash de agregador como âncora. O mantenedor Constantin Kaplinsky instrui, na lista oficial, a conferir assinatura válida de “GlavSoft LLC” ou “GlavSoft OOO” em vez de checksum: https://sourceforge.net/p/vnc-tight/mailman/vnc-tight-list/?limit=25&page=7 , mensagem “Re: Checksums for latest installers?”, 23/03/2021. A página oficial https://www.tightvnc.com/announce-2.0beta2.php também identifica assinatura GlavSoft LLC.
+**Chosen fix:** fail-closed Authenticode validation, as authorized by main agent. Keeps URL/version 2.8.90 and explicit VM creation. Creates random staging with noninherited DACL limited to SYSTEM/Administrators. Download timeout 120s; redirects forbidden. `Get-AuthenticodeSignature` must return `Status=Valid` and existing signer certificate; `GetNameInfo(SimpleName,false)` must exactly match `GlavSoft LLC`, `GlavSoft LLC.`, or `GlavSoft OOO`, no wildcard. Only then runs System32 msiexec; accepts codes 0/3010. `finally` removes staging/download on success/failure. Administrator password/autologon are set only after successful install and cleanup.
 
-**Correção escolhida:** assinatura Authenticode em modo fail closed, conforme alternativa autorizada pelo principal. Mantém URL/versionamento 2.8.90 e criação explícita da VM. Cria um staging aleatório com DACL sem herança e acesso apenas a SYSTEM/Administrators. Download tem timeout de 120s e nenhum redirect permitido. `Get-AuthenticodeSignature` deve retornar `Status=Valid` e certificado de assinante existente; `GetNameInfo(SimpleName,false)` deve bater exatamente com `GlavSoft LLC`, `GlavSoft LLC.` ou `GlavSoft OOO`, sem wildcard. Só então executa msiexec de `System32`; aceita códigos 0/3010. `finally` remove staging e download em sucesso/falha. A senha Administrator/autologon é configurada somente após instalação bem-sucedida e cleanup.
+Microsoft verifier docs: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-authenticode-signature?view=powershell-5.1. Signature validates origin/integrity against guest certificate trust; it does not prove program has no vulnerabilities or publisher was never compromised. No pinned checksum is used in this alternative.
 
-Documentação Microsoft do verificador: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-authenticodesignature?view=powershell-5.1 . A assinatura valida origem/integridade segundo a confiança de certificados do guest, não demonstra que o programa não possui vulnerabilidades ou que o publisher nunca foi comprometido. Não há checksum fixado nesta alternativa.
+**Test added:** `windows_verifies_publisher_before_install_and_cleans_up_before_autologon` checks generated script contract: check ordering, exact publisher, execution only after checks, finally block, and autologon after cleanup. Structural test does not replace PowerShell/Authenticode execution on Windows. Windows/VM flow was not run here; download/signature failure aborts install without unsafe fallback.
 
-**Teste adicionado:** `windows_verifies_publisher_before_install_and_cleans_up_before_autologon` verifica o contrato do script emitido: ordem dos checks, publisher exato, execução somente depois dos checks, bloco finally e autologon depois da limpeza. O teste é estrutural e não substitui execução de PowerShell/Authenticode no Windows. O fluxo Windows/VM não foi executado neste ambiente; falha de download/assinatura aborta a instalação, sem um fallback inseguro.
+**Secrets retained by explicit design:** to open Windows desktop without lock screen, project still configures Administrator and Winlogon AutoAdminLogon, including `DefaultPassword` in **AWS guest** registry. VNC uses traditional eight-character authentication, restricted to loopback and SSM tunnel; this password also appears in install parameters inside guest. User guidance must say not to use VM as secret vault, manage IAM/SSM, and terminate VM when no longer needed. Change prevents accidental Linux log and improves local temp storage; it does not remove every guest secret or change cloud access model.
 
-**Segredos mantidos por desenho explícito:** para abrir desktop Windows sem lockscreen, o projeto continua configurando Administrator e Winlogon AutoAdminLogon, incluindo `DefaultPassword` no registro **do guest AWS**. VNC usa autenticação tradicional de oito caracteres, restrita a loopback e túnel SSM; esse password também aparece nos parâmetros da instalação dentro do guest. Esses fatos precisam constar na orientação do usuário: não usar essa VM como cofre de segredos, controlar IAM/SSM e encerrar a VM quando dispensável. A alteração evita o log acidental no Linux e melhora o armazenamento temporário local; não elimina todo segredo do guest nem altera o modelo de acesso cloud.
+`run-instances` does not select its own security group: account/VPC default SG policy still applies, including possible intra-SG rules. Old comment promised “no inbound ports”; updated to match implementation: creates no SSH key pair and adds no VNC ingress rule; VNC is loopback-only. This audit created/changed no real AWS resources or account network rules.
 
-`run-instances` não escolhe um security group próprio: a política do default SG/VPC da conta continua valendo, inclusive possíveis regras intra-SG. O comentário antigo prometia “no inbound ports”; foi ajustado para refletir só o que o código implementa: não cria key pair SSH nem adiciona regra de ingresso VNC, que fica em loopback. Não houve criação ou alteração de recursos AWS reais nem de regras de rede da conta nesta auditoria.
+### EGR-11 — Additional Defense Against Speculative DNS
 
-### EGR-11 — Defesa adicional contra DNS especulativo
+`index.html` now includes `<meta http-equiv="x-dns-prefetch-control" content="off">` immediately after charset, before links/rendering. Expected effect: disable speculative host resolution without blocking explicitly opened links. Chromium documents that explicit opt-out cannot later be re-enabled by content and child frames inherit it: https://www.chromium.org/developers/design-documents/dns-prefetching/. This is additional hardening, not a leak reproduced in original app.
 
-`index.html` agora contém `<meta http-equiv="x-dns-prefetch-control" content="off">` imediatamente após o charset, antes de links/renderização. Impacto esperado: desabilitar resolução especulativa de hosts, sem impedir links explicitamente abertos. Chromium documenta que opt-out explícito não pode ser reabilitado depois pelo conteúdo e que frames filhos herdam o opt-out: https://www.chromium.org/developers/design-documents/dns-prefetching/ . Trata-se de hardening adicional, não de vazamento reproduzido na aplicação original.
+**Verification run:** extracted emitted Linux prologue from `aws.rs` and ran under `bash -x` with only a fixture printf to `/dev/null`. Passed: exit code zero, empty stdout, fixture absent from stderr. No provisioning command ran. `aws.rs` diff also had no whitespace alerts.
 
-**Verificação executada:** foi extraído do próprio `aws.rs` o prologue Linux emitido e executado sob `bash -x` com apenas um printf de fixture para `/dev/null`. Passou: código de saída zero, stdout vazio e nenhuma ocorrência da fixture no stderr. Nenhum comando de provisionamento foi executado. O diff de aws.rs também não apresentou alertas de whitespace.
-
-**Estado final deste subagente:** edições e testes adicionados; sem compilação/testes Rust paralelos e sem build npm. Resultados de execução nativa serão apresentados pelo agente principal.
+**Final status of this subagent:** edits and tests added; no parallel Rust compilation/tests and no npm build. Main agent will report native execution results.

@@ -1,61 +1,61 @@
-# PandaCode 0.3.34.1 hardened — auditoria direcionada e mitigação
+# PandaCode 0.3.34.1 hardened — Focused Audit and Mitigations
 
-**Revisão:** 2026-10-23 · **base de código:** ZIP 0.3.34 hardened (SHA-256 `7cf9a99bbfd3e3753d542753c954551007290e42e14464c43163b7d066f1a412`) · **alvo:** 0.3.34.1 hardened (SemVer `0.3.34-hardened.1`).
+**Review:** 2026-10-23 · **base:** PandaCode 0.3.34 hardened ZIP (SHA-256 `7cf9a99bbfd3e3753d542753c954551007290e42e14464c43163b7d066f1a412`) · **target:** 0.3.34.1 hardened (SemVer `0.3.34-hardened.1`).
 
-**Status global: `blocked-critical-evidence` — NÃO aprovado para produção.** Os patches e a inspeção de código não substituem `cargo test --locked`, builds Tauri, testes de integração, audit de dependências com dados atuais, isolamento de execução real, Windows/Keychain, deploy Cloudflare ou verificação independente. Foram adicionados testes de regressão de código-fonte, mas não executados. A análise é limitada aos oito achados e às superfícies próximas afetadas.
+**Overall status: `blocked-critical-evidence` — NOT approved for production.** Patches and code inspection do not replace `cargo test --locked`, Tauri builds, integration tests, dependency audits using current data, real execution isolation, Windows/Keychain checks, Cloudflare deployment, or independent verification. Source-level regression tests were added but not run. This analysis is limited to the eight findings and nearby affected surfaces.
 
-## Resumo por achado
+## Finding Summary
 
-| ID | Veredito sobre o relatório original | Alteração na 0.3.34.1 | Garantia / lacuna |
+| ID | Original report assessment | Change in 0.3.34.1 | Assurance / gap |
 |---|---|---|---|
-| F01 | **Suportado (alto, autorização cruzada)** | Associação obrigatória de confirmação a UUID de aprovação, uso único, TTL de 10 min e limite de fila. Resposta `yes` sem ID não aprova. | Código inspecionado; teste de A resolvido pelo desktop + resposta antiga versus B criado; teste não executado. O usuário precisa revisar a ação no desktop. |
-| F02 | **Suportado (alto, risco de governança)** | Novas tarefas em storage/UI/GitHub/overlay usam `ask` por padrão; modo `full` só por escolha explícita. | Tarefas persistidas com `full` são preservadas, sem migração silenciosa. Verificar launchers/CLI em runtime. |
-| F03 | **Suportado (médio, cancelamento)** | Processo externo de deploy supervisionado recebe flag atômica de parada, interrompe grupo/processo ao cancelar. Deadline de ferramentas de deploy ajustado para 1860 s versus limite interno de 1800 s. Resultado incerto explicitado. | Sem prova em Windows/Job Object; efeitos já enviados a APIs externas não podem ser revertidos; cancelamento externo de MCP exige validação adicional. |
-| F04 | **Suportado (médio, timeout)** | Worker aplica `timeout --kill-after` ao comando, serializa execuções e destrói sandbox ao timeout confirmado ou ao fallback. | Destruir o container elimina estado não persistido no workspace; execução real e semântica Cloudflare não verificadas. |
-| F05 | **Suportado (médio, supply chain)** | Removido `npm install` disparado pelo desktop; exige Wrangler previamente instalado/revisado e verificado na versão 4.151.0. | **Restrição funcional intencional**: sem dependências Worker previamente preparadas, deploy não está garantido. Não há lockfile auditado para o Worker; não declarar risco eliminado. |
-| F06 | **Suportado (médio, supply chain)** | Substituído `npx wrangler` por invocador local sem fallback/download, versão 4.151.0 validada antes de comandos permitidos; npm ignora hooks. | Invocador requer Wrangler pré-provisionado. A dependência não foi inserida no lockfile do relay; funcionalidade falha fechada quando ausente. |
-| F07 | **Suportado (médio, limites HTTP)** | Relay lê corpo via stream com limite real de 256 KiB antes de JSON/GitHub; 413 quando excede sem `Content-Length`. Worker /exec também limita bytes. | 3 testes de regressão definidos mas não executados em sandbox. Infra da plataforma não foi auditada. |
-| F08 | **Suportado (baixo, governança)** | SECURITY.md diferencia distribuição hardened de upstream, proíbe atualização automática e indica procedimento manual. | Contato de segurança específico do fork não foi fornecido/verificado; não criar endereço fictício. |
+| F01 | **Supported (high, cross-approval)** | Bind confirmation to an approval UUID; one-time use, 10-minute TTL, queue limit. `yes` without an ID does not approve. | Code inspected; test for A resolved by desktop plus stale response versus newly created B was not run. User must review the action on desktop. |
+| F02 | **Supported (high, governance risk)** | New tasks in storage/UI/GitHub/overlay default to `ask`; `full` requires explicit selection. | Persisted tasks already set to `full` are preserved, without silent migration. Verify launchers/CLI at runtime. |
+| F03 | **Supported (medium, cancellation)** | Supervised external deploy process receives an atomic stop flag and terminates the process/group on cancellation. Deploy-tool deadline set to 1,860 s versus the 1,800 s internal limit. Uncertain outcomes are explicit. | No Windows/Job Object proof; effects already sent to external APIs cannot be reversed; external MCP cancellation needs additional validation. |
+| F04 | **Supported (medium, timeout)** | Worker applies `timeout --kill-after` to the command, serializes executions, and destroys the sandbox after a confirmed timeout or fallback. | Destroying the container removes state not persisted in the workspace; real execution and Cloudflare semantics unverified. |
+| F05 | **Supported (medium, supply chain)** | Removed desktop-triggered `npm install`; requires Wrangler to be preinstalled/reviewed and verifies version 4.151.0. | **Intentional functional restriction:** deploy is not guaranteed without prepared Worker dependencies. No audited Worker lockfile; do not claim risk eliminated. |
+| F06 | **Supported (medium, supply chain)** | Replaced `npx wrangler` with a local invoker, no fallback/download; validates version 4.151.0 before allowed commands; npm ignores hooks. | Invoker requires pre-provisioned Wrangler. Dependency was not added to relay lockfile; feature fails closed if absent. |
+| F07 | **Supported (medium, HTTP limits)** | Relay streams request bodies with a real 256 KiB limit before JSON/GitHub; returns 413 when exceeded without `Content-Length`. Worker `/exec` also limits bytes. | Three regression tests defined but not run in a sandbox. Platform infrastructure was not audited. |
+| F08 | **Supported (low, governance)** | SECURITY.md distinguishes hardened distribution from upstream, prohibits automatic updates, and documents a manual process. | A fork-specific security contact was not supplied/verified; no fictional address was created. |
 
-Os achados F02, F05, F06 e F08 descrevem **políticas ou falhas de governança**, não backdoors, explorações observadas ou CVEs demonstradas. Não foram classificados como falsos positivos simplesmente porque não há reprodução dinâmica. F01, F03, F04 e F07 têm caminhos de código identificados e patches no alvo; a confirmação comportamental está pendente.
+F02, F05, F06, and F08 describe **policies or governance gaps**, not backdoors, observed exploits, or demonstrated CVEs. They were not labeled false positives merely because no dynamic reproduction exists. F01, F03, F04, and F07 have identified code paths and patches in the target; behavioral confirmation is pending.
 
-## Proveniência por entrada e saída (resumo)
+## Input/Output Provenance (Summary)
 
-- **F01:** `src-tauri/src/bots/gateway.rs` → `parse_command`, `approval_requested`, `answer_approval` → `respond_approval` em `src-tauri/src/lib.rs`. Ator: remetente previamente pareado, canal externo. Invariante: autorização específica e não reutilizável.
-- **F02:** `src-tauri/src/storage.rs` + `src/main.ts`, `src/github.ts`, `src/overlay-client.ts`, `src/preview.ts` → `providers.rs`. Ator: conteúdo de agente; invariante: menor privilégio em tarefas novas.
-- **F03:** `src-tauri/src/providers/host_tools.rs`, `src-tauri/src/providers/mcp_host.rs` → `src-tauri/src/cloud/deploy.rs` → `src-tauri/src/workspace.rs`. Ator: ferramenta do agente com permissão; invariante: nenhum efeito local indefinidamente após cancelamento. **Limite**: efeito remoto é indeterminado.
-- **F04:** `src-tauri/src/cloud/cloudflare_worker/src/index.ts` → `container.exec` → `timeout` / `container.destroy`. Ator: detentor de token remoto; recurso: container do sandbox.
-- **F05:** `src-tauri/src/cloud/cloudflare.rs` → Wrangler instalado no host, sem npm automático; falta de árvore de dependências pronta impede deploy.
-- **F06:** `relay/package.json` → `relay/scripts/wrangler.mjs`, sem invocação `npx` ou download implícito.
-- **F07:** `relay/src/index.ts` → `relay/src/limits.ts` → `githubUser`; corpo excedente rejeitado com 413 antes de solicitação GitHub.
-- **F08:** `SECURITY.md` política de atualização e reporte do fork.
+- **F01:** `src-tauri/src/bots/gateway.rs` → `parse_command`, `approval_requested`, `answer_approval` → `respond_approval` in `src-tauri/src/lib.rs`. Actor: previously paired sender, external channel. Invariant: specific, non-reusable authorization.
+- **F02:** `src-tauri/src/storage.rs` plus `src/main.ts`, `src/github.ts`, `src/overlay-client.ts`, `src/preview.ts` → `providers.rs`. Actor: agent content; invariant: least privilege for new tasks.
+- **F03:** `src-tauri/src/providers/host_tools.rs`, `src-tauri/src/providers/mcp_host.rs` → `src-tauri/src/cloud/deploy.rs` → `src-tauri/src/workspace.rs`. Actor: permitted agent tool; invariant: no local effect continues indefinitely after cancellation. **Limit:** remote outcome is uncertain.
+- **F04:** `src-tauri/src/cloud/cloudflare_worker/src/index.ts` → `container.exec` → `timeout` / `container.destroy`. Actor: remote token holder; resource: sandbox container.
+- **F05:** `src-tauri/src/cloud/cloudflare.rs` → host-installed Wrangler, no automatic npm; missing prepared dependency tree prevents deploy.
+- **F06:** `relay/package.json` → `relay/scripts/wrangler.mjs`, no `npx` invocation or implicit download.
+- **F07:** `relay/src/index.ts` → `relay/src/limits.ts` → `githubUser`; oversized body rejected with 413 before GitHub request.
+- **F08:** `SECURITY.md` update policy and fork reporting.
 
-## Testes de regressão adicionados (NÃO EXECUTADOS)
+## Regression Tests Added (NOT RUN)
 
-- `src-tauri/src/bots/gateway.rs`: resposta atrasada A nunca aprova B; bloqueia `yes` sem UUID.
-- `src-tauri/src/workspace.rs`: processo controlado ultrapassa deadline e é cancelado, sem criar arquivo marcador (Linux/Unix).
-- `relay/test/request-body-limit.test.ts`: corpo de duas partes acima de 256 KiB sem `Content-Length`, corpo normal e JSON inválido.
-- Testes existentes tiveram expectativas ajustadas para `ask` em novas tarefas.
+- `src-tauri/src/bots/gateway.rs`: delayed response for A never approves B; `yes` without UUID is blocked.
+- `src-tauri/src/workspace.rs`: controlled process exceeds deadline and is cancelled without creating a marker file (Linux/Unix).
+- `relay/test/request-body-limit.test.ts`: two-part body over 256 KiB without `Content-Length`, normal body, and invalid JSON.
+- Existing tests updated to expect `ask` for new tasks.
 
-## Validação, garantia e evidências pendentes
+## Validation, Assurance, and Pending Evidence
 
-- Verificação estrutural de mudanças, bloqueio de `npm install` em `cloudflare.rs`, bloqueio de `npx wrangler` no relay, versão e lockfiles: **executada por script estático externo**, ver `static-verification.json`.
-- Parser de sintaxe TS nos arquivos alterados (compilador TypeScript disponível no host, parsing sem executar o código): **executado**, ver `static-verification.json`.
-- `node --check` sobre invocador JS: **executado**, ver `static-verification.json`.
-- Testes de unidade/integrados, `cargo check --locked`, `cargo test --locked`, `npm ci`, `tsc --noEmit`, Playwright, Cloudflare real, Windows, macOS, SCA e varredura completa de segredos: **not-run** por ausência de isolamento/toolchain verificados, credenciais ou ambiente apropriado; não contam como pass.
-- Resultado de deploy ou ferramenta abortado pode permanecer **indeterminado**; não fazer retry automático sem reconciliação externa.
-- F04 destrói o container após timeout; dados não persistidos podem ser perdidos.
-- F05/F06 falham fechados quando Wrangler/dependências não estão previamente disponíveis; instalação manual e validação independentes são condições para operação.
-- Nenhum certificado, aprovação ou ausência de CVEs/segredos é reivindicado.
+- Structural change checks, blocking `npm install` in `cloudflare.rs`, blocking `npx wrangler` in relay, version and lockfiles: **run by an external static script**, see `static-verification.json`.
+- TypeScript syntax parsing for changed files (host TypeScript compiler, parse only; code not executed): **run**, see `static-verification.json`.
+- `node --check` for JS invoker: **run**.
+- Unit/integration tests, `cargo check --locked`, `cargo test --locked`, `npm ci`, `tsc --noEmit`, Playwright, real Cloudflare, Windows, macOS, SCA, and full secret scan: **not run** due to lack of verified isolation/toolchain, credentials, or suitable environment; they do not count as passes.
+- An aborted deploy/tool result may remain **uncertain**; do not retry automatically without external reconciliation.
+- F04 destroys the container after timeout; unpersisted data may be lost.
+- F05/F06 fail closed when Wrangler/dependencies are not already available; manual installation and independent validation are operational prerequisites.
+- No certificate, approval, or absence of CVEs/secrets is claimed.
 
-## Critérios para desbloquear uma release
+## Criteria to Unblock a Release
 
-1. `cargo check --locked` + `cargo test --locked` e testes de integração em Linux/Windows e cenários de aprovação atrasada.
-2. Provar propagação do cancelamento em deploys e MCP, inclusive filhos e Windows Job Objects, e definir o tratamento de resultados remotos indeterminados.
-3. Recriar worker Cloudflare com dependências fixadas/auditadas e executar teste de timeout observando a árvore de processos e efeitos posteriores.
-4. Resolver supply chain do Wrangler/Worker com lockfile e distribuição reprodutível, mantendo scripts desabilitados por padrão.
-5. Executar teste HTTP 413 sem Content-Length na implantação real e conferir ausência de chamada GitHub.
-6. Rodar SCA contemporânea e secret scanning, revisar o suporte a Windows/macOS/instalador/antivírus.
-7. Verificação independente que vincule ZIP final, árvore, toolchain e registros de execução.
+1. Run `cargo check --locked`, `cargo test --locked`, and integration tests on Linux/Windows, including delayed-approval scenarios.
+2. Prove cancellation propagation for deploys and MCP, including children and Windows Job Objects; define handling for uncertain remote outcomes.
+3. Rebuild the Cloudflare Worker with pinned/audited dependencies and run a timeout test observing the process tree and later effects.
+4. Resolve Wrangler/Worker supply chain with a lockfile and reproducible distribution, keeping scripts disabled by default.
+5. Run the real deployment HTTP 413 test without `Content-Length` and verify that GitHub is not called.
+6. Run contemporary SCA and secret scanning; review Windows/macOS/installer/antivirus support.
+7. Independently bind the final ZIP, tree, toolchain, and execution records.
 
-**Resultado:** correções estáticas candidatas; liberação bloqueada por evidências críticas ausentes, inclusive funcionamento e eventuais regressões.
+**Result:** candidate static corrections; release remains blocked by missing critical evidence, including functionality and potential regressions.

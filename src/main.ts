@@ -2671,6 +2671,15 @@ async function performAgentUiAction(request: AgentUiAction): Promise<unknown> {
     return browserPanel.navigate(String(args.url));
   }
   if (!browserPanel || !state.inspector || state.inspectorTab !== 'browser') throw new Error('Open the browser in this task first.');
+  if (action === 'browser_review' || action === 'browser_viewport') {
+    const owner = browserPanel; await active();
+    if (owner !== browserPanel) throw new Error('Browser changed. Retry in the visible task.');
+    const result = action === 'browser_review'
+      ? await owner.review?.(args)
+      : await owner.resizeReview?.(String(args.origin), Number(args.width), Number(args.height));
+    await active(); if (result === undefined || owner !== browserPanel) throw new Error('Browser review is no longer available.');
+    return result;
+  }
   if (action === 'read_browser') return call('browser_inspect', { action: 'read' });
   if (action === 'browser_click' || action === 'browser_type') return call('browser_inspect', { action: action === 'browser_click' ? 'click' : 'type', selector: args.selector, text: args.text });
   if (action === 'browser_action') { await call('browser_action', { action: args.action }); return { dispatched: true }; }
@@ -2913,6 +2922,23 @@ async function openReviewTools(): Promise<void> {
       prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
     },
     copyText: text => navigator.clipboard.writeText(text),
+    workflow: {
+      call,
+      current: () => { const task = session(); return task && !deletedSessions.has(task.id) && !isChatProject(state.projects.find(p => p.id === task.projectId)) && !botProjects.has(task.projectId) ? task : null; },
+      active: () => dialog.open && root.isConnected && Boolean(session()) && !isRunning(state.sessionId),
+      insert: (id, text) => {
+        const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+        if (!dialog.open || !root.isConnected || !task || task.id !== id || task.archived || task.remoteDevice || deletedSessions.has(id) || isRunning(id) || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) throw new Error('Select the same idle local project task.');
+        if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim() || state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('The composer has a draft or attachments. Nothing was replaced.');
+        prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
+      },
+      open: async view => {
+        if (!dialog.open || !root.isConnected || !session() || isRunning(state.sessionId)) throw new Error('Select the same idle project task.');
+        closeModal();
+        if (view === 'recipes') await openRecipes();
+        else { inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'browser'; state.selectedKind = ''; renderInspector(); }
+      },
+    },
   });
 }
 

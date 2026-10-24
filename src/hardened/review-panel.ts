@@ -1,4 +1,6 @@
 import './review-tools.css';
+import { mountWorkflowLibrary } from './workflow-panel.ts';
+import type { WorkflowHost } from './workflow-library.ts';
 import { buildReview, buildHandoff, collectAttention, inspectTeam, reviewProblems, type HandoffContext, type HandoffFields, type PendingAttention, type ReviewContext, type ReviewKind, type ReviewRequest } from './review-model.ts';
 import { prepareReviewPrompt, saveReviewProfile, type ReviewCall } from './review-actions.ts';
 import type { TeamSnapshot } from '../architect-types';
@@ -15,6 +17,7 @@ export interface ReviewToolsHost {
   openTask(sessionId: string, workerId?: string): Promise<void>;
   insertPrompt(sessionId: string, text: string): void | Promise<void>;
   copyText(text: string): Promise<void>;
+  workflow?: WorkflowHost;
 }
 let sequence = 0;
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] => {
@@ -216,6 +219,10 @@ export function mountReviewTools(root: HTMLElement, host: ReviewToolsHost): () =
       announce('Snapshot refreshed. No agent was started.');
     } finally { if (!disposed) { paint(); paintSnapshots(); } }
   }
+  const workflowSection = el('details'); workflowSection.className = 'workflow-library'; workflowSection.append(el('summary', 'Workflow library: visual, integration and code review'));
+  const workflowRoot = el('section'); workflowSection.append(workflowRoot); presets.append(workflowSection);
+  const workflowCleanup = host.workflow ? mountWorkflowLibrary(workflowRoot, host.workflow) : undefined;
+  if (!host.workflow) workflowRoot.append(el('p', 'Workflow library requires an active local project task.'));
   activate(0); paint(); void perform(refresh);
-  return () => { if (disposed) return; disposed = true; abort.abort(); root.replaceChildren(); root.classList.remove('hardened-review'); };
+  return () => { if (disposed) return; disposed = true; workflowCleanup?.(); abort.abort(); root.replaceChildren(); root.classList.remove('hardened-review'); };
 }

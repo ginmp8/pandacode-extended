@@ -1,5 +1,8 @@
 node_modules/
 __pycache__/
+.venv/
+venv/
+coverage/
 dist/
 src-tauri/target/
 src-tauri/gen/
@@ -19,4 +22,3 @@ website/.astro/
 *.key
 *.pem
 *.log
-*.tap

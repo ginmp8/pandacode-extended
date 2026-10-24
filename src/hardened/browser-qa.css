@@ -1,0 +1,25 @@
+/* Browser-scoped controls. The existing webview and color tokens are retained. */
+.hardened-browser-qa{flex:0 1 auto;min-height:80px;max-height:46%;overflow:auto;padding:12px;border-bottom:1px solid var(--border);background:var(--panel);color:var(--text);font-size:.78rem;line-height:1.5}
+.hardened-browser-qa [hidden]{display:none!important}
+.hardened-browser-qa .qa-heading,.hardened-browser-qa .qa-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.hardened-browser-qa .qa-heading{justify-content:space-between;margin-bottom:6px}
+.hardened-browser-qa .qa-note{color:var(--muted);margin:6px 0 10px;font-size:.75rem}
+.hardened-browser-qa .qa-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:8px 0 10px;flex-wrap:wrap}
+.hardened-browser-qa .qa-tabs button{padding:7px 9px;border-bottom:2px solid transparent;color:var(--muted)}
+.hardened-browser-qa .qa-tabs [aria-selected=true]{border-color:var(--accent);color:var(--text)}
+.hardened-browser-qa .qa-actions{margin:8px 0}
+.hardened-browser-qa button{font:inherit;cursor:pointer}
+.hardened-browser-qa .secondary-button,.hardened-browser-qa .primary-button{padding:7px 10px;min-height:32px;border:1px solid var(--border);border-radius:4px}
+.hardened-browser-qa .secondary-button{background:var(--bg);color:var(--text)}
+.hardened-browser-qa .primary-button{background:var(--accent);color:var(--on-accent)}
+.hardened-browser-qa button:disabled{opacity:.5;cursor:default}
+.hardened-browser-qa .qa-field{display:flex;flex-direction:column;gap:4px;margin:7px 0;min-width:0}
+.hardened-browser-qa .qa-field:has(input[type=checkbox]){flex-direction:row-reverse;align-items:center;justify-content:flex-end}
+.hardened-browser-qa input:not([type=checkbox]),.hardened-browser-qa select,.hardened-browser-qa textarea{font:inherit;width:100%;min-width:0;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);padding:7px;box-sizing:border-box}
+.hardened-browser-qa textarea{resize:vertical;font-family:var(--font-mono,monospace);font-size:.72rem}
+.hardened-browser-qa .qa-status{color:var(--muted);margin:7px 0 0;overflow-wrap:anywhere}
+.hardened-browser-qa pre{max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--border);padding:10px;font-size:.7rem}
+.hardened-browser-qa .qa-captures{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.hardened-browser-qa .qa-captures img{max-width:100%;max-height:260px;object-fit:contain;align-self:start;border:1px solid var(--border)}
+.hardened-browser-qa :focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:2px}
+@container browser-panel (max-width:25em){.hardened-browser-qa .qa-tabs button{flex:1 1 40%}.hardened-browser-qa .qa-captures{grid-template-columns:1fr}}

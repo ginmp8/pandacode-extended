@@ -1,14 +1,10 @@
-# PandaCode — 0.3.41-hardened
+# PandaCode — 0.3.42-hardened (source candidate)
 
-**Current hardened revision:** `0.3.41-hardened`, created from the supplied **0.3.35-hardened.4** source. This release selectively adds connection isolation, independent remote Full access authorization, GitHub Skills catalogs, bot/project Skills, Edit/Rewind, clickable history attachments, account-specific subscription limits and an installed-agent picker. It preserves the existing architecture, registered providers, dependency versions and hardened controls.
+**Current Hardened version:** `0.3.42-hardened`. Updated from the supplied Hardened `0.3.41` package with the **upstream 0.3.42 narrow-thread CSS fix**, regression test and mirrored release-note history. All existing hardening remains in place. See [what changed](releases/0.3.42-hardened.md), [upstream vs Hardened release history](docs/UPSTREAM-RELEASE-HISTORY.md), and [static verification/remaining risks](security-review/0.3.42-hardened/REPORT.md).
 
-**Start here:** [0.3.41 usage guide and feature locations](docs/HARDENED-0.3.41-GUIDE.md), [release notes](releases/0.3.41-hardened.md) and [executed validation report](security-review/0.3.41-hardened/REPORT.md). The deliverable is a complete **source ZIP**. It is not a signed native installer. Linux native tests, frontend build and the native Linux binary compilation passed; Windows/macOS installation and live provider/device interoperability remain outside the executed validation. The full browser regression recorded 117/118 passes and one intermittent WhatsApp preview race, which passed in a separate unchanged isolated run; the report keeps both results.
+**Version != source parity.** This release tracks upstream 0.3.42 by version and by the explicitly ported CSS fix, but the full upstream 0.3.42 source has **not** replaced the earlier 0.3.28 ancestry. Many upstream changes remain unmerged or deliberately excluded for security. The upstream `npx pandacode` installer and automatic updater are **not** safe substitutes for building this Hardened source. No native installer or full-runtime verification is included. The [read-only upstream release monitor](.github/workflows/upstream-version-watch.yml) detects newer official tags; it never downloads code or merges an upstream release automatically.
 
-This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The original source base remains **0.3.28**, with selective later backports; **0.3.41 is the comparison/reference version, not a wholesale base replacement or a claim of upstream feature parity**. Original license and attribution are preserved. Official upstream installers, Homebrew and the public `npx pandacode` package do not contain this revision. Build this source; automatic application and agent updates remain disabled.
-
-Existing local review tools are preserved. **Review & coordination → Review presets** supports manual multi-harness profiles. Isolated review remains deliberately unavailable (`containment_unproven`); this release does not introduce a provider sandbox or enable that execution path. See [Review & coordination](docs/HARDENED-REVIEW-TOOLS.md).
-
-Native credential storage, device trust/revocation, replay protection, gated agent tools and restricted HTML previews remain in place. Earlier security reports are retained as historical records; the current evidence is in `security-review/0.3.41-hardened/`.
+This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The license and upstream author attribution are preserved.
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding

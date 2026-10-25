@@ -1,7 +1,7 @@
 {
   "name": "pandacode",
   "private": true,
-  "version": "0.3.41-hardened",
+  "version": "0.3.42-hardened",
   "description": "Open-source desktop workspace for coding agents: Claude Code, Codex, Kimi Code, OpenCode and more.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/aicodeking/pandacode#readme",
@@ -30,7 +30,9 @@
     "release:build": "node scripts/release/build.mjs",
     "test:release": "node --test scripts/release/*.test.mjs packages/npx/*.test.mjs",
     "screenshots": "playwright test -c scripts/screenshots/playwright.config.ts",
-    "test:install-security": "node --test tests/install-policy.test.mjs"
+    "test:install-security": "node --test tests/install-policy.test.mjs",
+    "test:fork-sync": "node --test scripts/release/check-hardened-sync.test.mjs",
+    "check:upstream": "node scripts/release/check-upstream-current.mjs"
   },
   "dependencies": {
     "@pierre/diffs": "1.4.2",

@@ -4,7 +4,7 @@ import type { SkillCatalog, SkillCatalogs } from './skills-catalog';
 import type { SkillPin } from './skills-scope';
 import type { SkillActivation, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 
-const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'omp', 'muse']);
+const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'omp', 'muse', 'devin']);
 const FILES = ['claude', 'codex'];
 const PROJECT_ROOT = '/Users/you/Projects/orbit';
 

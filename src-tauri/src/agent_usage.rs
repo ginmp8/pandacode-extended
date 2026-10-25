@@ -353,6 +353,7 @@ fn cache() -> &'static HashMap<&'static str, CacheSlot> {
             "omp",
             "github-copilot",
             "muse",
+            "devin",
         ]
         .into_iter()
         .map(|id| (id, CacheSlot::default()))
@@ -649,6 +650,7 @@ async fn fetch_provider(provider: &str, env: &[(String, String)]) -> Usage {
         "cline" => Usage::empty(provider, "unsupported", "Cline does not expose credits or limits through this agent. Check your Cline account."),
         "github-copilot" => Usage::empty(provider, "unsupported", "GitHub Copilot CLI does not expose usage limits through this agent. Check your GitHub Copilot settings."),
         "muse" => Usage::empty(provider, "unsupported", "Muse Code reports its usage windows only inside a running session. Check them with /usage in Muse Code."),
+        "devin" => Usage::empty(provider, "unsupported", "Devin does not expose plan limits through its ACP server. Check usage in your Devin account settings."),
         _ => Usage::empty(provider, "unsupported", "Usage limits are not available for this agent."),
     };
     if result.dashboard_url.is_none() {

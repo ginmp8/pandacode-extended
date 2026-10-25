@@ -24,7 +24,7 @@ const MAX_NAME: usize = 60;
 // while a task still owns the previous connection's native session ID.
 const MAX_TASKS: usize = 5000;
 const PROVIDERS: &[&str] = &[
-    "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "omp", "github-copilot", "muse",
+    "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "omp", "github-copilot", "muse", "devin",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

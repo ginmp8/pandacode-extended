@@ -151,6 +151,7 @@ fn new_user_tasks_default_to_ask_without_overriding_requested_modes_or_saved_tas
             "deepseek",
             "cline",
             "github-copilot",
+            "devin",
         ] {
             let existing = store
                 .create_session(&source.project_id, provider, "default", "plan")

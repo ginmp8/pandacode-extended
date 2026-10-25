@@ -47,7 +47,7 @@ function scopes(value: string): string[] {
 
 const HARNESS_IDS: ReadonlySet<string> = new Set([
   'claude', 'codex', 'kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi',
-  'deepseek', 'commandcode', 'cline', 'omp', 'github-copilot', 'muse',
+  'deepseek', 'commandcode', 'cline', 'omp', 'github-copilot', 'muse', 'devin',
 ]);
 
 /** Bound profile selection to the original registry without implying executable/sandbox support. */

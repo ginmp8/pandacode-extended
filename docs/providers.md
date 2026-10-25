@@ -1,7 +1,7 @@
 # Provider integrations
 
 PandaCode launches each installed CLI directly. Claude, Codex, Kimi, OpenCode,
-Antigravity, and Grok Build own their authentication; sign in using their official
+Antigravity, Grok Build, and Devin CLI own their authentication; sign in using their official
 CLI or extension.
 The optional Z.AI Coding Plan and MiMo Token Plan API keys are stored in the macOS
 Keychain (separate entries) and injected only into their isolated Claude subprocesses. The app discovers executable paths
@@ -609,6 +609,78 @@ Verified against `cline` 3.0.73 on 2026-10-22 by driving `cline --acp`
 directly. The recorded frames back the unit tests in `providers/cline.rs`, and
 an ignored smoke test (`live_cline_lists_models`) reads the real catalog without
 spending tokens.
+
+## Devin CLI
+
+PandaCode Extended 0.5.0 includes the Devin integration introduced in upstream
+PandaCode 0.3.43. Install a reviewed Devin CLI separately using the
+[official instructions](https://docs.devin.ai/cli), then run `devin auth login` in
+its terminal. Extended runs the installed `devin acp` executable; it does not
+install or update Devin. Settings → Agents also accepts an explicit executable
+path. On macOS, the existing CLI inside Devin Desktop is a fallback when `devin`
+is not on PATH.
+
+### Authentication, discovery and models
+
+Devin owns its sign-in and account configuration. Extended removes `ACP_BACKEND`
+from task, discovery and console subprocesses because that variable selects
+Devin Desktop host authentication instead of the installed CLI's sign-in. The app
+never calls ACP `authenticate` or puts login commands into the conversation.
+
+The catalog comes from the CLI's ACP `configOptions`, including each model's
+`thought_level` choices and image capability. Bounded metadata discovery uses two
+processes with four temporary sessions each, sends no prompt, and attempts to
+delete every acknowledged temporary session even if discovery fails. Model
+probes use unique private temporary directories. The catalog is cached for five
+minutes and refreshed when the provider catalog is explicitly reloaded. A
+terminated or unresponsive CLI can prevent remote session cleanup; the local
+process and temporary directory are still cleaned up.
+
+The picker supports only advertised model IDs. Regular models expose their own
+reasoning levels; Fusion models keep the effort configured in Devin. Models
+marked text-only reject an image prompt before it is sent. Selecting a missing
+model or unsupported effort produces an error rather than silently substituting
+another setting. The catalog and its capabilities can change with the installed
+CLI and account.
+
+### Permissions and continuation
+
+| Extended control | Devin behavior |
+| --- | --- |
+| Standard | Code mode (`accept-edits`): project edits apply; Devin requests approval for commands it considers unsafe. |
+| Plan mode | Devin's `plan` mode; its own plan files may be written. The final implementation request stays an explicit approval. |
+| Full access | Explicitly selects `bypass`. Any remaining ordinary request uses a one-time approval; plan implementation still asks. |
+
+Devin has no separate ask-before-every-edit mode, so Extended does not display a
+redundant Accept edits choice. Approving an individual request chooses only
+`allow_once`, and accepting a plan chooses `plan_accept_edits`. Standing grants,
+project/global rules and `plan_bypass` are never selected by this approval action.
+Missing advertised modes fail before a prompt. Plan mode is a provider behavior,
+not OS confinement; Extended's manual review presets retain their existing
+non-isolation warning and admission checks.
+
+Resumed tasks reuse Devin's session and skip unchanged model, effort and mode
+round trips. A live steer is sent through a second `session/prompt`; if it cannot
+be accepted, the existing bounded queue/failure behavior applies. Subagent context
+usage does not replace the main task's usage meter.
+
+### Commands and console
+
+Advertised slash commands and skills are available in the composer. Account and
+mode commands (`/login`, `/logout`, `/ask`, `/plan`, `/code`, `/bypass`, `/normal`)
+remain with Devin's CLI and Extended's mode picker. Command discovery also
+attempts to delete its temporary session.
+
+The task console opens the installed Devin REPL with the same model and
+`--resume` session. Standard maps to `--permission-mode accept-edits`; Full access
+maps to `dangerous`. A Plan task cannot start the REPL in Plan mode and must use
+task chat or invoke `/plan` in the CLI. Devin does not expose account plan limits
+over ACP, so the Usage dialog reports them as unavailable.
+
+The adapter includes recorded upstream ACP fixtures, protocol tests, permission
+regressions, and opt-in ignored live tests. These fixtures are evidence of the
+mapped protocol; they do not establish a live test of this Extended build with a
+real account or every operating system.
 
 ## Muse Code
 

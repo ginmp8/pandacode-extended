@@ -18,11 +18,15 @@ export async function check() {
   const workers = await read('src/team-progress.css');
   const spec = await read('tests/architect.spec.ts');
   const v = pkg.version;
-  assert(/^\d+\.\d+\.\d+-hardened$/.test(v), 'Unexpected product version');
-  assert([lock.version, lock.packages?.['']?.version, tauri.version, meta.product_version, meta.release_display_version].every(x => x === v), 'Manifest version drift');
-  assert(new RegExp('\\[package\\][\\s\\S]*?\\nversion = "' + v + '"').test(cargo), 'Cargo.toml version drift');
-  assert(cargoLock.includes('name = "pandacode"\nversion = "' + v + '"'), 'Cargo.lock version drift');
-  assert(meta.upstream_version === v.replace('-hardened', '') && meta.tracked_upstream_version === meta.upstream_version, 'Reference version drift');
+  const release = /^(\d+\.\d+\.\d+)(?:\.(\d+)|-hardened)$/.exec(v);
+  assert(release, 'Unexpected product version');
+  const nativeVersion = release[2] ? `${release[1]}+${release[2]}` : v;
+  assert([lock.version, lock.packages?.['']?.version].every(x => x === v), 'npm package/lock version drift');
+  assert(tauri.version === nativeVersion, 'Tauri version drift');
+  assert(new RegExp('\\[package\\][\\s\\S]*?\\nversion = "' + nativeVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"').test(cargo), 'Cargo.toml version drift');
+  assert(new RegExp('name = "pandacode"\\r?\\nversion = "' + nativeVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"').test(cargoLock), 'Cargo.lock version drift');
+  assert(release[1] === meta.upstream_version && meta.upstream_version === meta.tracked_upstream_version && meta.reference_upstream_version === meta.upstream_version, 'Reference version drift');
+  assert(meta.product_version === `${meta.upstream_version}-hardened` && meta.product_version === meta.release_display_version && meta.revision === meta.release_display_version, 'Hardened revision metadata drift');
   assert(meta.source_base_upstream_version === '0.3.28' && meta.upstream_code_rebased === false, 'Missing honest base provenance');
   assert(meta.feature_parity_with_upstream_0_3_42 === false, 'False complete-parity claim');
   assert(css.includes('overflow-y:auto;overflow-x:hidden;'), 'Missing transcript overflow fix');
@@ -33,7 +37,9 @@ export async function check() {
     assert(Boolean((await read(`releases/${note}.md`)).trim()), `Missing upstream release note ${note}`);
     assert(Boolean(dates[note]), `Missing upstream date ${note}`);
   }
+  const displayVersion = meta.release_display_version;
   assert(Boolean((await read(`releases/${v}.md`)).trim()) && Boolean(dates[v]), 'Missing local Hardened release note/date');
+  assert(Boolean((await read(`releases/${displayVersion}.md`)).trim()) && Boolean(dates[displayVersion]), 'Missing metadata Hardened release note/date');
   return { version:v, upstream:meta.upstream_version, sourceBase:meta.source_base_upstream_version, upstreamNotes:14 };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

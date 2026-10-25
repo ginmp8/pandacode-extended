@@ -6,7 +6,7 @@ const next = version(process.argv[2]);
 for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json']) {
   const absolute = resolve(root, path);
   const value = await json(absolute);
-  value.version = next;
+  value.version = path === 'src-tauri/tauri.conf.json' ? cargoVersion(next) : next;
   if (value.packages?.['']) value.packages[''].version = next;
   await writeFile(absolute, `${JSON.stringify(value, null, 2)}\n`);
 }

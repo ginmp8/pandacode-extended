@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { root, version, json, run, digest, targetConfig, hostTarget, appImageBundleOptions, releaseDirectory } from './common.mjs';
+import { root, version, cargoVersion, json, run, digest, targetConfig, hostTarget, appImageBundleOptions, releaseDirectory } from './common.mjs';
 import { repackAppImage } from './appimage.mjs';
 
 // Never forwarded to the build: leftovers of the old license check in a developer
@@ -60,9 +60,12 @@ function plan(config, env, mode, bundle) {
 }
 
 export function builtArtifact(names, releaseVersion, releaseTarget) {
-  const expected = targetConfig(releaseTarget).built(version(releaseVersion));
-  if (!names.includes(expected)) throw new Error(`Tauri did not produce ${expected}.`);
-  return expected;
+  const config = targetConfig(releaseTarget);
+  const release = version(releaseVersion);
+  const expected = [...new Set([config.built(release), config.built(cargoVersion(release))])];
+  const found = expected.find(name => names.includes(name));
+  if (!found) throw new Error(`Tauri did not produce ${expected.join(' or ')}.`);
+  return found;
 }
 
 export function releaseAssetName(releaseVersion, asset) {
@@ -75,11 +78,11 @@ export function checksumLine(sha256, filename) {
   return `${sha256}  ${filename}\n`;
 }
 
-async function checkVersions(releaseVersion) {
+export async function checkVersions(releaseVersion) {
   const tauri = await json(resolve(root, 'src-tauri/tauri.conf.json'));
   const pkg = await json(resolve(root, 'package.json'));
   const cargo = await readFile(resolve(root, 'src-tauri/Cargo.toml'), 'utf8');
-  if (tauri.version !== releaseVersion || pkg.version !== releaseVersion || !cargo.includes(`version = "${releaseVersion}"`)) {
+  if (pkg.version !== version(releaseVersion) || tauri.version !== cargoVersion(releaseVersion) || !cargo.includes(`version = "${cargoVersion(releaseVersion)}"`)) {
     throw new Error('package.json, tauri.conf.json and Cargo.toml disagree on the version. Run npm run release:version first.');
   }
 }
@@ -110,7 +113,7 @@ async function verifyDmg(path, app, releaseVersion) {
     const installed = resolve(mount, 'PandaCode.app');
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', installed]);
     const installedVersion = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', resolve(installed, 'Contents/Info.plist')], { encoding: 'utf8' }).trim();
-    if (installedVersion !== releaseVersion || await digest(resolve(installed, 'Contents/MacOS/pandacode')) !== await digest(resolve(app, 'Contents/MacOS/pandacode'))) throw new Error('The disk image contains a different app build.');
+    if (![releaseVersion, cargoVersion(releaseVersion)].includes(installedVersion) || await digest(resolve(installed, 'Contents/MacOS/pandacode')) !== await digest(resolve(app, 'Contents/MacOS/pandacode'))) throw new Error('The disk image contains a different app build.');
   } finally {
     if (mounted) await run('/usr/bin/hdiutil', ['detach', mount, '-quiet']);
     // Only remove empty mount directories; never recursively delete a volume.
@@ -121,7 +124,7 @@ async function verifyDmg(path, app, releaseVersion) {
 async function main() {
   const releaseTarget = process.argv[2] || process.env.RELEASE_TARGET || hostTarget();
   const config = targetConfig(releaseTarget);
-  const releaseVersion = version((await json(resolve(root, 'src-tauri/tauri.conf.json'))).version);
+  const releaseVersion = version((await json(resolve(root, 'package.json'))).version);
   await checkVersions(releaseVersion);
   const build = buildPlan(releaseTarget, process.env);
   // Execute Node directly: npm.cmd is not an executable for spawn() on Windows.

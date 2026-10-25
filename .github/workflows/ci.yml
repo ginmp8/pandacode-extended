@@ -33,7 +33,7 @@ jobs:
       - run: npm run site:build
 
   chat-ui:
-    name: Chat/sidebar Playwright regressions
+    name: Desktop integration Playwright regressions
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -53,6 +53,12 @@ jobs:
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
           npx playwright test tests/chats.spec.ts tests/thread-order.spec.ts --workers=1 --repeat-each=2
+      - name: Run upstream integration browser regressions
+        run: |
+          set -euo pipefail
+          export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
+          test -x "$PANDACODE_TEST_CHROME"
+          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts --workers=2
 
   rust:
     name: Rust check and tests (Linux)

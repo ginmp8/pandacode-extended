@@ -37,14 +37,14 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &MenuItem::with_id(app, "show", "Open PandaCode", true, None::<&str>)?,
-            &MenuItem::with_id(app, "quit", "Quit PandaCode", true, None::<&str>)?,
+            &MenuItem::with_id(app, "show", "Open PandaCode Extended", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "Quit PandaCode Extended", true, None::<&str>)?,
         ],
     )?;
     TrayIconBuilder::with_id(ID)
         .icon(Image::from_bytes(include_bytes!("../icons/tray-template@2x.png"))?)
         .icon_as_template(true)
-        .tooltip("PandaCode")
+        .tooltip("PandaCode Extended")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(on_menu)
@@ -126,7 +126,7 @@ fn toggle(app: &AppHandle, rect: Rect) -> tauri::Result<()> {
         open(app, &window, rect)
     } else {
         let window = tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("index.html?view=tray".into()))
-            .title("PandaCode")
+            .title("PandaCode Extended")
             .inner_size(WIDTH, 420.0)
             .resizable(false)
             .decorations(false)

@@ -28,7 +28,7 @@ refreshTheme();
 window.addEventListener('storage', event => { if (event.key === 'pandacode.theme' || event.key === 'pandacode.palette') location.reload(); });
 
 const host = document.querySelector<HTMLDivElement>('#app')!;
-host.innerHTML = `<main class="tray" aria-label="PandaCode"><header class="tray-header"><img class="tray-mark" src="/icon.svg" alt=""><strong>PandaCode</strong><span class="tray-summary"></span><button type="button" class="tray-icon-button tray-open-app" aria-label="Open PandaCode" title="Open PandaCode">${icon('external')}</button></header><div class="tray-body"></div><footer class="tray-footer"><button type="button" class="tray-open-app">Open PandaCode</button><button type="button" class="tray-quit">Quit</button></footer></main>`;
+host.innerHTML = `<main class="tray" aria-label="PandaCode Extended"><header class="tray-header"><img class="tray-mark" src="/icon.svg" alt=""><strong>PandaCode Extended</strong><span class="tray-summary"></span><button type="button" class="tray-icon-button tray-open-app" aria-label="Open PandaCode Extended" title="Open PandaCode Extended">${icon('external')}</button></header><div class="tray-body"></div><footer class="tray-footer"><button type="button" class="tray-open-app">Open PandaCode Extended</button><button type="button" class="tray-quit">Quit</button></footer></main>`;
 const body = host.querySelector<HTMLDivElement>('.tray-body')!;
 const summary = host.querySelector<HTMLSpanElement>('.tray-summary')!;
 let snapshot: TraySnapshot | null = null;

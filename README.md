@@ -1,10 +1,12 @@
-# PandaCode — 0.3.42-hardened (source candidate)
+# PandaCode Extended
 
-**Current Hardened version:** `0.3.42-hardened`. Updated from the supplied Hardened `0.3.41` package with the **upstream 0.3.42 narrow-thread CSS fix**, regression test and mirrored release-note history. All existing hardening remains in place. See [what changed](releases/0.3.42-hardened.md), [upstream vs Hardened release history](docs/UPSTREAM-RELEASE-HISTORY.md), and [static verification/remaining risks](security-review/0.3.42-hardened/REPORT.md).
+**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current release branch is `0.3.42.1` (native version `0.3.42+1`). The repository remains [ginmp8/pandacode-hardened](https://github.com/ginmp8/pandacode-hardened).
 
-**Version != source parity.** This release tracks upstream 0.3.42 by version and by the explicitly ported CSS fix, but the full upstream 0.3.42 source has **not** replaced the earlier 0.3.28 ancestry. Many upstream changes remain unmerged or deliberately excluded for security. The upstream `npx pandacode` installer and automatic updater are **not** safe substitutes for building this Hardened source. No native installer or full-runtime verification is included. The [read-only upstream release monitor](.github/workflows/upstream-version-watch.yml) detects newer official tags; it never downloads code or merges an upstream release automatically.
+Historical security work: [release notes](releases/0.3.42-hardened.md), [upstream history](docs/UPSTREAM-RELEASE-HISTORY.md), and [security review](security-review/0.3.42-hardened/REPORT.md).
 
-This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The license and upstream author attribution are preserved.
+**Branding is not source parity.** This release tracks upstream 0.3.42 by version and by the explicitly ported CSS fix, but the full upstream 0.3.42 source has **not** replaced the earlier 0.3.28 ancestry. Many upstream changes remain unmerged or deliberately excluded for security. The upstream `npx pandacode` installer and automatic updater are **not** safe substitutes for building this Hardened source. No native installer or full-runtime verification is included. The [read-only upstream release monitor](.github/workflows/upstream-version-watch.yml) detects newer official tags; it never downloads code or merges an upstream release automatically.
+
+This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The license and upstream author attribution are preserved. Internal package names, the Tauri identifier (`ai.pandacode.desktop`), and user-data directories are deliberately unchanged. This preserves existing installations, but does **not** support installing Extended alongside original PandaCode without conflicts.
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding

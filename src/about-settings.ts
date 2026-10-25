@@ -4,6 +4,8 @@ import { appUpdates, describeUpdate } from './app-updates';
 
 /** Public upstream project links. Opening one is user-initiated; no update checks run. */
 export const PROJECT_LINKS = {
+  extendedRepository: 'https://github.com/ginmp8/pandacode-hardened',
+  extendedIssues: 'https://github.com/ginmp8/pandacode-hardened/issues',
   repository: 'https://github.com/aicodeking/pandacode',
   issues: 'https://github.com/aicodeking/pandacode/issues',
   releases: 'https://github.com/aicodeking/pandacode/releases',
@@ -16,11 +18,12 @@ const link = (label: string, url: string) =>
 /** The About group: app version, license, disabled update policy, and upstream links. */
 export function aboutSettingsHtml(): string {
   return `<div class="settings-group settings-about" aria-labelledby="settings-about-heading">
-    <div class="setting-row"><div><strong id="settings-about-heading">About PandaCode</strong><small class="settings-about-version">Version …</small></div></div>
+    <div class="setting-row"><div><strong id="settings-about-heading">About PandaCode Extended</strong><small class="settings-about-version">Version …</small></div></div>
     <div class="setting-row"><div><strong>License</strong><small>Open source (MIT-based). No account, no telemetry.</small></div>${link('PandaCode License', PROJECT_LINKS.license)}</div>
-    <div class="setting-row settings-updates"><div><strong>Updates</strong><small class="settings-update-status" aria-live="polite">External updates are disabled in this hardened build. Install reviewed releases manually.</small></div><div class="settings-row-actions"><button type="button" class="secondary-button settings-update-action" hidden></button>${link('Upstream releases', PROJECT_LINKS.releases)}</div></div>
+    <div class="setting-row settings-updates"><div><strong>Updates</strong><small class="settings-update-status" aria-live="polite">External updates are disabled in this distribution. Install reviewed releases manually.</small></div><div class="settings-row-actions"><button type="button" class="secondary-button settings-update-action" hidden></button>${link('Upstream releases', PROJECT_LINKS.releases)}</div></div>
     <div class="setting-row settings-updates-auto" hidden><div><strong>Automatic updates disabled</strong><small>This build cannot download or install external app updates.</small></div><input type="checkbox" class="settings-switch" data-update-automatic aria-label="Install updates automatically" disabled></div>
-    <div class="setting-row"><div><strong>Source code</strong><small>This is a fork of PandaCode. Upstream downloads do not include this security revision.</small></div><div class="settings-row-actions">${link('GitHub repository', PROJECT_LINKS.repository)}${link('Issues', PROJECT_LINKS.issues)}</div></div>
+    <div class="setting-row"><div><strong>Extended source</strong><small>This is a fork of PandaCode with additional features and reviewed security controls. Report issues for this distribution here.</small></div><div class="settings-row-actions">${link('Extended repository', PROJECT_LINKS.extendedRepository)}${link('Extended issues', PROJECT_LINKS.extendedIssues)}</div></div>
+    <div class="setting-row"><div><strong>Original PandaCode</strong><small>Original project and attribution. Upstream releases do not contain Extended changes.</small></div><div class="settings-row-actions">${link('Upstream repository', PROJECT_LINKS.repository)}${link('Upstream issues', PROJECT_LINKS.issues)}</div></div>
   </div>`;
 }
 

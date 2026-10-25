@@ -1,6 +1,7 @@
 import { preview } from './bridge';
 import { icon } from './dom';
 import { appUpdates, describeUpdate } from './app-updates';
+import extendedRelease from '../EXTENDED-RELEASE.json';
 
 /** Public upstream project links. Opening one is user-initiated; no update checks run. */
 export const PROJECT_LINKS = {
@@ -39,7 +40,7 @@ export function mountAboutSettings(host: HTMLElement): () => void {
   const cleanupUpdates = mountUpdates(host);
   if (version) {
     appVersion()
-      .then(value => { if (!disposed) version.textContent = `Version ${value.replace(/-hardened$/, '.hardened')}`; })
+      .then(value => { if (!disposed) version.textContent = `Version ${value === extendedRelease.extended_version ? extendedRelease.display_version : value.replace(/-hardened$/, '.hardened')}`; })
       .catch(() => { if (!disposed) version.textContent = 'Version unavailable'; });
   }
   return () => { disposed = true; cleanupUpdates(); };

@@ -2,7 +2,7 @@
 
 ## Goals and identity
 
-PandaCode Extended is an independently versioned derivative of [PandaCode](https://github.com/aicodeking/pandacode). Its application version is separate from the original project's version. The original upstream releases are *references*, not evidence that all their features or commits have been merged into Extended.
+PandaCode Extended is an independently versioned derivative of [PandaCode](https://github.com/aicodeking/pandacode). Its canonical repository URL is https://github.com/ginmp8/pandacode-extended (pending the rename of the currently hosted `ginmp8/pandacode-hardened` repository). Its application version is separate from the original project's version. The original upstream releases are *references*, not evidence that all their features or commits have been merged into Extended.
 
 **Product SemVer**: `MAJOR.MINOR.PATCH` (e.g. `0.4.0`). Npm, Cargo, Tauri, Cargo.lock, source release directory, updater/version comparisons (if separately authorized later), and the Git tag (`v0.4.0`) use this three-component core. Git tags and published artifacts are immutable: never rewrite a released version with different bytes.
 

@@ -4,13 +4,13 @@
   "version": "0.4.0",
   "description": "Open-source desktop workspace for coding agents: Claude Code, Codex, Kimi Code, OpenCode and more.",
   "license": "SEE LICENSE IN LICENSE",
-  "homepage": "https://github.com/aicodeking/pandacode#readme",
+  "homepage": "https://github.com/ginmp8/pandacode-extended#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aicodeking/pandacode.git"
+    "url": "git+https://github.com/ginmp8/pandacode-extended.git"
   },
   "bugs": {
-    "url": "https://github.com/aicodeking/pandacode/issues"
+    "url": "https://github.com/ginmp8/pandacode-extended/issues"
   },
   "type": "module",
   "scripts": {

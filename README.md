@@ -1,6 +1,6 @@
 # PandaCode Extended
 
-**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended release candidate is [`0.4.0+pc.0.3.42`](releases/extended/0.4.0.md) (technical version `0.4.0`, tracked upstream reference `0.3.42`). See [versioning policy](docs/VERSIONING.md). The repository currently lives at [ginmp8/pandacode-hardened](https://github.com/ginmp8/pandacode-hardened) and is planned to move to [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended). Settings already targets the planned address; those links will become active after the repository rename.
+**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended release candidate is [`0.4.0+pc.0.3.42`](releases/extended/0.4.0.md) (technical version `0.4.0`, tracked upstream reference `0.3.42`). See [versioning policy](docs/VERSIONING.md). The canonical Extended repository link is [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended). The current GitHub repository is still named `ginmp8/pandacode-hardened`; the new address may be unavailable until the planned repository rename. Settings already points to the new address.
 
 Historical security work: [release notes](releases/extended/0.3.42-hardened.md), [upstream history](docs/UPSTREAM-RELEASE-HISTORY.md), and [security review](security-review/0.3.42-hardened/REPORT.md).
 
@@ -291,8 +291,8 @@ see [providers](docs/providers.md).
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and
 the pull request process, and [AGENTS.md](AGENTS.md) for code conventions. Please
 follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues
-privately as described in [SECURITY.md](SECURITY.md). Bugs and ideas go in
-[GitHub issues](https://github.com/aicodeking/pandacode/issues).
+privately as described in [SECURITY.md](SECURITY.md). Bugs and ideas for Extended go in
+[Extended GitHub issues](https://github.com/ginmp8/pandacode-extended/issues). For issues specific to the original PandaCode, use [upstream issues](https://github.com/aicodeking/pandacode/issues).
 
 Architecture notes: [design](docs/design.md), [native IPC](docs/ipc.md),
 [research](docs/research.md). Provider protocols live in

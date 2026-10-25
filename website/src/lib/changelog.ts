@@ -19,10 +19,17 @@ export const inline = (text: string) => escape(text)
   .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 
 const compare = (a: string, b: string) => {
-  const numbers = (v: string) => (v.match(/^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?/)?.slice(1).map(part => Number(part ?? 0))) ?? [];
-  const x = numbers(a), y = numbers(b);
-  return x.reduce((order, part, index) => order || part - (y[index] ?? 0), 0)
-    || Number(a.includes('-hardened')) - Number(b.includes('-hardened'));
+  const parse = (version: string) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:-(hardened))?$/.exec(version);
+    if (!match) return [];
+    return [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] ?? 0), match[5] ? 1 : 0];
+  };
+  const x = parse(a), y = parse(b);
+  for (let index = 0; index < x.length; index++) {
+    const order = (x[index] as number) - ((y[index] as number) ?? 0);
+    if (order) return order;
+  }
+  return 0;
 };
 
 /** Top-level bullets, each with its indented sub-bullets; other lines continue the last one. */

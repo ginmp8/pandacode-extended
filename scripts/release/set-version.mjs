@@ -20,5 +20,18 @@ await writeFile(lockPath, cargoLockVersion(lock, next));
 const datesPath = resolve(root, 'website/src/data/release-dates.json');
 const dates = await json(datesPath);
 const today = new Date().toISOString().slice(0, 10);
-await writeFile(datesPath, `${JSON.stringify({ ...dates, [next]: dates[next] ?? today }, null, 2)}\n`);
+const entries = { ...dates, [next]: dates[next] ?? today };
+const releaseVersion = (value) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:-(hardened))?$/.exec(value);
+  if (!match) throw new Error(`Invalid release date key: ${value}`);
+  return [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] ?? 0), match[5] ? 1 : 0];
+};
+const orderedDates = Object.fromEntries(Object.entries(entries).sort(([left], [right]) => {
+  const a = releaseVersion(left), b = releaseVersion(right);
+  for (let index = 0; index < a.length; index++) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+}));
+await writeFile(datesPath, `${JSON.stringify(orderedDates, null, 2)}\n`);
 console.log(`Release version set to ${next}. Commit these files, then tag v${next}.`);

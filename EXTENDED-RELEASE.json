@@ -1,11 +1,22 @@
 {
   "schema_version": 1,
   "product": "PandaCode Extended",
-  "extended_version": "0.4.0",
-  "tracked_upstream_version": "0.3.42",
+  "extended_version": "0.5.0",
+  "tracked_upstream_version": "0.3.47",
   "source_base_upstream_version": "0.3.28",
   "upstream_code_rebased": false,
   "full_upstream_parity": false,
-  "display_version": "0.4.0+pc.0.3.42",
-  "release_note": "releases/extended/0.4.0.md"
+  "display_version": "0.5.0+pc.0.3.47",
+  "release_note": "releases/extended/0.5.0.md",
+  "reviewed_upstream_range": {
+    "from": "0.3.42",
+    "through": "0.3.47"
+  },
+  "integration_provenance": {
+    "extended_base_commit": "5d4cb69b0a97c46eef544303137c73a81f4c5b59",
+    "upstream_commit": "4187553cb48db96657609948f6b0904556845d45",
+    "reference_archive_sha256": "73a8dbe02d03c4aef37ff50362af266fa72c0f4b4dfb44d935ee649b1e3e85f1",
+    "reference_files_verified": 1146,
+    "coverage_document": "docs/upstream-integration-0.5.0.md"
+  }
 }

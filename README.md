@@ -1,17 +1,17 @@
 # PandaCode Extended
 
-**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended release candidate is [`0.4.0+pc.0.3.42`](releases/extended/0.4.0.md) (technical version `0.4.0`, tracked upstream reference `0.3.42`). See [versioning policy](docs/VERSIONING.md). The canonical Extended repository link is [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended). The current GitHub repository is still named `ginmp8/pandacode-hardened`; the new address may be unavailable until the planned repository rename. Settings already points to the new address.
+**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended release candidate is [`0.5.0+pc.0.3.47`](releases/extended/0.5.0.md) (technical version `0.5.0`, tracked upstream reference `0.3.47`). This candidate integrates the upstream `0.3.42`–`0.3.47` release range; see the [feature and validation map](docs/upstream-integration-0.5.0.md) and [versioning policy](docs/VERSIONING.md). The canonical repository is [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended).
 
 Historical security work: [release notes](releases/extended/0.3.42-hardened.md), [upstream history](docs/UPSTREAM-RELEASE-HISTORY.md), and [security review](security-review/0.3.42-hardened/REPORT.md).
 
-**Branding is not source parity.** This release tracks upstream 0.3.42 by version and by the explicitly ported CSS fix, but the full upstream 0.3.42 source has **not** replaced the earlier 0.3.28 ancestry. Many upstream changes remain unmerged or deliberately excluded for security. The upstream `npx pandacode` installer and automatic updater are **not** safe substitutes for building this Hardened source. No native installer or full-runtime verification is included. The [read-only upstream release monitor](.github/workflows/upstream-version-watch.yml) detects newer official tags; it never downloads code or merges an upstream release automatically.
+The integration adds Devin CLI, sidebar sections, persistent inspector tabs with inline diffs, remote task progress and images, and richer desktop/mobile Connect behavior while retaining Extended's review tools, Browser QA, workflow library, connection isolation and security controls. Historical ancestry remains `0.3.28`; this is a reviewed integration of the mapped release range, not a claim that every earlier upstream feature or platform has been verified. Automatic updates and network installers remain disabled. The [read-only upstream release monitor](.github/workflows/upstream-version-watch.yml) detects newer official tags; it never downloads code or merges an upstream release automatically.
 
 This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The license and upstream author attribution are preserved. Internal package names, the Tauri identifier (`ai.pandacode.desktop`), and user-data directories are deliberately unchanged. This preserves existing installations, but does **not** support installing Extended alongside original PandaCode without conflicts.
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding
 Plan and Xiaomi MiMo** (through Claude Code), **GitHub Copilot CLI, Antigravity,
-xAI's Grok Build, DeepSeek, Command Code and Cline** (through ACP), **Pi** and its
+xAI's Grok Build, DeepSeek, Command Code, Cline and Devin CLI** (through ACP), **Pi** and its
 fork **omp** (through Pi's RPC mode), and Meta's **Muse Code** (through its MSP
 protocol) — side by side, with your projects, Git, a
 terminal and a browser in one window.
@@ -37,7 +37,7 @@ embedded editor engine.
   per task; switch between them from the composer. See [providers](docs/providers.md).
 - **Tasks and a task board.** Parallel tasks across projects, a Pending → In
   progress → Review → Completed [board](docs/task-board.md), message queueing
-  and steering while an agent runs.
+  and steering while an agent runs. The sidebar groups Active, Needs review and Completed tasks, with row actions for completion, archive and deletion.
 - **Agent teams.** An [architect and up to three workers](docs/architect-workers.md),
   mixing harnesses and models, or named team profiles. Each spawned worker is one
   line in the turn that started it; click it to open the worker.
@@ -63,7 +63,8 @@ embedded editor engine.
 - **Find in thread.** `⌘/Ctrl F` searches your messages and the agent's, with
   every match highlighted.
 - **Review every turn.** Saved [turn changes](docs/turn-changes.md) with
-  unified/split diffs, an embedded [browser](docs/browser.md), and file previews.
+  unified/split diffs, an embedded [browser](docs/browser.md), and file previews. The inspector remembers its open tabs and Changes shows file diffs together with staging controls.
+- **Extended review tools.** [Review & coordination](docs/HARDENED-REVIEW-TOOLS.md), [Browser QA](docs/HARDENED-BROWSER-QA.md), and workflow templates remain available through their existing controls.
 - **Token saver.** Per-task response-style packs that cut output tokens.
 - **Quick overlay.** A global shortcut (default ⌘/Ctrl + Shift + Space) opens a
   launcher for new and running tasks from anywhere.
@@ -158,7 +159,7 @@ still require network access.
 
 Updates are a deliberate manual operation: review the new source, reproduce
 these protections, build it, and then replace the installed application. The
-package version is `0.3.30-hardened` (displayed as `0.3.30.hardened`); this is
+package version is `0.5.0` (displayed as `0.5.0+pc.0.3.47`); this is
 an independently labeled fork distribution, not an official upstream release.
 Back up application data before replacing a previous installation.
 
@@ -184,11 +185,11 @@ You need Node.js 22 or newer, stable Rust 1.88 or newer, and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```sh
-cd pandacode-0.3.34.1.hardened
+cd pandacode-extended
 npm ci --ignore-scripts
 npm run build
 npm run package
-# For a Windows x64 installer with a distinct 0.3.34.1.hardened asset name:
+# For a Windows x64 installer with a distinct Extended 0.5.0 asset name:
 # npm run release:build -- windows-x86_64
 # For local development: npm run desktop
 ```

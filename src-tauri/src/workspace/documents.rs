@@ -41,6 +41,14 @@ fn supported(path: &Path) -> bool {
     )
 }
 
+fn protected(path: &Path) -> bool {
+    path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+    })
+}
+
 pub fn read_document_bytes(root: &Path, path: &str) -> Result<Vec<u8>, String> {
     let target = scoped_path(root, path)?;
     let resolved = fs::canonicalize(&target).map_err(|error| error.to_string())?;
@@ -48,10 +56,7 @@ pub fn read_document_bytes(root: &Path, path: &str) -> Result<Vec<u8>, String> {
     let relative = resolved
         .strip_prefix(&base)
         .map_err(|_| "Path must stay inside the project")?;
-    if !supported(&target)
-        || !supported(&resolved)
-        || relative.components().any(|part| part.as_os_str() == ".git")
-    {
+    if !supported(&target) || !supported(&resolved) || protected(relative) {
         return Err("Only PDF, Word (.docx), spreadsheet and image files can be shown".into());
     }
     // Inspect before opening as well, so a FIFO/device cannot make the reader wait.
@@ -120,28 +125,71 @@ fn open_document(root: &Path, relative: &Path) -> Result<File, String> {
     Ok(parent)
 }
 
-#[cfg(not(unix))]
+#[cfg(any(windows, test))]
+fn validate_opened_path(root: &Path, relative: &Path, actual: &Path) -> Result<(), String> {
+    // The handle, not another lookup of the original pathname, identifies the
+    // object that will be read. A renamed object also invalidates this request.
+    if actual != root.join(relative) || protected(relative) || !supported(actual) {
+        return Err("The opened document no longer matches its workspace path".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn open_document(root: &Path, relative: &Path) -> Result<File, String> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // Open the reparse point itself rather than following a late replacement.
-        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    use std::os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    };
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            GetFinalPathNameByHandleW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
+        },
+    };
+    // Do not admit alternate data streams, absolute paths or parent components.
+    if !relative.components().all(|part| {
+        matches!(part, std::path::Component::Normal(name) if !name.to_string_lossy().contains(':'))
+    }) {
+        return Err("Invalid document path".into());
     }
-    let target = root.join(relative);
-    let file = options.open(&target).map_err(|error| error.to_string())?;
-    if !fs::canonicalize(target)
-        .map_err(|error| error.to_string())?
-        .starts_with(root)
-    {
-        return Err("Path must stay inside the project".into());
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(root.join(relative))
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err("The document must be a regular file".into());
     }
+    // OPEN_REPARSE_POINT protects the final component only. An ancestor can be
+    // replaced by a junction, so validate the opened handle before reading bytes.
+    let mut buffer = vec![0u16; 32768];
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(file.as_raw_handle()),
+            &mut buffer,
+            FILE_NAME_NORMALIZED,
+        )
+    };
+    if length == 0 || length as usize >= buffer.len() {
+        return Err("Could not verify the opened document path".into());
+    }
+    let actual = std::path::PathBuf::from(
+        String::from_utf16(&buffer[..length as usize])
+            .map_err(|_| "The opened document path is invalid")?,
+    );
+    validate_opened_path(root, relative, &actual)?;
     Ok(file)
 }
 
-fn validate_image(bytes: &[u8], kind: &str) -> Result<(), String> {
+#[cfg(not(any(unix, windows)))]
+fn open_document(_root: &Path, _relative: &Path) -> Result<File, String> {
+    Err("Safe document reads are not supported on this platform".into())
+}
+
+pub(super) fn validate_image(bytes: &[u8], kind: &str) -> Result<(), String> {
     if bytes.len() > 8 * 1024 * 1024 {
         return Err("Image previews are limited to 8 MiB".into());
     }
@@ -411,5 +459,20 @@ mod tests {
             assert!(read_document_bytes(&root, "notes.pdf").is_err());
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opened_handle_must_match_the_authorized_non_protected_path() {
+        let root = std::env::temp_dir().join("document-handle-boundary");
+        let relative = Path::new("docs/report.pdf");
+        assert!(validate_opened_path(&root, relative, &root.join(relative)).is_ok());
+        assert!(validate_opened_path(&root, relative, &root.join(".git/private.pdf")).is_err());
+        assert!(
+            validate_opened_path(&root, relative, &root.with_file_name("outside.pdf")).is_err()
+        );
+        assert!(validate_opened_path(&root, relative, &root.join("other.pdf")).is_err());
+        for path in [".git/private.pdf", ".GIT/private.pdf", "docs/notes.txt"] {
+            assert!(validate_opened_path(&root, Path::new(path), &root.join(path)).is_err());
+        }
     }
 }

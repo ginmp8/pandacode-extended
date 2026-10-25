@@ -1294,11 +1294,8 @@ pub fn list_files(root: &Path, path: Option<String>) -> Result<Vec<FileEntry>, S
         .collect())
 }
 
-/// Largest image an agent's question may show inline.
-const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
-
 /// An image in the workspace as a `data:` URL, so an agent's question can show it inline.
-/// Only image types, only inside the project, and bounded in size.
+/// Uses the same handle-safe path, byte and dimension checks as document tabs.
 pub fn image_data_url(root: &Path, path: &str) -> Result<String, String> {
     use base64::Engine;
     let target = scoped_path(root, path)?;
@@ -1310,13 +1307,10 @@ pub fn image_data_url(root: &Path, path: &str) -> Result<String, String> {
         Some("svg") => "image/svg+xml",
         _ => return Err("Only PNG, JPEG, GIF, WebP and SVG images can be shown".into()),
     };
-    let file = File::open(&target).map_err(|e| e.to_string())?;
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > IMAGE_LIMIT {
-        return Err("The image is missing or larger than 8 MB".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(IMAGE_LIMIT + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let bytes = documents::read_document_bytes(root, path)?;
+    // A permitted in-workspace alias must not turn a document into a differently
+    // typed, oversized image response. Validate the requested MIME as well.
+    documents::validate_image(&bytes, mime.strip_prefix("image/").unwrap().trim_end_matches("+xml"))?;
     Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
@@ -1422,14 +1416,25 @@ mod tests {
 
     #[test]
     fn question_images_are_scoped_typed_and_encoded() {
+        use base64::Engine;
         let f = Fixture::new(false);
-        fs::write(f.root.join("chart.png"), [137, 80, 78, 71]).unwrap();
+        let png = include_bytes!("../../tests/fixtures/sample.png");
+        fs::write(f.root.join("chart.png"), png).unwrap();
         fs::write(f.root.join("notes.txt"), "hello").unwrap();
         fs::write(f.base.join("outside.png"), [137, 80, 78, 71]).unwrap();
-        assert_eq!(image_data_url(&f.root, "chart.png").unwrap(), "data:image/png;base64,iVBORw==");
+        assert_eq!(image_data_url(&f.root, "chart.png").unwrap(), format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)));
         assert!(image_data_url(&f.root, "notes.txt").is_err(), "not an image");
         assert!(image_data_url(&f.root, "../outside.png").is_err(), "outside the project");
         assert!(image_data_url(&f.root, "missing.png").is_err());
+        fs::write(f.root.join("broken.png"), [137, 80, 78, 71]).unwrap();
+        assert!(image_data_url(&f.root, "broken.png").is_err(), "invalid raster");
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(f.root.join(".git")).unwrap();
+            fs::write(f.root.join(".git/private.png"), png).unwrap();
+            std::os::unix::fs::symlink(f.root.join(".git/private.png"), f.root.join("alias.png")).unwrap();
+            assert!(image_data_url(&f.root, "alias.png").is_err(), "protected alias");
+        }
     }
 
     #[test]

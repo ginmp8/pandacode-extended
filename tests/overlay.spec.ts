@@ -613,7 +613,7 @@ test('launcher streams the selected thread in place and keeps its completed resp
 
 for (const task of ['preview-active', 'preview-worker']) {
   test(`launcher preserves unchanged transcript DOM while still refreshing ${task} updates and recovery`, async ({page}) => {
-    await page.clock.install();
+    await page.clock.install({time:new Date('2026-01-01T00:00:00Z')});
     await instrumentLauncher(page, `if (command === 'overlay_thread') {
       const fixture = window.__stableThread ??= {calls:0,fail:false,version:1,live:'The first streaming response.',status:'running',messages:[
         {id:1,sessionId:args.sessionId,role:'user',content:'Keep the saved requirements.',createdAt:1000},
@@ -628,6 +628,10 @@ for (const task of ['preview-active', 'preview-worker']) {
     await page.locator(`.launcher-task[data-task="${task}"]`).click();
     const history = page.locator('.launcher-thread-history');
     await expect(history).toContainText('The first streaming response.');
+    // Initial formatting is asynchronous; observe only the settled transcript.
+    await expect(history.locator('.markdown')).toHaveCount(3);
+    // Advance polling explicitly so it cannot recover between fault removal and Retry.
+    await page.clock.pauseAt(new Date('2026-01-01T00:01:00Z'));
     await page.clock.runFor(100);
     await history.evaluate(host => {
       const win = window as any;
@@ -670,7 +674,7 @@ for (const task of ['preview-active', 'preview-worker']) {
 }
 
 test('launcher restores its empty conversation state after an unchanged snapshot recovers', async ({page}) => {
-  await page.clock.install();
+  await page.clock.install({time:new Date('2026-01-01T00:00:00Z')});
   await instrumentLauncher(page, `if (command === 'overlay_thread') {
     if (window.__emptyThreadFailure) throw new Error('Temporary connection failure');
     return {messages:[],hasOlder:false,liveText:'',status:'running',historyVersion:0,historyUnchanged:args.historyVersion === 0};
@@ -680,6 +684,8 @@ test('launcher restores its empty conversation state after an unchanged snapshot
   const empty = page.locator('.launcher-thread-empty');
   await expect(empty).toBeVisible();
   await expect(empty).toHaveText('The agent is getting started…');
+  // Keep the manual-retry window separate from the periodic snapshot refresh.
+  await page.clock.pauseAt(new Date('2026-01-01T00:01:00Z'));
   await page.evaluate(() => { (window as any).__emptyThreadFailure = true; });
   await page.clock.runFor(1600);
   await expect(empty).toBeHidden();

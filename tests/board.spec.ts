@@ -182,6 +182,8 @@ test.describe('project board', () => {
   test('GitHub disabled stays local without checking or writing the linked issue', async ({ page }) => {
     await page.evaluate(() => localStorage.setItem('pandacode.github', 'off'));
     await page.reload();
+    // Restore the initial task before using the preview's direct-IPC helpers.
+    await expect(page.locator('#prompt')).toBeEnabled();
     await openBoard(page);
     await readyIssueTaskForCompletion(page);
     await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
@@ -214,6 +216,8 @@ test.describe('project board', () => {
       (window as any).__failLinkedIssueAction = true;
     });
     await page.reload();
+    // Startup retries follow the initial task load; wait for that phase before checking the dialog.
+    await expect(page.locator('#prompt')).toBeEnabled();
     const failures = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
     await expect(failures).toBeVisible();
     await failures.evaluate(dialog => dialog.dispatchEvent(new Event('close')));
@@ -243,6 +247,8 @@ test.describe('project board', () => {
       (window as any).__failLinkedIssueAction = true;
     });
     await page.reload();
+    // Startup retries follow the initial task load; wait for that phase before checking the dialog.
+    await expect(page.locator('#prompt')).toBeEnabled();
     const failures = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
     await expect(failures).toBeVisible();
     await expect(failures).toContainText('orbit-labs/orbit #131');

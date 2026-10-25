@@ -21,7 +21,7 @@ const probe = String.raw`
   if(command === 'get_messages' && args.sessionId==='session-2' && window.__assistChangeFixture) return {messages:[
     {id:701,sessionId:'session-2',role:'user',content:'Review this change',createdAt:100},
     {id:702,sessionId:'session-2',role:'assistant',content:'Saved changes are ready.',createdAt:200},
-    {id:703,sessionId:'session-2',role:'changes',content:'',createdAt:200,turnChanges:{id:'change-1',files:[{path:'src/app.ts',status:'modified',additions:1,deletions:1}],additions:1,deletions:1,truncated:false,concurrent:false}}
+    {id:703,sessionId:'session-2',role:'changes',content:'',createdAt:200,turnChanges:{attributed:true,id:'change-1',files:[{path:'src/app.ts',status:'modified',additions:1,deletions:1}],additions:1,deletions:1,truncated:false,concurrent:false}}
   ],hasOlder:false};
   if(command === 'turn_change_diff' && args.changeId==='change-1') return {path:args.path,patch:'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n',binary:false,truncated:false};
   if(command === 'architect_get' && args.sessionId==='session-2' && window.__assistTeam) return structuredClone(window.__assistTeam);

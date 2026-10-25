@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-const installed = ['claude', 'codex', 'kimi', 'opencode', 'glm', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'github-copilot', 'muse', 'devin'];
+const installed = ['claude', 'codex', 'kimi', 'opencode', 'glm', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'kilo', 'cline', 'github-copilot', 'muse', 'devin'];
 const usageButton = (page: Page) => page.getByRole('button', { name: 'Agent usage', exact: true });
 const dialog = (page: Page) => page.getByRole('dialog', { name: 'Agent usage', exact: true });
 const card = (page: Page, name: string) => dialog(page).locator('.usage-card').filter({ hasText: name });
@@ -40,6 +40,7 @@ async function openApp(page: Page, hold: string[] = [], failures: string[] = [])
         glm: result('glm', 'error', 'The GLM usage service is temporarily unavailable.'),
         grok: result('grok', 'unsupported', 'Grok Build does not expose account usage.'),
         mimo: result('mimo', 'unavailable', 'Usage is not available for this MiMo account.'),
+        kilo: result('kilo', 'unsupported', 'Kilo Code does not expose credits or limits through this agent. Check your Kilo account or model provider dashboard.'),
         'github-copilot': result('github-copilot', 'unsupported', 'GitHub Copilot CLI does not expose usage limits through this agent.'),
         muse: result('muse', 'unsupported', 'Muse Code reports its usage windows only inside a running session.'),
         devin: result('devin', 'unsupported', 'Devin does not expose plan limits through its ACP server.'),
@@ -143,7 +144,8 @@ test('Agent usage shows successful and unavailable cards while a different provi
   await expect(card(page, 'OpenCode')).toContainText('OpenCode does not expose account usage.');
   await expect(card(page, 'GLM Coding Plan')).toContainText('The GLM usage service is temporarily unavailable.');
   await expect(card(page, 'MiMo Token Plan')).toContainText('Usage is not available for this MiMo account.');
-  for (const name of ['Kimi Code', 'OpenCode', 'GLM Coding Plan', 'MiMo Token Plan']) {
+  await expect(card(page, 'Kilo Code')).toContainText('Kilo Code does not expose credits or limits through this agent.');
+  for (const name of ['Kimi Code', 'OpenCode', 'GLM Coding Plan', 'MiMo Token Plan', 'Kilo Code']) {
     await expect(card(page, name).getByRole('progressbar')).toHaveCount(0);
   }
   await expect(refresh(page)).toBeDisabled();
@@ -224,7 +226,7 @@ test('Agent usage ignores responses from a closed panel after a new panel has lo
   await expect(dialog(page)).toHaveText(current, { useInnerText: true });
   await expect(card(page, 'Codex').getByRole('progressbar').first()).toHaveAttribute('aria-valuenow', '72');
   await expect(refresh(page)).toBeEnabled();
-  // The closed panel must not start its four queued requests after these settle.
+  // The closed panel must not start any remaining queued requests after these settle.
   expect(await calls(page)).toHaveLength(installed.length + 3);
   expect(errors).toEqual([]);
 });

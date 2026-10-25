@@ -7,7 +7,7 @@ interface FileLinkOptions {
 }
 
 const PREVIEW_EXTENSIONS = /\.(?:html?|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf)$/i;
-const TEXT_EXTENSIONS = /\.(?:html?|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|md|mdx|txt|css|scss|sass|less|js|jsx|ts|tsx|mjs|cjs|json|jsonc|yaml|yml|toml|xml|csv|rs|py|go|java|c|cc|cpp|h|hpp|swift|kt|sh|zsh|fish|sql|vue|svelte|astro|lock|env)$/i;
+const TEXT_EXTENSIONS = /\.(?:html?|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|xlsm|xls|ods|md|mdx|txt|css|scss|sass|less|js|jsx|ts|tsx|mjs|cjs|json|jsonc|yaml|yml|toml|xml|csv|rs|py|go|java|c|cc|cpp|h|hpp|swift|kt|sh|zsh|fish|sql|vue|svelte|astro|lock|env)$/i;
 export function isPreviewableFile(path: string): boolean { return PREVIEW_EXTENSIONS.test(path); }
 
 /** A reference is only a candidate. Native resolution must confirm its workspace and existence. */
@@ -97,6 +97,23 @@ export function bindFileLinkContext(target: HTMLElement, context: FileLinkContex
 }
 
 export function captureFileLinkContext(target: HTMLElement): object | undefined { return capture(target); }
+
+/** Relative document images stay in the workspace; native resolution also checks symlinks. */
+export function workspaceImagePath(src: string, documentPath: string): string | undefined {
+  if (!src || src.length > 4096 || /[\\\x00-\x1f]/.test(src) || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(src)) return;
+  try {
+    const decoded = decodeURIComponent(src);
+    if (/[\\\x00-\x1f]/.test(decoded) || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(decoded)) return;
+    const base = decoded.startsWith('/') ? [] : documentPath.split('/').slice(0, -1);
+    for (const part of decoded.split('/')) {
+      if (!part || part === '.') continue;
+      if (part === '..') { if (!base.length) return; base.pop(); }
+      else base.push(part);
+    }
+    const path = base.join('/');
+    return /\.(?:png|jpe?g|webp)$/i.test(path) && !base.includes('.git') && !/[?#]/.test(path) ? path : undefined;
+  } catch { return; }
+}
 
 function capture(target: HTMLElement): Hub | undefined {
   let bound = targets.get(target);

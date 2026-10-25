@@ -5,6 +5,8 @@ export interface TokenClaims {
   dev: string;
   iat: number;
   exp: number;
+  /** Fresh registration generation; absent only for rows migrated from schema 1. */
+  gen?: string;
 }
 
 const enc = new TextEncoder();
@@ -37,8 +39,9 @@ function hmacKey(secret: string): Promise<CryptoKey> {
   return key;
 }
 
-export async function signToken(secret: string, acct: string, dev: string, nowSeconds: number): Promise<string> {
-  const claims: TokenClaims = { acct, dev, iat: nowSeconds, exp: nowSeconds + TOKEN_TTL_SECONDS };
+export async function signToken(secret: string, acct: string, dev: string, nowSeconds: number, gen?: string): Promise<string> {
+  if (gen !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(gen)) throw new Error("invalid registration generation");
+  const claims: TokenClaims = { acct, dev, iat: nowSeconds, exp: nowSeconds + TOKEN_TTL_SECONDS, ...(gen === undefined ? {} : { gen }) };
   const payload = b64url(enc.encode(JSON.stringify(claims)));
   const sig = await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(payload));
   return `${payload}.${b64url(new Uint8Array(sig))}`;
@@ -56,8 +59,9 @@ export async function verifyToken(secret: string, token: string, nowSeconds: num
   if (!raw) return null;
   try {
     const c = JSON.parse(new TextDecoder().decode(raw)) as Partial<TokenClaims>;
-    if (typeof c.acct !== "string" || typeof c.dev !== "string" || typeof c.iat !== "number" || typeof c.exp !== "number") return null;
-    return c.exp > nowSeconds ? (c as TokenClaims) : null;
+    if (typeof c.acct !== "string" || typeof c.dev !== "string" || !Number.isSafeInteger(c.iat) || !Number.isSafeInteger(c.exp) || c.iat! < 0 || c.exp! <= c.iat!) return null;
+    if (c.gen !== undefined && (typeof c.gen !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(c.gen))) return null;
+    return c.exp! > nowSeconds ? (c as TokenClaims) : null;
   } catch {
     return null;
   }

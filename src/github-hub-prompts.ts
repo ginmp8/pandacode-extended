@@ -19,7 +19,7 @@ export function pullPrompt(action: PullAction, pull: PullRef): string {
   const ref = `#${pull.number}`;
   switch (action) {
     case 'review': return `Review pull request ${ref} (${pull.head} → ${pull.base}). Check it out with \`gh pr checkout ${pull.number}\`, read the whole diff against ${pull.base} and run the tests. Report bugs, risky changes and missing tests with file and line references, and suggest fixes. Don't push or comment on GitHub unless I ask.`;
-    case 'checks': return `Pull request ${ref} has failing checks. Check it out with \`gh pr checkout ${pull.number}\`, see what failed with \`gh pr checks ${pull.number}\`, reproduce it locally, fix it and push to ${pull.head}. Then tell me what was wrong.`;
+    case 'checks': return `Pull request ${ref} has failing checks. Check it out with \`gh pr checkout ${pull.number}\`, see what failed with \`gh pr checks ${pull.number}\`, reproduce it locally, fix it and tell me what was wrong. Don't push or comment on GitHub unless I ask.`;
     case 'feedback': return `Address the review comments on pull request ${ref}. Read them with \`gh pr view ${pull.number} --comments\`, make the requested changes on ${pull.head}, run the tests, push, and summarize what changed for each comment.`;
     case 'merge': return `Get pull request ${ref} merged if it's ready: checks pass (\`gh pr checks ${pull.number}\`), it's approved and it merges cleanly into ${pull.base}. If so, merge it with \`gh pr merge ${pull.number} --squash --delete-branch\`. If anything blocks it, don't merge; tell me what's blocking and how to fix it.`;
     case 'thread': return `Let's work on pull request ${ref}: `;

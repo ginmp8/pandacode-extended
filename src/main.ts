@@ -1582,7 +1582,6 @@ function syncGithubHub(shown: boolean): void {
       call, projects: () => userProjects(), sessions: () => listedSessions(), running: id => isRunning(id),
       openTask: id => run(openHubTask(id)),
       startTask: input => startHubTask(input),
-      customizeFix: (prompt, context) => customizeFix(prompt, context),
       reviewPull: context => openReviewTools(context),
       showChoices: (anchor, options) => showChoices(anchor, options),
       chooseFolder, notify,
@@ -1600,46 +1599,39 @@ async function openHubTask(id: string): Promise<void> {
  * request or issue, titled, with the prompt filled in and sent when asked. Mentions like `#128`
  * attach the item's content as GitHub context once the project's GitHub status is known. */
 async function startHubTask({ projectId, prompt, title, link, send: start, provider: selectedProvider }: { projectId: string; prompt: string; title?: string; link?: TaskLink; send: boolean; provider?: ProviderId }): Promise<void> {
-  await github.status(projectId);
-  await createTask(projectId);
-  const task = session();
-  if (!task || task.projectId !== projectId) return;
-  const replace = (next: Session) => { const index = state.sessions.findIndex(item => item.id === next.id); if (index >= 0) state.sessions[index] = next; };
-  if (selectedProvider) {
-    if (!state.providers.some(item => item.id === selectedProvider && item.installed)) { notify('That harness is no longer available. No fix was started.'); return; }
-    replace(await call<Session>('configure_session', { sessionId: task.id, provider: selectedProvider, model: rememberedModel(selectedProvider) }));
-  }
-  if (link) replace(await call<Session>('set_task_link', { sessionId: task.id, kind: link.kind, link }));
-  if (title) { await call('update_session', { sessionId: task.id, title }); const current = state.sessions.find(item => item.id === task.id); if (current) current.title = title; }
-  renderNavigation(); renderHeader();
-  const field = document.querySelector<HTMLTextAreaElement>('#prompt');
-  if (!field || field.dataset.sessionId !== task.id) return;
-  field.value = prompt;
-  field.dispatchEvent(new Event('input', { bubbles: true }));
-  field.focus();
-  field.setSelectionRange(prompt.length, prompt.length);
-  if (start) await send();
-}
-async function customizeFix(prompt: string, context: string): Promise<{ prompt: string; provider: ProviderId } | null> {
-  const harnesses = state.providers.filter(item => item.installed);
-  if (!harnesses.length) { notify('Open Settings to check your installed agents.'); return null; }
-  const defaultProvider = harnesses.find(item => item.id === state.defaultProvider)?.id ?? harnesses[0].id;
-  const dialog = modal('Customize fix', `<form id="customize-fix-form"><p class="dialog-description">Execution context: ${escape(context)}</p><label class="field-label" for="custom-fix-prompt">Prompt</label><textarea id="custom-fix-prompt" name="prompt" rows="8" required>${escape(prompt)}</textarea><button type="button" class="secondary-button" data-fix-reset>Reset to default</button><label class="field-label" for="custom-fix-harness">Harness</label><select id="custom-fix-harness" name="provider">${harnesses.map(item => `<option value="${escape(item.id)}" ${item.id === defaultProvider ? 'selected' : ''}>${escape(item.name)}</option>`).join('')}</select><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button class="primary-button">Start fix</button></div></form>`);
-  const form = dialog.querySelector<HTMLFormElement>('#customize-fix-form')!;
-  const field = form.elements.namedItem('prompt') as HTMLTextAreaElement;
-  form.querySelector('[data-fix-reset]')!.addEventListener('click', () => { field.value = prompt; field.focus(); });
-  return new Promise(resolve => {
-    const closed = () => resolve(null);
-    dialog.addEventListener('close', closed, { once: true });
-    form.addEventListener('submit', event => {
-      event.preventDefault();
-      const providerId = (form.elements.namedItem('provider') as HTMLSelectElement).value as ProviderId;
-      if (!state.providers.some(item => item.id === providerId && item.installed)) { notify('Choose an available harness.'); return; }
-      dialog.removeEventListener('close', closed);
-      const result = { prompt: field.value, provider: providerId };
-      closeModal(); resolve(result);
-    }, { once: true });
-  });
+  try {
+    const current = session();
+    const currentLink = link?.kind === 'issue' ? current?.issue : current?.pullRequest;
+    if (current?.draft && current.projectId === projectId && title === current.title
+      && (!link || currentLink?.number === link.number && currentLink.url === link.url)) {
+      document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
+      return;
+    }
+    const reusable = state.sessions.find(item => item.draft && item.id !== state.sessionId && item.projectId === projectId && !deletedSessions.has(item.id));
+    if (reusable && (state.drafts.get(reusable.id) ?? '').trim()) {
+      notify('An existing task draft has text. Open or clear it before creating a GitHub task; nothing was replaced.');
+      return;
+    }
+    await github.status(projectId);
+    await createTask(projectId);
+    const task = session();
+    if (!task || task.projectId !== projectId) throw new Error('Could not open a task for this repository.');
+    const replace = (next: Session) => { const index = state.sessions.findIndex(item => item.id === next.id); if (index >= 0) state.sessions[index] = next; };
+    if (selectedProvider) {
+      if (!state.providers.some(item => item.id === selectedProvider && item.installed)) throw new Error('That harness is no longer available. No prompt was sent.');
+      replace(await call<Session>('configure_session', { sessionId: task.id, provider: selectedProvider, model: rememberedModel(selectedProvider) }));
+    }
+    if (link) replace(await call<Session>('set_task_link', { sessionId: task.id, kind: link.kind, link }));
+    if (title) { await call('update_session', { sessionId: task.id, title }); const current = state.sessions.find(item => item.id === task.id); if (current) current.title = title; }
+    renderNavigation(); renderHeader();
+    const field = document.querySelector<HTMLTextAreaElement>('#prompt');
+    if (!field || field.dataset.sessionId !== task.id) throw new Error('Could not populate the task composer. No prompt was sent.');
+    field.value = prompt;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.focus();
+    field.setSelectionRange(prompt.length, prompt.length);
+    if (start) await send();
+  } catch (cause) { notify(`Could not prepare the GitHub task: ${cause instanceof Error ? cause.message : String(cause)}${start ? '' : ' No prompt was sent.'}`); }
 }
 async function prepareHubReviewTask(target: PullReviewContext, request: ReviewRequest, providers: Provider[], active: () => boolean): Promise<void> {
   const { buildPullReview } = await import('./hardened/review-model');

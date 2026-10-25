@@ -97,14 +97,18 @@ test('lists repositories and shows the chosen one’s threads, pull requests and
   await expect(row(page, 52)).toBeVisible();
 });
 
-test('Solve starts a linked thread that works on the issue', async ({ page }) => {
+test('Solve opens an editable, unsent issue draft with GitHub context', async ({ page }) => {
   await openHub(page);
   await tab(page, /Issues/).click();
   await row(page, 128).hover();
   await row(page, 128).getByRole('button', { name: 'Solve' }).click();
   await expectSideThread(page);
-  const sent = page.locator('#transcript .user-message').last();
-  await expect(sent).toContainText('Fix issue #128: Search index rebuilds on every keystroke');
+  const draft = page.locator('#prompt');
+  await expect(draft).toHaveValue(/Fix issue #128: Search index rebuilds on every keystroke/);
+  await expect(draft).toHaveValue(/Repository: orbit-labs\/orbit/);
+  await expect(draft).toHaveValue(/https:\/\/github.com\/orbit-labs\/orbit\/issues\/128/);
+  await expect(draft).toBeFocused();
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix #128: Search index rebuilds on every keystroke');
   // Closing the side thread leaves GitHub as it was; the issue now links to its thread.
   await side(page).getByRole('button', { name: 'Close task details', exact: true }).click();
@@ -116,7 +120,7 @@ test('Solve starts a linked thread that works on the issue', async ({ page }) =>
   await row(page, 128).getByRole('button', { name: 'Thread' }).click();
   await expectSideThread(page);
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix #128');
-  // Chatting continues right there, and Escape closes the panel.
+  // The draft remains editable; only explicit submission creates a user message.
   await page.locator('#prompt').fill('Also add a regression test');
   await page.locator('#prompt').press('Enter');
   await expect(page.locator('#transcript .user-message').last()).toContainText('Also add a regression test');
@@ -139,6 +143,21 @@ test('pull requests open for review, or in a thread with the prompt ready', asyn
   await menu.getByText('Open in thread', { exact: true }).click();
   await expect(page.locator('#prompt')).toHaveValue('Let’s work on pull request #127: '.replace('’', "'"));
   await expect(page.locator('#prompt')).toBeFocused();
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
+});
+
+test('Fix failing checks opens an editable, unsent pull request draft', async ({ page }) => {
+  await openHub(page);
+  await tab(page, /Pull requests/).click();
+  await row(page, 124).getByRole('button', { name: 'More actions for #124' }).click();
+  await hub(page).locator('.choice-menu').getByText('Fix failing checks', { exact: true }).click();
+  await expectSideThread(page);
+  const draft = page.locator('#prompt');
+  await expect(draft).toHaveValue(/Pull request #124/);
+  await expect(draft).toHaveValue(/Repository: orbit-labs\/orbit/);
+  await expect(draft).toHaveValue(/devon\/contrast → main/);
+  await expect(draft).toHaveValue(/Checks status: failing/);
+  await expect(draft).toBeFocused();
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
 });
 
@@ -335,7 +354,7 @@ test('repositories not pushed to in 30 days wait under a collapsed Other', async
   await expect(hub(page).getByRole('listbox', { name: 'Other repositories' }).getByRole('option', { name: /tauri/ })).toBeVisible();
 });
 
-test('pull requests show their CI status, and Actions lists runs with a fix for failures', async ({ page }) => {
+test('pull requests show CI status, and Actions Fix opens an editable draft', async ({ page }) => {
   await openHub(page);
   await tab(page, /Pull requests/).click();
   await expect(row(page, 130).locator('.gh-status')).toHaveText('Passed');
@@ -353,37 +372,30 @@ test('pull requests show their CI status, and Actions lists runs with a fix for 
   await run(9087).hover();
   await run(9087).getByRole('button', { name: 'Fix' }).click();
   await expectSideThread(page);
-  await expect(page.locator('#transcript .user-message').last()).toContainText('gh run view 9087 --log-failed');
+  await expect(page.locator('#prompt')).toHaveValue(/gh run view 9087 --log-failed/);
+  await expect(page.locator('#prompt')).toHaveValue(/Repository: orbit-labs\/orbit/);
+  await expect(page.locator('#prompt')).toHaveValue(/https:\/\/github.com\/orbit-labs\/orbit\/actions\/runs\/9087/);
+  await expect(page.locator('#prompt')).toBeFocused();
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
 });
 
-test('custom Fix edits the prompt and selects a harness before launching', async ({ page }) => {
+test('Actions Fix is the only fix control and keeps prompt editable until explicit send', async ({ page }) => {
   await openHub(page);
   await tab(page, /Actions/).click();
   const run = hub(page).locator('.gh-run[data-gh-run="9087"]');
-  await run.getByRole('button', { name: 'Customize fix' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Customize fix' });
-  const prompt = dialog.locator('#custom-fix-prompt');
-  await expect(prompt).toHaveValue(/gh run view 9087 --log-failed/);
-  await prompt.fill('Investigate this CI failure and make a focused fix.');
-  const harness = dialog.locator('#custom-fix-harness');
-  await expect(harness.locator('option')).not.toHaveCount(0);
-  const selectedHarness = await harness.inputValue();
-  await dialog.getByRole('button', { name: 'Start fix' }).click();
+  await expect(run.getByRole('button', { name: 'Customize fix' })).toHaveCount(0);
+  const prompt = page.locator('#prompt');
+  await run.getByRole('button', { name: 'Fix' }).click();
   await expectSideThread(page);
+  await prompt.fill('Investigate this CI failure and make a focused fix.');
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
+  const selectedHarness = await page.locator('#model-picker-trigger .provider-small').getAttribute('class');
+  await prompt.press('Enter');
   await expect(page.locator('#transcript .user-message').last()).toHaveText('Investigate this CI failure and make a focused fix.');
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
-  await expect(page.locator(`#model-picker-trigger .provider-small.${selectedHarness}`)).toBeVisible();
+  await expect(page.locator('#model-picker-trigger .provider-small')).toHaveAttribute('class', selectedHarness!);
   expect(selectedHarness).toBeTruthy();
-});
-
-test('canceling customized Fix starts no task', async ({ page }) => {
-  await openHub(page);
-  await tab(page, /Actions/).click();
-  await hub(page).locator('.gh-run[data-gh-run="9087"]').getByRole('button', { name: 'Customize fix' }).click();
-  await page.getByRole('dialog', { name: 'Customize fix' }).getByRole('button', { name: 'Cancel' }).click();
-  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
-  await expect(hub(page)).toBeVisible();
 });
 
 test('Actions show each run’s event, pull request, attempts and duration, filtered by event and pull request', async ({ page }) => {
@@ -470,7 +482,8 @@ test('a run’s jobs show their steps and summary, and a re-run lists its earlie
   // Fix on a re-run asks the agent to compare attempts.
   await run.hover();
   await run.getByRole('button', { name: 'Fix' }).click();
-  await expect(page.locator('#transcript .user-message').last()).toContainText('gh run view 9087 --attempt N');
+  await expect(page.locator('#prompt')).toHaveValue(/gh run view 9087 --attempt N/);
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
 });
 
 test('Check workflow files hands the workflow check to an agent', async ({ page }) => {
@@ -495,6 +508,7 @@ test('a run GitHub couldn’t start reads “Didn’t start”, and Fix looks at
   await run.hover();
   await run.getByRole('button', { name: 'Fix' }).click();
   await expectSideThread(page);
-  await expect(page.locator('#transcript .user-message').last()).toContainText('startup failure');
+  await expect(page.locator('#prompt')).toHaveValue(/startup failure/);
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix .github/workflows/nightly.yml workflow file');
 });

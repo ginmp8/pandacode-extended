@@ -107,7 +107,7 @@ export function runsBody(runs: HubRun[], pulls: HubPull[] | undefined, filter: R
   const list = filterRuns(runs, pulls, filter, query);
   const row = (run: HubRun) => {
     const pull = runPull(run, pulls), open = expanded.has(run.id), time = runDuration(run, now);
-    const fix = run.state === 'failed' || run.state === 'not_started' ? `<span class="gh-fix-actions"><button type="button" class="gh-act gh-primary" data-gh-run-fix>${icon('spark')}Fix</button><button type="button" class="gh-act" data-gh-run-customize aria-label="Customize fix" title="Customize fix">${icon('chevron')}</button></span>` : '';
+    const fix = run.state === 'failed' || run.state === 'not_started' ? `<button type="button" class="gh-act gh-primary" data-gh-run-fix>${icon('spark')}Fix</button>` : '';
     return `<div class="gh-run-item"><div class="gh-row gh-run" data-gh-run="${run.id}" tabindex="-1">${statusBadge(run.state)}<span class="gh-workflow">${escape(run.workflow)}</span>
         ${pull ? `<button type="button" class="gh-ref gh-run-pull" data-gh-run-pull="${pull}" title="${escape(run.branch)} · Show runs for #${pull}">${glyph('pull')}#${pull}</button>` : ''}<span class="gh-row-title" title="${escape(run.title)}">${escape(run.title)}</span>
         <span class="gh-row-meta"><span class="gh-event" data-event="${escape(run.event)}">${escape(eventLabel(run.event))}</span>${pull ? '' : `<span class="gh-ref" title="${escape(run.branch)}">${glyph('pull')}${escape(run.branch)}</span>`}${run.attempt > 1 ? `<span class="gh-attempt" title="Attempt ${run.attempt}">×${run.attempt}</span>` : ''}${time ? `<span class="gh-duration" title="Duration">${escape(time)}</span>` : ''}</span>

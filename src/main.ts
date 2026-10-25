@@ -407,7 +407,7 @@ const worktrees = createWorktrees({
   git: () => state.git, gitError: () => state.gitError,
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
   attachable: () => newTaskView(),
-  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice),
+  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice) + botTaskControl(task, fresh),
   running: () => isRunning(),
   afterAttach: async (saved, live) => {
     const index = state.sessions.findIndex(s => s.id === saved.id); if (index >= 0) state.sessions[index] = saved;
@@ -4287,15 +4287,54 @@ async function showBotSettings(botId: string, tab?: import('./bots').Section): P
 let sidebarBots: import('./bots').Bot[] = [];
 let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
+let botReloadGeneration = 0;
+let taskBots = new Map<string, string>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
-  sidebarBots = await call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots);
-  botProjects = new Set(sidebarBots.map(bot => bot.projectId));
-  // An earlier build could leave the filter on a bot's workspace; send it back to All projects.
+  const generation = ++botReloadGeneration;
+  const [bots, links, projects] = await Promise.all([
+    call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
+    call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots)),
+    withProjects ? call<Project[]>('list_projects') : Promise.resolve(null),
+  ]);
+  if (generation !== botReloadGeneration) return;
+  sidebarBots = bots; botProjects = new Set(bots.map(bot => bot.projectId));
+  taskBots = new Map(Object.entries(links));
   if (botProjects.has(state.projectFilter)) setProjectFilter('');
-  // A new bot brings a workspace project; a renamed bot renames it.
-  if (withProjects) state.projects = await call<Project[]>('list_projects');
+  if (projects) state.projects = projects;
   renderNavigation(); renderHeader();
+}
+const NO_BOT = 'none';
+function botTaskControl(task: Session, fresh: boolean): string {
+  const bot = sidebarBots.find(item => item.id === taskBots.get(task.id));
+  if (!fresh) return bot ? `<span class="composer-computer composer-computer-fixed" aria-label="Bot: ${escape(bot.name)} (fixed for this task)">${icon('bot')}<span>with ${escape(bot.name)}</span></span>` : '';
+  if (!sidebarBots.length || botProjects.has(task.projectId) || chatTask(task) || task.remoteDevice || remoteChoice !== LOCAL || Boolean(teams.get(task.id))) return '';
+  const name = bot?.name ?? 'No bot';
+  return `<button type="button" id="composer-bot" class="composer-computer" data-action="bot-task-menu" aria-label="Bot: ${escape(name)}" aria-haspopup="dialog" aria-expanded="false" title="Start this task with a bot">${icon('bot')}<span>${escape(name)}</span>${icon('down')}</button>`;
+}
+async function showBotTaskMenu(anchor: HTMLElement): Promise<void> {
+  const task = session(); if (!task || configuringSessions.has(task.id)) return;
+  const chosen = taskBots.get(task.id) ?? NO_BOT;
+  const items = [{ id: NO_BOT, label: 'No bot', icon: 'close', selected: chosen === NO_BOT }, ...sidebarBots.map(bot => ({ id: bot.id, label: bot.name, description: bot.paused ? 'Paused' : bot.role, icon: 'bot', disabled: bot.paused, selected: bot.id === chosen }))];
+  await showChoices(anchor, { title: 'Bot', width: 280, items, onSelect: id => { closeChoiceMenu(); run(assignTaskBot(task, id === NO_BOT ? null : id)); } });
+}
+async function assignTaskBot(task: Session, botId: string | null): Promise<void> {
+  if (!newTaskView() || state.sessionId !== task.id || configuringSessions.has(task.id)) throw new Error("Choose a bot before the task's first message.");
+  configuringSessions.add(task.id);
+  try {
+    // Native code commits profile defaults and the link together, preserving task permissions.
+    const bot = await call<import('./bots').Bot | null>('bot_assign_task', { sessionId: task.id, botId });
+    const saved = await call<Session>('get_task', { sessionId: task.id }).catch(error => {
+      if (!state.sessions.some(item => item.id === task.id)) return null;
+      throw error;
+    });
+    const index = state.sessions.findIndex(item => item.id === task.id);
+    // Leaving an empty draft may discard it while IPC settles. Never resurrect it.
+    if (saved && index >= 0) state.sessions[index] = saved;
+    if (bot && index >= 0) taskBots.set(task.id, bot.id);
+    else taskBots.delete(task.id);
+  } finally { configuringSessions.delete(task.id); }
+  if (state.sessionId === task.id) render();
 }
 const userProjects = (): Project[] => state.projects.filter(project => !botProjects.has(project.id) && !isChatProject(project));
 /** Whether a task runs as a projectless chat. */
@@ -4319,8 +4358,10 @@ async function initRemote(): Promise<void> {
 }
 async function showComputerMenu(anchor: HTMLElement): Promise<void> {
   await showChoices(anchor, { title: 'Run on', width: 280, items: computerItems(remoteTargets, remoteChoice), onSelect: id => {
-    closeChoiceMenu(); remoteChoice = id; renderHeader();
+    closeChoiceMenu();
     const task = session();
+    if (id !== LOCAL && task && taskBots.has(task.id)) { notify('Choose No bot before running this task on another computer.'); return; }
+    remoteChoice = id; renderHeader();
     if (task && newTaskView()) run(adaptPickerToComputer(task, id, remoteTargets.find(item => item.deviceId === id)?.name ?? 'That computer'));
   } });
 }
@@ -4541,6 +4582,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;
     case 'bot-pause': if (element.dataset.bot) { const bot = sidebarBots.find(item => item.id === element.dataset.bot); if (bot) { await call('bot_set_paused', { botId: bot.id, paused: !bot.paused }); notify(bot.paused ? `${bot.name} resumed` : `${bot.name} paused`); await reloadBotProjects(false); } } break;
     case 'open-bot': if (element.dataset.bot) await openBot(element.dataset.bot); break;
+    case 'bot-task-menu': await showBotTaskMenu(element); break;
     case 'computer-menu': await showComputerMenu(element); break;
     case 'toggle-bots-view': setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
     case 'import-conversations': await showConversationImport(); break;

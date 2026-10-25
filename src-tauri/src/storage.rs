@@ -165,7 +165,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 28;
+pub const SCHEMA_VERSION: i64 = 29;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -455,9 +455,14 @@ impl Store {
                   CREATE INDEX IF NOT EXISTS message_attachments_message ON message_attachments(message_id,session_id);
                   PRAGMA user_version=28;").map_err(|e|e.to_string())?;
             }
+            if version < 29 {
+                crate::bots::migrate_profiles(&migration)?;
+                migration.execute_batch("PRAGMA user_version=29;").map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
+        recovery.execute("UPDATE bot_tasks SET brief_version=-1 WHERE session_id IN (SELECT id FROM sessions WHERE status IN ('running','waiting'))", []).map_err(|e| e.to_string())?;
         // Only rows from before typed coordination existed are eligible for the
         // narrowly scoped legacy display projection. New user copies stay user text.
         Self::record_legacy_prompt_cutoff(&recovery)?;
@@ -1445,6 +1450,16 @@ impl Store {
         content: &str,
         kind: Option<crate::architect::internal_turns::CoordinationKind>,
     ) -> Result<i64> {
+        self.begin_task_turn_with_context(sid, content, kind, None)
+    }
+
+    pub(crate) fn begin_task_turn_with_context(
+        &self,
+        sid: &str,
+        content: &str,
+        kind: Option<crate::architect::internal_turns::CoordinationKind>,
+        bot_brief: Option<&crate::bots::tasks::TaskBrief>,
+    ) -> Result<i64> {
         if content.trim().is_empty() || content.len() > 128 * 1024 {
             return Err("Write a message under 128 KiB first.".into());
         }
@@ -1480,6 +1495,7 @@ impl Store {
         } else {
             self.start_turn_message(sid, content)?
         };
+        if let Some(brief) = bot_brief { crate::bots::tasks::mark(self, sid, brief)?; }
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(message_id)
     }
@@ -1506,6 +1522,10 @@ impl Store {
         } else {
             "error"
         };
+        let transaction = self.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        if !successful || stopped {
+            self.db.execute("UPDATE bot_tasks SET brief_version=-1 WHERE session_id=?1", [sid]).map_err(|e| e.to_string())?;
+        }
         self.db
             .execute(
                 "UPDATE sessions SET status=?2,
@@ -1514,6 +1534,7 @@ impl Store {
                 params![sid, status, successful && !stopped, now(), restore_stage],
             )
             .map_err(|e| e.to_string())?;
+        transaction.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -3027,7 +3048,7 @@ mod tests {
     fn migration_28_creates_message_attachments_index() {
         let (store, _) = empty_session();
         let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 28);
+        assert_eq!(version, SCHEMA_VERSION);
         let table: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_attachments')", [], |row| row.get(0)).unwrap();
         let index: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='message_attachments_session_id')", [], |row| row.get(0)).unwrap();
         assert!(table && index);

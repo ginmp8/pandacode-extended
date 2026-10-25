@@ -228,6 +228,7 @@ impl Library {
 /// Resolve under the same store/execution lock as the task being admitted.
 pub(crate) fn task(library: &Library, store: &crate::storage::Store, session: &crate::storage::Session, root: &Path) -> Result<Resolution, String> {
     let bot = crate::bots::owner_of(store, &session.id)?.map(|(bot, _)| bot.id)
+        .or(crate::bots::tasks::linked(store, &session.id)?.map(|(bot, _)| bot.id))
         .or(crate::bots::list(store)?.into_iter().find(|b| b.project_id == session.project_id).map(|b| b.id));
     library.resolve(&session.provider, root, &session.project_id, bot.as_deref())
 }
@@ -252,6 +253,24 @@ mod tests {
     fn skill(fx: &Fixture, name: &str, body: &str) -> super::super::Item {
         let text = format!("---\nname: {name}\ndescription: {name} instructions\n---\n{body}");
         let path = fx.folder(name, &[("SKILL.md", &text)]); fx.import(Kind::Skill, &path)
+    }
+    #[test]
+    fn ordinary_linked_task_resolves_bot_pins_without_channel_ownership() {
+        let fx = Fixture::new(); let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let root = fx.repo(); let project = store.add_project(&root).unwrap();
+        let bot = crate::bots::create(&store, &crate::bots::BotInput { name: "Reviewer".into(), provider: "codex".into(), model: "default".into(), mode: "full".into(), ..Default::default() }, &fx.base.join("bots")).unwrap();
+        let session = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        skill(&fx, "Review", "Review the selected patch.");
+        fx.library.select(Target::Bot, &bot.id, &["review".into()], false).unwrap();
+        crate::bots::tasks::assign(&store, &session.id, Some(&bot.id)).unwrap();
+        let result = task(&fx.library, &store, &session, &root).unwrap();
+        assert_eq!(result.items[0].provenance, "bot"); assert!(result.text.contains("Review the selected patch."));
+        assert_eq!(store.session(&session.id).unwrap().mode, "ask");
+        assert!(crate::bots::owner_of(&store, &session.id).unwrap().is_none());
+        skill(&fx, "Review", "Updated text needs explicit review.");
+        assert!(task(&fx.library, &store, &session, &root).unwrap().text.is_empty());
+        crate::bots::tasks::assign(&store, &session.id, None).unwrap();
+        assert!(task(&fx.library, &store, &session, &root).unwrap().items.is_empty());
     }
     #[test]
     fn selections_deduplicate_preserve_origin_and_do_not_touch_checkout() {

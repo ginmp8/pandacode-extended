@@ -27,7 +27,8 @@ test('Extended About page separately attributes the original PandaCode project',
   const tray = await source('src/tray-popover.ts');
   const nativeTray = await source('src-tauri/src/tray.rs');
   assert.match(about, /About PandaCode Extended/);
-  assert.match(about, /https:\/\/github\.com\/ginmp8\/pandacode-hardened/);
+  assert.match(about, /extendedRepository: 'https:\/\/github\.com\/ginmp8\/pandacode-extended'/);
+  assert.match(about, /extendedIssues: 'https:\/\/github\.com\/ginmp8\/pandacode-extended\/issues'/);
   assert.match(about, /https:\/\/github\.com\/aicodeking\/pandacode/);
   assert.match(about, /Extended issues/);
   assert.match(about, /Upstream repository/);

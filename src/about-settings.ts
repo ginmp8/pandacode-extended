@@ -4,8 +4,8 @@ import { appUpdates, describeUpdate } from './app-updates';
 
 /** Public upstream project links. Opening one is user-initiated; no update checks run. */
 export const PROJECT_LINKS = {
-  extendedRepository: 'https://github.com/ginmp8/pandacode-hardened',
-  extendedIssues: 'https://github.com/ginmp8/pandacode-hardened/issues',
+  extendedRepository: 'https://github.com/ginmp8/pandacode-extended',
+  extendedIssues: 'https://github.com/ginmp8/pandacode-extended/issues',
   repository: 'https://github.com/aicodeking/pandacode',
   issues: 'https://github.com/aicodeking/pandacode/issues',
   releases: 'https://github.com/aicodeking/pandacode/releases',

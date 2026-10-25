@@ -18,7 +18,7 @@ terminal and a browser in one window.
 
 PandaCode is free and open source under the [PandaCode License](LICENSE), the MIT
 License with one addition: forks that are used commercially or released publicly
-must say "This is a fork of PandaCode" and link to this repository. There is no
+must say "This is a fork of PandaCode" and link to the [original PandaCode repository](https://github.com/aicodeking/pandacode). There is no
 account, no license key and no telemetry.
 
 Built with Tauri 2, Rust, SQLite and plain TypeScript. It uses the operating

@@ -15,6 +15,7 @@ import './usage-limit.css';
 import './document-viewer.css';
 import './tool-trace.css';
 import { renderDocument, setDocumentView } from './document-viewer';
+import { createFileTabs } from './file-tabs';
 import { moved, queuePanel, type HoldReason, type QueuedMessage } from './message-queue';
 import { afterRun as turnChecksAfterRun, enabled as turnChecksEnabled, noteManualSend, setEnabled as turnChecksSetEnabled } from './turn-checks';
 import { limitActive, limitBanner, limitConnections, resetLabel } from './usage-limit';
@@ -304,7 +305,7 @@ $app.innerHTML = `<div class="workspace">
   </aside>
   <main class="main-pane">
     <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}<button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button><div class="view-switch" role="group" aria-label="Workspace view"><button data-action="conversation-view" aria-label="Conversation view" aria-pressed="true">${icon('chat')}<span>Conversation</span></button><button data-action="board-view" aria-label="Board view" aria-pressed="false">${icon('board')}<span>Board</span></button><button data-action="github-view" aria-label="GitHub view" aria-pressed="false">${icon('github')}<span>GitHub</span></button></div><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}<span class="header-divider" aria-hidden="true"></span>${button('moodboards', 'Project moodboards', 'images')}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('terminal', `Toggle terminal (${shortcut('J')})`, 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false"')}<span class="header-divider" aria-hidden="true"></span>${button('toggle-inspector', `Toggle inspector (${shortcut('B', true)})`, 'panel', 'active', 'id="inspector-toggle"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div></header>
-    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><div id="subagents-host" class="subagents-host" hidden></div><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div></section></div>
+    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section><div id="task-details-heading" class="task-details-heading" hidden></div><div id="subagents-host" class="subagents-host" hidden></div><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
@@ -359,6 +360,14 @@ const searchPanel = createSearchPanel({
   call,
   context: () => project() ? workspaceContext() : null,
   open: path => run(openFile(path, 'file')),
+});
+const fileTabs = createFileTabs({
+  call,
+  canAttach: context => Boolean(state.sessionId) && context.sessionId === state.sessionId && context.projectId === state.projectId && !session()?.remoteDevice && !session()?.archived && taskStage(session()!) !== 'completed',
+  attach: path => attachFile(path),
+  preview: (path, context) => previewFile(path, context),
+  notify: text => notify(text), report: error => report(error),
+  focusConversation: () => document.querySelector<HTMLElement>('#prompt')?.focus(),
 });
 const pullView = createPullView({
   call,
@@ -422,6 +431,14 @@ window.addEventListener('pandacode-github-change', () => { renderComposer(); ren
 window.addEventListener('focus', () => { void github.refreshLinks(state.projectId); run(retryLinkedIssueActionsOnConnect(state.projectId, true)); });
 const attachments = mountPromptAttachments({
   taskId: () => state.sessionId,
+  contextKey: () => `${state.sessionId}:${state.generation}:${workspaceKey()}`,
+  insertText: text => {
+    const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+    if (!prompt || prompt.disabled || prompt.dataset.sessionId !== state.sessionId) return false;
+    const before = prompt.value.slice(0, prompt.selectionStart);
+    prompt.setRangeText((before && !/\s$/.test(before) ? (text.includes('\n') ? '\n' : ' ') : '') + text, prompt.selectionStart, prompt.selectionEnd, 'end');
+    prompt.dispatchEvent(new Event('input', { bubbles: true })); prompt.focus(); return true;
+  },
   blocked: taskId => {
     const task = state.sessions.find(s => s.id === taskId);
     if (!task) return 'Start a task before attaching anything.';
@@ -608,7 +625,7 @@ configureFileLinks({
   resolve: (context, paths) => call<ResolvedFile[]>('resolve_workspace_files', { ...context, paths }),
   open: async (context, file) => {
     try {
-      if (file.previewable) await previewFile(file.path, context);
+      if (/\.html?$/i.test(file.path)) await previewFile(file.path, context);
       else { state.inspectorTab = 'files'; await openFile(file.path, 'file', false, context); }
     } catch (error) { report(error); }
   },
@@ -627,6 +644,7 @@ function restoreThreadPanel(task?: Session): void {
   state.selectedFile = sameWorkspace ? saved?.file ?? '' : ''; state.selectedKind = sameWorkspace ? saved?.kind ?? '' : ''; state.selectedStaged = saved?.staged ?? false;
   state.browserUrl = sameWorkspace ? saved?.browserUrl ?? '' : ''; selectedFileContext = sameWorkspace && saved?.context ? { ...saved.context } : undefined;
   state.filePreviewLoading = Boolean(state.selectedKind);
+  fileTabs.show(state.sessionId, workspaceKey());
 }
 async function restoreSelectedFile(): Promise<void> {
   if (!state.selectedKind || !state.selectedFile) return;
@@ -649,7 +667,7 @@ function clearWorkspaceInspector(render = true): void {
   state.filePath = ''; state.selectedFile = ''; state.selectedContent = ''; state.selectedKind = ''; state.filePreviewLoading = false;
   state.browserUrl = '';
   selectedFileContext = undefined;
-  if (render) renderInspector();
+  if (render) { fileTabs.show(state.sessionId, workspaceKey()); renderInspector(); }
 }
 function renderThemeToggle(): void {
   const dark = currentTheme() === 'dark', toggle = $('#theme-toggle');
@@ -2337,7 +2355,7 @@ function removeDeletedSessions(ids: string[]): void {
     chatFileAttachments.delete(id);
     attachments.clear(id); pendingPromptActivity.delete(id);
     subagents.forget(id);
-    threadPanels.delete(id);
+    threadPanels.delete(id); fileTabs.forget(id);
   }
   state.sessions = state.sessions.filter(task => !removed.has(task.id));
   ++sessionsReload;
@@ -3001,6 +3019,7 @@ function onAgent(event: AgentEvent): void {
 }
 
 async function refreshInspector(): Promise<void> {
+  fileTabs.show(state.sessionId, workspaceKey());
   void projectRunner.refresh();
   const request = ++inspectorRequest;
   const p = project(); if (!p) { state.git = null; state.jj = null; state.files = []; state.gitError = ''; state.filesError = ''; state.inspectorLoading = false; renderInspector(); return; }
@@ -3014,7 +3033,7 @@ async function refreshInspector(): Promise<void> {
   state.files = results[1].status === 'fulfilled' ? results[1].value : [];
   state.jj = results[2].status === 'fulfilled' ? results[2].value : null;
   state.filesError = results[1].status === 'rejected' ? errorText(results[1].reason) || 'The folder could not be read.' : '';
-  renderInspector(); renderHeader();
+  renderInspector(); renderHeader(); fileTabs.reload();
 }
 /** The simulator panel stays mounted once opened; hiding it stops its frames. */
 function syncSimulatorPanel(): void {
@@ -3116,7 +3135,7 @@ async function performAgentUiAction(request: AgentUiAction): Promise<unknown> {
   await active();
   const { action, args } = request;
   if (action === 'open_task') { await selectSession(String(args.taskId)); return { opened: state.sessionId === args.taskId }; }
-  if (action === 'open_file') { if (args.view === 'rendered' || args.view === 'raw') setDocumentView(String(args.path), args.view); state.inspectorTab = 'files'; await openFile(String(args.path), 'file'); return { opened: state.selectedFile === args.path }; }
+  if (action === 'open_file') { if (args.view === 'rendered' || args.view === 'raw') setDocumentView(String(args.path), args.view); state.inspectorTab = 'files'; await openFile(String(args.path), 'file'); return { opened: fileTabs.active === args.path }; }
   if (action === 'open_terminal') { if (!terminalPanel.open) await toggleTerminal(); return { opened: terminalPanel.open }; }
   if (action === 'run_project') return projectRunner.run(request.requestId, active);
   if (action === 'preview_file') { await previewFile(String(args.path), workspaceContext(), active); return { opened: true }; }
@@ -3268,7 +3287,7 @@ function renderInspector(): void {
     return;
   }
   if (state.inspectorTab === 'files') {
-    target.innerHTML = `<div class="file-folder-path"><span>${escape(project()?.name)}${state.filePath ? ' / ' + escape(state.filePath) : ''}</span>${state.filePath ? button('parent-folder', 'Go to parent folder', 'arrow') : ''}</div><div class="file-list">${state.files.map(file => `<div class="file-row"><button data-action="${file.isDir ? 'open-folder' : isPreviewableFile(file.path) ? 'preview-file' : 'open-file'}" data-path="${escape(file.path)}">${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span>${file.isDir ? icon('chevron') : ''}</button>${!file.isDir && /\.(html?|svg)$/i.test(file.path) ? button('open-file', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${escape(file.path)}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${escape(file.path)}"`) : ''}</div>`).join('') || '<div class="inspector-empty">This folder is empty.</div>'}</div>`; return;
+    target.innerHTML = `<div class="file-folder-path"><span>${escape(project()?.name)}${state.filePath ? ' / ' + escape(state.filePath) : ''}</span>${state.filePath ? button('parent-folder', 'Go to parent folder', 'arrow') : ''}</div><div class="file-list">${state.files.map(file => `<div class="file-row"><button data-action="${file.isDir ? 'open-folder' : /\.html?$/i.test(file.path) ? 'preview-file' : 'open-file'}" data-path="${escape(file.path)}">${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span>${file.isDir ? icon('chevron') : ''}</button>${!file.isDir && /\.(html?|svg)$/i.test(file.path) ? button('open-file', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${escape(file.path)}" data-source="true"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${escape(file.path)}"`) : ''}</div>`).join('') || '<div class="inspector-empty">This folder is empty.</div>'}</div>`; return;
   }
   if (state.jj?.isRepo && !state.jj.colocated) {
     showJjPanel(target, state.jj, {
@@ -3302,9 +3321,16 @@ async function previewFile(path: string, context = workspaceContext(), active?: 
   if (!browserPanel) throw new Error('Browser could not be opened.');
   await browserPanel.navigate(file.url);
 }
-async function openFile(path: string, kind: 'file' | 'diff', staged = false, context = workspaceContext()): Promise<void> {
+async function openFile(path: string, kind: 'file' | 'diff', staged = false, context = workspaceContext(), source = false): Promise<void> {
   const p = project(); if (!p) return;
-  const request = ++fileRequest, generation = state.generation; const content = await call<string>(kind === 'file' ? 'read_file' : 'git_diff', { ...context, path, staged }); if (request !== fileRequest || p.id !== state.projectId || generation !== state.generation) return;
+  if (kind === 'file') {
+    if (context.sessionId && context.sessionId !== state.sessionId) await selectSession(context.sessionId);
+    if (context.projectId !== state.projectId || (context.sessionId && context.sessionId !== state.sessionId) || session()?.remoteDevice) return;
+    if (state.view !== 'conversation' && !state.boardPanel) setWorkspaceView('conversation');
+    fileTabs.show(state.sessionId, workspaceKey());
+    fileTabs.open(path, context, source); return;
+  }
+  const request = ++fileRequest, generation = state.generation; const content = await call<string>('git_diff', { ...context, path, staged }); if (request !== fileRequest || p.id !== state.projectId || generation !== state.generation) return;
   selectedFileContext = { ...context };
   state.selectedFile = path; state.selectedContent = content; state.selectedKind = kind; state.selectedStaged = staged; state.filePreviewLoading = false; state.inspector = true; renderInspector();
 }
@@ -4557,7 +4583,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'run-project': if (!element.dataset.sessionId || element.dataset.sessionId === state.sessionId) await projectRunner.run(); break;
     case 'preview-file': await previewFile(element.dataset.path!); break;
     case 'preview-selected-file': await previewFile(state.selectedFile, selectedFileContext); break;
-    case 'open-file': await openFile(element.dataset.path!, 'file'); break;
+    case 'open-file': await openFile(element.dataset.path!, 'file', false, workspaceContext(), element.dataset.source === 'true'); break;
     case 'open-diff': await openFile(element.dataset.path!, 'diff', element.dataset.staged === 'true'); break;
     case 'back-inspector': state.selectedKind = ''; renderInspector(); break;
     case 'open-message-attachment': await openMessageAttachment(element); break;

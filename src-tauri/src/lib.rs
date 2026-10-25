@@ -2992,6 +2992,16 @@ async fn read_file(
     blocking(move || workspace::read_file(&root, path)).await
 }
 #[tauri::command]
+async fn read_document_file(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: Option<String>,
+    path: String,
+) -> Result<tauri::ipc::Response> {
+    let root = state.root(&project_id, session_id.as_deref())?;
+    blocking(move || workspace::read_document_bytes(&root, &path)).await.map(tauri::ipc::Response::new)
+}
+#[tauri::command]
 async fn workspace_image(state: State<'_, AppState>, session_id: String, path: String) -> Result<String> {
     // A question belongs to one task: its images come from that task's checkout only.
     let project_id = state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.project_id;
@@ -3616,6 +3626,7 @@ pub fn run() {
                 design::design_comments,
                 design::design_save_comments,
                 workspace_image,
+                read_document_file,
                 resolve_workspace_files,
                 prepare_file_preview,
                 get_run_script,

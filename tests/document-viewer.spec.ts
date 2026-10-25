@@ -24,7 +24,7 @@ test('renders Markdown as a reader and switches to raw source', async ({ page })
   await expect(viewer.locator('.doc-raw')).toContainText('## Usage');
 
   // The choice is remembered for Markdown files during the session.
-  await page.locator('[data-action="back-inspector"]').click();
+  await page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'Conversation', exact: true }).click();
   await page.locator('[data-action="open-file"][data-path="README.md"]').click();
   await expect(page.locator('.document-viewer .doc-raw')).toContainText('# Orbit');
 });

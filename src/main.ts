@@ -1570,6 +1570,8 @@ function renderBoardView(): void {
 /** The GitHub view, mounted the first time it is shown and refreshed with the workspace. */
 let githubHub: import('./github-hub').HubView | undefined;
 let githubHubLoading = false;
+const githubTaskPreparations = new Set<string>();
+const githubPreparedTasks = new Map<string, string>();
 function syncGithubHub(shown: boolean): void {
   const host = $('#github-hub');
   host.hidden = !shown;
@@ -1598,8 +1600,17 @@ async function openHubTask(id: string): Promise<void> {
 /** Starts a thread from the GitHub view: a task in the repository's project, linked to its pull
  * request or issue, titled, with the prompt filled in and sent when asked. Mentions like `#128`
  * attach the item's content as GitHub context once the project's GitHub status is known. */
-async function startHubTask({ projectId, prompt, title, link, send: start, provider: selectedProvider }: { projectId: string; prompt: string; title?: string; link?: TaskLink; send: boolean; provider?: ProviderId }): Promise<void> {
+async function startHubTask({ projectId, prompt, title, link, identity, send: start, provider: selectedProvider }: { projectId: string; prompt: string; title?: string; link?: TaskLink; identity?: string; send: boolean; provider?: ProviderId }): Promise<void> {
+  const key = `${projectId}:${identity ?? (link ? `${link.kind}:${link.number}` : title ?? prompt)}`;
+  if (githubTaskPreparations.has(key)) return;
+  githubTaskPreparations.add(key);
   try {
+    const preparedId = identity && githubPreparedTasks.get(key);
+    if (preparedId && state.sessions.some(item => item.id === preparedId)) {
+      if (preparedId !== state.sessionId) await openHubTask(preparedId);
+      else document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
+      return;
+    }
     const current = session();
     const currentLink = link?.kind === 'issue' ? current?.issue : current?.pullRequest;
     if (current?.draft && current.projectId === projectId && title === current.title
@@ -1607,13 +1618,14 @@ async function startHubTask({ projectId, prompt, title, link, send: start, provi
       document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
       return;
     }
-    const reusable = state.sessions.find(item => item.draft && item.id !== state.sessionId && item.projectId === projectId && !deletedSessions.has(item.id));
-    if (reusable && (state.drafts.get(reusable.id) ?? '').trim()) {
-      notify('An existing task draft has text. Open or clear it before creating a GitHub task; nothing was replaced.');
+    const existingDraft = !identity && state.sessions.find(item => item.draft && item.projectId === projectId && item.title === title && !deletedSessions.has(item.id)
+      && (!link || (link.kind === 'issue' ? item.issue : item.pullRequest)?.number === link.number));
+    if (existingDraft) {
+      if (existingDraft.id !== state.sessionId) await openHubTask(existingDraft.id);
       return;
     }
     await github.status(projectId);
-    await createTask(projectId);
+    await createTask(projectId, false);
     const task = session();
     if (!task || task.projectId !== projectId) throw new Error('Could not open a task for this repository.');
     const replace = (next: Session) => { const index = state.sessions.findIndex(item => item.id === next.id); if (index >= 0) state.sessions[index] = next; };
@@ -1622,6 +1634,7 @@ async function startHubTask({ projectId, prompt, title, link, send: start, provi
       replace(await call<Session>('configure_session', { sessionId: task.id, provider: selectedProvider, model: rememberedModel(selectedProvider) }));
     }
     if (link) replace(await call<Session>('set_task_link', { sessionId: task.id, kind: link.kind, link }));
+    if (identity) githubPreparedTasks.set(key, task.id);
     if (title) { await call('update_session', { sessionId: task.id, title }); const current = state.sessions.find(item => item.id === task.id); if (current) current.title = title; }
     renderNavigation(); renderHeader();
     const field = document.querySelector<HTMLTextAreaElement>('#prompt');
@@ -1632,6 +1645,7 @@ async function startHubTask({ projectId, prompt, title, link, send: start, provi
     field.setSelectionRange(prompt.length, prompt.length);
     if (start) await send();
   } catch (cause) { notify(`Could not prepare the GitHub task: ${cause instanceof Error ? cause.message : String(cause)}${start ? '' : ' No prompt was sent.'}`); }
+  finally { githubTaskPreparations.delete(key); }
 }
 async function prepareHubReviewTask(target: PullReviewContext, request: ReviewRequest, providers: Provider[], active: () => boolean): Promise<void> {
   const { buildPullReview } = await import('./hardened/review-model');
@@ -3330,7 +3344,7 @@ async function showDeploy(anchor: HTMLElement): Promise<void> {
     await send();
   } });
 }
-async function createTask(projectId = state.projectId): Promise<void> {
+async function createTask(projectId = state.projectId, reuseDraft = true): Promise<void> {
   if (creatingTask) return;
   const projects = state.projects.filter(p => !isChatProject(p));
   const active = projects.find(p => p.id === projectId)
@@ -3346,7 +3360,7 @@ async function createTask(projectId = state.projectId): Promise<void> {
   // (typed text or a worktree) is reopened; from inside one, New task starts another.
   const current = state.sessionId;
   leaveDraft('');
-  const existing = state.sessions.find(task => task.draft && task.id !== current && task.projectId === active.id && !deletedSessions.has(task.id));
+  const existing = reuseDraft && state.sessions.find(task => task.draft && task.id !== current && task.projectId === active.id && !deletedSessions.has(task.id));
   if (existing) { state.query = ''; closeModal(); await selectSession(existing.id, true); return; }
   creatingTask = true;
   let created: Session;

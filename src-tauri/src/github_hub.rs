@@ -43,14 +43,23 @@ pub struct HubPull {
     pub author: String,
     pub state: String,
     pub head: String,
+    pub head_sha: String,
     pub base: String,
     pub updated_at: String,
     pub url: String,
     pub review: String,
     pub checks: String,
+    pub check_details: Vec<HubCheck>,
     pub additions: i64,
     pub deletions: i64,
     pub labels: Vec<String>,
+}
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HubCheck {
+    pub name: String,
+    pub state: String,
+    pub url: String,
 }
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -66,8 +75,28 @@ pub struct HubIssue {
 }
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct HubIssueContext {
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub body: String,
+    pub body_truncated: bool,
+    pub labels: Vec<String>,
+    pub comments: Vec<HubIssueComment>,
+}
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HubIssueComment {
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+}
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct HubRun {
     pub id: i64,
+    pub run_number: i64,
+    pub head_sha: String,
     pub workflow: String,
     pub title: String,
     pub branch: String,
@@ -210,28 +239,57 @@ fn author(value: &serde_json::Value) -> String {
     value.get("author").map(|author| text(author, "login")).unwrap_or_default()
 }
 
+fn check_details(value: &serde_json::Value) -> Vec<HubCheck> {
+    let Some(items) = value.as_array() else { return Vec::new() };
+    items.iter().map(|item| {
+        let is_status = text(item, "__typename") == "StatusContext";
+        let (name, raw_state, url) = if is_status {
+            (text(item, "context"), text(item, "state"), text(item, "targetUrl"))
+        } else {
+            let name = text(item, "name");
+            let workflow = text(item, "workflowName");
+            let name = if workflow.is_empty() || workflow == name { name } else { format!("{workflow} / {name}") };
+            let status = if text(item, "status").eq_ignore_ascii_case("completed") { text(item, "conclusion") } else { text(item, "status") };
+            (name, status, text(item, "detailsUrl"))
+        };
+        let state = match raw_state.to_ascii_lowercase().as_str() {
+            "success" => "success",
+            "failure" | "error" | "timed_out" | "cancelled" | "action_required" | "startup_failure" => "failure",
+            "skipped" => "skipped",
+            "neutral" => "neutral",
+            _ => "pending",
+        };
+        HubCheck { name, state: state.into(), url }
+    }).collect()
+}
+
 pub fn pulls(repo: &str) -> Result<Vec<HubPull>, String> {
     let repo = valid_repo(repo)?;
-    let fields = "number,title,author,state,isDraft,headRefName,baseRefName,updatedAt,url,reviewDecision,statusCheckRollup,additions,deletions,labels";
+    let fields = "number,title,author,state,isDraft,headRefName,headRefOid,baseRefName,updatedAt,url,reviewDecision,statusCheckRollup,additions,deletions,labels";
     let capture = run_gh(&account_root(), &["pr", "list", &format!("--repo={repo}"), "--state=open", &format!("--limit={LIST_LIMIT}"), &format!("--json={fields}")], TIMEOUT)?;
     let value = json(&capture)?;
     let items = value.as_array().ok_or("GitHub returned an unexpected response.")?;
     Ok(items
         .iter()
-        .map(|item| HubPull {
-            number: item.get("number").and_then(|v| v.as_i64()).unwrap_or_default(),
-            title: text(item, "title"),
-            author: author(item),
-            state: state_of(item),
-            head: text(item, "headRefName"),
-            base: text(item, "baseRefName"),
-            updated_at: text(item, "updatedAt"),
-            url: text(item, "url"),
-            review: text(item, "reviewDecision").to_ascii_lowercase(),
-            checks: checks_summary(item.get("statusCheckRollup")),
-            additions: item.get("additions").and_then(|v| v.as_i64()).unwrap_or_default(),
-            deletions: item.get("deletions").and_then(|v| v.as_i64()).unwrap_or_default(),
-            labels: names(item, "labels", "name"),
+        .map(|item| {
+            let check_rollup = item.get("statusCheckRollup").cloned().unwrap_or_default();
+            HubPull {
+                number: item.get("number").and_then(|v| v.as_i64()).unwrap_or_default(),
+                title: text(item, "title"),
+                author: author(item),
+                state: state_of(item),
+                head: text(item, "headRefName"),
+                head_sha: text(item, "headRefOid"),
+                base: text(item, "baseRefName"),
+                updated_at: text(item, "updatedAt"),
+                url: text(item, "url"),
+                review: text(item, "reviewDecision").to_ascii_lowercase(),
+                checks: checks_summary(Some(&check_rollup)),
+                check_details: check_details(&check_rollup),
+                additions: item.get("additions").and_then(|v| v.as_i64()).unwrap_or_default(),
+                deletions: item.get("deletions").and_then(|v| v.as_i64()).unwrap_or_default(),
+                labels: names(item, "labels", "name"),
+            }
         })
         .collect())
 }
@@ -319,6 +377,44 @@ pub fn issues(repo: &str) -> Result<Vec<HubIssue>, String> {
         .collect())
 }
 
+/// Bounded issue description and recent discussion for a GitHub Solve draft.
+pub fn issue_context(repo: &str, number: i64) -> Result<HubIssueContext, String> {
+    let repo = valid_repo(repo)?;
+    if number <= 0 {
+        return Err("Choose a positive issue number.".into());
+    }
+    let capture = run_gh(&account_root(), &[
+        "issue", "view", &number.to_string(), &format!("--repo={repo}"),
+        "--json=number,title,url,body,labels,comments",
+    ], TIMEOUT)?;
+    issue_context_of(&repo, number, &json(&capture)?)
+}
+
+fn issue_context_of(repo: &str, number: i64, value: &serde_json::Value) -> Result<HubIssueContext, String> {
+    let url = text(value, "url");
+    if value.get("number").and_then(|v| v.as_i64()) != Some(number)
+        || !url.eq_ignore_ascii_case(&format!("https://github.com/{repo}/issues/{number}")) {
+        return Err("GitHub returned a missing or mismatched issue.".into());
+    }
+    let original = text(value, "body");
+    let body = bounded(&original, 16 * 1024);
+    let body_truncated = original.len() > 16 * 1024;
+    let comments = list(value, "comments")
+        .iter()
+        .rev()
+        .take(20)
+        .map(|comment| HubIssueComment {
+            author: author(comment),
+            body: bounded(&text(comment, "body"), 2 * 1024),
+            created_at: text(comment, "createdAt"),
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Ok(HubIssueContext { number, title: text(value, "title"), url, body, body_truncated, labels: names(value, "labels", "name"), comments })
+}
+
 /// One word for a workflow run or job from its status and conclusion. A run that never
 /// started (an invalid workflow file, a missing runner) is `not_started`, not a failure to fix in code.
 pub fn run_state(status: &str, conclusion: &str) -> String {
@@ -346,6 +442,8 @@ pub fn runs_of(value: &serde_json::Value) -> Vec<HubRun> {
         .iter()
         .map(|item| HubRun {
             id: number(item, "id"),
+            run_number: number(item, "run_number"),
+            head_sha: text(item, "head_sha"),
             workflow: text(item, "name"),
             title: text(item, "display_title"),
             branch: text(item, "head_branch"),
@@ -581,6 +679,36 @@ mod tests {
     }
 
     #[test]
+    fn check_details_keep_names_statuses_and_links() {
+        let checks = json!([
+            {"__typename":"CheckRun","workflowName":"CI","name":"test","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/5"},
+            {"__typename":"StatusContext","context":"deploy","state":"SUCCESS","targetUrl":"https://example.test/deploy"}
+        ]);
+        assert_eq!(check_details(&checks), vec![
+            HubCheck { name: "CI / test".into(), state: "failure".into(), url: "https://github.com/o/r/actions/runs/5".into() },
+            HubCheck { name: "deploy".into(), state: "success".into(), url: "https://example.test/deploy".into() },
+        ]);
+    }
+
+    #[test]
+    fn issue_context_is_bounded_and_contains_recent_discussion() {
+        let comments = (0..25).map(|n| json!({"author":{"login":format!("user{n}")},"body":format!("comment {n}"),"createdAt":format!("{n:02}")})).collect::<Vec<_>>();
+        let value = json!({"number":42,"title":"Issue","url":"https://github.com/o/r/issues/42","body":"description",
+            "labels":[{"name":"bug"}],"comments":comments});
+        let context = issue_context_of("o/r", 42, &value).unwrap();
+        assert_eq!(context.body, "description");
+        assert_eq!(context.labels, vec!["bug".to_string()]);
+        assert_eq!(context.comments.len(), 20);
+        assert_eq!(context.comments.first().unwrap().body, "comment 5");
+        assert_eq!(context.comments.last().unwrap().body, "comment 24");
+        let mut oversized = value.clone();
+        oversized["body"] = serde_json::Value::String("x".repeat(16 * 1024 + 1));
+        let context = issue_context_of("o/r", 42, &oversized).unwrap();
+        assert!(context.body_truncated);
+        assert!(issue_context_of("other/r", 42, &value).is_err());
+    }
+
+    #[test]
     fn runs_fold_into_one_state() {
         assert_eq!(run_state("completed", "success"), "passed");
         assert_eq!(run_state("completed", "skipped"), "passed");
@@ -595,7 +723,7 @@ mod tests {
     #[test]
     fn runs_carry_their_pull_requests_attempts_and_timing() {
         let value = json!({ "total_count": 2, "workflow_runs": [
-            { "id": 9087, "name": "CI", "display_title": "Fix contrast", "head_branch": "devon/contrast", "event": "pull_request", "status": "completed", "conclusion": "failure",
+            { "id": 9087, "run_number": 44, "head_sha": "abc123", "name": "CI", "display_title": "Fix contrast", "head_branch": "devon/contrast", "event": "pull_request", "status": "completed", "conclusion": "failure",
               "created_at": "2026-10-20T10:00:00Z", "run_started_at": "2026-10-20T10:01:00Z", "updated_at": "2026-10-20T10:05:30Z", "html_url": "https://github.com/o/r/actions/runs/9087",
               "run_attempt": 2, "pull_requests": [{ "number": 124, "head": { "ref": "devon/contrast" } }] },
             { "id": 9001, "name": ".github/workflows/bad.yml", "display_title": "push", "head_branch": "main", "event": "push", "status": "completed", "conclusion": "startup_failure", "pull_requests": [] }
@@ -603,6 +731,7 @@ mod tests {
         let runs = runs_of(&value);
         assert_eq!(runs.len(), 2);
         assert_eq!((runs[0].attempt, runs[0].pulls.clone(), runs[0].state.as_str(), runs[0].started_at.as_str()), (2, vec![124], "failed", "2026-10-20T10:01:00Z"));
+        assert_eq!((runs[0].run_number, runs[0].head_sha.as_str()), (44, "abc123"));
         assert_eq!((runs[1].attempt, runs[1].pulls.len(), runs[1].state.as_str()), (1, 0, "not_started"));
         assert!(runs_of(&json!({})).is_empty());
     }

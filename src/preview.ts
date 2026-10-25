@@ -1197,6 +1197,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       break;
     }
     case 'github_repo_issues': result = previewHub.issues(String(args.repo)); break;
+    case 'github_repo_issue_context': result = previewHub.issueContext(String(args.repo), Number(args.number)); break;
     case 'github_repo_runs': result = previewHub.runs(String(args.repo)); break;
     case 'github_run_details': result = previewHub.runDetails(String(args.repo), Number(args.id)); break;
     case 'github_project_repos': result = projects.filter(p => p.id === 'project-1' || previewClones.has(p.id)).map(p => ({ projectId: p.id, repo: previewClones.get(p.id) ?? 'orbit-labs/orbit' })); break;

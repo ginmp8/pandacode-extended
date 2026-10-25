@@ -281,9 +281,31 @@ fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, Strin
         );
     }
     if let Some(connection) = &connection {
+        check_console_connection(context.provider, &connection.args)?;
         apply_connection(&mut cmd, connection);
     }
+    if context.provider == "kilo" {
+        // Named account/model configuration survives; permission and update
+        // policy is authoritative after its environment and extra arguments.
+        let inherited = cmd.get_env("KILO_CONFIG_CONTENT").and_then(|value| value.to_str()).map(str::to_owned);
+        cmd.env("KILO_CONFIG_CONTENT", crate::providers::kilo_configuration(context.mode, inherited.as_deref()));
+        cmd.env_remove("KILO_PERMISSION");
+        cmd.env("KILO_DISABLE_AUTOUPDATE", "true");
+        cmd.arg("--auto=false");
+    }
     Ok(cmd)
+}
+
+fn check_console_connection(provider: &str, args: &[String]) -> Result<(), String> {
+    let reserved: &[&str] = match provider {
+        "cline" => &["--auto-approve", "--plan", "--act"],
+        "kilo" => &["--auto", "--agent"],
+        _ => &[],
+    };
+    if args.iter().any(|arg| reserved.contains(&arg.split('=').next().unwrap_or_default())) {
+        return Err("Remove permission or agent-mode arguments from this named connection; choose the console's mode on the task.".into());
+    }
+    Ok(())
 }
 
 fn apply_connection(command: &mut CommandBuilder, connection: &crate::connections::Launch) {
@@ -297,7 +319,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
     if provider == "antigravity" {
         return Err("Antigravity's ACP server does not have an interactive console. Use its synced commands in the composer, or open the agy CLI separately.".into());
     }
-    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "pi" | "omp" | "github-copilot" | "muse" | "devin") {
+    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "pi" | "omp" | "github-copilot" | "muse" | "devin" | "cline" | "kilo") {
         return Err("Choose a supported coding harness.".into());
     }
     if provider == "github-copilot" {
@@ -338,6 +360,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
             match provider {
                 "codex" | "muse" => "resume",
                 "claude" | "glm" | "mimo" | "grok" | "devin" => "--resume",
+                "cline" => "--id",
                 _ => "--session",
             }
             .into(),
@@ -421,6 +444,20 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
             };
             args.extend(["--permission-mode".into(), mode.into()]);
         }
+        "cline" => {
+            args.push("-i".into());
+            if context.mode == "plan" { args.push("--plan".into()); }
+            args.extend(["--auto-approve".into(), if context.mode == "full" { "true" } else { "false" }.into()]);
+        }
+        "kilo" => {
+            if !matches!(context.mode, "ask" | "full") {
+                return Err("Kilo's console cannot enforce this task's approval mode. Use task chat for Plan or Accept edits.".into());
+            }
+            if context.reasoning_effort.is_some() {
+                return Err("Kilo's interactive console cannot apply this reasoning override. Use task chat instead.".into());
+            }
+            args.extend(["--agent".into(), "code".into()]);
+        }
         _ => {
             match context.mode {
                 "plan" => args.push("--plan".into()),
@@ -453,7 +490,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
             ]),
             "claude" | "glm" | "mimo" => args.extend(["--effort".into(), effort.into()]),
             "grok" => args.extend(["--reasoning-effort".into(), effort.into()]),
-            "pi" | "omp" => args.extend(["--thinking".into(), effort.into()]),
+            "pi" | "omp" | "cline" => args.extend(["--thinking".into(), effort.into()]),
             "muse" => args.extend(["--reasoning-effort".into(), effort.into()]),
             _ => {} // The Kimi TUI restores its persisted thinking setting.
         }
@@ -1018,6 +1055,37 @@ mod tests {
         assert!(args.contains(&"--disable-write".to_owned()) && args.contains(&"--disable-shell".to_owned()));
         let full = harness_arguments(&HarnessContext { mode: "full", resume_id: None, ..context }).unwrap();
         assert!(full.contains(&"--disable-approval".to_owned()) && full.contains(&"--disable-sandbox".to_owned()));
+    }
+
+    #[test]
+    fn cline_console_uses_manual_confirmation_including_plan_and_preserves_resume() {
+        let context = HarnessContext { session_id: "task", provider: "cline", resume_id: Some("1792719287191_NBdt7_cli"), model: Some("anthropic/claude-sonnet-5.5"), reasoning_effort: Some("high"), mode: "ask" };
+        for mode in ["ask", "auto", "plan", "full"] {
+            let args = harness_arguments(&HarnessContext { mode, ..context }).unwrap();
+            for pair in [["--id", "1792719287191_NBdt7_cli"], ["--model", "anthropic/claude-sonnet-5.5"], ["--thinking", "high"], ["--auto-approve", if mode == "full" { "true" } else { "false" }]] {
+                assert!(args.windows(2).any(|args| args == pair), "{mode}: {args:?}");
+            }
+            assert!(args.contains(&"-i".into()));
+            assert_eq!(args.contains(&"--plan".into()), mode == "plan");
+            assert!(!args.contains(&"--acp".into()));
+        }
+    }
+
+    #[test]
+    fn kilo_console_preserves_literal_session_and_refuses_unsupported_policy_or_effort() {
+        let context = HarnessContext { session_id: "task", provider: "kilo", resume_id: Some("ses_fixture"), model: Some("provider/model"), reasoning_effort: None, mode: "ask" };
+        for mode in ["ask", "full"] {
+            let args = harness_arguments(&HarnessContext { mode, ..context }).unwrap();
+            assert_eq!(args, ["--session", "ses_fixture", "--agent", "code", "--model", "provider/model"]);
+        }
+        for mode in ["plan", "auto"] {
+            assert!(harness_arguments(&HarnessContext { mode, ..context }).unwrap_err().contains("Use task chat"));
+        }
+        assert!(harness_arguments(&HarnessContext { reasoning_effort: Some("max"), ..context }).is_err());
+        for (provider, flag) in [("kilo", "--auto"), ("kilo", "--auto=true"), ("kilo", "--agent=plan"), ("cline", "--auto-approve"), ("cline", "--auto-approve=true"), ("cline", "--act")] {
+            assert!(check_console_connection(provider, &[flag.into()]).is_err());
+        }
+        assert!(check_console_connection("kilo", &["--verbose".into()]).is_ok());
     }
 
     #[test]

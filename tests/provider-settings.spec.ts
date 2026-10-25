@@ -424,3 +424,37 @@ test('plans have one setup home and OpenCode models stay under Agents', async ({
   await expect(panel).toContainText('Settings → Agents');
   await expect(panel.getByRole('img', { name: 'How providers relate to agents', exact: true })).toBeVisible();
 });
+
+
+test('Kilo keeps its catalog, permissions, named account configuration and installed-CLI guidance', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('pandacode.provider', 'kilo'));
+  await page.goto('/');
+  await page.locator('.new-task-button').click();
+  const trigger = page.getByRole('button', { name: 'Choose harness and model', exact: true });
+  await trigger.click();
+  const picker = page.getByRole('dialog', { name: 'Harness and model', exact: true });
+  const group = picker.getByRole('region', { name: 'Kilo Code', exact: true });
+  await expect(group).toBeVisible();
+  await group.locator('.model-menu-option[data-model="kilo/stealth/claude-sonnet-4.6"]').click();
+  await expect(trigger).toContainText('Claude Sonnet 4.6');
+  await trigger.click();
+  await expect(picker.getByRole('slider', { name: 'Reasoning effort' })).toHaveAttribute('max', '5');
+  await page.keyboard.press('Escape');
+  await page.locator('#mode-picker-trigger').click();
+  const modes = page.getByRole('dialog', { name: 'Permissions', exact: true }).getByRole('menuitemradio');
+  await expect(modes).toHaveCount(4);
+  await expect(modes.filter({ hasText: 'Plan mode' })).toContainText('state-changing permissions are declined');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const settings = page.getByRole('region', { name: 'Settings', exact: true });
+  await settings.getByRole('tab', { name: 'Providers', exact: true }).click();
+  const card = page.locator('.connection-card').filter({ has: page.getByRole('heading', { name: /Kilo Code/ }) });
+  await expect(card).toContainText('kilo auth login');
+  await expect(card.getByRole('link', { name: 'Kilo CLI docs' })).toHaveAttribute('href', 'https://kilo.ai/docs/code-with-ai/platforms/cli');
+  await card.locator('summary').click();
+  await expect(card.getByLabel('Kilo executable', { exact: true })).toBeVisible();
+  const accounts = page.locator('#named-connections');
+  await accounts.getByRole('button', { name: 'Add connection', exact: true }).click();
+  await accounts.getByLabel('Harness', { exact: true }).selectOption('kilo');
+  await expect(accounts.locator('[data-config-var]')).toHaveText('(sets KILO_CONFIG_DIR)');
+});

@@ -15,6 +15,9 @@ pub(super) async fn discover(provider: &str, cwd: &Path) -> Result<Catalog, Stri
     }
     let mut command = crate::providers::command(&path)?;
     match provider {
+        "kilo" => {
+            command.arg("acp").env("KILO_DISABLE_AUTOUPDATE", "true");
+        }
         "opencode" => {
             command.arg("acp");
         }
@@ -84,7 +87,7 @@ mod tests {
 
     #[test]
     fn commands_use_real_provider_names_and_advertised_hints() {
-        for provider in ["opencode", "antigravity", "grok", "github-copilot"] {
+        for provider in ["opencode", "kilo", "antigravity", "grok", "github-copilot"] {
             let catalog = parse_runtime(provider,&json!({"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"review","description":"Review changes","input":{"hint":"[focus]"}}]}}})).unwrap();
             assert_eq!(catalog.commands[0].id, format!("{provider}:/review"));
             assert_eq!(

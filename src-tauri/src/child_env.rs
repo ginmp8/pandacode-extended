@@ -86,6 +86,7 @@ const HARNESS_PRIVACY: &[(&str, &str)] = &[
     ("KIMI_CODE_NO_AUTO_UPDATE", "1"),
     ("KIMI_CLI_NO_AUTO_UPDATE", "1"),
     ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
+    ("KILO_DISABLE_AUTOUPDATE", "true"),
 ];
 
 /// Disable supported background updates/telemetry, then remove AppImage runtime

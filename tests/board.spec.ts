@@ -163,6 +163,8 @@ test.describe('project board', () => {
     await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
     await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
     const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await expect(confirm).toBeVisible();
+    await expect(confirm.getByRole('button', { name: 'Keep issue closed', exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(confirm).toBeHidden();
     await expect.poll(async () => (await calls(page, 'github_cancel_linked_issue_action')).length).toBe(1);
@@ -198,10 +200,30 @@ test.describe('project board', () => {
     await expect(failed).toBeVisible();
     await expect(failed).toContainText('temporarily unavailable');
     await expect(page.locator('#toast')).not.toContainText('closed.');
+    // A late close event from the preceding confirmation must not cancel the open retry form.
+    await failed.evaluate(dialog => dialog.dispatchEvent(new Event('close')));
+    expect(await calls(page, 'github_cancel_linked_issue_action')).toHaveLength(0);
     await failed.getByRole('button', { name: 'Retry approved actions', exact: true }).click();
     await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
     expect(await calls(page, 'github_retry_linked_issue_actions')).not.toHaveLength(0);
     expect((await calls(page, 'github_apply_linked_issue_action')).map(call => call.args.action)).toEqual(['close']);
+  });
+  test('dismissing a retry dialog still cancels after an earlier close event arrives', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
+      (window as any).__failLinkedIssueAction = true;
+    });
+    await page.reload();
+    const failures = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
+    await expect(failures).toBeVisible();
+    await failures.evaluate(dialog => dialog.dispatchEvent(new Event('close')));
+    expect(await calls(page, 'github_cancel_linked_issue_action')).toHaveLength(0);
+    await expect(failures.getByRole('button', { name: 'Leave issues unchanged', exact: true })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(failures).toBeHidden();
+    await expect.poll(async () => (await calls(page, 'github_cancel_linked_issue_action')).length).toBe(1);
+    expect((await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('open');
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pandacode.preview.githubIssueActions') ?? '[]'))).toEqual([]);
   });
   test('retries a persisted approved issue action after GitHub reconnects', async ({ page }) => {
     await page.addInitScript(() => {
@@ -508,6 +530,10 @@ test.describe('project board', () => {
       ]) sessions.push({ ...sessions[1], ...fixture, taskDescription: 'Saved task details', createdAt: now - 691200000, updatedAt: now - 691200000, lastResponseAt: null, archived: false });
     `);
     await page.reload();
+    // The seeded pinned completion is selected at boot; choose the active task for the filter check.
+    await page.locator('.task-item[data-id="session-1"]').click();
+    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
+    await expect(prompt(page)).toBeEnabled();
     await page.locator('#project-filter').click();
     await page.getByRole('dialog', { name: 'Filter projects', exact: true }).getByRole('menuitemradio', { name: 'pandacode', exact: true }).click();
     await expect(page.locator('#sidebar-note .filter-note')).toHaveText('4 more in other projectsShow all');

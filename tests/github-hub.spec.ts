@@ -278,6 +278,8 @@ test('Prepare task links a fresh plan task and seeds a PR-scoped draft without s
   await expect(page.locator('#transcript .user-message')).toHaveCount(1);
   await expect(page.locator('#transcript .user-message').last()).toContainText('Pull request · open');
   await expect(page.locator('#transcript .user-message').last()).not.toContainText('review-context-body-sentinel');
+  // The user row is optimistic; wait for dispatch to reach the IPC boundary.
+  await expect.poll(async () => (await reviewCalls(page)).filter(call => call.command === 'architect_start')).toHaveLength(1);
   const afterSend = await reviewCalls(page);
   expect(afterSend.filter(call => call.command === 'architect_start')).toHaveLength(1);
   expect(afterSend.filter(call => call.command === 'send_message')).toHaveLength(0);
@@ -469,6 +471,8 @@ test('Actions Fix is the only fix control and keeps prompt editable until explic
   const selectedHarness = await page.locator('#model-picker-trigger .provider-small').getAttribute('class');
   await prompt.press('Enter');
   await expect(page.locator('#transcript .user-message').last().locator('.message-content')).toHaveText('Investigate this CI failure and make a focused fix.');
+  // The user row is optimistic; wait for dispatch to reach the IPC boundary.
+  await expect.poll(async () => (await hubCalls(page)).filter(call => call.command === 'send_message')).toHaveLength(1);
   expect((await hubCalls(page)).filter(call => call.command === 'send_message')).toHaveLength(1);
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
   await expect(page.locator('#model-picker-trigger .provider-small')).toHaveAttribute('class', selectedHarness!);

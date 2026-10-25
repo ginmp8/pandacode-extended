@@ -10,7 +10,7 @@ import { cascade, trackSegment } from './motion';
 import { providerLogo } from './provider-logos';
 import { taskStage } from './task-board';
 import { age, connectAdvice, isRecent, issuePrompt, PULL_ACTIONS, pullPrompt, runPrompt, runTitle, threadTitle, WORKFLOW_CHECK_TITLE, workflowCheckPrompt, type IssueAction, type PullAction } from './github-hub-prompts';
-import type { Project, Session, TaskLink } from './types';
+import type { Project, ProviderId, Session, TaskLink } from './types';
 import type { PullReviewContext } from './hardened/review-model';
 
 export interface HubRepo { nameWithOwner: string; description: string; private: boolean; fork: boolean; archived: boolean; pushedAt: string; url: string; defaultBranch: string; openIssues: number; language: string }
@@ -28,7 +28,8 @@ export interface HubHost {
   running(sessionId: string): boolean;
   openTask(sessionId: string): void;
   /** Creates a task in the project, linked when given, and opens it; `send` starts it with the prompt. */
-  startTask(input: { projectId: string; prompt: string; title?: string; link?: TaskLink; send: boolean }): Promise<void>;
+  startTask(input: { projectId: string; prompt: string; title?: string; link?: TaskLink; send: boolean; provider?: ProviderId }): Promise<void>;
+  customizeFix(prompt: string, context: string): Promise<{ prompt: string; provider: ProviderId } | null>;
   reviewPull(context: PullReviewContext): Promise<void>;
   showChoices(anchor: HTMLElement, options: { title: string; items: { id: string; label: string; icon?: string }[]; onSelect: (id: string) => void | Promise<void> }): Promise<void>;
   chooseFolder(title: string): Promise<string | null>;
@@ -277,6 +278,11 @@ export function mountGithubHub(root: HTMLElement, host: HubHost): HubView {
     const project = await ensureLocal(); if (!project) return;
     await host.startTask({ projectId: project.id, prompt: runPrompt(run), title: runTitle(run), send: true });
   }
+  async function customizeRun(run: HubRun): Promise<void> {
+    const project = await ensureLocal(); if (!project) return;
+    const choice = await host.customizeFix(runPrompt(run), `${run.workflow} · ${run.branch} · run ${run.id}`); if (!choice) return;
+    await host.startTask({ projectId: project.id, ...choice, title: runTitle(run), send: true });
+  }
   async function checkWorkflows(): Promise<void> {
     const name = selected, project = await ensureLocal(); if (!project) return;
     await host.startTask({ projectId: project.id, prompt: workflowCheckPrompt(name), title: WORKFLOW_CHECK_TITLE, send: true });
@@ -335,6 +341,7 @@ export function mountGithubHub(root: HTMLElement, host: HubHost): HubView {
     if (data.ghIssue && issue) { void issueAction(data.ghIssue as IssueAction, issue); return; }
     const run = runs.get(selected)?.items?.find(item => item.id === Number(target.closest<HTMLElement>('[data-gh-run]')?.dataset.ghRun));
     if ('ghRunFix' in data && run) void fixRun(run);
+    if ('ghRunCustomize' in data && run) void customizeRun(run);
     if ('ghRunToggle' in data && run) void toggleRun(run);
   };
   const input = (event: Event) => {

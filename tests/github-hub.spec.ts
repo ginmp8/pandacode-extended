@@ -357,6 +357,35 @@ test('pull requests show their CI status, and Actions lists runs with a fix for 
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
 });
 
+test('custom Fix edits the prompt and selects a harness before launching', async ({ page }) => {
+  await openHub(page);
+  await tab(page, /Actions/).click();
+  const run = hub(page).locator('.gh-run[data-gh-run="9087"]');
+  await run.getByRole('button', { name: 'Customize fix' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Customize fix' });
+  const prompt = dialog.locator('#custom-fix-prompt');
+  await expect(prompt).toHaveValue(/gh run view 9087 --log-failed/);
+  await prompt.fill('Investigate this CI failure and make a focused fix.');
+  const harness = dialog.locator('#custom-fix-harness');
+  await expect(harness.locator('option')).not.toHaveCount(0);
+  const selectedHarness = await harness.inputValue();
+  await dialog.getByRole('button', { name: 'Start fix' }).click();
+  await expectSideThread(page);
+  await expect(page.locator('#transcript .user-message').last()).toHaveText('Investigate this CI failure and make a focused fix.');
+  await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
+  await expect(page.locator(`#model-picker-trigger .provider-small.${selectedHarness}`)).toBeVisible();
+  expect(selectedHarness).toBeTruthy();
+});
+
+test('canceling customized Fix starts no task', async ({ page }) => {
+  await openHub(page);
+  await tab(page, /Actions/).click();
+  await hub(page).locator('.gh-run[data-gh-run="9087"]').getByRole('button', { name: 'Customize fix' }).click();
+  await page.getByRole('dialog', { name: 'Customize fix' }).getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
+  await expect(hub(page)).toBeVisible();
+});
+
 test('Actions show each run’s event, pull request, attempts and duration, filtered by event and pull request', async ({ page }) => {
   await openHub(page);
   await tab(page, /Actions/).click();

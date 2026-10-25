@@ -1,4 +1,4 @@
-// Builds one desktop installer on its native OS into release/<version>/hardened/
+// Builds one desktop installer on its native OS into release/<version>/extended/
 // with a SHA-256 sidecar. This local-only distribution never uploads a build.
 //
 //   node scripts/release/build.mjs [darwin-aarch64|darwin-x86_64|windows-x86_64|windows-aarch64|linux-x86_64|linux-aarch64]
@@ -62,7 +62,12 @@ function plan(config, env, mode, bundle) {
 export function builtArtifact(names, releaseVersion, releaseTarget) {
   const config = targetConfig(releaseTarget);
   const release = version(releaseVersion);
-  const expected = [...new Set([config.built(release), config.built(cargoVersion(release))])];
+  // Tauri derives the bundle name from productName; Extended has spaces.
+  // Accept the original name as a fallback for older reproducible source builds.
+  const expected = [...new Set([release, cargoVersion(release)].flatMap(v => {
+    const previous = config.built(v);
+    return [previous.replace(/^PandaCode_/, 'PandaCode Extended_'), previous.replace(/^PandaCode_/, 'PandaCode_Extended_'), previous];
+  }))];
   const found = expected.find(name => names.includes(name));
   if (!found) throw new Error(`Tauri did not produce ${expected.join(' or ')}.`);
   return found;
@@ -70,7 +75,8 @@ export function builtArtifact(names, releaseVersion, releaseTarget) {
 
 export function releaseAssetName(releaseVersion, asset) {
   const displayVersion = version(releaseVersion).replace(/-hardened(\.\d+)?$/, (_, revision = '') => `.hardened${revision}`);
-  return asset.replace('PandaCode-', `PandaCode-${displayVersion}-`);
+  const prefix = /^\d+\.\d+\.\d+$/.test(releaseVersion) ? 'PandaCode-Extended-' : 'PandaCode-';
+  return asset.replace('PandaCode-', prefix + displayVersion + '-');
 }
 
 export function checksumLine(sha256, filename) {
@@ -110,7 +116,7 @@ async function verifyDmg(path, app, releaseVersion) {
     await run('/usr/bin/hdiutil', ['attach', path, '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mount, '-quiet']);
     mounted = true;
     if (await readlink(resolve(mount, 'Applications')) !== '/Applications') throw new Error('The disk image is missing its Applications shortcut.');
-    const installed = resolve(mount, 'PandaCode.app');
+    const installed = resolve(mount, 'PandaCode Extended.app');
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', installed]);
     const installedVersion = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', resolve(installed, 'Contents/Info.plist')], { encoding: 'utf8' }).trim();
     if (![releaseVersion, cargoVersion(releaseVersion)].includes(installedVersion) || await digest(resolve(installed, 'Contents/MacOS/pandacode')) !== await digest(resolve(app, 'Contents/MacOS/pandacode'))) throw new Error('The disk image contains a different app build.');
@@ -134,7 +140,7 @@ async function main() {
   const bundleDir = resolve(bundleRoot, config.bundleDir);
   const source = resolve(bundleDir, builtArtifact(await readdir(bundleDir), releaseVersion, releaseTarget));
   if (releaseTarget.startsWith('darwin-')) {
-    const app = resolve(bundleRoot, 'macos/PandaCode.app');
+    const app = resolve(bundleRoot, 'macos/PandaCode Extended.app');
     await verifyMacApp(app, build.signing.mode);
     await verifyDmg(source, app, releaseVersion);
   }
@@ -142,7 +148,7 @@ async function main() {
     // Drop the build host's Wayland libraries (see appimage.mjs).
     await repackAppImage(source, { log: message => console.log(message) });
   }
-  const output = resolve(releaseDirectory(releaseVersion), 'hardened');
+  const output = resolve(releaseDirectory(releaseVersion), 'extended');
   const asset = releaseAssetName(releaseVersion, config.asset);
   await mkdir(output, { recursive: true });
   const destination = resolve(output, asset);

@@ -102,7 +102,7 @@ fn contains_image(content: &str, id: &str) -> bool {
     let expected = format!("Image ID: {id}");
     context_blocks(content).into_iter().any(|block| {
         let lines: Vec<_> = block
-            .trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '\n'))
+            .trim_end_matches([' ', '\t', '\r', '\n'])
             .split('\n')
             .collect();
         let head = lines[0];

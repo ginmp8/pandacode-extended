@@ -165,7 +165,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -431,6 +431,29 @@ impl Store {
             }
             if version < 27 {
                 migration.execute_batch("CREATE TABLE IF NOT EXISTS github_issue_actions(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,action TEXT NOT NULL CHECK(action IN ('close','reopen')),repository TEXT NOT NULL,number INTEGER NOT NULL CHECK(number>0),url TEXT NOT NULL,approved_at INTEGER NOT NULL); PRAGMA user_version=27;").map_err(|e| e.to_string())?;
+            }
+            if version < 28 {
+                // Durable links let Connect load only attachments belonging to a saved message.
+                migration.execute_batch("CREATE TABLE IF NOT EXISTS message_attachments(
+                    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind='image'),
+                    name TEXT NOT NULL,
+                    mime TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    bytes INTEGER NOT NULL CHECK(bytes>=0),
+                    file TEXT,
+                    source TEXT NOT NULL CHECK(source IN ('file','moodboard')),
+                    moodboard_id TEXT REFERENCES moodboards(id) ON DELETE CASCADE,
+                    moodboard_image_id TEXT REFERENCES moodboard_images(id) ON DELETE CASCADE,
+                    PRIMARY KEY(session_id,id),
+                    CHECK((source='file' AND file IS NOT NULL AND moodboard_id IS NULL AND moodboard_image_id IS NULL) OR (source='moodboard' AND file IS NULL AND moodboard_id IS NOT NULL AND moodboard_image_id IS NOT NULL))
+                  );
+                  CREATE INDEX IF NOT EXISTS message_attachments_session_id ON message_attachments(session_id,id,message_id);
+                  CREATE INDEX IF NOT EXISTS message_attachments_message ON message_attachments(message_id,session_id);
+                  PRAGMA user_version=28;").map_err(|e|e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }
@@ -1039,6 +1062,7 @@ impl Store {
             "omp",
             "github-copilot",
             "muse",
+            "devin",
         ]
         .contains(&provider)
         {
@@ -1224,6 +1248,7 @@ impl Store {
             "omp",
             "github-copilot",
             "muse",
+            "devin",
         ]
         .contains(&provider)
         {
@@ -1742,6 +1767,7 @@ fn handoff_from_provider(content: &str) -> Option<String> {
                 | "omp"
                 | "github-copilot"
                 | "muse"
+                | "devin"
         )
     };
     (known(from) && known(to)).then(|| from.to_owned())
@@ -2996,6 +3022,41 @@ mod tests {
     }
 
     #[test]
+    fn migration_28_creates_message_attachments_index() {
+        let (store, _) = empty_session();
+        let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, 28);
+        let table: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_attachments')", [], |row| row.get(0)).unwrap();
+        let index: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='message_attachments_session_id')", [], |row| row.get(0)).unwrap();
+        assert!(table && index);
+    }
+
+    #[test]
+    fn migration_28_preserves_extended_issue_actions_and_task_history() {
+        let directory = std::env::temp_dir().join(format!("pandacode-attachments-migration-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        let session_id = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&directory).unwrap();
+            let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+            store.message(&task.id, "user", "Keep this Extended conversation").unwrap();
+            store.db.execute("INSERT INTO github_issue_actions(session_id,action,repository,number,url,approved_at) VALUES(?1,'close','owner/project',47,'https://github.com/owner/project/issues/47',123)", [&task.id]).unwrap();
+            store.db.execute_batch("DROP TABLE message_attachments; PRAGMA user_version=27;").unwrap();
+            task.id
+        };
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+            let action: String = store.db.query_row("SELECT action FROM github_issue_actions WHERE session_id=?1", [&session_id], |row| row.get(0)).unwrap();
+            assert_eq!(action, "close");
+            assert_eq!(store.messages(&session_id, None).unwrap()[0].content, "Keep this Extended conversation");
+            assert_eq!(store.db.query_row("SELECT COUNT(*) FROM message_attachments", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn last_response_backfills_old_schema_and_survives_reopen() {
         let dir = std::env::temp_dir().join(format!("pandacode-migration-{}", id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3506,6 +3567,7 @@ mod tests {
                 "omp",
                 "github-copilot",
                 "muse",
+                "devin",
             ] {
                 for mode in ["ask", "auto", "plan", "full"] {
                     let session = store

@@ -235,7 +235,8 @@ test('launcher discovers full model names on demand and launches the chosen harn
   const claude = page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true});
   await expect(claude).toBeVisible();
   await expect(claude.locator('.provider-logo')).toHaveCount(1);
-  await expect(page.getByRole('button',{name:'Antigravity · Default',exact:true})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Antigravity · Default',exact:true})).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'list_provider_models' && call.args.provider === 'antigravity'))).toBe(false);
   await page.getByRole('searchbox',{name:'Search harnesses and models'}).fill('Claude Sonnet 5');
   await claude.click();
   await expect(page.getByRole('dialog',{name:'Harness and model'})).toHaveCount(0);
@@ -243,10 +244,30 @@ test('launcher discovers full model names on demand and launches the chosen harn
   await expect(page.locator('.launcher-agent .provider-logo')).toHaveCount(1);
   await page.getByRole('textbox',{name:'New task'}).fill('Use the selected Claude model');
   await page.getByRole('button',{name:'Start task',exact:true}).click();
-  await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'sonnet',mode:'full'});
+  await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'sonnet',mode:'ask'});
   await expect(page.locator('.launcher-task').filter({hasText:'Use the selected Claude model'})).toBeVisible();
   expect(loaded.some(url => /\/src\/(main|preview)\.ts(?:\?|$)/.test(url))).toBe(false);
   await expect(page.locator('html')).not.toHaveAttribute('data-overlay-hidden','true');
+});
+
+test('launcher keeps an unavailable saved harness visible but disabled without discovering its models', async ({page}) => {
+  await page.addInitScript(() => localStorage.setItem('pandacode.overlay-preview', JSON.stringify({
+    enabled:true, shortcut:'CommandOrControl+Shift+Space', error:null,
+    context:{projectId:'preview-project',provider:'antigravity',model:'default',mode:'ask'},
+  })));
+  await instrumentLauncher(page);
+  await page.goto('/?view=launcher');
+  await expect(page.locator('.launcher-task')).toHaveCount(4);
+  await page.getByRole('button',{name:'Choose harness and model'}).click();
+  const unavailable = page.getByRole('button',{name:'Antigravity · Default',exact:true});
+  await expect(unavailable).toBeVisible();
+  await expect(unavailable).toHaveAttribute('aria-current','true');
+  await expect(unavailable).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'list_provider_models' && call.args.provider === 'antigravity'))).toBe(false);
+  await unavailable.dispatchEvent('click');
+  expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'overlay_select_model'))).toBe(false);
+  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
 });
 
 test('launcher keeps its chosen harness and model through main-window context sync and reload', async ({page}) => {
@@ -283,7 +304,7 @@ test('launcher blocks starting a task while a model change is saving', async ({p
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
   await expect(page.getByRole('button',{name:'Start task',exact:true})).toBeEnabled();
   await page.getByRole('button',{name:'Start task',exact:true}).click();
-  await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'sonnet',mode:'full'});
+  await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'sonnet',mode:'ask'});
 });
 
 test('launcher retains its old model after a failed selection and allows retry', async ({page}) => {
@@ -342,7 +363,7 @@ test('launcher keeps a saved model when an older status snapshot arrives late', 
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
   await page.getByRole('textbox',{name:'New task'}).fill('Preserve my model selection');
   await page.getByRole('button',{name:'Start task',exact:true}).click();
-  await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'sonnet',mode:'full'});
+  await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'sonnet',mode:'ask'});
 });
 
 test('launcher model picker fits the minimum window and Escape only closes the picker', async ({page}) => {

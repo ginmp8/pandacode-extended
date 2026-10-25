@@ -15,9 +15,9 @@ export function compareVersion(a, b) {
   return 0;
 }
 export async function checkUpstream(fetcher = fetch) {
-  const meta = JSON.parse(await readFile(resolve(root, 'HARDENED-REVISION.json'), 'utf8'));
+  const meta = JSON.parse(await readFile(resolve(root, 'EXTENDED-RELEASE.json'), 'utf8'));
   const response = await fetcher('https://api.github.com/repos/aicodeking/pandacode/releases/latest', {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'pandacode-hardened-version-check' },
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'pandacode-extended-version-check' },
     signal: AbortSignal.timeout(10000),
   });
   if (!response.ok) throw new Error(`Could not check upstream releases (HTTP ${response.status})`);

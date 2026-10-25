@@ -30,14 +30,13 @@ releases/
   0.3.42.md                    # Original PandaCode note, unchanged
   extended/
     0.3.42-hardened.md         # Legacy Extended note, retained
-    0.3.42.1.md                # Legacy Extended note, retained
     0.4.0.md                   # New Extended source note
 ```
 
 - Original PandaCode notes stay at `releases/<upstream-version>.md` and keep existing `website/src/data/release-dates.json` keys such as `0.3.42`.
 - All local/Extended notes, including historical `hardened` files, live at `releases/extended/<extended-version>.md`; date keys are **`extended/<extended-version>`** (e.g. `extended/0.4.0`). This avoids future collisions if the original and Extended both use `0.4.0`.
 - The changelog identifies a note's source **from its directory**, not its version number or heading. The display version is taken from the current metadata for the active Extended release.
-- Keep historical note content, attribution and original dates. Missing historical dates remain unknown; never fabricate them to pass a test.
+- Keep historical note content, attribution and original dates for documented releases. Missing historical dates remain unknown; never fabricate them to pass a test. The `0.3.42.1` release candidate was never published as a GitHub Release or tagged; it is intentionally **not** a release-history entry. The Extended release line starts with `0.4.0`.
 - Moving notes changes raw GitHub paths. The maintained links are corrected, but external links to the old paths are not automatically redirected by GitHub; use the mapping above to find the new locations.
 - Git tags and GitHub Releases in this repository, when explicitly created, represent **Extended**, not the mirrored upstream note.
 

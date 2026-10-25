@@ -76,15 +76,23 @@ test.describe('project board', () => {
     await openBoard(page);
     await queueTask(page, 'Drag between stages');
     const task = await savedTask(page, 'Drag between stages');
+    const sidebarRow = page.locator('#navigation .task-item[data-id="' + task.id + '"]');
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
+    await expect(sidebarRow.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: Pending');
     const source = page.locator(`.board-card[data-task-id="${task.id}"]`);
     await source.dragTo(column(page, 'Review'));
     await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'review');
+    const reviewColor = await sidebarRow.locator('.stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor);
+    expect(reviewColor).toBe(await page.locator('.board-column[data-stage="review"] .stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor));
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'review', completedAt: null });
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
     await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'pending', completedAt: null });
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
     await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
+    await expect(sidebarRow).toHaveCount(0);
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'completed', completedAt: expect.any(Number) });
   });
   test('confirms linked issue close and reopen only after each saved stage', async ({ page }) => {

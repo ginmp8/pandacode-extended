@@ -46,7 +46,8 @@ test('a usage limit holds the queue, marks the task, and Continue now recovers b
   await hitLimit(page, Date.now() + 2 * 3600_000);
   await expect(banner(page)).toContainText('Usage limit reached · Resets');
   await expect(queue(page)).toContainText('Paused until the usage limit resets');
-  await expect(page.locator('.task-item[data-id="session-1"] .task-indicator.limited')).toHaveAttribute('aria-label', /^Usage limit · Resets/);
+  await expect(page.locator('.task-item[data-id="session-1"] .task-status.limited')).toHaveAttribute('aria-label', /^Usage limit · Resets/);
+  await expect(page.locator('.task-item[data-id="session-1"] .task-indicator')).toHaveCount(0);
   await banner(page).getByRole('checkbox', { name: 'Resume at reset' }).check();
   await expect.poll(async () => (await calls(page, 'set_resume_at_reset')).at(-1)?.args).toEqual({ sessionId: 'session-1', enabled: true });
   await banner(page).getByRole('button', { name: 'Continue now' }).click();

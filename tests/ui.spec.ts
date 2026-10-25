@@ -2184,6 +2184,10 @@ test('updates live startup and retry status only when real response text arrives
 test('updates live tool status and preserves newer response status across delayed approval replies', async ({ page }) => {
   const sessionId = await startControlledStatusStream(page);
   const status = page.locator('.live-status');
+  const sidebarRow = taskRow(page, sessionId);
+  await expect(sidebarRow).toBeVisible();
+  await expect(sidebarRow.locator('.task-status.running')).toHaveAttribute('aria-label', 'Running');
+  await expect(sidebarRow.locator('.task-indicator')).toHaveCount(0);
   const tool = (id: string, name: string, state: string) => ({ kind: 'tool', text: name, tool: { id, name, status: state, input: `${name} input`, output: state === 'completed' ? `${name} complete` : '' } });
   await emitStatusEvents(page, sessionId, [tool('status-read', 'Read', 'running')]);
   await expect(status).toHaveText('Running Read');
@@ -2196,6 +2200,7 @@ test('updates live tool status and preserves newer response status across delaye
   await emitStatusEvents(page, sessionId, [{ kind: 'approval', requestId: 'status-approval', text: 'Run the next check?' }]);
   const approval = page.locator('.approval-bar');
   await expect(approval).toBeVisible();
+  await expect(sidebarRow.locator('.task-status.attention')).toHaveAttribute('aria-label', 'Needs approval');
   await expect(status).toBeHidden();
   await approval.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__pandacodeResolveStatusApproval)).toBe('function');
@@ -2404,6 +2409,70 @@ test('groups tasks into project folders and remembers a collapsed folder', async
   await expect(taskRow(page, 'session-4')).toHaveAttribute('aria-current', 'page');
   await expect(pandacode.getByRole('button', { name: 'pandacode', exact: true })).toHaveAttribute('aria-expanded', 'true');
   await expect(taskRow(page, 'session-4')).toBeVisible();
+});
+
+test('shows Board stages before project task titles and refreshes a retained sidebar row', async ({ page }) => {
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const body = source + '\nexport const setNativeTaskStage = (id, stage) => { sessions.find(task => task.id === id).taskStage = stage; emit("sessions-changed", {}); };';
+    await route.fulfill({ response, body: previewBody(body) });
+  });
+  await page.reload();
+  const pending = taskRow(page, 'session-2');
+  const pendingDot = pending.locator('.stage-dot');
+  await expect(pending).toHaveAttribute('data-stage', 'pending');
+  await expect(pending).toHaveClass(/task-oneline/);
+  await expect(pendingDot).toHaveAttribute('title', 'Board stage: Pending');
+  await expect(pending).toHaveAttribute('aria-description', /Board stage: Pending/);
+  expect(await pending.locator('.task-title-row').evaluate(row => row.firstElementChild === row.querySelector('.stage-dot') && row.lastElementChild === row.querySelector('.task-title'))).toBe(true);
+
+  const selectedReview = taskRow(page, 'session-1');
+  await expect(selectedReview).toHaveAttribute('data-stage', 'review');
+  await expect(selectedReview).toHaveAttribute('data-activity', 'active');
+  await expect(pendingDot).toHaveCSS('background-color', 'rgb(150, 149, 143)');
+  await expect(selectedReview.locator('.stage-dot')).toHaveCSS('background-color', 'rgb(165, 154, 220)');
+  await chooseProjectFilter(page, 'orbit');
+  await expect(pending).not.toHaveClass(/task-oneline/);
+  await expect(pending.locator('.stage-dot')).toBeVisible();
+
+  await pending.press('Shift+F10');
+  const menu = page.getByRole('dialog', { name: 'Task actions', exact: true });
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: 'Pin task', exact: true }).click();
+  const pinned = page.locator('.pinned-group .task-item[data-id="session-2"]');
+  await expect(pinned).toHaveAttribute('data-stage', 'pending');
+  await expect(pinned.locator('.stage-dot')).toBeVisible();
+  await pinned.press('Shift+F10');
+  await expect(menu).toBeVisible();
+  await pinned.evaluate(row => { (window as any).__retainedTaskRow = row; });
+  await page.evaluate(async () => {
+    const { setNativeTaskStage } = await import((window as any).__pandacodePreviewUrl);
+    setNativeTaskStage('session-2', 'review');
+  });
+  await expect(pinned).toHaveAttribute('data-stage', 'review');
+  await expect(pinned).toHaveAttribute('aria-description', /Board stage: Review/);
+  await expect(pinned.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: Review');
+  await expect(menu).toBeVisible();
+  expect(await pinned.evaluate(row => row === (window as any).__retainedTaskRow)).toBe(true);
+  await expect(pinned.locator('.stage-dot')).toHaveCSS('background-color', 'rgb(165, 154, 220)');
+
+  await page.evaluate(async () => {
+    const { setNativeTaskStage } = await import((window as any).__pandacodePreviewUrl);
+    setNativeTaskStage('session-2', 'in_progress');
+  });
+  await expect(pinned).toHaveAttribute('data-stage', 'in_progress');
+  await expect(pinned.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: In progress');
+  const accentColor = await page.evaluate(() => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--accent)';
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  expect(await pinned.locator('.stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor)).toBe(accentColor);
+  await page.keyboard.press('Escape');
 });
 
 test('moves a task to inactive automatically at the 24 hour response boundary', async ({ page }) => {

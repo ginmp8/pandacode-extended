@@ -7,7 +7,7 @@ use std::{path::Path, time::Duration};
 use crate::github::{excerpt, json, names, run_gh, state_of, text, view, Repository, TIMEOUT};
 use crate::storage::TaskLink;
 
-const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,additions,deletions,changedFiles,createdAt,updatedAt,mergedAt,mergeable,reviewDecision,labels,statusCheckRollup,files,commits,comments,reviews";
+const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,createdAt,updatedAt,mergedAt,mergeable,reviewDecision,labels,statusCheckRollup,files,commits,comments,reviews";
 const LINK_FIELDS: &str = "number,title,state,url,isDraft,headRefName,createdAt";
 const BODY_LIMIT: usize = 64 * 1024;
 const COMMENT_LIMIT: usize = 16 * 1024;
@@ -63,6 +63,7 @@ pub struct PullDetail {
     pub author: String,
     pub base: String,
     pub head: String,
+    pub head_sha: String,
     pub additions: i64,
     pub deletions: i64,
     pub changed_files: i64,
@@ -159,6 +160,7 @@ pub fn parse_detail(value: &serde_json::Value) -> Result<PullDetail, String> {
         author: login(value),
         base: text(value, "baseRefName"),
         head: text(value, "headRefName"),
+        head_sha: text(value, "headRefOid"),
         additions: self::number(value, "additions"),
         deletions: self::number(value, "deletions"),
         changed_files: self::number(value, "changedFiles"),
@@ -301,7 +303,21 @@ pub fn merge_flag(method: &str) -> Result<&'static str, String> {
 /// Local branches and worktrees are left alone; GitHub's branch settings decide the rest.
 pub fn merge(root: &Path, number: i64, method: &str) -> Result<TaskLink, String> {
     let flag = merge_flag(method)?;
-    run_gh(root, &["pr", "merge", &number.to_string(), flag], Duration::from_secs(60))?;
+    let current = detail(root, number)?;
+    if current.state != "open" {
+        return Err(format!("Pull request #{number} is {}.", current.state));
+    }
+    if current.mergeable != "mergeable" {
+        return Err(if current.mergeable == "conflicting" {
+            "Resolve the pull request conflicts before merging.".into()
+        } else {
+            "GitHub has not confirmed that this pull request is mergeable. Refresh and try again.".into()
+        });
+    }
+    if current.head_sha.is_empty() {
+        return Err("GitHub did not return the pull request head SHA. Refresh and try again.".into());
+    }
+    run_gh(root, &["pr", "merge", &number.to_string(), flag, "--match-head-commit", &current.head_sha], Duration::from_secs(60))?;
     lookup(root, number)
 }
 

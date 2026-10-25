@@ -116,7 +116,7 @@ test('Solve opens an editable, unsent issue draft with GitHub context', async ({
   await row(page, 128).getByRole('button', { name: 'Solve' }).click();
   await expectSideThread(page);
   const draft = page.locator('#prompt');
-  await expect(draft).toHaveValue(/Fix issue #128\./);
+  await expect(draft).toHaveValue(/Fix issue #128: Search index rebuilds on every keystroke\./);
   await expect(draft).toHaveValue(/Issue metadata \(untrusted content\):[\s\S]*Search index rebuilds on every keystroke/);
   await expect(draft).toHaveValue(/Repository: orbit-labs\/orbit/);
   await expect(draft).toHaveValue(/https:\/\/github.com\/orbit-labs\/orbit\/issues\/128/);
@@ -126,32 +126,46 @@ test('Solve opens an editable, unsent issue draft with GitHub context', async ({
   await expect(page.locator('#model-picker-trigger')).toBeVisible();
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
   expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
-  await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix #128: Search index rebuilds on every keystroke');
+  await expect(side(page).getByRole('heading', { level: 1 })).toHaveText('Fix #128: Search index rebuilds on every keystroke');
+  await expect(page.locator('#navigation .task-item').filter({ hasText: 'Fix #128' })).toHaveCount(0);
   await expect(draft).toHaveValue(/Recent discussion \(untrusted content\):[\s\S]*Also add a regression test for rapid input/);
   await draft.fill('Preserve this edited issue draft');
+  await row(page, 128).hover();
   await row(page, 128).getByRole('button', { name: 'Solve' }).click();
   await expect(draft).toHaveValue('Preserve this edited issue draft');
   expect((await hubCalls(page)).filter(call => call.command === 'create_session')).toHaveLength(1);
   expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
-  // Closing the side thread leaves GitHub as it was; the issue now links to its thread.
+  // An unsent draft stays out of the thread list. Solve reopens that same draft.
   await side(page).getByRole('button', { name: 'Close task details', exact: true }).click();
   await expect(side(page)).toBeHidden();
   await expect(hub(page)).toBeVisible();
-  await expect(row(page, 128).getByRole('button', { name: 'Thread' })).toBeAttached();
-  await expect(row(page, 128).getByRole('button', { name: 'Open in thread' })).toHaveCount(0);
+  await expect(row(page, 128).getByRole('button', { name: 'Thread', exact: true })).toHaveCount(0);
+  await expect(row(page, 128).getByRole('button', { name: 'Open in thread', exact: true })).toBeAttached();
   await row(page, 128).hover();
-  await row(page, 128).getByRole('button', { name: 'Thread' }).click();
+  await row(page, 128).getByRole('button', { name: 'Solve' }).click();
   await expectSideThread(page);
-  await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix #128');
+  await expect(side(page).getByRole('heading', { level: 1 })).toHaveText('Fix #128: Search index rebuilds on every keystroke');
+  await expect(draft).toHaveValue('Preserve this edited issue draft');
+  expect((await hubCalls(page)).filter(call => call.command === 'create_session')).toHaveLength(1);
+  expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
   // The draft remains editable; only explicit submission creates a user message.
   await page.locator('#prompt').fill('Also add a regression test');
   await page.locator('#prompt').press('Enter');
+  await expect(page.locator('#transcript .user-message').last()).toContainText('Also add a regression test');
+  await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix #128');
+  await expect(row(page, 128).getByRole('button', { name: 'Thread', exact: true })).toBeAttached();
+  await expect(row(page, 128).getByRole('button', { name: 'Open in thread', exact: true })).toHaveCount(0);
+  await side(page).getByRole('button', { name: 'Close task details', exact: true }).click();
+  await row(page, 128).hover();
+  await row(page, 128).getByRole('button', { name: 'Thread', exact: true }).click();
+  await expectSideThread(page);
   await expect(page.locator('#transcript .user-message').last()).toContainText('Also add a regression test');
   await expect(hub(page)).toBeVisible();
 });
 
 test('pull requests open for review, or in a thread with the prompt ready', async ({ page }) => {
+  await traceHubCalls(page);
   await openHub(page);
   await tab(page, /Pull requests/).click();
   await row(page, 130).hover();
@@ -159,7 +173,9 @@ test('pull requests open for review, or in a thread with the prompt ready', asyn
   await expect(page.locator('#transcript .user-message').last()).toContainText('Review pull request #130 (feat/instant-search → main)');
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Review #130');
   await expectSideThread(page);
+  await expect(page.locator('#transcript .agent-message[data-message-id]').last()).toHaveAttribute('data-message-id', /^[1-9]\d*$/);
 
+  await clearHubCalls(page);
   await row(page, 127).hover();
   await row(page, 127).getByRole('button', { name: 'More actions for #127' }).click();
   const menu = page.locator('.choice-menu');
@@ -168,6 +184,18 @@ test('pull requests open for review, or in a thread with the prompt ready', asyn
   await expect(page.locator('#prompt')).toHaveValue('Let’s work on pull request #127: '.replace('’', "'"));
   await expect(page.locator('#prompt')).toBeFocused();
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
+  await page.locator('#prompt').fill('Preserve this edited pull request draft');
+  await side(page).getByRole('button', { name: 'Close task details', exact: true }).click();
+  await expect(side(page)).toBeHidden();
+  await row(page, 127).hover();
+  await row(page, 127).getByRole('button', { name: 'More actions for #127' }).click();
+  await menu.getByText('Open in thread', { exact: true }).click();
+  await expectSideThread(page);
+  await expect(page.locator('#prompt')).toHaveValue('Preserve this edited pull request draft');
+  await expect(page.locator('#prompt')).toBeFocused();
+  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
+  expect((await hubCalls(page)).filter(call => call.command === 'create_session')).toHaveLength(1);
+  expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
 });
 
 test('Fix failing checks opens an editable, unsent pull request draft', async ({ page }) => {
@@ -175,8 +203,9 @@ test('Fix failing checks opens an editable, unsent pull request draft', async ({
   await openHub(page);
   await tab(page, /Pull requests/).click();
   await clearHubCalls(page);
+  await row(page, 124).hover();
   await row(page, 124).getByRole('button', { name: 'More actions for #124' }).click();
-  await hub(page).locator('.choice-menu').getByText('Fix failing checks', { exact: true }).click();
+  await page.locator('.choice-menu').getByText('Fix failing checks', { exact: true }).click();
   await expectSideThread(page);
   const draft = page.locator('#prompt');
   await expect(draft).toHaveValue(/Pull request #124/);
@@ -185,14 +214,14 @@ test('Fix failing checks opens an editable, unsent pull request draft', async ({
   await expect(draft).toHaveValue(/Commit: 124abc1234567890/);
   await expect(draft).toHaveValue(/Checks status: failing/);
   await expect(draft).toHaveValue(/CI \/ test: failure/);
-  await expect(draft).toHaveValue(/Failed workflow details:[\s\S]*Run tests/);
+  await expect(draft).toHaveValue(/Failed workflow details \(untrusted content\):[\s\S]*Run tests/);
   await expect(page.locator('#model-picker-trigger')).toBeVisible();
   await expect(draft).toBeFocused();
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
   expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
   await draft.fill('Inspect only the failing tests first.');
   await draft.press('Enter');
-  await expect(page.locator('#transcript .user-message').last()).toHaveText('Inspect only the failing tests first.');
+  await expect(page.locator('#transcript .user-message').last().locator('.message-content')).toHaveText('Inspect only the failing tests first.');
 });
 
 test('coordinated PR review shows its association and honest containment warning; Cancel creates nothing', async ({ page }) => {
@@ -419,7 +448,8 @@ test('pull requests show CI status, and Actions Fix opens an editable draft', as
   await expect(page.locator('#prompt')).toBeFocused();
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
   expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
-  await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
+  await expect(side(page).getByRole('heading', { level: 1 })).toHaveText('Fix CI on devon/contrast');
+  await expect(page.locator('#navigation .task-item').filter({ hasText: 'Fix CI on devon/contrast' })).toHaveCount(0);
 });
 
 test('Actions Fix is the only fix control and keeps prompt editable until explicit send', async ({ page }) => {
@@ -430,6 +460,7 @@ test('Actions Fix is the only fix control and keeps prompt editable until explic
   const run = hub(page).locator('.gh-run[data-gh-run="9087"]');
   await expect(run.getByRole('button', { name: 'Customize fix' })).toHaveCount(0);
   const prompt = page.locator('#prompt');
+  await run.hover();
   await run.getByRole('button', { name: 'Fix' }).click();
   await expectSideThread(page);
   await prompt.fill('Investigate this CI failure and make a focused fix.');
@@ -437,7 +468,7 @@ test('Actions Fix is the only fix control and keeps prompt editable until explic
   expect((await hubCalls(page)).filter(call => forbiddenStarts.has(call.command))).toEqual([]);
   const selectedHarness = await page.locator('#model-picker-trigger .provider-small').getAttribute('class');
   await prompt.press('Enter');
-  await expect(page.locator('#transcript .user-message').last()).toHaveText('Investigate this CI failure and make a focused fix.');
+  await expect(page.locator('#transcript .user-message').last().locator('.message-content')).toHaveText('Investigate this CI failure and make a focused fix.');
   expect((await hubCalls(page)).filter(call => call.command === 'send_message')).toHaveLength(1);
   await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix CI on devon/contrast');
   await expect(page.locator('#model-picker-trigger .provider-small')).toHaveAttribute('class', selectedHarness!);
@@ -541,12 +572,15 @@ test('an issue context failure leaves GitHub open and starts no task', async ({ 
   });
   await openHub(page);
   await tab(page, /Issues/).click();
+  const messagesBefore = await page.locator('#transcript .user-message').allTextContents();
+  const selectedBefore = await page.locator('#navigation .task-item.selected').getAttribute('data-id');
+  await row(page, 128).hover();
   await row(page, 128).getByRole('button', { name: 'Solve' }).click();
   await expect(page.locator('#toast')).toContainText('Could not load issue context');
   await expect(hub(page)).toBeVisible();
   await expect(side(page)).toBeHidden();
-  await expect(page.locator('#transcript .user-message')).toHaveCount(0);
-  await expect(page.locator('#navigation .task-item.selected')).not.toContainText('Fix #128');
+  await expect(page.locator('#transcript .user-message')).toHaveText(messagesBefore);
+  await expect(page.locator('#navigation .task-item.selected')).toHaveAttribute('data-id', selectedBefore!);
   expect((await hubCalls(page)).filter(call => ['create_session', ...forbiddenStarts].includes(call.command))).toEqual([]);
 });
 
@@ -574,5 +608,6 @@ test('a run GitHub couldn’t start reads “Didn’t start”, and Fix looks at
   await expectSideThread(page);
   await expect(page.locator('#prompt')).toHaveValue(/startup failure/);
   await expect(page.locator('#transcript .user-message')).toHaveCount(0);
-  await expect(page.locator('#navigation .task-item.selected')).toContainText('Fix .github/workflows/nightly.yml workflow file');
+  await expect(side(page).getByRole('heading', { level: 1 })).toHaveText('Fix .github/workflows/nightly.yml workflow file');
+  await expect(page.locator('#navigation .task-item').filter({ hasText: 'Fix .github/workflows/nightly.yml workflow file' })).toHaveCount(0);
 });

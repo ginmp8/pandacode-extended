@@ -1669,7 +1669,7 @@ async function startHubTask({ projectId, prompt, title, link, identity, send: st
   try {
     const preparedId = identity && githubPreparedTasks.get(key);
     if (preparedId && state.sessions.some(item => item.id === preparedId)) {
-      if (preparedId !== state.sessionId) await openHubTask(preparedId);
+      if (preparedId !== state.sessionId || !state.boardPanel) await openHubTask(preparedId);
       else document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
       return;
     }
@@ -1677,13 +1677,14 @@ async function startHubTask({ projectId, prompt, title, link, identity, send: st
     const currentLink = link?.kind === 'issue' ? current?.issue : current?.pullRequest;
     if (current?.draft && current.projectId === projectId && title === current.title
       && (!link || currentLink?.number === link.number && currentLink.url === link.url)) {
-      document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
+      if (!state.boardPanel) await openHubTask(current.id);
+      else document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
       return;
     }
     const existingDraft = !identity && state.sessions.find(item => item.draft && item.projectId === projectId && item.title === title && !deletedSessions.has(item.id)
       && (!link || (link.kind === 'issue' ? item.issue : item.pullRequest)?.number === link.number));
     if (existingDraft) {
-      if (existingDraft.id !== state.sessionId) await openHubTask(existingDraft.id);
+      if (existingDraft.id !== state.sessionId || !state.boardPanel) await openHubTask(existingDraft.id);
       return;
     }
     await github.status(projectId);
@@ -1958,7 +1959,13 @@ function showLinkedIssueActionFailures(projectId: string, failures: LinkedIssueA
   let settled = false;
   const dialog = modal('GitHub issue actions need attention', issueActionDialogBody(pending), 'github-issue-retry-dialog');
   const cancelPending = () => { for (const failure of pending) void cancelLinkedIssueAction(failure.sessionId); };
-  dialog.addEventListener('close', () => { if (!settled) { settled = true; cancelPending(); } }, { once: true });
+  const cancelWhenClosed = () => {
+    // The preceding confirmation's queued close event can arrive after this shared dialog reopens.
+    if (dialog.open) return;
+    dialog.removeEventListener('close', cancelWhenClosed);
+    if (!settled) { settled = true; cancelPending(); }
+  };
+  dialog.addEventListener('close', cancelWhenClosed);
   const leave = dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!;
   const retry = dialog.querySelector<HTMLButtonElement>('[data-issue-retry]')!;
   leave.addEventListener('click', () => { settled = true; cancelPending(); closeModal(); });

@@ -14,7 +14,7 @@ export type PullComment = { kind: 'comment' | 'review'; author: string; body: st
 export type PullDetail = {
   number: number; title: string; body: string; bodyTruncated: boolean; state: string; url: string; author: string;
   base: string; head: string; additions: number; deletions: number; changedFiles: number;
-  createdAt: string; updatedAt: string; mergedAt: string; mergeable: string; reviewDecision: string;
+  createdAt: string; updatedAt: string; mergedAt: string; mergeable: string; reviewDecision: string; headSha: string;
   labels: string[]; checks: PullCheck[]; files: PullFile[]; commits: PullCommit[]; timeline: PullComment[];
 };
 export type PullDiff = { patch: string; truncated: boolean };
@@ -83,6 +83,7 @@ export function createPullView(host: PullHost) {
     const root = document.createElement('div');
     root.className = 'pull-view';
     root.addEventListener('click', event => void onClick(event));
+    root.addEventListener('change', event => void onChange(event));
     target.replaceChildren(root);
     mounted = { key, session, root, section: 'overview', viewers: new Map(), request: 0, merge: 'idle', method: 'squash' };
     void load(false);
@@ -116,7 +117,7 @@ export function createPullView(host: PullHost) {
     const options = (Object.keys(MERGE_LABEL) as MergeMethod[]).map(method => `<option value="${method}" ${method === view.method ? 'selected' : ''}>${MERGE_LABEL[method]}</option>`).join('');
     return `<div class="pull-merge pull-merge-confirm" role="group" aria-label="Merge pull request #${detail.number}">
       <select data-pull-merge-method aria-label="Merge method" ${busy ? 'disabled' : ''}>${options}</select>
-      <button class="primary-button" data-pull-action="merge-confirm" ${busy ? 'disabled' : ''}>${busy ? 'Merging…' : `Confirm merge`}</button>
+      <button class="primary-button" data-pull-action="merge-confirm" ${busy ? 'disabled' : ''}>${busy ? 'Merging…' : `Confirm ${MERGE_LABEL[view.method]}`}</button>
       <button class="secondary-button" data-pull-action="merge-cancel" ${busy ? 'disabled' : ''}>Cancel</button>
     </div>`;
   }
@@ -153,6 +154,7 @@ export function createPullView(host: PullHost) {
         <span class="pull-actions"><button class="icon-button" data-pull-action="refresh" aria-label="Refresh pull request" title="Refresh">${icon('refresh')}</button><button class="icon-button" data-pull-action="open" data-url="${escape(detail.url)}" aria-label="Open on GitHub" title="Open on GitHub">${icon('globe')}</button><button class="icon-button" data-pull-action="unlink" aria-label="Unlink pull request" title="Unlink from this task">${icon('close')}</button></span></div>
       <h3 class="pull-title">${escape(detail.title)}</h3>
       <p class="pull-meta">${detail.author ? `<strong>${escape(detail.author)}</strong> · ` : ''}<code title="${escape(detail.head)}">${escape(detail.head)}</code><span class="pull-into" aria-label="into">→</span><code>${escape(detail.base)}</code></p>
+      ${detail.headSha ? `<p class="pull-muted">Head <code>${escape(detail.headSha)}</code></p>` : ''}
       <p class="pull-stats"><span class="pull-added">+${detail.additions}</span><span class="pull-removed">−${detail.deletions}</span><span>${plural(detail.changedFiles, 'file')}</span><span>${plural(detail.commits.length, 'commit')}</span><span>${escape(state === 'merged' ? `merged ${ago(detail.mergedAt)}` : `updated ${ago(detail.updatedAt)}`)}</span></p>
       ${badges ? `<div class="pull-badges">${badges}</div>` : ''}
       ${detail.labels.length ? `<div class="pull-labels">${detail.labels.map(label => `<span>${escape(label)}</span>`).join('')}</div>` : ''}
@@ -229,6 +231,15 @@ export function createPullView(host: PullHost) {
       case 'section': if (detail) { view.section = target.dataset.section as Section; await render(view, detail); view.root.querySelector<HTMLElement>('[aria-selected="true"]')?.focus(); } break;
       case 'file': await toggleFile(view, target); break;
     }
+  }
+
+  async function onChange(event: Event): Promise<void> {
+    const view = mounted;
+    const select = (event.target as Element).closest<HTMLSelectElement>('[data-pull-merge-method]');
+    const detail = view && details.get(view.key)?.detail;
+    if (!view || !select || !detail || !Object.hasOwn(MERGE_LABEL, select.value)) return;
+    view.method = select.value as MergeMethod;
+    await render(view, detail);
   }
 
   /** Forget a task's cached PR, e.g. after relinking. */

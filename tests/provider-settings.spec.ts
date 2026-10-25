@@ -406,3 +406,21 @@ test('Cline has a sign-in card, four approval modes and thinking levels', async 
   await card.locator('summary').click();
   await expect(card.getByLabel('Cline executable', { exact: true })).toBeVisible();
 });
+
+
+test('plans have one setup home and OpenCode models stay under Agents', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const settings = page.getByRole('region', { name: 'Settings', exact: true });
+  await settings.getByRole('tab', { name: 'Agents', exact: true }).click();
+  await expect(settings.locator('.provider-diagnostic[data-provider="glm"]')).toHaveCount(0);
+  await expect(settings.locator('.provider-diagnostic[data-provider="mimo"]')).toHaveCount(0);
+  await expect(settings.locator('.provider-diagnostic[data-provider="opencode"]')).toBeVisible();
+  await settings.getByRole('tab', { name: 'Providers', exact: true }).click();
+  const panel = settings.getByRole('tabpanel', { name: 'Providers', exact: true });
+  await expect(panel.getByRole('heading', { name: /GLM Coding Plan/ })).toBeVisible();
+  await expect(panel.getByRole('heading', { name: /MiMo Token Plan/ })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Choose models', exact: true })).toHaveCount(0);
+  await expect(panel).toContainText('Settings → Agents');
+  await expect(panel.getByRole('img', { name: 'How providers relate to agents', exact: true })).toBeVisible();
+});

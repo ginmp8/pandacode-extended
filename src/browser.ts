@@ -7,6 +7,8 @@ import type { BrowserAttachment, BrowserBounds, BrowserElement, BrowserScreensho
 
 export interface BrowserPanel { close(): Promise<void>; refresh(): void; navigate(url: string): Promise<BrowserStatus>; watchJev(runId: string): Promise<void>; review?(args: Record<string, unknown>): Promise<unknown>; resizeReview?(origin: string, width: number, height: number): Promise<unknown>; }
 type Options = { task(): string | undefined; session(): string | undefined; navigated?(url: string): void; attach(taskId: string, attachment: BrowserAttachment): void; close(): void; test?(url?: string, anchor?: HTMLElement): void; };
+const linuxBrowser = (): boolean => /Linux/i.test(navigator.platform);
+const EXTERNAL_NOTICE = 'Opened in your system browser. QA and captures stay with the native Browser pane.';
 const emptyStatus = (): BrowserStatus => ({ url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false });
 
 export function normalizeUrl(input: string): string {
@@ -34,9 +36,9 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   host.innerHTML = `<div class="browser-toolbar">
     ${tool('back', 'Go back', 'back')}${tool('forward', 'Go forward', 'forward')}${tool('reload', 'Reload page', 'refresh')}
     <form class="browser-address"><span>${icon('globe')}</span><input aria-label="Browser URL" placeholder="Enter URL or localhost port" autocomplete="off" spellcheck="false" inputmode="url"><button type="submit" aria-label="Open URL">${icon('arrow')}</button></form>
-    ${tool('pick', 'Attach an element', 'select')}${tool('capture', 'Attach screenshot', 'camera')}${tool('review-qa', 'Browser QA', 'check')}
+    ${linuxBrowser() ? tool('external', 'Open in system browser', 'forward') : ''}${tool('pick', 'Attach an element', 'select')}${tool('capture', 'Attach screenshot', 'camera')}${tool('review-qa', 'Browser QA', 'check')}
   </div><div class="browser-location"><button type="button" data-browser-action="home">${icon('server')}Local servers</button><span class="browser-page-title"></span><button type="button" class="browser-watch-jev" data-browser-action="watch-jev" hidden>${icon('spark')}Watch Jev</button>${options.test ? tool('test', 'Test with Jev', 'spark') : ''}${tool('close', 'Close browser', 'close')}</div>
-  <div class="browser-notice" role="status" hidden></div><div class="browser-viewport"><section class="browser-home"><div class="browser-home-heading"><h2>Local servers</h2>${tool('refresh-ports', 'Refresh local servers', 'refresh')}</div><div class="browser-servers" aria-label="Local servers"></div><p class="browser-home-hint">Open a server, or enter any website above.</p></section><div class="browser-guest-placeholder" hidden></div></div>`;
+  <div class="browser-notice" role="status" hidden></div><div class="browser-viewport"><section class="browser-home"><div class="browser-home-heading"><h2>Local servers</h2>${tool('refresh-ports', 'Refresh local servers', 'refresh')}</div><div class="browser-servers" aria-label="Local servers"></div><p class="browser-home-hint">Open a server, or enter any website above.${linuxBrowser() ? ' If a native page does not fit on Linux, choose Open in system browser. Browser QA remains in the native pane.' : ''}</p></section><div class="browser-guest-placeholder" hidden></div></div>`;
   const query = <T extends HTMLElement = HTMLElement>(selector: string) => host.querySelector<T>(selector)!;
   const address = query<HTMLInputElement>('.browser-address input'), viewport = query('.browser-viewport');
   const notice = query('.browser-notice'), placeholder = query('.browser-guest-placeholder');
@@ -178,6 +180,12 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   }
   async function act(action: string, anchor?: HTMLElement): Promise<void> {
     if (disposed) return;
+    if (action === 'external') {
+      const url = normalizeUrl(address.value || status.url);
+      await call('browser_open_external', { url });
+      if (!disposed) tell(EXTERNAL_NOTICE);
+      return;
+    }
     if (action === 'review-qa') { (await ensureQA()).toggle(); return; }
     if (action === 'test') { options.test?.(watching ? live?.url() : status.url || undefined, anchor); return; }
     if (action === 'watch-jev') { await live?.watch(); return; }

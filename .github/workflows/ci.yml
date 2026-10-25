@@ -60,6 +60,13 @@ jobs:
           test -x "$PANDACODE_TEST_CHROME"
           npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --workers=2
 
+      - name: Run historical parity, bot, document and permission regressions
+        run: |
+          set -euo pipefail
+          export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
+          test -x "$PANDACODE_TEST_CHROME"
+          npx playwright test 'historical-.*.spec.ts' tests/office-viewer.spec.ts tests/document-viewer.spec.ts tests/bots.spec.ts tests/bots-web.spec.ts tests/bots-profile.spec.ts tests/approval-modes.spec.ts tests/tray-popover.spec.ts tests/inspector-new-task.spec.ts tests/jev.spec.ts tests/jev-assist.spec.ts tests/vm.spec.ts tests/deploy.spec.ts --workers=2
+
   connect:
     name: Connect (${{ matrix.package }})
     runs-on: ubuntu-latest

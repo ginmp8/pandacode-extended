@@ -32,6 +32,28 @@ jobs:
       - run: npm run test:release
       - run: npm run site:build
 
+  chat-ui:
+    name: Chat/sidebar Playwright regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run chat and thread-order browser tests twice
+        run: |
+          set -euo pipefail
+          # An existing thread-order screenshot test uses this macOS path.
+          sudo mkdir -p /private/tmp
+          sudo chmod 1777 /private/tmp
+          export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
+          test -x "$PANDACODE_TEST_CHROME"
+          npx playwright test tests/chats.spec.ts tests/thread-order.spec.ts --workers=1 --repeat-each=2
+
   rust:
     name: Rust check and tests (Linux)
     runs-on: ubuntu-22.04

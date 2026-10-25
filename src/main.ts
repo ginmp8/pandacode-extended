@@ -92,7 +92,7 @@ type WorkspaceView = 'conversation' | 'board' | 'github';
 type LiveTool = { key: string; content: string | ToolActivity; statusOnly?: boolean; commentary?: boolean };
 type Stream = { text: string; retainedMessageKey?: string; tools: LiveTool[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage };
 /** Views this platform can show; the inspector's open tabs and selection persist across launches. */
-const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view === 'simulator' ? isMac || isWindows : view === 'vm' ? isMac : true);
+const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view !== 'simulator' || isMac || isWindows);
 let inspectorTabs = loadTabs(localStorage, INSPECTOR_AVAILABLE);
 const INSPECTOR_TITLES: Record<InspectorView, string> = { files: 'Files', search: 'Search', changes: 'Changes', browser: 'Browser', pull: 'Pull request', simulator: 'Simulators', vm: 'Virtual machines', design: 'Design' };
 const INSPECTOR_TIPS: Partial<Record<InspectorView, string>> = { simulator: 'iOS & Android simulators', design: 'Design canvas' };
@@ -3053,7 +3053,7 @@ function syncSimulatorPanel(): void {
 }
 /** The VM panel stays mounted once opened; hiding it stops its frames. */
 function syncVmPanel(): void {
-  const wanted = isMac && state.inspector && state.inspectorTab === 'vm' && !inspectorSuppressed;
+  const wanted = state.inspector && state.inspectorTab === 'vm' && !inspectorSuppressed;
   $('#vm-panel').hidden = !wanted;
   if (wanted) { $('#inspector-content').hidden = true; $('#inspector-refresh').hidden = true; }
   if (!wanted) { vmPanel?.hide(); return; }

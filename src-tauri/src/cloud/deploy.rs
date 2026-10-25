@@ -545,6 +545,8 @@ mod tests {
 
     #[test]
     fn wrangler_gets_the_token_in_its_environment_only() {
+        let _serial = super::super::settings_test_guard();
+        let _guard = super::super::settings_guard().unwrap();
         super::super::set_secret("cloudflare_token", "cf_token_for_tests").unwrap();
         let mut settings = super::super::settings();
         settings.cloudflare_account = Some("0123456789abcdef0123456789abcdef".into());

@@ -187,10 +187,17 @@ export function createPreviewSkills() {
         case 'skills_catalog_import': return this.catalogImport(args.repo, args.paths);
         case 'skills_scope_get': return structuredClone(selections.get(`${args.target}:${args.targetId}`) ?? []);
         case 'skills_scope_set': return this.scopeSet(args.target, args.targetId, args.ids, !!args.acknowledge);
-        case 'skills_task_resolve': return { items: (selections.get('project:orbit') ?? []).map(pin => {
-          const item = find(pin.id).item, current = item.sha256 === pin.sha256;
-          return { id: pin.id, name: item.name, provenance: 'project', delivery: current ? 'prompt' : 'skipped', reason: current ? null : 'A newer version was imported. Select it again to approve that version.' };
-        }) };
+        case 'skills_task_resolve': {
+          const bot = selections.get(`bot:${args.botId ?? ''}`) ?? [];
+          const project = selections.get(`project:${args.projectId ?? 'orbit'}`) ?? [];
+          const ids = [...new Set([...bot, ...project].map(pin => pin.id))];
+          return { items: ids.map(id => {
+            const pins = [...bot, ...project].filter(pin => pin.id === id), item = find(id).item;
+            const conflict = pins.some(pin => pin.sha256 !== pins[0].sha256);
+            const current = item.sha256 === pins[0].sha256 && !conflict;
+            return { id, name: item.name, provenance: bot.some(pin => pin.id === id) ? project.some(pin => pin.id === id) ? 'both' : 'bot' : 'project', delivery: current ? 'prompt' : 'skipped', reason: conflict ? 'Bot and project selected different versions. Review their selections.' : current ? null : 'A newer version was imported. Select it again to approve that version.' };
+          }) };
+        }
         case 'skills_import_folder': return this.importFolder(args.path, args.kind);
         case 'skills_import_github': return this.importGithub(args.repo, args.path, args.gitRef, args.kind);
         case 'skills_activate': return this.activate(args.id, args.harness, args.scope, args.projectId, args.acknowledge);

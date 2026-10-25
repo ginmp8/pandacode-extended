@@ -1444,6 +1444,7 @@ fn prepare_task_run_in_project(
     } else { None };
     let needs_context = context_recovery::pending(&store, &session)?;
     let fork_brief = if goal_control { None } else { bots::fork_task_brief(&store, &session, session.resume_id.is_none() || needs_context)? };
+    let bot_brief = if goal_control || maintenance { None } else { bots::tasks::prepare(&store, &session, session.resume_id.is_none() || needs_context)? };
     if needs_context
         && ((!goal_control && admission.goal.is_some())
             || slash_commands::split_command(&prompt).is_some())
@@ -1451,6 +1452,7 @@ fn prepare_task_run_in_project(
         return Err(context_recovery::RECOVERY_REQUIRED.into());
     }
     let prompt = match fork_brief { Some(brief) => format!("{prompt}{brief}"), None => prompt };
+    let prompt = match &bot_brief { Some(brief) => format!("{prompt}{}", brief.text), None => prompt };
     let (prompt, context_handoff) = if goal_control {
         if needs_context {
             context_recovery::queue(&store, &session_id)?;
@@ -1465,7 +1467,7 @@ fn prepare_task_run_in_project(
     let turn_started = std::time::Instant::now();
     let turn_message_id = if admission.goal.is_some() {
         if matches!(admission.goal, Some(goal_state::GoalRequest::Set { .. })) {
-            store.begin_task_turn(&session_id, &text)?
+            store.begin_task_turn_with_context(&session_id, &text, None, bot_brief.as_ref())?
         } else {
             store.begin_goal_operation(&session_id)?;
             0
@@ -1477,7 +1479,7 @@ fn prepare_task_run_in_project(
             &text,
             admission.team.as_ref(),
         )?;
-        store.begin_task_turn_with_kind(&session_id, &text, kind)?
+        store.begin_task_turn_with_context(&session_id, &text, kind, bot_brief.as_ref())?
     };
     let maintenance = maintenance
         || matches!(
@@ -3418,6 +3420,9 @@ pub fn run() {
                 bots::bot_detail,
                 bots::bot_create,
                 bots::bot_update,
+                bots::bot_set_capabilities,
+                bots::tasks::bot_assign_task,
+                bots::tasks::bot_task_links,
                 bots::bot_set_paused,
                 bots::bot_reset,
                 bots::bot_delete,

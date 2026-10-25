@@ -166,7 +166,7 @@ pub(crate) fn read_key(account: &str) -> crate::Result<Option<String>> {
     #[cfg(all(not(test), target_os = "macos"))]
     {
         match security_framework::passwords::get_generic_password(SERVICE, account) {
-            Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
+            Ok(bytes) => decode_stored_key(bytes).map(Some),
             Err(error) if error.code() == -25300 => Ok(None),
             // -25293 (auth failed) and -128 (cancelled): the access prompt was denied or dismissed.
             Err(error) if matches!(error.code(), -25293 | -128) => Err("macOS did not let PandaCode read its Connect key. Choose Always Allow when Keychain asks, or sign out and sign in again.".into()),
@@ -187,11 +187,16 @@ pub(crate) fn read_key(account: &str) -> crate::Result<Option<String>> {
     }
 }
 
-/// The stored key, or a new one written once when none (or an unreadable value) is stored.
-/// A read error is returned as is.
+#[cfg(any(test, target_os = "macos"))]
+fn decode_stored_key(bytes: Vec<u8>) -> crate::Result<String> {
+    String::from_utf8(bytes).map_err(|_| "This computer's PandaCode Connect key is invalid. Sign out and sign in again to create a new identity.".into())
+}
+
+/// Create a key only when secure storage confirms that none exists. Malformed or
+/// unreadable existing keys must never silently replace a pinned device identity.
 pub(crate) fn load_or_create_key(stored: crate::Result<Option<String>>, write: impl FnOnce(&str) -> crate::Result<()>) -> crate::Result<x25519_dalek::StaticSecret> {
-    if let Some(secret) = stored?.and_then(|text| super::crypto::decode_secret(&text)) {
-        return Ok(secret);
+    if let Some(text) = stored? {
+        return super::crypto::decode_secret(&text).ok_or_else(|| "This computer's PandaCode Connect key is invalid. Sign out and sign in again to create a new identity.".into());
     }
     let secret = super::crypto::generate();
     write(&super::crypto::encode_secret(&secret))?;
@@ -317,6 +322,17 @@ mod tests {
         assert!(!written.get());
         load_or_create_key(Ok(None), write).unwrap();
         assert!(written.get());
+    }
+
+    #[test]
+    fn a_malformed_existing_key_is_never_overwritten() {
+        let writes = std::cell::Cell::new(0);
+        let write = |_: &str| { writes.set(writes.get() + 1); Ok(()) };
+        for value in ["", "not a key", "YQ==", "A".repeat(100).as_str()] {
+            assert!(load_or_create_key(Ok(Some(value.to_owned())), write).is_err());
+        }
+        assert!(load_or_create_key(decode_stored_key(vec![0xff]).map(Some), write).is_err());
+        assert_eq!(writes.get(), 0);
     }
 
     #[test]

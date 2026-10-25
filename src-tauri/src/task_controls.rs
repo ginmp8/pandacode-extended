@@ -656,6 +656,7 @@ pub(super) async fn start_harness_terminal(
         }
         let cwd = db.workspace_root(&task.project_id, Some(&session_id))?;
         crate::skills::scoped::check_console_context(&crate::skills::library(&app)?, &db, &task, &cwd)?;
+        crate::bots::tasks::check_console_context(&db, &task)?;
         let named = crate::connections::for_task(&session_id, &task.provider).is_some();
         (task, cwd, named)
     };
@@ -690,6 +691,7 @@ pub(super) async fn start_harness_terminal(
             let db = store.lock().map_err(|error| error.to_string())?;
             let current = verify_console_task(&db, &task)?;
             crate::skills::scoped::check_console_context(&crate::skills::library(&app)?, &db, &current, &cwd)?;
+            crate::bots::tasks::check_console_context(&db, &current)?;
             current
         };
         ensure_console_goal_inactive(current.goal_state.as_ref())?;

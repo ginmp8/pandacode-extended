@@ -4,6 +4,7 @@
 //! harness runs, approvals, the queue and history work unchanged.
 
 mod brief;
+pub(crate) mod tasks;
 pub(crate) mod channels;
 pub(crate) mod gateway;
 pub(crate) mod guard;
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS bots(
   role TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',
   goals TEXT NOT NULL DEFAULT '',
+  soul TEXT NOT NULL DEFAULT '',
+  mcp TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(mcp)),
   avatar TEXT NOT NULL DEFAULT '',
   project_id TEXT NOT NULL REFERENCES projects(id),
   provider TEXT NOT NULL,
@@ -105,6 +108,7 @@ CREATE TABLE IF NOT EXISTS bot_rules(
 ";
 
 const MAX_TEXT: usize = 16 * 1024;
+const MAX_SOUL: usize = 64 * 1024;
 const MAX_MEMORIES: i64 = 500;
 pub(crate) const DESKTOP: &str = "desktop";
 
@@ -116,6 +120,8 @@ pub struct Bot {
     pub role: String,
     pub instructions: String,
     pub goals: String,
+    /// Optional personality text; never grants permissions or tools.
+    pub soul: String,
     pub avatar: String,
     pub project_id: String,
     pub provider: String,
@@ -125,6 +131,8 @@ pub struct Bot {
     pub next_heartbeat_at: Option<i64>,
     pub paused: bool,
     pub memory_version: i64,
+    /// Names from the harness configuration, with no credentials or server definitions.
+    pub mcp: Vec<String>,
     pub notify_channel_id: Option<String>,
     pub notify_thread: Option<String>,
     pub created_at: i64,
@@ -139,6 +147,8 @@ pub struct BotInput {
     pub role: String,
     pub instructions: String,
     pub goals: String,
+    /// Optional personality text; never grants permissions or tools.
+    pub soul: String,
     pub avatar: String,
     pub provider: String,
     pub model: String,
@@ -174,7 +184,7 @@ pub struct Thread {
     pub updated_at: i64,
 }
 
-const BOT_COLUMNS: &str = "id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,paused,memory_version,notify_channel_id,notify_thread,created_at,updated_at";
+const BOT_COLUMNS: &str = "id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,paused,memory_version,notify_channel_id,notify_thread,created_at,updated_at,soul,mcp";
 
 fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
     Ok(Bot {
@@ -196,6 +206,8 @@ fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         notify_thread: r.get(15)?,
         created_at: r.get(16)?,
         updated_at: r.get(17)?,
+        soul: r.get(18)?,
+        mcp: serde_json::from_str(&r.get::<_, String>(19)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, Box::new(e)))?,
     })
 }
 
@@ -228,6 +240,7 @@ fn validate(input: &BotInput) -> Result<BotInput> {
             | "github-copilot"
             | "muse"
             | "devin"
+            | "kilo"
     );
     if input.model.len() > 200 || !known {
         return Err("Choose a harness and model for the bot.".into());
@@ -235,11 +248,15 @@ fn validate(input: &BotInput) -> Result<BotInput> {
     if !(0..=7 * 24 * 60).contains(&input.heartbeat_minutes) {
         return Err("Check-ins run at most once a week and at least every minute.".into());
     }
+    if input.soul.len() > MAX_SOUL {
+        return Err("Personality must be under 64 KB. Shorten the text or import a smaller soul.md.".into());
+    }
     Ok(BotInput {
         name,
         role: clean(&input.role, 200),
         instructions: clean(&input.instructions, MAX_TEXT),
         goals: clean(&input.goals, MAX_TEXT),
+        soul: clean(&input.soul, MAX_SOUL),
         avatar: validate_avatar(&input.avatar)?,
         provider: input.provider.clone(),
         model: input.model.clone(),
@@ -307,6 +324,32 @@ mod avatar_security_tests {
     }
 }
 
+/// Extended schema 29 adds personality and MCP references without replacing hash-pinned Skills.
+pub(crate) fn migrate_profiles(db: &rusqlite::Connection) -> Result<()> {
+    for (name, definition) in [("soul", "TEXT NOT NULL DEFAULT ''"), ("mcp", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(mcp))")] {
+        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name=?1)", [name], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if !exists { db.execute_batch(&format!("ALTER TABLE bots ADD COLUMN {name} {definition};")).map_err(|e| e.to_string())?; }
+    }
+    db.execute_batch(tasks::SCHEMA).map_err(|e| e.to_string())
+}
+
+/// Bounded names only: this never imports MCP definitions or changes a harness config.
+pub(crate) fn set_capabilities(store: &Store, id: &str, names: &[String]) -> Result<Bot> {
+    if names.len() > 50 { return Err("A bot can reference up to 50 MCP servers.".into()); }
+    let mut mcp: Vec<String> = Vec::new();
+    for value in names.iter().map(|name| name.trim()) {
+        if value.is_empty() || value.len() > 100 || value.chars().any(char::is_control) {
+            return Err("Use a non-empty MCP server name under 100 bytes without control characters.".into());
+        }
+        if !mcp.iter().any(|name| name == value) { mcp.push(value.to_owned()); }
+    }
+    let before = get(store, id)?;
+    if before.mcp == mcp { return Ok(before); }
+    store.db.execute("UPDATE bots SET mcp=?2,memory_version=memory_version+1,updated_at=?3 WHERE id=?1", params![id, serde_json::to_string(&mcp).map_err(|e| e.to_string())?, crate::storage::now()]).map_err(|e| e.to_string())?;
+    log(store, id, "updated", "MCP server selection changed", json!({"mcp": mcp.len()}))?;
+    get(store, id)
+}
+
 /// Folder name for a bot workspace: readable, unique per bot.
 fn slug(name: &str, id: &str) -> String {
     let base: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
@@ -346,8 +389,8 @@ pub(crate) fn create(store: &Store, input: &BotInput, root: &std::path::Path) ->
     store
         .db
         .execute(
-            "INSERT INTO bots(id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
-            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, project.id, input.provider, input.model, input.mode, input.heartbeat_minutes, schedule::heartbeat_after(input.heartbeat_minutes, now), now],
+            "INSERT INTO bots(id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,created_at,updated_at,soul) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13,?14)",
+            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, project.id, input.provider, input.model, input.mode, input.heartbeat_minutes, schedule::heartbeat_after(input.heartbeat_minutes, now), now, input.soul],
         )
         .map_err(|e| e.to_string())?;
     log(store, &id, "created", &format!("Created {}", input.name), json!({}))?;
@@ -360,12 +403,12 @@ pub(crate) fn update(store: &Store, id: &str, input: &BotInput) -> Result<Bot> {
     let now = crate::storage::now();
     let next = if before.heartbeat_minutes == input.heartbeat_minutes { before.next_heartbeat_at } else { schedule::heartbeat_after(input.heartbeat_minutes, now) };
     // Instructions and goals are part of the brief; bump the version so open threads get them.
-    let brief_changed = before.instructions != input.instructions || before.goals != input.goals || before.role != input.role || before.name != input.name;
+    let brief_changed = before.instructions != input.instructions || before.goals != input.goals || before.role != input.role || before.name != input.name || before.soul != input.soul;
     store
         .db
         .execute(
-            "UPDATE bots SET name=?2,role=?3,instructions=?4,goals=?5,avatar=?6,provider=?7,model=?8,mode=?9,heartbeat_minutes=?10,next_heartbeat_at=?11,memory_version=memory_version+?12,updated_at=?13 WHERE id=?1",
-            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, input.provider, input.model, input.mode, input.heartbeat_minutes, next, brief_changed as i64, now],
+            "UPDATE bots SET name=?2,role=?3,instructions=?4,goals=?5,avatar=?6,provider=?7,model=?8,mode=?9,heartbeat_minutes=?10,next_heartbeat_at=?11,memory_version=memory_version+?12,updated_at=?13,soul=?14 WHERE id=?1",
+            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, input.provider, input.model, input.mode, input.heartbeat_minutes, next, brief_changed as i64, now, input.soul],
         )
         .map_err(|e| e.to_string())?;
     if before.name != input.name {
@@ -710,6 +753,14 @@ pub async fn bot_create(app: tauri::AppHandle, window: tauri::WebviewWindow, sta
 pub async fn bot_update(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String, input: BotInput) -> Result<Bot> {
     guard_main(&window)?;
     let bot = update(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &input)?;
+    let _ = app.emit("bots-changed", ());
+    Ok(bot)
+}
+
+#[tauri::command]
+pub async fn bot_set_capabilities(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String, mcp: Vec<String>) -> Result<Bot> {
+    guard_main(&window)?;
+    let bot = set_capabilities(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &mcp)?;
     let _ = app.emit("bots-changed", ());
     Ok(bot)
 }

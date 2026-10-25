@@ -73,6 +73,205 @@ fn edited_bot_task_keeps_current_brief_without_adopting_the_source_thread() {
 }
 
 #[test]
+fn personality_is_bounded_persisted_and_rebriefs_existing_threads() {
+    let f = fixture();
+    let mut profile = input("Scout");
+    profile.soul = "# Voice\nBe direct, warm and concise.".into();
+    let bot = create(&f.store, &profile, &f.root).unwrap();
+    assert_eq!(get(&f.store, &bot.id).unwrap().soul, profile.soul);
+    let text = brief::compose(&bot, &[], DESKTOP, "You");
+    assert!(text.find("Instructions from the user").unwrap() < text.find("Personality").unwrap());
+    assert!(text.contains("never grants tools, permissions, credentials or authority"));
+    assert_eq!(update(&f.store, &bot.id, &profile).unwrap().memory_version, bot.memory_version);
+    profile.soul.clear();
+    assert!(update(&f.store, &bot.id, &profile).unwrap().memory_version > bot.memory_version);
+    profile.soul = "é".repeat(MAX_SOUL / 2 + 1);
+    assert!(update(&f.store, &bot.id, &profile).unwrap_err().contains("64 KB"));
+    assert!(get(&f.store, &bot.id).unwrap().soul.is_empty(), "a refused update preserves the saved profile");
+}
+
+#[test]
+fn mcp_references_are_bounded_names_and_never_raw_skills() {
+    let f = fixture(); let bot = bot(&f);
+    let saved = set_capabilities(&f.store, &bot.id, &[" docs ".into(), "docs".into(), "browser".into()]).unwrap();
+    assert_eq!(saved.mcp, ["docs", "browser"]);
+    assert_eq!(set_capabilities(&f.store, &bot.id, &saved.mcp).unwrap().memory_version, saved.memory_version);
+    let text = brief::compose(&saved, &[], brief::TASK, "");
+    assert!(text.contains("docs, browser")); assert!(text.contains("these names grant nothing"));
+    assert!(!text.contains("pandacode_bot_"));
+    for invalid in [vec!["a\nb".into()], vec![String::new()], vec!["x".repeat(101)], vec!["x".into(); 51]] {
+        assert!(set_capabilities(&f.store, &bot.id, &invalid).is_err());
+    }
+    assert_eq!(get(&f.store, &bot.id).unwrap().mcp, saved.mcp);
+    let raw_skills: bool = f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='skills')", [], |r| r.get(0)).unwrap();
+    assert!(!raw_skills, "Extended keeps Skills in its scoped hash-pinned library");
+}
+
+fn project_task(f: &Fixture) -> crate::storage::Session {
+    let folder = f.root.join("project"); std::fs::create_dir_all(&folder).unwrap();
+    let project = f.store.add_project(&folder).unwrap();
+    f.store.create_session(&project.id, "codex", "default", "ask").unwrap()
+}
+
+#[test]
+fn ordinary_task_binding_keeps_checkout_permissions_and_channel_identity_separate() {
+    let f = fixture(); let bot = bot(&f); let task = project_task(&f);
+    tasks::assign(&f.store, &task.id, Some(&bot.id)).unwrap();
+    let saved = f.store.session(&task.id).unwrap();
+    assert_eq!(saved.project_id, task.project_id); assert_eq!(saved.mode, "ask");
+    assert_eq!(saved.provider, bot.provider); assert_eq!(saved.model, bot.model);
+    assert_eq!(tasks::links(&f.store).unwrap().get(&task.id), Some(&bot.id));
+    assert!(owner_of(&f.store, &task.id).unwrap().is_none());
+    assert!(threads(&f.store, &bot.id).unwrap().is_empty());
+    assert!(get(&f.store, &bot.id).unwrap().notify_channel_id.is_none());
+    let brief = tasks::prepare(&f.store, &saved, true).unwrap().unwrap();
+    assert!(brief.text.contains("own checkout")); assert!(!brief.text.contains("pandacode_bot_"));
+    tasks::assign(&f.store, &task.id, None).unwrap();
+    assert!(tasks::linked(&f.store, &task.id).unwrap().is_none());
+    let (thread, _) = thread_session(&f.store, &bot, DESKTOP, DESKTOP, "Bot chat").unwrap();
+    assert!(tasks::assign(&f.store, &thread, Some(&bot.id)).is_err());
+}
+
+#[test]
+fn linked_brief_commits_with_the_turn_and_failed_delivery_retries_it() {
+    let f = fixture(); let bot = bot(&f); let task = project_task(&f);
+    tasks::assign(&f.store, &task.id, Some(&bot.id)).unwrap();
+    let saved = f.store.session(&task.id).unwrap();
+    assert!(tasks::check_console_context(&f.store, &saved).is_err());
+    let context = tasks::prepare(&f.store, &saved, true).unwrap().unwrap();
+    f.store.db.execute_batch("CREATE TRIGGER refuse_bot_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'No insert'); END;").unwrap();
+    assert!(f.store.begin_task_turn_with_context(&task.id, "Hello", None, Some(&context)).is_err());
+    assert_eq!(tasks::linked(&f.store, &task.id).unwrap().unwrap().1, -1);
+    assert_eq!(f.store.session(&task.id).unwrap().status, "idle");
+    f.store.db.execute_batch("DROP TRIGGER refuse_bot_message;").unwrap();
+    f.store.begin_task_turn_with_context(&task.id, "Hello", None, Some(&context)).unwrap();
+    assert_eq!(f.store.messages(&task.id, None).unwrap()[0].content, "Hello");
+    assert!(tasks::assign(&f.store, &task.id, None).is_err());
+    assert!(tasks::prepare(&f.store, &saved, false).unwrap().is_none());
+    f.store.finish_task_turn(&task.id, false, false).unwrap();
+    assert!(tasks::prepare(&f.store, &saved, false).unwrap().is_some());
+    f.store.begin_task_turn_with_context(&task.id, "Retry", None, Some(&context)).unwrap();
+    f.store.finish_task_turn(&task.id, true, false).unwrap();
+    assert!(tasks::prepare(&f.store, &saved, false).unwrap().is_none());
+    remember(&f.store, &bot.id, "Prefers concise reports", "user").unwrap();
+    assert!(tasks::prepare(&f.store, &saved, false).unwrap().unwrap().text.contains("Prefers concise reports"));
+    set_paused(&f.store, &bot.id, true).unwrap();
+    assert!(tasks::prepare(&f.store, &saved, false).is_err());
+    delete(&f.store, &bot.id).unwrap();
+    assert!(f.store.session(&task.id).is_ok());
+    assert!(tasks::linked(&f.store, &task.id).unwrap().is_none());
+}
+
+#[test]
+fn native_admission_applies_the_profile_without_frontend_context_or_bot_tools() {
+    for paused in [false, true] {
+        let f = fixture();
+        let (state, project) = crate::concurrent_task_tests::test_state();
+        let (bot, task) = {
+            let store = state.store.lock().unwrap();
+            let mut profile = input("Native Scout"); profile.soul = "Warm and precise.".into(); profile.mode = "full".into();
+            let bot = create(&store, &profile, &f.root).unwrap();
+            set_capabilities(&store, &bot.id, &["documentation".into()]).unwrap();
+            let task = store.create_session(&project, "codex", "default", "ask").unwrap();
+            tasks::assign(&store, &task.id, Some(&bot.id)).unwrap();
+            if paused { set_paused(&store, &bot.id, true).unwrap(); }
+            (bot, task)
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let prepared = crate::prepare_task_run(&state, task.id.clone(), Some("Review the project".into()), vec![], tx, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        if paused {
+            assert!(prepared.err().unwrap().contains("paused"));
+            assert!(state.agents.lock().unwrap().is_empty());
+            let store = state.store.lock().unwrap();
+            assert!(store.messages(&task.id, None).unwrap().is_empty());
+            assert_eq!(tasks::linked(&store, &task.id).unwrap().unwrap().1, -1);
+        } else {
+            let prepared = prepared.unwrap();
+            assert_eq!(prepared.config.mode, "ask");
+            assert!(prepared.config.prompt.contains("Warm and precise."));
+            assert!(prepared.config.prompt.contains("documentation"));
+            assert!(!prepared.config.prompt.contains("pandacode_bot_"));
+            let store = state.store.lock().unwrap();
+            assert_eq!(store.messages(&task.id, None).unwrap()[0].content, "Review the project");
+            assert!(owner_of(&store, &task.id).unwrap().is_none());
+            assert_eq!(tasks::linked(&store, &task.id).unwrap().unwrap().0.id, bot.id);
+        }
+    }
+}
+
+#[test]
+fn interrupted_bot_task_rebriefs_after_restart() {
+    let f = fixture(); let path = f.root.join("restart.db");
+    let id = {
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(&f.root).unwrap();
+        let bot = create(&store, &input("Scout"), &f.root.join("bots")).unwrap();
+        let task = store.create_session(&project.id, "claude", "default", "ask").unwrap();
+        tasks::assign(&store, &task.id, Some(&bot.id)).unwrap();
+        let context = tasks::prepare(&store, &task, true).unwrap().unwrap();
+        store.begin_task_turn_with_context(&task.id, "Started before restart", None, Some(&context)).unwrap();
+        store.resume(&task.id, "existing-native-conversation").unwrap();
+        task.id
+    };
+    let reopened = Store::open(&path).unwrap();
+    let task = reopened.session(&id).unwrap();
+    assert_eq!(task.status, "interrupted");
+    assert!(task.resume_id.is_some());
+    assert!(tasks::prepare(&reopened, &task, false).unwrap().is_some());
+}
+
+#[test]
+fn binding_refuses_started_or_paused_tasks_without_partial_defaults() {
+    let f = fixture(); let bot = bot(&f); let task = project_task(&f);
+    set_paused(&f.store, &bot.id, true).unwrap();
+    assert!(tasks::assign(&f.store, &task.id, Some(&bot.id)).is_err());
+    assert_eq!(f.store.session(&task.id).unwrap().provider, task.provider);
+    set_paused(&f.store, &bot.id, false).unwrap();
+    f.store.message(&task.id, "user", "Started").unwrap();
+    assert!(tasks::assign(&f.store, &task.id, Some(&bot.id)).is_err());
+    assert!(tasks::linked(&f.store, &task.id).unwrap().is_none());
+}
+
+#[test]
+fn migration_29_preserves_existing_bot_issue_and_attachment_data_and_reopens() {
+    let f = fixture(); let path = f.root.join("migration.db");
+    let (bot_id, task_id) = {
+        let store = Store::open(&path).unwrap();
+        let bot = create(&store, &input("Existing"), &f.root.join("bots")).unwrap();
+        let task = store.create_session(&bot.project_id, "codex", "default", "ask").unwrap();
+        store.message(&task.id, "user", "Keep this conversation").unwrap();
+        let message: i64 = store.db.query_row("SELECT id FROM messages WHERE session_id=?1", [&task.id], |r| r.get(0)).unwrap();
+        store.db.execute("INSERT INTO github_issue_actions(session_id,action,repository,number,url,approved_at) VALUES(?1,'close','owner/project',24,'https://github.com/owner/project/issues/24',123)", [&task.id]).unwrap();
+        store.db.execute("INSERT INTO message_attachments(message_id,session_id,id,kind,name,mime,bytes,file,source) VALUES(?1,?2,'image-1','image','Keep.png','image/png',10,'image-1.png','file')", params![message, task.id]).unwrap();
+        store.db.execute_batch("DROP TABLE bot_tasks; ALTER TABLE bots DROP COLUMN soul; ALTER TABLE bots DROP COLUMN mcp; PRAGMA user_version=28;").unwrap();
+        (bot.id, task.id)
+    };
+    for _ in 0..2 {
+        let store = Store::open(&path).unwrap(); let bot = get(&store, &bot_id).unwrap();
+        assert_eq!(bot.name, "Existing"); assert_eq!(bot.instructions, "Be brief."); assert!(bot.soul.is_empty() && bot.mcp.is_empty());
+        assert_eq!(store.messages(&task_id, None).unwrap()[0].content, "Keep this conversation");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM message_attachments", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert!(store.github_issue_action(&task_id).unwrap().is_some());
+        assert_eq!(store.db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 29);
+    }
+}
+
+#[test]
+fn migration_29_failure_rolls_back_new_columns_and_schema_version() {
+    let f = fixture(); let path = f.root.join("rollback.db");
+    {
+        let store = Store::open(&path).unwrap();
+        create(&store, &input("Existing"), &f.root.join("bots")).unwrap();
+        store.db.execute_batch("DROP TABLE bot_tasks; ALTER TABLE bots DROP COLUMN soul; ALTER TABLE bots DROP COLUMN mcp; CREATE INDEX bot_tasks ON bots(name); PRAGMA user_version=28;").unwrap();
+    }
+    assert!(Store::open(&path).is_err());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 28);
+    assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='soul')", [], |r| r.get::<_, bool>(0)).unwrap());
+    assert_eq!(db.query_row("SELECT name FROM bots", [], |r| r.get::<_, String>(0)).unwrap(), "Existing");
+}
+
+#[test]
 fn rejects_invalid_bot_settings() {
     let f = fixture();
     assert!(create(&f.store, &input("  "), &f.root).is_err());

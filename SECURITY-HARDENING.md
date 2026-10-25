@@ -1,4 +1,6 @@
-# Current revision: 0.3.41-hardened
+> **Current validation scope:** 0.3.42 adds only an upstream CSS layout correction, Playwright regression case and release-note provenance. See [0.3.42 verification](security-review/0.3.42-hardened/REPORT.md). Historical 0.3.41 validation does **not** attest the current source version. The source ancestry is still upstream 0.3.28, not a complete upstream 0.3.42 rebase.
+
+# Current revision: 0.3.42-hardened (source candidate)
 
 The current source release extends the supplied `0.3.35-hardened.4` selectively. See [current validation and limits](security-review/0.3.41-hardened/REPORT.md), [connection/session safeguards](docs/connection-session-safety.md), and the [0.3.41 usage guide](docs/HARDENED-0.3.41-GUIDE.md). The sections below are historical records; their findings, test counts and environment limitations must not be read as the results of this revision.
 

@@ -1,0 +1,16 @@
+name: Upstream version watch (read-only)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
+permissions:
+  contents: read
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout this fork
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pinned)
+      - name: Compare public upstream release tag
+        run: node scripts/release/check-upstream-current.mjs

@@ -12,6 +12,7 @@ import { extendedVersion } from './extended-version.mjs';
 const execute = promisify(execFile);
 const MAX_OUTPUT = 32 * 1024 * 1024;
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low', 'Negligible', 'Unknown'];
+const identified = value => typeof value === 'string' && value.trim().length > 0;
 const json = text => { try { return JSON.parse(text); } catch { return undefined; } };
 const safe = value => String(value).replace(/[|`<>\r\n]/g, ' ').slice(0, 300);
 
@@ -35,7 +36,10 @@ export function scannerEnvironment(inherited) {
 
 export function inventoryStatus({ bom, error }) {
   if (error) return { status: 'incomplete', components: 0, reason: error };
-  if (bom?.bomFormat !== 'CycloneDX' || !Array.isArray(bom.components) || !bom.components.length) {
+  if (bom?.bomFormat !== 'CycloneDX' || !/^\d+\.\d+$/.test(bom.specVersion ?? '')
+    || !Number.isSafeInteger(bom.version) || bom.version < 1
+    || !Array.isArray(bom.components) || !bom.components.length
+    || !bom.components.every(component => identified(component?.type) && identified(component?.name))) {
     return { status: 'incomplete', components: 0, reason: 'Missing, malformed or empty CycloneDX inventory' };
   }
   return { status: 'ok', components: bom.components.length };
@@ -43,7 +47,12 @@ export function inventoryStatus({ bom, error }) {
 
 export function scanStatus(inventory, { report, error }) {
   if (inventory.status !== 'ok') return { status: 'not-scanned', reason: 'Inventory incomplete' };
-  if (error || !Array.isArray(report?.matches)) return { status: 'failed', reason: error ?? 'Missing or malformed Grype report' };
+  if (error || report?.descriptor?.name !== 'grype' || !identified(report.descriptor.version)
+    || !Array.isArray(report.matches)
+    || !report.matches.every(match => identified(match?.vulnerability?.id) && identified(match.vulnerability.severity)
+      && identified(match?.artifact?.name) && identified(match.artifact.type))) {
+    return { status: 'failed', reason: error ?? 'Missing or malformed Grype report' };
+  }
   const severities = Object.fromEntries(SEVERITIES.map(severity => [severity, 0]));
   for (const match of report.matches) {
     const severity = match?.vulnerability?.severity;

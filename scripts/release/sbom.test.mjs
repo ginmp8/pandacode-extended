@@ -16,18 +16,25 @@ test('inventory only selects this Extended version installers, without updater a
 });
 
 test('malformed or empty inventory/scan data never means clean', () => {
-  for (const bom of [undefined, {}, { components: [{}] }, { bomFormat: 'CycloneDX', components: [] }]) {
+  const base = { bomFormat: 'CycloneDX', specVersion: '1.6', version: 1 };
+  for (const bom of [undefined, {}, { components: [{}] }, { ...base, components: [] }, { ...base, components: [null] }, { ...base, components: [{}] }]) {
     assert.equal(inventoryStatus({ bom }).status, 'incomplete');
   }
-  const inventory = inventoryStatus({ bom: { bomFormat: 'CycloneDX', components: [{}] } });
-  for (const report of [undefined, {}, { matches: null }, { matches: 'not an array' }]) {
+  const inventory = inventoryStatus({ bom: { ...base, components: [{ name: 'fixture', type: 'library' }] } });
+  const descriptor = { name: 'grype', version: 'fixture' };
+  for (const report of [undefined, {}, { matches: null }, { matches: 'not an array' }, { matches: [] }, { descriptor, matches: [null] }, { descriptor, matches: [{}] }]) {
     assert.equal(scanStatus(inventory, { report }).status, 'failed');
   }
   assert.equal(scanStatus({ status: 'incomplete' }, { report: { matches: [] } }).status, 'not-scanned');
-  const report = scanStatus(inventory, { report: { matches: [{ vulnerability: { severity: 'High' } }, {}] } });
+  const artifact = { name: 'fixture', type: 'npm' };
+  const report = scanStatus(inventory, { report: { descriptor, matches: [
+    { vulnerability: { id: 'fixture-advisory-a', severity: 'High' }, artifact },
+    { vulnerability: { id: 'fixture-advisory-b', severity: 'Unspecified' }, artifact },
+  ] } });
   assert.equal(report.findings, 2);
   assert.equal(report.severities.High, 1);
   assert.equal(report.severities.Unknown, 1);
+  assert.equal(scanStatus(inventory, { report: { descriptor, matches: [] } }).findings, 0);
 });
 
 test('dependency-only output does not imply installer coverage', () => {
@@ -60,7 +67,7 @@ test('the complete local flow overrides inherited network options and records sc
       assert.equal(options.timeout, 300_000);
       if (args.includes('version')) return { stdout: '{"version":"fixture"}' };
       if (args.includes('status')) return { stdout: '{"built":"2026-10-25T00:00:00Z"}' };
-      if (name === 'syft') return { stdout: '{"bomFormat":"CycloneDX","components":[{"name":"fixture"}]}' };
+      if (name === 'syft') return { stdout: '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"name":"fixture","type":"library"}]}' };
       return { stdout: 'malformed output must not become zero findings' };
     };
     const report = await generate({ sourceRoot, assets, out, version: '0.5.0', commit: '1'.repeat(40), runner,

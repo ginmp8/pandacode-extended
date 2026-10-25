@@ -131,6 +131,9 @@ let menuEpoch = 0;
 let pendingMenuOpen: { anchor: HTMLElement; release: () => void } | undefined;
 let openingProjectForTask: { id: string; generation: number } | undefined;
 let creatingTask = false;
+let creatingChat = false;
+let recoveringChatId: string | undefined;
+const chatFileAttachments = new Map<string, string[]>();
 let openingSupport = false;
 let activityTimer = 0;
 let workTimer = 0;
@@ -793,8 +796,9 @@ function closeProjectPicker(): void { cancelPendingMenu(); const close = project
 function closeChoiceMenu(): void { cancelPendingMenu(); const close = choiceMenuCleanup; choiceMenuCleanup = undefined; choiceMenuAnchor = undefined; close?.(); }
 function closeMenus(): void { ++architectSetupRequest; ++jevTestRequest; jevTestCleanup?.(); architectSetupCleanup?.(); closeModelPicker(); closeProjectPicker(); closeChoiceMenu(); }
 function closeContentMenus(): void {
-  // Header/browser controls survive transcript and composer updates.
-  if (!jevTestCleanup && (choiceMenuAnchor ?? pendingMenuOpen?.anchor)?.id !== 'task-menu-trigger') closeMenus();
+  const anchor = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
+  if (jevTestCleanup || anchor?.id === 'task-menu-trigger' || anchor?.classList.contains('task-item') && anchor.isConnected) return;
+  closeMenus();
 }
 function beginMenuOpen(anchor: HTMLElement): { epoch: number; release: () => void } {
   cancelPendingMenu();
@@ -2147,13 +2151,17 @@ const pageSignature = (messages: Message[]): string => messages.filter(message =
 // Best-effort visual notification state, never an agent permission or authorization gate.
 function markTraySeen(sessionId: string): void { void call('tray_seen', { sessionId }).catch(() => undefined); }
 
-async function selectSession(id: string, focusComposer = false): Promise<void> {
+async function selectSession(id: string, focusComposer = false, preservePreviousAttachments = false): Promise<void> {
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
   closeMenus();
   if (document.querySelector('#dialog')?.classList.contains('change-review-dialog')) closeModal();
   const previousTask = session(), changingTask = previousTask?.id !== id;
-  if (changingTask) { if (previousTask) rememberThread(previousTask.id); leaveDraft(id); saveThreadPanel(); }
+  if (changingTask) {
+    if (previousTask) rememberThread(previousTask.id);
+    if (preservePreviousAttachments && previousTask && state.attachments.length) chatFileAttachments.set(previousTask.id, [...state.attachments]);
+    leaveDraft(id); saveThreadPanel();
+  }
   if (previousTask && previousTask.id !== id) {
     if (previousTask.taskDescription) previousTask.taskDescription = [...previousTask.taskDescription].slice(0, 512).join('');
     fullTaskDescription = undefined;
@@ -2162,7 +2170,9 @@ async function selectSession(id: string, focusComposer = false): Promise<void> {
   // A bot's conversation lives in the Bots section; it never re-points the project filter.
   if (state.projectFilter && state.projectFilter !== s.projectId && !botProjects.has(s.projectId) && !chatTask(s)) setProjectFilter(s.projectId);
   if (state.collapsedFolders.delete(s.projectId)) saveCollapsedFolders();
-  state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.archived = s.archived; state.attachments = [];
+  state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.archived = s.archived;
+  state.attachments = changingTask ? (chatFileAttachments.get(s.id) ?? []) : state.attachments;
+  if (changingTask) chatFileAttachments.delete(s.id);
   const remembered = changingTask ? threadPages.get(id) : undefined;
   state.messages = remembered ? [...remembered.messages] : []; state.messagesLoading = !remembered; state.messagesError = ''; state.hasOlder = remembered?.hasOlder ?? false;
   const generation = ++state.generation;
@@ -2247,9 +2257,11 @@ function removeDeletedSessions(ids: string[]): void {
   const removed = new Set(ids);
   for (const id of removed) {
     deletedSessions.add(id);
+    if (recoveringChatId === id) recoveringChatId = undefined;
     const live = state.streams.get(id); if (live) clearAgentInputs(live);
     state.streams.delete(id); finishingStreams.delete(id); teams.delete(id);
     state.drafts.delete(id); state.browserAttachments.delete(id); state.moodboardAttachments.delete(id);
+    chatFileAttachments.delete(id);
     attachments.clear(id); pendingPromptActivity.delete(id);
     subagents.forget(id);
     threadPanels.delete(id);
@@ -3523,39 +3535,90 @@ async function createTask(projectId = state.projectId, reuseDraft = true): Promi
   if (generation !== state.generation) { renderNavigation(); return; }
   state.query = ''; closeModal(); await selectSession(created.id, true);
 }
+function untouchedSelectedChat(task: Session): boolean {
+  if (task.id !== state.sessionId || !chatTask(task) || task.resumeId || task.archived || isRunning(task.id)
+    || state.messagesLoading || state.messagesError || state.messages.length || task.lastPromptAt != null || task.lastResponseAt != null) return false;
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  const draft = prompt?.dataset.sessionId === task.id ? prompt.value : state.drafts.get(task.id) ?? '';
+  return !draft.trim() && !state.attachments.length && !attachments.list(task.id).length
+    && !state.browserAttachments.get(task.id)?.length && !state.moodboardAttachments.get(task.id)?.length;
+}
+async function refreshChatProject(projectId: string): Promise<void> {
+  let failure: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      state.projects = await call<Project[]>('list_projects');
+      if (state.projects.some(project => project.id === projectId && isChatProject(project))) return;
+      failure = new Error('The new chat project could not be found.');
+    } catch (error) { failure = error; }
+  }
+  throw failure;
+}
 /** A projectless chat: its own folder, the usual harness and model. */
 async function createChat(): Promise<void> {
-  if (creatingTask) return;
+  if (creatingChat || creatingTask) return;
   closeModelPicker(); closeProjectPicker();
+  const selected = session();
+  if (selected && untouchedSelectedChat(selected)) {
+    if (recoveringChatId === selected.id) recoveringChatId = undefined;
+    document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return;
+  }
+  if (recoveringChatId === selected?.id) recoveringChatId = undefined;
   const generation = state.generation;
   const harness = state.providers.find(p => p.id === state.defaultProvider && p.installed)
     ?? state.providers.find(p => p.installed) ?? state.providers[0];
   if (!harness) { notify('Open Settings to check your installed agents.'); return; }
   leaveDraft('');
-  creatingTask = true;
-  let created: Session;
+  creatingChat = true; creatingTask = true;
+  const button = document.querySelector<HTMLButtonElement>('.new-chat-button');
+  if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+  let created: Session | undefined;
   try {
-    created = await call<Session>('chat_create', { provider: harness.id, model: rememberedModel(harness.id), mode: 'ask' });
-    state.projects = await call<Project[]>('list_projects');
-  } finally { creatingTask = false; }
-  state.sessions.unshift(created);
-  if (generation !== state.generation) { renderNavigation(); return; }
-  if (state.projectFilter) setProjectFilter('');
-  state.query = ''; closeModal(); await selectSession(created.id, true);
+    created = recoveringChatId ? state.sessions.find(task => task.id === recoveringChatId) : undefined;
+    if (!created) {
+      created = await call<Session>('chat_create', { provider: harness.id, model: rememberedModel(harness.id), mode: 'ask' });
+      const existing = state.sessions.find(task => task.id === created!.id);
+      if (existing) Object.assign(existing, created); else state.sessions.unshift(created);
+      recoveringChatId = created.id;
+    }
+    await refreshChatProject(created.projectId);
+    creatingTask = false;
+    renderNavigation();
+    if (generation !== state.generation) { recoveringChatId = undefined; return; }
+    if (state.projectFilter) setProjectFilter('');
+    state.query = ''; closeModal();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await selectSession(created.id, true, true);
+        if (state.sessionId !== created.id) { recoveringChatId = undefined; return; }
+        recoveringChatId = undefined;
+        return;
+      } catch (error) {
+        if (state.sessionId !== created.id || attempt === 1) throw error;
+      }
+    }
+  } catch (error) {
+    if (!created || state.projects.some(project => project.id === created!.projectId && !isChatProject(project))) recoveringChatId = undefined;
+    if (created) renderNavigation();
+    throw error;
+  } finally {
+    creatingTask = false; creatingChat = false;
+    if (button?.isConnected) { button.disabled = false; button.removeAttribute('aria-busy'); }
+  }
 }
 /** Drops a chat's hidden project (and its empty folder) once no task uses it. */
 async function forgetChat(projectId: string): Promise<void> {
   if (await call<boolean>('chat_cleanup', { projectId }).catch(() => false)) state.projects = state.projects.filter(p => p.id !== projectId);
 }
 type ChoiceOptions = Omit<Parameters<typeof import('./choice-menu').openChoiceMenu>[0], 'anchor' | 'onClose'>;
-async function showChoices(anchor: HTMLElement, options: ChoiceOptions): Promise<void> {
+async function showChoices(anchor: HTMLElement, options: ChoiceOptions, guardGeneration = true): Promise<void> {
   if (pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
   if (choiceMenuCleanup && choiceMenuAnchor === anchor) { closeChoiceMenu(); return; }
   closeMenus();
   const { epoch, release } = beginMenuOpen(anchor);
   const generation = state.generation;
   const { openChoiceMenu } = await import('./choice-menu').finally(release);
-  if (epoch !== menuEpoch || generation !== state.generation || !anchor.isConnected) return;
+  if (epoch !== menuEpoch || guardGeneration && generation !== state.generation || !anchor.isConnected) return;
   choiceMenuAnchor = anchor;
   choiceMenuCleanup = openChoiceMenu({ ...options, anchor, onClose: () => { choiceMenuCleanup = undefined; choiceMenuAnchor = undefined; } });
 }
@@ -3632,13 +3695,23 @@ async function showSidebarTaskMenu(anchor: HTMLElement): Promise<void> {
   const id = anchor.dataset.id!, task = state.sessions.find(item => item.id === id);
   if (!task) return;
   const ids = threadGroupRows(anchor).map(row => row.dataset.id!), index = ids.indexOf(id);
+  const deleteBlocked = isRunning(id) || configuringSessions.has(id) || finishingStreams.has(id) || task.goalState?.status === 'active';
+  const deleteDescription = task.goalState?.status === 'active' ? 'Pause the active goal before deleting this chat.'
+    : isRunning(id) ? 'Stop the agent before deleting this chat.'
+      : finishingStreams.has(id) ? 'Wait for the agent to finish before deleting this chat.' : undefined;
   await showChoices(anchor, { title: 'Task actions', actions: true, items: [
     { id: 'pin', label: task.pinned ? 'Unpin task' : 'Pin task', icon: 'pin', disabled: orderingBusy },
     { id: 'up', label: 'Move up', icon: 'arrow', disabled: orderingBusy || index < 1 },
     { id: 'down', label: 'Move down', icon: 'down', disabled: orderingBusy || index === ids.length - 1 },
+    ...(chatTask(task) ? [{ id: 'delete-chat', label: 'Delete chat…', icon: 'trash', danger: true, disabled: deleteBlocked, description: deleteDescription }] : []),
   ], onSelect: choice => {
     closeChoiceMenu();
     if (choice === 'pin') { run(pinTask(id)); return; }
+    if (choice === 'delete-chat') {
+      const current = state.sessions.find(item => item.id === id);
+      if (current && chatTask(current)) showDeleteTask(id, true);
+      return;
+    }
     // Resolve the current list after an agent activity change or project filter.
     const row = $('#navigation').querySelector<HTMLElement>(`.task-item[data-id="${CSS.escape(id)}"]`);
     if (!row) return;
@@ -3648,7 +3721,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement): Promise<void> {
       [current[from], current[to]] = [current[to], current[from]];
       run(reorderThreads(current, id));
     }
-  } });
+  } }, false);
 }
 /** A project's favicon or app icon; the sidebar redraws once a new one has loaded. */
 function projectAppIcon(projectId: string, name: string): string {
@@ -3697,9 +3770,16 @@ async function showDefaultModel(anchor: HTMLElement): Promise<void> {
     },
   });
 }
-function showDeleteTask(): void {
-  const task = session(); if (!task || isRunning(task.id) || configuringSessions.has(task.id)) return;
-  const dialog = modal('Delete task?', `<form id="delete-task-form"><p class="delete-task-name">${escape(task.title)}</p><p class="delete-task-description">Permanently delete this conversation and its worker history from PandaCode? This cannot be undone. Its terminal tabs close and running commands may stop. Project files and worktrees stay.</p><p class="delete-task-error" role="alert" hidden></p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="secondary-button delete-task-confirm">Delete task</button></div></form>`, 'delete-task-dialog');
+function showDeleteTask(targetId = state.sessionId, chatOnly = false): void {
+  const task = state.sessions.find(item => item.id === targetId);
+  if (!task || isRunning(task.id) || configuringSessions.has(task.id) || finishingStreams.has(task.id) || chatOnly && !chatTask(task)) return;
+  const taskId = task.id, projectId = task.projectId;
+  const label = chatOnly ? 'chat' : 'task';
+  const title = chatOnly ? 'Delete chat?' : 'Delete task?';
+  const description = chatOnly
+    ? 'Permanently delete this chat and its worker history from PandaCode? This cannot be undone. Its folder is removed only if it contains no user files.'
+    : 'Permanently delete this conversation and its worker history from PandaCode? This cannot be undone. Its terminal tabs close and running commands may stop. Project files and worktrees stay.';
+  const dialog = modal(title, `<form id="delete-task-form"><p class="delete-task-name">${escape(task.title)}</p><p class="delete-task-description">${description}</p><p class="delete-task-error" role="alert" hidden></p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="secondary-button delete-task-confirm">Delete ${label}</button></div></form>`, 'delete-task-dialog');
   const form = dialog.querySelector<HTMLFormElement>('#delete-task-form')!;
   const confirm = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
   const error = form.querySelector<HTMLElement>('[role="alert"]')!;
@@ -3711,11 +3791,15 @@ function showDeleteTask(): void {
     confirm.disabled = true; confirm.setAttribute('aria-busy', 'true'); error.hidden = true;
     void (async () => {
       try {
-        const result = await call<{deletedSessionIds: string[]}>('delete_session', { sessionId: task.id });
-        if (chatTask(task)) await forgetChat(task.projectId);
+        const current = state.sessions.find(item => item.id === taskId);
+        if (!current || chatOnly && (!chatTask(current) || current.projectId !== projectId)) throw new Error('This chat is no longer available.');
+        if (isRunning(taskId) || configuringSessions.has(taskId) || finishingStreams.has(taskId)) throw new Error('Stop the agent before deleting this conversation.');
+        const cleanupProjectId = chatTask(current) ? current.projectId : undefined;
+        const result = await call<{deletedSessionIds: string[]}>('delete_session', { sessionId: taskId });
+        if (cleanupProjectId) await forgetChat(cleanupProjectId);
         removeDeletedSessions(result.deletedSessionIds);
         if (ownsDialog()) closeModal();
-        notify('Task deleted');
+        notify(chatOnly ? 'Chat deleted' : 'Task deleted');
       } catch (failure) {
         if (ownsDialog()) { error.textContent = String(failure instanceof Error ? failure.message : failure); error.hidden = false; }
         else report(failure);

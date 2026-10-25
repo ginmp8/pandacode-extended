@@ -126,6 +126,15 @@ pub struct TaskLink {
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GithubIssueAction {
+    pub session_id: String,
+    pub action: String,
+    pub repository: String,
+    pub number: i64,
+    pub url: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Message {
     pub id: i64,
     pub session_id: String,
@@ -156,7 +165,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -419,6 +428,9 @@ impl Store {
                     }
                 }
                 migration.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS sessions_remote ON sessions(remote_device,remote_session) WHERE remote_session IS NOT NULL; PRAGMA user_version=26;").map_err(|e| e.to_string())?;
+            }
+            if version < 27 {
+                migration.execute_batch("CREATE TABLE github_issue_actions(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,action TEXT NOT NULL CHECK(action IN ('close','reopen')),repository TEXT NOT NULL,number INTEGER NOT NULL CHECK(number>0),url TEXT NOT NULL,approved_at INTEGER NOT NULL); PRAGMA user_version=27;").map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }
@@ -879,7 +891,38 @@ impl Store {
                     .map_err(|e| e.to_string())?;
             }
         }
+        if kind == "issue" {
+            self.cancel_github_issue_action(sid)?;
+        }
         self.session(sid)
+    }
+    pub fn approve_github_issue_action(&self, sid: &str, action: &str, repository: &str, number: i64, url: &str) -> Result<()> {
+        if !["close", "reopen"].contains(&action) || number <= 0 || repository.is_empty() || url.len() > 2048 {
+            return Err("Invalid linked issue action.".into());
+        }
+        let tx = self.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM github_issue_actions WHERE repository=?1 AND number=?2 AND session_id<>?3", params![repository,number,sid]).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO github_issue_actions(session_id,action,repository,number,url,approved_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id) DO UPDATE SET action=excluded.action,repository=excluded.repository,number=excluded.number,url=excluded.url,approved_at=excluded.approved_at", params![sid, action, repository, number, url, now()]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+    pub fn github_issue_action(&self, sid: &str) -> Result<Option<GithubIssueAction>> {
+        self.db.query_row("SELECT session_id,action,repository,number,url FROM github_issue_actions WHERE session_id=?1", [sid], |r| Ok(GithubIssueAction { session_id:r.get(0)?,action:r.get(1)?,repository:r.get(2)?,number:r.get(3)?,url:r.get(4)? })).optional().map_err(|e| e.to_string())
+    }
+    pub fn project_github_issue_actions(&self, project_id: &str) -> Result<Vec<GithubIssueAction>> {
+        let mut stmt = self.db.prepare("SELECT a.session_id,a.action,a.repository,a.number,a.url FROM github_issue_actions a JOIN sessions s ON s.id=a.session_id WHERE s.project_id=?1 ORDER BY a.approved_at,a.session_id").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([project_id], |r| Ok(GithubIssueAction { session_id:r.get(0)?,action:r.get(1)?,repository:r.get(2)?,number:r.get(3)?,url:r.get(4)? })).map_err(|e| e.to_string())?;
+        rows.collect::<std::result::Result<Vec<_>,_>>().map_err(|e| e.to_string())
+    }
+    pub fn cancel_github_issue_action(&self, sid: &str) -> Result<()> {
+        self.db.execute("DELETE FROM github_issue_actions WHERE session_id=?1", [sid]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    pub fn finish_github_issue_action(&self, sid: &str, action: &str, repository: &str, number: i64, url: &str, state: &str, title: &str) -> Result<()> {
+        let tx = self.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let changed = tx.execute("UPDATE task_links SET state=?6,title=CASE WHEN ?7='' THEN title ELSE ?7 END,checked_at=?8 WHERE session_id=?1 AND kind='issue' AND number=?2 AND url=?3 AND EXISTS(SELECT 1 FROM github_issue_actions WHERE session_id=?1 AND action=?4 AND repository=?5 AND number=?2 AND url=?3)", params![sid,number,url,action,repository,state,title,now()]).map_err(|e| e.to_string())?;
+        if changed == 0 { return Err("The approved linked issue action is no longer current.".into()); }
+        tx.execute("DELETE FROM github_issue_actions WHERE session_id=?1 AND action=?2 AND repository=?3 AND number=?4 AND url=?5", params![sid,action,repository,number,url]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
     /// Linked numbers for one project, so states can be refreshed in one batch.
     pub fn project_links(&self, project_id: &str) -> Result<Vec<(String, TaskLink)>> {
@@ -1091,6 +1134,7 @@ impl Store {
         if changed == 0 {
             return Err("Restore this task and stop its agent before changing its stage.".into());
         }
+        self.cancel_github_issue_action(sid)?;
         self.session(sid)
     }
 

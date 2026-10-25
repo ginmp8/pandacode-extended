@@ -2626,6 +2626,40 @@ async fn github_refresh_links(state: State<'_, AppState>, project_id: String) ->
 }
 
 #[tauri::command]
+async fn github_linked_issue_status(state: State<'_, AppState>, session_id: String, action: String) -> Result<github::LinkedIssueStatus> {
+    let (root, task) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let task = store.session(&session_id)?;
+        let root = store.workspace_root(&task.project_id, Some(&session_id))?;
+        (root, task)
+    };
+    blocking(move || github::linked_issue_status(&root, &task, &action)).await
+}
+
+#[tauri::command]
+async fn github_apply_linked_issue_action(state: State<'_, AppState>, session_id: String, action: String) -> Result<Session> {
+    let store = state.store.clone();
+    let root = {
+        let store = store.lock().map_err(|e| e.to_string())?;
+        let task = store.session(&session_id)?;
+        store.workspace_root(&task.project_id, Some(&session_id))?
+    };
+    blocking(move || github::apply_linked_issue_action(&root, &store, &session_id, &action)).await
+}
+
+#[tauri::command]
+async fn github_cancel_linked_issue_action(state: State<'_, AppState>, session_id: String) -> Result<()> {
+    github::cancel_linked_issue_action(&state.store, &session_id)
+}
+
+#[tauri::command]
+async fn github_retry_linked_issue_actions(state: State<'_, AppState>, project_id: String) -> Result<Vec<github::LinkedIssueActionFailure>> {
+    let root = state.root(&project_id, None)?;
+    let store = state.store.clone();
+    blocking(move || github::retry_linked_issue_actions(&root, &store, &project_id)).await
+}
+
+#[tauri::command]
 async fn set_task_link(
     state: State<'_, AppState>,
     session_id: String,
@@ -3361,6 +3395,10 @@ pub fn run() {
                 github_issues,
                 github_resolve,
                 github_refresh_links,
+                github_linked_issue_status,
+                github_apply_linked_issue_action,
+                github_cancel_linked_issue_action,
+                github_retry_linked_issue_actions,
                 github_create_pull_request,
                 github_pull_request,
                 github_pull_request_diff,

@@ -3540,7 +3540,7 @@ function untouchedSelectedChat(task: Session): boolean {
     || state.messagesLoading || state.messagesError || state.messages.length || task.lastPromptAt != null || task.lastResponseAt != null) return false;
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
   const draft = prompt?.dataset.sessionId === task.id ? prompt.value : state.drafts.get(task.id) ?? '';
-  return !draft.trim() && !state.attachments.length && !attachments.list(task.id).length
+  return !draft.length && !state.attachments.length && !attachments.list(task.id).length
     && !state.browserAttachments.get(task.id)?.length && !state.moodboardAttachments.get(task.id)?.length;
 }
 async function refreshChatProject(projectId: string): Promise<void> {
@@ -3582,7 +3582,6 @@ async function createChat(): Promise<void> {
       recoveringChatId = created.id;
     }
     await refreshChatProject(created.projectId);
-    creatingTask = false;
     renderNavigation();
     if (generation !== state.generation) { recoveringChatId = undefined; return; }
     if (state.projectFilter) setProjectFilter('');
@@ -3607,8 +3606,17 @@ async function createChat(): Promise<void> {
   }
 }
 /** Drops a chat's hidden project (and its empty folder) once no task uses it. */
-async function forgetChat(projectId: string): Promise<void> {
-  if (await call<boolean>('chat_cleanup', { projectId }).catch(() => false)) state.projects = state.projects.filter(p => p.id !== projectId);
+async function forgetChat(projectId: string, strict = false): Promise<boolean> {
+  try {
+    const cleaned = await call<boolean>('chat_cleanup', { projectId });
+    if (cleaned) state.projects = state.projects.filter(p => p.id !== projectId);
+    return cleaned;
+  } catch (error) {
+    // Project changes retain their existing best-effort cleanup behavior.
+    // Deletion must report failures because its native mutation cannot be retried.
+    if (strict) throw error;
+    return false;
+  }
 }
 type ChoiceOptions = Omit<Parameters<typeof import('./choice-menu').openChoiceMenu>[0], 'anchor' | 'onClose'>;
 async function showChoices(anchor: HTMLElement, options: ChoiceOptions, guardGeneration = true): Promise<void> {
@@ -3794,11 +3802,25 @@ function showDeleteTask(targetId = state.sessionId, chatOnly = false): void {
         const current = state.sessions.find(item => item.id === taskId);
         if (!current || chatOnly && (!chatTask(current) || current.projectId !== projectId)) throw new Error('This chat is no longer available.');
         if (isRunning(taskId) || configuringSessions.has(taskId) || finishingStreams.has(taskId)) throw new Error('Stop the agent before deleting this conversation.');
+        if (current.goalState?.status === 'active') throw new Error('Pause the active goal before deleting this conversation.');
         const cleanupProjectId = chatTask(current) ? current.projectId : undefined;
         const result = await call<{deletedSessionIds: string[]}>('delete_session', { sessionId: taskId });
-        if (cleanupProjectId) await forgetChat(cleanupProjectId);
+        // Commit the native outcome to the UI before optional cleanup. A failed
+        // cleanup must not leave a deleted conversation available for a second delete.
         removeDeletedSessions(result.deletedSessionIds);
         if (ownsDialog()) closeModal();
+        if (cleanupProjectId) {
+          try {
+            const cleaned = await forgetChat(cleanupProjectId, true);
+            const stillNeeded = state.sessions.some(item => item.projectId === cleanupProjectId);
+            if (!cleaned && !stillNeeded && state.projects.some(p => p.id === cleanupProjectId)) {
+              throw new Error('The hidden chat project is still registered.');
+            }
+          } catch (cleanupError) {
+            report(new Error(`${chatOnly ? 'Chat' : 'Task'} deleted, but hidden project cleanup failed: ${errorText(cleanupError)}`));
+            return;
+          }
+        }
         notify(chatOnly ? 'Chat deleted' : 'Task deleted');
       } catch (failure) {
         if (ownsDialog()) { error.textContent = String(failure instanceof Error ? failure.message : failure); error.hidden = false; }

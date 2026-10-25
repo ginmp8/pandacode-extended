@@ -129,3 +129,28 @@ test("Worker authentication strips caller-supplied generation headers", async ()
   assert.equal((await worker.fetch(new Request("https://relay.example/v1/account", { method: "DELETE" }), env)).status, 401);
   assert.equal(seen, undefined, "unauthenticated deletion never reaches account storage");
 });
+
+test("throttled frames skip large JSON while small sends retain correlation", async t => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const f = fixture();
+  try {
+    await f.account.fetch(registration());
+    f.socket.sent.length = 0;
+    f.socket.attachment.tokens = 0;
+    const parse = t.mock.method(JSON, "parse");
+    for (const frame of [new ArrayBuffer(8), JSON.stringify({ to: ID, body: "x".repeat(4096), ref: "large" })]) {
+      await f.account.webSocketMessage(f.socket, frame);
+    }
+    assert.equal(parse.mock.callCount(), 0, "throttled large frames never reach JSON parsing");
+    assert.deepEqual(f.socket.sent.map(value => JSON.parse(value)), [
+      { kind: "error", error: "rate limit exceeded" }, { kind: "error", error: "rate limit exceeded" },
+    ]);
+    f.socket.sent.length = 0;
+    await f.account.webSocketMessage(f.socket, JSON.stringify({ to: ID, body: "small", ref: "request-id" }));
+    assert.deepEqual(JSON.parse(f.socket.sent[0]), { kind: "undeliverable", to: ID, ref: "request-id", reason: "rate" });
+    now += 1000;
+    await f.account.webSocketMessage(f.socket, '{"kind":"host","enabled":true}');
+    assert.equal(f.database.prepare("SELECT host FROM devices WHERE id = ?").get(ID)?.host, 1, "replenished budgets accept valid frames");
+  } finally { f.database.close(); }
+});

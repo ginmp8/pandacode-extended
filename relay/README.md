@@ -25,7 +25,7 @@ Development, installation, tests and CI do not publish a relay.
    ```
    Each `secret put` takes the secret's name and asks for its value (paste the OAuth App's client ID,
    then its client secret). Run them one line at a time.
-   The deploy creates the `Account` Durable Object (SQLite migration `v1`) and the `AUTH_LIMITER` (10/min per IP) and `ACCOUNT_LIMITER` (30/min per account) rate-limit bindings.
+   The deploy creates the `Account` Durable Object (SQLite migration `v1`), `AUTH_LIMITER` (10/min per IP), `GLOBAL_AUTH_LIMITER` (300 sign-ins/min), and `ACCOUNT_LIMITER` (30/min per account) rate-limit bindings. A signing secret shorter than 32 characters, or missing OAuth configuration for sign-in, receives a generic server error before requests are processed.
 3. Build the desktop app with `PANDACODE_RELAY_URL` set to the Worker URL (or set it as an environment variable at run time).
 
 Rotating `SESSION_SECRET` signs everyone out.
@@ -39,6 +39,7 @@ Rotating `SESSION_SECRET` signs everyone out.
 - Presence is `{ kind: "presence", devices: [{ id, name, platform, publicKey, host, online, lastSeen }] }`, the full registered list, the same shape as `GET /v1/devices`.
 - Clients send `ping` every 30 s (answered by the runtime without waking the object). A socket is online only while its last ping, or its join before the first ping, is under 75 s old; stale sockets are closed (code 4002) when found and presence is broadcast.
 - A reconnect keeps the device's rate bucket (20/s, burst 100), seeded from the old socket before it closes.
+- Throttled binary frames and text longer than 4,096 characters are rejected before JSON parsing. Small throttled sends retain their `to` and `ref` correlation.
 - Schema 2 adds a random UUID registration generation, included in signed tokens and forwarded only from verified claims. A newly registered row has a new generation after device revocation or account deletion, so an old token cannot revive even if re-registration occurs within the same second. Existing schema-1 rows keep legacy `iat` validation until removal; no-generation tokens are rejected for all fresh rows. Token contents remain opaque to desktop/mobile clients, which continue using `acct`, `dev`, `iat` and `exp` locally. The schema migration is gated on `PRAGMA user_version`.
 
 ## Develop

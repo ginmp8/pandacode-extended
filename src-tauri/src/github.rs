@@ -2,7 +2,7 @@
 //! runs the signed-in CLI with a null stdin, bounded output, and a deadline, and
 //! only ever from a project's checkout so the repository is the remote's.
 use serde::{Deserialize, Serialize};
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, process::Command, sync::{Mutex, MutexGuard, OnceLock}, time::Duration};
 
 use crate::workspace::{checked, run_process, Capture};
 
@@ -80,6 +80,199 @@ pub struct PullRequest {
     pub url: String,
     pub title: String,
     pub state: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedIssueStatus {
+    pub session_id: String,
+    pub link: crate::storage::TaskLink,
+    pub repository: String,
+    pub remote_state: String,
+    pub needs_action: Option<String>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedIssueActionFailure {
+    pub session_id: String,
+    pub action: String,
+    pub repository: String,
+    pub number: i64,
+    pub error: String,
+}
+
+static ISSUE_ACTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn issue_action_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    ISSUE_ACTION_LOCK.get_or_init(|| Mutex::new(())).lock().map_err(|e| e.to_string())
+}
+
+fn issue_action_for_stage(stage: &str) -> Option<&'static str> {
+    match stage { "completed" => Some("close"), "review" | "pending" => Some("reopen"), _ => None }
+}
+
+fn issue_store(store: &Mutex<crate::storage::Store>) -> Result<MutexGuard<'_, crate::storage::Store>, String> {
+    store.lock().map_err(|e| e.to_string())
+}
+
+fn canonical_issue_url(repository: &str, number: i64) -> Result<String, String> {
+    if number <= 0 { return Err("The linked issue number is invalid.".into()); }
+    let (owner, name) = repository.split_once('/').ok_or("The project repository name is incomplete.")?;
+    let valid_segment = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid_segment(owner) || !valid_segment(name) || name.contains('/') {
+        return Err("The project repository name is invalid.".into());
+    }
+    Ok(format!("https://github.com/{owner}/{name}/issues/{number}"))
+}
+
+fn repository_from_issue_url(url: &str, number: i64) -> Result<String, String> {
+    let suffix = format!("/issues/{number}");
+    let repo_path = url.strip_prefix("https://github.com/").and_then(|value| value.strip_suffix(&suffix)).ok_or("The linked issue URL is not canonical.")?;
+    let canonical = canonical_issue_url(repo_path, number)?;
+    if canonical != url { return Err("The linked issue URL is not canonical.".into()); }
+    Ok(repo_path.to_string())
+}
+
+fn issue_action_args(action: &str, number: i64, repository: &str) -> Result<Vec<String>, String> {
+    if !["close", "reopen"].contains(&action) { return Err("Choose whether to close or reopen the issue.".into()); }
+    canonical_issue_url(repository, number)?;
+    let mut args = vec!["issue".to_string(), action.to_string(), number.to_string(), flag("repo", repository)];
+    if action == "close" { args.push("--reason=completed".into()); }
+    Ok(args)
+}
+
+fn linked_issue_identity(root: &Path, task: &crate::storage::Session) -> Result<(crate::storage::TaskLink, Repository), String> {
+    if task.remote_device.is_some() { return Err("This task runs on another computer.".into()); }
+    let link = task.issue.clone().ok_or("This task has no linked GitHub issue.")?;
+    if link.kind != "issue" || link.number <= 0 { return Err("The linked GitHub item is not a valid issue.".into()); }
+    let repo = repository(root).map_err(|e| if e.is_empty() { "This project has no GitHub remote.".to_string() } else { e })?;
+    let expected = canonical_issue_url(&repo.name_with_owner, link.number)?;
+    if link.url != expected { return Err("The linked issue URL does not match this project's repository.".into()); }
+    Ok((link, repo))
+}
+
+fn read_linked_issue(root: &Path, link: &crate::storage::TaskLink, repo: &Repository) -> Result<serde_json::Value, String> {
+    let canonical = canonical_issue_url(&repo.name_with_owner, link.number)?;
+    if link.url != canonical { return Err("The linked issue URL does not match this project's repository.".into()); }
+    let number = link.number.to_string();
+    let repo_arg = flag("repo", &repo.name_with_owner);
+    let value = json(&run_gh(root, &["issue", "view", &number, &repo_arg, "--json", "number,url,state,title"], TIMEOUT)?)?;
+    if value.get("number").and_then(|v| v.as_i64()) != Some(link.number)
+        || text(&value, "url") != canonical
+        || text(&value, "url").contains("/pull/")
+    { return Err("GitHub returned a different item than the linked issue.".into()); }
+    let state = text(&value, "state").to_ascii_lowercase();
+    if !matches!(state.as_str(), "open" | "closed") { return Err("GitHub returned an unexpected issue state.".into()); }
+    Ok(value)
+}
+
+pub fn linked_issue_status(root: &Path, task: &crate::storage::Session, action: &str) -> Result<LinkedIssueStatus, String> {
+    if !["close", "reopen"].contains(&action) || issue_action_for_stage(&task.task_stage) != Some(action) {
+        return Err("This action does not match the task's current stage.".into());
+    }
+    let (link, repo) = linked_issue_identity(root, task)?;
+    let value = read_linked_issue(root, &link, &repo)?;
+    let remote_state = text(&value, "state").to_ascii_lowercase();
+    let needs_action = match action { "close" if remote_state != "closed" => Some("close".into()), "reopen" if remote_state != "open" => Some("reopen".into()), _ => None };
+    Ok(LinkedIssueStatus { session_id: task.id.clone(), link, repository: repo.name_with_owner, remote_state, needs_action })
+}
+
+fn apply_saved_issue_action(root: &Path, store: &Mutex<crate::storage::Store>, sid: &str) -> Result<crate::storage::Session, String> {
+    let (action, task) = {
+        let store = issue_store(store)?;
+        (store.github_issue_action(sid)?.ok_or("There is no approved linked issue action to apply.")?, store.session(sid)?)
+    };
+    let linked = task.issue.as_ref().ok_or("This task no longer has a linked GitHub issue.")?;
+    if issue_action_for_stage(&task.task_stage) != Some(action.action.as_str()) || linked.kind != "issue" || linked.number != action.number || linked.url != action.url {
+        issue_store(store)?.cancel_github_issue_action(sid)?;
+        return Err("The task stage or linked issue changed; approve the action again.".into());
+    }
+    let (link, repo) = linked_issue_identity(root, &task)?;
+    if repo.name_with_owner != action.repository {
+        issue_store(store)?.cancel_github_issue_action(sid)?;
+        return Err("The linked issue no longer matches this project's repository.".into());
+    }
+    let current = read_linked_issue(root, &link, &repo)?;
+    let desired_state = if action.action == "close" { "closed" } else { "open" };
+    if text(&current, "state").eq_ignore_ascii_case(desired_state) {
+        let store = issue_store(store)?;
+        store.finish_github_issue_action(sid, &action.action, &action.repository, action.number, &action.url, desired_state, &text(&current, "title"))?;
+        return store.session(sid);
+    }
+    {
+        let store = issue_store(store)?;
+        let latest = store.github_issue_action(sid)?.ok_or("The approved linked issue action was canceled.")?;
+        let latest_task = store.session(sid)?;
+        let latest_link = latest_task.issue.as_ref().ok_or("This task no longer has a linked GitHub issue.")?;
+        if latest.action != action.action || latest.repository != action.repository || latest.number != action.number || latest.url != action.url
+            || issue_action_for_stage(&latest_task.task_stage) != Some(latest.action.as_str())
+            || latest_link.number != latest.number || latest_link.url != latest.url || latest_link.kind != "issue"
+        { return Err("The approved linked issue action is no longer current.".into()); }
+    }
+    let args = issue_action_args(&action.action, action.number, &action.repository)?;
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_gh(root, &args, TIMEOUT)?;
+    let verified = read_linked_issue(root, &link, &repo)?;
+    if !text(&verified, "state").eq_ignore_ascii_case(desired_state) {
+        return Err("GitHub did not confirm the approved issue state change.".into());
+    }
+    let store = issue_store(store)?;
+    store.finish_github_issue_action(sid, &action.action, &action.repository, action.number, &action.url, desired_state, &text(&verified, "title"))?;
+    store.session(sid)
+}
+
+pub fn apply_linked_issue_action(root: &Path, store: &Mutex<crate::storage::Store>, sid: &str, action: &str) -> Result<crate::storage::Session, String> {
+    let _guard = issue_action_lock()?;
+    if !["close", "reopen"].contains(&action) { return Err("Choose whether to close or reopen the issue.".into()); }
+    let store_lock = issue_store(store)?;
+    let task = store_lock.session(sid)?;
+    let expected = issue_action_for_stage(&task.task_stage);
+    if expected != Some(action) { return Err("This action does not match the task's current stage.".into()); }
+    let link = task.issue.as_ref().ok_or("This task has no linked GitHub issue.")?;
+    if link.kind != "issue" || link.number <= 0 { return Err("The linked GitHub item is not a valid issue.".into()); }
+    let repo = repository_from_issue_url(&link.url, link.number)?;
+    store_lock.approve_github_issue_action(sid, action, &repo, link.number, &link.url)?;
+    drop(store_lock);
+    apply_saved_issue_action(root, store, sid)
+}
+
+pub fn cancel_linked_issue_action(store: &Mutex<crate::storage::Store>, sid: &str) -> Result<(), String> {
+    issue_store(store)?.cancel_github_issue_action(sid)
+}
+
+fn retry_failure_if_pending(store: &Mutex<crate::storage::Store>, expected: &crate::storage::GithubIssueAction, error: String) -> Result<Option<LinkedIssueActionFailure>, String> {
+    let store = issue_store(store)?;
+    let Some(current) = store.github_issue_action(&expected.session_id)? else { return Ok(None); };
+    if current.action != expected.action || current.repository != expected.repository || current.number != expected.number || current.url != expected.url {
+        return Ok(None);
+    }
+    let task = store.session(&expected.session_id)?;
+    let valid = issue_action_for_stage(&task.task_stage) == Some(current.action.as_str())
+        && task.remote_device.is_none()
+        && task.issue.as_ref().is_some_and(|link| link.kind == "issue" && link.number == current.number && link.url == current.url)
+        && repository_from_issue_url(&current.url, current.number).is_ok_and(|repo| repo == current.repository);
+    if !valid {
+        store.cancel_github_issue_action(&expected.session_id)?;
+        return Ok(None);
+    }
+    Ok(Some(LinkedIssueActionFailure {
+        session_id: current.session_id,
+        action: current.action,
+        repository: current.repository,
+        number: current.number,
+        error,
+    }))
+}
+
+pub fn retry_linked_issue_actions(root: &Path, store: &Mutex<crate::storage::Store>, project_id: &str) -> Result<Vec<LinkedIssueActionFailure>, String> {
+    let actions = issue_store(store)?.project_github_issue_actions(project_id)?;
+    let mut failures = Vec::new();
+    for action in actions {
+        let _guard = issue_action_lock()?;
+        if let Err(error) = apply_saved_issue_action(root, store, &action.session_id) {
+            if let Some(failure) = retry_failure_if_pending(store, &action, error)? { failures.push(failure); }
+        }
+    }
+    Ok(failures)
 }
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -486,6 +679,78 @@ pub fn create_pull_request(root: &Path, title: &str, body: &str, base: &str, hea
 
 #[cfg(test)]
 mod tests {
+    use super::{canonical_issue_url, issue_action_args, issue_action_for_stage, repository_from_issue_url, retry_failure_if_pending};
+    use crate::storage::{Store, TaskLink};
+    use std::{path::Path, sync::Mutex};
+
+    #[test]
+    fn linked_issue_action_validation_is_canonical_and_stage_scoped() {
+        assert_eq!(canonical_issue_url("owner/repo", 11).unwrap(), "https://github.com/owner/repo/issues/11");
+        assert_eq!(repository_from_issue_url("https://github.com/owner/repo/issues/11", 11).unwrap(), "owner/repo");
+        assert!(repository_from_issue_url("https://github.com/owner/repo/pull/11", 11).is_err());
+        for (repo, number) in [("owner/repo/extra", 11), ("owner/repo", 0), ("https://github.com/owner/repo", 11)] {
+            assert!(canonical_issue_url(repo, number).is_err());
+        }
+        assert_eq!(issue_action_for_stage("completed"), Some("close"));
+        assert_eq!(issue_action_for_stage("review"), Some("reopen"));
+        assert_eq!(issue_action_for_stage("pending"), Some("reopen"));
+        assert_eq!(issue_action_for_stage("in_progress"), None);
+    }
+
+    #[test]
+    fn linked_issue_action_arguments_are_exact_and_validated() {
+        assert_eq!(issue_action_args("close", 11, "owner/repo").unwrap(), vec![String::from("issue"), String::from("close"), String::from("11"), String::from("--repo=owner/repo"), String::from("--reason=completed")]);
+        assert_eq!(issue_action_args("reopen", 11, "owner/repo").unwrap(), vec![String::from("issue"), String::from("reopen"), String::from("11"), String::from("--repo=owner/repo")]);
+        assert!(issue_action_args("delete", 11, "owner/repo").is_err());
+        assert!(issue_action_args("close", 0, "owner/repo").is_err());
+        assert!(issue_action_args("close", 11, "owner/repo/extra").is_err());
+    }
+
+    #[test]
+    fn canceled_issue_approval_is_removed_without_network_access() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        let link = TaskLink { kind:"issue".into(), number:11, url:"https://github.com/owner/repo/issues/11".into(), title:"Test".into(), state:"open".into(), checked_at:0 };
+        store.set_task_link(&task.id, "issue", Some(&link)).unwrap();
+        store.set_task_stage(&task.id, "completed").unwrap();
+        store.approve_github_issue_action(&task.id, "close", "owner/repo", 11, &link.url).unwrap();
+        assert_eq!(store.github_issue_action(&task.id).unwrap().unwrap().action, "close");
+        let other = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.set_task_link(&other.id, "issue", Some(&link)).unwrap();
+        store.set_task_stage(&other.id, "completed").unwrap();
+        store.approve_github_issue_action(&other.id, "close", "owner/repo", 11, &link.url).unwrap();
+        assert!(store.github_issue_action(&task.id).unwrap().is_none());
+        assert!(store.github_issue_action(&other.id).unwrap().is_some());
+        store.cancel_github_issue_action(&task.id).unwrap();
+        assert!(store.github_issue_action(&other.id).unwrap().is_some());
+        store.set_task_stage(&other.id, "review").unwrap();
+        assert!(store.github_issue_action(&other.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn retry_failure_is_returned_only_while_approval_remains_pending() {
+        let store = Mutex::new(Store::open(Path::new(":memory:")).unwrap());
+        let project = store.lock().unwrap().add_project(&std::env::temp_dir()).unwrap();
+        let task = store.lock().unwrap().create_session(&project.id, "codex", "default", "ask").unwrap();
+        let link = TaskLink { kind:"issue".into(), number:11, url:"https://github.com/owner/repo/issues/11".into(), title:"Test".into(), state:"open".into(), checked_at:0 };
+        {
+            let store = store.lock().unwrap();
+            store.set_task_link(&task.id, "issue", Some(&link)).unwrap();
+            store.set_task_stage(&task.id, "completed").unwrap();
+            store.approve_github_issue_action(&task.id, "close", "owner/repo", 11, &link.url).unwrap();
+        }
+        let pending = store.lock().unwrap().github_issue_action(&task.id).unwrap().unwrap();
+        let failure = retry_failure_if_pending(&store, &pending, "temporary failure".into()).unwrap().unwrap();
+        assert_eq!(failure.session_id, task.id);
+        assert_eq!(failure.action, "close");
+        assert_eq!(failure.repository, "owner/repo");
+        assert_eq!(failure.number, 11);
+        assert_eq!(failure.error, "temporary failure");
+        store.lock().unwrap().cancel_github_issue_action(&task.id).unwrap();
+        assert!(retry_failure_if_pending(&store, &pending, "temporary failure".into()).unwrap().is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn gh_runs_with_the_tool_search_path_even_from_a_minimal_gui_path() {

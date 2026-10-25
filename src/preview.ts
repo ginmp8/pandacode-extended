@@ -239,10 +239,30 @@ const previewGithub = (() => {
   ];
   const pulls: { projectId: string; number: number; title: string; body: string; base: string; head: string }[] = [{ projectId: 'project-1', number: 130, title: 'Debounce library search and cache the index', body: '', base: 'main', head: 'feat/instant-search' }];
   let next = 200;
+  type ApprovedIssueAction = { action: 'close' | 'reopen'; number: number; repository: string; targetStage: TaskStage };
+  const approvedKey = 'pandacode.preview.githubIssueActions';
+  const approvedIssueActions = new Map<string, ApprovedIssueAction>();
+  try {
+    const saved = JSON.parse(localStorage.getItem(approvedKey) ?? '[]') as [string, ApprovedIssueAction][];
+    for (const [sessionId, intent] of saved) if (typeof sessionId === 'string' && intent && ['close', 'reopen'].includes(intent.action)) approvedIssueActions.set(sessionId, intent);
+  } catch { /* Invalid preview intent data is ignored. */ }
+  const persistApprovedActions = () => localStorage.setItem(approvedKey, JSON.stringify([...approvedIssueActions]));
+  for (const [sessionId, intent] of approvedIssueActions) {
+    const task = sessions.find(item => item.id === sessionId);
+    if (!task || !task.issue || task.issue.kind !== 'issue' || task.issue.number !== intent.number
+      || intent.action === 'close' && intent.targetStage !== 'completed'
+      || intent.action === 'reopen' && !['review', 'pending'].includes(intent.targetStage)) {
+      approvedIssueActions.delete(sessionId);
+      continue;
+    }
+    task.taskStage = intent.targetStage;
+    task.completedAt = intent.targetStage === 'completed' ? task.completedAt ?? now : null;
+  }
+  persistApprovedActions();
   const url = (projectId: string, kind: 'issue' | 'pull', number: number) => `${repos[projectId]?.url}/${kind === 'pull' ? 'pull' : 'issues'}/${number}`;
   return {
     pulls,
-    status(projectId: string) { return { installed: true, version: '2.62.0', authenticated: true, login: 'you', repo: repos[projectId] ?? null, error: repos[projectId] ? null : null }; },
+    status(projectId: string) { const connected = !(window as any).__previewGithubDisconnected; return { installed: true, version: '2.62.0', authenticated: connected, login: connected ? 'you' : null, repo: connected ? repos[projectId] ?? null : null, error: repos[projectId] ? null : null }; },
     nextNumber(_projectId: string) { return ++next; },
     search(projectId: string, query: string) {
       const q = query.trim().replace(/^#/, '').toLocaleLowerCase();
@@ -285,6 +305,44 @@ const previewGithub = (() => {
     refresh(projectId: string, link: NonNullable<Session['issue']>) {
       const issue = issues.find(i => i.projectId === projectId && i.number === link.number);
       return { ...link, title: issue?.title ?? link.title, state: issue?.state ?? link.state, checkedAt: Date.now() };
+    },
+    linkedIssueStatus(s: Session, action: 'close' | 'reopen') {
+      if (!s.issue || s.issue.kind !== 'issue') throw new Error('This task has no linked GitHub issue.');
+      const repo = repos[s.projectId], issue = issues.find(item => item.projectId === s.projectId && item.number === s.issue!.number);
+      if (!repo || !issue) throw new Error('The linked GitHub issue is unavailable.');
+      const remoteState = (window as any).__previewGithubIssueStates?.[`${s.projectId}:${issue.number}`] ?? issue.state;
+      issue.state = remoteState;
+      const link = { ...s.issue, title: issue.title, state: remoteState, checkedAt: Date.now() };
+      return { sessionId: s.id, link, repository: repo.nameWithOwner, remoteState, needsAction: remoteState !== (action === 'close' ? 'closed' : 'open') ? action : null };
+    },
+    applyLinkedIssueAction(s: Session, action: 'close' | 'reopen') {
+      const status = this.linkedIssueStatus(s, action);
+      if (status.needsAction !== action) { s.issue = status.link; approvedIssueActions.delete(s.id); persistApprovedActions(); return s; }
+      const validStage = action === 'close' ? s.taskStage === 'completed' : s.taskStage === 'review' || s.taskStage === 'pending';
+      if (!validStage) throw new Error('The task stage changed; this approved issue action is no longer valid.');
+      approvedIssueActions.set(s.id, { action, number: status.link.number, repository: status.repository, targetStage: s.taskStage ?? 'pending' });
+      persistApprovedActions();
+      if ((window as any).__failLinkedIssueAction) { (window as any).__failLinkedIssueAction = false; throw new Error('GitHub is temporarily unavailable.'); }
+      const issue = issues.find(item => item.projectId === s.projectId && item.number === status.link.number)!;
+      issue.state = action === 'close' ? 'closed' : 'open';
+      s.issue = { ...status.link, state: issue.state, checkedAt: Date.now() };
+      approvedIssueActions.delete(s.id);
+      persistApprovedActions();
+      return s;
+    },
+    cancelLinkedIssueAction(sessionId: string) { approvedIssueActions.delete(sessionId); persistApprovedActions(); },
+    retryLinkedIssueActions(projectId: string) {
+      const failures: { sessionId: string; action: 'close' | 'reopen'; repository: string; number: number; error: string }[] = [];
+      for (const [sessionId, intent] of [...approvedIssueActions]) {
+        const s = sessions.find(task => task.id === sessionId && task.projectId === projectId);
+        const validStage = s && (intent.action === 'close' ? s.taskStage === 'completed' : s.taskStage === 'review' || s.taskStage === 'pending');
+        const validLink = s?.issue?.kind === 'issue' && s.issue.number === intent.number && repos[projectId]?.nameWithOwner === intent.repository;
+        if (!s || !validStage || !validLink) { approvedIssueActions.delete(sessionId); continue; }
+        try { this.applyLinkedIssueAction(s, intent.action); }
+        catch (error) { failures.push({ sessionId, action: intent.action, repository: intent.repository, number: intent.number, error: error instanceof Error ? error.message : String(error) }); }
+      }
+      persistApprovedActions();
+      return failures;
     },
   };
 })();
@@ -1211,6 +1269,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'github_issues': result = previewGithub.issues(args.projectId, args.filter ?? {}); break;
     case 'github_resolve': result = previewGithub.resolve(args.projectId, (args.numbers ?? []) as number[]); break;
     case 'github_refresh_links': result = sessions.filter(s => s.projectId === args.projectId).flatMap(s => [s.issue, s.pullRequest].filter(Boolean).map(link => ({ sessionId: s.id, link: previewGithub.refresh(s.projectId, link!) }))); break;
+    case 'github_linked_issue_status': result = previewGithub.linkedIssueStatus(session(args.sessionId), args.action); break;
+    case 'github_apply_linked_issue_action': result = previewGithub.applyLinkedIssueAction(session(args.sessionId), args.action); break;
+    case 'github_cancel_linked_issue_action': previewGithub.cancelLinkedIssueAction(String(args.sessionId)); result = undefined; break;
+    case 'github_retry_linked_issue_actions': result = previewGithub.retryLinkedIssueActions(String(args.projectId)); break;
     case 'set_task_link': {
       const s = session(args.sessionId);
       if (!['issue', 'pull'].includes(args.kind)) throw new Error('Unknown link kind.');

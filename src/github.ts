@@ -11,6 +11,8 @@ const REFRESH_INTERVAL = 5 * 60 * 1000;
 export const MAX_REFERENCES = 5;
 export type MentionEntry = FileEntry & { mention?: string; detail?: string; icon?: string };
 type ChoiceItem = { id: string; label: string; description?: string; icon?: string; disabled?: boolean };
+export type LinkedIssueAction = 'close' | 'reopen';
+export type LinkedIssueActionFailure = { sessionId: string; action: LinkedIssueAction; repository: string; number: number; error: string };
 
 export type GithubHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -89,6 +91,12 @@ export function createGithub(host: GithubHost) {
   function connected(projectId: string): boolean {
     const value = cached(projectId);
     return githubEnabled() && Boolean(value?.installed && value.authenticated && value.repo);
+  }
+  async function retryApprovedActions(projectId: string, forceStatus = false): Promise<LinkedIssueActionFailure[] | null> {
+    if (!githubEnabled() || !projectId) return null;
+    await status(projectId, forceStatus);
+    if (!connected(projectId)) return null;
+    return host.call<LinkedIssueActionFailure[]>('github_retry_linked_issue_actions', { projectId });
   }
 
   async function mentionSearch(projectId: string, sessionId: string | undefined, query: string): Promise<MentionEntry[]> {
@@ -323,5 +331,5 @@ export function createGithub(host: GithubHost) {
     return () => { disposed = true; toggle.removeEventListener('change', onToggle); };
   }
 
-  return { enabled: githubEnabled, setEnabled, status, cached, connected, mentionSearch, contextFor, menuItems, onMenu, showImport, showPullRequest, showLinkPull, submit, refreshLinks, mountSettings };
+  return { enabled: githubEnabled, setEnabled, status, cached, connected, retryApprovedActions, mentionSearch, contextFor, menuItems, onMenu, showImport, showPullRequest, showLinkPull, submit, refreshLinks, mountSettings };
 }

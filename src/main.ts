@@ -60,7 +60,7 @@ import { mountSlashCommands, type SlashCommand } from './slash-commands';
 import { mountFileMentions, type MentionEntry } from './file-mentions';
 import { bindFileLinkContext, configureFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
 import { createWorktrees } from './worktrees';
-import { createGithub, githubEnabled } from './github';
+import { createGithub, githubEnabled, type LinkedIssueAction, type LinkedIssueActionFailure } from './github';
 import { startAppUpdates } from './app-updates';
 import { projectIconHtml } from './project-icons';
 import { createPullView } from './github-pull';
@@ -396,8 +396,8 @@ const worktrees = createWorktrees({
   extraItems: task => github.menuItems(task),
   onExtra: (id, task) => github.onMenu(id, task),
 });
-window.addEventListener('pandacode-github-change', () => { renderComposer(); renderHeader(); renderInspector(); });
-window.addEventListener('focus', () => void github.refreshLinks(state.projectId));
+window.addEventListener('pandacode-github-change', () => { renderComposer(); renderHeader(); renderInspector(); if (githubEnabled()) run(retryLinkedIssueActionsOnConnect(state.projectId, true)); });
+window.addEventListener('focus', () => { void github.refreshLinks(state.projectId); run(retryLinkedIssueActionsOnConnect(state.projectId, true)); });
 const attachments = mountPromptAttachments({
   taskId: () => state.sessionId,
   blocked: taskId => {
@@ -1849,38 +1849,165 @@ async function archiveTask(s: Session, offerCleanup: boolean): Promise<void> {
   }
   renderNavigation();
 }
-async function moveBoardTask(id: string, stage: TaskStage): Promise<void> {
+type LinkedIssueStatus = { sessionId: string; link: TaskLink; repository: string; remoteState: string; needsAction: LinkedIssueAction | null };
+const retryingIssueProjects = new Set<string>();
+let deferredIssueFailures: { projectId: string; failures: LinkedIssueActionFailure[] } | undefined;
+function stageTaskSnapshot(saved: Session): void {
+  upsertSession(saved);
+  if (saved.id === state.sessionId) renderComposer();
+  renderNavigation(); renderBoardView();
+}
+async function cancelLinkedIssueAction(sessionId: string): Promise<void> {
+  try { await call('github_cancel_linked_issue_action', { sessionId }); } catch { /* Cancellation is local best-effort; the stage is already saved. */ }
+}
+function askLinkedIssueAction(task: Session, action: LinkedIssueAction, status: LinkedIssueStatus): Promise<boolean> {
+  return new Promise(resolve => {
+    const dialog = modal(`Update GitHub issue #${status.link.number}?`, `<p class="dialog-description">${escape(status.repository)} · #${status.link.number} · ${escape(status.link.title)}</p><p>Completing or reopening this task can also ${action === 'close' ? 'close' : 'reopen'} its linked GitHub issue.</p><div class="dialog-footer"><button type="button" class="secondary-button" data-issue-decline>Keep issue ${escape(status.remoteState)}</button><button type="button" class="primary-button" data-issue-accept>${action === 'close' ? 'Close issue' : 'Reopen issue'}</button></div>`, 'github-issue-stage-dialog');
+    let settled = false;
+    const finish = (accepted: boolean) => { if (settled) return; settled = true; resolve(accepted); };
+    dialog.addEventListener('close', () => {
+      if (settled) return;
+      finish(false);
+      void cancelLinkedIssueAction(task.id);
+    }, { once: true });
+    dialog.querySelector<HTMLButtonElement>('[data-issue-decline]')!.addEventListener('click', () => {
+      finish(false);
+      void cancelLinkedIssueAction(task.id);
+      closeModal();
+    });
+    const decline = dialog.querySelector<HTMLButtonElement>('[data-issue-decline]')!;
+    decline.focus();
+    const accept = dialog.querySelector<HTMLButtonElement>('[data-issue-accept]')!;
+    accept.addEventListener('click', () => { finish(true); closeModal(); });
+  });
+}
+function issueActionDialogBody(failures: LinkedIssueActionFailure[]): string {
+  return `<p class="dialog-description" id="issue-retry-summary" role="status">These previously approved GitHub issue actions are still pending. Retry them or leave the issues unchanged.</p><ul class="github-issue-retry-list" aria-label="Pending approved GitHub issue actions">${failures.map(failure => `<li><strong>${escape(failure.repository)} #${failure.number}</strong><span>${failure.action === 'close' ? 'Close issue' : 'Reopen issue'}</span><p role="alert">${escape(failure.error)}</p></li>`).join('')}</ul><div class="dialog-footer"><button type="button" class="secondary-button" data-issue-leave>Leave issues unchanged</button><button type="button" class="primary-button" data-issue-retry>Retry approved actions</button></div>`;
+}
+function showLinkedIssueActionFailures(projectId: string, failures: LinkedIssueActionFailure[]): void {
+  if (!failures.length) return;
+  const current = document.querySelector<HTMLDialogElement>('#dialog')!;
+  if (current.open && !current.classList.contains('github-issue-retry-dialog')) {
+    deferredIssueFailures = { projectId, failures };
+    return;
+  }
+  if (current.open) return;
+  let pending = [...failures];
+  let settled = false;
+  const dialog = modal('GitHub issue actions need attention', issueActionDialogBody(pending), 'github-issue-retry-dialog');
+  const cancelPending = () => { for (const failure of pending) void cancelLinkedIssueAction(failure.sessionId); };
+  dialog.addEventListener('close', () => { if (!settled) { settled = true; cancelPending(); } }, { once: true });
+  const leave = dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!;
+  const retry = dialog.querySelector<HTMLButtonElement>('[data-issue-retry]')!;
+  leave.addEventListener('click', () => { settled = true; cancelPending(); closeModal(); });
+  retry.addEventListener('click', () => { void retryLinkedIssueFailures(projectId, pending, dialog, next => { pending = next; }); });
+  leave.focus();
+}
+async function retryLinkedIssueActionsOnConnect(projectId: string, forceStatus = false): Promise<void> {
+  if (!projectId || !githubEnabled() || retryingIssueProjects.has(projectId)) return;
+  const dialog = document.querySelector<HTMLDialogElement>('#dialog');
+  if (dialog?.classList.contains('github-issue-retry-dialog')) return;
+  retryingIssueProjects.add(projectId);
+  try {
+    const failures = await github.retryApprovedActions(projectId, forceStatus);
+    if (failures === null) return;
+    await github.refreshLinks(projectId);
+    if (failures.length) showLinkedIssueActionFailures(projectId, failures);
+  } catch { /* A reconnect retry is best-effort; only native returned failures are surfaced. */ }
+  finally { retryingIssueProjects.delete(projectId); }
+}
+async function retryLinkedIssueFailures(projectId: string, previous: LinkedIssueActionFailure[], dialog: HTMLDialogElement, replace: (next: LinkedIssueActionFailure[]) => void): Promise<void> {
+  const retry = dialog.querySelector<HTMLButtonElement>('[data-issue-retry]');
+  if (retry) retry.disabled = true;
+  try {
+    if (!githubEnabled()) throw new Error('GitHub is turned off. Turn it on and reconnect before retrying.');
+    const failed = await github.retryApprovedActions(projectId);
+    if (failed === null) throw new Error('GitHub is not connected. Reconnect before retrying these actions.');
+    const returned = new Map(failed.map(item => [`${item.sessionId}:${item.action}`, item]));
+    const remaining: LinkedIssueActionFailure[] = [];
+    let verified = 0;
+    for (const failure of previous) {
+      if (!githubEnabled()) { remaining.push({ ...failure, error: 'GitHub is turned off. Turn it on and reconnect before retrying.' }); continue; }
+      try {
+        const status = await call<LinkedIssueStatus>('github_linked_issue_status', { sessionId: failure.sessionId, action: failure.action });
+        const desired = failure.action === 'close' ? 'closed' : 'open';
+        if (status.needsAction === null && status.remoteState === desired) {
+          const task = state.sessions.find(item => item.id === failure.sessionId);
+          if (task) stageTaskSnapshot({ ...task, issue: status.link });
+          verified++;
+          continue;
+        }
+        const stillFailed = returned.get(`${failure.sessionId}:${failure.action}`);
+        if (stillFailed) remaining.push(stillFailed);
+        else notify(`No approved action remains for ${failure.repository} issue #${failure.number}; GitHub reports it ${status.remoteState}.`);
+      } catch (error) {
+        remaining.push({ ...failure, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    await github.refreshLinks(projectId, true);
+    if (remaining.length) {
+      replace(remaining);
+      dialog.innerHTML = `<div class="dialog-heading"><div class="dialog-title"><h2>GitHub issue actions need attention</h2></div><button type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div>${issueActionDialogBody(remaining)}`;
+      dialog.setAttribute('aria-describedby', 'issue-retry-summary');
+      dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!.addEventListener('click', () => { for (const item of remaining) void cancelLinkedIssueAction(item.sessionId); closeModal(); });
+      dialog.querySelector<HTMLButtonElement>('[data-issue-retry]')!.addEventListener('click', () => { void retryLinkedIssueFailures(projectId, remaining, dialog, replace); });
+      dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!.focus();
+    } else {
+      replace([]);
+      closeModal();
+      if (verified) { githubHub?.refresh(); notify(`Verified ${verified} GitHub issue action${verified === 1 ? '' : 's'}.`); }
+    }
+  } catch (error) {
+    const summary = dialog.querySelector<HTMLElement>('[role="status"]');
+    if (summary) summary.textContent = error instanceof Error ? error.message : String(error);
+  } finally { if (retry?.isConnected) retry.disabled = false; }
+}
+async function applyLinkedIssueAction(task: Session, action: LinkedIssueAction, status: LinkedIssueStatus): Promise<void> {
+  try {
+    const saved = await call<Session>('github_apply_linked_issue_action', { sessionId: task.id, action });
+    stageTaskSnapshot(saved);
+    githubHub?.refresh();
+    notify(`GitHub issue #${saved.issue?.number ?? task.issue?.number} ${action === 'close' ? 'closed' : 'reopened'}.`);
+  } catch (error) {
+    showLinkedIssueActionFailures(task.projectId, [{ sessionId: task.id, action, repository: status.repository, number: status.link.number, error: error instanceof Error ? error.message : String(error) }]);
+  }
+}
+async function syncLinkedIssueForStage(task: Session, previousStage: TaskStage, stage: TaskStage): Promise<void> {
+  const action: LinkedIssueAction | undefined = stage === 'completed' && previousStage !== 'completed' ? 'close'
+    : previousStage === 'completed' && (stage === 'review' || stage === 'pending') ? 'reopen' : undefined;
+  if (!action || !githubEnabled() || !task.issue || task.issue.kind !== 'issue') return;
+  let status: LinkedIssueStatus;
+  try { status = await call<LinkedIssueStatus>('github_linked_issue_status', { sessionId: task.id, action }); }
+  catch (error) { notify(`Task stage saved. GitHub issue status could not be checked: ${error instanceof Error ? error.message : String(error)}`); return; }
+  if (status.needsAction !== action) {
+    stageTaskSnapshot({ ...task, issue: status.link });
+    if (status.remoteState === (action === 'close' ? 'closed' : 'open')) notify(`GitHub issue #${status.link.number} is already ${status.remoteState}.`);
+    else notify(`GitHub issue #${status.link.number} is ${status.remoteState}; no action was taken.`);
+    return;
+  }
+  if (await askLinkedIssueAction(task, action, status)) await applyLinkedIssueAction(task, action, status);
+}
+async function persistTaskStage(task: Session, previousStage: TaskStage, stage: TaskStage): Promise<void> {
+  const changed = await call<Session>('set_task_stage', { sessionId: task.id, stage });
+  stageTaskSnapshot(changed);
+  await syncLinkedIssueForStage(changed, previousStage, stage);
+}
+async function changeTaskStage(id: string, stage: TaskStage): Promise<void> {
   const task = state.sessions.find(item => item.id === id);
   if (!task || task.archived || isRunning(id) || configuringSessions.has(id) || taskStage(task) === stage || stage === 'in_progress') return;
-  if (stage === 'completed' && task.worktreePath) {
-    const decision = await worktrees.cleanupOffer(task, 'complete');
-    if (!decision.proceed) return;
-    if (decision.remove) await worktrees.remove(task);
-  }
   configuringSessions.add(id);
   try {
-    const changed = await call<Session>('set_task_stage', { sessionId: id, stage });
-    const index = state.sessions.findIndex(item => item.id === id); if (index >= 0) state.sessions[index] = changed;
-    if (id === state.sessionId) renderComposer(); renderNavigation(); renderBoardView();
+    if (stage === 'completed' && task.worktreePath) {
+      const decision = await worktrees.cleanupOffer(task, 'complete');
+      if (!decision.proceed) return;
+      if (decision.remove) await worktrees.remove(task);
+    }
+    await persistTaskStage(task, taskStage(task), stage);
   } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
   finally { configuringSessions.delete(id); }
 }
-async function changeBoardStage(stage: 'review' | 'completed'): Promise<void> {
-  const s = session(); if (!s || isRunning(s.id) || configuringSessions.has(s.id)) return;
-  if (stage === 'completed' && s.worktreePath) {
-    const decision = await worktrees.cleanupOffer(s, 'complete');
-    if (!decision.proceed) return;
-    if (decision.remove) await worktrees.remove(s);
-    if (session()?.id !== s.id) return;
-  }
-  configuringSessions.add(s.id);
-  try {
-    const changed = await call<Session>('set_task_stage', { sessionId: s.id, stage });
-    const index = state.sessions.findIndex(task => task.id === s.id); if (index >= 0) state.sessions[index] = changed;
-    if (s.id === state.sessionId) renderComposer();
-    renderNavigation(); renderBoardView();
-  } finally { configuringSessions.delete(s.id); }
-}
+async function moveBoardTask(id: string, stage: TaskStage): Promise<void> { await changeTaskStage(id, stage); }
+async function changeBoardStage(stage: 'review' | 'completed'): Promise<void> { const task = session(); if (task) await changeTaskStage(task.id, stage); }
 let fullTaskDescription: { id: string; value: string } | undefined;
 let sessionsReload = 0;
 const startingBoardTasks = new Set<string>();
@@ -4257,6 +4384,12 @@ installTooltips();
 new MutationObserver(() => compactSublines(document.querySelector('#dialog')!)).observe(document.querySelector('#dialog')!, { childList: true, subtree: true });
 window.addEventListener('focus', renderNavigation);
 document.addEventListener('visibilitychange', () => { renderNavigation(); if (!document.hidden) { renderHeader(); renderStream(); } updateWorkTimer(); });
+document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('close', () => {
+  const pending = deferredIssueFailures;
+  if (!pending) return;
+  deferredIssueFailures = undefined;
+  queueMicrotask(() => showLinkedIssueActionFailures(pending.projectId, pending.failures));
+});
 if (localStorage.getItem('pandacode.compact') === 'true') document.body.classList.add('compact');
 // Material file icons arrive in a lazy chunk and have light-theme variants; markup is baked at render time.
 // A full render() here would close open menus mid-click; other icon spots pick the icons up on their next render.
@@ -4335,6 +4468,9 @@ async function boot(): Promise<void> {
   run(fileIconsReady.then(refreshFileIcons));
   window.addEventListener('pandacode-theme-change', refreshFileIcons);
   if (state.view !== 'conversation' && state.generation === bootGeneration) { state.boardPanel = false; renderInspector(); renderBoardView(); }
+  if (githubEnabled()) for (const project of state.projects) {
+    if (state.sessions.some(task => task.projectId === project.id && task.issue?.kind === 'issue')) run(retryLinkedIssueActionsOnConnect(project.id));
+  }
   if (!preview && !state.providers.some(p => p.installed)) notify('Open Settings to check your installed agent CLIs.');
 }
 // PandaCode's own updates: checked on GitHub Releases, installed when no agent is working.

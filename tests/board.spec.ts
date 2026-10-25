@@ -44,6 +44,12 @@ async function storedMessages(page: Page, sessionId: string): Promise<any[]> {
   }, sessionId);
 }
 
+async function readyIssueTaskForCompletion(page: Page, title = 'Add keyboard shortcuts'): Promise<void> {
+  const task = await savedTask(page, title);
+  if (task.taskStage === 'pending') await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Review'));
+  await card(page, title).click();
+}
+
 async function openBoard(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Board view', exact: true }).click();
   await expect(board(page)).toBeVisible();
@@ -80,6 +86,153 @@ test.describe('project board', () => {
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
     await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'completed', completedAt: expect.any(Number) });
+  });
+  test('confirms linked issue close and reopen only after each saved stage', async ({ page }) => {
+    await openBoard(page);
+    const title = 'Add keyboard shortcuts';
+    await readyIssueTaskForCompletion(page, title);
+    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
+    const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await expect(confirm).toContainText('orbit-labs/orbit');
+    await expect(confirm).toContainText('Keyboard shortcut cheat sheet');
+    await expect(confirm.getByRole('button', { name: 'Keep issue open', exact: true })).toBeFocused();
+    expect((await calls(page, 'set_task_stage')).at(-1).args.stage).toBe('completed');
+    await confirm.getByRole('button', { name: 'Close issue', exact: true }).click();
+    await expect(confirm).toBeHidden();
+    await expect(page.locator('#toast')).toContainText('GitHub issue #131 closed.');
+    await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('closed');
+
+    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
+    const reopen = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await reopen.getByRole('button', { name: 'Reopen issue', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('open');
+
+    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await readyIssueTaskForCompletion(page, title);
+    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
+    const closeAgain = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await closeAgain.getByRole('button', { name: 'Close issue', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('closed');
+    expect((await calls(page, 'github_apply_linked_issue_action')).map(call => call.args.action)).toEqual(['close', 'reopen', 'close']);
+  });
+  test('Board drag offers issue confirmation and decline keeps local completion only', async ({ page }) => {
+    await openBoard(page);
+    const task = await savedTask(page, 'Add keyboard shortcuts');
+    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
+    const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole('button', { name: 'Keep issue open', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).taskStage).toBe('completed');
+    expect(await calls(page, 'github_apply_linked_issue_action')).toHaveLength(0);
+    expect((await calls(page, 'github_cancel_linked_issue_action')).at(-1).args.sessionId).toBe(task.id);
+    await expect(page.locator('#toast')).not.toContainText('closed.');
+  });
+  test('dragging a completed issue task to Pending confirms reopen and focuses the safe choice', async ({ page }) => {
+    await openBoard(page);
+    const task = await savedTask(page, 'Add keyboard shortcuts');
+    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
+    const close = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await expect(close.getByRole('button', { name: 'Keep issue open', exact: true })).toBeFocused();
+    await close.getByRole('button', { name: 'Close issue', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
+
+    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
+    const reopen = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await expect(reopen.getByRole('button', { name: 'Keep issue closed', exact: true })).toBeFocused();
+    await reopen.getByRole('button', { name: 'Reopen issue', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).taskStage).toBe('pending');
+    expect((await calls(page, 'github_apply_linked_issue_action')).map(item => item.args.action)).toEqual(['close', 'reopen']);
+  });
+  test('dismissal cancels the pending issue intent; already-correct and unrelated tasks do not prompt', async ({ page }) => {
+    await page.evaluate(() => { (window as any).__previewGithubIssueStates = { 'project-1:131': 'closed' }; });
+    await openBoard(page);
+    await readyIssueTaskForCompletion(page);
+    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true })).toHaveCount(0);
+    await expect(page.locator('#toast')).toContainText('GitHub issue #131 is already closed.');
+
+    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
+    const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
+    await page.keyboard.press('Escape');
+    await expect(confirm).toBeHidden();
+    await expect.poll(async () => (await calls(page, 'github_cancel_linked_issue_action')).length).toBe(1);
+    expect(await page.evaluate(() => ((window as any).__boardCalls ?? []).filter((call: any) => call.command === 'github_apply_linked_issue_action').length)).toBe(0);
+    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await card(page, 'Make search feel instant').click();
+    await page.evaluate(async () => {
+      const { invoke } = await import((window as any).__boardPreviewUrl);
+      await invoke('set_task_link', { sessionId: 'session-1', kind: 'pull', link: { kind: 'pull', number: 130, url: 'https://github.com/orbit-labs/orbit/pull/130', title: 'Sample PR', state: 'open', checkedAt: Date.now() } });
+    });
+    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: /Update GitHub issue/ })).toHaveCount(0);
+    expect(await calls(page, 'github_linked_issue_status')).toHaveLength(2);
+  });
+  test('GitHub disabled stays local without checking or writing the linked issue', async ({ page }) => {
+    await page.evaluate(() => localStorage.setItem('pandacode.github', 'off'));
+    await page.reload();
+    await openBoard(page);
+    await readyIssueTaskForCompletion(page);
+    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: /Update GitHub issue/ })).toHaveCount(0);
+    expect(await calls(page, 'github_linked_issue_status')).toHaveLength(0);
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).taskStage).toBe('completed');
+  });
+  test('issue action failure exposes retry without claiming success', async ({ page }) => {
+    await page.evaluate(() => { (window as any).__failLinkedIssueAction = true; });
+    await openBoard(page);
+    await readyIssueTaskForCompletion(page);
+    await page.getByRole('button', { name: 'Mark complete', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true }).getByRole('button', { name: 'Close issue', exact: true }).click();
+    await expect.poll(async () => (await calls(page, 'github_apply_linked_issue_action')).length).toBe(1);
+    const failed = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
+    await expect(failed).toBeVisible();
+    await expect(failed).toContainText('temporarily unavailable');
+    await expect(page.locator('#toast')).not.toContainText('closed.');
+    await failed.getByRole('button', { name: 'Retry approved actions', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
+    expect(await calls(page, 'github_retry_linked_issue_actions')).not.toHaveLength(0);
+    expect((await calls(page, 'github_apply_linked_issue_action')).map(call => call.args.action)).toEqual(['close']);
+  });
+  test('retries a persisted approved issue action after GitHub reconnects', async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as any).__previewGithubDisconnected = true;
+      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
+    });
+    await page.reload();
+    await expect.poll(async () => page.evaluate(() => document.querySelector('.task-item.selected') !== null)).toBe(true);
+    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(0);
+    await page.evaluate(() => { (window as any).__previewGithubDisconnected = false; window.dispatchEvent(new Event('focus')); });
+    await expect.poll(async () => (await calls(page, 'github_retry_linked_issue_actions')).length).toBe(1);
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
+  });
+  test('startup retries a persisted approved issue action and keeps failed retries visible', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
+      (window as any).__failLinkedIssueAction = true;
+    });
+    await page.reload();
+    const failures = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
+    await expect(failures).toBeVisible();
+    await expect(failures).toContainText('orbit-labs/orbit #131');
+    await expect(failures).toContainText('temporarily unavailable');
+    await expect(failures.getByRole('button', { name: 'Leave issues unchanged', exact: true })).toBeFocused();
+    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(1);
+    await failures.getByRole('button', { name: 'Retry approved actions', exact: true }).click();
+    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
+    await expect(failures).toBeHidden();
+    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(2);
+  });
+  test('startup skips persisted issue retries while GitHub integration is off', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('pandacode.github', 'off');
+      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
+    });
+    await page.reload();
+    await expect.poll(async () => page.evaluate(() => document.querySelector('.task-item.selected') !== null)).toBe(true);
+    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(0);
+    expect(await calls(page, 'github_status')).toHaveLength(0);
   });
   test('switches views without losing the conversation draft and remembers the chosen view', async ({ page }) => {
     const errors: string[] = [];
@@ -139,7 +292,7 @@ test.describe('project board', () => {
     await openBoard(page);
     await queueTask(page, 'Fix the settings keyboard order', 'Tab through every setting and preserve a logical focus order.');
     const task = await savedTask(page, 'Fix the settings keyboard order');
-    expect(task).toMatchObject({ mode: 'full', projectId: 'project-2', taskStage: 'pending', taskDescription: 'Tab through every setting and preserve a logical focus order.', status: 'idle', archived: false, completedAt: null });
+    expect(task).toMatchObject({ mode: 'ask', projectId: 'project-2', taskStage: 'pending', taskDescription: 'Tab through every setting and preserve a logical focus order.', status: 'idle', archived: false, completedAt: null });
     expect(await storedMessages(page, task.id)).toEqual([]);
     expect(await calls(page, 'start_task')).toEqual([]);
     expect(await calls(page, 'send_message')).toEqual([]);

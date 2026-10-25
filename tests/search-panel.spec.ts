@@ -99,7 +99,7 @@ test('toggles reach the backend, invalid regex is reported, and opening a match 
   const path = await line.getAttribute('data-search-open');
   await line.click();
   await expect.poll(async () => (await calls(page, 'read_file')).at(-1)?.args.path).toBe(path);
-  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
   await expect(searchInput(page)).toHaveValue('createSearchIndex');
   await expect(page.locator('.search-line').first()).toBeVisible();
 });

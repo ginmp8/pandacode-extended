@@ -1,34 +1,35 @@
 ---
-/* Every release, newest first, from releases/X.Y.Z.md (lib/changelog.ts). */
+/* Historical upstream + Extended notes with independent source-qualified keys. */
 import Page from '../layouts/Page.astro';
-import { releases, formatDate } from '../lib/changelog';
+import { releases, formatDate, type Release } from '../lib/changelog';
 const [latest] = releases;
-const id = (version: string) => `v${version.replace(/\./g, '-')}`;
-const months = releases.reduce<{ label: string; versions: string[] }[]>((groups, release) => {
+// Preserve existing upstream anchors. Prefix Extended anchors to avoid future collisions.
+const id = (release: Release) => (release.origin === 'extended' ? 'vextended-' : 'v') + release.version.replace(/[^A-Za-z0-9]+/g, '-');
+const months = releases.reduce<{ label: string; items: Release[] }[]>((groups, release) => {
   const label = release.date ? new Date(`${release.date}T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : 'Earlier';
   const last = groups.at(-1);
-  return last?.label === label ? [...groups.slice(0, -1), { label, versions: [...last.versions, release.version] }] : [...groups, { label, versions: [release.version] }];
+  return last?.label === label ? [...groups.slice(0, -1), { label, items: [...last.items, release] }] : [...groups, { label, items: [release] }];
 }, []);
 ---
 <Page title="Changelog" current="changelog" eyebrow="LITTLE BY LITTLE"
-  heading="PandaCode release history."
-  description={`Upstream release references and Hardened revisions. Latest tracked: ${latest.version}${latest.date ? `, ${formatDate(latest.date)}` : ''}.`}
-  lede={`${releases.length} source notes, including upstream-only references. These do not imply Hardened build or feature parity.`}>
+  heading="PandaCode Extended and original release history."
+  description={`Original PandaCode references and Extended source revisions. Latest source note: ${latest.displayVersion}${latest.date ? `, ${formatDate(latest.date)}` : ''}.`}
+  lede={`${releases.length} source notes, including upstream-only references; neither native release publication nor full upstream feature parity is implied.`}>
   <div slot="hero" class="changelog-latest page-rise">
-    <span class="live-dot" aria-hidden="true"></span>Latest <a href={`#${id(latest.version)}`}>{latest.version}</a>{latest.date && <> · <time datetime={latest.date}>{formatDate(latest.date)}</time></>}
+    <span class="live-dot" aria-hidden="true"></span>Latest source note <a href={`#${id(latest)}`}>{latest.displayVersion}</a>{latest.date && <> · <time datetime={latest.date}>{formatDate(latest.date)}</time></>}
   </div>
 
   <div class="changelog-layout section-width">
     <nav class="changelog-rail" aria-label="Releases">
-      {months.map(month => <div class="rail-month"><p>{month.label}</p><ul>{month.versions.map(version => <li><a href={`#${id(version)}`} data-rail={id(version)}>{version}</a></li>)}</ul></div>)}
+      {months.map(month => <div class="rail-month"><p>{month.label}</p><ul>{month.items.map(release => <li><a href={`#${id(release)}`} data-rail={id(release)}>{release.displayVersion}</a></li>)}</ul></div>)}
     </nav>
     <ol class="changelog-list">
       {releases.map((release, index) => (
-        <li class="release reveal" id={id(release.version)} aria-labelledby={`${id(release.version)}-title`}>
+        <li class="release reveal" id={id(release)} aria-labelledby={`${id(release)}-title`}>
           <div class="release-marker" aria-hidden="true"><span></span></div>
           <div class="release-meta">
-            <h2 id={`${id(release.version)}-title`}><a href={`#${id(release.version)}`}>{release.version}</a></h2>
-            {index === 0 && <span class="release-badge">Latest tracked</span>}<span class="release-badge">{release.origin === 'hardened' ? 'Hardened source' : 'Upstream reference'}</span>
+            <h2 id={`${id(release)}-title`}><a href={`#${id(release)}`}>{release.displayVersion}</a></h2>
+            {index === 0 && <span class="release-badge">Latest source note</span>}<span class="release-badge">{release.origin === 'upstream' ? 'Original reference' : release.version.includes('hardened') ? 'Extended legacy' : 'Extended source'}</span>
             {release.date && <time datetime={release.date}>{formatDate(release.date)}</time>}
           </div>
           <div class="release-body">
@@ -41,5 +42,5 @@ const months = releases.reduce<{ label: string; versions: string[] }[]>((groups,
       ))}
     </ol>
   </div>
-  <p class="changelog-note section-width">These notes combine <a href="https://github.com/aicodeking/pandacode/releases">original PandaCode releases</a> and local Hardened source revisions. An upstream-only entry does not mean its features or binaries are included in this fork. For official Hardened releases and tags, see <a href="https://github.com/ginmp8/pandacode-hardened/releases">Hardened GitHub Releases</a>. Automatic upstream installers and updates are not part of this security-focused source distribution.</p>
+  <p class="changelog-note section-width">These notes combine <a href="https://github.com/aicodeking/pandacode/releases">original PandaCode reference releases</a> and PandaCode Extended source history. A referenced upstream release does not mean its features or binaries are included in Extended. See <a href="https://github.com/ginmp8/pandacode-hardened/releases">the currently hosted Extended repository releases</a> for any explicitly published assets. Automatic upstream installers and application updates are disabled in this distribution.</p>
 </Page>

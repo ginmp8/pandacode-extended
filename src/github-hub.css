@@ -145,6 +145,8 @@ button.gh-run-pull:hover{color:var(--text);background:var(--gh-hover)}
 .gh-act:hover{background:color-mix(in srgb,var(--gh-card) 80%,var(--text) 6%)}
 .gh-act:active{scale:.96}
 .gh-act .icon{width:13px;height:13px}
+.gh-fix-actions{display:inline-flex;gap:1px}
+.gh-fix-actions [data-gh-run-customize]{padding:0 6px}
 .gh-act.gh-primary{background:var(--accent);color:var(--on-accent);box-shadow:0 1px 2px rgb(0 0 0 / .12)}
 .gh-act.gh-primary:hover{background:var(--accent-hover,var(--accent))}
 .gh-more{width:26px;padding:0;justify-content:center}

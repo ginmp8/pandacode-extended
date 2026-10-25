@@ -15,8 +15,7 @@ test('original releases remain at their original paths and every Extended histor
   assert.ok(root.every(name => /^\d+\.\d+\.\d+\.md$/.test(name)), 'root contains an Extended release or invalid filename');
   assert.ok(root.includes('0.3.42.md'));
   assert.ok(local.includes('0.4.0.md'));
-  assert.ok(!root.includes('0.3.42.1.md'));
-  assert.ok(!local.includes('0.3.42.1.md'), 'never-published 0.3.42.1 candidate must not appear as an Extended release');
+  assert.deepEqual([...local].sort(), [...legacy.map(version => version + '.md'), '0.4.0.md'].sort(), 'Extended history must contain exactly the reviewed legacy notes and the current release');
   for (const v of legacy) {
     assert.ok(local.includes(v + '.md'), 'missing migrated local history ' + v);
     assert.ok(!root.includes(v + '.md'), 'legacy local release still in original namespace ' + v);
@@ -34,6 +33,5 @@ test('every dated source note has a uniquely namespaced ISO date, without invent
   assert.deepEqual(local.filter(key => !dates[key]).sort(), [...historicalUndated].sort());
   assert.equal(dates['0.3.42'], '2026-10-25');
   assert.equal(dates['extended/0.4.0'], '2026-10-25');
-  assert.equal(dates['extended/0.3.42.1'], undefined, 'never-published candidate must not have a release date');
   assert.equal(dates['0.4.0'], undefined, 'Extended and original releases must not share an unqualified date key');
 });

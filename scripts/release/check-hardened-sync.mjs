@@ -45,7 +45,8 @@ export async function check() {
   assert(rootFiles.every(name => /^\d+\.\d+\.\d+\.md$/.test(name)), 'Local notes leaked into the upstream root');
   assert(rootFiles.includes(meta.tracked_upstream_version + '.md'), 'Missing tracked upstream reference');
   assert(extendedFiles.includes(v + '.md'), 'Missing active Extended note');
-  assert(!rootFiles.includes('0.3.42.1.md') && !extendedFiles.includes('0.3.42.1.md') && !dates['extended/0.3.42.1'], 'Unpublished 0.3.42.1 candidate must not be in the release history');
+  const extendedDateKeys = new Set(extendedFiles.map(name => 'extended/' + name.slice(0, -3)));
+  assert(Object.keys(dates).every(key => !key.startsWith('extended/') || extendedDateKeys.has(key)), 'An Extended release date has no matching release note');
   assert(Boolean((await read(meta.release_note)).trim()) && Boolean(dates[releaseDateKey(v)]), 'Missing active Extended release note/date');
   for (const older of legacy) {
     assert(!rootFiles.includes(older + '.md') && extendedFiles.includes(older + '.md'), 'Legacy release note misplaced: ' + older);

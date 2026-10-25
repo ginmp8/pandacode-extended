@@ -3237,6 +3237,8 @@ pub fn run() {
         std::process::exit(local_signing::cli());
     }
     let app = tauri::Builder::default()
+        // Register first: another launch must focus the owner of this database.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| tray::show(app)))
         .plugin(tauri_plugin_dialog::init())
         // Hardened distribution: no updater plugin or restart-to-install capability.
         .setup(|app| {
@@ -3655,6 +3657,7 @@ pub fn run() {
                 jev_decisions::jev_assist_list,
                 jev_decisions::jev_assist_save_rules,
                 browser::browser_open,
+                browser::browser_open_external,
                 browser::browser_bounds,
                 browser::browser_action,
                 browser::browser_pick,

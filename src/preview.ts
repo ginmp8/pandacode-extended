@@ -923,6 +923,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'export_task': { const task = session(args.sessionId); result = `# ${task.title}\n\n` + (messages[task.id] ?? []).map(message => `## ${message.role}\n\n${message.content}\n\n`).join(''); break; }
     case 'list_subagents': return [] as T;
     case 'list_local_servers': result = [{ port: 3000, process: 'node', url: 'http://localhost:3000' }, { port: 5173, process: 'vite', url: 'http://localhost:5173' }]; break;
+    case 'browser_open_external': {
+      const url = new URL(args.url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Use an HTTP or HTTPS address without embedded credentials.');
+      if (url.origin === 'http://127.0.0.1:4179') throw new Error('Workspace file previews stay in the native Browser pane.');
+      // This fixture does not open an external page or establish native QA evidence.
+      break;
+    }
     case 'browser_open': {
       const url = new URL(args.url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Use an HTTP or HTTPS address.');
       browserHistory = browserHistory.slice(0, browserIndex + 1); browserHistory.push(url.href); browserIndex++;

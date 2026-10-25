@@ -497,3 +497,28 @@ test.describe('native element picker script', () => {
     expect(await page.evaluate(() => (window as any).afterCancel)).toBe(true);
   });
 });
+
+
+test('Linux offers explicit system browsing without changing native Browser QA or file previews', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Linux x86_64' }));
+  await installPreviewProbe(page);
+  await page.goto('/');
+  await openBrowser(page);
+  await browserUrl(page).fill('https://example.test/application');
+  await browserPanel(page).getByRole('button', { name: 'Open in system browser', exact: true }).click();
+  await expect.poll(async () => (await commandCalls(page, 'browser_open_external')).length).toBe(1);
+  expect((await commandCalls(page, 'browser_open_external'))[0].args).toEqual({ url: 'https://example.test/application' });
+  expect(await commandCalls(page, 'browser_open')).toHaveLength(0);
+  await expect(browserPanel(page).locator('.browser-notice')).toContainText('QA and captures stay with the native Browser pane');
+  await navigate(page, 'localhost:5173');
+  await expect(browserPanel(page).getByRole('button', { name: 'Browser QA', exact: true })).toBeVisible();
+  await expect.poll(async () => (await commandCalls(page, 'browser_open')).length).toBe(1);
+  await openInspectorTab(page, 'Files');
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.locator('.file-row').getByRole('button', { name: 'index.html', exact: true }).click();
+  await expect(browserUrl(page)).toHaveValue(/\/index\.html$/);
+  expect(await commandCalls(page, 'browser_open_external')).toHaveLength(1);
+  await browserPanel(page).getByRole('button', { name: 'Open in system browser', exact: true }).click();
+  await expect(browserPanel(page).locator('.browser-notice')).toContainText('Workspace file previews stay in the native Browser pane');
+  expect(await commandCalls(page, 'open_external_url')).toHaveLength(0);
+});

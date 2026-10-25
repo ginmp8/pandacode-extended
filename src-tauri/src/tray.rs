@@ -103,7 +103,7 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-fn show(app: &AppHandle) {
+pub(crate) fn show(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();

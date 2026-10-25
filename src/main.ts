@@ -3563,7 +3563,8 @@ async function createChat(): Promise<void> {
     if (recoveringChatId === selected.id) recoveringChatId = undefined;
     document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return;
   }
-  if (recoveringChatId === selected?.id) recoveringChatId = undefined;
+  // A failed navigation can leave the newly created chat selected but unloaded.
+  // Keep its recovery ID until that same session loads successfully.
   const generation = state.generation;
   const harness = state.providers.find(p => p.id === state.defaultProvider && p.installed)
     ?? state.providers.find(p => p.installed) ?? state.providers[0];

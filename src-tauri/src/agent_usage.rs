@@ -327,8 +327,10 @@ struct CacheSlot {
     generation: AtomicU64,
 }
 
-fn connection_slots() -> &'static std::sync::Mutex<HashMap<String, (u64, Arc<CacheSlot>)>> {
-    static SLOTS: OnceLock<std::sync::Mutex<HashMap<String, (u64, Arc<CacheSlot>)>>> = OnceLock::new();
+type ConnectionSlots = std::sync::Mutex<HashMap<String, (u64, Arc<CacheSlot>)>>;
+
+fn connection_slots() -> &'static ConnectionSlots {
+    static SLOTS: OnceLock<ConnectionSlots> = OnceLock::new();
     SLOTS.get_or_init(Default::default)
 }
 

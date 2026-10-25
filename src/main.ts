@@ -23,7 +23,7 @@ import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } fro
 import { renderCoordination } from './coordination-message';
 import { renderTurnChanges, changeRequest, captureChangeCards, restoreChangeCards } from './turn-changes';
 import { mountWallpapers } from './wallpapers';
-import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubReference, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, ToolActivity, TurnChanges } from './types';
+import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubReference, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, ToolActivity, TurnChanges } from './types';
 import type { BrowserPanel } from './browser';
 import { botAvatarHtml } from './bot-avatars';
 import { call, chooseFolder, preview, subscribe } from './bridge';
@@ -1848,6 +1848,22 @@ async function archiveTask(s: Session, offerCleanup: boolean): Promise<void> {
     state.archived = archived; renderComposer();
   }
   renderNavigation();
+}
+async function moveBoardTask(id: string, stage: TaskStage): Promise<void> {
+  const task = state.sessions.find(item => item.id === id);
+  if (!task || task.archived || isRunning(id) || configuringSessions.has(id) || taskStage(task) === stage || stage === 'in_progress') return;
+  if (stage === 'completed' && task.worktreePath) {
+    const decision = await worktrees.cleanupOffer(task, 'complete');
+    if (!decision.proceed) return;
+    if (decision.remove) await worktrees.remove(task);
+  }
+  configuringSessions.add(id);
+  try {
+    const changed = await call<Session>('set_task_stage', { sessionId: id, stage });
+    const index = state.sessions.findIndex(item => item.id === id); if (index >= 0) state.sessions[index] = changed;
+    if (id === state.sessionId) renderComposer(); renderNavigation(); renderBoardView();
+  } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
+  finally { configuringSessions.delete(id); }
 }
 async function changeBoardStage(stage: 'review' | 'completed'): Promise<void> {
   const s = session(); if (!s || isRunning(s.id) || configuringSessions.has(s.id)) return;
@@ -4117,6 +4133,27 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   }
 }
 mountExternalLinks(document, url => call('open_external_url', { url }), report);
+document.addEventListener('dragstart', event => {
+  const card = (event.target as Element).closest<HTMLElement>('.board-card[draggable="true"]');
+  if (!card || !event.dataTransfer) return;
+  event.dataTransfer.setData('text/plain', card.dataset.taskId ?? ''); event.dataTransfer.effectAllowed = 'move';
+});
+document.addEventListener('dragover', event => {
+  const column = (event.target as Element).closest<HTMLElement>('.board-column');
+  if (!column || !event.dataTransfer?.types.includes('text/plain')) return;
+  event.preventDefault(); event.dataTransfer.dropEffect = 'move'; column.classList.add('board-drop-target');
+});
+document.addEventListener('dragleave', event => {
+  const column = (event.target as Element).closest<HTMLElement>('.board-column');
+  if (column && !column.contains(event.relatedTarget as Node | null)) column.classList.remove('board-drop-target');
+});
+document.addEventListener('drop', event => {
+  const column = (event.target as Element).closest<HTMLElement>('.board-column');
+  if (!column) return;
+  event.preventDefault(); document.querySelectorAll('.board-drop-target').forEach(item => item.classList.remove('board-drop-target'));
+  const id = event.dataTransfer?.getData('text/plain');
+  if (id && column.dataset.stage) run(moveBoardTask(id, column.dataset.stage as TaskStage));
+});
 document.addEventListener('click', event => {
   const target = event.target as Element;
   // Message markup cannot grant access to arbitrary application actions. Only

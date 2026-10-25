@@ -85,7 +85,7 @@ async function startTurn(page: Page, view: View, expandActivity = true): Promise
     await page.locator('#dialog').getByRole('button', { name: 'Add to pending', exact: true }).click();
     await page.getByRole('region', { name: 'Task details', exact: true }).getByRole('button', { name: 'Start task', exact: true }).click();
   } else {
-    await page.getByRole('button', { name: 'New task ⌘ N', exact: true }).click();
+    await page.getByRole('button', { name: /^New task (?:⌘|Ctrl) N$/ }).click();
     await expect(page.getByRole('heading', { name: /^What should we build in/ })).toBeVisible();
     await expect(prompt(page)).toBeEnabled();
     await prompt(page).fill('Controlled streaming response');
@@ -124,7 +124,7 @@ test.describe('streamed responses', () => {
     await expect(activity).toHaveAttribute('open', '');
     await page.evaluate(id => { const fixture = (window as any).__streamFixtures[id]; for (let i = 0; i < 6; i++) fixture.tool(); }, id);
     await expect(liveGroups(page)).toHaveCount(2);
-    await page.keyboard.press('Meta+,');
+    await page.keyboard.press('ControlOrMeta+,');
     await page.getByRole('checkbox', { name: 'Expand tool activity', exact: true }).check();
     await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
     await expect(activity).toHaveAttribute('open', '');
@@ -136,7 +136,7 @@ test.describe('streamed responses', () => {
     await expect(liveGroups(page)).toHaveCount(3);
     await expect(first).not.toHaveAttribute('open', '');
     await expect(liveGroups(page).last()).toHaveAttribute('open', '');
-    await page.keyboard.press('Meta+,');
+    await page.keyboard.press('ControlOrMeta+,');
     await page.getByRole('checkbox', { name: 'Expand tool activity', exact: true }).uncheck();
     await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
     await expect(activity).toHaveAttribute('open', '');

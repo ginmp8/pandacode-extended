@@ -221,11 +221,19 @@ test('drafts and prompt attachments make New chat create a separate conversation
 
 test('a chat with saved messages starts a separate conversation without stopping its agent', async ({ page }) => {
   await newChat(page);
+  const firstId = await chats(page).locator('.task-item.selected').getAttribute('data-id');
   await prompt(page).fill('Save this conversation first');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('#transcript')).toContainText('Save this conversation first');
   await newChat(page);
-  expect(await chats(page).locator('.task-item')).toHaveCount(2);
+  const nextId = await chats(page).locator('.task-item.selected').getAttribute('data-id');
+  expect(nextId).not.toBe(firstId);
+  // A running chat moves to Active, and to Needs review when its turn finishes.
+  // Both conversations must remain visible exactly once across those sections.
+  await expect(row(page, firstId!)).toHaveCount(1);
+  await expect(row(page, firstId!)).toBeVisible();
+  await expect(row(page, nextId!)).toHaveCount(1);
+  await expect(row(page, nextId!)).toBeVisible();
   expect(await calls(page, 'chat_create')).toHaveLength(2);
   expect(await calls(page, 'stop_session')).toEqual([]);
 });

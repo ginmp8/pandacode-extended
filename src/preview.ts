@@ -10,7 +10,7 @@ import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
 import { invokeBots } from './preview-bots';
-import { invokeRemote } from './preview-remote';
+import { invokeRemote, previewRemoteStart } from './preview-remote';
 import { createPreviewDesign } from './preview-design';
 import { createPreviewSkills } from './preview-skills';
 import { previewCapabilities } from './preview-capabilities';
@@ -71,6 +71,21 @@ for (const s of sessions) {
 loadThreadOrder();
 // One sample task already tracks a GitHub issue so chips have something to show.
 sessions[2].issue = { kind: 'issue', number: 131, url: 'https://github.com/orbit-labs/orbit/issues/131', title: 'Keyboard shortcut cheat sheet', state: 'open', checkedAt: now };
+// Sidebar sections showcase: opt in with ?sections so default session counts stay unchanged.
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('sections')) {
+  const sample = (id: string, projectId: string, title: string, extra: Partial<Session>): Session => ({ id, projectId, title, provider: 'claude', model: 'sonnet', mode: 'ask', status: 'idle', createdAt: now - 7200000, updatedAt: now - 60000, archived: false, worktreePath: null, resumeId: null, lastResponseAt: null, pinned: false, sidebarOrder: null, taskStage: 'review', taskDescription: '', completedAt: null, ...extra });
+  sessions.push(
+    sample('sections-running', 'project-1', 'Speed up the search index', { status: 'running', taskStage: 'in_progress', lastPromptAt: now - 95000 }),
+    sample('sections-approval', 'project-2', 'Migrate settings storage', { provider: 'codex', model: '', status: 'waiting_approval', taskStage: 'in_progress', lastPromptAt: now - 240000 }),
+    sample('sections-review-1', 'project-1', 'Fix the flaky filter test', { lastPromptAt: now - 1500000, lastResponseAt: now - 1200000 }),
+    sample('sections-review-2', 'project-2', 'Write the release notes', { provider: 'codex', model: '', lastPromptAt: now - 11000000, lastResponseAt: now - 10800000 }),
+    sample('sections-done-1', 'project-1', 'Add dark mode tokens', { taskStage: 'completed', lastResponseAt: now - 90000000, completedAt: now - 86000000 }),
+    sample('sections-done-2', 'project-2', 'Remove the old onboarding', { taskStage: 'completed', lastResponseAt: now - 200000000, completedAt: now - 190000000 }),
+    sample('sections-done-3', 'project-1', 'Document the keyboard map', { provider: 'kimi', model: '', taskStage: 'completed', lastResponseAt: now - 300000000, completedAt: now - 290000000 }),
+  );
+  // These two finished while another thread was open, so they wait in Needs review.
+  localStorage.setItem('pandacode.sidebar.unreviewed', JSON.stringify(['sections-review-1', 'sections-review-2']));
+}
 let id = 10;
 let previewClaudeMode: 'inherit' | 'subscription' = 'inherit';
 const traceRoot = '/Users/you/Projects/orbit';
@@ -123,6 +138,7 @@ const providers: Provider[] = [
   { id: 'omp', name: 'Oh My Pi', installed: false, path: null, version: '', models: [] },
   { id: 'github-copilot', name: 'GitHub Copilot CLI', installed: true, path: '/sample/bin/copilot', version: 'GitHub Copilot CLI 1.0.82 (sample)', models: [] },
   { id: 'muse', name: 'Muse Code', installed: true, path: '/sample/bin/muse', version: 'Muse Code 1.4.7 (sample)', models: [] },
+  { id: 'devin', name: 'Devin CLI', installed: true, path: '/sample/bin/devin', version: 'devin 3000.11.216 (sample)', models: [] },
 ];
 // Mirrors providers::mimo::ENDPOINTS; the native side is the authority.
 const previewMimoEndpoints = [
@@ -171,6 +187,14 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
   // Recorded from `cline --acp` 3.0.73; efforts are its --thinking levels.
   cline: ['anthropic/claude-sonnet-5.5', 'anthropic/claude-opus-5.5', 'openai/gpt-6-sol'].map((id, index) => ({ id, name: ['Claude Sonnet 5.5', 'Claude Opus 5.5', 'GPT-6 Sol'][index], description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'].map(effort => ({ id: effort, name: effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1), description: '' })) })),
   'github-copilot': [{ id: 'default', name: 'Default', description: 'Use the model configured in GitHub Copilot CLI.' }],
+  // Recorded from `devin acp` 3000.11.216: each model lists its own thinking levels.
+  devin: ([
+    ['adaptive', 'Adaptive', [], ''], ['swe-2-high', 'SWE-2', ['medium', 'high', 'max'], 'high'],
+    ['claude-opus-5-5-medium', 'Claude Opus 5.5', ['low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
+    ['gpt-6-sol-medium', 'GPT-6 Sol', ['none', 'low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
+    ['glm-5-2', 'GLM-5.2 High', ['none', 'high', 'max'], 'high'],
+    ['fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'Fusion (Claude Opus 5.5 Medium + SWE-2 Medium)', [], ''],
+  ] as [string, string, string[], string][]).map(([id, name, efforts, effort]) => ({ id, name, description: id === 'glm-5-2' ? 'Text only' : '', reasoningEfforts: efforts.map(value => ({ id: value, name: value === 'xhigh' ? 'Extra high' : value[0].toUpperCase() + value.slice(1), description: '' })), ...(effort ? { defaultReasoningEffort: effort } : {}) })),
   muse: ['muse-wonder-1.0', 'muse-spark-1.3'].map(id => ({ id, name: id, description: '', reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(effort => ({ id: effort, name: effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1), description: '' })), defaultReasoningEffort: 'high', contextWindow: 1007997 })),
   opencode: openCodePreviewModels,
   glm: [
@@ -498,7 +522,11 @@ function finishTiming(sessionId: string): void {
   turnChanges.finish(marker); history.push(marker);
   agent({ sessionId, kind: 'turn_changes', text: '', data: { messageId: marker.id, turnChanges: marker.turnChanges } });
 }
-function finish(sessionId: string, content: string) { const time = Date.now(); messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time }); finishTiming(sessionId); const s = session(sessionId); if (content.trim()) s.lastResponseAt = time; s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time; timers.delete(sessionId); activeTools.delete(sessionId); agent({ sessionId, kind: 'done', text: '' }); }
+/* A task on another computer: like remote/mirror.rs, its history here is what was copied
+ * from the host, which happens when a run ends (just before its `done`). */
+const mirrorSynced = new Map<string, number>();
+function syncMirror(sessionId: string): void { if (mirrorSynced.has(sessionId)) mirrorSynced.set(sessionId, id); }
+function finish(sessionId: string, content: string) { const time = Date.now(); messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time }); finishTiming(sessionId); const s = session(sessionId); if (content.trim()) s.lastResponseAt = time; s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time; timers.delete(sessionId); activeTools.delete(sessionId); syncMirror(sessionId); agent({ sessionId, kind: 'done', text: '' }); }
 const codexPreferences: Record<string, string | boolean> = { personality: 'none', memory: false };
 const previewImports = [{ id: 'preview-instructions', title: 'Project instructions', description: 'Sample project instructions from Claude Code.', source: 'Claude Code' }, { id: 'preview-skills', title: 'Project skills', description: 'Sample coding skills.', source: 'Kimi Code' }];
 const importedPreviewItems = new Set<string>();
@@ -726,9 +754,12 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     const target = targets.find(item => item.deviceId === args.deviceId && item.online);
     if (!target) throw new Error('That computer is offline.');
     ((window as any).__remoteStarts ??= []).push(args);
+    // The host's stages (finding, downloading…), shown by src/remote-progress.ts; may fail on request.
+    await previewRemoteStart({ ...args, repo: previewGithub.status(args.projectId).repo?.nameWithOwner }, emit);
     const s = args.sessionId ? session(args.sessionId) : await invoke<Session>('create_session', { projectId: args.projectId, provider: args.provider, model: args.model, mode: args.mode });
     Object.assign(session(s.id), { projectId: args.projectId, provider: args.provider, model: args.model, mode: args.mode, reasoningEffort: args.effort, remoteDevice: { id: target.deviceId, name: target.name }, worktreeBranch: args.branch });
-    await invoke('send_message', { sessionId: s.id, text: args.prompt });
+    mirrorSynced.set(s.id, id);
+    await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] });
     emit('sessions-changed', {});
     return { sessionId: s.id } as T;
   }
@@ -947,9 +978,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'steer_task': {
       const s = session(args.sessionId);
       if (!timers.has(s.id) && s.status !== 'running') throw new Error('The agent is not running; the message stays queued.');
-      // Claude-family, Codex, Pi and Muse take it live; others hold it for the next turn of the same run.
+      // Claude-family, Codex, Pi, Muse and Devin take it live; others hold it for the next turn of the same run.
       const text = String(args.text).trim(), steerId = `steer-${++id}`;
-      const mode = ['claude', 'glm', 'mimo', 'codex', 'pi', 'muse'].includes(s.provider) ? 'live' : 'next-turn';
+      const mode = ['claude', 'glm', 'mimo', 'codex', 'pi', 'muse', 'devin'].includes(s.provider) ? 'live' : 'next-turn';
       const report = (status: string) => agent({ sessionId: s.id, kind: 'steer' as AgentEvent['kind'], text, data: { id: steerId, status, mode } });
       window.setTimeout(() => report('pending'));
       window.setTimeout(() => {
@@ -1124,7 +1155,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       s.projectId = projectId; s.provider = args.provider; s.model = args.model; s.updatedAt = Date.now(); result = s; break;
     }
     case 'get_messages': {
-      const history = messages[args.sessionId] ?? [];
+      const synced = mirrorSynced.get(args.sessionId);
+      const history = (messages[args.sessionId] ?? []).filter(message => synced == null || message.id <= synced);
       const current = session(args.sessionId).provider;
       const eligible = history.filter(m => args.beforeId == null || m.id < args.beforeId);
       result = { messages: eligible.slice(-100).map(message => message.role === 'assistant'
@@ -1179,7 +1211,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         agent({ sessionId: args.sessionId, kind: 'tool', text: 'Bash canceled', tool: { ...pending.activity } });
         activeTools.delete(args.sessionId);
       }
-      const stopped = session(args.sessionId); stopped.status = 'idle'; if (stopped.goalState?.status === 'active') { stopped.goalState.status = 'paused'; emitGoal(stopped); } agent({ sessionId: args.sessionId, kind: 'done', text: 'Stopped' }); break;
+      const stopped = session(args.sessionId); stopped.status = 'idle'; if (stopped.goalState?.status === 'active') { stopped.goalState.status = 'paused'; emitGoal(stopped); } syncMirror(args.sessionId); agent({ sessionId: args.sessionId, kind: 'done', text: 'Stopped' }); break;
     }
     case 'respond_approval': case 'respond_user_input': break;
     case 'git_status': result = checkoutGit(args.sessionId); break;
@@ -1463,7 +1495,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#2e513b"/><stop offset="1" stop-color="#ffd43b"/></linearGradient></defs><rect width="320" height="180" rx="12" fill="url(#g)"/><text x="160" y="96" fill="#fffcef" font-family="sans-serif" font-size="18" text-anchor="middle">${String(args.path).split('/').pop()}</text></svg>`;
       result = `data:image/svg+xml;base64,${btoa(svg)}`; break;
     }
-    case 'read_file': result = /\.(md|markdown)$/i.test(args.path) ? sampleReadme : args.path.endsWith('.json') ? '{\n  "name": "orbit",\n  "private": true,\n  "type": "module"\n}' : args.path.endsWith('.html') ? '<!doctype html>\n<html><head><title>Orbit</title></head><body><h1>Orbit</h1></body></html>' : sampleSource; break;
+    // Like `Store::workspace_root`: a task on another computer has no checkout here.
+    case 'read_file': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) throw new Error(`This task runs on ${mirror.name}.`); }
+      result = /\.(md|markdown)$/i.test(args.path) ? sampleReadme : args.path.endsWith('.json') ? '{\n  "name": "orbit",\n  "private": true,\n  "type": "module"\n}' : args.path.endsWith('.html') ? '<!doctype html>\n<html><head><title>Orbit</title></head><body><h1>Orbit</h1></body></html>' : args.path.endsWith('.svg') ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>' : sampleSource; break;
     case 'get_metrics': result = { coreRssBytes: 0, activeAgents: timers.size, activeTerminals: 0, databaseBytes: 0 }; break;
     case 'get_terminal_activity': result = { running: false, processNames: [], uncertain: false }; break;
     case 'get_run_script': result = null; break;

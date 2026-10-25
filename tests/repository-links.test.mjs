@@ -40,4 +40,6 @@ test('Extended website source/issue links and original PandaCode download/attrib
   assert.ok(license.includes('href={originalPandaCode.repo}'));
   assert.ok(license.includes('href={project.repo}'));
   assert.ok(releaseTools.includes("|| 'ginmp8/pandacode-extended'"));
+  const downloadNotice = await read('website/src/components/DistributionNote.astro');
+  assert.match(downloadNotice, /original PandaCode builds, not PandaCode Extended installers/);
 });

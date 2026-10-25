@@ -37,9 +37,10 @@ pub fn catalog() -> Vec<Value> {
             "command":{"type":"string","maxLength":8192},
             "timeoutSeconds":int("1–1800, default 120"),
             "name":name}), &["command"]),
-        spec("vm_manage", "Manage machines: create a local VM from an image (ubuntu, debian, fedora, macos-tahoe, macos-sequoia; first use downloads it: Linux about 5 GB, macOS about 30 GB; Linux desktop package installation is a separate explicit install_desktop action; commands work right away) or a cloud sandbox: daytona (a Linux desktop billed by Daytona), cloudflare (a commands-only Linux container in the user's Cloudflare account), aws-linux or aws-windows (an EC2 desktop in the user's AWS account, billed while running; Windows takes about 10 minutes to be ready), or agentcore (an AWS AgentCore code interpreter for commands, ending after an hour); start, stop, suspend (local macOS only), delete, show it in PandaCode's VM panel, or install_desktop on a console-only local Linux VM. Idle local VMs are suspended or stopped after 10 minutes. Creating or starting cloud sandboxes can cost money: confirm with the user first.", json!({
-            "action":{"type":"string","enum":["create","start","stop","suspend","delete","show","install_desktop"]},
-            "provider":{"type":"string","enum":["local","daytona","cloudflare","aws-linux","aws-windows","agentcore"],"description":"create: where the machine runs (default local). daytona, aws-linux and aws-windows have desktops; cloudflare and agentcore are commands-only."},
+        spec("vm_manage", "Manage local VMs or explicitly connected cloud machines. Use vm_list for provider availability and each machine's capabilities. Create starts a billed cloud resource; start and keep_alive can also incur charges. Modal and Vercel support permanent delete but no stop or restart. Blaxel standby is automatic. keep_alive requests a bounded activity lease where supported (Runloop resets its fixed 360-minute idle clock). Local image downloads and install_desktop are explicit actions; cloud images are prepared and PandaCode does not install CLIs or transfer local credentials or checkout files. Local macOS VMs can suspend; idle local VMs stop or suspend after 10 minutes. show opens the machine in the panel. Confirm billed operations with the user first.", json!({
+            "action":{"type":"string","enum":["create","start","stop","suspend","delete","show","install_desktop","keep_alive"]},
+            "provider":{"type":"string","enum":["local","daytona","cloudflare","aws-linux","aws-windows","agentcore","gcloud","e2b","modal","vercel","codesandbox","runloop","blaxel","tensorlake","freestyle","boat","instabox"],"description":"create: where the machine runs (default local). daytona, aws-linux and aws-windows have desktops; the other cloud providers are commands-only. Vercel requires a Sandbox project ID in Settings."},
+            "minutes":{"type":"integer","minimum":1,"maximum":1440,"description":"keep_alive: requested lease minutes, subject to provider limits. Defaults to 30; Runloop requires 360. InstaBox supports at most 60."},
             "image":{"type":"string","enum":super::IMAGES.iter().map(|i| i.id).collect::<Vec<_>>()},
             "shareProject":{"type":"boolean","description":"start: share this task's checkout read-only with the VM."},
             "name":name}), &["action"]),
@@ -51,6 +52,15 @@ fn string(args: &Value, key: &str) -> Option<String> {
 }
 fn number(args: &Value, key: &str) -> Result<f64, String> {
     args[key].as_i64().map(|n| n as f64).ok_or_else(|| format!("Missing argument: {key}"))
+}
+
+fn lease_minutes(args: &Value) -> Result<u32, String> {
+    let minutes = match args.get("minutes") {
+        Some(value) => value.as_u64().ok_or("Invalid activity lease duration.")?,
+        None => 30,
+    };
+    if !(1..=1440).contains(&minutes) { return Err("Choose an activity lease between 1 and 1440 minutes, within the provider's limit.".into()); }
+    Ok(minutes as u32)
 }
 
 /// One computer-use action from tool or panel arguments.
@@ -128,6 +138,11 @@ fn manage(app: &tauri::AppHandle, session_id: &str, vms: &Vms, args: &Value) -> 
             match action.as_str() {
                 "show" => { vms.show(Some(id.clone())); format!("Showing {id} in PandaCode's VM panel.") }
                 "start" | "stop" | "delete" => { cloud::power(&id, &action)?; format!("{id}: {action} requested.") }
+                "keep_alive" => {
+                    let minutes = lease_minutes(args)?;
+                    cloud::keep_alive(&id, minutes)?;
+                    format!("{id}: requested an activity lease for {minutes} minutes, subject to the provider's lifetime limits.")
+                }
                 "suspend" => { cloud::power(&id, "stop")?; format!("{id} is stopping; cloud sandboxes stop rather than suspend.") }
                 _ => return Err("That action is for local VMs.".into()),
             }
@@ -243,6 +258,15 @@ mod tests {
         assert!(validate_spec(&tools, "pandacode_vm_manage", &json!({"action":"create","image":"windows"})).is_err());
         assert!(READ_ONLY.iter().all(|name| tools.iter().any(|t| t["name"] == *name)));
         assert!(!READ_ONLY.contains(&"pandacode_vm_exec"));
+        assert!(!READ_ONLY.contains(&"pandacode_vm_manage"));
+        for provider in crate::cloud::sandbox::PROVIDERS {
+            assert!(validate_spec(&tools, "pandacode_vm_manage", &json!({"action":"create","provider":provider,"name":"pandacode-test"})).is_ok(), "{provider}");
+        }
+        assert!(validate_spec(&tools, "pandacode_vm_manage", &json!({"action":"keep_alive","name":"instabox:box-1","minutes":30})).is_ok());
+        for minutes in [0, 1441, u64::MAX] {
+            assert!(lease_minutes(&json!({"minutes":minutes})).is_err());
+        }
+        assert_eq!(lease_minutes(&json!({})).unwrap(), 30);
     }
     #[test]
     fn parses_every_action_and_requires_its_fields() {

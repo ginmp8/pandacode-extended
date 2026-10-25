@@ -1,6 +1,7 @@
 /* Browser-preview stand-ins for the native VM commands: Tart setup, a catalog of images,
  * VMs that start and stop, a drawn 1024×768 desktop for frames, and recorded input. */
 import type { Vm, VmImage, VmStatus } from './vm-panel';
+import { SANDBOX_PROVIDERS, cloudCapabilities, type CloudMachine } from './vm-machines';
 
 const IMAGES: VmImage[] = [
   { id: 'ubuntu', name: 'Ubuntu 24.04', os: 'linux', source: 'ghcr.io/cirruslabs/ubuntu:latest', downloadGb: 5, memoryMb: 2048, cpus: 2 },
@@ -18,7 +19,7 @@ export function createPreviewVm() {
   const starts: { name: string; share: string | null }[] = [];
   let mark: { x: number; y: number } | null = null, typed = '';
   const status = (): VmStatus => {
-    return { supported: true, installed, vms: structuredClone(vms), shown, images: structuredClone(IMAGES) };
+    return { supported: navigator.platform.includes('Mac'), installed, vms: structuredClone(vms), shown, images: structuredClone(IMAGES) };
   };
   const startVm = (vm: Vm) => {
     vm.running = vm.attached = true;
@@ -76,46 +77,67 @@ export function createPreviewVm() {
 
 /* Cloud sandboxes in the preview: connections that accept any key (except "bad"),
  * machines per provider, a drawn desktop for providers with screens, and recorded input. */
-type PreviewCloudMachine = { id: string; provider: string; name: string; state: string; os: string; desktop: boolean; detail: string };
 export function createPreviewCloud() {
   const connected = new Map<string, string | null>();
-  const machines: PreviewCloudMachine[] = [];
+  const savedOptions = new Map<string, Record<string, unknown>>();
+  const machines: CloudMachine[] = [];
   const inputs: { id: string; input: Record<string, unknown> }[] = [];
+  const leases: { id: string; minutes: number }[] = [];
   const kinds: Record<string, { provider: string; os: string; desktop: boolean; detail: string; needs: string }> = {
     daytona: { provider: 'daytona', os: 'linux', desktop: true, detail: 'Daytona · 1 CPU · 1 GB', needs: 'daytona' },
     cloudflare: { provider: 'cloudflare', os: 'linux', desktop: false, detail: 'Cloudflare container · commands only', needs: 'cloudflare' },
     'aws-linux': { provider: 'aws', os: 'linux', desktop: true, detail: 'AWS EC2 · Ubuntu · t4g.medium', needs: 'aws' },
     'aws-windows': { provider: 'aws', os: 'windows', desktop: true, detail: 'AWS EC2 · Windows Server · t3.large', needs: 'aws' },
     agentcore: { provider: 'agentcore', os: 'linux', desktop: false, detail: 'AWS AgentCore code interpreter · commands only · ends after an hour', needs: 'aws' },
+    ...Object.fromEntries(Object.entries(SANDBOX_PROVIDERS).map(([provider, label]) => [provider, { provider, os: 'linux', desktop: false, detail: `${label} · commands only`, needs: provider }])),
   };
   let sandboxes = false;
-  const connections = () => (['daytona', 'cloudflare', 'aws', 'vercel', 'railway', 'gcloud'] as const).map(provider => ({ provider, connected: connected.has(provider), detail: connected.get(provider) ?? null, ...(provider === 'cloudflare' ? { sandboxes: connected.has(provider) && sandboxes } : {}) }));
+  const providers = ['daytona', 'cloudflare', 'aws', 'railway', ...Object.keys(SANDBOX_PROVIDERS)];
+  const connections = () => providers.map(provider => ({ provider, connected: connected.has(provider), detail: connected.get(provider) ?? null, ...(provider === 'cloudflare' ? { sandboxes: connected.has(provider) && sandboxes } : provider === 'vercel' ? { sandboxes: connected.has(provider) && Boolean(savedOptions.get(provider)?.projectId) } : {}) }));
+  const imageChoices = [{ value: 'template:agent-browser', label: 'Agent browser' }, { value: 'snapshot:ready-image', label: 'Prepared snapshot' }];
+  let selectedImage = 'template:agent-browser';
   const find = (id: unknown) => { const machine = machines.find(m => m.id === id); if (!machine) throw new Error('Unknown cloud machine.'); return machine; };
   return {
-    inputs,
+    inputs, leases,
     connections,
     connect(provider: unknown, key: unknown, options: Record<string, unknown>) {
-      if (provider !== 'daytona' && provider !== 'cloudflare' && provider !== 'aws' && provider !== 'vercel' && provider !== 'railway' && provider !== 'gcloud') throw new Error('Unknown cloud provider.');
+      if (typeof provider !== 'string' || !providers.includes(provider)) throw new Error('Unknown cloud provider.');
       if (provider !== 'aws' && provider !== 'gcloud' && (typeof key !== 'string' || !key.trim())) throw new Error('Enter the key.');
       if (key === 'bad') throw new Error(`${provider === 'daytona' ? 'Daytona' : 'Cloudflare'} refused the credentials (HTTP 401). Check them in Settings → Cloud.`);
       connected.set(provider, provider === 'aws' ? `${options.profile || 'default profile'} · ${options.region}` : provider === 'cloudflare' ? String(options.account) : provider === 'vercel' ? (String(options.team ?? '') || null) : provider === 'railway' ? (String(options.workspace ?? '') || null) : provider === 'gcloud' ? [options.project, options.region].filter(Boolean).join(' · ') : null);
+      savedOptions.set(provider, structuredClone(options));
       return connections();
     },
-    disconnect(provider: unknown) { connected.delete(String(provider)); if (provider === 'cloudflare') sandboxes = false; return connections(); },
+    disconnect(provider: unknown) { connected.delete(String(provider)); savedOptions.delete(String(provider)); if (provider === 'cloudflare') sandboxes = false; if (provider === 'instabox') selectedImage = 'template:agent-browser'; return connections(); },
     setupSandboxes() { if (!connected.has('cloudflare')) throw new Error('Connect Cloudflare first.'); sandboxes = true; return connections(); },
     list() { return { machines: structuredClone(machines.filter(m => connected.has(kinds[Object.keys(kinds).find(k => kinds[k].provider === m.provider)!].needs))), errors: [] }; },
     create(kind: unknown, name: unknown) {
       const spec = kinds[String(kind)];
       if (!spec || !connected.has(spec.needs)) throw new Error('Connect this provider in Settings → Cloud first.');
-      const machine = { id: `${spec.provider}:${String(name)}`, provider: spec.provider, name: String(name), state: 'running', os: spec.os, desktop: spec.desktop, detail: spec.detail };
+      if (kind === 'vercel' && !savedOptions.get('vercel')?.projectId) throw new Error('Set a Vercel Sandbox project ID first.');
+      const machine = { id: `${spec.provider}:${String(name)}`, provider: spec.provider, name: String(name), state: 'running', os: spec.os, desktop: spec.desktop, detail: spec.detail, capabilities: cloudCapabilities(spec.provider) };
       machines.push(machine); return structuredClone(machine);
     },
     power(id: unknown, action: unknown) {
       const machine = find(id);
+      const caps = machine.capabilities!;
+      if ((action === 'start' && !caps.start) || (action === 'stop' && !caps.stop)) throw new Error('This provider does not support that action.');
       if (action === 'delete') machines.splice(machines.indexOf(machine), 1);
       else if (action === 'start' || action === 'stop') machine.state = action === 'start' ? 'running' : 'stopped';
       else throw new Error('Unknown action.');
       return null;
+    },
+    keepAlive(id: unknown, minutes: unknown) {
+      const machine = find(id);
+      if (!machine.capabilities?.lease || typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 1 || minutes > (machine.provider === 'instabox' ? 60 : 1440)) throw new Error('Invalid activity lease.');
+      if (machine.provider === 'runloop' && minutes !== 360) throw new Error('Runloop requires a 360-minute lease.');
+      leases.push({ id: machine.id, minutes });
+    },
+    images() { if (!connected.has('instabox')) throw new Error('Connect InstaBox first.'); return { images: structuredClone(imageChoices), selected: selectedImage }; },
+    setImage(value: unknown) {
+      if (!connected.has('instabox') || !imageChoices.some(image => image.value === value)) throw new Error('Choose an available InstaBox image.');
+      selectedImage = String(value);
+      return { images: structuredClone(imageChoices), selected: selectedImage };
     },
     async frame(id: unknown) {
       const machine = find(id);

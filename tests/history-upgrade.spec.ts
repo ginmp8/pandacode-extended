@@ -108,6 +108,11 @@ test('history chips open project tabs, reveal external files, and enlarge images
   await expect(message.locator('.message-attachments .prompt-chip')).toHaveCount(4);
   await message.getByRole('button',{name:'Open README.md',exact:true}).click();
   await expect.poll(async()=> (await calls(page,'read_file')).some((call:any)=>call.args.path==='README.md')).toBe(true);
+  const tabs=page.getByRole('tablist',{name:'Open files'});
+  await expect(tabs.getByRole('tab',{name:'README.md',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('#transcript')).toHaveAttribute('inert','');
+  await tabs.getByRole('tab',{name:'Conversation',exact:true}).click();
+  await expect(page.locator('#transcript')).not.toHaveAttribute('inert','');
   await message.getByRole('button',{name:'Open brief.md',exact:true}).click();
   await expect.poll(() => calls(page,'reveal_message_attachment')).toEqual([{command:'reveal_message_attachment',args:{sessionId:sid,messageId:103,path:'/tmp/brief.md'}}]);
   await message.getByRole('button',{name:'Open draft.png',exact:true}).click();

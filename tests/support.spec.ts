@@ -123,17 +123,22 @@ test('Settings shows an About section with the version and GitHub links', async 
   await settings.getByRole('tab', { name: 'About & updates', exact: true }).click();
   const about = settings.locator('.settings-about');
   await expect(about).toBeVisible();
+  await expect(about.locator('#settings-about-heading')).toHaveText('About PandaCode Extended');
   await expect(about.locator('.settings-about-version')).toHaveText('Version Preview');
   const urls = await about.locator('[data-action="open-url"]').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.url));
   expect(urls).toEqual(expect.arrayContaining([
+    'https://github.com/ginmp8/pandacode-extended',
+    'https://github.com/ginmp8/pandacode-extended/issues',
     'https://github.com/aicodeking/pandacode',
     'https://github.com/aicodeking/pandacode/issues',
     'https://github.com/aicodeking/pandacode/releases',
   ]));
-  await expect(about.getByRole('button', { name: 'Releases', exact: true })).toBeVisible();
+  await expect(about.getByRole('button', { name: 'Extended repository', exact: true })).toHaveAttribute('data-url', 'https://github.com/ginmp8/pandacode-extended');
+  await expect(about.getByRole('button', { name: 'Extended issues', exact: true })).toHaveAttribute('data-url', 'https://github.com/ginmp8/pandacode-extended/issues');
+  await expect(about.getByRole('button', { name: 'Upstream releases', exact: true })).toBeVisible();
   await expect(about.getByRole('button', { name: 'PandaCode License' })).toBeVisible();
   await expect(settings).not.toContainText('License & updates');
-  await about.getByRole('button', { name: 'Releases', exact: true }).click();
+  await about.getByRole('button', { name: 'Upstream releases', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__supportFixture.opened)).toEqual([
     ['https://github.com/aicodeking/pandacode/releases', '_blank', 'noopener,noreferrer'],
   ]);

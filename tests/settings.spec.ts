@@ -132,7 +132,7 @@ test('support details are loaded on demand and copied only by the customer', asy
   const details = page.locator('.support-details');
   await expect(details.getByRole('textbox')).toBeHidden();
   await details.locator('summary').click();
-  const expected = 'PandaCode: Preview\nPlatform: Browser preview\nArchitecture: Not reported';
+  const expected = 'PandaCode Extended: Preview\nPlatform: Browser preview\nArchitecture: Not reported';
   await expect(details.getByRole('textbox')).toHaveValue(expected);
   expect(await page.evaluate(() => (window as any).__supportCopies)).toEqual([]);
   await details.getByRole('button', { name: 'Copy app details' }).click();

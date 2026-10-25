@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PandaCode",
+  "productName": "PandaCode Extended",
   "version": "0.3.42+1",
   "identifier": "ai.pandacode.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "PandaCode",
+        "title": "PandaCode Extended",
         "width": 1440,
         "height": 940,
         "minWidth": 860,

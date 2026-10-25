@@ -1440,10 +1440,12 @@ impl Store {
 
     /// Claim execution and save its initiating message together. A failed insert
     /// rolls the claim back; concurrent callers cannot enqueue a second run.
+    #[cfg(test)]
     pub fn begin_task_turn(&self, sid: &str, content: &str) -> Result<i64> {
         self.begin_task_turn_with_kind(sid, content, None)
     }
 
+    #[cfg(test)]
     pub fn begin_task_turn_with_kind(
         &self,
         sid: &str,

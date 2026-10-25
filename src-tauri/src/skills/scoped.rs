@@ -311,10 +311,12 @@ mod tests {
         fx.library.activate("review", "claude", Scope::Project, Some(&root), false).unwrap();
         let native = fx.library.resolve("claude", &root, "p", None).unwrap();
         assert!(native.text.is_empty()); assert_eq!(native.items[0].delivery, "native");
-        fx.library.activate("review", "cline", Scope::Project, Some(&root), false).unwrap();
-        let prompt = fx.library.resolve("cline", &root, "p", None).unwrap();
-        assert!(prompt.text.contains("Review code.")); assert_eq!(prompt.items[0].delivery, "prompt");
-        assert!(fx.library.resolve("cline", &fx.home, "other", None).unwrap().text.is_empty());
+        for harness in ["cline", "kilo"] {
+            fx.library.activate("review", harness, Scope::Project, Some(&root), false).unwrap();
+            let prompt = fx.library.resolve(harness, &root, "p", None).unwrap();
+            assert!(prompt.text.contains("Review code.")); assert_eq!(prompt.items[0].delivery, "prompt");
+            assert!(fx.library.resolve(harness, &fx.home, "other", None).unwrap().text.is_empty());
+        }
     }
     #[test]
     fn malformed_store_and_unmanaged_hidden_files_fail_closed() {

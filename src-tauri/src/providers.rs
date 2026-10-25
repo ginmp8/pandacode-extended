@@ -35,6 +35,7 @@ mod codex_stream_tests;
 #[cfg(all(test, unix))]
 pub(crate) mod concurrent_process_tests;
 mod cline;
+mod kilo;
 mod commandcode;
 mod extra_models;
 mod github_copilot;
@@ -68,7 +69,7 @@ const TOOL_INPUT_LIMIT: usize = 4096;
 const TOOL_OUTPUT_LIMIT: usize = 8192;
 const TOOL_CACHE_LIMIT: usize = 64;
 const PREVIEW_TRUNCATED: &str = "\n[Preview truncated]";
-pub(crate) const PROVIDERS: [(&str, &str); 16] = [
+pub(crate) const PROVIDERS: [(&str, &str); 17] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("kimi", "Kimi Code"),
@@ -81,6 +82,7 @@ pub(crate) const PROVIDERS: [(&str, &str); 16] = [
     ("deepseek", "DeepSeek"),
     ("commandcode", "Command Code"),
     ("cline", "Cline"),
+    ("kilo", "Kilo Code"),
     ("omp", "Oh My Pi"),
     ("github-copilot", "GitHub Copilot CLI"),
     ("muse", "Muse Code"),
@@ -457,14 +459,14 @@ pub fn validate_reasoning_effort(provider: &str, effort: Option<&str>) -> Result
     let valid = match (provider, effort) {
         (
             "claude" | "codex" | "kimi" | "glm" | "opencode" | "antigravity" | "grok" | "mimo"
-            | "pi" | "deepseek" | "commandcode" | "cline" | "omp" | "github-copilot" | "muse" | "devin",
+            | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin",
             None,
         ) => true,
         ("claude" | "glm" | "mimo", Some(value)) => {
             ["low", "medium", "high", "xhigh", "max"].contains(&value)
         }
         // The current app-server schema deliberately permits catalog-defined effort IDs.
-        ("codex" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "devin", Some(value)) => {
+        ("codex" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "devin", Some(value)) => {
             !value.is_empty()
                 && value.len() <= 64
                 && value
@@ -537,6 +539,10 @@ pub(crate) fn tool_path(name: &str) -> Option<std::path::PathBuf> {
 
 pub(crate) fn opencode_configuration(mode: &str) -> String {
     acp::configuration(mode)
+}
+
+pub(crate) fn kilo_configuration(mode: &str, inherited: Option<&str>) -> String {
+    kilo::configuration(mode, inherited)
 }
 
 /// The saved Command Code key for discovery paths that build their own process.
@@ -700,7 +706,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
     let semaphore = &model_discovery_semaphores()[index];
     let _permit = if matches!(
         provider,
-        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "github-copilot" | "muse" | "devin"
+        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "muse" | "devin"
     ) {
         // Saving models refreshes both windows. Queue their bounded metadata
         // queries so one window does not cache incomplete ID-only fallbacks.
@@ -727,6 +733,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
         "deepseek" => deepseek::models(&path).await,
         "commandcode" => commandcode::models(&path).await,
         "cline" => cline::models(&path).await,
+        "kilo" => kilo::models(&path).await,
         "github-copilot" => github_copilot::models(&path).await,
         "muse" => muse::models(&path).await,
         "devin" => devin::models(&path).await,
@@ -1655,7 +1662,7 @@ impl Protocol {
                     json!({"experimentalApi":true,"requestAttestation":false});
                 request
             }
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "github-copilot" | "devin" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" => {
                 json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"pandacode","version":"0.1.0"}}})
             }
             _ => {
@@ -1695,7 +1702,7 @@ impl Protocol {
                 json!({"id":request["id"],"result":result})
             }
             "devin" => devin::decision(&request, approved),
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "github-copilot" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" => {
                 let options = request["params"]["options"].as_array();
                 let kinds = if approved {
                     ["allow_once", "allow_always"]
@@ -1722,7 +1729,7 @@ impl Protocol {
             "codex" => {
                 json!({"id":900,"method":"turn/interrupt","params":{"threadId":self.remote_id,"turnId":self.turn_id}})
             }
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "github-copilot" | "devin" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" => {
                 json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.remote_id}})
             }
             _ => {
@@ -1752,7 +1759,7 @@ impl Protocol {
             "kimi" => self.kimi_steered(value),
             "pi" | "omp" => self.pi(value).map(|step| self.steered(step)),
             "muse" => self.muse(value),
-            "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "github-copilot" | "devin" => self.acp(value),
+            "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" => self.acp(value),
             _ => self.claude(value),
         }
     }
@@ -2686,7 +2693,7 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
         }
         "pi" | "omp" => pi::configure(command, config),
         "muse" => muse::configure(command, config),
-        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" => acp::configure(command, config),
+        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" => acp::configure(command, config),
         "github-copilot" | "devin" => acp::configure(command, config),
         "kimi" => {
             if use_model {
@@ -2762,6 +2769,7 @@ async fn run_inner(
         "deepseek",
         "commandcode",
         "cline",
+        "kilo",
         "omp",
         "github-copilot",
         "muse",
@@ -2775,7 +2783,7 @@ async fn run_inner(
         return Err("Unknown permission mode".into());
     }
     validate_reasoning_effort(&config.provider, config.reasoning_effort.as_deref())?;
-    let connection = crate::connections::for_task(&config.session_id, &config.provider)
+    let mut connection = crate::connections::for_task(&config.session_id, &config.provider)
         .map(|connection| crate::connections::launch(&connection))
         .transpose()?;
     let path = connection
@@ -2790,6 +2798,10 @@ async fn run_inner(
     // A named connection's arguments and environment win over the global setup.
     if let Some(connection) = &connection {
         connection.apply(&mut command);
+    }
+    if config.provider == "kilo" {
+        let effective = kilo::configure_environment(&mut command, &config);
+        if let Some(connection) = &mut connection { connection.secrets.push(effective); }
     }
     let key = if config.provider == "glm" {
         Some(glm::configure(&mut command)?)
@@ -2924,7 +2936,7 @@ async fn run_process_with_tools(
         }
         (
             "claude" | "glm" | "mimo" | "kimi" | "opencode" | "antigravity" | "grok" | "pi"
-            | "deepseek" | "commandcode" | "cline" | "omp" | "github-copilot" | "muse" | "devin",
+            | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin",
             Some(host),
         ) => (
             None,
@@ -3099,6 +3111,16 @@ async fn run_process_with_tools(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kilo_is_registered_with_its_cli_and_catalog_defined_efforts() {
+        assert!(PROVIDERS.contains(&("kilo", "Kilo Code")));
+        assert!(PROVIDERS.contains(&("devin", "Devin CLI")));
+        assert_eq!(executable_name("kilo"), "kilo");
+        assert!(validate_reasoning_effort("kilo", None).is_ok());
+        assert!(validate_reasoning_effort("kilo", Some("max")).is_ok());
+        assert!(validate_reasoning_effort("kilo", Some("bad\nflag")).is_err());
+    }
+
     #[test]
     fn opencode_choices_keep_only_saved_models_and_retain_unavailable_ids() {
         let model = super::ModelInfo {

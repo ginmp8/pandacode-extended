@@ -24,7 +24,7 @@ const MAX_NAME: usize = 60;
 // while a task still owns the previous connection's native session ID.
 const MAX_TASKS: usize = 5000;
 const PROVIDERS: &[&str] = &[
-    "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "omp", "github-copilot", "muse", "devin",
+    "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -116,6 +116,7 @@ fn config_dir_var(provider: &str) -> Option<&'static str> {
         "codex" => Some("CODEX_HOME"),
         "pi" => Some("PI_CODING_AGENT_DIR"),
         "opencode" => Some("OPENCODE_CONFIG_DIR"),
+        "kilo" => Some("KILO_CONFIG_DIR"),
         _ => None,
     }
 }
@@ -455,6 +456,15 @@ mod tests {
 
     fn input(provider: &str) -> Input {
         Input { id: None, provider: provider.into(), name: "Claude Work".into(), executable: None, args: vec![], env: vec![], config_dir: None }
+    }
+
+    #[test]
+    fn kilo_named_connections_have_their_own_config_folder() {
+        assert_eq!(config_dir_var("kilo"), Some("KILO_CONFIG_DIR"));
+        let connection = Connection { id: "kilo-account".into(), provider: "kilo".into(), config_dir: Some("/fixture/kilo-work".into()), ..Connection::default() };
+        let launched = launch_with(&connection, |_| None).unwrap();
+        assert!(launched.env.contains(&("KILO_CONFIG_DIR".into(), "/fixture/kilo-work".into())));
+        assert!(launched.secrets.is_empty());
     }
 
     #[test]

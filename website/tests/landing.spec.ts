@@ -52,6 +52,7 @@ test('hero, supported harnesses, and complete page have valid resources and resp
   for (const id of ['hero-distribution', 'download-distribution']) {
     const disclosure = page.locator(`#${id}`);
     await expect(disclosure).toContainText('macOS · Windows · Linux');
+    await expect(disclosure).toContainText('original PandaCode builds, not PandaCode Extended installers');
     await expect(disclosure).toContainText('Unsigned build');
     await expect(disclosure).toContainText('Windows x64: unsigned installer');
     await expect(disclosure).toContainText('Linux x64: AppImage');

@@ -31,7 +31,7 @@ const Row = memo(function Row({ device, demo }: { device: DeviceRow; demo: boole
   };
   return (
     <View style={[styles.row, { backgroundColor: colors.card }]}>
-      <Pressable disabled={!open} onPress={() => router.navigate('/inbox')}
+      <Pressable disabled={!open} onPress={() => router.navigate({ pathname: '/inbox', params: { computer: device.id, project: '' } })}
         style={({ pressed }) => [styles.summary, { opacity: pressed ? 0.7 : 1 }]} accessibilityRole={open ? 'button' : undefined}>
         <View style={[styles.dot, { backgroundColor: device.online ? colors.green : colors.tertiary }]} accessibilityLabel={device.online ? 'Online' : 'Offline'} />
         <View style={styles.main}>

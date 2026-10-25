@@ -1,6 +1,7 @@
 export interface Env {
   ACCOUNT: DurableObjectNamespace;
   AUTH_LIMITER: RateLimit;
+  GLOBAL_AUTH_LIMITER: RateLimit;
   ACCOUNT_LIMITER: RateLimit;
   SESSION_SECRET: string;
   GITHUB_CLIENT_ID: string;

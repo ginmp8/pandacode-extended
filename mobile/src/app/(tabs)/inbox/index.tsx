@@ -2,9 +2,9 @@
 // Unsent (the outbox), Bots (every computer's bots; their conversations stay out of the other
 // sections), then Snoozed and Settled folded away. Logic in src/store/inbox.ts.
 import { Image } from 'expo-image';
-import { router, Stack, useFocusEffect } from 'expo-router';
+import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { BotRow as BotItem, InboxRow as Row, Section } from '../../../store/inbox.ts';
 import { BotRow } from '../../../ui/BotRow.tsx';
@@ -17,6 +17,8 @@ import { useSplit } from '../../../ui/split.tsx';
 import { useBackdrop } from '../../../ui/Backdrop.tsx';
 import { useColors } from '../../../ui/theme.ts';
 import { useInbox } from '../../../ui/useInbox.ts';
+import { Choice } from '../../../ui/Choice.tsx';
+import { filterInbox, inboxProjects } from '../../../store/inbox-filter.ts';
 
 const TITLES: Record<Section | 'bots', string> = { bots: 'Bots', running: 'Running', needs: 'Needs you', recent: 'Recent', unsent: 'Unsent', snoozed: 'Snoozed', settled: 'Settled' };
 const FOLDED: (Section | 'bots')[] = ['snoozed', 'settled'];
@@ -34,6 +36,13 @@ function Inbox() {
   const { connected } = useStatus();
   const insets = useSafeAreaInsets();
   const { hosts, inbox, bots, minute, errors, load, updating } = useInbox();
+  const { computer, project: projectParam } = useLocalSearchParams<{ computer?: string; project?: string }>();
+  const deviceId = typeof computer === 'string' ? computer : '';
+  const project = typeof projectParam === 'string' ? projectParam : '';
+  const [query, setQuery] = useState('');
+  const filtered = useMemo(() => filterInbox(inbox, bots, { query, deviceId, project }), [inbox, bots, query, deviceId, project]);
+  const projects = useMemo(() => inboxProjects(inbox, bots, deviceId), [inbox, bots, deviceId]);
+  const searching = !!(query.trim() || deviceId || project);
   const [open, setOpen] = useState<Partial<Record<Section, boolean>>>({});
   const [refreshing, setRefreshing] = useState(false);
   const online = hosts.filter(h => h.online);
@@ -45,17 +54,17 @@ function Inbox() {
     const list: Item[] = [];
     for (const section of ['running', 'needs', 'recent', 'unsent', 'bots', 'snoozed', 'settled'] as const) {
       if (section === 'bots') {
-        if (bots.length) list.push({ type: 'header', section, count: bots.length }, ...bots.map((row, i) => ({ type: 'bot' as const, row, last: i === bots.length - 1 })));
+        if (filtered.bots.length) list.push({ type: 'header', section, count: filtered.bots.length }, ...filtered.bots.map((row, i) => ({ type: 'bot' as const, row, last: i === filtered.bots.length - 1 })));
         continue;
       }
-      const rows = inbox[section];
+      const rows = filtered.inbox[section];
       if (!rows.length) continue;
-      const folded = FOLDED.includes(section);
+      const folded = !searching && FOLDED.includes(section);
       list.push({ type: 'header', section, count: rows.length, open: folded ? !!open[section] : undefined });
       if (!folded || open[section]) rows.forEach((row, i) => list.push({ type: 'row', section, row, last: i === rows.length - 1 }));
     }
     return list;
-  }, [inbox, bots, open]);
+  }, [filtered, searching, open]);
 
   const render = ({ item }: { item: Item }) => {
     if (item.type === 'bot') return <BotRow row={item.row} last={item.last} minute={minute} />;
@@ -73,7 +82,8 @@ function Inbox() {
   const offline = hosts.filter(h => !h.online).map(h => h.name);
   // Cached rows show at once; until their live lists arrive a quiet note says so.
   const problems = [...Object.values(errors), ...(updating ? ['Updating…'] : connected ? [] : ['Connecting to PandaCode Connect…'])];
-  const empty = !hosts.length ? 'Turn on remote access on a computer signed in to the same GitHub account to see its tasks here.'
+  const empty = searching ? 'No matching threads or bots. Try another search or clear the filters.'
+    : !hosts.length ? 'Turn on remote access on a computer signed in to the same GitHub account to see its tasks here.'
     : !online.length ? `${offline.join(', ')} ${offline.length > 1 ? 'are' : 'is'} offline.`
     : 'No tasks yet. Start one with New task.';
 
@@ -105,9 +115,34 @@ function Inbox() {
         keyExtractor={item => (item.type === 'header' ? `h/${item.section}` : item.type === 'bot' ? item.row.key : `${item.section}/${item.row.key}`)}
         renderItem={render}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         ListHeaderComponent={
           <>
             {Platform.OS === 'ios' && <View style={styles.listBrand}><Brand /></View>}
+            <View style={styles.filters}>
+              <View style={[styles.search, { backgroundColor: colors.card }]}>
+                <Icon ios="magnifyingglass" android="search" size={16} color={colors.secondary} />
+                <TextInput value={query} onChangeText={setQuery} placeholder="Search threads and bots" placeholderTextColor={colors.secondary as string}
+                  style={[styles.searchInput, { color: colors.text }]} returnKeyType="search" autoCorrect={false} autoCapitalize="none"
+                  clearButtonMode="while-editing" accessibilityLabel="Search threads and bots" />
+              </View>
+              <View style={styles.filterRow}>
+                <Text style={{ color: colors.secondary }}>Computer</Text>
+                <Choice value={deviceId} options={[{ value: '', label: 'All computers' }, ...hosts.map(host => ({ value: host.id, label: host.name })),
+                  ...(deviceId && !hosts.some(host => host.id === deviceId) ? [{ value: deviceId, label: 'Unavailable computer' }] : [])]}
+                  onChange={value => router.setParams({ computer: value, project: '' })} />
+              </View>
+              <View style={styles.filterRow}>
+                <Text style={{ color: colors.secondary }}>Project</Text>
+                <Choice value={project} options={[{ value: '', label: 'All projects' }, ...projects,
+                  ...(project && !projects.some(option => option.value === project) ? [{ value: project, label: 'Unavailable project' }] : [])]}
+                  onChange={value => router.setParams({ project: value })} />
+              </View>
+              {searching && <Pressable onPress={() => { setQuery(''); router.setParams({ computer: '', project: '' }); }} accessibilityRole="button" style={styles.clearFilters}>
+                <Text style={{ color: colors.tint }}>Clear filters</Text>
+              </Pressable>}
+            </View>
             {problems.length ? <Text style={[styles.problem, { color: colors.secondary }]}>{problems.join('\n')}</Text> : null}
           </>
         }
@@ -140,4 +175,9 @@ const styles = StyleSheet.create({
   foldTitle: { paddingRight: 0, marginTop: 0, marginBottom: 0 },
   problem: { fontSize: 13, paddingHorizontal: 20, paddingTop: 8 },
   empty: { fontSize: 15, textAlign: 'center', marginTop: 60, paddingHorizontal: 32 },
+  filters: { gap: 8, paddingHorizontal: 16, paddingVertical: 12 },
+  search: { flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 12, paddingHorizontal: 12 },
+  searchInput: { flex: 1, minHeight: 44, fontSize: 16 },
+  filterRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 36 },
+  clearFilters: { alignSelf: 'flex-start', paddingVertical: 8 },
 });

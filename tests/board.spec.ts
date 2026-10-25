@@ -66,6 +66,21 @@ test.describe('project board', () => {
     await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
   });
 
+  test('moves idle tasks bidirectionally between stages by dragging cards', async ({ page }) => {
+    await openBoard(page);
+    await queueTask(page, 'Drag between stages');
+    const task = await savedTask(page, 'Drag between stages');
+    const source = page.locator(`.board-card[data-task-id="${task.id}"]`);
+    await source.dragTo(column(page, 'Review'));
+    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
+    expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'review', completedAt: null });
+    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
+    await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
+    expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'pending', completedAt: null });
+    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
+    await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
+    expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'completed', completedAt: expect.any(Number) });
+  });
   test('switches views without losing the conversation draft and remembers the chosen view', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));

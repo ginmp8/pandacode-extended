@@ -105,3 +105,7 @@ html[data-native-platform=macos] .board-view .workspace-header{padding-left:var(
 .board-completed-note .secondary-button{display:block;margin:9px auto 0;font-size:.75rem;padding:5px 10px}
 
 .board-eyebrow>.icon{width:15px;height:15px;color:var(--bamboo)}
+
+.board-column.board-drop-target{background:color-mix(in srgb,var(--accent-tint) 35%,transparent);border-radius:8px}.board-card[draggable=true]{cursor:grab}.board-card[draggable=true]:active{cursor:grabbing}
+
+.board-column.board-drop-target{background:color-mix(in srgb,var(--accent-tint) 35%,transparent);border-radius:8px}.board-card[draggable=true]{cursor:grab}.board-card[draggable=true]:active{cursor:grabbing}

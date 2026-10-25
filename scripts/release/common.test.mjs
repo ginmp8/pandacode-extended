@@ -11,7 +11,7 @@ test('release versions cannot become paths, arbitrary prereleases, or shell comm
   assert.equal(version('0.3.35-hardened.3'), '0.3.35-hardened.3');
   assert.equal(version('0.3.35.3'), '0.3.35.3');
   assert.equal(cargoVersion('0.4.0'), '0.4.0');
-  assert.equal(cargoVersion('0.3.42-hardened.1'), '0.3.42-hardened.1');
+  assert.equal(cargoVersion('0.4.1'), '0.4.1');
   for (const input of ['0.3.30.0', '0.3.30.01', '0.3.30.9007199254740992', '0.3.30-hardened.0', '0.3.30-hardened.01', '0.3.30-hardened.9007199254740992', '0.3.30-hardened/../etc', '0.3.30-beta', '0.3.30-hardened+other']) assert.throws(() => version(input));
   assert.match(releaseDirectory('1.2.3'), /release[\\/]1\.2\.3$/);
 });

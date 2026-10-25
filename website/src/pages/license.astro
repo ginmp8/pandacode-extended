@@ -2,7 +2,7 @@
 /* The PandaCode License (MIT plus an attribution requirement for forks), with a plain-language summary. Keep the
  * full text identical to LICENSE in the repository root. */
 import Page from '../layouts/Page.astro';
-import { project } from '../lib/distribution';
+import { project, originalPandaCode } from '../lib/distribution';
 const sections = [
   ['summary', 'In plain words'],
   ['text', 'The PandaCode License'],
@@ -30,7 +30,7 @@ const sections = [
         <ul>
           <li>You may <strong>use, copy, modify, merge, publish, distribute, sublicense and sell</strong> copies of PandaCode.</li>
           <li>Include the copyright notice and the license text in all copies or substantial portions of the software.</li>
-          <li>If you <strong>release a fork publicly or use one commercially</strong>, state “This is a fork of PandaCode” with a link to <a href={project.repo} target="_blank" rel="noopener noreferrer">github.com/aicodeking/pandacode</a>, in its README or main docs and somewhere its users can see, like an About screen, website or store listing.</li>
+          <li>If you <strong>release a fork publicly or use one commercially</strong>, state “This is a fork of PandaCode” with a link to <a href={originalPandaCode.repo} target="_blank" rel="noopener noreferrer">github.com/aicodeking/pandacode</a>, in its README or main docs and somewhere its users can see, like an About screen, website or store listing.</li>
           <li>Simply using PandaCode, at home or at work, needs no credit.</li>
           <li>PandaCode is provided <strong>“as is”, without warranty of any kind</strong>. The authors aren’t liable for any claim, damages or other liability arising from it.</li>
         </ul>
@@ -57,7 +57,7 @@ const sections = [
 
       <section id="contribute" aria-labelledby="contribute-title">
         <h2 id="contribute-title">Contributing</h2>
-        <p>The source lives at <a href={project.repo} target="_blank" rel="noopener noreferrer">github.com/aicodeking/pandacode</a>. Bugs, ideas and pull requests are welcome in <a href={project.issues} target="_blank" rel="noopener noreferrer">GitHub issues</a>. Unless you say otherwise, contributions you submit are licensed under the same PandaCode License.</p>
+        <p>The Extended source lives at <a href={project.repo} target="_blank" rel="noopener noreferrer">github.com/ginmp8/pandacode-extended</a>; the <a href={originalPandaCode.repo} target="_blank" rel="noopener noreferrer">original PandaCode project</a> remains independent. Bugs, ideas and pull requests for Extended are welcome in <a href={project.issues} target="_blank" rel="noopener noreferrer">GitHub issues</a>. Unless you say otherwise, contributions you submit are licensed under the same PandaCode License.</p>
         <p>See also the <a href="/privacy/">Privacy Policy</a>.</p>
       </section>
     </article>

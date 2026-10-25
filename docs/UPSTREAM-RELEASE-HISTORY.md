@@ -1,6 +1,6 @@
 # PandaCode Extended — original upstream release history
 
-**Important:** An upstream PandaCode release note is a reference, not a release or implemented feature of PandaCode Extended. Versions 0.3.29–0.3.42 are tracked as historical upstream references. See [Extended source releases](https://github.com/ginmp8/pandacode-hardened/releases) for actual published builds/tags and [upstream releases](https://github.com/aicodeking/pandacode/releases) for original release notes.
+**Important:** An upstream PandaCode release note is a reference, not a release or implemented feature of PandaCode Extended. Versions 0.3.29–0.3.42 are tracked as historical upstream references. See [Extended source releases](https://github.com/ginmp8/pandacode-extended/releases) for actual published builds/tags and [upstream releases](https://github.com/aicodeking/pandacode/releases) for original release notes.
 
 | Upstream reference | Note | Extended status |
 |---|---|---|

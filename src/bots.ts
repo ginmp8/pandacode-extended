@@ -6,19 +6,22 @@ import { infoMark } from './tooltip';
 import type { Provider, ProviderId, ProviderModel } from './types';
 import { advertisedModelsOnly, modelChoices } from './model-catalog';
 import { connectInput, guideToggled } from './bots-connect';
+import { readSoulFile, MAX_SOUL_BYTES } from './bot-soul';
+import { mountBotCapabilities } from './bot-capabilities';
 import { avatarPicker, botAvatarHtml, handleAvatarPicker } from './bot-avatars';
 import { renderPanel, panelClick, panelSubmit, panelChange, invalidateActivity, type PanelContext, type Tab } from './bots-panels';
 
 export interface Bot {
-  id: string; name: string; role: string; instructions: string; goals: string; avatar: string; projectId: string;
+  id: string; name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; projectId: string;
   provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; nextHeartbeatAt: number | null;
+  mcp: string[];
   paused: boolean; memoryVersion: number; notifyChannelId: string | null; notifyThread: string | null; createdAt: number; updatedAt: number;
   /** The bot's conversation in this app, once it exists. */
   desktopSession?: string | null;
   /** The latest thing said in that conversation, flattened to one line. */
   lastMessage?: { role: 'user' | 'assistant'; text: string; at: number } | null;
 }
-export interface BotInput { name: string; role: string; instructions: string; goals: string; avatar: string; provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; }
+export interface BotInput { name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; }
 export interface Memory { id: string; content: string; source: 'user' | 'bot'; createdAt: number; }
 export interface Schedule { id: string; botId: string; title: string; prompt: string; kind: 'once' | 'interval' | 'daily' | 'weekdays'; intervalMinutes: number | null; timeOfDay: string | null; nextRunAt: number | null; lastRunAt: number | null; enabled: boolean; createdBy: 'user' | 'bot'; createdAt: number; }
 export type ChannelKind = 'web' | 'telegram' | 'slack' | 'discord' | 'whatsapp';
@@ -51,23 +54,24 @@ export interface BotsOptions {
   onDeleted?(): void;
 }
 export interface BotsView { dispose(): void; refresh(): void; agent(sessionId: string, kind: string): void; }
-export type Section = Tab | 'profile';
+export type Section = Tab | 'profile' | 'skills';
 
 /** The settings nav, like the app's own Settings. Activity also holds conversations and rules. */
-type Nav = 'profile' | 'channels' | 'schedules' | 'memory' | 'activity';
+type Nav = 'profile' | 'skills' | 'channels' | 'schedules' | 'memory' | 'activity';
 const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
   { id: 'profile', label: 'Profile', icon: 'bot', text: 'Who the bot is, how it works and what runs it.' },
   { id: 'channels', label: 'Channels', icon: 'globe', text: 'Talk to it from a browser, Telegram, Slack, Discord or WhatsApp.' },
   { id: 'schedules', label: 'Schedules', icon: 'refresh', text: 'Recurring or one-off work the bot starts on its own.' },
   { id: 'memory', label: 'Memory', icon: 'leaf', text: 'Kept across conversations. The bot adds its own as it learns.' },
+  { id: 'skills', label: 'Skills & MCP', icon: 'widget', text: 'Reviewed skill versions and configured server names used by this bot.' },
   { id: 'activity', label: 'Activity', icon: 'activity', text: 'Conversations, approval rules and everything the bot did.' },
 ];
 const navFor = (section: Section): Nav => section === 'conversations' || section === 'rules' ? 'activity' : section;
 /** One labelled row, like a Settings row: title and hint on the left, the control on the right. */
 const row = (title: string, hint: string, control: string, stacked = false) => `<label class="bs-row ${stacked ? 'stacked' : ''}"><span class="bs-row-text"><strong>${title}</strong>${hint ? `<small>${escape(hint)}</small>` : ''}</span>${control}</label>`;
 const heading = (title: string, more = '') => `<h3 class="bs-heading">${escape(title)}${more}</h3>`;
-const MODES = [{ id: 'ask', label: 'Ask before acting' }, { id: 'auto', label: 'Auto-approve edits' }, { id: 'plan', label: 'Plan only' }, { id: 'full', label: 'Full access' }];
-const providerModes = (provider: ProviderId) => ['github-copilot', 'devin'].includes(provider) ? MODES.filter(mode => mode.id !== 'auto') : MODES;
+const MODES = [{ id: 'ask', label: 'Ask before acting' }, { id: 'auto', label: 'Auto-approve edits' }, { id: 'review', label: 'Approve for me' }, { id: 'plan', label: 'Plan only' }, { id: 'full', label: 'Full access' }];
+const providerModes = (provider: ProviderId) => MODES.filter(mode => mode.id === 'review' ? ['claude', 'glm', 'mimo'].includes(provider) : !(mode.id === 'auto' && ['github-copilot', 'devin'].includes(provider)));
 const CHECK_INS = [{ minutes: 0, label: 'Off' }, { minutes: 30, label: 'Every 30 minutes' }, { minutes: 60, label: 'Every hour' }, { minutes: 180, label: 'Every 3 hours' }, { minutes: 360, label: 'Every 6 hours' }, { minutes: 1440, label: 'Once a day' }];
 
 /** Starting points, in the spirit of the named bots this feature follows. */
@@ -100,7 +104,8 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   let template = TEMPLATES[0];
   let confirming: { title: string; text: string; button: string; action: () => Promise<void> } | null = null;
   let loading = true, busy = false, disposed = false, request = 0, moreOpen = false;
-  let formModelGeneration = 0;
+  let formModelGeneration = 0, soulImportGeneration = 0;
+  let disposeCapabilities: (() => void) | undefined;
   const modelCatalogs = new Map<ProviderId, ProviderModel[]>();
   const modelCatalogRequests = new Map<ProviderId, Promise<ProviderModel[]>>();
   for (const provider of options.providers) if (provider.models.length) modelCatalogs.set(provider.id, provider.models);
@@ -130,11 +135,12 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       if (disposed || id !== request) return;
       bots = next;
       if (!bots.some(bot => bot.id === selected)) selected = single ? '' : bots[0]?.id ?? '';
-      detail = selected ? await options.call<BotDetail>('bot_detail', { botId: selected }) : null;
+      const nextDetail = selected ? await options.call<BotDetail>('bot_detail', { botId: selected }) : null;
       if (disposed || id !== request) return;
+      detail = nextDetail;
       if (!bots.length && !single) editing ??= 'new';
       // A background refresh keeps a message the user has not acted on yet; the next action clears it.
-    } catch (cause) { error = message(cause); }
+    } catch (cause) { if (disposed || id !== request) return; error = message(cause); }
     loading = false;
     render();
   }
@@ -198,14 +204,15 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   }
 
   function renderForm(bot: Bot | null): string {
-    const source = bot ?? { ...template, provider: (installed()[0]?.id ?? 'claude') as ProviderId, model: '', mode: 'ask' };
+    const source = bot ?? { ...template, soul: '', provider: (installed()[0]?.id ?? 'claude') as ProviderId, model: '', mode: 'ask' };
     const providers = options.providers;
     const hasInstalledProvider = providers.some(item => item.installed);
     const provider = providers.find(item => item.id === source.provider) ?? providers.find(item => item.installed) ?? providers[0];
     const model = source.model || (provider ? options.defaultModel(provider.id) : '');
     const models = provider ? modelCatalogs.get(provider.id) ?? provider.models : [];
     const visibleModes = provider ? providerModes(provider.id) : MODES;
-    const mode = visibleModes.some(item => item.id === source.mode) ? source.mode : 'ask';
+    const mode = source.mode;
+    const unavailableMode = !visibleModes.some(item => item.id === mode);
     const templates = bot ? '' : `<div class="bots-templates" role="group" aria-label="Start from">${TEMPLATES.map(item => `<button type="button" data-template="${item.id}" aria-pressed="${item.id === template.id}">${botAvatarHtml(item.avatar, item.name, 'bots-template-avatar')}${escape(item.name || 'Blank')}</button>`).join('')}</div>`;
     const checkIns = `<select name="heartbeatMinutes" aria-label="Check-ins">${CHECK_INS.map(item => `<option value="${item.minutes}" ${item.minutes === source.heartbeatMinutes ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`;
     return `<form class="bots-form" novalidate>
@@ -217,11 +224,13 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         ${row('Job', '', `<input name="role" maxlength="200" value="${escape(source.role)}" placeholder="What it's for, in a few words" aria-label="Job" autocomplete="off">`)}
         ${row('Instructions', 'How it should work, what to always or never do', `<textarea name="instructions" rows="4" maxlength="16000" aria-label="Instructions">${escape(source.instructions)}</textarea>`, true)}
       </div>
+      ${heading('Personality', infoMark('Optional tone, values and conversational style. Personality never grants permissions or overrides safety rules.', 'About personality'))}
+      <div class="bs-group"><div class="bs-row stacked"><span class="bs-row-text"><strong>Soul</strong></span><textarea name="soul" rows="5" aria-label="Soul" placeholder="How the bot sounds and relates to you">${escape(source.soul)}</textarea><div class="bots-soul-actions"><button type="button" class="secondary-button" data-bots-action="import-soul">Import soul.md</button><button type="button" class="secondary-button" data-bots-action="remove-soul">Remove personality</button><input type="file" data-soul-file accept=".md,.txt,text/plain,text/markdown" hidden><span class="field-help" data-live>UTF-8 text, up to 64 KB. Imported once; the file stays on your computer.</span></div></div></div>
       ${heading('Agent')}
       <div class="bs-group">
         ${row('Harness', '', `<select name="provider" aria-label="Harness">${providers.map(item => `<option value="${item.id}" ${item.id === provider?.id ? 'selected' : ''} ${!item.installed && hasInstalledProvider ? 'disabled' : ''}>${escape(item.name)}${!item.installed ? ' · Not installed' : ''}</option>`).join('')}</select>`)}
         ${row('Model', '', `<select name="model" aria-label="Model" data-preferred-model="${escape(model)}">${provider ? modelOptions(provider.id, models, advertisedModelsOnly(provider.id) && model !== 'default' && !models.some(item => item.id === model) ? 'default' : model) : `<option value="default">Default</option>`}</select>`)}
-        ${row('Permissions', '', `<select name="mode" aria-label="Permissions">${visibleModes.map(item => `<option value="${item.id}" ${item.id === mode ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`)}
+        ${row('Permissions', '', `<select name="mode" aria-label="Permissions">${unavailableMode ? `<option value="${escape(mode)}" selected>${escape(mode)} · Unavailable for this harness</option>` : ''}${visibleModes.map(item => `<option value="${item.id}" ${item.id === mode ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`)}
       </div>
       ${heading('Check-ins', infoMark('On each check-in the bot reviews its goals and memory using read-only steps, and messages you only when something needs attention.', 'About check-ins'))}
       <div class="bs-group">
@@ -235,7 +244,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   function readForm(form: HTMLFormElement): BotInput {
     const data = new FormData(form);
     const text = (name: string) => String(data.get(name) ?? '').trim();
-    return { name: text('name'), role: text('role'), instructions: text('instructions'), goals: text('goals'), avatar: text('avatar'), provider: text('provider') as ProviderId, model: text('model'), mode: text('mode'), heartbeatMinutes: Number(text('heartbeatMinutes')) || 0 };
+    return { name: text('name'), role: text('role'), instructions: text('instructions'), goals: text('goals'), soul: text('soul'), avatar: text('avatar'), provider: text('provider') as ProviderId, model: text('model'), mode: text('mode'), heartbeatMinutes: Number(text('heartbeatMinutes')) || 0 };
   }
 
   /** Identity and live state on the left; the conversation, pause, and the rare destructive actions on the right. */
@@ -265,6 +274,8 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
 
   function render(): void {
     if (disposed) return;
+    disposeCapabilities?.(); disposeCapabilities = undefined;
+    soulImportGeneration++;
     renderList();
     const confirm = confirming ? `<div class="bots-confirm" role="alertdialog" aria-label="${escape(confirming.title)}"><b>${escape(confirming.title)}</b><p>${escape(confirming.text)}</p><div class="dialog-footer"><button type="button" class="secondary-button" data-bots-action="confirm-cancel">Cancel</button><button type="button" class="primary-button danger" data-bots-action="confirm-run">${escape(confirming.button)}</button></div></div>` : '';
     const alert = error ? `<p class="bots-error" role="alert">${escape(error)}</p>` : '';
@@ -280,10 +291,12 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const nav = `<div class="bs-nav" role="tablist" aria-orientation="vertical" aria-label="Bot settings">${SECTIONS.map(item => `<button type="button" role="tab" id="bs-tab-${item.id}" data-section="${item.id}" aria-controls="bs-panel" aria-selected="${item.id === section}" tabindex="${item.id === section ? 0 : -1}">${icon(item.icon)}<span>${item.label}</span>${badge(item.id)}</button>`).join('')}</div>`;
     const current = SECTIONS.find(item => item.id === section)!;
     const body = section === 'profile' ? renderForm(detail.bot)
+      : section === 'skills' ? '<div data-bot-capabilities></div>'
       : section === 'activity' ? `${heading('Conversations')}${renderPanel('conversations', detail, context)}${heading('Rules', infoMark('Answer the bot\'s requests for you. Deny wins over allow, and * matches anything, as in npm test*. Risky actions such as sudo, force pushes, deleting files or anything about passwords always ask, whatever the rules say.', 'About rules'))}${renderPanel('rules', detail, context)}${heading('Activity log')}${renderPanel('activity', detail, context)}`
       : renderPanel(section, detail, context);
     pane.innerHTML = `${renderHeader(detail.bot)}${confirm}${alert}<div class="bs-body">${nav}<div class="bots-panel" id="bs-panel" role="tabpanel" aria-labelledby="bs-tab-${section}"><div class="bs-panel-head"><h2>${current.label}</h2><p>${escape(current.text)}</p></div>${body}</div></div>`;
     hydrateFormModels();
+    if (section === 'skills') disposeCapabilities = mountBotCapabilities(pane.querySelector<HTMLElement>('[data-bot-capabilities]')!, detail.bot, options);
     if (kept?.name) {
       const again = [...pane.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].find(field => (field.name || field.getAttribute('aria-label')) === kept.name);
       if (again) { again.value = kept.value; again.focus(); }
@@ -306,6 +319,8 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const bot = detail?.bot;
     if (moreOpen && action !== 'more') moreOpen = false;
     if (action === 'new') { editing = 'new'; template = TEMPLATES[0]; confirming = null; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); }
+    else if (action === 'import-soul') pane.querySelector<HTMLInputElement>('[data-soul-file]')?.click();
+    else if (action === 'remove-soul') { soulImportGeneration++; const soul = pane.querySelector<HTMLTextAreaElement>('[name=soul]'); if (soul) { soul.value = ''; soul.focus(); } }
     else if (action === 'cancel-edit') { editing = null; render(); }
     else if (action === 'more') { moreOpen = !moreOpen; render(); if (moreOpen) pane.querySelector<HTMLElement>('.bp-menu [role=menuitem]')?.focus(); }
     else if (action === 'open-chat' && bot) options.openChat(bot.id);
@@ -314,14 +329,15 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     else if (action === 'delete' && bot) context.confirm(`Delete ${bot.name}?`, 'This removes the bot, its conversations and its channel connections. Its workspace folder stays on disk.', 'Delete', async () => { await options.call('bot_delete', { botId: bot.id }); selected = ''; options.notify(`${bot.name} was deleted`); if (single) { options.onDeleted?.(); return; } await load(); });
     else if (action === 'confirm-cancel') { confirming = null; render(); }
     else if (action === 'confirm-run' && confirming) { const run = confirming.action; confirming = null; render(); void work(run); }
-    else if (section !== 'profile') panelClick(target, section, context);
+    else if (section !== 'profile' && section !== 'skills') panelClick(target, section, context);
   };
   const submit = (event: SubmitEvent) => {
     const form = event.target as HTMLFormElement;
     if (!host.contains(form)) return;
     event.preventDefault();
-    if (!form.matches('.bots-form')) { if (section !== 'profile') panelSubmit(form, section, context); return; }
+    if (!form.matches('.bots-form')) { if (section !== 'profile' && section !== 'skills') panelSubmit(form, section, context); return; }
     const input = readForm(form);
+    if (new TextEncoder().encode(input.soul).length > MAX_SOUL_BYTES) { error = 'Personality must be under 64 KB.'; render(); return; }
     if (!input.name) { error = 'Give the bot a name.'; render(); return; }
     void work(async () => {
       if (editing !== 'new' && detail) { await options.call('bot_update', { botId: detail.bot.id, input }); options.notify('Bot saved'); await load(); return; }
@@ -336,6 +352,20 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   const change = (event: Event) => {
     if (handleAvatarPicker(event)) return;
     const target = event.target as HTMLElement;
+    if (target instanceof HTMLInputElement && target.matches('[data-soul-file]')) {
+      const file = target.files?.[0], form = target.closest('form'), soul = form?.querySelector<HTMLTextAreaElement>('[name=soul]');
+      target.value = '';
+      if (!file || !form || !soul) return;
+      const generation = ++soulImportGeneration;
+      void readSoulFile(file).then(text => {
+        if (disposed || generation !== soulImportGeneration || !form.isConnected || !pane.contains(form)) return;
+        soul.value = text; soul.focus();
+      }).catch(cause => {
+        if (disposed || generation !== soulImportGeneration || !form.isConnected) return;
+        options.notify(message(cause));
+      });
+      return;
+    }
     if (target.matches('.bots-form select[name=provider]')) {
       const provider = options.providers.find(item => item.id === (target as HTMLSelectElement).value);
       const select = pane.querySelector<HTMLSelectElement>('.bots-form select[name=model]');
@@ -348,17 +378,17 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       if (provider && mode) {
         const choices = providerModes(provider.id);
         const current = mode.value;
-        const selected = choices.some(item => item.id === current) ? current : 'ask';
-        mode.innerHTML = choices.map(item => `<option value="${item.id}" ${item.id === selected ? 'selected' : ''}>${item.label}</option>`).join('');
+        const unavailable = !choices.some(item => item.id === current);
+        mode.innerHTML = (unavailable ? `<option value="${escape(current)}" selected>${escape(current)} · Unavailable for this harness</option>` : '') + choices.map(item => `<option value="${item.id}" ${item.id === current ? 'selected' : ''}>${item.label}</option>`).join('');
       }
       return;
     }
-    if (section !== 'profile') panelChange(target, section, context);
+    if (section !== 'profile' && section !== 'skills') panelChange(target, section, context);
   };
   host.addEventListener('click', click);
   host.addEventListener('submit', submit);
   host.addEventListener('change', change);
-  const typed = (event: Event) => connectInput(event.target as HTMLElement);
+  const typed = (event: Event) => { if (event.target instanceof HTMLTextAreaElement && event.target.name === 'soul') soulImportGeneration++; connectInput(event.target as HTMLElement); };
   host.addEventListener('input', typed);
   // `toggle` does not bubble, so listen while capturing.
   const toggled = (event: Event) => { if (event.target instanceof HTMLDetailsElement) guideToggled(event.target); };
@@ -386,6 +416,6 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       if (kind === 'done') { void load(); return; }
       if (kind === 'turn_start' || kind === 'status') renderList();
     },
-    dispose: () => { disposed = true; host.removeEventListener('click', click); host.removeEventListener('submit', submit); host.removeEventListener('change', change); host.removeEventListener('input', typed); host.removeEventListener('toggle', toggled, true); host.removeEventListener('keydown', keys); },
+    dispose: () => { disposed = true; soulImportGeneration++; disposeCapabilities?.(); host.removeEventListener('click', click); host.removeEventListener('submit', submit); host.removeEventListener('change', change); host.removeEventListener('input', typed); host.removeEventListener('toggle', toggled, true); host.removeEventListener('keydown', keys); },
   };
 }

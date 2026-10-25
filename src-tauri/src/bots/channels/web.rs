@@ -243,6 +243,7 @@ form{display:flex;align-items:flex-end;gap:8px;padding:10px 16px calc(12px + env
 .box{flex:1;display:flex;align-items:flex-end;gap:8px;border:1px solid var(--line);background:var(--panel);border-radius:22px;padding:6px 6px 6px 16px;box-shadow:0 6px 24px rgba(0,0,0,.06)}
 .box:focus-within{border-color:color-mix(in srgb,var(--accent) 80%,var(--line))}
 textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);padding:6px 0;font:inherit;max-height:180px;outline:none}
+:is(.avatar,.mini) img{width:100%;height:100%;border-radius:50%;object-fit:cover}
 .send{flex:none;width:34px;height:34px;border:0;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;cursor:pointer}
 .send:disabled{opacity:.4;cursor:default}
 @media (prefers-reduced-motion:no-preference){.msg,.actions{animation:in .24s cubic-bezier(.2,.8,.2,1)}@keyframes in{from{opacity:0;transform:translateY(6px)}}}
@@ -261,7 +262,11 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
   if (location.hash) history.replaceState(null, "", location.pathname);
   const log = document.getElementById("log"), input = document.getElementById("input"), form = document.getElementById("form");
   const status = document.getElementById("status"), sendButton = document.getElementById("send");
-  let cursor = 0, botName = "Bot", glyph = "·", role = "", typing = null;
+  let cursor = 0, botName = "Bot", glyph = "·", image = "", role = "", typing = null;
+  function showAvatar(el) {
+    if (!image) { el.textContent = glyph; return; }
+    const img = document.createElement("img"); img.alt = ""; img.src = image; el.replaceChildren(img);
+  }
   const api = (path, init = {}) => fetch("/api/chat/" + channel + "/" + path, { ...init, headers: { ...(init.headers || {}), Authorization: "Bearer " + token, "Content-Type": "application/json" } })
     .then(async r => { const body = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(body.error || "Something went wrong."), { revoked: r.status === 401 }); return body; });
   const escape = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -334,7 +339,7 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
     log.querySelector(".hello")?.remove();
     const row = document.createElement("div");
     row.className = "msg " + (who === "user" ? "me" : "bot");
-    if (who !== "user") { const mini = document.createElement("span"); mini.className = "mini"; mini.textContent = glyph; row.append(mini); }
+    if (who !== "user") { const mini = document.createElement("span"); mini.className = "mini"; showAvatar(mini); row.append(mini); }
     const body = document.createElement("div"); body.className = "b";
     if (who === "user") body.textContent = text; else body.innerHTML = render(text);
     if (who !== "user" && text.startsWith("Approval needed:")) {
@@ -356,7 +361,7 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
   function hello() {
     const box = document.createElement("div"); box.className = "hello";
     box.innerHTML = '<span class="avatar"></span><b></b><span></span><div class="chips"></div>';
-    box.querySelector(".avatar").textContent = glyph; box.querySelector("b").textContent = "Say hi to " + botName;
+    showAvatar(box.querySelector(".avatar")); box.querySelector("b").textContent = "Say hi to " + botName;
     box.querySelector("span:not(.avatar)").textContent = (role || "Your always-on assistant") + ". Type /stop to stop work, /new to start over.";
     for (const text of ["What can you do for me?", "Remember that I like short answers", "What are you working on?"]) {
       const b = document.createElement("button"); b.type = "button"; b.textContent = text; b.onclick = () => post(text); box.querySelector(".chips").append(b);
@@ -390,8 +395,13 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
       await Promise.race([engine, new Promise(resolve => setTimeout(resolve, 1500))]);
       const r = await api("history");
       if (r.bot) {
-        botName = r.bot.name; role = r.bot.role || ""; glyph = r.bot.avatar || r.bot.name.slice(0, 1).toUpperCase();
-        document.getElementById("name").textContent = r.bot.name; document.title = r.bot.name; document.getElementById("avatar").textContent = glyph;
+        botName = r.bot.name; role = r.bot.role || "";
+        const avatar = typeof r.bot.avatar === "string" ? r.bot.avatar : "";
+        // Native storage accepts bounded PNG thumbnails. Keep that boundary here too;
+        // legacy glyphs remain text and presets use initials without fetching assets.
+        image = avatar.length <= 300000 && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(avatar) ? avatar : "";
+        glyph = avatar && !avatar.startsWith("panda:") && !avatar.includes(":") && Array.from(avatar).length <= 4 ? avatar : (Array.from(botName)[0] || "·").toUpperCase();
+        document.getElementById("name").textContent = r.bot.name; document.title = r.bot.name; showAvatar(document.getElementById("avatar"));
         status.textContent = r.bot.paused ? "Paused" : (role || "On your computer");
       }
       if (!r.messages.length) hello();

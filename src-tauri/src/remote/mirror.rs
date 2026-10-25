@@ -388,6 +388,7 @@ pub async fn remote_start_task(
     image_ids: Option<Vec<String>>,
 ) -> Result<Value> {
     super::valid_device_id(&device_id)?;
+    if let Some(id) = session_id.as_deref() { ensure_no_local_bot(&*lock(&state)?, id)?; }
     {
         let state = remote(&app);
         let inner = state.lock();
@@ -431,9 +432,17 @@ pub async fn remote_start_task(
     Ok(session)
 }
 
+fn ensure_no_local_bot(store: &Store, id: &str) -> Result<()> {
+    if crate::bots::tasks::linked(store, id)?.is_some() {
+        return Err("Choose No bot before running this task on another computer.".into());
+    }
+    Ok(())
+}
+
 /// Makes (or converts an empty draft into) the local mirror row, published and running.
 #[allow(clippy::too_many_arguments)]
 fn mirror_row(store: &Store, device: &str, project_id: &str, provider: &str, model: &str, mode: Option<&str>, effort: Option<&str>, draft: Option<&str>) -> Result<(String, bool)> {
+    if let Some(id) = draft { ensure_no_local_bot(store, id)?; }
     // A draft with its own local worktree keeps it; the mirror gets a fresh row.
     let reuse = draft.filter(|id| store.is_empty_draft(id).unwrap_or(false) && store.session(id).is_ok_and(|task| task.project_id == project_id && task.worktree_path.is_none()));
     // `create_user_task` commits its own transaction, so a new row is made before this one.
@@ -491,6 +500,26 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[test]
+    fn a_bot_linked_draft_cannot_start_a_remote_task() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let root = std::env::temp_dir().join(format!("pandacode-bot-mirror-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = store.add_project(&root).unwrap();
+        let draft = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.mark_draft(&draft.id).unwrap();
+        let bot = crate::bots::create(&store, &crate::bots::BotInput { name: "Local bot".into(), provider: "codex".into(), model: "default".into(), mode: "ask".into(), ..Default::default() }, &root.join("bots")).unwrap();
+        crate::bots::tasks::assign(&store, &draft.id, Some(&bot.id)).unwrap();
+        assert!(ensure_no_local_bot(&store, &draft.id).is_err());
+        assert!(mirror_row(&store, "host", &project.id, "codex", "default", None, None, Some(&draft.id)).unwrap_err().contains("Choose No bot"));
+        let unchanged = store.session(&draft.id).unwrap();
+        assert!(unchanged.remote_device.is_none() && unchanged.draft);
+        assert_eq!(unchanged.status, "idle");
+        crate::bots::tasks::assign(&store, &draft.id, None).unwrap();
+        assert!(ensure_no_local_bot(&store, &draft.id).is_ok());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -9,7 +9,7 @@ import { createPreviewArchitect } from './preview-architect';
 import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
-import { invokeBots } from './preview-bots';
+import { invokeBots, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
 import { invokeRemote, previewRemoteStart } from './preview-remote';
 import { createPreviewDesign } from './preview-design';
 import { createPreviewSkills } from './preview-skills';
@@ -746,7 +746,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
   if (command.startsWith('jj_')) return (await import('./preview-jj')).invokeJj<T>(command, args);
   if (command.includes('moodboard')) return (await import('./preview-moodboards')).invokeMoodboards<T>(command, args);
   if (command === 'bots_list' || command.startsWith('bot_')) return invokeBots<T>(command, args, {
-    invoke, emit,
+    invoke, emit, task: session, started: id => Boolean(messages[id]?.length), isTeam: id => Boolean(architect.get(id)), project: id => projects.find(project => project.id === id),
     addProject: name => { const p = { id: crypto.randomUUID(), name, path: `/Users/you/PandaCode Bots/${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` }; projects.push(p); return p; },
   });
   if (command === 'remote_repo_check') {
@@ -755,6 +755,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     return { repo: repo?.nameWithOwner ?? null, branch: git.branch, ahead: behind.ahead ?? 0, dirty: behind.dirty ?? false, pushed: behind.pushed ?? true } as T;
   }
   if (command === 'remote_start_task') {
+    if (args.sessionId && taskBotId(args.sessionId)) throw new Error('Choose No bot before running this task on another computer.');
     // The task runs on the other computer; here it is an ordinary session that names it.
     const targets = await invokeRemote<{ deviceId: string; name: string; online: boolean }[]>('remote_targets', {}, emit);
     const target = targets.find(item => item.deviceId === args.deviceId && item.online);
@@ -1037,7 +1038,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       if (!task) { result = false; break; }
       settleDraft(task);
       if (!task.draft || (messages[task.id] ?? []).length) { result = false; break; }
-      sessions = sessions.filter(item => item.id !== task.id); delete messages[task.id]; architect.remove([task.id]);
+      sessions = sessions.filter(item => item.id !== task.id); delete messages[task.id]; architect.remove([task.id]); forgetBotTask(task.id);
       result = true; break;
     }
     case 'pin_session': {
@@ -1096,7 +1097,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       turnChanges.remove(deletedSessionIds);
       sessions = sessions.filter(task => !deletedSessionIds.includes(task.id));
       saveThreadOrder(sessions.map(threadOrder));
-      for (const id of deletedSessionIds) delete messages[id];
+      for (const id of deletedSessionIds) { delete messages[id]; forgetBotTask(id); }
       emit('sessions-deleted', { sessionIds: deletedSessionIds }); emit('sessions-changed', undefined);
       result = { deletedSessionIds }; break;
     }
@@ -1191,6 +1192,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const text = typeof args.text === 'string' ? args.text.trim() + moodboardContext : '';
       if (!text) throw new Error('Write a message first.');
       if (new TextEncoder().encode(text).length > 128 * 1024) throw new Error('Message and attached context must be under 128 KiB.');
+      const botContext = prepareBotTask(s);
+      botContext?.commit();
+      if (botContext) ((window as any).__botTaskPrompts ??= []).push({ sessionId: s.id, text: text + botContext.text });
       s.status = 'running'; s.taskStage = 'in_progress'; s.completedAt = null; s.updatedAt = Date.now(); s.lastPromptAt = s.updatedAt; s.limitedAt = null; s.limitedUntil = null; s.resumeAtReset = false; if (s.title === 'New conversation') s.title = text.slice(0, 48); messages[s.id] ??= []; messages[s.id].push({ id: ++id, sessionId: s.id, role: 'user', content: text, createdAt: Date.now() });
       agent({ sessionId: s.id, kind: 'status', text: 'Previewing response' });
       const tool: ToolActivity = { id: `preview-tool-${crypto.randomUUID()}`, name: 'Bash', status: 'running', input: 'npm test -- --runInBand', output: '' };
@@ -1225,6 +1229,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         agent({ sessionId: args.sessionId, kind: 'tool', text: 'Bash canceled', tool: { ...pending.activity } });
         activeTools.delete(args.sessionId);
       }
+      retryBotTask(args.sessionId);
       const stopped = session(args.sessionId); stopped.status = 'idle'; if (stopped.goalState?.status === 'active') { stopped.goalState.status = 'paused'; emitGoal(stopped); } syncMirror(args.sessionId); agent({ sessionId: args.sessionId, kind: 'done', text: 'Stopped' }); break;
     }
     case 'respond_approval': case 'respond_user_input': break;
@@ -1411,8 +1416,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'skills_list': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
     case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
     case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import':
-    case 'skills_scope_get': case 'skills_scope_set': case 'skills_task_resolve':
+    case 'skills_scope_get': case 'skills_scope_set':
       result = previewSkills.call(command, args); break;
+    case 'skills_task_resolve': { const task = session(args.sessionId); result = previewSkills.call(command, { ...args, projectId: task.projectId, botId: taskBotId(task.id) }); break; }
     case 'simulator_status': result = previewSimulator.status(); break;
     case 'simulator_pose': result = await previewSimulator.pose(args.udid, args.pose); break;
     case 'simulator_create_duo': result = previewSimulator.createDuo(); break;

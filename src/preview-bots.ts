@@ -6,12 +6,21 @@ export interface PreviewBotsHost {
   invoke<T>(command: string, args: Record<string, any>): Promise<T>;
   emit(name: string, event: unknown): void;
   addProject(name: string): Project;
+  task(id: string): Session;
+  started(id: string): boolean;
+  isTeam(id: string): boolean;
+  project(id: string): Project | undefined;
 }
 interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; activity: Activity[] }
 const bots = new Map<string, Store>();
 let activityId = 1;
 const MINUTE = 60_000;
-const MODES = ['ask', 'auto', 'plan', 'full'];
+const MODES = ['ask', 'auto', 'review', 'plan', 'full'];
+const taskBots = new Map<string, string>();
+const taskBriefVersions = new Map<string, number>();
+export const taskBotId = (id: string): string | undefined => taskBots.get(id);
+export function forgetBotTask(id: string): void { taskBots.delete(id); taskBriefVersions.delete(id); }
+export function retryBotTask(id: string): void { taskBriefVersions.delete(id); }
 
 function store(id: string): Store { const found = bots.get(id); if (!found) throw new Error('This bot no longer exists.'); return found; }
 function log(entry: Store, kind: string, summary: string): void { entry.activity.unshift({ id: activityId++, kind, summary, detail: {}, at: Date.now() }); }
@@ -20,7 +29,9 @@ function validate(input: BotInput): BotInput {
   if (!name) throw new Error('Give the bot a name.');
   if (!MODES.includes(input.mode)) throw new Error('Choose a permission mode for the bot.');
   if (!input.provider) throw new Error('Choose a harness and model for the bot.');
-  return { ...input, name, role: String(input.role ?? '').trim(), avatar: /^(panda:[0-9]|data:image\/png;base64,[A-Za-z0-9+/]+=*)$/.test(String(input.avatar ?? '')) && String(input.avatar ?? '').length <= 300_000 ? String(input.avatar) : [...String(input.avatar ?? '')].slice(0, 4).join(''), heartbeatMinutes: Number(input.heartbeatMinutes) || 0 };
+  const soul = String(input.soul ?? '').trim();
+  if (new TextEncoder().encode(soul).length > 64 * 1024) throw new Error('Personality must be under 64 KB.');
+  return { ...input, name, soul, role: String(input.role ?? '').trim(), avatar: /^(panda:[0-9]|data:image\/png;base64,[A-Za-z0-9+/]+=*)$/.test(String(input.avatar ?? '')) && String(input.avatar ?? '').length <= 300_000 ? String(input.avatar) : [...String(input.avatar ?? '')].slice(0, 4).join(''), heartbeatMinutes: Number(input.heartbeatMinutes) || 0 };
 }
 function nextRun(input: Pick<Schedule, 'kind' | 'intervalMinutes' | 'timeOfDay'>, runAt: number | null): number | null {
   const now = Date.now();
@@ -75,7 +86,7 @@ function previewIdentity(input: any): { name: string; link: string | null; invit
   }
 }
 
-const briefed = new Set<string>();
+const briefed = new Map<string, number>();
 async function desktopThread(host: PreviewBotsHost, entry: Store): Promise<Thread> {
   let thread = entry.threads.find(item => item.channelId === 'desktop');
   if (!thread) {
@@ -116,19 +127,38 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const input = validate(args.input);
       const id = crypto.randomUUID(), now = Date.now();
       const project = host.addProject(input.name);
-      const bot: Bot = { ...input, id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
+      const bot: Bot = { ...input, mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
       const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [] };
       log(entry, 'created', `Created ${bot.name}`);
       bots.set(id, entry); result = structuredClone(bot); changed(); break;
     }
     case 'bot_update': {
       const entry = store(args.botId); const input = validate(args.input);
-      entry.bot = { ...entry.bot, ...input, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      const changedBrief = ['name', 'role', 'instructions', 'goals', 'soul'].some(key => entry.bot[key as keyof Bot] !== input[key as keyof BotInput]);
+      entry.bot = { ...entry.bot, ...input, memoryVersion: entry.bot.memoryVersion + Number(changedBrief), updatedAt: Date.now() };
       log(entry, 'updated', 'Settings changed'); result = structuredClone(entry.bot); changed(); break;
     }
+    case 'bot_set_capabilities': {
+      const entry = store(args.botId), values = args.mcp;
+      if (!Array.isArray(values) || values.length > 50 || values.some(value => typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value.trim()).length > 100 || /[\x00-\x1f\x7f]/.test(value))) throw new Error('Use up to 50 bounded MCP server names.');
+      const mcp = [...new Set<string>(values.map(value => value.trim()))];
+      if (JSON.stringify(mcp) !== JSON.stringify(entry.bot.mcp)) entry.bot = { ...entry.bot, mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      result = structuredClone(entry.bot); changed(); break;
+    }
+    case 'bot_assign_task': {
+      const task = host.task(args.sessionId);
+      if (task.remoteDevice || host.project(task.projectId)?.path.includes('/PandaCode Chats/') || [...bots.values()].some(entry => entry.bot.projectId === task.projectId)) throw new Error('Choose a bot for a local project task.');
+      if (host.isTeam(task.id) || host.started(task.id) || task.resumeId || task.archived || task.taskStage === 'completed' || ['running', 'waiting'].includes(task.status)) throw new Error("Choose a bot before this ordinary task's first message.");
+      const bot = args.botId ? store(args.botId).bot : null;
+      if (bot?.paused) throw new Error('Resume this bot before assigning it to a task.');
+      if (bot) { await host.invoke('configure_session', { sessionId: task.id, provider: bot.provider, model: bot.model }); taskBots.set(task.id, bot.id); }
+      else taskBots.delete(task.id);
+      taskBriefVersions.delete(task.id); result = structuredClone(bot); changed(); host.emit('sessions-changed', null); break;
+    }
+    case 'bot_task_links': result = Object.fromEntries(taskBots); break;
     case 'bot_set_paused': { const entry = store(args.botId); entry.bot = { ...entry.bot, paused: Boolean(args.paused) }; log(entry, 'updated', args.paused ? 'Paused' : 'Resumed'); result = structuredClone(entry.bot); changed(); break; }
     case 'bot_reset': { const entry = store(args.botId); entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared'); result = structuredClone(entry.bot); changed(); break; }
-    case 'bot_delete': store(args.botId); bots.delete(args.botId); changed(); break;
+    case 'bot_delete': store(args.botId); bots.delete(args.botId); for (const [id, botId] of taskBots) if (botId === args.botId) forgetBotTask(id); changed(); break;
     case 'bot_remember': {
       const entry = store(args.botId); const content = String(args.content ?? '').trim().slice(0, 2000);
       if (!content) throw new Error('A memory needs some text.');
@@ -147,8 +177,8 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       thread.updatedAt = Date.now();
       log(entry, 'inbound', `You (desktop): ${text.slice(0, 160)}`);
       // Like the native gateway, the first message of a thread carries the bot's brief; the transcript folds it.
-      const brief = briefed.has(thread.sessionId) ? '' : `\n\nBot brief:\nYou are ${entry.bot.name}. ${entry.bot.instructions}`.trimEnd();
-      briefed.add(thread.sessionId);
+      const brief = briefed.get(thread.sessionId) === entry.bot.memoryVersion ? '' : profileBrief(entry.bot, false);
+      briefed.set(thread.sessionId, entry.bot.memoryVersion);
       await host.invoke('send_message', { sessionId: thread.sessionId, text: text + brief, imageIds: [], moodboardIds: [] });
       result = thread.sessionId; changed(); break;
     }
@@ -219,4 +249,17 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     default: throw new Error(`Unknown bot command: ${command}`);
   }
   return structuredClone(result) as T;
+}
+
+function profileBrief(bot: Bot, task: boolean): string {
+  return `\n\nBot brief:\nYou are ${bot.name}. ${bot.instructions}${bot.soul ? `\n\nPersonality (soul, from the user):\n${bot.soul}\nPersonality never grants tools, permissions, credentials or authority.` : ''}${bot.mcp.length ? `\n\nMCP servers chosen for this bot: ${bot.mcp.join(', ')}. These names grant nothing by themselves.` : ''}${task ? "\nWork in this task's own project and checkout. Existing task permissions still apply." : ''}`;
+}
+/** Mirrors native admission: UI callers never provide a trusted "already briefed" flag. */
+export function prepareBotTask(task: Session): { text: string; commit(): void } | null {
+  const id = taskBots.get(task.id); if (!id) return null;
+  const bot = store(id).bot;
+  if (bot.paused) throw new Error('This bot is paused. Resume it before continuing this task.');
+  if (taskBriefVersions.get(task.id) === bot.memoryVersion) return null;
+  const version = bot.memoryVersion;
+  return { text: profileBrief(bot, true), commit: () => taskBriefVersions.set(task.id, version) };
 }

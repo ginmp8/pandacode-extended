@@ -12,6 +12,9 @@ export type PromptAttachment = PromptImage | PromptDocument | PromptFolder;
 type MenuItem = { id: string; label: string; description?: string; icon?: string };
 export type AttachmentsHost = {
   taskId(): string;
+  /** Changes on task/workspace navigation, including leaving and returning. */
+  contextKey(): string;
+  insertText(text: string): boolean;
   /** A reason attaching is impossible right now, or null. */
   blocked(taskId: string): string | null;
   /** Browser screenshots already waiting on the task; they share the image cap. */
@@ -36,6 +39,8 @@ const MAX_INLINE_TEXT = 32768;
 function id(): string { return crypto.randomUUID(); }
 function baseName(path: string): string { return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path; }
 function formatSize(bytes: number): string { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
+function quotePath(path: string): string { return /[\s"\\]/.test(path) ? JSON.stringify(path) : path; }
+function alreadyAttached(error: unknown): boolean { return String(error instanceof Error ? error.message : error).includes('already attached'); }
 function documentLabel(document: PromptDocument): string {
   if (document.method === 'history') return 'Saved attachment snapshot';
   const ext = document.name.split('.').pop()?.toUpperCase();
@@ -101,9 +106,17 @@ export function mountPromptAttachments(host: AttachmentsHost) {
   }
 
   /** Paths from a picker or a drop. Folders are tried first when the kind is unknown. */
-  async function attachPaths(paths: string[], hint: 'files' | 'folder' | 'unknown' = 'unknown'): Promise<void> {
-    const taskId = target();
+  function insertInstead(taskId: string, contextKey: string, lines: string[]): boolean {
+    if (!lines.length || host.taskId() !== taskId || host.contextKey() !== contextKey || host.blocked(taskId)) return false;
+    if (!host.insertText(lines.join('\n'))) return false;
+    host.notify(`Inserted ${lines.length === 1 ? 'the file path or name' : `${lines.length} file paths or names`} into the prompt.`);
+    return true;
+  }
+
+  async function attachPaths(paths: string[], hint: 'files' | 'folder' | 'unknown' = 'unknown', dropped = false): Promise<void> {
+    const taskId = target(), contextKey = host.contextKey();
     let attached = 0;
+    const failed: { path: string; error: unknown }[] = [];
     for (const path of paths) {
       try {
         if (hint === 'folder') await addFolder(taskId, path);
@@ -114,15 +127,17 @@ export function mountPromptAttachments(host: AttachmentsHost) {
           catch (error) { if (String(error instanceof Error ? error.message : error).includes('not a folder')) await addDocument(taskId, path); else throw error; }
         }
         attached++;
-      } catch (error) { host.report(error); }
+      } catch (error) { if (dropped && !alreadyAttached(error)) failed.push({ path, error }); else host.report(error); }
     }
     if (attached) host.notify(attached === 1 ? `Attached ${baseName(paths[0])}` : `Attached ${attached} items`);
+    if (!insertInstead(taskId, contextKey, failed.map(item => quotePath(item.path)))) failed.forEach(item => host.report(item.error));
   }
 
   /** Browser drops and pastes deliver File objects rather than paths. */
   async function attachFiles(files: File[], origin: 'paste' | 'drop'): Promise<void> {
-    const taskId = target();
+    const taskId = target(), contextKey = host.contextKey();
     let attached = 0;
+    const failed: { file: File; error: unknown }[] = [];
     for (const file of files) {
       try {
         if (file.type.startsWith('image/') || IMAGE_EXTENSIONS.test(file.name)) {
@@ -130,13 +145,14 @@ export function mountPromptAttachments(host: AttachmentsHost) {
           await addImage(taskId, { dataUrl, name: file.name || (origin === 'paste' ? 'Pasted image.png' : 'Image.png'), origin });
         } else {
           // Browser File objects carry no path, so only text can be read here.
-          const text = (await file.text()).slice(0, MAX_INLINE_TEXT + 1);
+          const text = await file.slice(0, MAX_INLINE_TEXT + 1).text();
           if (!text.trim() || text.includes('\0')) throw new Error(`${file.name} is not a text document. Attach it with the picker instead.`);
-          add(taskId, { kind: 'document', id: id(), path: file.name, name: file.name, size: file.size, text: text.slice(0, MAX_INLINE_TEXT), truncated: text.length > MAX_INLINE_TEXT, method: 'text' });
+          add(taskId, { kind: 'document', id: id(), path: file.name, name: file.name, size: file.size, text: text.slice(0, MAX_INLINE_TEXT), truncated: file.size > MAX_INLINE_TEXT, method: 'text' });
         }
         attached++;
-      } catch (error) { host.report(error); }
+      } catch (error) { if (origin === 'drop' && !alreadyAttached(error)) failed.push({ file, error }); else host.report(error); }
     }
+    if (!insertInstead(taskId, contextKey, failed.map(item => `${quotePath(item.file.name)} (dropped file; its local path is unavailable)`))) failed.forEach(item => host.report(item.error));
     // A paste shows up in the composer right away; no toast needed.
     if (attached && origin !== 'paste') host.notify(attached === 1 ? `Attached ${files[0].name}` : `Attached ${attached} items`);
   }
@@ -215,6 +231,10 @@ export function mountPromptAttachments(host: AttachmentsHost) {
       const accepting = () => Boolean(host.taskId()) && !document.querySelector('dialog[open]');
       const setActive = (active: boolean) => zone()?.classList.toggle('drop-active', active && accepting());
       if (preview) {
+        document.addEventListener('pandacode-preview-file-drop', event => {
+          const paths = (event as CustomEvent<{ paths: string[] }>).detail?.paths;
+          if (accepting() && Array.isArray(paths) && paths.every(path => typeof path === 'string')) void attachPaths(paths, 'unknown', true).catch(host.report);
+        });
         let depth = 0;
         document.addEventListener('dragenter', event => { if (event.dataTransfer?.types.includes('Files')) { depth++; setActive(true); } });
         document.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; setActive(false); } });
@@ -231,7 +251,7 @@ export function mountPromptAttachments(host: AttachmentsHost) {
       import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent(event => {
         if (event.payload.type === 'enter' || event.payload.type === 'over') setActive(true);
         else if (event.payload.type === 'leave') setActive(false);
-        else if (event.payload.type === 'drop') { setActive(false); if (accepting()) attachPaths(event.payload.paths).catch(host.report); }
+        else if (event.payload.type === 'drop') { setActive(false); if (accepting()) attachPaths(event.payload.paths, 'unknown', true).catch(host.report); }
       })).catch(() => { /* Drag and drop is unavailable in this webview. */ });
     },
   };

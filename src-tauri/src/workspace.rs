@@ -1,6 +1,8 @@
 use serde::Serialize;
 mod file_search;
 mod text_search;
+mod documents;
+pub use documents::read_document_bytes;
 pub use file_search::search_files;
 pub use text_search::{search_text, TextSearchResult};
 /// Build output and version-control folders that no listing should walk into.

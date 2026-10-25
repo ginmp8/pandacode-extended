@@ -22,3 +22,5 @@ website/.astro/
 *.key
 *.pem
 *.log
+
+.vite-cache/

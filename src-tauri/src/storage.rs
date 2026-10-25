@@ -430,7 +430,7 @@ impl Store {
                 migration.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS sessions_remote ON sessions(remote_device,remote_session) WHERE remote_session IS NOT NULL; PRAGMA user_version=26;").map_err(|e| e.to_string())?;
             }
             if version < 27 {
-                migration.execute_batch("CREATE TABLE github_issue_actions(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,action TEXT NOT NULL CHECK(action IN ('close','reopen')),repository TEXT NOT NULL,number INTEGER NOT NULL CHECK(number>0),url TEXT NOT NULL,approved_at INTEGER NOT NULL); PRAGMA user_version=27;").map_err(|e| e.to_string())?;
+                migration.execute_batch("CREATE TABLE IF NOT EXISTS github_issue_actions(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,action TEXT NOT NULL CHECK(action IN ('close','reopen')),repository TEXT NOT NULL,number INTEGER NOT NULL CHECK(number>0),url TEXT NOT NULL,approved_at INTEGER NOT NULL); PRAGMA user_version=27;").map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }
@@ -917,11 +917,11 @@ impl Store {
         self.db.execute("DELETE FROM github_issue_actions WHERE session_id=?1", [sid]).map_err(|e| e.to_string())?;
         Ok(())
     }
-    pub fn finish_github_issue_action(&self, sid: &str, action: &str, repository: &str, number: i64, url: &str, state: &str, title: &str) -> Result<()> {
+    pub fn finish_github_issue_action(&self, action: &GithubIssueAction, state: &str, title: &str) -> Result<()> {
         let tx = self.db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let changed = tx.execute("UPDATE task_links SET state=?6,title=CASE WHEN ?7='' THEN title ELSE ?7 END,checked_at=?8 WHERE session_id=?1 AND kind='issue' AND number=?2 AND url=?3 AND EXISTS(SELECT 1 FROM github_issue_actions WHERE session_id=?1 AND action=?4 AND repository=?5 AND number=?2 AND url=?3)", params![sid,number,url,action,repository,state,title,now()]).map_err(|e| e.to_string())?;
+        let changed = tx.execute("UPDATE task_links SET state=?6,title=CASE WHEN ?7='' THEN title ELSE ?7 END,checked_at=?8 WHERE session_id=?1 AND kind='issue' AND number=?2 AND url=?3 AND EXISTS(SELECT 1 FROM github_issue_actions WHERE session_id=?1 AND action=?4 AND repository=?5 AND number=?2 AND url=?3)", params![action.session_id,action.number,action.url,action.action,action.repository,state,title,now()]).map_err(|e| e.to_string())?;
         if changed == 0 { return Err("The approved linked issue action is no longer current.".into()); }
-        tx.execute("DELETE FROM github_issue_actions WHERE session_id=?1 AND action=?2 AND repository=?3 AND number=?4 AND url=?5", params![sid,action,repository,number,url]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM github_issue_actions WHERE session_id=?1 AND action=?2 AND repository=?3 AND number=?4 AND url=?5", params![action.session_id,action.action,action.repository,action.number,action.url]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
     /// Linked numbers for one project, so states can be refreshed in one batch.

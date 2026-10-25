@@ -195,7 +195,7 @@ fn apply_saved_issue_action(root: &Path, store: &Mutex<crate::storage::Store>, s
     let desired_state = if action.action == "close" { "closed" } else { "open" };
     if text(&current, "state").eq_ignore_ascii_case(desired_state) {
         let store = issue_store(store)?;
-        store.finish_github_issue_action(sid, &action.action, &action.repository, action.number, &action.url, desired_state, &text(&current, "title"))?;
+        store.finish_github_issue_action(&action, desired_state, &text(&current, "title"))?;
         return store.session(sid);
     }
     {
@@ -216,7 +216,7 @@ fn apply_saved_issue_action(root: &Path, store: &Mutex<crate::storage::Store>, s
         return Err("GitHub did not confirm the approved issue state change.".into());
     }
     let store = issue_store(store)?;
-    store.finish_github_issue_action(sid, &action.action, &action.repository, action.number, &action.url, desired_state, &text(&verified, "title"))?;
+    store.finish_github_issue_action(&action, desired_state, &text(&verified, "title"))?;
     store.session(sid)
 }
 

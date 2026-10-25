@@ -211,6 +211,25 @@ test('saved history stays scoped and closing invalidates late async results', as
   await expect(page.locator('.jev-assist-advisory')).toHaveCount(0);
 });
 
+test('a queued close event cannot dispose reopened Jev assistance', async ({page}) => {
+  await setup(page); await open(page); await prepared(page); await finish(page);
+  await page.evaluate(async () => {
+    const module = await import('/src/jev-assist.ts');
+    const dialog = document.querySelector<HTMLDialogElement>('#dialog')!;
+    (window as any).__assistDelayPrepare = true;
+    const closed = new Promise<void>(resolve => dialog.addEventListener('close', () => resolve(), { once: true }));
+    dialog.querySelector<HTMLButtonElement>('[data-assist-close]')!.click();
+    void module.showJevAssist(dialog, { sessionId: 'session-1' });
+    await closed;
+  });
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__assistReleasePrepare)).toBe('function');
+  await page.evaluate(() => { (window as any).__assistReleasePrepare(); });
+  await prepared(page);
+  await expect(page.getByRole('combobox', { name: 'Saved Jev report' }).locator('option')).toHaveCount(1);
+  await expect(page.locator('.dialog-plate')).toBeVisible();
+  await expect(page.locator('.dialog-scrim')).toBeVisible();
+});
+
 for (const theme of ['dark','light']) test(`Jev assistance is readable in ${theme} and keyboard tabs fit narrow screens`, async ({page}) => {
   await setup(page); await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
   await open(page); await prepared(page); await finish(page);

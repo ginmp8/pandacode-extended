@@ -2,6 +2,8 @@
 
 This document defines the release integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22). The product version is **0.5.0** and the display identity is **0.5.0+pc.0.3.47**. It maps the upstream release changes to application flows, retained Extended behavior and validation requirements. It does not certify a native installer, live provider session or complete equivalence to every upstream version.
 
+The subsequent [0.3.28–0.3.42 historical coverage supplement](upstream-parity-0.3.28-0.3.42.md), tracked in issue #24, starts from this integration's feature branch and retains the same candidate version. Its additional features, explicit exclusions and source identities are recorded separately; the frozen provenance below remains unchanged.
+
 ## Frozen inputs and scope
 
 | Input | Identity |

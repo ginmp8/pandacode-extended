@@ -18,5 +18,16 @@
     "reference_archive_sha256": "73a8dbe02d03c4aef37ff50362af266fa72c0f4b4dfb44d935ee649b1e3e85f1",
     "reference_files_verified": 1146,
     "coverage_document": "docs/upstream-integration-0.5.0.md"
+  },
+  "historical_upstream_review": {
+    "from": "0.3.28",
+    "through": "0.3.42",
+    "extended_base_commit": "7f14199973d7bfc62dfb07fa08cb1e3bbd328c5e",
+    "upstream_from_commit": "70bdc708303c8681d8eb0b46f2cdb0ff087aa6eb",
+    "upstream_through_commit": "bca0b9f1f03a1cc3f8a8e6330881c34103f14a46",
+    "coverage_document": "docs/upstream-parity-0.3.28-0.3.42.md",
+    "release_evidence": "docs/upstream-release-evidence-0.3.28-0.3.42.json",
+    "release_evidence_sha256": "1222807342583b683749d2014d200a8ea52bbe78479c9f9fb5581d30d8067e71",
+    "issue": "https://github.com/ginmp8/pandacode-extended/issues/24"
   }
 }

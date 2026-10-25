@@ -1,5 +1,7 @@
 # Feature parity plan
 
+**Historical planning document.** This competitor triage predates the current Extended integration. Its “no mobile client” and “Devin” exclusions are no longer current: Extended 0.5.0 includes those integrations. Use the [0.3.42–0.3.47 map](upstream-integration-0.5.0.md) and [0.3.28–0.3.42 supplement](upstream-parity-0.3.28-0.3.42.md) for current implemented scope, security exclusions and verification evidence. The original planning entries below are retained as historical context, not a current feature inventory.
+
 A triage of a long competitor feature list (October 2026) against PandaCode. Each group is marked:
 
 - **Have**: PandaCode already does this, possibly in its own form.

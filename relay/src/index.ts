@@ -1,4 +1,5 @@
 import { Account } from "./account.ts";
+import { configured } from "./config.ts";
 import { type Env, fail, json } from "./env.ts";
 import { githubUser } from "./github.ts";
 import { MAX_FRAME_BYTES, readJsonLimited } from "./limits.ts";
@@ -13,6 +14,7 @@ const stub = (env: Env, acct: string) => env.ACCOUNT.get(env.ACCOUNT.idFromName(
 async function authGithub(request: Request, env: Env): Promise<Response> {
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
   if (!(await env.AUTH_LIMITER.limit({ key: ip })).success) return fail(429, "too many sign-in attempts");
+  if (!(await env.GLOBAL_AUTH_LIMITER.limit({ key: "all" })).success) return fail(429, "too many sign-in attempts");
   if (Number(request.headers.get("content-length") ?? 0) > MAX_FRAME_BYTES) return fail(413, "request too large");
   const parsed = await readJsonLimited(request, MAX_FRAME_BYTES);
   if (parsed.tooLarge) return fail(413, "request too large");
@@ -36,6 +38,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    if (!configured(env, path === "/v1/auth/github")) return fail(500, "server error");
     if (path === "/v1/auth/github") return request.method === "POST" ? authGithub(request, env) : fail(405, "method not allowed");
 
     if (!isKnownRoute(path)) return fail(404, "not found");

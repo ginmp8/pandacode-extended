@@ -13,7 +13,7 @@ import { Icon } from './Icon.tsx';
 import { Menu, TextMenu, ViewMenu, type MenuItem } from './Menu.tsx';
 import { interactiveGlass, nativeGlass } from './NativeGlass.tsx';
 import { toggleSidebar, useSidebar } from './split.tsx';
-import { MODES } from './status.tsx';
+import { permissionModes, permissionNotice } from './approval-modes.ts';
 import { useBackdrop } from './Backdrop.tsx';
 import { useColors } from './theme.ts';
 import { useNewTask } from './useNewTask.ts';
@@ -47,7 +47,7 @@ export function NewThread() {
   const computerItems: MenuItem[] = hosts.map(h => ({ label: h.name, ios: 'desktopcomputer', android: 'computer', checked: h.id === deviceId, onPress: () => form.pickDevice(h.id) }));
   const optionItems: MenuItem[] = [
     { label: 'New worktree', ios: 'arrow.triangle.branch', android: 'call_split', checked: worktree, onPress: () => form.setWorktree(w => !w) },
-    ...MODES.map(m => ({ label: m.label, section: 'Permissions', checked: m.id === mode, onPress: () => pick({ mode: m.id }) })),
+    ...permissionModes(provider, mode).map(m => ({ label: m.label, section: 'Permissions', checked: m.id === mode, onPress: () => { if (m.available) pick({ mode: m.id }); } })),
     ...efforts.map(e => ({ label: e.label, section: 'Effort', checked: e.value === effort, onPress: () => pick({ effort: e.value }) })),
   ];
   const harnessItems: MenuItem[] = [
@@ -66,6 +66,7 @@ export function NewThread() {
       </Stack.Toolbar>
       <View style={styles.center}>
         <Text style={[styles.title, { color: colors.text }]}>What should we work on?</Text>
+        {permissionNotice(provider, mode) && <Text style={{ color: colors.secondary, textAlign: 'center' }}>{permissionNotice(provider, mode)}</Text>}
         {hosts.length ? (
           <View style={styles.pickers}>
             {project ? (

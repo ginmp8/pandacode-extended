@@ -777,7 +777,7 @@ function refreshModelLabels(): void {
   if (logo && !logo.classList.contains(s.provider)) { logo.className = `provider-small ${s.provider}`; logo.innerHTML = providerLogo(s.provider); }
   const modeTrigger = document.querySelector<HTMLElement>('#mode-picker-trigger');
   const mode = approvalMode(s.provider, s.mode);
-  if (modeTrigger && modeTrigger.dataset.mode !== mode.id) {
+  if (modeTrigger && (modeTrigger.dataset.mode !== mode.id || modeTrigger.title !== mode.description)) {
     modeTrigger.dataset.mode = mode.id; modeTrigger.title = mode.description;
     modeTrigger.innerHTML = `${icon(mode.icon)}<span>${escape(mode.label)}</span>${icon('down')}`;
   }
@@ -3809,10 +3809,10 @@ async function showChoices(anchor: HTMLElement, options: ChoiceOptions, guardGen
 async function showMode(anchor: HTMLElement): Promise<void> {
   const s = session(); if (!s || isRunning() || configuringSessions.has(s.id)) return;
   const generation = state.generation;
-  const modes = approvalModes(s.provider);
+  const modes = approvalModes(s.provider, s.mode);
   await showChoices(anchor, { title: 'Permissions', width: 320, items: modes.map(mode => ({ ...mode, selected: s.mode === mode.id })), onSelect: async id => {
     if (s.id !== state.sessionId || generation !== state.generation || isRunning() || configuringSessions.has(s.id)) throw new Error('Select the task again to change its permissions.');
-    const chosen = modes.find(mode => mode.id === id); if (!chosen) throw new Error('Choose an available approval behavior.');
+    const chosen = modes.find(mode => mode.id === id); if (!chosen || chosen.disabled) throw new Error('Choose an available approval behavior.');
     configuringSessions.add(s.id);
     try {
       await call('update_session', { sessionId: s.id, mode: id as Mode });

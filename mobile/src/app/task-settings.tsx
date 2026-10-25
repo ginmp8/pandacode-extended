@@ -10,7 +10,7 @@ import { Choice } from '../ui/Choice.tsx';
 import { HarnessLogo } from '../ui/harness.tsx';
 import { Icon } from '../ui/Icon.tsx';
 import { useModelOptions } from '../ui/models.ts';
-import { MODES } from '../ui/status.tsx';
+import { permissionModes, permissionNotice, supportsPermissionMode } from '../ui/approval-modes.ts';
 import { useColors } from '../ui/theme.ts';
 
 type Settings = Pick<TaskSummary, 'provider' | 'model' | 'effort' | 'mode'>;
@@ -28,6 +28,10 @@ function Form({ deviceId, sessionId, task }: { deviceId: string; sessionId: stri
   const [settings, setSettings] = useState<Settings>({ provider: task.provider, model: task.model, effort: task.effort, mode: task.mode });
   const options = useModelOptions(deviceId, settings.provider);
   const configure = async (change: Partial<Settings>) => {
+    if (!supportsPermissionMode(change.provider ?? settings.provider, change.mode ?? settings.mode)) {
+      Alert.alert('Choose another permission mode', 'This harness cannot use Approve for me. Choose a supported mode before changing its model or harness.');
+      return;
+    }
     const before = settings;
     setSettings(s => ({ ...s, ...change }));
     void Haptics.selectionAsync();
@@ -56,9 +60,10 @@ function Form({ deviceId, sessionId, task }: { deviceId: string; sessionId: stri
           </Row>
         )}
         <Row icon={<Icon ios="lock.shield" android="shield" size={17} color={colors.tint} />} label="Permissions" last>
-          <Choice value={settings.mode} options={MODES.map(m => ({ value: m.id, label: m.label }))} onChange={mode => configure({ mode })} />
+          <Choice value={settings.mode} options={permissionModes(settings.provider, settings.mode).map(m => ({ value: m.id, label: m.label }))} onChange={mode => configure({ mode })} />
         </Row>
       </View>
+      {permissionNotice(settings.provider, settings.mode) && <Text style={[styles.footer, { color: colors.secondary }]}>{permissionNotice(settings.provider, settings.mode)}</Text>}
       <Text style={[styles.footer, { color: colors.secondary }]}>Changes apply from the next message.</Text>
     </ScrollView>
   );

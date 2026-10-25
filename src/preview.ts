@@ -1115,7 +1115,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const details = taskDetails(args.title, args.description);
       if (!projects.some(p => p.id === args.projectId)) throw new Error('Project not found.');
       if (!providers.some(p => p.id === args.provider) || typeof args.model !== 'string' || args.model.length > 200) throw new Error('Invalid harness or model.');
-      if (!['ask', 'auto', 'plan', 'full'].includes(args.mode)) throw new Error('Unknown permission mode.');
+      if (!['ask', 'auto', 'review', 'plan', 'full'].includes(args.mode)) throw new Error('Unknown permission mode.');
       const s = await invoke<Session>('create_session', { projectId: args.projectId, provider: args.provider, model: args.model, mode: args.mode });
       Object.assign(session(s.id), details);
       result = session(s.id); break;
@@ -1181,6 +1181,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'send_message': {
       if (resolveSlash(session(args.sessionId).provider, String(args.text)).action) throw new Error('This command opens a PandaCode control.');
       const s = session(args.sessionId); assertIdle(s);
+      if (s.mode === 'review' && !['claude', 'glm', 'mimo'].includes(s.provider)) throw new Error('Approve for me needs Claude Code’s auto mode; this harness has no agent-reviewed approvals. Choose another permission mode.');
       let moodboardContext = '';
       for (const boardId of args.moodboardIds ?? []) {
         const board = await invoke<import('./moodboards').MoodboardDetail>('read_moodboard', { projectId: s.projectId, boardId });

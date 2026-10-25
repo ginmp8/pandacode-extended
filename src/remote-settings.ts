@@ -7,7 +7,7 @@ import type { RemoteDevice, RemoteHost, RemoteSignIn, RemoteStatus } from './rem
 
 const TRUST_TIP = 'Both computers must trust each other before one can drive the other. Compare the fingerprint shown on the other computer with the one here before trusting it. If its key changes, you need to trust it again.';
 const ALLOW_TIP = 'Remote prompts follow this computer’s approval settings; they get no more power than prompts typed here.';
-const FULL_ACCESS_TIP = 'Off by default. Enable here only if trusted computers may start, continue or configure Full access tasks on this computer. Turning this off blocks new remote actions; already running work can still be stopped.';
+const FULL_ACCESS_TIP = 'Off by default. Enable here only if trusted computers may start, continue or configure Full access or Claude Code Approve for me tasks on this computer. Turning this off blocks new remote actions; already running work can still be stopped.';
 
 export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => void {
   let status: RemoteStatus | undefined, devices: RemoteDevice[] = [], error = '', code: RemoteSignIn | undefined, expires = 0, signingIn = false, disposed = false, attempt = 0;
@@ -25,7 +25,7 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     }
     return `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Signed in with GitHub · ${status.connected ? 'connected' : 'connecting…'}</small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
       <div class="setting-row"><div><strong>Allow remote control of this computer ${infoMark(ALLOW_TIP, 'About remote control')}</strong><small>Your other signed-in computers can see and drive tasks here.</small></div><input type="checkbox" class="settings-switch" id="remote-host" aria-label="Allow remote control of this computer" ${status.hostEnabled ? 'checked' : ''}></div>
-      <div class="setting-row"><div><strong>Full access for remote tasks ${infoMark(FULL_ACCESS_TIP, 'About Full access for remote tasks')}</strong><small>Allow trusted computers to choose Full access explicitly.</small></div><input type="checkbox" class="settings-switch" id="remote-full-access" aria-label="Full access for remote tasks" ${status.allowFullAccess ? 'checked' : ''}></div>
+      <div class="setting-row"><div><strong>Full access for remote tasks ${infoMark(FULL_ACCESS_TIP, 'About Full access for remote tasks')}</strong><small>Allow trusted computers to choose Full access or Claude Code Approve for me explicitly.</small></div><input type="checkbox" class="settings-switch" id="remote-full-access" aria-label="Full access for remote tasks" ${status.allowFullAccess ? 'checked' : ''}></div>
       <h3 class="settings-heading">Devices</h3><div class="settings-group remote-devices">${devices.length ? devices.map(deviceRow).join('') : '<p class="remote-note">No devices yet.</p>'}</div>`;
   }
   function render(): void {

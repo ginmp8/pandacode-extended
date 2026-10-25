@@ -9,10 +9,3 @@ export function ago(ms: number): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
 }
-
-export const MODES = [
-  { id: 'ask', label: 'Standard' },
-  { id: 'auto', label: 'Auto-approve edits' },
-  { id: 'plan', label: 'Plan only' },
-  { id: 'full', label: 'Full access' },
-];

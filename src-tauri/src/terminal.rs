@@ -282,6 +282,7 @@ fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, Strin
     }
     if let Some(connection) = &connection {
         check_console_connection(context.provider, &connection.args)?;
+        crate::providers::review_connection_args(context.mode, &connection.args)?;
         apply_connection(&mut cmd, connection);
     }
     if context.provider == "kilo" {
@@ -370,6 +371,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
     if !crate::storage::valid_permission_mode(context.mode) {
         return Err("Choose a supported permission mode.".into());
     }
+    crate::providers::review_supported(provider, context.mode)?;
     match provider {
         "pi" | "omp" => {
             if context.mode != "full" { return Err("Pi console requires Full access. Use task chat for approval modes.".into()); }
@@ -395,6 +397,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
                 "plan" => "plan",
                 "full" => "bypassPermissions",
                 "auto" => "acceptEdits",
+                "review" => "auto",
                 _ => "default",
             };
             args.extend(["--permission-mode".into(), mode.into()]);
@@ -1163,6 +1166,24 @@ mod tests {
             .windows(2)
             .any(|args| args == ["--permission-mode", "default"]));
         assert!(!args.iter().any(|arg| arg.contains("danger")));
+    }
+
+    #[test]
+    fn console_review_mode_never_falls_back_to_standard_or_full_access() {
+        let context = HarnessContext {
+            session_id: "task", provider: "claude", resume_id: None,
+            model: None, reasoning_effort: None, mode: "review",
+        };
+        for (provider, _) in crate::providers::PROVIDERS {
+            let result = harness_arguments(&HarnessContext { provider, ..context });
+            if matches!(provider, "claude" | "glm" | "mimo") {
+                let args = result.unwrap();
+                assert!(args.windows(2).any(|pair| pair == ["--permission-mode", "auto"]));
+                assert!(!args.iter().any(|arg| arg.contains("danger") || arg == "bypassPermissions"));
+            } else {
+                assert!(result.is_err(), "{provider}");
+            }
+        }
     }
 
     #[test]

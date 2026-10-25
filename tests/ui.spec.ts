@@ -1913,6 +1913,7 @@ async function showTurnFixture(page: Page, entries: Array<{ role: string; conten
     await route.fulfill({ response, body: previewBody(source.replace(marker, `messages['session-4'] = ${JSON.stringify(fixture)}; const providers =`)) });
   });
   await page.reload();
+  await expect(prompt(page)).toBeEnabled();
   await chooseProjectFilter(page, 'pandacode');
 }
 

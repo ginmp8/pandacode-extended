@@ -82,7 +82,7 @@ The existing Daytona, Cloudflare, EC2 and AgentCore implementations remain. New 
 | boat | Start and stop | Up to 1,440 minutes |
 | InstaBox | Start and stop; ready account snapshot or plan template | Up to 60 minutes |
 
-Credentials remain in the protected store. Authenticated HTTP disables redirects and bounds response bytes/time. Provider-returned secondary endpoints require provider-specific validation before secrets can be used. Errors and command output are redacted. User/agent mutations retain existing approval boundaries. GCP does not open firewall rules or public addresses on the user's behalf. Modal/Tensorlake require prepared images; no implicit package installation repairs an unsuitable image. CodeSandbox does not fall back from Pint to an unsupported transport.
+Credentials remain in the protected store. Authenticated HTTP disables redirects and bounds response bytes/time. Provider-returned secondary endpoints require provider-specific validation before secrets can be used. Provider error messages redact authentication values; response bodies and command output remain bounded. User/agent mutations retain existing approval boundaries. GCP does not open firewall rules or public addresses on the user's behalf. Modal/Tensorlake require prepared images; no implicit package installation repairs an unsuitable image. CodeSandbox does not fall back from Pint to an unsupported transport.
 
 This deliberately excludes the original cloud-agent pipeline: no automatic Git/Node/CLI install, copying provider logins or checkout content, unattended task bridge, or background worktree synchronization. Explicit manual sandbox operations do not authorize that separate pipeline.
 

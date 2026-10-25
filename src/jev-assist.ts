@@ -67,10 +67,12 @@ export async function showJevAssist(dialog: HTMLDialogElement, context: AssistCo
   const el = <T extends HTMLElement = HTMLElement>(selector: string) => host.querySelector<T>(selector)!;
   const query = el<HTMLTextAreaElement>('#jev-assist-query'), rules = el<HTMLTextAreaElement>('#jev-assist-rules');
   const alive = () => !disposed && host.isConnected && dialog.contains(host);
-  const dispose = () => { if (disposed) return; disposed = true; revision++; observer.disconnect(); dialog.removeEventListener('close', dispose); if (views.get(dialog) === dispose) views.delete(dialog); };
+  const dispose = () => { if (disposed) return; disposed = true; revision++; observer.disconnect(); dialog.removeEventListener('close', onClose); if (views.get(dialog) === dispose) views.delete(dialog); };
+  // A prior view's queued close event can arrive after this shared dialog reopens.
+  const onClose = () => { if (!dialog.open) dispose(); };
   const observer = new MutationObserver(() => { if (!dialog.open || !host.isConnected || !dialog.contains(host)) dispose(); });
   observer.observe(dialog, { childList: true, attributes: true, attributeFilter: ['open'] });
-  dialog.addEventListener('close', dispose, { once: true });
+  dialog.addEventListener('close', onClose);
   views.set(dialog, dispose);
   el('[data-assist-close]').addEventListener('click', () => { dispose(); dialog.close(); });
   if (!dialog.open) dialog.showModal();

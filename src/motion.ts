@@ -382,7 +382,8 @@ export function installDialogMotion(dialog: HTMLDialogElement): () => void {
   dialog.close = function close(this: HTMLDialogElement, returnValue?: string): void { depart(); nativeClose.call(this, returnValue); };
   // Escape closes natively; cancel is the last moment the dialog is still on screen.
   const onCancel = (event: Event): void => { if (!event.defaultPrevented) depart(); };
-  const onClose = (): void => { if (!running.has(scrim)) { scrim.hidden = true; plate.hidden = true; } };
+  // Closing an earlier view queues an event that may outlive its reopen.
+  const onClose = (): void => { if (!dialog.open && !running.has(scrim)) { scrim.hidden = true; plate.hidden = true; } };
   dialog.addEventListener('cancel', onCancel);
   dialog.addEventListener('close', onClose);
   window.addEventListener('resize', refit);

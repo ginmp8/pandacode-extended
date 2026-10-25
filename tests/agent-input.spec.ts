@@ -32,6 +32,7 @@ test.beforeEach(async ({ page }) => {
 test('agent input preserves typed answers while tools and tokens stream and across task switches', async ({ page }) => {
   await emit(page, 'input_request', question);
   await expect(form(page)).toBeVisible();
+  await expect(page.locator('.task-item[data-id="session-1"] .task-status.attention')).toHaveAttribute('aria-label', 'Needs your answer');
   const input = form(page).getByRole('textbox', { name: 'Theme', exact: true });
   await input.fill('Amber and forest green');
   const original = await input.elementHandle();

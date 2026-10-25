@@ -56,6 +56,13 @@ html[data-theme] .sidebar .new-task-button>.icon{color:var(--focus)}
    branch, linked pull request and agent. Quiet until hovered or selected. */
 .sidebar .task-item{display:grid;grid-template-columns:minmax(0,1fr);row-gap:3px;min-height:0;height:auto;padding:8px 10px 8px 9px;border-radius:4px;align-items:center;font-size:.84rem;font-weight:400;color:var(--text)}
 .sidebar .task-line{display:flex;align-items:center;gap:6px;min-width:0}
+.sidebar .task-title-row{width:100%;min-width:0;flex:1 1 auto}
+.sidebar .task-title-row>.task-title{flex:1 1 auto}
+.sidebar .task-status{display:inline-flex;align-items:center;justify-content:center;flex:none;width:12px;height:12px;color:var(--muted)}
+.sidebar .task-status .icon{width:12px;height:12px}
+.sidebar .task-status.running{color:var(--accent)}
+.sidebar .task-status.attention{color:var(--focus)}
+.sidebar .task-status.limited{color:var(--focus)}
 .sidebar .task-head{font-size:.74rem;color:var(--muted)}
 .sidebar .task-app-icon{flex:none;width:16px;height:16px;border-radius:2px;object-fit:contain}
 .sidebar .task-app-default{display:grid;place-items:center;background:color-mix(in srgb,var(--text) 10%,transparent);color:var(--muted);font-size:.6rem;font-weight:650;line-height:1}

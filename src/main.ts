@@ -40,7 +40,7 @@ import { palette } from './palette';
 import { contextSummary, fallbackModel, parseContextUsage } from './model-catalog';
 import { openCodeChoices, type OpenCodeModels } from './preview-opencode';
 import { approvalMode, approvalModes } from './approval-modes';
-import { renderTaskBoard, renderTaskDetails, taskStage } from './task-board';
+import { renderTaskBoard, renderTaskDetails, stageNames, taskStage } from './task-board';
 import { streamMarkdown } from './streaming-markdown';
 import { TerminalPanel } from './terminal-panel';
 import { ProjectRunner } from './run-project';
@@ -928,6 +928,10 @@ function renderNavigation(): void {
   $('#archive-toggle').setAttribute('aria-pressed', String(state.archived));
   const row = (s: Session, inFolder = false, inProject = false): string => {
     const p = state.projects.find(p => p.id === s.projectId);
+    const stage = chatTask(s) ? '' : taskStage(s);
+    const stageName = stage ? stageNames[stage] : '';
+    const stageDot = stage ? '<span class="stage-dot" aria-hidden="true" title="Board stage: ' + escape(stageName) + '"></span>' : '';
+    const taskTitle = '<span class="task-title-row">' + stageDot + '<span class="task-title">' + escape(s.title) + '</span></span>';
     const activityAt = lastActivity(s);
     const live = state.streams.get(s.id);
     const startedAt = live?.startedAt ?? s.lastPromptAt;
@@ -943,17 +947,20 @@ function renderNavigation(): void {
     // Worktree tasks show their branch; the worktree mark keeps its accessible name either way.
     const worktreeMark = s.worktreePath ? `<span class="task-worktree" role="img" aria-label="Worktree" title="${escape(s.worktreePath)}">${icon('worktree')}</span>` : '';
     const branch = s.worktreePath ? `<span class="task-branch">${worktreeMark}${s.worktreeBranch ? `<span>${escape(s.worktreeBranch)}</span>` : ''}</span>` : '';
-    const signals = `${status ? `<span class="task-indicator ${status}" role="img" aria-label="${statusLabel}" title="${statusLabel}"></span>` : ''}${age ? `<span class="task-age${elapsed ? ' task-runtime' : ''}"${elapsed ? ` data-started-at="${startedAt}"` : ''} title="${elapsed ? `Working for ${elapsed}` : `Last message: ${escape(new Date(activityAt!).toLocaleString())}`}">${age}</span>` : ''}`;
-    const button = `<button class="task-item${inFolder ? ' task-oneline' : ''} ${s.id === state.sessionId ? 'selected' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" draggable="true" data-pinned="${Boolean(s.pinned)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" ${s.id === state.sessionId ? 'aria-current="page"' : ''} aria-description="${shortProvider(s.provider)}" title="${escape(s.worktreeBranch ? `${s.title}\n${s.worktreeBranch}` : s.title)}">`;
+    const signalIcon = status === 'attention' ? live?.inputs.size ? 'help' : 'alert' : status === 'limited' ? 'pause' : 'activity';
+    const signals = `${status ? `<span class="task-status ${status}" role="img" aria-label="${escape(statusLabel)}" title="${escape(statusLabel)}">${icon(signalIcon)}</span>` : ''}${age ? `<span class="task-age${elapsed ? ' task-runtime' : ''}"${elapsed ? ` data-started-at="${startedAt}"` : ''} title="${elapsed ? `Working for ${elapsed}` : `Last message: ${escape(new Date(activityAt!).toLocaleString())}`}">${age}</span>` : ''}`;
+    const stageAttribute = stage ? `data-stage="${stage}"` : '';
+    const description = [shortProvider(s.provider), stage ? `Board stage: ${stageName}` : ''].filter(Boolean).join(' · ');
+    const button = `<button class="task-item${inFolder ? ' task-oneline' : ''} ${s.id === state.sessionId ? 'selected' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" ${stageAttribute} draggable="true" data-pinned="${Boolean(s.pinned)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" ${s.id === state.sessionId ? 'aria-current="page"' : ''} aria-description="${escape(description)}" title="${escape(s.worktreeBranch ? `${s.title}\n${s.worktreeBranch}` : s.title)}">`;
     const pin = s.pinned ? `<span class="task-pin" role="img" aria-label="Pinned">${icon('pin')}</span>` : '';
     const projectName = `<span class="task-project">${escape(p?.name ?? 'Project')}</span>`;
     // Inside a project's folder the heading already names the project: one line with the
     // title, then the worktree mark, linked PR or issue, status, age and harness.
-    if (inFolder) return `${button}<span class="task-line task-top"><span class="task-title">${escape(s.title)}</span>${worktreeMark}${linkMark}${pin}${projectName}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`;
+    if (inFolder) return `${button}<span class="task-line task-top">${taskTitle}${worktreeMark}${linkMark}${pin}${projectName}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`;
     // With one project chosen the filter names it: two lines, the title and then the rest.
     const head = inProject
-      ? `<span class="task-line task-top"><span class="task-title">${escape(s.title)}</span>${signals}</span>`
-      : `<span class="task-line task-head">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-checkout">${escape(checkout)}</span>${signals}</span><span class="task-title">${escape(s.title)}</span>`;
+      ? `<span class="task-line task-top">${taskTitle}${signals}</span>`
+      : `<span class="task-line task-head">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-checkout">${escape(checkout)}</span>${signals}</span>${taskTitle}`;
     return `${button}${head}`
       + `<span class="task-line task-meta">${branch}${linkMark}${pin}${projectName}${providerLogo(s.provider, 'task-provider')}</span></button>`;
   };
@@ -998,6 +1005,8 @@ function renderNavigation(): void {
       retainedRow.innerHTML = replacement.innerHTML; retainedRow.className = replacement.className;
       retainedRow.title = replacement.title;
       retainedRow.dataset.pinned = replacement.dataset.pinned;
+      if (replacement.dataset.stage) retainedRow.dataset.stage = replacement.dataset.stage; else delete retainedRow.dataset.stage;
+      if (replacement.hasAttribute('aria-description')) retainedRow.setAttribute('aria-description', replacement.getAttribute('aria-description')!); else retainedRow.removeAttribute('aria-description');
       if (replacement.hasAttribute('aria-current')) retainedRow.setAttribute('aria-current', 'page'); else retainedRow.removeAttribute('aria-current');
       replacement.replaceWith(retainedRow);
       nav.dispatchEvent(new Event('scroll'));

@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test 'historical-.*.spec.ts' tests/office-viewer.spec.ts tests/document-viewer.spec.ts tests/bots.spec.ts tests/bots-web.spec.ts tests/bots-profile.spec.ts tests/approval-modes.spec.ts tests/tray-popover.spec.ts tests/inspector-new-task.spec.ts tests/jev.spec.ts tests/jev-assist.spec.ts tests/jev-live.spec.ts tests/agent-usage.spec.ts tests/browser.spec.ts tests/history-upgrade.spec.ts tests/overlay.spec.ts tests/vm.spec.ts tests/deploy.spec.ts --workers=2
+          npx playwright test 'historical-.*.spec.ts' tests/office-viewer.spec.ts tests/document-viewer.spec.ts tests/bots.spec.ts tests/bots-web.spec.ts tests/bots-profile.spec.ts tests/approval-modes.spec.ts tests/tray-popover.spec.ts tests/inspector-new-task.spec.ts tests/jev.spec.ts tests/jev-assist.spec.ts tests/jev-live.spec.ts tests/agent-usage.spec.ts tests/browser.spec.ts tests/history-upgrade.spec.ts tests/overlay.spec.ts tests/vm.spec.ts tests/deploy.spec.ts tests/streaming.spec.ts tests/support.spec.ts --workers=2
 
   connect:
     name: Connect (${{ matrix.package }})

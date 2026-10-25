@@ -35,6 +35,14 @@ async function probe(page: Page): Promise<void> {
         chatTestWindow.__failChatNavigationOnce = false;
         throw new Error('Chat navigation failed.');
       }
+      if (command === 'list_projects' && chatTestWindow.__failChatProjectsRemaining > 0) {
+        chatTestWindow.__failChatProjectsRemaining--;
+        throw new Error('Chat project refresh failed.');
+      }
+      if (command === 'get_task' && args.sessionId === chatTestWindow.__chatTestTargetId && chatTestWindow.__failChatNavigationRemaining > 0) {
+        chatTestWindow.__failChatNavigationRemaining--;
+        throw new Error('Chat navigation failed.');
+      }
       if (command === 'delete_session' && chatTestWindow.__holdChatDelete) {
         chatTestWindow.__holdChatDelete = false;
         await new Promise(resolve => { chatTestWindow.__releaseChatDelete = resolve; });
@@ -43,10 +51,24 @@ async function probe(page: Page): Promise<void> {
         chatTestWindow.__failChatDeleteOnce = false;
         throw new Error('Chat deletion failed.');
       }
+      if (command === 'delete_session' && chatTestWindow.__rejectManagedChatId === args.sessionId) {
+        throw new Error('This chat is managed by a team. Delete its parent task instead.');
+      }
+      if (command === 'chat_cleanup' && chatTestWindow.__failChatCleanup) {
+        throw new Error('Hidden project cleanup failed.');
+      }
+      if (command === 'chat_cleanup' && chatTestWindow.__returnChatCleanupFalse) return false;
       switch (command) {
     `);
     await route.fulfill({ response, body: body + `
       window.__chatPreviewUrl = import.meta.url;
+      window.__chatTestSetProtection = (id, status, goalActive = false) => {
+        const chat = session(id);
+        chat.status = status;
+        chat.goalState = goalActive ? { threadId: id, objective: 'Protected goal', status: 'active',
+          tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: Date.now(), updatedAt: Date.now() } : null;
+        emit('sessions-changed', undefined);
+      };
     ` });
   });
   await page.goto('/');
@@ -287,6 +309,123 @@ test('pinned chat supports keyboard Delete chat and confirmed deletion', async (
   await page.getByRole('dialog', { name: 'Delete chat?', exact: true }).getByRole('button', { name: 'Delete chat', exact: true }).click();
   await expect(row(page, id!)).toHaveCount(0);
   await expect(pinned.locator('.task-item')).toHaveCount(0);
+});
+
+test('persistent refresh and navigation failures recover the same created chat on later clicks', async ({ page }) => {
+  const before = await snapshot(page);
+  await page.evaluate(() => { (window as any).__failChatProjectsRemaining = 2; });
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  await expect(page.locator('#toast')).toContainText('Chat project refresh failed.');
+  await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeEnabled();
+  expect(await calls(page, 'chat_create')).toHaveLength(1);
+
+  const partial = await snapshot(page);
+  const created = partial.sessions.find(task => !before.sessions.some(existing => existing.id === task.id));
+  expect(created).toBeTruthy();
+  await page.evaluate(id => {
+    const w = window as any;
+    w.__chatTestTargetId = id;
+    w.__failChatNavigationRemaining = 2;
+  }, created.id);
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  await expect(page.locator('#toast')).toContainText('Chat navigation failed.');
+  await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeEnabled();
+  expect(await calls(page, 'chat_create')).toHaveLength(1);
+
+  await newChat(page);
+  await expect(chats(page).locator('.task-item.selected')).toHaveAttribute('data-id', created.id);
+  expect(await calls(page, 'chat_create')).toHaveLength(1);
+  const after = await snapshot(page);
+  expect(after.sessions).toHaveLength(before.sessions.length + 1);
+  expect(after.projects).toHaveLength(before.projects.length + 1);
+});
+
+test('deletion pending during selection and draft changes affects only the captured chat', async ({ page }) => {
+  await newChat(page);
+  const targetId = await chats(page).locator('.task-item.selected').getAttribute('data-id');
+  await prompt(page).fill('Draft on chat to remove');
+  await newChat(page);
+  const otherId = await chats(page).locator('.task-item.selected').getAttribute('data-id');
+  await prompt(page).fill('Preserve this other draft');
+  await deleteChatFromRow(page, targetId!);
+  await page.evaluate(() => { (window as any).__holdChatDelete = true; });
+  const dialog = page.getByRole('dialog', { name: 'Delete chat?', exact: true });
+  await dialog.getByRole('button', { name: 'Delete chat', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseChatDelete)).toBe('function');
+  await expect(dialog.getByRole('button', { name: 'Delete chat', exact: true })).toBeDisabled();
+
+  // A native session event or a programmatic navigation can race the pending IPC.
+  // Dispatch directly because the confirmation dialog normally blocks pointer input behind it.
+  await row(page, 'session-2').evaluate(element => element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })));
+  await expect(row(page, 'session-2')).toHaveAttribute('aria-current', 'page');
+  await expect(prompt(page)).toBeEnabled();
+  await prompt(page).evaluate((element: HTMLTextAreaElement) => {
+    element.value = 'Draft changed while the deletion was pending';
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.evaluate(() => (window as any).__releaseChatDelete());
+  await expect(row(page, targetId!)).toHaveCount(0);
+  await expect(row(page, 'session-2')).toHaveAttribute('aria-current', 'page');
+  await expect(prompt(page)).toHaveValue('Draft changed while the deletion was pending');
+  await row(page, otherId!).click();
+  await expect(prompt(page)).toHaveValue('Preserve this other draft');
+  expect((await calls(page, 'delete_session')).map(entry => entry.args.sessionId)).toEqual([targetId]);
+  expect(await calls(page, 'stop_session')).toEqual([]);
+});
+
+for (const failure of ['rejected', 'not-cleaned'] as const) {
+  test(`a ${failure} hidden-project cleanup warns after committed deletion without retrying the native delete`, async ({ page }) => {
+    await newChat(page);
+    const id = await chats(page).locator('.task-item.selected').getAttribute('data-id');
+    const projectId = (await snapshot(page)).sessions.find(task => task.id === id)!.projectId;
+    await page.evaluate(failure => {
+      const w = window as any;
+      if (failure === 'rejected') w.__failChatCleanup = true;
+      else w.__returnChatCleanupFalse = true;
+    }, failure);
+    await deleteChatFromRow(page, id!);
+    await page.getByRole('dialog', { name: 'Delete chat?', exact: true }).getByRole('button', { name: 'Delete chat', exact: true }).click();
+    await expect(row(page, id!)).toHaveCount(0);
+    await expect(page.locator('#toast')).toContainText('hidden project cleanup failed');
+    expect((await calls(page, 'delete_session')).map(entry => entry.args.sessionId)).toEqual([id]);
+    expect((await calls(page, 'chat_cleanup')).map(entry => entry.args.projectId)).toEqual([projectId]);
+    expect((await snapshot(page)).projects.some(project => project.id === projectId)).toBe(true);
+    await expect(page.getByRole('dialog', { name: 'Delete chat?', exact: true })).toBeHidden();
+  });
+}
+
+test('the sidebar disables deletion for running, awaiting-approval and active-goal chats', async ({ page }) => {
+  await newChat(page);
+  const id = (await chats(page).locator('.task-item.selected').getAttribute('data-id'))!;
+  for (const status of ['running', 'waiting'] as const) {
+    await page.evaluate(({ id, status }) => (window as any).__chatTestSetProtection(id, status), { id, status });
+    await expect(row(page, id).locator('.task-status.running')).toBeVisible();
+    await row(page, id).click({ button: 'right' });
+    await expect(menu(page).getByRole('menuitem', { name: 'Delete chat…', exact: true })).toBeDisabled();
+    await page.keyboard.press('Escape');
+  }
+  await page.evaluate(id => (window as any).__chatTestSetProtection(id, 'idle', true), id);
+  // Wait for the sidebar's asynchronous session reload rather than guessing a delay.
+  await expect.poll(async () => {
+    await row(page, id).click({ button: 'right' });
+    const blocked = await menu(page).getByRole('menuitem', { name: 'Delete chat…', exact: true }).isDisabled();
+    await page.keyboard.press('Escape');
+    return blocked;
+  }).toBe(true);
+  expect(await calls(page, 'delete_session')).toEqual([]);
+});
+
+test('a team-managed chat rejected by native deletion stays visible without cleanup', async ({ page }) => {
+  await newChat(page);
+  const id = await chats(page).locator('.task-item.selected').getAttribute('data-id');
+  await page.evaluate(id => { (window as any).__rejectManagedChatId = id; }, id);
+  await deleteChatFromRow(page, id!);
+  const dialog = page.getByRole('dialog', { name: 'Delete chat?', exact: true });
+  await dialog.getByRole('button', { name: 'Delete chat', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('managed by a team');
+  await expect(row(page, id!)).toBeVisible();
+  expect(await calls(page, 'chat_cleanup')).toEqual([]);
+  await expect(dialog.getByRole('button', { name: 'Delete chat', exact: true })).toBeEnabled();
 });
 
 test('Go to anything starts a chat, and an empty chat can move to a project', async ({ page }) => {

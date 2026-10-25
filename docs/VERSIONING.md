@@ -4,13 +4,13 @@
 
 PandaCode Extended is an independently versioned derivative of [PandaCode](https://github.com/aicodeking/pandacode). Its canonical repository is https://github.com/ginmp8/pandacode-extended. Its application version is separate from the original project's version. Original upstream releases are references; implemented features are tracked separately in the current integration coverage document.
 
-**Product SemVer**: `MAJOR.MINOR.PATCH` (e.g. `0.5.0`). Npm, Cargo, Tauri, Cargo.lock, source release directory, updater/version comparisons (if separately authorized later), and the Git tag (`v0.5.0`) use this three-component core. Git tags and published artifacts are immutable: never rewrite a released version with different bytes.
+**Product SemVer**: `MAJOR.MINOR.PATCH` (e.g. `0.5.0`). Npm, Cargo, Tauri, Cargo.lock, the mobile package/lock and Expo manifest, source release directory, updater/version comparisons (if separately authorized later), and the Git tag (`v0.5.0`) use this three-component core. Git tags and published artifacts are immutable: never rewrite a released version with different bytes.
 
 **Display/distribution identity**: `<extended>+pc.<tracked-upstream>` (e.g. `0.5.0+pc.0.3.47`). `pc` refers to the latest reviewed/tracked original PandaCode version; it does not claim a complete source rebase, binary compatibility or an exact dependency version. SemVer ignores build metadata after `+` when comparing precedence: updating `pc` alone must never create a distinct release under an unchanged Extended core. Fixes to an unpublished candidate keep its approved core version. A distinct release requires a separately approved core version.
 
 **Source provenance**: the historical initial upstream source ancestry is independently recorded as `0.3.28`. Selected later ports do not rewrite that ancestry. The current integration covers the `0.3.42` through `0.3.47` release range and preserves intentional Extended differences; full upstream parity remains unclaimed. `HARDENED-REVISION.json` is the immutable historical review record for the earlier integration through `0.3.42`, not the current product version.
 
-`EXTENDED-RELEASE.json` is the current source metadata contract. The product-version script updates its Extended version, display identifier and current release-note path. Updating the tracked upstream reference requires a reviewed integration, an explicit `reviewed_upstream_range`, immutable source identities in `integration_provenance`, and a coverage document. The release validator checks those separately from the historical review's pinned digest; advancing the active reference must not edit old evidence to match. An upstream announcement alone does not update this metadata.
+`EXTENDED-RELEASE.json` is the current source metadata contract. The product-version script updates its Extended version, display identifier and current release-note path. A product-only patch retains the existing integration coverage document and source identities. Updating the tracked upstream reference requires a reviewed integration, an explicit `reviewed_upstream_range`, immutable source identities in `integration_provenance`, and a coverage document. The release validator checks those separately from the historical review's pinned digest; advancing the active reference must not edit old evidence to match. An upstream announcement alone does not update this metadata.
 
 ## Current release candidate
 
@@ -44,7 +44,7 @@ releases/
 ## Procedure (no auto-publication)
 
 1. Decide the next Extended SemVer from actual product/consumer changes. For an upstream integration, record the reviewed release range, source commits, reference-archive digest and coverage document separately from historical ancestry.
-2. On a disposable checkout run `npm run release:version -- X.Y.Z`; this updates npm, Tauri, Cargo, lockfiles, `EXTENDED-RELEASE.json`, and the namespaced website release date.
+2. On a disposable checkout run `npm run release:version -- X.Y.Z`; this updates desktop and mobile npm manifests/locks, Tauri, Cargo, the Expo version, `EXTENDED-RELEASE.json`, and the namespaced website release date. Mobile platform build counters remain an explicit packaging decision; this command does not enable Expo updates or configure publication.
 3. Write the user-facing `releases/extended/X.Y.Z.md`, with highlights, risks, upstream reference, evidence limitations and migration instructions where needed. Do not claim tests, signatures or source parity not actually verified.
 4. Run `npm run build`, `npm test`, `npm run test:release`, `npm run site:build`, and supported native/test checks. Keep the PR unmerged if required checks fail or remain unknown.
 5. Only when explicitly authorized to ship: tag `vX.Y.Z`, run the local-only reviewed build process and document SHA-256/source identity. No automatic GitHub Release, updater feed or npm publication.

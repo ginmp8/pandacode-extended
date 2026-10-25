@@ -5,6 +5,23 @@ import { openInspectorTab } from './inspector-tab-helper';
 // touches Xcode. Calls are recorded so gestures can be checked in points.
 const calls = (page: Page, command: string): Promise<any[]> => page.evaluate(command => ((window as any).__simCalls ?? []).filter((entry: any) => entry.command === command), command);
 const inputs = async (page: Page) => (await calls(page, 'simulator_input')).map(entry => entry.args.input);
+/** Typing flushes after an idle interval; rendering speed can split one word into several calls. */
+async function coalescedInputs(page: Page): Promise<any[]> {
+  const result: any[] = [];
+  for (const input of await inputs(page)) {
+    const previous = result.at(-1);
+    if (input.kind === 'type' && previous?.kind === 'type') previous.text += input.text;
+    else result.push({ ...input });
+  }
+  return result;
+}
+
+test.beforeEach(async ({ page }, testInfo) => {
+  // Native simulator fixtures use macOS; software-rendered 3D on Linux CI is slower.
+  test.slow();
+  const platform = testInfo.titlePath.includes('on Windows') ? 'Win32' : 'MacIntel';
+  await page.addInitScript(value => Object.defineProperty(Navigator.prototype, 'platform', { get: () => value }), platform);
+});
 
 async function open(page: Page): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
@@ -30,6 +47,8 @@ async function showSimulator(page: Page): Promise<void> {
   if (!(await page.locator('#inspector').isVisible())) await page.locator('#inspector-toggle').click();
   await openInspectorTab(page, 'tab-simulator');
   await page.locator('.inspector-tabs [data-action="tab-simulator"]').click();
+  // The tab can be selected while its lazy 3D module is still loading.
+  await expect(page.locator('#simulator-panel [data-sim="finish"]')).toHaveAttribute('aria-label', /^Device finish: /, { timeout: 15_000 });
 }
 /** The display after facing forward: the screen is centered in the stage. */
 async function stage(page: Page) {
@@ -77,14 +96,15 @@ test('clicks and drags on the display become taps and swipes in points; elsewher
   expect(Math.abs(tap.y - 437)).toBeLessThan(20);
   // A drag up the display is a swipe up.
   await page.mouse.move(center.x, center.y + 120); await page.mouse.down();
-  await page.mouse.move(center.x, center.y - 80, { steps: 8 }); await page.mouse.up();
+  // One move preserves the exact endpoints without interpolated software-WebGL frames.
+  await page.mouse.move(center.x, center.y - 80); await page.mouse.up();
   await expect.poll(async () => (await inputs(page)).length).toBe(2);
   const swipe = (await inputs(page))[1];
   expect(swipe.kind).toBe('swipe');
   expect(swipe.endY).toBeLessThan(swipe.y - 100);
   // Dragging the empty stage orbits the model and sends nothing.
   await page.mouse.move(box.x + 12, box.y + 30); await page.mouse.down();
-  await page.mouse.move(box.x + 160, box.y + 60, { steps: 8 }); await page.mouse.up();
+  await page.mouse.move(box.x + 160, box.y + 60); await page.mouse.up();
   await page.waitForTimeout(300);
   expect(await inputs(page)).toHaveLength(2);
   // Turned away, the same point no longer lands where it did; facing forward restores it.
@@ -102,10 +122,11 @@ test('typing, keys and hardware buttons reach the device', async ({ page }) => {
   await page.mouse.click(center.x, center.y);
   await page.keyboard.type('hello');
   await page.keyboard.press('Enter');
-  await expect.poll(async () => (await inputs(page)).slice(1)).toEqual([{ kind: 'type', text: 'hello' }, { kind: 'key', key: 'return' }]);
+  const typed = [{ kind: 'type', text: 'hello' }, { kind: 'key', key: 'return' }];
+  await expect.poll(async () => (await coalescedInputs(page)).slice(1)).toEqual(typed);
   await page.locator('#simulator-panel').getByRole('button', { name: 'Home', exact: true }).click();
   await page.locator('#simulator-panel').getByRole('button', { name: 'Lock', exact: true }).click();
-  await expect.poll(async () => (await inputs(page)).slice(3)).toEqual([{ kind: 'button', button: 'home' }, { kind: 'button', button: 'lock' }]);
+  await expect.poll(async () => (await coalescedInputs(page)).slice(1)).toEqual([...typed, { kind: 'button', button: 'home' }, { kind: 'button', button: 'lock' }]);
   await page.locator('#simulator-panel').getByRole('button', { name: 'Toggle dark appearance' }).click();
   await expect.poll(async () => (await calls(page, 'simulator_appearance')).at(-1)?.args.mode).toBe('dark');
 });
@@ -301,12 +322,13 @@ test('rapid pose changes keep the window responsive and end in the last pose', a
     let worst = 0, last = performance.now(), ticks = 0;
     const timer = setInterval(() => { const now = performance.now(); worst = Math.max(worst, now - last - 20); last = now; if (++ticks === 25) { clearInterval(timer); resolve(worst); } }, 20);
   }));
-  expect(lag).toBeLessThan(150);
   await page.evaluate(() => { const w = window as any; w.__simPoseHold = null; w.__simPoseRelease(); });
   // Only the fold in flight and the newest one reach the simulator.
   await expect.poll(async () => (await calls(page, 'simulator_pose')).map(entry => entry.args.pose)).toEqual(['open', 'book']);
   await expect(pose).toHaveAccessibleName('iPhone Duo pose: Book');
   await expect(panel.locator('.sim-stage')).not.toHaveAttribute('aria-busy');
+  // Finish checking the queue even when a software-rendered host exceeds the timing budget.
+  expect(lag).toBeLessThan(150);
 });
 
 test('iPhone Duo follows a pose changed outside PandaCode', async ({ page }) => {
@@ -353,9 +375,6 @@ test('Add iPhone Duo is disabled without Xcode 27.1', async ({ page }) => {
 });
 
 test.describe('on Windows', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Win32' }));
-  });
 
   test('the Simulators tab lists Android emulators only, with no Xcode or AXe notes', async ({ page }) => {
     await open(page);

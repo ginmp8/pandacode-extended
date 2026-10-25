@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { check } from './check-hardened-sync.mjs';
 
 test('Extended core/display version, historical ancestry, layout patch and separated release histories stay consistent', async () => {
@@ -11,6 +12,7 @@ test('Extended core/display version, historical ancestry, layout patch and separ
 
 const source = new URL('../../', import.meta.url);
 const fixturePaths = ['HARDENED-REVISION.json', 'EXTENDED-RELEASE.json', 'package.json', 'package-lock.json',
+  'mobile/package.json', 'mobile/package-lock.json', 'mobile/app.json',
   'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'website/src/data/release-dates.json',
   'src/styles.css', 'src/team-progress.css', 'tests/architect.spec.ts', 'docs/upstream-integration-0.5.0.md', 'releases'];
 
@@ -78,6 +80,47 @@ test('version disagreement and gaps in the integrated release history fail the g
   await fixture(async directory => {
     await editJson(directory, 'website/src/data/release-dates.json', value => { delete value['0.3.46']; });
     await assert.rejects(check(directory), /Missing upstream historical reference 0\.3\.46/);
+  });
+});
+
+test('mobile manifests cannot silently diverge from the Extended release', async () => {
+  for (const [path, edit] of [
+    ['mobile/package.json', value => { value.version = '1.0.0'; }],
+    ['mobile/package-lock.json', value => { value.packages[''].version = '0.4.0'; }],
+    ['mobile/app.json', value => { value.expo.version = '0.5.0+pc.0.3.47'; }],
+  ]) {
+    await fixture(async directory => {
+      await editJson(directory, path, edit);
+      await assert.rejects(check(directory), /Mobile version drift/);
+    });
+  }
+});
+
+test('the version command advances desktop and mobile together without rewriting published history', async () => {
+  await fixture(async directory => {
+    for (const name of ['set-version.mjs', 'common.mjs', 'extended-version.mjs']) {
+      const target = join(directory, 'scripts/release', name);
+      await mkdir(dirname(target), { recursive: true });
+      await cp(new URL(name, import.meta.url), target);
+    }
+    const historical = await readFile(join(directory, 'HARDENED-REVISION.json'), 'utf8');
+    const published = await readFile(join(directory, 'releases/extended/0.4.0.md'), 'utf8');
+    execFileSync(process.execPath, [join(directory, 'scripts/release/set-version.mjs'), '0.5.1'], { stdio: 'pipe' });
+    for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'mobile/package.json', 'mobile/package-lock.json']) {
+      const value = JSON.parse(await readFile(join(directory, path), 'utf8'));
+      assert.equal(value.version, '0.5.1', path);
+      if (value.packages?.['']) assert.equal(value.packages[''].version, '0.5.1', path);
+    }
+    const app = JSON.parse(await readFile(join(directory, 'mobile/app.json'), 'utf8'));
+    assert.equal(app.expo.version, '0.5.1');
+    assert.equal(app.expo.updates.enabled, false);
+    assert.equal(await readFile(join(directory, 'HARDENED-REVISION.json'), 'utf8'), historical);
+    assert.equal(await readFile(join(directory, 'releases/extended/0.4.0.md'), 'utf8'), published);
+    // Follow the documented workflow: add the new product note, retaining reviewed upstream evidence.
+    await writeFile(join(directory, 'releases/extended/0.5.1.md'), '# Extended 0.5.1\n\nProduct-only patch.\n');
+    const metadata = JSON.parse(await readFile(join(directory, 'EXTENDED-RELEASE.json'), 'utf8'));
+    assert.equal(metadata.integration_provenance.coverage_document, 'docs/upstream-integration-0.5.0.md');
+    assert.deepEqual(await check(directory), { version: '0.5.1', display: '0.5.1+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 19, extendedNotes: 9 });
   });
 });
 

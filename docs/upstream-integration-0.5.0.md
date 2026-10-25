@@ -91,13 +91,23 @@ The client can group related reads; encryption, replay metadata and device autho
     "calls": [
       { "method": "task.messages", "params": { "sessionId": "task-id", "tail": true } },
       { "method": "subscribe", "params": { "sessionIds": ["task-id"] } },
-      { "method": "task.pullDetect", "params": { "sessionId": "task-id" } }
+      { "method": "task.pull", "params": { "sessionId": "task-id" } }
     ]
   }
 }
 ```
 
-The outer request retains authenticated peer identity. A batch containing `task.send`, `approval.respond`, another write method, or another `batch` is rejected before dispatch. A failure in one allowed read is returned for that entry without reordering the others. Concurrent reads do not authorize concurrent writes.
+The outer request retains authenticated peer identity. A batch containing `task.send`, `approval.respond`, `task.pullDetect` (which can save a link), another write method, or another `batch` is rejected before dispatch. A failure in one allowed read is returned for that entry without reordering the others. Concurrent reads do not authorize concurrent writes.
+
+### Preserve Extended's database and scheduling contracts
+
+Extended already has schema **27** for durable `github_issue_actions`. This integration adds message attachment metadata in migration **28**, within the existing migration transaction. The migration preserves issue intents, task rows and messages, and remains idempotent when an existing database is reopened. Stored image reads correlate the attachment with both its task and its owning message before opening a bounded regular file.
+
+The Connect scheduler has three bounded paths: independent reads, repository starts, and ordered controls for existing tasks. Keeping long repository clones outside the existing-task control queue preserves responsive Stop and approval replies. Each path revalidates the exact authenticated public key and the relevant host permission before dispatch. An independent remote Full access grant is still required for that mode.
+
+Remote progress uses a new opaque ID for every start attempt. A delayed event with an explicit unknown ID is ignored; an earlier request settling cannot clear its retry. Mirror prompts are remembered even when context preparation finishes after the user switches tasks. Removed inline-diff entries invalidate outstanding loads before disposing their viewers.
+
+The mobile package includes the upstream screens and their prerequisite stores. Its token, trust and replay writes are serialized with account cleanup. Cache generations invalidate delayed reads and attachment handles, and native file writes/moves finish before cleanup reports success. These boundaries retain Extended's explicit trust model while supporting the new mobile flows.
 
 ## Extended behavior that must survive
 
@@ -137,7 +147,7 @@ The upstream integration does not remove per-device trust, the independent remot
 
 ## Validation and publication status
 
-The source integration requires the following checks on the assembled candidate. Their presence here is an acceptance checklist, not a claim that they have all run. Final executed results belong in the pull request and any attached verification report.
+The [executed verification report](verification-0.5.0.md) records build, unit, release, native, browser, mobile and relay results, including focused reruns and unexecuted environment-specific checks. The following commands reproduce the principal source gates.
 
 ```sh
 npm ci --ignore-scripts

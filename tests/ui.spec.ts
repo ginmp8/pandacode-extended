@@ -185,8 +185,8 @@ test('identifies sample data and renders the desktop workspace without runtime e
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.reload();
-  await expect(page).toHaveTitle('PandaCode');
-  await expect(page.locator('.brand')).toHaveText('PandaCode');
+  await expect(page).toHaveTitle('PandaCode Extended');
+  await expect(page.locator('.brand')).toHaveText('PandaCode Extended');
   await expect(page.getByText('Browser preview · sample data', { exact: true })).toBeVisible();
   await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
   await expect(page.locator('#task-heading')).toHaveCount(0);
@@ -236,6 +236,8 @@ async function installHistoryFixture(page: Page, total: number, formatted = fals
     await route.fulfill({ response, body: previewBody(body) });
   });
   await page.reload();
+  await expect(page.locator('.task-item.selected')).toHaveCount(1);
+  await expect(prompt(page)).toBeEnabled();
   await chooseProjectFilter(page, 'pandacode');
   await expect(page.locator('#transcript .message-content')).toHaveCount(Math.min(total, 100));
   await expect.poll(() => page.locator('#transcript').evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
@@ -1031,7 +1033,7 @@ for (const outcome of ['resolve', 'reject'] as const) {
 
 test('changes terminal colors without replacing its session or the composer draft', async ({ page }) => {
   await prompt(page).fill('Keep this draft while changing appearance');
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   const viewport = page.locator('#terminal-host .xterm-scrollable-element');
   await expect(viewport).toBeVisible();
   await expect(viewport).toHaveCSS('background-color', 'rgb(25, 26, 24)');
@@ -1168,6 +1170,8 @@ test('finds and selects projects beyond the first hundred filter options', async
     await route.fulfill({ response, body: previewBody(body) });
   });
   await page.reload();
+  await expect(page.locator('.task-item.selected')).toHaveCount(1);
+  await expect(prompt(page)).toBeEnabled();
   await projectFilter(page).click();
   const menu = page.getByRole('dialog', { name: 'Filter projects', exact: true });
   const search = menu.getByRole('searchbox', { name: 'Search projects', exact: true });
@@ -1358,24 +1362,22 @@ test('keeps the saved approval behaviour and draft when saving a different mode 
   await expect(menu.getByRole('menuitemradio', { name: 'Standard', exact: true })).toHaveAttribute('aria-checked', 'true');
 });
 
-test('starts new tasks with Full access and preserves deliberate permissions across harness changes', async ({ page }) => {
+test('starts new tasks with Standard permissions and preserves deliberate permissions across harness changes', async ({ page }) => {
   const trigger = page.locator('#mode-picker-trigger');
   const menu = page.getByRole('dialog', { name: 'Permissions', exact: true });
   await expect(trigger).toHaveText('Standard');
   await page.locator('.new-task-button').click();
   await expect(newTaskHeading(page)).toBeVisible();
-  await expect(trigger).toHaveText('Full access');
-  await expect.poll(() => savedPermission(page)).toBe('full');
+  await expect(trigger).toHaveText('Standard');
+  await expect.poll(() => savedPermission(page)).toBe('ask');
   await prompt(page).fill('Keep this draft while switching harnesses');
   for (const selection of [
     { provider: 'Codex', id: 'codex', mode: 'full', label: 'Full access' },
     { provider: 'Kimi Code', id: 'kimi', mode: 'plan', label: 'Plan mode' },
     { provider: 'Claude Code', id: 'claude', mode: 'ask', label: 'Standard' },
   ]) {
-    if (selection.mode !== 'full') {
-      await trigger.click();
-      await menu.getByRole('menuitemradio', { name: selection.mode === 'plan' ? 'Read only' : 'Standard', exact: true }).click();
-    }
+    await trigger.click();
+    await menu.getByRole('menuitemradio', { name: selection.mode === 'plan' ? 'Read only' : selection.label, exact: true }).click();
     await modelTrigger(page).click();
     await modelPicker(page).getByRole('searchbox', { name: 'Search harnesses and models', exact: true }).fill('approval-preserved-model');
     await modelPicker(page).getByRole('button', { name: `Use "approval-preserved-model" with ${selection.provider}`, exact: true }).click();
@@ -1457,7 +1459,8 @@ test('keeps the Settings agent menu clickable at the minimum desktop window size
     return { inViewport: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
       reachable: element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)) };
   }));
-  expect(hitTargets).toHaveLength(17);
+  expect(hitTargets).toHaveLength(16);
+  await expect(menu.getByRole('menuitemradio', { name: 'Devin CLI', exact: true })).toHaveCount(1);
   expect(hitTargets.every(target => target.inViewport && target.reachable)).toBe(true);
   await menu.getByRole('menuitemradio', { name: 'Kimi Code', exact: true }).click();
   await expect(settings.getByRole('button', { name: 'Default agent for new tasks', exact: true })).toHaveText('Kimi Code');
@@ -1797,6 +1800,8 @@ test('caps long live tool activity without dropping the output being read', asyn
   });
   await page.clock.install();
   await page.reload();
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
+  await expect(prompt(page)).toBeEnabled();
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await page.locator('.new-task-button').click();
   await expect(newTaskHeading(page)).toBeVisible();
@@ -2090,6 +2095,8 @@ async function startControlledStatusStream(page: Page, withoutContextMetadata = 
   });
   await page.clock.install();
   await page.reload();
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
+  await expect(prompt(page)).toBeEnabled();
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await page.locator('.new-task-button').click();
   await expect(newTaskHeading(page)).toBeVisible();
@@ -3169,7 +3176,7 @@ test('agent Markdown cannot inject application actions, IDs, or forms', async ({
 });
 
 test('opens a visible terminal without relying on entrance animation', async ({ page }) => {
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   await expect(page.locator('#terminal-drawer')).toBeVisible();
   await expect(page.locator('#terminal-drawer .drawer-heading')).toBeVisible();
   await expect(page.locator('#terminal-host .xterm-screen')).toBeVisible();
@@ -3232,11 +3239,11 @@ test('creates a worktree task under its original project with an icon and fresh 
   await expect(page.locator('.composer-local')).toHaveText('Worktree');
   await expect(page.locator('#composer-project')).toBeDisabled();
   await expect.poll(() => savedSelection(page)).toEqual({ provider: 'claude', model: 'sonnet' });
-  await expect(page.locator('#mode-picker-trigger')).toHaveText('Full access');
+  await expect(page.locator('#mode-picker-trigger')).toHaveText('Standard');
   await expect(prompt(page)).toHaveValue('');
   expect(await previewProjectNames(page)).toEqual(projects);
   expect(await previewWorktreeTasks(page)).toEqual([expect.objectContaining({
-    id: taskId, projectId: 'project-1', title: 'New conversation', provider: 'claude', model: 'sonnet', mode: 'full',
+    id: taskId, projectId: 'project-1', title: 'New conversation', provider: 'claude', model: 'sonnet', mode: 'ask',
     worktreePath: expect.any(String), resumeId: null,
   })]);
   await page.locator('.task-item[data-id="session-1"]').click();
@@ -3258,7 +3265,7 @@ test('routes worktree files, Git, and terminals by task and retains each checkou
     if (command === 'git_status') return { ...git, branch: session(args.sessionId).worktreePath ? 'codex/worktree-routing' : 'main' };
     if (command === 'read_file') return JSON.stringify({ checkout: session(args.sessionId).worktreePath ? 'worktree' : 'root' });
   `);
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   await expect(page.locator('#terminal-host .xterm-screen:visible')).toBeVisible();
   await submitWorktree(page, 'codex/worktree-routing');
   await expect(newTaskHeading(page)).toBeVisible();
@@ -3279,7 +3286,7 @@ test('routes worktree files, Git, and terminals by task and retains each checkou
   await expect(page.locator('.user-message')).toContainText('"checkout":"worktree"');
   await expect(page.getByRole('button', { name: 'Stop task', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Stop task', exact: true }).click();
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   await expect(page.locator('#terminal-host .xterm-screen:visible')).toBeVisible();
   const calls = await page.evaluate(() => (window as any).__pandacodeWorktreeCalls);
   for (const command of ['git_status', 'list_files', 'git_diff', 'read_file', 'start_terminal']) {
@@ -3409,11 +3416,11 @@ test('keeps the worktree terminal open when the previous checkout terminal fails
   await expect(newTaskHeading(page)).toBeVisible();
   const taskId = await page.locator('.task-item.selected').getAttribute('data-id');
   await page.locator('.task-item[data-id="session-1"]').click();
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__pandacodeRejectOldTerminal)).toBe('function');
   await page.locator(`.task-item[data-id="${taskId}"]`).click();
   await expect(page.locator('#terminal-drawer')).toBeHidden();
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   await expect(page.locator('#terminal-host .xterm-screen:visible')).toBeVisible();
   await page.evaluate(() => {
     (window as any).__pandacodeCurrentTerminal = document.querySelector('#terminal-host .terminal-tab-surface:not([hidden]) .xterm-screen');

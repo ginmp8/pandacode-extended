@@ -53,12 +53,35 @@ jobs:
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
           npx playwright test tests/chats.spec.ts tests/thread-order.spec.ts --workers=1 --repeat-each=2
-      - name: Run upstream integration browser regressions
+      - name: Run upstream integration and GitHub workflow regressions
         run: |
           set -euo pipefail
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts --workers=2
+          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --workers=2
+
+  connect:
+    name: Connect (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [mobile, relay]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+      - run: npm ci --ignore-scripts --prefix ${{ matrix.package }}
+      - run: npm test --prefix ${{ matrix.package }}
+      - run: npm run typecheck --prefix ${{ matrix.package }}
+      - if: matrix.package == 'mobile'
+        run: npm run lint --prefix mobile
+        env:
+          EXPO_NO_TELEMETRY: '1'
 
   rust:
     name: Rust check and tests (Linux)

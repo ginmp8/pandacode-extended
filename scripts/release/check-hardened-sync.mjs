@@ -23,6 +23,9 @@ export async function check(sourceRoot = root) {
   const pkg = await json('package.json');
   const lock = await json('package-lock.json');
   const tauri = await json('src-tauri/tauri.conf.json');
+  const mobile = await json('mobile/package.json');
+  const mobileLock = await json('mobile/package-lock.json');
+  const mobileApp = await json('mobile/app.json');
   const cargo = await read('src-tauri/Cargo.toml');
   const cargoLock = await read('src-tauri/Cargo.lock');
   const dates = await json('website/src/data/release-dates.json');
@@ -47,13 +50,15 @@ export async function check(sourceRoot = root) {
   assert(/^[a-f0-9]{40}$/.test(integration?.extended_base_commit ?? '') && /^[a-f0-9]{40}$/.test(integration?.upstream_commit ?? ''), 'Missing integration commit identities');
   assert(/^[a-f0-9]{64}$/.test(integration?.reference_archive_sha256 ?? ''), 'Missing reference archive identity');
   assert(Number.isSafeInteger(integration?.reference_files_verified) && integration.reference_files_verified > 0, 'Missing reference comparison coverage');
-  assert(integration.coverage_document === `docs/upstream-integration-${v}.md`, 'Integration coverage path drift');
+  // Product-only patches retain the reviewed source evidence from their integration release.
+  assert(/^docs\/upstream-integration-(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.md$/.test(integration.coverage_document ?? ''), 'Integration coverage path drift');
   const coverage = await read(integration.coverage_document);
   for (const identity of [integration.extended_base_commit, integration.upstream_commit, integration.reference_archive_sha256]) {
     assert(coverage.includes(identity), 'Integration coverage omits source identity');
   }
   assert([lock.version, lock.packages?.['']?.version].every(x => x === v), 'npm package/lock version drift');
   assert(tauri.version === v, 'Tauri version drift');
+  assert([mobile.version, mobileLock.version, mobileLock.packages?.['']?.version, mobileApp.expo?.version].every(x => x === v), 'Mobile version drift');
   assert(cargo.includes('[package]\nname = "pandacode"\nversion = "' + v + '"'), 'Cargo.toml version drift');
   assert(cargoLock.includes('name = "pandacode"\nversion = "' + v + '"'), 'Cargo.lock version drift');
   assert(tauri.identifier === 'ai.pandacode.desktop', 'App data identity changed without migration');

@@ -7,14 +7,15 @@ import { execFileSync } from 'node:child_process';
 import { check } from './check-hardened-sync.mjs';
 
 test('Extended core/display version, historical ancestry, layout patch and separated release histories stay consistent', async () => {
-  assert.deepEqual(await check(), { version: '0.5.0', display: '0.5.0+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 19, extendedNotes: 8 });
+  assert.deepEqual(await check(), { version: '0.5.0', display: '0.5.0+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 20, extendedNotes: 8 });
 });
 
 const source = new URL('../../', import.meta.url);
 const fixturePaths = ['HARDENED-REVISION.json', 'EXTENDED-RELEASE.json', 'package.json', 'package-lock.json',
   'mobile/package.json', 'mobile/package-lock.json', 'mobile/app.json',
   'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'website/src/data/release-dates.json',
-  'src/styles.css', 'src/team-progress.css', 'tests/architect.spec.ts', 'docs/upstream-integration-0.5.0.md', 'releases'];
+  'src/styles.css', 'src/team-progress.css', 'tests/architect.spec.ts', 'docs/upstream-integration-0.5.0.md',
+  'docs/upstream-parity-0.3.28-0.3.42.md', 'docs/upstream-release-evidence-0.3.28-0.3.42.json', 'releases'];
 
 async function fixture(run) {
   const directory = await mkdtemp(join(tmpdir(), 'extended-release-'));
@@ -120,14 +121,38 @@ test('the version command advances desktop and mobile together without rewriting
     await writeFile(join(directory, 'releases/extended/0.5.1.md'), '# Extended 0.5.1\n\nProduct-only patch.\n');
     const metadata = JSON.parse(await readFile(join(directory, 'EXTENDED-RELEASE.json'), 'utf8'));
     assert.equal(metadata.integration_provenance.coverage_document, 'docs/upstream-integration-0.5.0.md');
-    assert.deepEqual(await check(directory), { version: '0.5.1', display: '0.5.1+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 19, extendedNotes: 9 });
+    assert.deepEqual(await check(directory), { version: '0.5.1', display: '0.5.1+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 20, extendedNotes: 9 });
   });
 });
 
 test('the historical evidence identity is unchanged by Windows checkout line endings', async () => {
   await fixture(async directory => {
-    const path = join(directory, 'HARDENED-REVISION.json');
-    await writeFile(path, (await readFile(path, 'utf8')).replaceAll('\n', '\r\n'));
+    for (const file of ['HARDENED-REVISION.json', 'docs/upstream-release-evidence-0.3.28-0.3.42.json', 'releases/0.3.28.md', 'releases/0.3.36.md']) {
+      const path = join(directory, file);
+      await writeFile(path, (await readFile(path, 'utf8')).replaceAll('\n', '\r\n'));
+    }
     await assert.doesNotReject(check(directory));
+  });
+});
+
+test('historical review cannot silently omit a release or rewrite its frozen evidence', async () => {
+  for (const [edit, expected] of [
+    [value => { delete value.historical_upstream_review; }, /Historical coverage range drift/],
+    [value => { value.historical_upstream_review.from = '0.3.29'; }, /Historical coverage range drift/],
+    [value => { value.historical_upstream_review.extended_base_commit = value.integration_provenance.extended_base_commit; }, /Historical coverage commit drift/],
+    [value => { value.historical_upstream_review.release_evidence = '../outside.json'; }, /Historical coverage path drift/],
+  ]) {
+    await fixture(async directory => {
+      await editJson(directory, 'EXTENDED-RELEASE.json', edit);
+      await assert.rejects(check(directory), expected);
+    });
+  }
+  await fixture(async directory => {
+    await writeFile(join(directory, 'releases/0.3.28.md'), '# Rewritten reference\n');
+    await assert.rejects(check(directory), /Historical source note changed: 0\.3\.28/);
+  });
+  await fixture(async directory => {
+    await editJson(directory, 'docs/upstream-release-evidence-0.3.28-0.3.42.json', value => { value.notes.splice(8, 1); });
+    await assert.rejects(check(directory), /Historical release evidence digest drift/);
   });
 });

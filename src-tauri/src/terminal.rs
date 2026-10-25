@@ -269,6 +269,11 @@ fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, Strin
             cmd.env(key, value);
         }
     }
+    if context.provider == "devin" {
+        // The REPL runs its agent as a `devin acp` child, which would otherwise
+        // wait for host credentials when PandaCode starts inside Devin Desktop.
+        cmd.env_remove("ACP_BACKEND");
+    }
     if context.provider == "opencode" {
         cmd.env(
             "OPENCODE_CONFIG_CONTENT",
@@ -292,7 +297,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
     if provider == "antigravity" {
         return Err("Antigravity's ACP server does not have an interactive console. Use its synced commands in the composer, or open the agy CLI separately.".into());
     }
-    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "pi" | "omp" | "github-copilot" | "muse") {
+    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "pi" | "omp" | "github-copilot" | "muse" | "devin") {
         return Err("Choose a supported coding harness.".into());
     }
     if provider == "github-copilot" {
@@ -332,7 +337,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
         args.push(
             match provider {
                 "codex" | "muse" => "resume",
-                "claude" | "glm" | "mimo" | "grok" => "--resume",
+                "claude" | "glm" | "mimo" | "grok" | "devin" => "--resume",
                 _ => "--session",
             }
             .into(),
@@ -406,6 +411,15 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
                 crate::providers::grok_permission_mode(context.mode)
             };
             args.extend(["--no-auto-update".into(), "--permission-mode".into(), mode.into()]);
+        }
+        "devin" => {
+            // The REPL's permission modes have no Plan; ACP tasks get Devin's own Plan mode.
+            let mode = match context.mode {
+                "plan" => return Err("Devin's console cannot start in Plan mode. Use task chat, or type /plan in the console.".into()),
+                "full" => "dangerous",
+                _ => "accept-edits",
+            };
+            args.extend(["--permission-mode".into(), mode.into()]);
         }
         _ => {
             match context.mode {
@@ -1004,6 +1018,22 @@ mod tests {
         assert!(args.contains(&"--disable-write".to_owned()) && args.contains(&"--disable-shell".to_owned()));
         let full = harness_arguments(&HarnessContext { mode: "full", resume_id: None, ..context }).unwrap();
         assert!(full.contains(&"--disable-approval".to_owned()) && full.contains(&"--disable-sandbox".to_owned()));
+    }
+
+    #[test]
+    fn devin_console_preserves_the_session_and_never_substitutes_a_wider_plan_mode() {
+        let context = HarnessContext {
+            session_id: "task", provider: "devin", resume_id: Some("garnet-sweater"),
+            model: Some("swe-2-high"), reasoning_effort: None, mode: "ask",
+        };
+        let args = harness_arguments(&context).unwrap();
+        for pair in [["--resume", "garnet-sweater"], ["--model", "swe-2-high"], ["--permission-mode", "accept-edits"]] {
+            assert!(args.windows(2).any(|args| args == pair), "{args:?}");
+        }
+        assert!(!args.iter().any(|arg| arg == "dangerous" || arg == "--always-approve"));
+        assert!(harness_arguments(&HarnessContext { mode: "plan", ..context }).unwrap_err().contains("Plan mode"));
+        let full = harness_arguments(&HarnessContext { mode: "full", ..context }).unwrap();
+        assert!(full.windows(2).any(|args| args == ["--permission-mode", "dangerous"]));
     }
 
     #[test]

@@ -59,7 +59,7 @@ export async function showJevAssist(dialog: HTMLDialogElement, context: AssistCo
         <div class="jev-assist-setup" role="status" hidden><span></span><button type="button" class="jev-text-button" data-assist-settings>Set up Jev ${icon('forward')}</button></div>
         <div class="jev-assist-preview"></div><p class="jev-feedback" role="status" aria-live="polite"></p>
         <div class="jev-assist-run-row"><button type="button" class="secondary-button" data-assist-prepare>${icon('file')}Preview evidence</button><button type="submit" class="primary-button" data-assist-run disabled>${icon('spark')}<span></span></button></div>
-        <p class="jev-assist-disclosure">Optional · selected task evidence is sent to TypeSafe when you run. Provider usage charges apply. PandaCode works without Jev. Advice does not change files, models, or permissions.</p>
+        <p class="jev-assist-disclosure">Optional · selected task evidence is sent to your configured decision provider (TypeSafe or OpenRouter) when you run. Provider usage charges apply. PandaCode works without Jev. Advice does not change files, models, or permissions.</p>
       </form>
     </section><section class="jev-assist-results" aria-label="Saved Jev reports"><div class="jev-assist-history-heading"><h3>Reports</h3><select aria-label="Saved Jev report" hidden></select></div><div class="jev-assist-report"><p class="jev-empty">Your reports will appear here and stay on this device.</p></div></section>`;
   dialog.className = 'settings-dialog jev-dialog jev-assist-dialog';
@@ -133,7 +133,7 @@ export async function showJevAssist(dialog: HTMLDialogElement, context: AssistCo
       box.innerHTML = `<div class="jev-assist-evidence-heading"><strong>${result.evidence.length} evidence ${result.evidence.length === 1 ? 'item' : 'items'}</strong><span>${bytes(result.inputBytes)} · ${result.candidateCount} ${kind === 'route' ? 'workers' : 'checks'}</span></div>${result.truncated ? '<p class="jev-hint">Some evidence is omitted or shortened. Results only cover what is shown here.</p>' : ''}<div class="jev-assist-evidence-list">${evidenceHtml(result.evidence)}</div>`;
       bindDiffs(box, result.evidence);
       const setup = el('.jev-assist-setup'); setup.hidden = result.enabled && result.keySaved;
-      setup.querySelector('span')!.textContent = !result.enabled ? 'Enable decision assistance to run this check.' : 'Add your TypeSafe key to run this check.';
+      setup.querySelector('span')!.textContent = !result.enabled ? 'Enable decision assistance to run this check.' : 'Add your decision provider key to run this check.';
       el<HTMLButtonElement>('[data-assist-settings]').hidden = !context.settings;
       tell(result.candidateCount ? 'Evidence prepared locally. Run when you’re ready.' : kind === 'route' ? 'Add worker profiles to this task’s team first.' : kind === 'rules' ? 'Add a project rule before checking changes.' : 'No saved evidence is available for this task yet.');
     } catch (error) { if (alive() && ticket === revision) { prepared = undefined; tell(errorText(error), true); } }

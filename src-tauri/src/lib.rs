@@ -3644,6 +3644,7 @@ pub fn run() {
                 get_metrics,
                 list_local_servers,
                 jev::jev_configuration,
+            jev::jev_decision_models,
                 jev::jev_save_configuration,
                 jev::jev_doctor,
                 jev::jev_install_runtime,

@@ -37,6 +37,10 @@ pub struct Settings {
     pub enabled: bool,
     #[serde(default)]
     pub decisions_enabled: bool,
+    #[serde(default = "default_provider")]
+    pub decision_provider: String,
+    #[serde(default)]
+    pub decision_model: String,
     pub python_path: String,
     pub chrome_path: String,
     pub text_model: String,
@@ -47,12 +51,17 @@ impl Default for Settings {
         Self {
             enabled: false,
             decisions_enabled: false,
+            decision_provider: default_provider(),
+            decision_model: String::new(),
             python_path: String::new(),
             chrome_path: String::new(),
             text_model: "inception/mercury-2.5".into(),
             text_base_url: "https://openrouter.ai/api/v1".into(),
         }
     }
+}
+fn default_provider() -> String {
+    "typesafe".into()
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -64,6 +73,8 @@ struct Saved {
     typesafe_key: String,
     #[serde(default, skip_serializing)]
     text_key: String,
+    #[serde(default, skip_serializing)]
+    openrouter_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_ref: Option<CredentialRef>,
 }
@@ -74,6 +85,8 @@ struct CredentialRef {
     id: String,
     typesafe: bool,
     text: bool,
+    #[serde(default)]
+    openrouter: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +95,7 @@ pub struct Configuration {
     settings: Settings,
     typesafe_key_saved: bool,
     text_key_saved: bool,
+    openrouter_key_saved: bool,
 }
 impl From<&Saved> for Configuration {
     fn from(saved: &Saved) -> Self {
@@ -89,6 +103,7 @@ impl From<&Saved> for Configuration {
             settings: saved.settings.clone(),
             typesafe_key_saved: !saved.typesafe_key.is_empty(),
             text_key_saved: !saved.text_key.is_empty(),
+            openrouter_key_saved: !saved.openrouter_key.is_empty(),
         }
     }
 }
@@ -268,8 +283,9 @@ fn load_saved(path: &Path) -> (Saved, Option<String>) {
             };
             saved.typesafe_key = read("typesafe", reference.typesafe)?;
             saved.text_key = read("text", reference.text)?;
+            saved.openrouter_key = read("openrouter", reference.openrouter)?;
             validate_saved(saved)
-        } else if !saved.typesafe_key.is_empty() || !saved.text_key.is_empty() {
+        } else if !saved.typesafe_key.is_empty() || !saved.text_key.is_empty() || !saved.openrouter_key.is_empty() {
             // Commit a new vault generation before replacing the legacy file.
             // On failure the original file and its keys remain recoverable.
             persist_saved(path, &saved)
@@ -312,12 +328,13 @@ fn persist_saved_with(
         id: uuid::Uuid::new_v4().to_string(),
         typesafe: !saved.typesafe_key.is_empty(),
         text: !saved.text_key.is_empty(),
+        openrouter: !saved.openrouter_key.is_empty(),
     };
-    let accounts = [format!("{}.typesafe", reference.id), format!("{}.text", reference.id)];
+    let accounts = [format!("{}.typesafe", reference.id), format!("{}.text", reference.id), format!("{}.openrouter", reference.id)];
     let mut next = saved.clone();
     next.credential_ref = Some(reference);
     let result = (|| {
-        for (account, value) in accounts.iter().zip([&saved.typesafe_key, &saved.text_key]) {
+        for (account, value) in accounts.iter().zip([&saved.typesafe_key, &saved.text_key, &saved.openrouter_key]) {
             if !value.is_empty() { put(account, value)?; }
         }
         let bytes = serde_json::to_vec(&next).map_err(|_| "Could not encode Jev settings.")?;
@@ -328,7 +345,7 @@ fn persist_saved_with(
         return Err(error);
     }
     if let Some(previous) = &saved.credential_ref {
-        for name in ["typesafe", "text"] {
+        for name in ["typesafe", "text", "openrouter"] {
             remove(&format!("{}.{name}", previous.id));
         }
     }
@@ -340,12 +357,16 @@ pub fn enabled() -> bool {
 pub fn decisions_enabled() -> bool {
     runtime().is_ok_and(|state| state.saved.settings.decisions_enabled)
 }
-pub(crate) fn decision_credentials() -> Result<(bool, String)> {
+pub(crate) fn decision_credentials() -> Result<(bool, String, crate::jev_decisions::Provider)> {
+    use crate::jev_decisions::Provider;
     let state = runtime()?;
-    Ok((
-        state.saved.settings.decisions_enabled,
-        state.saved.typesafe_key.clone(),
-    ))
+    let settings = &state.saved.settings;
+    let (key, provider) = if settings.decision_provider == "openrouter" {
+        (state.saved.openrouter_key.clone(), Provider::OpenRouter { model: settings.decision_model.clone() })
+    } else {
+        (state.saved.typesafe_key.clone(), Provider::TypeSafe)
+    };
+    Ok((settings.decisions_enabled, key, provider))
 }
 pub fn is_busy() -> bool {
     crate::jev_decisions::is_busy()
@@ -487,8 +508,23 @@ fn validate_saved(mut saved: Saved) -> Result<Saved> {
         return Err("Text model API URLs cannot contain query parameters or fragments.".into());
     }
     saved.settings.text_base_url = base.trim_end_matches('/').into();
+    saved.settings.decision_model = saved.settings.decision_model.trim().into();
+    match saved.settings.decision_provider.as_str() {
+        "typesafe" => saved.settings.decision_model.clear(),
+        "openrouter" => {
+            let model = &saved.settings.decision_model;
+            if model.len() > 200 || model.chars().any(char::is_control) {
+                return Err("Choose a valid OpenRouter decision model.".into());
+            }
+            if model.is_empty() && saved.settings.decisions_enabled {
+                return Err("Choose an OpenRouter decision model.".into());
+            }
+        }
+        _ => return Err("Choose TypeSafe or OpenRouter for decisions.".into()),
+    }
     saved.typesafe_key = key(saved.typesafe_key)?;
     saved.text_key = key(saved.text_key)?;
+    saved.openrouter_key = key(saved.openrouter_key)?;
     Ok(saved)
 }
 fn normalized_url(input: &str) -> Result<String> {
@@ -562,6 +598,7 @@ pub async fn jev_save_configuration(
     settings: Settings,
     typesafe_key: Option<String>,
     text_key: Option<String>,
+    openrouter_key: Option<String>,
 ) -> Result<Configuration> {
     crate::blocking(move || {
         let mut state = runtime()?;
@@ -579,7 +616,13 @@ pub async fn jev_save_configuration(
         if let Some(value) = text_key {
             next.text_key = value;
         }
+        if let Some(value) = openrouter_key {
+            next.openrouter_key = value;
+        }
         let next = validate_saved(next)?;
+        if next.settings.decisions_enabled && next.settings.decision_provider == "openrouter" && next.openrouter_key.is_empty() {
+            return Err("Add your OpenRouter API key to use it for decisions.".into());
+        }
         let next = persist_saved(&path, &next)?;
         if !next.settings.enabled {
             for active in state.active.values() {
@@ -591,6 +634,11 @@ pub async fn jev_save_configuration(
         Ok(Configuration::from(&state.saved))
     })
     .await
+}
+
+#[tauri::command]
+pub async fn jev_decision_models(provider: String) -> Result<Vec<crate::jev_decisions::DecisionModel>> {
+    crate::jev_decisions::models::list(&provider).await
 }
 
 fn venv_python(dir: &Path) -> PathBuf {
@@ -1380,7 +1428,7 @@ fn short(value: &str, limit: usize) -> String {
 fn sanitized(value: &str, saved: &Saved, limit: usize) -> String {
     // Redact before truncating, otherwise a secret cut at the limit could leak a prefix.
     let mut value = value.to_owned();
-    for secret in [&saved.typesafe_key, &saved.text_key] {
+    for secret in [&saved.typesafe_key, &saved.text_key, &saved.openrouter_key] {
         if !secret.is_empty() {
             value = value.replace(secret, "[redacted]");
         }
@@ -1763,6 +1811,7 @@ mod tests {
         let saved = Saved {
             typesafe_key: "super-secret-type".into(),
             text_key: "super-secret-text".into(),
+            openrouter_key: "super-secret-openrouter".into(),
             ..Saved::default()
         };
         let json = serde_json::to_string(&Configuration::from(&saved)).unwrap();
@@ -1784,21 +1833,24 @@ mod tests {
         private_write(&path, &serde_json::to_vec(&json!({
             "settings": Settings::default(),
             "typesafeKey": "fixture-typesafe-key",
-            "textKey": "fixture-text-key"
+            "textKey": "fixture-text-key",
+            "openrouterKey": "fixture-openrouter-key"
         })).unwrap()).unwrap();
         let (saved, warning) = load_saved(&path);
         assert!(warning.is_none());
         assert_eq!(saved.typesafe_key, "fixture-typesafe-key");
         assert_eq!(saved.text_key, "fixture-text-key");
+        assert_eq!(saved.openrouter_key, "fixture-openrouter-key");
         let disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!disk.contains("fixture-") && !disk.contains("typesafeKey") && !disk.contains("textKey"));
+        assert!(!disk.contains("fixture-") && !disk.contains("typesafeKey") && !disk.contains("textKey") && !disk.contains("openrouterKey"));
         assert!(disk.contains("credentialRef"));
         let (reloaded, warning) = load_saved(&path);
         assert!(warning.is_none());
         assert_eq!(reloaded.typesafe_key, saved.typesafe_key);
         assert_eq!(reloaded.text_key, saved.text_key);
+        assert_eq!(reloaded.openrouter_key, saved.openrouter_key);
         let reference = saved.credential_ref.unwrap();
-        for name in ["typesafe", "text"] {
+        for name in ["typesafe", "text", "openrouter"] {
             crate::secret_store::remove(SECRET_SERVICE, &format!("{}.{name}", reference.id));
         }
         let (unavailable, warning) = load_saved(&path);
@@ -1811,18 +1863,18 @@ mod tests {
     #[test]
     fn failed_vault_or_settings_write_preserves_previous_credential_generation() {
         use std::cell::{Cell, RefCell};
-        for fail_key in [true, false] {
+        for fail_at in ["typesafe", "text", "openrouter", "settings"] {
             let old_id = uuid::Uuid::new_v4().to_string();
             let old_account = format!("{old_id}.typesafe");
             let vault = RefCell::new(HashMap::from([(old_account.clone(), "old-key".to_owned())]));
             let attempted_write = Cell::new(false);
             let saved = Saved {
-                typesafe_key: "new-typesafe".into(), text_key: "new-text".into(),
-                credential_ref: Some(CredentialRef { id: old_id, typesafe: true, text: false }),
+                typesafe_key: "new-typesafe".into(), text_key: "new-text".into(), openrouter_key: "new-openrouter".into(),
+                credential_ref: Some(CredentialRef { id: old_id, typesafe: true, text: false, openrouter: false }),
                 ..Saved::default()
             };
             let result = persist_saved_with(&saved, |account, value| {
-                if fail_key && account.ends_with(".text") { return Err("Vault unavailable.".into()); }
+                if account.ends_with(&format!(".{fail_at}")) { return Err("Vault unavailable.".into()); }
                 vault.borrow_mut().insert(account.into(), value.into());
                 Ok(())
             }, |account| { vault.borrow_mut().remove(account); }, |bytes| {
@@ -1831,7 +1883,7 @@ mod tests {
                 Err("Settings could not be committed.".into())
             });
             assert!(result.is_err());
-            assert_eq!(attempted_write.get(), !fail_key);
+            assert_eq!(attempted_write.get(), fail_at == "settings");
             assert_eq!(*vault.borrow(), HashMap::from([(old_account, "old-key".into())]));
         }
     }
@@ -1843,7 +1895,7 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let account = format!("{id}.typesafe");
         let reference = Saved {
-            credential_ref: Some(CredentialRef { id, typesafe: true, text: false }),
+            credential_ref: Some(CredentialRef { id, typesafe: true, text: false, openrouter: false }),
             ..Saved::default()
         };
         private_write(&path, &serde_json::to_vec(&reference).unwrap()).unwrap();
@@ -1867,7 +1919,7 @@ mod tests {
         let old_id = uuid::Uuid::new_v4().to_string();
         let committed = Cell::new(false);
         let removed = RefCell::new(Vec::new());
-        let saved = Saved { credential_ref: Some(CredentialRef { id: old_id.clone(), typesafe: true, text: true }), ..Saved::default() };
+        let saved = Saved { credential_ref: Some(CredentialRef { id: old_id.clone(), typesafe: true, text: true, openrouter: true }), ..Saved::default() };
         let next = persist_saved_with(&saved, |_, _| panic!("empty keys must not be stored"), |account| {
             assert!(committed.get());
             removed.borrow_mut().push(account.to_owned());
@@ -1875,11 +1927,39 @@ mod tests {
             let value: Value = serde_json::from_slice(bytes).unwrap();
             assert_eq!(value["credentialRef"]["typesafe"], false);
             assert_eq!(value["credentialRef"]["text"], false);
+            assert_eq!(value["credentialRef"]["openrouter"], false);
             committed.set(true);
             Ok(())
         }).unwrap();
-        assert!(next.typesafe_key.is_empty() && next.text_key.is_empty());
-        assert_eq!(*removed.borrow(), vec![format!("{old_id}.typesafe"), format!("{old_id}.text")]);
+        assert!(next.typesafe_key.is_empty() && next.text_key.is_empty() && next.openrouter_key.is_empty());
+        assert_eq!(*removed.borrow(), vec![format!("{old_id}.typesafe"), format!("{old_id}.text"), format!("{old_id}.openrouter")]);
+    }
+    #[test]
+    fn decision_provider_defaults_to_typesafe_and_validates_openrouter() {
+        assert_eq!(Settings::default().decision_provider, "typesafe");
+        let with = |provider: &str, model: &str, enabled: bool| {
+            validate_saved(Saved {
+                settings: Settings {
+                    decisions_enabled: enabled,
+                    decision_provider: provider.into(),
+                    decision_model: model.into(),
+                    ..Settings::default()
+                },
+                ..Saved::default()
+            })
+        };
+        assert!(with("typesafe", "ignored", true).unwrap().settings.decision_model.is_empty());
+        assert!(with("openrouter", "", true).is_err());
+        assert!(with("openrouter", "", false).is_ok());
+        assert_eq!(with("openrouter", " vendor/model ", true).unwrap().settings.decision_model, "vendor/model");
+        assert!(with("other", "", false).is_err());
+        let old: Settings = serde_json::from_value(json!({
+            "enabled": false, "pythonPath": "", "chromePath": "", "textModel": "v/m", "textBaseUrl": "https://example.com/v1"
+        })).unwrap();
+        assert_eq!(old.decision_provider, "typesafe");
+        assert!(old.decision_model.is_empty());
+        let reference: CredentialRef = serde_json::from_value(json!({"id": uuid::Uuid::new_v4().to_string(), "typesafe": true, "text": true})).unwrap();
+        assert!(!reference.openrouter, "old vault references must remain readable");
     }
     #[test]
     fn verifies_assertions_instead_of_model_done() {

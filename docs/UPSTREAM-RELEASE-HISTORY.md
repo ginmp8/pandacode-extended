@@ -1,8 +1,8 @@
-# PandaCode Hardened — upstream release history
+# PandaCode Extended — original upstream release history
 
-**Important:** An upstream PandaCode release note is a reference, not a release or implemented feature of this Hardened fork. Versions 0.3.29–0.3.42 are tracked as historical upstream references. See [official Hardened releases](https://github.com/ginmp8/pandacode-hardened/releases) for actual published builds/tags and [upstream releases](https://github.com/aicodeking/pandacode/releases) for original release notes.
+**Important:** An upstream PandaCode release note is a reference, not a release or implemented feature of PandaCode Extended. Versions 0.3.29–0.3.42 are tracked as historical upstream references. See [Extended source releases](https://github.com/ginmp8/pandacode-hardened/releases) for actual published builds/tags and [upstream releases](https://github.com/aicodeking/pandacode/releases) for original release notes.
 
-| Upstream reference | Note | Hardened status |
+| Upstream reference | Note | Extended status |
 |---|---|---|
 | 0.3.29 | [Upstream 0.3.29](../releases/0.3.29.md) | Reference only; no parity claim |
 | 0.3.30 | [Upstream 0.3.30](../releases/0.3.30.md) | Reference only; no parity claim |
@@ -19,6 +19,6 @@
 | 0.3.41 | [Upstream 0.3.41](../releases/0.3.41.md) | Reference only; no parity claim |
 | 0.3.42 | [Upstream 0.3.42](../releases/0.3.42.md) | Narrow-thread CSS fix selectively ported; not full parity |
 
-The current candidate version is `0.3.42-hardened`, but its original source ancestry remains upstream `0.3.28`, with selective feature ports. A complete upstream `0.3.42` source rebase **has not occurred**. See [`HARDENED-REVISION.json`](../HARDENED-REVISION.json) and [0.3.42 validation](../security-review/0.3.42-hardened/REPORT.md).
+The current Extended source candidate is [`0.4.0+pc.0.3.42`](../releases/extended/0.4.0.md), while original source ancestry remains upstream `0.3.28`, with selective feature ports. Legacy Extended notes are in [`releases/extended/`](../releases/extended/). A complete upstream `0.3.42` source rebase **has not occurred**. See [`HARDENED-REVISION.json`](../HARDENED-REVISION.json) and [0.3.42 validation](../security-review/0.3.42-hardened/REPORT.md).
 
 The [read-only upstream version watch](../.github/workflows/upstream-version-watch.yml) checks GitHub's latest official stable tag daily and fails if a newer version exists. It never updates dependencies, merges code, runs upstream executables or publishes a release automatically. Each new release requires an independently reviewed code integration, tests and explicit publication decision.

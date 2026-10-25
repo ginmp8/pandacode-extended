@@ -106,7 +106,7 @@ Native document reads derive the root from the selected project/task, reject mir
 - PDF uses a pinned PDF.js canvas renderer with XFA disabled, bounded canvas/image dimensions, two concurrent render jobs and recycling/cancellation. It does not mount PDF annotation or scripting layers.
 - DOCX is staged in an inert document and sanitized before adoption; fonts, HTML chunks, external images, active SVG/MathML and unsafe CSS are excluded. HTTP(S) links require an explicit click.
 - Spreadsheets run in a disposable worker with a deadline and sheet/row/column/cell/text limits. Values render as text; formulas, macros and HTML are not executed.
-- Images use bounded local data. SVG uses a static allowlist without external references or active content. Markdown images resolve only safe relative PNG/JPEG/WebP paths through the existing workspace boundary; remote images become links.
+- Images use bounded local data. SVG uses a static allowlist without external references or active content. Markdown images resolve only safe relative PNG/JPEG/WebP paths through the native document boundary; remote images become links, and unchecked inline data images remain alt text. Existing workspace-image requests also use the protected path and dimension checks.
 
 The application CSP and scriptless prepared-preview origin remain intact. Archive/image limits reduce resource risk; they do not make arbitrary documents trusted or certify all parser behavior. The dependency pins and reproducible lockfile are part of this candidate.
 

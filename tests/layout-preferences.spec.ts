@@ -42,7 +42,8 @@ for (const [platform, modifier, key] of [['MacIntel', '⌘', 'Meta'], ['Win32', 
     await expect(settings).toBeVisible();
     await expect(page.locator('.text-size-setting')).toContainText(`${modifier} + / −`);
     await settings.getByRole('tab', {name:'About & updates', exact:true}).click();
-    await expect(page.locator('.settings-about')).toContainText('Releases');
+    await expect(page.locator('.settings-about').getByRole('button', { name: 'Upstream releases', exact: true })).toBeVisible();
+    await expect(page.locator('.settings-about').getByRole('button', { name: 'Extended repository', exact: true })).toBeVisible();
   });
 }
 
@@ -265,7 +266,7 @@ test('layout preferences resize focused terminal text without restarting the PTY
   await recordTerminalCalls(page);
   await open(page);
   await prompt(page).fill('Keep the agent draft while resizing terminal text.');
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   const screen = page.locator('#terminal-host .xterm-screen');
   const row = screen.locator('.xterm-rows > div').first();
   const input = page.locator('#terminal-host .xterm-helper-textarea');
@@ -315,7 +316,7 @@ test('layout preferences keep controls readable at 160 percent in wide and narro
     const inspector = page.getByRole('complementary', { name: 'Project inspector', exact: true });
     // The narrow-window media callback closes the inspector asynchronously in WebKit.
     if (width <= 920) await expect(inspector).toBeHidden();
-    if (!await inspector.isVisible()) await page.getByRole('button', { name: 'Toggle inspector (⌘ ⇧ B)', exact: true }).click();
+    if (!await inspector.isVisible()) await page.getByRole('button', { name: /^Toggle inspector \((?:⌘ ⇧|Ctrl Shift) B\)$/ }).click();
     await expect(inspector).toBeVisible();
     await expect.poll(() => rootSize(page)).toBeCloseTo(22.4, 2);
     await expect.poll(() => sidebarWidth(page)).toBe(190);
@@ -457,7 +458,7 @@ test('layout preferences collapse the sidebar without replacing the draft or liv
   await recordTerminalCalls(page);
   await open(page);
   await prompt(page).fill('Keep my composer and terminal while toggling the sidebar.');
-  await page.getByRole('button', { name: 'Toggle terminal (⌘ J)', exact: true }).click();
+  await page.getByRole('button', { name: /^Toggle terminal \((?:⌘|Ctrl) J\)$/ }).click();
   const terminal = page.locator('#terminal-host .xterm-screen');
   const terminalInput = page.locator('#terminal-host .xterm-helper-textarea');
   await expect(terminal).toBeVisible();

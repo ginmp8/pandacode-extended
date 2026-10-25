@@ -12,13 +12,17 @@ if (previous.version !== metadata.extended_version) {
   throw new Error('Extended metadata and package.json already disagree; reconcile before changing version.');
 }
 const full = displayVersion(next, metadata.tracked_upstream_version);
-for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json']) {
+for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'mobile/package.json', 'mobile/package-lock.json']) {
   const absolute = resolve(root, path);
   const value = await json(absolute);
   value.version = path === 'src-tauri/tauri.conf.json' ? cargoVersion(next) : next;
   if (value.packages?.['']) value.packages[''].version = next;
   await writeFile(absolute, JSON.stringify(value, null, 2) + '\n');
 }
+const mobileAppPath = resolve(root, 'mobile/app.json');
+const mobileApp = await json(mobileAppPath);
+mobileApp.expo.version = next;
+await writeFile(mobileAppPath, JSON.stringify(mobileApp, null, 2) + '\n');
 const cargoPath = resolve(root, 'src-tauri/Cargo.toml');
 const cargo = await readFile(cargoPath, 'utf8');
 await writeFile(cargoPath, cargo.replace(/(\[package\][\s\S]*?\nversion = )"[^"]+"/, '$1"' + cargoVersion(next) + '"'));

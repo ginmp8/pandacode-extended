@@ -74,17 +74,20 @@ test('four-part npm release IDs map to Cargo/Tauri build artifact versions', () 
     assert.equal(builtArtifact([`PandaCode_0.3.42+1${suffix}`], '0.3.42.1', target), `PandaCode_0.3.42+1${suffix}`);
   }
   assert.equal(builtArtifact(['PandaCode_0.3.42.1_x64-setup.exe'], '0.3.42.1', 'windows-x86_64'), 'PandaCode_0.3.42.1_x64-setup.exe');
+  assert.equal(builtArtifact(['PandaCode Extended_0.4.0_x64-setup.exe'], '0.4.0', 'windows-x86_64'), 'PandaCode Extended_0.4.0_x64-setup.exe');
+  assert.equal(builtArtifact(['PandaCode_Extended_0.4.0_amd64.AppImage'], '0.4.0', 'linux-x86_64'), 'PandaCode_Extended_0.4.0_amd64.AppImage');
 });
 
 test('the release build validates npm ID separately from Cargo/Tauri SemVer', async () => {
-  await assert.doesNotReject(checkVersions('0.3.42.1'));
-  await assert.rejects(checkVersions('0.3.42'), /disagree on the version/);
+  await assert.doesNotReject(checkVersions('0.4.0'));
+  await assert.rejects(checkVersions('0.3.42.1'), /disagree on the version/);
 });
 
-test('hardened release asset names preserve the existing folder convention', () => {
+test('legacy release asset names stay reproducible and new Extended assets use their own identity', () => {
   assert.equal(releaseAssetName('0.3.34-hardened', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-0.3.34.hardened-Windows-x64-setup.exe');
   assert.equal(releaseAssetName('0.3.35-hardened.4', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-0.3.35.hardened.4-Windows-x64-setup.exe');
-  assert.equal(releaseAssetName('1.2.3', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-1.2.3-Windows-x64-setup.exe');
+  assert.equal(releaseAssetName('1.2.3', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-Extended-1.2.3-Windows-x64-setup.exe');
+  assert.equal(releaseAssetName('0.4.0', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-Extended-0.4.0-Windows-x64-setup.exe');
 });
 
 test('checksum sidecars use the sha256sum format', () => {

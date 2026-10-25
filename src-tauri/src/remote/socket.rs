@@ -2,9 +2,9 @@
 //! and seals and opens every frame between this computer and the others.
 use super::{auth, config, crypto, emit_presence, emit_status, host, mirror, remote, sign_out_local, Device, Inner};
 use crate::Result;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::BoxFuture, stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, Message};
@@ -207,7 +207,61 @@ async fn refresh_token(app: tauri::AppHandle, old: String) {
 
 /// An opened request and its authenticated peer key. Trust is rechecked at
 /// dispatch and delivery because either may happen after a user revoked it.
-type Request = (Value, crypto::Key, String);
+/// An opened request, its pair key, and when it entered this peer's bounded queue.
+struct Request {
+    message: Value,
+    key: crypto::Key,
+    public_key: String,
+    queued_at: Instant,
+}
+
+impl Request {
+    fn new(message: Value, key: crypto::Key, public_key: String) -> Self {
+        Self { message, key, public_key, queued_at: Instant::now() }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Lane {
+    Read,
+    Start,
+    Ordered,
+}
+
+#[derive(Default)]
+struct PendingRequests {
+    reads: VecDeque<Request>,
+    starts: VecDeque<Request>,
+    ordered: VecDeque<Request>,
+}
+
+impl PendingRequests {
+    fn len(&self) -> usize {
+        self.reads.len() + self.starts.len() + self.ordered.len()
+    }
+
+    fn push(&mut self, request: Request) {
+        let method = request.message["method"].as_str().unwrap_or_default();
+        if method == "task.start" {
+            self.starts.push_back(request);
+        } else if method == "batch" || host::is_read_only_method(method) {
+            self.reads.push_back(request);
+        } else {
+            self.ordered.push_back(request);
+        }
+    }
+
+    fn next_ordered(&mut self, active: &mut bool) -> Option<Request> {
+        if *active {
+            return None;
+        }
+        let request = self.ordered.pop_front()?;
+        *active = true;
+        Some(request)
+    }
+}
+
+
 
 /// One relay frame: presence, delivery failures and errors, or an encrypted message.
 /// Responses and events are handled at once; only requests wait in their peer's queue.
@@ -246,13 +300,14 @@ fn frame(app: &tauri::AppHandle, text: &str, peers: &mut HashMap<String, mpsc::S
                 admit_delivery(&mut inner, from, &public_key, &message, chrono::Utc::now().timestamp_millis())
             };
             match message["type"].as_str() {
-                Some("req") => queue(app, from, (message, key, public_key), peers),
+                Some("req") => queue(app, from, Request::new(message, key, public_key), peers),
                 // Responses/events need freshness too: authenticated ciphertext
                 // can otherwise be replayed by the relay without forging a key.
                 Some("res") if delivery => super::client::resolve(app, from, &message),
                 Some("event") if delivery => match message["name"].as_str() {
                     Some("agent.events") => mirror::events(app, from, &message["data"]),
                     Some("run.finished") => mirror::finished(app, from, &message["data"]),
+                    Some("task.progress") => super::start::progress(app, from, &message["data"]),
                     _ => {}
                 },
                 _ => {}
@@ -269,54 +324,104 @@ fn admit_delivery(inner: &mut Inner, from: &str, public_key: &str, message: &Val
         && inner.replay.check(message["ts"].as_i64(), message["nonce"].as_str(), now_ms).is_ok()
 }
 
-/// `task.start` runs beside the peer's queue, so a slow clone never holds up its other
-/// requests (which stay in order); at most [`MAX_STARTS`] at once, then it queues too.
-fn runs_apart(message: &Value) -> bool {
-    message["method"] == "task.start"
-}
-
 const MAX_STARTS: usize = 4;
-static STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static STARTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
 
 fn queue(app: &tauri::AppHandle, from: &str, request: Request, peers: &mut HashMap<String, mpsc::Sender<Request>>) {
-    use std::sync::atomic::Ordering;
-    if runs_apart(&request.0) && STARTS.fetch_add(1, Ordering::AcqRel) < MAX_STARTS {
-        let (app, from) = (app.clone(), from.to_owned());
-        tauri::async_runtime::spawn(async move {
-            answer(&app, &from, request).await;
-            STARTS.fetch_sub(1, Ordering::AcqRel);
-        });
-        return;
-    } else if runs_apart(&request.0) {
-        STARTS.fetch_sub(1, Ordering::AcqRel);
-    }
     if !peers.contains_key(from) {
         if peers.len() >= MAX_PEERS {
-            return;
+            return busy(app, from, request);
         }
         let (tx, rx) = mpsc::channel(PEER_QUEUE);
         tauri::async_runtime::spawn(peer(app.clone(), from.to_owned(), rx));
         peers.insert(from.to_owned(), tx);
     }
-    if peers[from].try_send(request).is_err() {
-        eprintln!("PandaCode Connect: dropped a request from a busy peer");
+    if let Err(error) = peers[from].try_send(request) {
+        busy(app, from, error.into_inner());
     }
 }
 
-/// Answers one peer's requests strictly in arrival order.
+/// Refuses a request at once instead of dropping it, so the caller doesn't wait for its timeout.
+fn busy(app: &tauri::AppHandle, from: &str, request: Request) {
+    let failure = json!({"type": "res", "id": request.message["id"], "ok": false, "error": "This computer is busy. Try again in a moment."});
+    let _ = send_sealed(app, from, &request.key, None, false, &failure);
+}
+
+const READS_PER_PEER: usize = 4;
+
+/// Reads overlap up to a small bound. Starts use their own globally bounded lane so
+/// a long clone never blocks Stop/approval on an existing task. Other mutations stay FIFO.
 async fn peer(app: tauri::AppHandle, from: String, mut requests: mpsc::Receiver<Request>) {
-    while let Some(request) = requests.recv().await {
-        answer(&app, &from, request).await;
+    let mut pending = PendingRequests::default();
+    let mut in_flight = FuturesUnordered::<BoxFuture<'static, Lane>>::new();
+    let mut active_reads = 0usize;
+    let mut active_starts = 0usize;
+    let mut ordered_active = false;
+    let mut input_open = true;
+
+    loop {
+        while active_reads < READS_PER_PEER {
+            let Some(request) = pending.reads.pop_front() else { break };
+            active_reads += 1;
+            let (app, from) = (app.clone(), from.clone());
+            in_flight.push(Box::pin(async move {
+                answer(&app, &from, request).await;
+                Lane::Read
+            }));
+        }
+        while active_starts < MAX_STARTS {
+            let Some(request) = pending.starts.pop_front() else { break };
+            active_starts += 1;
+            let (app, from) = (app.clone(), from.clone());
+            in_flight.push(Box::pin(async move {
+                answer(&app, &from, request).await;
+                Lane::Start
+            }));
+        }
+        if let Some(request) = pending.next_ordered(&mut ordered_active) {
+            let (app, from) = (app.clone(), from.clone());
+            in_flight.push(Box::pin(async move {
+                answer(&app, &from, request).await;
+                Lane::Ordered
+            }));
+        }
+        if !input_open && pending.len() == 0 && active_reads == 0 && active_starts == 0 && !ordered_active {
+            break;
+        }
+
+        tokio::select! {
+            request = requests.recv(), if input_open => match request {
+                Some(request) if pending.len() + active_reads + active_starts + usize::from(ordered_active) < PEER_QUEUE => pending.push(request),
+                Some(request) => busy(&app, &from, request),
+                None => input_open = false,
+            },
+            completed = in_flight.next(), if !in_flight.is_empty() => match completed {
+                Some(Lane::Read) => active_reads -= 1,
+                Some(Lane::Start) => active_starts -= 1,
+                Some(Lane::Ordered) => ordered_active = false,
+                None => {}
+            },
+        }
     }
 }
 
-async fn answer(app: &tauri::AppHandle, from: &str, (message, key, public_key): Request) {
+async fn answer(app: &tauri::AppHandle, from: &str, request: Request) {
+    let Request { message, key, public_key, queued_at } = request;
+    let method = message["method"].as_str().unwrap_or("unknown");
+    let queue_wait = queued_at.elapsed();
+    let _start_permit = if method == "task.start" {
+        Some(STARTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_STARTS))).clone().acquire_owned().await.ok())
+    } else { None };
+    let handling = Instant::now();
     if let Some(response) = host::handle(app, from, &message, &public_key).await {
-        // An untrusted caller only ever gets an error back, never task content.
+        // Content is released only to the current key that authenticated this request.
         if let Err(error) = send_sealed(app, from, &key, Some(&public_key), true, &response) {
             let failure = json!({"type": "res", "id": response["id"], "ok": false, "error": error});
             let _ = send_sealed(app, from, &key, None, false, &failure);
         }
+    }
+    if std::env::var_os("PANDACODE_CONNECT_TIMING").is_some() {
+        eprintln!("PandaCode Connect timing method={method} queue_wait_ms={} handle_ms={}", queue_wait.as_secs_f64() * 1000.0, handling.elapsed().as_secs_f64() * 1000.0);
     }
 }
 
@@ -342,6 +447,10 @@ fn presence(app: &tauri::AppHandle, list: &Value) {
 fn apply_presence(inner: &mut Inner, list: &[Value]) {
     let devices = parse_devices(list);
     for old in &inner.devices {
+        if !devices.iter().any(|d| d.id == old.id && d.public_key == old.public_key) {
+            inner.uploads.forget(&old.id);
+            inner.subscribers.remove(&old.id);
+        }
         if !devices.iter().any(|d| d.id == old.id && d.online == old.online && d.host == old.host) {
             inner.catalog.forget(&old.id);
         }
@@ -443,16 +552,38 @@ pub(crate) fn send_trusted(app: &tauri::AppHandle, to: &str, message: &Value) ->
     send_sealed(app, to, &key, Some(&public_key), message["type"] == "event", message)
 }
 
+/// Events produced by a request remain bound to its original authenticating key.
+pub(crate) fn send_authenticated(app: &tauri::AppHandle, to: &str, authenticated_key: &str, message: &Value) -> Result<()> {
+    let (key, current_key) = peer_key(app, to)?;
+    if current_key != authenticated_key {
+        return Err("The requesting device's key changed.".into());
+    }
+    send_sealed(app, to, &key, Some(authenticated_key), true, message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn only_starts_run_beside_the_queue() {
-        assert!(runs_apart(&json!({"method": "task.start"})));
-        for method in ["subscribe", "task.send", "task.messages", "task.stop"] {
-            assert!(!runs_apart(&json!({"method": method})), "{method}");
+    fn reads_and_starts_do_not_block_ordered_task_controls() {
+        let mut pending = PendingRequests::default();
+        for method in ["task.start", "task.send", "task.messages", "task.stop", "task.team", "approval.respond"] {
+            pending.push(Request::new(json!({"method": method}), [0; 32], "pinned".into()));
         }
+        assert_eq!(pending.reads.len(), 2);
+        assert_eq!(pending.starts.len(), 1);
+        assert_eq!(pending.ordered.len(), 3);
+        let mut active = false;
+        let first = pending.next_ordered(&mut active).unwrap();
+        assert_eq!(first.message["method"], "task.send");
+        assert_eq!(first.public_key, "pinned");
+        assert!(pending.next_ordered(&mut active).is_none());
+        active = false;
+        assert_eq!(pending.next_ordered(&mut active).unwrap().message["method"], "task.stop");
+        assert_eq!(pending.starts.front().unwrap().message["method"], "task.start", "a pending clone does not block controls for existing tasks");
+        active = false;
+        assert_eq!(pending.next_ordered(&mut active).unwrap().message["method"], "approval.respond");
     }
 
     #[test]

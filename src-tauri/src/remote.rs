@@ -7,14 +7,15 @@ mod client;
 mod config;
 mod crypto;
 mod host;
+mod images;
 mod permissions;
 pub(crate) mod mirror;
 mod replay;
 mod socket;
 mod start;
 
-pub(crate) use mirror::{route, Mirror};
-pub(crate) use host::check_current_request;
+pub(crate) use mirror::route;
+pub(crate) use host::{check_current_request, is_remote_request};
 
 use crate::{secret_store, Result};
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,8 @@ pub(crate) struct Inner {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     /// Other computers' harnesses and models, for their mirrors' model pickers.
     catalog: catalog::Cache,
+    /// Bounded image uploads from authenticated peers.
+    uploads: images::Uploads,
 }
 
 impl Inner {
@@ -152,6 +155,7 @@ impl Inner {
         self.devices.clear();
         self.presence = false;
         self.subscribers.clear();
+        self.uploads = Default::default();
         self.catalog = Default::default();
         true
     }
@@ -485,6 +489,7 @@ pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Re
         inner.settings.host_enabled = enabled;
         if !enabled {
             inner.subscribers.clear();
+            inner.uploads = Default::default();
         }
         if let Some(outbox) = &inner.outbox {
             let _ = outbox.send(json!({"kind": "host", "enabled": enabled}).to_string());
@@ -543,6 +548,7 @@ pub async fn remote_set_trusted(app: tauri::AppHandle, device_id: String, truste
         } else {
             inner.settings.trusted.remove(&device_id);
             inner.subscribers.remove(&device_id);
+            inner.uploads.forget(&device_id);
             inner.catalog.forget(&device_id);
         }
         inner.settings.clone()
@@ -574,6 +580,7 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
             let mut inner = state.lock();
             inner.devices.retain(|device| device.id != device_id);
             inner.subscribers.remove(&device_id);
+            inner.uploads.forget(&device_id);
             inner.keys.remove(&device_id);
             inner.catalog.forget(&device_id);
             inner.settings.trusted.remove(&device_id);

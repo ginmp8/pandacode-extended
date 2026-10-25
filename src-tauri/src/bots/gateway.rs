@@ -112,6 +112,9 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
     let state = app.state::<AppState>();
     let busy = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
     if busy {
+        if crate::remote::is_remote_request() {
+            return Err("This remote bot is running. Wait for it to finish before sending another message.".into());
+        }
         message_queue::add(&*state.store.lock().map_err(|e| e.to_string())?, session_id, &text, &json!([]))?;
         return Ok(());
     }

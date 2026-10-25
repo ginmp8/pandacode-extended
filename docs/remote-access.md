@@ -21,8 +21,10 @@ undo work already admitted.
 | Piece | Where | Job |
 |---|---|---|
 | Relay | `relay/` (Cloudflare Worker + one Durable Object per account) | Sign-in, device list, forwards encrypted frames between an account's devices. Stores no task content. |
-| Native | `src-tauri/src/remote/` | Sign-in, keys in the OS keychain, one WebSocket to the relay, host RPC (`host.rs`, `start.rs`), mirrors (`mirror.rs`), client calls. |
+| Native | `src-tauri/src/remote/` | Sign-in, keys in the OS keychain, one WebSocket to the relay, host RPC (`host.rs`, `start.rs`), mirrors (`mirror.rs`), client calls and bounded image transfer (`images.rs`). |
 | UI | `src/remote*.ts`, `src/remote-settings.css` | Settings → Remote access, and choosing where a new task runs. |
+| Mobile | `mobile/` | Opt-in Expo client for tasks, teams, approvals, attachments, changes, pull requests and bots. Uses the configured relay and explicit peer trust. |
+| Attachments | `src-tauri/src/attachments.rs` | Task-owned durable image metadata and files, paged through authenticated RPC. |
 
 ## Mirrors
 
@@ -36,7 +38,8 @@ while H is still starting it) and `remote_synced_id` (the last of H's message id
   `configure_session` (model), `set_reasoning_effort` and `update_session` (mode, so
   permissions change on H) go to H natively, with H's session id.
   A prompt marks the mirror running before H answers (and restores the status if H refuses).
-  Images can't be sent to a mirror yet: they are files on this computer.
+  Up to four images travel through authenticated `image.put` chunks before the prompt;
+  the host assigns fresh capture IDs and accepts them only from the sending device's exact key.
 - Stopping a mirror whose host is offline (the relay reports it undeliverable, or presence
   shows it offline) ends the local turn as stopped, so the spinner clears. A run end is applied
   once: a mirror that is no longer running or waiting is never ended again.
@@ -206,7 +209,8 @@ the persisted watermark is reached again. Do not delete the ledger while using
 Connect. Restoring/deleting all application data as its owner is outside this
 anti-replay guarantee.
 
-**Both peers must run hardened.1.** Legacy response/event frames without freshness
+**Both peers must implement the hardened protocol.** Extended 0.5.0 retains this protocol
+when adding the upstream 0.3.47 features. Legacy response/event frames without freshness
 metadata are refused. Current trust, the pinned public key and hosting state are
 rechecked when queued work starts and after slow preparation steps. Revocation
 blocks subsequent admissions and sends; it cannot undo already executed actions.
@@ -221,25 +225,89 @@ more power than local ones.
 | Method | Params | Result |
 |---|---|---|
 | `subscribe` | `{ sessionIds: [...] }` (≤ 500) | `{ tasks: [{ sessionId, status, lastId, title }] }` for those that exist. Adds the ids to this device's subscription for 10 minutes; the viewer renews every 9 minutes and on every presence frame. An expired subscription starts over. |
+| `tasks.list` | `{ limit?: number }` (default 200, maximum 500; 0 lists projects only) | Task/project summaries, pending approval and input payloads, live timing and active team state, bounded to one reply. |
+| `projects.icons` | `{ projectIds: [...] }` (1–50) | `{ icons: { [projectId]: dataUrl or null } }`; icons larger than 64 KiB are omitted. |
 | `providers.list` | `{ force?: boolean }` | the host's `list_providers` result: `[{ id, name, installed, path, version, models }]`. `force` drops the same ACP catalog caches. If it would not fit one reply, the longest `models` lists are halved until it does. |
 | `providers.models` | `{ provider, force?: boolean }` | the host's `list_provider_models` result: `[{ id, name, description, reasoningEfforts, defaultReasoningEffort, contextWindow }]`, its tail dropped to fit one reply. `provider` must be a known harness id (`Unknown provider.`). |
-| `task.start` | `{ repo: "owner/name", branch?, worktree, prompt, provider, model, mode?, effort? }` | `{ sessionId }` |
-| `task.messages` | `{ sessionId, afterId }` | `{ messages: [{ id, role, content, createdAt, turnDurationMs }], hasMore, title }` |
-| `task.send` | `{ sessionId, text }` | `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
+| `task.start` | `{ repo?: "owner/name", projectId?, startId?, branch?, worktree, prompt, provider, model, mode?, effort?, imageIds? }` | `{ sessionId }`; exactly one of `repo` and `projectId` is required. `startId` correlates progress to the initiating attempt. |
+| `task.messages` | `{ sessionId, afterId?, beforeId?, limit?, tail? }` | Paged transcript with title, cursor metadata, attachment metadata and turn/coordination details. `tail: true` requests the newest page; legacy `afterId` remains supported. |
+| `task.team` | `{ sessionId }` | `{ team }`; compact team/worker/checkpoint/coordination data, or `null` without a team. |
+| `task.workerMessages` | `{ sessionId, workerId, afterId?, limit? }` | Worker transcript with ownership checked against its parent team. Maximum 100 messages per request. |
+| `task.attachment` | `{ sessionId, id, variant: "thumb" or "full", offset? }` | `{ data, mime, total, offset, done }`; base64 image chunks, only from a saved message owned by that task. |
+| `task.workspaceImage` | `{ sessionId, path, variant: "thumb" or "full", offset? }` | The same chunk shape, using the existing workspace image path/format/size checks. |
+| `image.put` | `{ uploadId, index, size, data }` | Uploads one base64 chunk; the completed upload returns a host-generated `imageId`. |
+| `task.send` | `{ sessionId, text, imageIds? }` | `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
 | `task.stop` | `{ sessionId }` | `{}` |
 | `task.steer` | `{ sessionId, text }` | `{}` (as `steer_task`) |
 | `task.configure` | `{ sessionId, provider?, model?, effort?, mode? }` | `{}`. `provider` and `model` together (a provider not installed there is refused as in `task.start`); `effort: null` clears it; `mode` changes permissions. |
 | `approval.respond` | `{ sessionId, requestId, approve: boolean }` | `{}` |
 | `input.respond` | `{ sessionId, requestId, response }` | `{}` (as `respond_user_input`) |
+| `task.pull` | `{ sessionId }` | `{ pull }` with linked pull request details, or `null`. |
+| `task.pullDiff` | `{ sessionId, path? }` | File list when `path` is absent; bounded diff when present. |
+| `task.pullMerge` | `{ sessionId, method }` | `{}` after the explicit merge action using `merge`, `squash` or `rebase`; the authenticated peer is rechecked before invoking `gh`. |
+| `task.pullDetect` | `{ sessionId }` | Detects and links a pull request mentioned in the latest task turn; current trust is checked again before saving the link. |
+| `task.changes` | `{ sessionId }` | Git status, changed files and ahead/behind counts. |
+| `task.diff` | `{ sessionId, path?, staged? }` | `{ diff, truncated }`, capped at 120 KiB. |
+| `bots.list` | `{}` | Bot summaries and their desktop conversations, with bounded avatars. |
+| `bot.thread` | `{ botId }` | `{ sessionId }`; opens or creates that bot's desktop conversation. |
+| `bot.message` | `{ botId, text }` | `{ sessionId }`; uses the existing bot brief, memory and approval path. Busy remote bot sends are refused rather than queued without caller provenance. |
+| `bot.pause` | `{ botId, paused }` | `{}`; pausing stops running bot work. Resuming a Full access bot requires the host's separate Full access grant. |
+| `batch` | `{ calls: [{ method, params }] }` (1–8) | `{ results: [{ ok, result? , error? }] }`; only the explicit read-method allowlist is accepted, with a shared 180 KiB reply budget. Nested or mutating batches are refused. |
 
-A host refuses a session id that is itself a mirror, so tasks never hop twice.
+A host refuses a session id that is itself a mirror, so tasks never hop twice. Four read
+requests may run concurrently per peer, while commands for existing tasks run in one
+ordered lane. Batches contain only reads. `task.start` retains Extended's separate lane,
+with a global limit of four starts, so a repository clone never blocks Stop or approval
+on an already running task. Status and transcript reads also remain responsive during
+that clone. PR detection stays ordered because it can change the task's linked pull request.
+Parent and worker transcripts use Extended's typed coordination projection: app-origin
+scheduler instructions become compact status labels, with their coordination kind retained
+when a desktop mirror saves the page. A person's pasted JSON remains an ordinary user message.
+
+### Attachments and durable ownership
+
+Extended schema **28** adds `message_attachments` without changing Extended schema 27's
+`github_issue_actions` table. Migration is transactional and idempotent; existing tasks,
+messages, issue decisions and mirror columns are retained. New user messages link their
+prompt captures to private `attachments/<session-uuid>/<image-uuid>.png` copies, and link
+only moodboards belonging to the task's project. Image IDs are never arbitrary file paths.
+Both the message and attachment row must belong to the requested session. Deleting a task
+cascades its metadata and removes only that task's owned attachment directory. Existing
+transcripts without durable attachment rows remain readable; their expired cache images
+cannot be reconstructed by the migration.
+
+Uploads accept PNG, JPEG and WebP, up to 5 MiB each and four per prompt. Raw upload chunks
+are at most 72 KiB and are sent no faster than every 75 ms. A sender may hold four partial
+uploads and 16 unclaimed completed images; both expire after 15 minutes. Claims are
+all-or-none, single-use and bound to the sender's current authenticated key. Changing or
+revoking that key clears its uploads. The host decodes accepted uploads through the existing
+capture pipeline before exposing their IDs.
+
+Attachment downloads use at most 120 KiB of raw bytes per response. Thumbnails fit a
+480-pixel long edge and are JPEG; full images are chunked, with oversized sources converted
+to a bounded preview. Regular-file checks, explicit byte limits and UUID paths apply to
+the persisted files. A workspace image is resolved through `workspace::image_data_url`,
+with the same task root restrictions used by desktop rich questions.
+
+For example, a client uploads an image and then uses only the host's returned ID:
+
+```json
+{"method":"image.put","params":{"uploadId":"client-upload-1","index":0,"size":2048,"data":"<base64 bytes>"}}
+```
+
+```json
+{"method":"task.send","params":{"sessionId":"<host-task-id>","text":"Review the attached screenshot.","imageIds":["<host-image-uuid>"]}}
+```
+
+These are method/parameter excerpts. The transport adds the encrypted `req` envelope,
+fresh timestamp and nonce, and refuses an untrusted current peer key before sending.
 
 ### Starting a task on another computer
 
 `task.start` on the host:
 
 1. Refuses a provider that isn't installed there: `<Provider> is not installed on <host>.`
-2. Finds a project whose `origin` is that GitHub repository (as `github_project_repos`, case
+2. For `projectId`, uses that existing host project. For `repo`, finds a project whose `origin` is that GitHub repository (as `github_project_repos`, case
    insensitive). With none, it clones it with `gh` (as `github_clone_repo`, at most 6 minutes)
    into `~/PandaCode/<name>`, or `<name>-2`, `-3`… when taken, and adds the project.
 3. Fetches `origin` (at most 90 s), then uses the viewer's branch if origin has it, otherwise
@@ -254,9 +322,11 @@ A host refuses a session id that is itself a mirror, so tasks never hop twice.
    subscription, and sends the prompt.
 
 The host's worst case is about 9.5 minutes (clone, fetch and local git steps, each capped); the
-viewer waits 3 minutes longer. A `task.start` runs beside the peer's ordered request queue (at
-most 4 at once, then it queues), so a slow clone never delays that peer's other requests, which
-stay in order.
+viewer waits 3 minutes longer. Optional `task.progress` events report `finding`,
+`downloading`, `preparing`, `starting` or `error`, with the caller's opaque `startId` and
+clone percentage when available. Progress and task-event batches stay bound to the exact
+authenticated key throughout asynchronous work; re-pinning a device ID cannot redirect
+an older operation's content to its replacement key.
 
 ### Model lists for another computer
 

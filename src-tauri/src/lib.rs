@@ -41,6 +41,7 @@ mod local_signing;
 mod message_queue;
 mod message_attachments;
 mod moodboards;
+mod attachments;
 mod prompt_attachments;
 mod overlay;
 mod provider_settings;
@@ -86,6 +87,7 @@ struct RunningAgent {
     stopped: Arc<AtomicBool>,
     run_id: String,
     approvals: Arc<Mutex<HashSet<String>>>,
+    pending_requests: Arc<Mutex<HashMap<String, AgentEvent>>>,
     subagents: Arc<Mutex<subagent_state::SubagentState>>,
     assistant: Arc<Mutex<String>>,
     /// When the harness last sent anything; team watchdogs stop a turn that went silent.
@@ -98,6 +100,7 @@ impl RunningAgent {
             stopped,
             run_id: uuid::Uuid::new_v4().to_string(),
             approvals: Arc::new(Mutex::new(HashSet::new())),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
             subagents: Arc::new(Mutex::new(subagent_state::SubagentState::default())),
             assistant: Arc::new(Mutex::new(String::new())),
             last_event: Arc::new(std::sync::atomic::AtomicI64::new(storage::now())),
@@ -119,9 +122,10 @@ impl RunningAgent {
         request_id: String,
         approved: bool,
     ) -> Result<()> {
-        // Lock order is registry (caller) -> approvals -> store. A new request
+        // Lock order is registry (caller) -> approvals -> pending requests -> store. A new request
         // cannot become waiting between deciding the status and persisting it.
         let mut approvals = self.approvals.lock().map_err(|error| error.to_string())?;
+        let mut pending_requests = self.pending_requests.lock().map_err(|error| error.to_string())?;
         if self.stopped.load(Ordering::SeqCst) || !approvals.contains(&request_id) {
             return Err("This approval is no longer pending.".into());
         }
@@ -135,7 +139,7 @@ impl RunningAgent {
             approved,
         })
         .map_err(|_| "Agent has stopped.".to_string())?;
-        approvals.remove(&request_id);
+        remove_pending_request(&mut approvals, Some(&mut pending_requests), &request_id);
         store.status(
             session_id,
             if approvals.is_empty() {
@@ -161,9 +165,20 @@ impl RunningAgent {
 }
 type Agents = Arc<Mutex<HashMap<String, RunningAgent>>>;
 
+#[cfg(test)]
 fn save_approval(
     store: &Mutex<Store>,
     approvals: &Mutex<HashSet<String>>,
+    run_id: &str,
+    activity: &mut AgentEvent,
+) -> Result<()> {
+    save_approval_with_pending(store, approvals, None, run_id, activity)
+}
+
+fn save_approval_with_pending(
+    store: &Mutex<Store>,
+    approvals: &Mutex<HashSet<String>>,
+    pending_requests: Option<&Mutex<HashMap<String, AgentEvent>>>,
     run_id: &str,
     activity: &mut AgentEvent,
 ) -> Result<()> {
@@ -174,11 +189,8 @@ fn save_approval(
     let request_id = format!("{run_id}:{request_id}");
     activity.request_id = Some(request_id.clone());
     let mut approvals = approvals.lock().map_err(|error| error.to_string())?;
-    if matches!(activity.kind.as_str(), "approval" | "input_request") {
-        approvals.insert(request_id);
-    } else {
-        approvals.remove(&request_id);
-    }
+    let mut pending_requests = pending_requests.map(|requests| requests.lock().map_err(|error| error.to_string())).transpose()?;
+    update_pending_request(&mut approvals, pending_requests.as_deref_mut(), &request_id, activity);
     store.lock().map_err(|error| error.to_string())?.status(
         &activity.session_id,
         if approvals.is_empty() {
@@ -187,6 +199,62 @@ fn save_approval(
             "waiting"
         },
     )
+}
+
+fn update_pending_request(
+    approvals: &mut HashSet<String>,
+    pending_requests: Option<&mut HashMap<String, AgentEvent>>,
+    request_id: &str,
+    activity: &AgentEvent,
+) {
+    if matches!(activity.kind.as_str(), "approval" | "input_request") {
+        approvals.insert(request_id.to_owned());
+        if let Some(pending_requests) = pending_requests {
+            pending_requests.insert(request_id.to_owned(), activity.clone());
+        }
+    } else {
+        remove_pending_request(approvals, pending_requests, request_id);
+    }
+}
+
+fn remove_pending_request(
+    approvals: &mut HashSet<String>,
+    pending_requests: Option<&mut HashMap<String, AgentEvent>>,
+    request_id: &str,
+) {
+    approvals.remove(request_id);
+    if let Some(pending_requests) = pending_requests {
+        pending_requests.remove(request_id);
+    }
+}
+
+#[cfg(test)]
+mod pending_request_tests {
+    use super::*;
+
+    #[test]
+    fn remote_pending_request_payloads_are_added_and_cancelled_with_the_approval_id() {
+        let request_id = "run-id:provider-id";
+        let mut approvals = HashSet::new();
+        let mut pending = HashMap::new();
+        let request = AgentEvent {
+            session_id: "task-id".into(),
+            kind: "input_request".into(),
+            text: "Choose one".into(),
+            request_id: Some(request_id.into()),
+            data: Some(serde_json::json!({"questions": [{"question": "Which?"}]})),
+            tool: None,
+        };
+        update_pending_request(&mut approvals, Some(&mut pending), request_id, &request);
+        assert!(approvals.contains(request_id));
+        assert_eq!(pending.get(request_id).unwrap().text, "Choose one");
+        assert_eq!(pending.get(request_id).unwrap().data, request.data);
+
+        let cancelled = AgentEvent { kind: "input_cancelled".into(), ..request };
+        update_pending_request(&mut approvals, Some(&mut pending), request_id, &cancelled);
+        assert!(!approvals.contains(request_id));
+        assert!(!pending.contains_key(request_id));
+    }
 }
 
 #[cfg(test)]
@@ -491,6 +559,32 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
     tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename = "delete_session")]
+async fn delete_session_with_attachment_cleanup(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<task_deletion::DeletedSessions> {
+    let deleted = task_deletion::delete_session(app.clone(), window, session_id).await?;
+    match app.path().app_data_dir() {
+        Ok(data_dir) => {
+            let sessions = deleted.deleted_session_ids.clone();
+            if let Err(error) = crate::blocking(move || {
+                for sid in sessions {
+                    if let Err(error) = attachments::remove_task_files(&data_dir, &sid) {
+                        eprintln!("PandaCode: could not remove deleted task attachments: {error}");
+                    }
+                }
+                Ok(())
+            }).await {
+                eprintln!("PandaCode: could not clean up deleted task attachments: {error}");
+            }
+        }
+        Err(error) => eprintln!("PandaCode: could not locate deleted task attachments: {error}"),
+    }
+    Ok(deleted)
 }
 
 #[tauri::command]
@@ -1122,6 +1216,23 @@ async fn prepare_command(
     }))
 }
 
+/// Where a prompt goes. A mirror goes to its host even when a team was saved on it (a
+/// default team applies to every new task): a team here would run in a checkout this
+/// computer does not have.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SendTarget {
+    Mirror,
+    Team,
+    Local,
+}
+
+pub(crate) fn send_target(store: &Store, session_id: &str) -> Result<SendTarget> {
+    if remote::mirror::of(store, session_id)?.is_some() {
+        return Ok(SendTarget::Mirror);
+    }
+    Ok(if architect::load(store, session_id)?.is_some() { SendTarget::Team } else { SendTarget::Local })
+}
+
 #[tauri::command]
 async fn send_message(
     app: tauri::AppHandle,
@@ -1131,18 +1242,15 @@ async fn send_message(
     image_ids: Option<Vec<String>>,
     moodboard_ids: Option<Vec<String>>,
 ) -> Result<()> {
-    let (is_team, project_id) = {
+    let (target, project_id) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = store.session(&session_id)?;
         if let Some(ids) = moodboard_ids.as_deref().filter(|ids| !ids.is_empty()) {
             text.push_str(&moodboards::resolve_refs(&store, &task.project_id, ids)?);
         }
-        (
-            architect::load(&store, &session_id)?.is_some(),
-            task.project_id,
-        )
+        (send_target(&store, &session_id)?, task.project_id)
     };
-    if is_team {
+    if target == SendTarget::Team {
         return architect::architect_start_in_project(
             app,
             state,
@@ -1153,13 +1261,9 @@ async fn send_message(
         )
         .await;
     }
-    if remote::Mirror::is(&state, &session_id)? {
-        // Screenshots and images are files on this computer; the host cannot read them.
-        if image_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
-            return Err("Images can't be sent to a task on another computer yet.".into());
-        }
-        remote::route(&app, &state, &session_id, "task.send", serde_json::json!({"text": text})).await?;
-        return Ok(());
+    if target == SendTarget::Mirror {
+        // Screenshots and images are files on this computer: they are copied to the host first.
+        return remote::mirror::send(&app, &state, &session_id, text, image_ids.as_deref().unwrap_or_default()).await;
     }
     launch_task_in_project(
         app,
@@ -1214,6 +1318,7 @@ struct PreparedRun {
     context_handoff: Option<i64>,
     run_id: String,
     pending_approvals: Arc<Mutex<HashSet<String>>>,
+    pending_requests: Arc<Mutex<HashMap<String, AgentEvent>>>,
     subagents: Arc<Mutex<subagent_state::SubagentState>>,
     assistant: Arc<Mutex<String>>,
     last_event: Arc<std::sync::atomic::AtomicI64>,
@@ -1403,6 +1508,7 @@ fn prepare_task_run_in_project(
     let agent = RunningAgent::new(tx, stopped.clone());
     let run_id = agent.run_id.clone();
     let pending_approvals = agent.approvals.clone();
+    let pending_requests = agent.pending_requests.clone();
     let subagents = agent.subagents.clone();
     let assistant = agent.assistant.clone();
     let last_event = agent.last_event.clone();
@@ -1415,6 +1521,7 @@ fn prepare_task_run_in_project(
         context_handoff,
         run_id,
         pending_approvals,
+        pending_requests,
         subagents,
         assistant,
         last_event,
@@ -1528,6 +1635,8 @@ async fn launch_operation_admitted(
     let goal_request = goal.as_ref().map(|g| g.request.clone());
     let goal_reply = Arc::new(Mutex::new(goal.map(|g| g.reply)));
     let image_ids = image_ids.unwrap_or_default();
+    let attachment_ids = image_ids.clone();
+    let attachment_text = text.clone().unwrap_or_default();
     if image_ids.len() > 4 {
         return Err("Attach up to four screenshots per message.".into());
     }
@@ -1564,6 +1673,7 @@ async fn launch_operation_admitted(
         context_handoff,
         run_id,
         pending_approvals,
+        pending_requests,
         subagents,
         assistant,
         last_event,
@@ -1583,6 +1693,50 @@ async fn launch_operation_admitted(
             team: team_admission,
         },
     )?;
+    if turn_message_id > 0 && (!attachment_ids.is_empty() || attachment_text.contains("(moodboard ID: ")) {
+        match app.path().app_data_dir() {
+            Ok(app_data_dir) => {
+                let store = state.store.clone();
+                let sid = session_id.clone();
+                let content = attachment_text;
+                let captures = capture_dir.clone();
+                if let Err(error) = crate::blocking(move || {
+                    let store = store.lock().map_err(|error| error.to_string())?;
+                    crate::attachments::link_message_attachments(
+                        &store, &sid, turn_message_id, &content, &attachment_ids, &captures, &app_data_dir,
+                    ).map(|_| ())
+                }).await {
+                    eprintln!("PandaCode: could not persist task attachments: {error}");
+                }
+            }
+            Err(error) => eprintln!("PandaCode: could not find attachment storage: {error}"),
+        }
+    }
+    // Attachment persistence can yield after admission. A peer revoked during
+    // that work must leave a saved, interrupted turn without starting a provider.
+    if let Err(error) = remote::check_current_request(&config.mode) {
+        let mut registry = state.agents.lock().map_err(|error| error.to_string())?;
+        if registry.get(&session_id).is_some_and(|agent| agent.run_id == run_id) {
+            stopped.store(true, Ordering::SeqCst);
+            let saved = (|| -> Result<()> {
+                let store = state.store.lock().map_err(|error| error.to_string())?;
+                if turn_message_id > 0 {
+                    store.finish_turn(&session_id, turn_message_id, turn_started.elapsed().as_millis().min(i64::MAX as u128) as i64)?;
+                }
+                store.finish_task_operation(&session_id, false, true, restore_stage.as_deref())
+            })();
+            registry.remove(&session_id);
+            architect::completed(&app, &session_id, team.as_ref(), false, true, &registry);
+            if let Err(error) = saved {
+                eprintln!("PandaCode: could not persist a revoked remote turn: {error}");
+            }
+        }
+        drop(registry);
+        let _ = app.emit("agent-event", event(&session_id, "status", "interrupted"));
+        let _ = app.emit("sessions-changed", ());
+        tray::refresh(&app);
+        return Err(error);
+    }
     let _ = app.emit("agent-event", event(&session_id, "status", "running"));
     tray::refresh(&app);
     let store = state.store.clone();
@@ -1708,7 +1862,7 @@ async fn launch_operation_admitted(
                     e.kind.as_str(),
                     "approval" | "approval_cancelled" | "input_request" | "input_cancelled"
                 ) {
-                    let saved = save_approval(&store_sink, &pending_approvals, &run_id, &mut e);
+                    let saved = save_approval_with_pending(&store_sink, &pending_approvals, Some(&pending_requests), &run_id, &mut e);
                     if saved.is_ok() && e.kind == "approval" {
                         if let Some(request_id) = &e.request_id {
                             bots::approval_requested(&app_sink, &e.session_id, request_id, &e.text);
@@ -2077,6 +2231,7 @@ pub(crate) async fn local_providers(force: bool) -> Vec<providers::ProviderInfo>
     if force {
         providers::acp_catalog::invalidate("antigravity");
         providers::acp_catalog::invalidate("grok");
+        providers::acp_catalog::invalidate("devin");
     }
     tauri::async_runtime::spawn_blocking(providers::discover)
         .await
@@ -2749,15 +2904,7 @@ async fn github_detect_pull_request(state: State<'_, AppState>, session_id: Stri
         if task.pull_request.as_ref().is_some_and(|link| ["open", "draft"].contains(&link.state.as_str())) {
             return Ok(None);
         }
-        let mut turn = Vec::new();
-        let mut started = 0;
-        for message in store.messages(&session_id, None)? {
-            if message.role == "user" {
-                started = message.created_at;
-                break;
-            }
-            turn.push(message.content);
-        }
+        let github_pull::LatestTurn { text: turn, started_at: started, .. } = github_pull::latest_turn(store.messages(&session_id, None)?);
         if !turn.iter().any(|text| text.contains("/pull/")) {
             return Ok(None);
         }
@@ -3335,7 +3482,7 @@ pub fn run() {
                 configure_session,
                 set_reasoning_effort,
                 update_session,
-                task_deletion::delete_session,
+                delete_session_with_attachment_cleanup,
                 chats::chat_create,
                 chats::chat_cleanup,
                 get_messages,

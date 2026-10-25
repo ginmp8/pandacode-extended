@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::{path::Path, time::Duration};
 
 use crate::github::{excerpt, json, names, run_gh, state_of, text, view, Repository, TIMEOUT};
-use crate::storage::TaskLink;
+use crate::storage::{Message, TaskLink};
 
 const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,createdAt,updatedAt,mergedAt,mergeable,reviewDecision,labels,statusCheckRollup,files,commits,comments,reviews";
 const LINK_FIELDS: &str = "number,title,state,url,isDraft,headRefName,createdAt";
@@ -16,6 +16,28 @@ const MAX_COMMITS: usize = 100;
 /// A PR created this long before the turn's prompt still counts as the turn's.
 const TURN_SLACK_MS: i64 = 60_000;
 const MAX_CANDIDATES: usize = 3;
+
+pub(crate) struct LatestTurn {
+    pub text: Vec<String>,
+    pub started_at: i64,
+    pub last_message_id: i64,
+}
+
+/// Store pages are chronological. Detect only links in the newest turn, visiting
+/// its latest response first; the newest row also identifies the detection cache.
+pub(crate) fn latest_turn(messages: Vec<Message>) -> LatestTurn {
+    let last_message_id = messages.last().map(|message| message.id).unwrap_or_default();
+    let mut text = Vec::new();
+    let mut started_at = 0;
+    for message in messages.into_iter().rev() {
+        if message.role == "user" {
+            started_at = message.created_at;
+            break;
+        }
+        text.push(message.content);
+    }
+    LatestTurn { text, started_at, last_message_id }
+}
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -324,6 +346,30 @@ pub fn merge(root: &Path, number: i64, method: &str) -> Result<TaskLink, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_detection_uses_only_the_latest_turn_from_chronological_store_pages() {
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.message(&task.id, "user", "First task").unwrap();
+        store.message(&task.id, "assistant", "https://github.com/owner/project/pull/1").unwrap();
+        store.message(&task.id, "user", "New task").unwrap();
+        let prompt_id = store.db.last_insert_rowid();
+        store.db.execute("UPDATE messages SET created_at=1234 WHERE id=?1", [prompt_id]).unwrap();
+        store.message(&task.id, "assistant", "https://github.com/owner/project/pull/2").unwrap();
+        store.message(&task.id, "assistant", "Latest response").unwrap();
+        let last_id = store.db.last_insert_rowid();
+        let turn = latest_turn(store.messages(&task.id, None).unwrap());
+        assert_eq!(turn.last_message_id, last_id);
+        assert_eq!(turn.started_at, 1234);
+        assert_eq!(turn.text, vec!["Latest response", "https://github.com/owner/project/pull/2"]);
+        store.message(&task.id, "user", "Next task has no response").unwrap();
+        let turn = latest_turn(store.messages(&task.id, None).unwrap());
+        assert!(turn.text.is_empty(), "an earlier turn's pull request must not leak into the current turn");
+        assert_eq!(turn.last_message_id, store.db.last_insert_rowid());
+        assert_eq!(latest_turn(Vec::new()).last_message_id, 0);
+    }
 
     #[test]
     fn merge_accepts_only_known_methods() {

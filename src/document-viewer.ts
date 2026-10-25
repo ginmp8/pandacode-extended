@@ -80,8 +80,9 @@ async function renderHtmlDocument(reader: HTMLElement, path: string, content: st
     const src = img.dataset.src ?? '';
     img.removeAttribute('data-src');
     const local = workspaceImagePath(src, path), label = img.alt || 'Image';
-    if (inlineRaster(src)) img.src = src;
-    else if (local && image && ++images <= 32) image(local).then(url => { if (img.isConnected && inlineRaster(url)) img.src = url; }, () => { if (img.isConnected) img.replaceWith(label); });
+    // Inline document data has not passed the native byte/dimension checks.
+    // Keep it as alt text; only bounded workspace images may be decoded here.
+    if (local && image && ++images <= 32) image(local).then(url => { if (img.isConnected && inlineRaster(url)) img.src = url; }, () => { if (img.isConnected) img.replaceWith(label); });
     else if (!/^https?:\/\//i.test(src) || img.closest('a')) img.replaceWith(label);
     // Remote images link to their address instead, as in the transcript.
     else img.replaceWith(Object.assign(document.createElement('a'), { className: 'md-media', href: src, textContent: img.alt || 'Image' }));

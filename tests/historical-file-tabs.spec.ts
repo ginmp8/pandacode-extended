@@ -1,6 +1,26 @@
 import { expect, test, type Page } from '@playwright/test';
 import { openInspectorTab } from './inspector-tab-helper';
 
+test('Markdown never decodes unchecked inline images and bounds workspace image requests', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    // A plausible oversized GIF header must never be sent to a browser decoder.
+    const oversized = 'data:image/gif;base64,' + btoa('GIF89a' + String.fromCharCode(255, 255, 255, 255));
+    const reader = document.createElement('div'); document.body.append(reader);
+    const paths: string[] = [];
+    const { renderDocument } = await import('/src/document-viewer.ts');
+    renderDocument(reader, 'README.md', '<div>' + `<img src="${oversized}" alt="unverified inline">`.repeat(40)
+      + Array.from({ length: 40 }, (_, index) => `<img src="image-${index}.png" alt="workspace">`).join('') + '</div>', async path => {
+        paths.push(path); return 'data:image/png;base64,AA==';
+      });
+    await new Promise<void>(resolve => { const check = () => paths.length ? resolve() : setTimeout(check, 10); check(); });
+    return { requests: paths.length, unchecked: reader.querySelectorAll(`img[src="${oversized}"]`).length, text: reader.textContent };
+  });
+  expect(result.requests).toBe(32);
+  expect(result.unchecked).toBe(0);
+  expect(result.text).toContain('unverified inline');
+});
+
 async function files(page: Page) {
   await page.goto('/');
   await openInspectorTab(page, 'Files');

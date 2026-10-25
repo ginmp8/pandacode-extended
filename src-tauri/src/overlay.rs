@@ -1762,7 +1762,7 @@ mod tests {
             "muse",
             "devin",
         ] {
-            for mode in [None, Some("ask"), Some("auto"), Some("plan"), Some("full")] {
+            for mode in [None, Some("ask"), Some("auto"), Some("review"), Some("plan"), Some("full")] {
                 let mut saved = serde_json::json!({"provider":provider,"model":"default"});
                 if let Some(mode) = mode {
                     saved["mode"] = serde_json::json!(mode);

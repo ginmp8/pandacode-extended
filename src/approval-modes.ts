@@ -1,9 +1,16 @@
 import type { Mode, ProviderId } from './types';
 
-export interface ApprovalMode { id: Mode; label: string; description: string; icon: string; }
+export interface ApprovalMode { id: Mode; label: string; description: string; icon: string; disabled?: boolean; }
 
 /** Labels describe the native policy for each harness, not a simulated approval layer. */
-export function approvalModes(provider: ProviderId): ApprovalMode[] {
+export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMode[] {
+  const reviews = ['claude', 'glm', 'mimo'].includes(provider);
+  const review: ApprovalMode[] = reviews || current === 'review' ? [{
+    id: 'review', label: 'Approve for me', icon: 'spark', disabled: !reviews,
+    description: reviews
+      ? 'Let Claude Code review tool requests using its auto mode. Requires a recent Claude Code CLI; some actions may still ask you.'
+      : 'This harness has no agent-reviewed approvals for this mode. Choose another permission mode before continuing.',
+  }] : [];
   // omp is a Pi fork driven through the same bridge, so it shares Pi's policy.
   const pi = provider === 'pi' || provider === 'omp' ? (provider === 'omp' ? 'omp' : 'Pi') : '';
   const standard: ApprovalMode = { id: 'ask', label: 'Standard', icon: 'check', description: provider === 'codex'
@@ -44,11 +51,11 @@ export function approvalModes(provider: ProviderId): ApprovalMode[] {
     : provider === 'github-copilot'
     ? 'Use Copilot Agent mode with Allow All on. Copilot automatically approves tool, path, and URL requests.'
     : 'Run tools without approval prompts, including outside this project.' };
-  if (provider === 'github-copilot') return [standard,
+  if (provider === 'github-copilot') return [standard, ...review,
     { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Use Copilot Plan mode. Read, search, and think requests are allowed; other permission requests are declined.' },
     full];
   // Devin's Code mode already accepts edits, so it has no separate Accept edits choice.
-  if (provider === 'devin') return [standard,
+  if (provider === 'devin') return [standard, ...review,
     { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Devin’s Plan mode: it investigates and writes a plan; commands ask you, and edits wait until you approve the plan.' },
     full];
   return [standard, provider === 'muse'
@@ -60,7 +67,7 @@ export function approvalModes(provider: ProviderId): ApprovalMode[] {
     : provider === 'kimi'
     ? { id: 'auto', label: 'Ask when needed', icon: 'spark', description: 'Allow routine tools automatically. Ask you about sensitive actions.' }
     : provider === 'codex' ? { id: 'auto', label: 'Approve for me', icon: 'spark', description: 'Let Codex review approval requests. Keep the workspace sandbox.' }
-    : { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Automatically approve edit requests offered by the server.' },
+    : { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Automatically approve edit requests offered by the server.' }, ...review,
   provider === 'codex'
     ? { id: 'plan', label: 'Read only', icon: 'plan', description: 'Inspect the project. Block writes and permission escalation.' }
     : provider === 'grok'
@@ -81,6 +88,6 @@ export function approvalModes(provider: ProviderId): ApprovalMode[] {
 }
 
 export function approvalMode(provider: ProviderId, mode: Mode): ApprovalMode {
-  const modes = approvalModes(provider);
+  const modes = approvalModes(provider, mode);
   return modes.find(item => item.id === mode) ?? modes[0];
 }

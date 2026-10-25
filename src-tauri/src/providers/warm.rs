@@ -117,6 +117,9 @@ async fn start(mut config: RunConfig, tools: Vec<Value>, approval_tools: HashSet
     let selected_key = connection.as_ref().map(|c| format!("{}#{}", c.id, c.revision)).unwrap_or_default();
     if selected_key != connection_key { return Ok(()); }
     let connection = connection.map(|connection| crate::connections::launch(&connection)).transpose()?;
+    if let Some(connection) = &connection {
+        review_connection_args(&config.mode, &connection.args)?;
+    }
     let path = connection
         .as_ref()
         .and_then(|connection| connection.executable.clone())

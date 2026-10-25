@@ -5,7 +5,7 @@ import { ActivityIndicator, Alert, ScrollView, StyleSheet, Switch, Text, TextInp
 import { Choice } from '../ui/Choice.tsx';
 import { ProjectTile } from '../ui/ProjectTile.tsx';
 import { Button } from '../ui/requests.tsx';
-import { MODES } from '../ui/status.tsx';
+import { permissionModes, permissionNotice, supportsPermissionMode } from '../ui/approval-modes.ts';
 import { useColors } from '../ui/theme.ts';
 import { useNewTask } from '../ui/useNewTask.ts';
 
@@ -34,9 +34,10 @@ export default function NewTask() {
         <Row label="Harness">{options.loaded ? <Choice value={provider} options={options.harnesses} onChange={form.pickProvider} /> : <ActivityIndicator />}</Row>
         <Row label="Model"><Choice value={model} options={[{ value: 'default', label: 'Default' }, ...options.models.filter(m => m.value !== 'default')]} onChange={form.pickModel} /></Row>
         {efforts.length > 0 && <Row label="Effort"><Choice value={effort ?? ''} options={efforts} onChange={e => pick({ effort: e })} /></Row>}
-        <Row label="Permissions"><Choice value={mode} options={MODES.map(m => ({ value: m.id, label: m.label }))} onChange={m => pick({ mode: m })} /></Row>
+        <Row label="Permissions"><Choice value={mode} options={permissionModes(provider, mode).map(m => ({ value: m.id, label: m.label }))} onChange={m => { if (supportsPermissionMode(provider, m)) pick({ mode: m }); }} /></Row>
         <Row label="New worktree" last><Switch value={worktree} onValueChange={form.setWorktree} /></Row>
       </View>
+      {permissionNotice(provider, mode) && <Text style={{ color: colors.secondary }}>{permissionNotice(provider, mode)}</Text>}
       <TextInput value={prompt} onChangeText={setPrompt} placeholder="What should the agent do?" placeholderTextColor={colors.tertiary as string} multiline autoFocus
         style={[styles.prompt, { backgroundColor: colors.card, color: colors.text }]} accessibilityLabel="Prompt" />
       {starting

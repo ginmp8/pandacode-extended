@@ -1333,6 +1333,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 let inner = remote.lock();
                 let effective = permissions::configure_mode(&task.mode, mode.as_deref(), inner.settings.allow_full_access)?;
                 authorize_mode(&inner, from, authenticated_key, effective)?;
+                crate::providers::review_supported(model.as_ref().map_or(task.provider.as_str(), |(provider, _)| provider.as_str()), effective)?;
             }
             if let Some((provider, _)) = &model {
                 start::require_installed(provider).await?;
@@ -3285,14 +3286,18 @@ mod extended_security_tests {
         inner.settings.host_enabled = true;
         assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_ok());
         assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_err());
         inner.settings.allow_full_access = true;
         assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_ok());
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_ok());
         // No cached grant survives revocation while a request awaits discovery.
         inner.settings.allow_full_access = false;
         assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_err());
         inner.settings.allow_full_access = true;
         inner.settings.host_enabled = false;
         assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
+        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_err());
         inner.settings.host_enabled = true;
         inner.settings.trusted.remove("peer");
         assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_err());

@@ -1941,6 +1941,51 @@ fn auto_assignment(key: &str, extra: Value) -> Value {
     value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
     value
 }
+
+#[test]
+fn review_mode_refuses_mixed_harness_workers_before_creation_and_preserves_retries() {
+    let (state, sid) = auto_state();
+    state.store.lock().unwrap().db.execute("UPDATE sessions SET mode='review' WHERE id=?1", [&sid]).unwrap();
+    let error = call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[
+        auto_assignment("supported", json!({"provider":"glm","model":"default"})),
+        auto_assignment("unsupported", json!({"provider":"devin","model":"default"})),
+    ]})).unwrap_err();
+    assert!(error.contains("Approve for me"));
+    {
+        let store = state.store.lock().unwrap();
+        let count: i64 = store.db.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1, "the whole dispatch batch rolls back before an unsupported worker can run");
+        assert!(load(&store, &sid).unwrap().unwrap().workers.is_empty());
+    }
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[
+        auto_assignment("supported", json!({"provider":"glm","model":"default"})),
+    ]})).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (worker, _rx) = claim(&state, action);
+    assert_eq!(worker.config.mode, "review");
+    assert_eq!(worker.config.provider, "glm");
+    finish(&state, &worker, "Needs another pass.", false);
+    control_state(&state, &sid, "pause").unwrap();
+    state.store.lock().unwrap().update(&sid, None, None, None, Some("ask".into())).unwrap();
+    control_state(&state, &sid, "resume").unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (retry, _rx) = claim(&state, action);
+    assert_eq!(retry.config.mode, "ask");
+}
+
+#[test]
+fn worker_admission_rechecks_review_support_after_the_parent_changes_mode() {
+    let (state, sid) = auto_state();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[
+        auto_assignment("existing", json!({"provider":"codex","model":"default"})),
+    ]})).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let store = state.store.lock().unwrap();
+    store.db.execute("UPDATE sessions SET mode='review' WHERE id=?1", [&sid]).unwrap();
+    assert!(validate_admission(&store, &action.sid, Some(&action.admission)).unwrap_err().contains("Approve for me"));
+    assert_eq!(store.session(&action.sid).unwrap().mode, "ask", "refusal must not rewrite the worker into an unsupported mode");
+}
+
 #[test]
 fn auto_team_lead_chooses_worker_models() {
     let (state, sid) = auto_state();

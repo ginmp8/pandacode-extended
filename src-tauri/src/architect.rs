@@ -350,6 +350,7 @@ pub(crate) fn validate_admission(
     if parent.archived || parent.task_stage == "completed" {
         return Err("Restore or reopen the parent task before resuming the team.".into());
     }
+    crate::providers::review_supported(&parent.provider, &parent.mode)?;
     if sid != team.session_id {
         if !team
             .workers
@@ -362,7 +363,8 @@ pub(crate) fn validate_admission(
         if worker.project_id != parent.project_id || worker.worktree_path != parent.worktree_path {
             return Err("The worker checkout no longer matches its architect.".into());
         }
-        // Revoking Full access while paused must affect retries and follow-ups too.
+        crate::providers::review_supported(&worker.provider, &parent.mode)?;
+        // Revoking privileged modes while paused affects retries and follow-ups too.
         store
             .db
             .execute(
@@ -424,13 +426,16 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
     if sid == team.session_id {
         let profiles = serde_json::to_string(&team.config.workers).map_err(|e| e.to_string())?;
         let lead = store.session(sid)?;
-        let staffing = if team.config.roster_only {
+        let mut staffing = if team.config.roster_only {
             format!("You lead {} with your own model ({} via {}). Use only these models for workers, never any other: set profileId to one of these entries in each assignment{}. Team: {}.", team.config.name.as_deref().map_or_else(|| "this agent team".to_string(), |name| format!("the {name} team")), lead.model, lead.provider, if team.config.workers.iter().any(|p| p.provider == lead.provider && p.model == lead.model) { ", or omit it to use your own model" } else { "" }, profiles)
         } else if team.config.auto {
             format!("You lead this team with your own model ({} via {}). Choose each worker's model yourself: if the user's request names models or harnesses to orchestrate with (for example \"use Sonnet workers\" or \"have Codex review\"), use those; otherwise pick the best fit per assignment, such as a strong model for hard implementation and a faster or cheaper one for simple edits, tests, or review. In each assignment either set profileId to a roster entry, or set provider and model directly (provider is one of {}); omit all three to use your own model. Installed model roster: {}.", lead.model, lead.provider, HARNESSES.join(", "), profiles)
         } else {
             format!("Worker profiles are reusable: several assignments may use the same profile, and profile count does not limit parallel workers. Available profiles: {}.", profiles)
         };
+        if lead.mode == "review" {
+            staffing.push_str(" This task uses Approve for me: workers must use Claude Code, GLM, or MiMo. Other harnesses are refused until the user chooses another permission mode.");
+        }
         // A team's own guidance wins; otherwise the app-wide one from Settings applies.
         // A corrupt library must not stop the rules from going out.
         let default_guidance = profiles::read(store).ok().and_then(|library| library.lead_guidance);
@@ -601,6 +606,7 @@ pub(super) fn configure_state(
         config: config.clone(),
     };
     setup.validate()?;
+    crate::providers::review_supported(&selection.provider, &session.mode)?;
     let used: bool = store
         .db
         .query_row(
@@ -660,6 +666,7 @@ fn apply_setup(store: &Store, team: &mut TeamSnapshot, setup: &profiles::TeamSet
     setup.validate()?;
     validate_setup_limits(team, &setup.config)?;
     let session = store.session(&team.session_id)?;
+    crate::providers::review_supported(&setup.architect.provider, &session.mode)?;
     if setup.architect.provider != session.provider {
         crate::context_recovery::queue(store, &team.session_id)?;
         store.db.execute("UPDATE sessions SET resume_id=NULL,goal_state=NULL,codex_settings=NULL WHERE id=?1", [&team.session_id]).map_err(|e|e.to_string())?;
@@ -1252,6 +1259,7 @@ fn dispatch_state(
                     return Err("Dependencies must be previously returned worker IDs.".into());
                 }
                 let profile = staff(&team.config, &parent, &assignment)?;
+                crate::providers::review_supported(&profile.provider, &parent.mode)?;
                 let profile = &profile;
                 let session = store.create_session(
                     &parent.project_id,

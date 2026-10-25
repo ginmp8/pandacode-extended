@@ -92,6 +92,25 @@ pub(crate) const PROVIDERS: [(&str, &str); 17] = [
 /// Claude Code tools that only report back to a session that stays open after its turn.
 pub(crate) const CLAUDE_SESSION_BOUND_TOOLS: &str = "ScheduleWakeup,Monitor,CronCreate";
 
+/// Never launch an explicitly agent-reviewed task under a different policy.
+pub(crate) fn review_supported(provider: &str, mode: &str) -> Result<(), String> {
+    if mode == "review" && !matches!(provider, "claude" | "glm" | "mimo") {
+        return Err("Approve for me needs Claude Code's auto mode; this harness has no agent-reviewed approvals. Choose another permission mode.".into());
+    }
+    Ok(())
+}
+
+/// Named connections may select accounts, but cannot replace an explicit review
+/// policy with a later CLI permission flag. Check before cold and warm launches.
+pub(crate) fn review_connection_args(mode: &str, args: &[String]) -> Result<(), String> {
+    if mode == "review" && args.iter().any(|arg| matches!(arg.split('=').next(),
+        Some("--permission-mode" | "--dangerously-skip-permissions" | "--allow-dangerously-skip-permissions")
+    )) {
+        return Err("This named connection overrides Claude Code's permission mode. Remove its permission arguments in Settings before using Approve for me.".into());
+    }
+    Ok(())
+}
+
 /// Harnesses that take app instructions as a system prompt (`--append-system-prompt`).
 pub fn takes_system_instructions(provider: &str) -> bool {
     matches!(provider, "claude" | "glm" | "mimo" | "pi" | "omp")
@@ -2717,6 +2736,7 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             ]);
             let permission_mode = match config.mode.as_str() {
                 "auto" => "acceptEdits",
+                "review" => "auto",
                 "plan" => "plan",
                 "full" => "bypassPermissions",
                 _ => "default",
@@ -2782,10 +2802,14 @@ async fn run_inner(
     if !crate::storage::valid_permission_mode(&config.mode) {
         return Err("Unknown permission mode".into());
     }
+    review_supported(&config.provider, &config.mode)?;
     validate_reasoning_effort(&config.provider, config.reasoning_effort.as_deref())?;
     let mut connection = crate::connections::for_task(&config.session_id, &config.provider)
         .map(|connection| crate::connections::launch(&connection))
         .transpose()?;
+    if let Some(connection) = &connection {
+        review_connection_args(&config.mode, &connection.args)?;
+    }
     let path = connection
         .as_ref()
         .and_then(|connection| connection.executable.clone())
@@ -3111,6 +3135,36 @@ async fn run_process_with_tools(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approve_for_me_runs_only_where_the_harness_reviews_actions() {
+        for (provider, _) in PROVIDERS {
+            let reviewed = review_supported(provider, "review");
+            if matches!(provider, "claude" | "glm" | "mimo") {
+                assert!(reviewed.is_ok(), "{provider}");
+            } else {
+                assert!(reviewed.unwrap_err().contains("Approve for me"), "{provider}");
+            }
+            for mode in ["ask", "auto", "plan", "full"] {
+                assert!(review_supported(provider, mode).is_ok(), "{provider}: {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn named_connection_cannot_replace_an_explicit_review_policy() {
+        for args in [
+            vec!["--permission-mode", "bypassPermissions"],
+            vec!["--permission-mode=default"],
+            vec!["--dangerously-skip-permissions"],
+            vec!["--allow-dangerously-skip-permissions=true"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(review_connection_args("review", &args).unwrap_err().contains("named connection"));
+            assert!(review_connection_args("full", &args).is_ok(), "existing explicit connection choices are unchanged");
+        }
+        assert!(review_connection_args("review", &["--debug".into(), "--model=sonnet".into()]).is_ok());
+    }
+
     #[test]
     fn kilo_is_registered_with_its_cli_and_catalog_defined_efforts() {
         assert!(PROVIDERS.contains(&("kilo", "Kilo Code")));
@@ -3701,11 +3755,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_glm_modes_override_resume_and_only_full_enables_bypass() {
-        for provider in ["claude", "glm"] {
+    fn claude_family_modes_override_resume_and_only_full_enables_bypass() {
+        for provider in ["claude", "glm", "mimo"] {
             for (mode, expected) in [
                 ("ask", "default"),
                 ("auto", "acceptEdits"),
+                ("review", "auto"),
                 ("plan", "plan"),
                 ("full", "bypassPermissions"),
             ] {

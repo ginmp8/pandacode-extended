@@ -15,7 +15,7 @@ pub fn id() -> String {
 }
 
 pub fn valid_permission_mode(mode: &str) -> bool {
-    matches!(mode, "ask" | "auto" | "plan" | "full")
+    matches!(mode, "ask" | "auto" | "review" | "plan" | "full")
 }
 
 // Only new user tasks use this default. Persisted tasks always retain their
@@ -3593,7 +3593,7 @@ mod tests {
                 "muse",
                 "devin",
             ] {
-                for mode in ["ask", "auto", "plan", "full"] {
+                for mode in ["ask", "auto", "review", "plan", "full"] {
                     let session = store
                         .create_session(&project.id, provider, "default", mode)
                         .unwrap();

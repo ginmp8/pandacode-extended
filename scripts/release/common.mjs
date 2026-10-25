@@ -47,7 +47,8 @@ export function required(name, env = process.env) {
 }
 
 export function version(value) {
-  // Accept the standard four-part hardened version, not arbitrary prerelease identifiers.
+  // Historical four-component and hardened IDs remain parseable for archival compatibility.
+  // New Extended releases are strictly X.Y.Z (enforced by extendedVersion).
   const match = typeof value === 'string' && value.length <= 32
     ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.([1-9]\d*)|-hardened(?:\.([1-9]\d*))?)?$/.exec(value)
     : null;

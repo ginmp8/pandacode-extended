@@ -62,25 +62,29 @@ test('Developer ID signing requires a real identity and notarization credentials
   assert.equal(plan.env.APPLE_ID, 'a');
 });
 
-test('the build selects the exact versioned bundle Tauri produced', () => {
-  for (const [target, file] of [['windows-x86_64', 'PandaCode_1.2.3_x64-setup.exe'], ['linux-x86_64', 'PandaCode_1.2.3_amd64.AppImage'], ['darwin-aarch64', 'PandaCode_1.2.3_aarch64.dmg'], ['darwin-x86_64', 'PandaCode_1.2.3_x64.dmg']]) {
-    assert.equal(builtArtifact([file, file.replace('1.2.3', '1.2.2')], '1.2.3', target), file);
-    assert.throws(() => builtArtifact([file], '1.2.4', target), /did not produce/);
+test('Extended 0.4.0 packaging only accepts matching Extended-named Tauri bundles', () => {
+  for (const [target, suffix] of [
+    ['windows-x86_64', '_x64-setup.exe'],
+    ['windows-aarch64', '_arm64-setup.exe'],
+    ['linux-x86_64', '_amd64.AppImage'],
+    ['linux-aarch64', '_aarch64.AppImage'],
+    ['darwin-aarch64', '_aarch64.dmg'],
+    ['darwin-x86_64', '_x64.dmg'],
+  ]) {
+    const spaced = `PandaCode Extended_0.4.0${suffix}`;
+    const underscored = `PandaCode_Extended_0.4.0${suffix}`;
+    assert.equal(builtArtifact([spaced, underscored], '0.4.0', target), spaced);
+    assert.equal(builtArtifact([underscored], '0.4.0', target), underscored);
+    assert.throws(() => builtArtifact([spaced], '0.4.1', target), /did not produce/);
+    assert.throws(() => builtArtifact([`PandaCode_0.4.0${suffix}`], '0.4.0', target), /did not produce/);
   }
 });
 
-test('four-part npm release IDs map to Cargo/Tauri build artifact versions', () => {
-  for (const [target, suffix] of [['windows-x86_64', '_x64-setup.exe'], ['linux-x86_64', '_amd64.AppImage'], ['darwin-aarch64', '_aarch64.dmg']]) {
-    assert.equal(builtArtifact([`PandaCode_0.3.42+1${suffix}`], '0.3.42.1', target), `PandaCode_0.3.42+1${suffix}`);
-  }
-  assert.equal(builtArtifact(['PandaCode_0.3.42.1_x64-setup.exe'], '0.3.42.1', 'windows-x86_64'), 'PandaCode_0.3.42.1_x64-setup.exe');
-  assert.equal(builtArtifact(['PandaCode Extended_0.4.0_x64-setup.exe'], '0.4.0', 'windows-x86_64'), 'PandaCode Extended_0.4.0_x64-setup.exe');
-  assert.equal(builtArtifact(['PandaCode_Extended_0.4.0_amd64.AppImage'], '0.4.0', 'linux-x86_64'), 'PandaCode_Extended_0.4.0_amd64.AppImage');
-});
-
-test('the release build validates npm ID separately from Cargo/Tauri SemVer', async () => {
+test('release builds require one matching three-component Extended SemVer', async () => {
   await assert.doesNotReject(checkVersions('0.4.0'));
-  await assert.rejects(checkVersions('0.3.42.1'), /disagree on the version/);
+  await assert.rejects(checkVersions('0.4.1'), /disagree on the version/);
+  await assert.rejects(checkVersions('0.4.0.1'), /SemVer core/);
+  await assert.rejects(checkVersions('0.4.0+pc.0.3.42'), /SemVer core/);
 });
 
 test('legacy release asset names stay reproducible and new Extended assets use their own identity', () => {

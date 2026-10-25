@@ -1,6 +1,6 @@
 # PandaCode Extended
 
-**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current release branch is `0.3.42.1` (native version `0.3.42+1`). The repository remains [ginmp8/pandacode-hardened](https://github.com/ginmp8/pandacode-hardened).
+**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current release branch is `0.3.42.1` (native version `0.3.42+1`). The repository currently lives at [ginmp8/pandacode-hardened](https://github.com/ginmp8/pandacode-hardened) and is planned to move to [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended). Settings already targets the planned address; those links will become active after the repository rename.
 
 Historical security work: [release notes](releases/0.3.42-hardened.md), [upstream history](docs/UPSTREAM-RELEASE-HISTORY.md), and [security review](security-review/0.3.42-hardened/REPORT.md).
 

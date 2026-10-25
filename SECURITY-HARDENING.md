@@ -1,6 +1,6 @@
 # Current revision: 0.3.41-hardened
 
-The current source release extends the supplied `0.3.35-hardened.4` selectively. See [current validation and limits](security-review/0.3.41-hardened/REPORT.md), [connection/session safeguards](docs/connection-session-safety.md), and the [Portuguese feature guide](docs/HARDENED-0.3.41-GUIDE.pt-BR.md). The sections below are historical records; their findings, test counts and environment limitations must not be read as the results of this revision.
+The current source release extends the supplied `0.3.35-hardened.4` selectively. See [current validation and limits](security-review/0.3.41-hardened/REPORT.md), [connection/session safeguards](docs/connection-session-safety.md), and the [0.3.41 usage guide](docs/HARDENED-0.3.41-GUIDE.md). The sections below are historical records; their findings, test counts and environment limitations must not be read as the results of this revision.
 
 This revision adds native account-bound session invalidation, a separate remote Full access gate (default off), commit/hash-pinned Skills imports and scope resolution, and validated historical attachment actions. It preserves secure credential storage, device trust/revocation, replay checks, disabled automatic updates and the existing fail-closed isolated-review admission. Dependency versions are unchanged.
 

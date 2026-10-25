@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { root, version, json, cargoLockVersion } from './common.mjs';
+import { root, version, cargoVersion, json, cargoLockVersion } from './common.mjs';
 
 const next = version(process.argv[2]);
 for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json']) {
@@ -12,7 +12,7 @@ for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.j
 }
 const cargoPath = resolve(root, 'src-tauri/Cargo.toml');
 const cargo = await readFile(cargoPath, 'utf8');
-await writeFile(cargoPath, cargo.replace(/(\[package\][\s\S]*?\nversion = )"[^"]+"/, `$1"${next}"`));
+await writeFile(cargoPath, cargo.replace(/(\[package\][\s\S]*?\nversion = )"[^"]+"/, `$1"${cargoVersion(next)}"`));
 const lockPath = resolve(root, 'src-tauri/Cargo.lock');
 const lock = await readFile(lockPath, 'utf8');
 await writeFile(lockPath, cargoLockVersion(lock, next));

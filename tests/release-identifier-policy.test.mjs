@@ -15,7 +15,7 @@ const obsolete = /0\.3\.42(?:\.1|\+1|-hardened\.1)/;
 // Prevent retired intermediate candidate identifiers from reappearing in
 // maintained source, docs and tests. Keep third-party and immutable audit
 // evidence out of scope; original upstream release notes are also read-only.
-test('active Extended source and documentation use the current 0.4.0 release identity', async () => {
+test('active Extended source and documentation do not restore retired candidate identifiers', async () => {
   const matches = [];
   const visit = async directory => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {

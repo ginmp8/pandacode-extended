@@ -2871,6 +2871,8 @@ for (const delayedCommand of ['add_project', 'list_projects']) {
       await route.fulfill({ response, body: previewBody(body) });
     });
     await page.reload();
+    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
+    await expect(page.locator('.markdown pre code')).toContainText('createSearchIndex');
     await page.locator('.new-task-button').click();
     await expect(newTaskHeading(page)).toHaveAccessibleName('What should we build in orbit?');
     const sessionId = await draftTaskId(page);

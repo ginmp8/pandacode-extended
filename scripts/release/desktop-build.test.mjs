@@ -75,14 +75,14 @@ test('Extended 0.4.0 packaging only accepts matching Extended-named Tauri bundle
     const underscored = `PandaCode_Extended_0.4.0${suffix}`;
     assert.equal(builtArtifact([spaced, underscored], '0.4.0', target), spaced);
     assert.equal(builtArtifact([underscored], '0.4.0', target), underscored);
-    assert.throws(() => builtArtifact([spaced], '0.4.1', target), /did not produce/);
+    assert.throws(() => builtArtifact([spaced], '0.3.42', target), /did not produce/);
     assert.throws(() => builtArtifact([`PandaCode_0.4.0${suffix}`], '0.4.0', target), /did not produce/);
   }
 });
 
 test('release builds require one matching three-component Extended SemVer', async () => {
   await assert.doesNotReject(checkVersions('0.4.0'));
-  await assert.rejects(checkVersions('0.4.1'), /disagree on the version/);
+  await assert.rejects(checkVersions('0.3.42'), /disagree on the version/);
   await assert.rejects(checkVersions('0.4.0.1'), /SemVer core/);
   await assert.rejects(checkVersions('0.4.0+pc.0.3.42'), /SemVer core/);
 });

@@ -6,22 +6,21 @@ PandaCode Extended is an independently versioned derivative of [PandaCode](https
 
 **Product SemVer**: `MAJOR.MINOR.PATCH` (e.g. `0.4.0`). Npm, Cargo, Tauri, Cargo.lock, source release directory, updater/version comparisons (if separately authorized later), and the Git tag (`v0.4.0`) use this three-component core. Git tags and published artifacts are immutable: never rewrite a released version with different bytes.
 
-**Display/distribution identity**: `<extended>+pc.<tracked-upstream>` (e.g. `0.4.0+pc.0.3.42`). `pc` refers to the latest *reviewed/tracked original PandaCode version*, not a full source rebase, binary compatibility guarantee, or exact dependency version. SemVer ignores build metadata after `+` when comparing precedence: updating `pc` alone must **never** create a distinct release under an unchanged Extended core. Before any new publication, increment the Extended core appropriately.
+**Display/distribution identity**: `<extended>+pc.<tracked-upstream>` (e.g. `0.4.0+pc.0.3.42`). `pc` refers to the latest *reviewed/tracked original PandaCode version*, not a full source rebase, binary compatibility guarantee, or exact dependency version. SemVer ignores build metadata after `+` when comparing precedence: updating `pc` alone must **never** create a distinct release under an unchanged Extended core. While the first `0.4.0` release is still unpublished, corrections on `release/0.4.0` keep the same core version. Only after a release is actually published should a later, distinct release receive a separately approved new core version.
 
 **Source provenance**: the historical initial upstream source ancestry is independently recorded (currently `0.3.28`). Selected patches and upstream changes tracked through `0.3.42` have not established complete `0.3.42` source parity. Keep provenance truthful and security evidence immutable. `HARDENED-REVISION.json` remains a historical review record, not the current product version.
 
 `EXTENDED-RELEASE.json` is the current source metadata contract. The product-version script updates its Extended version, display identifier and current release-note path. Updating the tracked upstream reference requires a separate vetted integration/decision, explicit metadata update and validation; it is **not** inferred from an upstream announcement.
 
-## Version examples
+## Current release candidate
 
-| Change | Technical version | Display identifier |
+| Status | Technical version | Display identifier |
 | --- | --- | --- |
-| First Extended release candidate | `0.4.0` | `0.4.0+pc.0.3.42` |
-| Compatible Extended fix | `0.4.1` | `0.4.1+pc.0.3.42` |
-| Compatible Extended feature | `0.5.0` | `0.5.0+pc.0.3.42` |
-| Reviewed upstream reference update plus suitable Extended feature | `0.6.0` | `0.6.0+pc.0.3.43` |
+| First Extended release — not yet published | `0.4.0` | `0.4.0+pc.0.3.42` |
 
-These are examples, not releases that already exist. Use the highest applicable compatibility impact: corrections normally increment PATCH; compatible additions increment MINOR; incompatible changes require an explicit migration assessment. Pre-1.0 incompatibilities may increment MINOR only with documented migration. If version selection or consumer compatibility is uncertain, treat the next version as provisional.
+**Until this release is actually published**, all corrections, adjustments and review fixes on `release/0.4.0` remain part of **the same version `0.4.0`**. Neither a new tag nor a new release version is created for each corrective commit. The planned tag is `v0.4.0`, and it must not be created before publication is explicitly authorized.
+
+**After publication**, version selection for a distinct future release must be decided from its actual changes and consumer compatibility. Corrections normally use PATCH, compatible additions use MINOR, and incompatible changes require a migration assessment. This document deliberately does not preassign numbers to hypothetical releases.
 
 ## Source history layout and dates
 

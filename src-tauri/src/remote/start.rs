@@ -391,6 +391,7 @@ pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &
 
 async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, progress: &Arc<Progress>) -> Result<Value> {
     super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
+    crate::providers::review_supported(&start.provider, start.mode.as_deref().unwrap_or(crate::storage::DEFAULT_PERMISSION_MODE))?;
     progress.report("finding", None, None);
     // Before any clone: the images must be ones this caller just sent.
     super::images::claim(app, from, authenticated_key, &start.image_ids)?;

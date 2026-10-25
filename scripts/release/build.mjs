@@ -11,7 +11,8 @@ import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { root, version, cargoVersion, json, run, digest, targetConfig, hostTarget, appImageBundleOptions, releaseDirectory } from './common.mjs';
+import { root, version, json, run, digest, targetConfig, hostTarget, appImageBundleOptions, releaseDirectory } from './common.mjs';
+import { extendedVersion } from './extended-version.mjs';
 import { repackAppImage } from './appimage.mjs';
 
 // Never forwarded to the build: leftovers of the old license check in a developer
@@ -61,13 +62,15 @@ function plan(config, env, mode, bundle) {
 
 export function builtArtifact(names, releaseVersion, releaseTarget) {
   const config = targetConfig(releaseTarget);
-  const release = version(releaseVersion);
-  // Tauri derives the bundle name from productName; Extended has spaces.
-  // Accept the original name as a fallback for older reproducible source builds.
-  const expected = [...new Set([release, cargoVersion(release)].flatMap(v => {
-    const previous = config.built(v);
-    return [previous.replace(/^PandaCode_/, 'PandaCode Extended_'), previous.replace(/^PandaCode_/, 'PandaCode_Extended_'), previous];
-  }))];
+  const release = extendedVersion(releaseVersion);
+  // The active Extended product must produce an Extended-named bundle at the
+  // exact technical SemVer. Never silently package a stale original-PandaCode
+  // bundle or a previous four-component build under the Extended release.
+  const bundle = config.built(release);
+  const expected = [
+    bundle.replace(/^PandaCode_/, 'PandaCode Extended_'),
+    bundle.replace(/^PandaCode_/, 'PandaCode_Extended_'),
+  ];
   const found = expected.find(name => names.includes(name));
   if (!found) throw new Error(`Tauri did not produce ${expected.join(' or ')}.`);
   return found;
@@ -85,10 +88,11 @@ export function checksumLine(sha256, filename) {
 }
 
 export async function checkVersions(releaseVersion) {
+  const release = extendedVersion(releaseVersion);
   const tauri = await json(resolve(root, 'src-tauri/tauri.conf.json'));
   const pkg = await json(resolve(root, 'package.json'));
   const cargo = await readFile(resolve(root, 'src-tauri/Cargo.toml'), 'utf8');
-  if (pkg.version !== version(releaseVersion) || tauri.version !== cargoVersion(releaseVersion) || !cargo.includes(`version = "${cargoVersion(releaseVersion)}"`)) {
+  if (pkg.version !== release || tauri.version !== release || !cargo.includes(`version = "${release}"`)) {
     throw new Error('package.json, tauri.conf.json and Cargo.toml disagree on the version. Run npm run release:version first.');
   }
 }
@@ -119,7 +123,7 @@ async function verifyDmg(path, app, releaseVersion) {
     const installed = resolve(mount, 'PandaCode Extended.app');
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', installed]);
     const installedVersion = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', resolve(installed, 'Contents/Info.plist')], { encoding: 'utf8' }).trim();
-    if (![releaseVersion, cargoVersion(releaseVersion)].includes(installedVersion) || await digest(resolve(installed, 'Contents/MacOS/pandacode')) !== await digest(resolve(app, 'Contents/MacOS/pandacode'))) throw new Error('The disk image contains a different app build.');
+    if (installedVersion !== releaseVersion || await digest(resolve(installed, 'Contents/MacOS/pandacode')) !== await digest(resolve(app, 'Contents/MacOS/pandacode'))) throw new Error('The disk image contains a different app build.');
   } finally {
     if (mounted) await run('/usr/bin/hdiutil', ['detach', mount, '-quiet']);
     // Only remove empty mount directories; never recursively delete a volume.
@@ -130,7 +134,7 @@ async function verifyDmg(path, app, releaseVersion) {
 async function main() {
   const releaseTarget = process.argv[2] || process.env.RELEASE_TARGET || hostTarget();
   const config = targetConfig(releaseTarget);
-  const releaseVersion = version((await json(resolve(root, 'package.json'))).version);
+  const releaseVersion = extendedVersion((await json(resolve(root, 'package.json'))).version);
   await checkVersions(releaseVersion);
   const build = buildPlan(releaseTarget, process.env);
   // Execute Node directly: npm.cmd is not an executable for spawn() on Windows.

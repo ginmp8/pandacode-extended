@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPlan, builtArtifact, checksumLine, macosSigning, releaseAssetName } from './build.mjs';
+import { buildPlan, builtArtifact, checkVersions, checksumLine, macosSigning, releaseAssetName } from './build.mjs';
 import { appImageBundleOptions } from './common.mjs';
 
 const env = { PANDACODE_LICENSE_PUBLIC_KEY: 'stale', PANDACODE_UPDATE_PUBLIC_KEY: 'stale', TAURI_SIGNING_PRIVATE_KEY: 'stale', APPLE_ID: 'someone', APPLE_SIGNING_IDENTITY: 'Developer ID Application: Someone', PATH: 'test-path' };
@@ -67,6 +67,18 @@ test('the build selects the exact versioned bundle Tauri produced', () => {
     assert.equal(builtArtifact([file, file.replace('1.2.3', '1.2.2')], '1.2.3', target), file);
     assert.throws(() => builtArtifact([file], '1.2.4', target), /did not produce/);
   }
+});
+
+test('four-part npm release IDs map to Cargo/Tauri build artifact versions', () => {
+  for (const [target, suffix] of [['windows-x86_64', '_x64-setup.exe'], ['linux-x86_64', '_amd64.AppImage'], ['darwin-aarch64', '_aarch64.dmg']]) {
+    assert.equal(builtArtifact([`PandaCode_0.3.42+1${suffix}`], '0.3.42.1', target), `PandaCode_0.3.42+1${suffix}`);
+  }
+  assert.equal(builtArtifact(['PandaCode_0.3.42.1_x64-setup.exe'], '0.3.42.1', 'windows-x86_64'), 'PandaCode_0.3.42.1_x64-setup.exe');
+});
+
+test('the release build validates npm ID separately from Cargo/Tauri SemVer', async () => {
+  await assert.doesNotReject(checkVersions('0.3.42.1'));
+  await assert.rejects(checkVersions('0.3.42'), /disagree on the version/);
 });
 
 test('hardened release asset names preserve the existing folder convention', () => {

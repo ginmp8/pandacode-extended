@@ -1308,7 +1308,7 @@ test('updates permissions after leaving and reselecting a task while the save is
 });
 
 for (const configuration of [
-  { provider: 'Claude Code', sessionId: 'session-1', labels: ['Standard', 'Accept edits', 'Plan mode', 'Full access'], selected: 'Plan mode', mode: 'plan' },
+  { provider: 'Claude Code', sessionId: 'session-1', labels: ['Standard', 'Accept edits', 'Approve for me', 'Plan mode', 'Full access'], selected: 'Plan mode', mode: 'plan' },
   { provider: 'Codex', sessionId: 'session-2', labels: ['Standard', 'Approve for me', 'Read only', 'Full access'], selected: 'Approve for me', mode: 'auto' },
   { provider: 'Kimi Code', sessionId: 'session-3', labels: ['Standard', 'Ask when needed', 'Plan mode', 'Full access'], selected: 'Full access', mode: 'full' },
 ]) {
@@ -1459,7 +1459,8 @@ test('keeps the Settings agent menu clickable at the minimum desktop window size
     return { inViewport: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
       reachable: element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)) };
   }));
-  expect(hitTargets).toHaveLength(16);
+  expect(hitTargets).toHaveLength(17);
+  await expect(menu.getByRole('menuitemradio', { name: 'Kilo Code', exact: true })).toHaveCount(1);
   await expect(menu.getByRole('menuitemradio', { name: 'Devin CLI', exact: true })).toHaveCount(1);
   expect(hitTargets.every(target => target.inViewport && target.reachable)).toBe(true);
   await menu.getByRole('menuitemradio', { name: 'Kimi Code', exact: true }).click();

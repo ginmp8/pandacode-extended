@@ -55,6 +55,10 @@ export function version(value) {
   return value;
 }
 
+export function cargoVersion(value) {
+  return version(value).replace(/^(\d+\.\d+\.\d+)\.(\d+)$/, '$1+$2');
+}
+
 export async function json(path) { return JSON.parse(await readFile(path, 'utf8')); }
 
 /** Cargo.lock text with the `pandacode` package at `next`. Keeps the file's line endings,
@@ -62,7 +66,7 @@ export async function json(path) { return JSON.parse(await readFile(path, 'utf8'
 export function cargoLockVersion(lock, next) {
   const entry = /(\[\[package\]\]\r?\nname = "pandacode"\r?\nversion = )"[^"]+"/;
   if (!entry.test(lock)) throw new Error('No pandacode package in src-tauri/Cargo.lock.');
-  return lock.replace(entry, `$1"${version(next)}"`);
+  return lock.replace(entry, `$1"${cargoVersion(next)}"`);
 }
 
 export async function digest(path) {

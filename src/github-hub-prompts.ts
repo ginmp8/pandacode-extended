@@ -29,7 +29,7 @@ export function pullPrompt(action: PullAction, pull: PullRef): string {
 export function issuePrompt(action: IssueAction, issue: IssueRef): string {
   const ref = `#${issue.number}`;
   return action === 'solve'
-    ? `Fix issue ${ref}. Review the supplied issue context, work on a new branch, make the requested change, add or update tests and run them. Summarize what changed and offer to open a pull request that closes ${ref}.`
+    ? `Fix issue ${ref}: ${issue.title}. Review the supplied issue context, work on a new branch, make the requested change, add or update tests and run them. Summarize what changed and offer to open a pull request that closes ${ref}.`
     : `Let's work on issue ${ref}: `;
 }
 

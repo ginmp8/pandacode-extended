@@ -323,7 +323,9 @@ test('GitHub Copilot model discovery does not crash the picker in an existing ch
 test('Pi offers four approval modes with Accept edits', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.provider', 'pi'));
   await page.goto('/');
+  await expect(page.locator('#prompt')).toBeEnabled();
   await page.locator('.new-task-button').click();
+  await expect(page.locator('#model-picker-trigger .provider-logo[data-provider="pi"]')).toBeVisible();
   await page.locator('#mode-picker-trigger').click();
   const items = page.getByRole('dialog', { name: 'Permissions', exact: true }).getByRole('menuitemradio');
   await expect(items).toHaveCount(4);
@@ -354,7 +356,9 @@ test('settings organization supports Pi models and executable settings', async (
 test('DeepSeek has a key card, four approval modes and effort levels', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.provider', 'deepseek'));
   await page.goto('/');
+  await expect(page.locator('#prompt')).toBeEnabled();
   await page.locator('.new-task-button').click();
+  await expect(page.locator('#model-picker-trigger .provider-logo[data-provider="deepseek"]')).toBeVisible();
   await page.locator('#mode-picker-trigger').click();
   const items = page.getByRole('dialog', { name: 'Permissions', exact: true }).getByRole('menuitemradio');
   await expect(items).toHaveCount(4);
@@ -372,7 +376,9 @@ test('DeepSeek has a key card, four approval modes and effort levels', async ({ 
 test('Command Code has a key card, four approval modes and its own model list', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.provider', 'commandcode'));
   await page.goto('/');
+  await expect(page.locator('#prompt')).toBeEnabled();
   await page.locator('.new-task-button').click();
+  await expect(page.locator('#model-picker-trigger .provider-logo[data-provider="commandcode"]')).toBeVisible();
   await page.locator('#mode-picker-trigger').click();
   const items = page.getByRole('dialog', { name: 'Permissions', exact: true }).getByRole('menuitemradio');
   await expect(items).toHaveCount(4);
@@ -390,6 +396,7 @@ test('Command Code has a key card, four approval modes and its own model list', 
 test('Cline has a sign-in card, four approval modes and thinking levels', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.provider', 'cline'));
   await page.goto('/');
+  await expect(page.locator('#prompt')).toBeEnabled();
   await page.locator('.new-task-button').click();
   await expect(page.locator('#model-picker-trigger .provider-logo[data-provider="cline"]')).toBeVisible();
   await page.locator('#mode-picker-trigger').click();
@@ -429,7 +436,9 @@ test('plans have one setup home and OpenCode models stay under Agents', async ({
 test('Kilo keeps its catalog, permissions, named account configuration and installed-CLI guidance', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.provider', 'kilo'));
   await page.goto('/');
+  await expect(page.locator('#prompt')).toBeEnabled();
   await page.locator('.new-task-button').click();
+  await expect(page.locator('#model-picker-trigger .provider-small')).toHaveClass('provider-small kilo');
   const trigger = page.getByRole('button', { name: 'Choose harness and model', exact: true });
   await trigger.click();
   const picker = page.getByRole('dialog', { name: 'Harness and model', exact: true });

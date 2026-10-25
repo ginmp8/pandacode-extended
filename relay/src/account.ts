@@ -1,9 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import { deleteAccountState } from "./account-delete.ts";
 import { type Bucket, fullBucket, take } from "./bucket.ts";
 import { type Env, fail, json } from "./env.ts";
 import { type DeviceView, errorFrame, forwardFrame, parseClientFrame, presenceFrame, undeliverableFrame } from "./frames.ts";
 import { MAX_DEVICES } from "./limits.ts";
-import { hostChanged, isStale, issuedAfterRegistration, keyChanged } from "./policy.ts";
+import { hostChanged, isStale, keyChanged, tokenCurrent } from "./policy.ts";
 import { isUuid, parseDevice } from "./validate.ts";
 
 interface Attachment extends Bucket {
@@ -12,7 +13,7 @@ interface Attachment extends Bucket {
   joinedAt: number;
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 interface Row {
   id: string;
@@ -22,6 +23,7 @@ interface Row {
   host: number;
   last_seen: number;
   registered_at: number;
+  gen: string;
   [column: string]: SqlStorageValue;
 }
 
@@ -31,6 +33,9 @@ export class Account extends DurableObject<Env> {
   private readonly buckets = new Map<string, Bucket>();
   // Sockets this wake already closed or saw leave, so close + error (or revoke + close) broadcast once.
   private readonly departed = new WeakSet<WebSocket>();
+  /** deleteAll removes the schema too. Only an explicit new sign-in recreates it. */
+  private deleted = false;
+  private deleting = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -56,23 +61,36 @@ export class Account extends DurableObject<Env> {
     if (!sql.exec<{ name: string }>("PRAGMA table_info(devices)").toArray().some((c) => c.name === "registered_at")) {
       sql.exec("ALTER TABLE devices ADD COLUMN registered_at INTEGER NOT NULL DEFAULT 0");
     }
+    // Existing rows retain legacy token compatibility until they are revoked or
+    // deleted. Fresh registrations receive an unguessable generation.
+    if (!sql.exec<{ name: string }>("PRAGMA table_info(devices)").toArray().some((c) => c.name === "gen")) {
+      sql.exec("ALTER TABLE devices ADD COLUMN gen TEXT NOT NULL DEFAULT ''");
+    }
     if (version >= 0) sql.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   async fetch(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
+    if (this.deleting) return fail(503, "account deletion is in progress");
+    if (this.deleted) {
+      if (pathname !== "/internal/register") return fail(401, "account was deleted");
+      this.migrate();
+      this.deleted = false;
+    }
     if (pathname === "/internal/register") return this.register(await request.json());
     // Every request is checked against the registered devices, so a revoked token stops working at once.
     const device = request.headers.get("x-device-id") ?? "";
     const row = this.row(device);
     if (!row) return fail(401, "device is not registered");
-    if (!issuedAfterRegistration(Number(request.headers.get("x-token-iat")), row.registered_at)) {
+    const gen = request.headers.get("x-token-gen") ?? undefined;
+    if (!tokenCurrent({ iat: Number(request.headers.get("x-token-iat")), gen }, row)) {
       return fail(401, "token was issued before the device registered");
     }
 
+    if (pathname === "/v1/account") return request.method === "DELETE" ? this.deleteAccount() : fail(405, "method not allowed");
     if (pathname === "/v1/connect") return this.join(request, device);
     // The Worker signs the fresh token after this 200; reaching here means the device is still registered.
-    if (pathname === "/v1/token") return request.method === "POST" ? json({ ok: true }) : fail(405, "method not allowed");
+    if (pathname === "/v1/token") return request.method === "POST" ? json({ ok: true, gen: row.gen }) : fail(405, "method not allowed");
     if (pathname === "/v1/devices" && request.method === "GET") {
       if (this.reap()) this.broadcastPresence();
       return json({ devices: this.devices() });
@@ -88,12 +106,13 @@ export class Account extends DurableObject<Env> {
     const existing = this.row(d.id);
     if (keyChanged(existing?.public_key, d.publicKey)) return fail(409, "device key changed");
     if (!existing && this.rows().length >= MAX_DEVICES) return fail(403, `device limit reached (${MAX_DEVICES})`);
+    const gen = crypto.randomUUID();
     this.ctx.storage.sql.exec(
-      `INSERT INTO devices (id, name, platform, public_key, last_seen, registered_at) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO devices (id, name, platform, public_key, last_seen, registered_at, gen) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform`,
-      d.id, d.name, d.platform, d.publicKey, Date.now(), Math.floor(Date.now() / 1000),
+      d.id, d.name, d.platform, d.publicKey, Date.now(), Math.floor(Date.now() / 1000), gen,
     );
-    return json({ ok: true });
+    return json({ ok: true, gen: existing?.gen ?? gen });
   }
 
   private revoke(raw: string): Response {
@@ -125,9 +144,21 @@ export class Account extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
+  private async deleteAccount(): Promise<Response> {
+    this.deleting = true;
+    try {
+      await deleteAccountState(this.ctx, (ws, code, reason) => this.close(ws, code, reason));
+      this.buckets.clear();
+      this.deleted = true;
+      return json({ ok: true });
+    } finally { this.deleting = false; }
+  }
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.deleting || this.deleted || this.departed.has(ws)) return;
     const att = ws.deserializeAttachment() as Attachment | null;
     if (!att) return ws.close(1011, "missing attachment");
+    if (!this.row(att.device)) return this.close(ws, 4001, "signed out");
     const now = Date.now();
     const spent = take(this.buckets.get(att.device) ?? att, now);
     this.buckets.set(att.device, spent.bucket);

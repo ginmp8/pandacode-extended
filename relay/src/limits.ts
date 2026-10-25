@@ -31,7 +31,7 @@ export async function readJsonLimited(request: Request, limit: number): Promise<
     const bytes = new Uint8Array(used);
     let offset = 0;
     for (const part of parts) { bytes.set(part, offset); offset += part.byteLength; }
-    return { tooLarge: false, value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) };
+    return { tooLarge: false, value: JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)) };
   } catch {
     return { tooLarge: false, value: null };
   } finally {

@@ -2,6 +2,7 @@ import { Account } from "./account.ts";
 import { type Env, fail, json } from "./env.ts";
 import { githubUser } from "./github.ts";
 import { MAX_FRAME_BYTES, readJsonLimited } from "./limits.ts";
+import { isKnownRoute } from "./routes.ts";
 import { signToken, verifyToken } from "./token.ts";
 import { parseDevice } from "./validate.ts";
 
@@ -25,7 +26,9 @@ async function authGithub(request: Request, env: Env): Promise<Response> {
   if ("status" in user) return fail(user.status, user.error);
   const res = await stub(env, user.id).fetch("https://account/internal/register", { method: "POST", body: JSON.stringify(device) });
   if (!res.ok) return res;
-  const token = await signToken(env.SESSION_SECRET, user.id, device.id, Math.floor(Date.now() / 1000));
+  const { gen } = await res.json() as { gen: string };
+  if (typeof gen !== "string") return fail(500, "registration could not be confirmed");
+  const token = await signToken(env.SESSION_SECRET, user.id, device.id, Math.floor(Date.now() / 1000), gen || undefined);
   return json({ token, account: user });
 }
 
@@ -35,8 +38,7 @@ export default {
     const path = url.pathname;
     if (path === "/v1/auth/github") return request.method === "POST" ? authGithub(request, env) : fail(405, "method not allowed");
 
-    const known = path === "/v1/connect" || path === "/v1/devices" || path === "/v1/token" || path.startsWith("/v1/devices/");
-    if (!known) return fail(404, "not found");
+    if (!isKnownRoute(path)) return fail(404, "not found");
     const bearer = /^Bearer (\S+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
     const claims = bearer ? await verifyToken(env.SESSION_SECRET, bearer, Math.floor(Date.now() / 1000)) : null;
     if (!claims) return fail(401, "invalid or expired token");
@@ -46,9 +48,13 @@ export default {
     const headers = new Headers(request.headers);
     headers.set("x-device-id", claims.dev);
     headers.set("x-token-iat", String(claims.iat));
+    headers.delete("x-token-gen");
+    if (claims.gen !== undefined) headers.set("x-token-gen", claims.gen);
     headers.delete("authorization");
     const res = await stub(env, claims.acct).fetch(new Request(request, { headers }));
     if (path !== "/v1/token" || !res.ok) return res;
-    return json({ token: await signToken(env.SESSION_SECRET, claims.acct, claims.dev, Math.floor(Date.now() / 1000)) });
+    const { gen } = await res.json() as { gen: string };
+    if (typeof gen !== "string") return fail(500, "registration could not be confirmed");
+    return json({ token: await signToken(env.SESSION_SECRET, claims.acct, claims.dev, Math.floor(Date.now() / 1000), gen || undefined) });
   },
 } satisfies ExportedHandler<Env>;

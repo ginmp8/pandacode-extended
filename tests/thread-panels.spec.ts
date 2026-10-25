@@ -72,24 +72,24 @@ test.describe('thread panels', () => {
     await page.getByRole('button', { name: 'Files', exact: true }).click();
     await page.locator('.file-row').getByRole('button', { name: 'src', exact: true }).click();
     await page.locator('.file-row').getByRole('button', { name: 'main.ts', exact: true }).click();
-    await expect(page.locator('.file-preview-title')).toHaveText('src/main.ts');
+    await expect(page.locator('.file-view-path')).toHaveText('src/main.ts');
     await select(page, 'session-2');
     await expect(inspector(page)).toBeVisible();
     await openInspectorTab(page, 'Files');
     await page.getByRole('button', { name: 'Files', exact: true }).click();
     await page.locator('.file-row').getByRole('button', { name: 'package.json', exact: true }).click();
-    await expect(page.locator('.file-preview-title')).toHaveText('package.json');
+    await expect(page.locator('.file-view-path')).toHaveText('package.json');
     await page.locator('#inspector-toggle').click();
     await select(page, 'session-1');
     await expect(inspector(page)).toBeVisible();
-    await expect(page.locator('.file-preview-title')).toHaveText('src/main.ts');
+    await expect(page.locator('.file-view-path')).toHaveText('src/main.ts');
     expect((await calls(page, 'read_file')).at(-1).args).toMatchObject({sessionId:'session-1',path:'src/main.ts'});
-    await page.getByRole('button', { name: 'Back', exact: true }).click();
+    await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
     await expect(page.locator('.file-folder-path')).toContainText('/ src');
     await select(page, 'session-2');
     await expect(inspector(page)).toBeHidden();
     await page.locator('#inspector-toggle').click();
-    await expect(page.locator('.file-preview-title')).toHaveText('package.json');
+    await expect(page.locator('.file-view-path')).toHaveText('package.json');
   });
 
   test('new tasks open on Changes and returning restores the prior task browser including in-page navigation', async ({ page }) => {
@@ -166,9 +166,9 @@ test.describe('thread panels', () => {
     await select(page, 'session-1');
     await expect.poll(() => page.evaluate(() => typeof (window as any).__releasePanelFile)).toBe('function');
     await select(page, 'session-2');
-    await expect(page.locator('.file-preview-title')).toHaveText('package.json');
+    await expect(page.locator('.file-view-path')).toHaveText('package.json');
     await page.evaluate(() => (window as any).__releasePanelFile());
-    await expect(page.locator('.file-preview-title')).toHaveText('package.json');
+    await expect(page.locator('.file-view-path')).toHaveText('package.json');
   });
 
   test('a browser mount that finishes after switching tasks disposes its detached view cleanly', async ({ page }) => {
@@ -212,7 +212,7 @@ test.describe('thread panels', () => {
     await select(page, 'session-1');
     await page.evaluate(() => (window as any).__releasePanelFile());
     await page.locator('#inspector-toggle').click();
-    await expect(page.locator('.file-preview-title')).toHaveText('README.md');
+    await expect(page.locator('.file-view-path')).toHaveText('README.md');
     await expect(page.locator('.document-viewer')).toBeVisible();
   });
 
@@ -222,6 +222,7 @@ test.describe('thread panels', () => {
     await page.getByRole('button', { name:'Files',exact:true }).click();
     await page.locator('.file-row').getByRole('button', { name:'src',exact:true }).click();
     await page.locator('.file-row').getByRole('button', { name:'main.ts',exact:true }).click();
+    await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
     await page.evaluate(() => { (window as any).__holdPanelProject = true; });
     await page.getByRole('button', { name:'Change task project',exact:true }).first().click();
     await page.getByRole('dialog', { name:'Choose project',exact:true }).getByRole('option', {name:/^pandacode — /}).click();
@@ -231,7 +232,7 @@ test.describe('thread panels', () => {
     await page.evaluate(() => (window as any).__releasePanelProject());
     await expect(row(page, 'session-2').locator('.task-project')).toHaveText('pandacode');
     await select(page, 'session-2');
-    await expect(page.locator('.file-preview-title')).toHaveCount(0);
+    await expect(page.locator('.file-view-path')).toHaveCount(0);
     await expect(page.locator('.file-folder-path')).toHaveText('pandacode');
     expect((await calls(page, 'read_file')).length).toBe(reads);
   });

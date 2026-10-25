@@ -9,7 +9,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const read = async path => readFile(resolve(root, path), 'utf8');
 const json = async path => JSON.parse(await read(path));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
-const legacy = ['0.3.35-hardened.3', '0.3.35-hardened.4', '0.3.35.3', '0.3.35.4', '0.3.41-hardened', '0.3.42-hardened', '0.3.42.1'];
+const legacy = ['0.3.35-hardened.3', '0.3.35-hardened.4', '0.3.35.3', '0.3.35.4', '0.3.41-hardened', '0.3.42-hardened'];
 
 export async function check() {
   const history = await json('HARDENED-REVISION.json');
@@ -45,6 +45,7 @@ export async function check() {
   assert(rootFiles.every(name => /^\d+\.\d+\.\d+\.md$/.test(name)), 'Local notes leaked into the upstream root');
   assert(rootFiles.includes(meta.tracked_upstream_version + '.md'), 'Missing tracked upstream reference');
   assert(extendedFiles.includes(v + '.md'), 'Missing active Extended note');
+  assert(!rootFiles.includes('0.3.42.1.md') && !extendedFiles.includes('0.3.42.1.md') && !dates['extended/0.3.42.1'], 'Unpublished 0.3.42.1 candidate must not be in the release history');
   assert(Boolean((await read(meta.release_note)).trim()) && Boolean(dates[releaseDateKey(v)]), 'Missing active Extended release note/date');
   for (const older of legacy) {
     assert(!rootFiles.includes(older + '.md') && extendedFiles.includes(older + '.md'), 'Legacy release note misplaced: ' + older);

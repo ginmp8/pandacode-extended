@@ -6,7 +6,7 @@ const notes = new URL('../releases/', import.meta.url);
 const extended = new URL('../releases/extended/', import.meta.url);
 const datesFile = new URL('../website/src/data/release-dates.json', import.meta.url);
 const historicalUndated = new Set(['extended/0.3.35-hardened.3', 'extended/0.3.35-hardened.4']);
-const legacy = ['0.3.35-hardened.3', '0.3.35-hardened.4', '0.3.35.3', '0.3.35.4', '0.3.41-hardened', '0.3.42-hardened', '0.3.42.1'];
+const legacy = ['0.3.35-hardened.3', '0.3.35-hardened.4', '0.3.35.3', '0.3.35.4', '0.3.41-hardened', '0.3.42-hardened'];
 
 test('original releases remain at their original paths and every Extended history entry moves into its own folder', async () => {
   const root = (await readdir(notes)).filter(name => name.endsWith('.md'));
@@ -15,6 +15,8 @@ test('original releases remain at their original paths and every Extended histor
   assert.ok(root.every(name => /^\d+\.\d+\.\d+\.md$/.test(name)), 'root contains an Extended release or invalid filename');
   assert.ok(root.includes('0.3.42.md'));
   assert.ok(local.includes('0.4.0.md'));
+  assert.ok(!root.includes('0.3.42.1.md'));
+  assert.ok(!local.includes('0.3.42.1.md'), 'never-published 0.3.42.1 candidate must not appear as an Extended release');
   for (const v of legacy) {
     assert.ok(local.includes(v + '.md'), 'missing migrated local history ' + v);
     assert.ok(!root.includes(v + '.md'), 'legacy local release still in original namespace ' + v);
@@ -32,5 +34,6 @@ test('every dated source note has a uniquely namespaced ISO date, without invent
   assert.deepEqual(local.filter(key => !dates[key]).sort(), [...historicalUndated].sort());
   assert.equal(dates['0.3.42'], '2026-10-25');
   assert.equal(dates['extended/0.4.0'], '2026-10-25');
+  assert.equal(dates['extended/0.3.42.1'], undefined, 'never-published candidate must not have a release date');
   assert.equal(dates['0.4.0'], undefined, 'Extended and original releases must not share an unqualified date key');
 });

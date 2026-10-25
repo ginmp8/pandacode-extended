@@ -124,6 +124,27 @@ fn normalize_url(input: &str) -> Result<tauri::Url> {
     Ok(url)
 }
 
+fn external_allowed(url: &tauri::Url, is_preview: bool, preview_origin: Option<&str>) -> Result<()> {
+    if is_preview || preview_origin.is_some_and(|origin| origin == url.origin().ascii_serialization()) {
+        return Err("Workspace file previews stay in the native Browser pane.".into());
+    }
+    Ok(())
+}
+
+/// Explicit UI choice only. A local document cannot escape its preview origin
+/// through this route, and system browsing never advertises native QA access.
+#[tauri::command]
+pub async fn browser_open_external(caller: Webview, app: tauri::AppHandle, url: String) -> Result<()> {
+    guard(&caller)?;
+    let url = normalize_url(&url)?;
+    {
+        let state = app.state::<BrowserState>();
+        let origin = state.preview_origin.lock().map_err(|_| "Browser navigation is unavailable.")?;
+        external_allowed(&url, app.state::<crate::file_preview::FilePreviews>().is_preview_url(&url), origin.as_deref())?;
+    }
+    crate::open_external_url(url.to_string()).await
+}
+
 fn allowed_url(url: &tauri::Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
@@ -789,6 +810,17 @@ pub async fn browser_close(caller: Webview, app: tauri::AppHandle) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_system_browsing_preserves_preview_origins() {
+        let ordinary = normalize_url("localhost:5173/app").unwrap();
+        assert!(external_allowed(&ordinary, false, None).is_ok());
+        assert!(external_allowed(&ordinary, true, None).is_err());
+        assert!(external_allowed(&ordinary, false, Some("http://localhost:5173")).is_err());
+        for input in ["file:///tmp/private.html", "https://user:password@example.com/", "javascript:alert(1)"] {
+            assert!(normalize_url(input).is_err());
+        }
+    }
+
     #[test]
     fn file_preview_cannot_navigate_to_an_external_or_other_local_origin() {
         let state = BrowserState::default();

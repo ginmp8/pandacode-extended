@@ -1400,6 +1400,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'cloud_machines': result = previewCloud.list(); break;
     case 'cloud_create': result = previewCloud.create(args.provider, args.name); break;
     case 'cloud_power': result = previewCloud.power(args.id, args.action); break;
+    case 'cloud_keep_alive': result = previewCloud.keepAlive(args.id, args.minutes); break;
+    case 'cloud_instabox_images': result = previewCloud.images(); break;
+    case 'cloud_instabox_set_image': result = previewCloud.setImage(args.image); break;
     case 'cloud_frame': result = await previewCloud.frame(args.id); break;
     case 'cloud_input': result = previewCloud.input(args.id, args.input); break;
     case 'vm_status': result = previewVm.status(); break;

@@ -2,7 +2,14 @@
  * connected providers, with what each can do. Pure, so the panel only renders. */
 import type { Vm, VmStatus } from './vm-panel';
 
-export type CloudMachine = { id: string; provider: string; name: string; state: string; os: string; desktop: boolean; detail: string };
+export type CloudCapabilities = { start: boolean; stop: boolean; delete: boolean; exec: boolean; lease: boolean };
+export type CloudMachine = { id: string; provider: string; name: string; state: string; os: string; desktop: boolean; detail: string; capabilities?: CloudCapabilities };
+export const SANDBOX_PROVIDERS = { gcloud: 'Google Cloud VM', e2b: 'E2B', modal: 'Modal', vercel: 'Vercel Sandbox', codesandbox: 'CodeSandbox', runloop: 'Runloop', blaxel: 'Blaxel', tensorlake: 'Tensorlake', freestyle: 'Freestyle', boat: 'boat', instabox: 'InstaBox' } as const;
+/** Compatibility for older native snapshots; new native machines declare these directly. */
+export function cloudCapabilities(provider: string): CloudCapabilities {
+  const known = ['daytona', 'cloudflare', 'aws', 'agentcore', ...Object.keys(SANDBOX_PROVIDERS)].includes(provider);
+  return { start: known && !['modal', 'vercel', 'agentcore'].includes(provider), stop: known && !['modal', 'vercel', 'blaxel'].includes(provider), delete: known, exec: known, lease: ['e2b', 'modal', 'vercel', 'codesandbox', 'runloop', 'freestyle', 'boat', 'instabox'].includes(provider) };
+}
 export type { CloudConnection } from './cloud-settings';
 import type { CloudConnection } from './cloud-settings';
 export type Machine = {
@@ -19,6 +26,10 @@ export type Machine = {
   /** Local VMs running outside PandaCode must be restarted here to be seen. */
   elsewhere: boolean;
   canStart: boolean;
+  canStop: boolean;
+  canDelete: boolean;
+  canLease: boolean;
+  leaseMinutes: number;
   local?: Vm;
 };
 export type CreateOption = { id: string; label: string; description: string; cloud: boolean };
@@ -30,12 +41,16 @@ export function machines(status: VmStatus | undefined, cloud: CloudMachine[]): M
   const local = (status?.vms ?? []).map((vm): Machine => ({
     key: vm.name, name: vm.name, os: vm.os, cloud: false, running: vm.running, live: vm.running && vm.attached, desktop: true,
     detail: `${osName(vm.os)} · ${memory(vm.memoryMb)} · ${vm.running ? (vm.attached ? 'Running' : 'Running elsewhere') : 'Stopped'}`,
-    elsewhere: vm.running && !vm.attached, canStart: true, local: vm,
+    elsewhere: vm.running && !vm.attached, canStart: true, canStop: true, canDelete: true, canLease: false, leaseMinutes: 0, local: vm,
   }));
   const remote = cloud.map((machine): Machine => ({
     key: machine.id, name: machine.name, os: machine.os, cloud: true, running: machine.state === 'running', live: machine.state === 'running' && machine.desktop,
     desktop: machine.desktop, detail: `${machine.detail} · ${machine.state[0].toUpperCase()}${machine.state.slice(1)}`, elsewhere: false,
-    canStart: machine.provider !== 'agentcore',
+    canStart: (machine.capabilities ?? cloudCapabilities(machine.provider)).start,
+    canStop: (machine.capabilities ?? cloudCapabilities(machine.provider)).stop,
+    canDelete: (machine.capabilities ?? cloudCapabilities(machine.provider)).delete,
+    canLease: (machine.capabilities ?? cloudCapabilities(machine.provider)).lease,
+    leaseMinutes: machine.provider === 'runloop' ? 360 : 30,
   }));
   return [...local, ...remote];
 }
@@ -52,6 +67,9 @@ export function createOptions(status: VmStatus | undefined, connections: CloudCo
       { id: 'cloud:aws-windows', label: 'AWS Windows desktop', description: 'Windows Server on EC2 · about 10 min to set up', cloud: true },
       { id: 'cloud:agentcore', label: 'AWS AgentCore session', description: 'Commands only · ends after an hour', cloud: true },
     ] : []),
+    ...Object.entries(SANDBOX_PROVIDERS).filter(([provider]) => on(provider as CloudConnection['provider']) && (provider !== 'vercel' || connections.some(c => c.provider === 'vercel' && c.sandboxes))).map(([provider, label]) => ({
+      id: `cloud:${provider}`, label, description: `Commands only · ${provider === 'modal' || provider === 'vercel' ? 'delete only; no resume' : provider === 'blaxel' ? 'automatic standby' : 'your cloud account'} · billed by provider`, cloud: true,
+    })),
   ];
   return [...local, ...cloud];
 }

@@ -66,7 +66,7 @@ export function mountVmPanel(root: HTMLElement, host: VmHost) {
       const setup = status.supported && !status.installed ? `<button type="button" class="primary-button" data-vm="setup">Set up VMs</button><small>Downloads Tart from Cirrus Labs and checks Apple's notarization. Free for personal and small-team use.</small>` : '';
       const options = createOptions(status, connections);
       const local = status.supported ? "PandaCode runs Linux and macOS VMs on Apple's Virtualization framework: headless, and only the memory you give it." : 'Local VMs need a Mac with Apple silicon.';
-      return `<strong>${options.length ? 'Create a machine' : 'Run Linux, macOS and Windows machines'}</strong><p>Agents can see, click, type and run commands in an isolated machine. ${local}${anyCloud() ? '' : ' Cloud sandboxes from Daytona, Cloudflare and AWS connect in Settings → Agents.'}</p>${setup}${options.length ? `<div class="vm-images">${options.map(option => `<button type="button" class="secondary-button" data-vm-create="${escape(option.id)}">${escape(option.label)}<small>${escape(option.description)}</small></button>`).join('')}</div>` : ''}`;
+      return `<strong>${options.length ? 'Create a machine' : 'Run Linux, macOS and Windows machines'}</strong><p>Agents can run commands in isolated machines and control desktops where supported. ${local}${anyCloud() ? '' : ' Connect cloud providers in Settings → Cloud sandboxes.'}</p>${setup}${options.length ? `<div class="vm-images">${options.map(option => `<button type="button" class="secondary-button" data-vm-create="${escape(option.id)}">${escape(option.label)}<small>${escape(option.description)}</small></button>`).join('')}</div>` : ''}`;
     }
     if (vm.elsewhere) return `<strong>${escape(vm.name)} is running outside PandaCode</strong><p>Stop it, then start it here to see its screen.</p><button type="button" class="secondary-button" data-vm="power">Stop</button>`;
     if (!vm.running) return `<strong>${escape(vm.name)} is ${vm.os === 'darwin' && !vm.cloud ? 'stopped or suspended' : 'stopped'}</strong><p>${escape(vm.detail)}</p>${vm.canStart ? '<button type="button" class="primary-button" data-vm="power">Start</button>' : ''}`;
@@ -81,7 +81,7 @@ export function mountVmPanel(root: HTMLElement, host: VmHost) {
     root.querySelector('.vm-name')!.textContent = vm?.name ?? 'Machines';
     root.querySelector('.vm-detail')!.textContent = vm ? vm.detail : '';
     const power = button('power');
-    power.disabled = !vm || Boolean(busy) || (!vm.running && !vm.canStart);
+    power.disabled = !vm || Boolean(busy) || (vm.running ? !vm.canStop : !vm.canStart);
     power.innerHTML = icon(vm?.running ? 'stop' : 'play');
     power.setAttribute('aria-label', vm?.running ? 'Stop VM' : 'Start VM'); power.title = vm?.running ? 'Stop' : 'Start';
     button('suspend').hidden = !(vm && !vm.cloud && vm.os === 'darwin' && live());
@@ -121,7 +121,7 @@ export function mountVmPanel(root: HTMLElement, host: VmHost) {
     finally { busy = ''; if (!disposed) { await refresh(); } }
   }
   const power = () => {
-    const vm = current(); if (!vm) return;
+    const vm = current(); if (!vm || (vm.running ? !vm.canStop : !vm.canStart)) return;
     const action = vm.running ? 'stop' : 'start';
     const label = `${vm.running ? 'Stopping' : 'Starting'} ${vm.name}…`;
     if (vm.cloud) return run(label, () => host.call('cloud_power', { id: vm.key, action }));
@@ -152,9 +152,11 @@ export function mountVmPanel(root: HTMLElement, host: VmHost) {
   function chooseVm(anchor: HTMLElement): void {
     const vm = current();
     const items: ChoiceItem[] = all().map(machine => ({ id: `vm:${machine.key}`, label: machine.name, description: machine.detail, icon: 'monitor', selected: machine.key === vm?.key }));
-    if (vm) items.push({ id: 'delete', label: `Delete ${vm.name}`, description: vm.cloud ? 'Removes it from your cloud account' : `Frees about ${vm.local?.sizeGb ?? 0} GB`, icon: 'trash' });
+    if (vm?.canLease) items.push({ id: 'lease', label: `Request ${vm.leaseMinutes}-minute activity lease`, description: 'Provider limits apply; cloud charges may apply', icon: 'play' });
+    if (vm?.canDelete) items.push({ id: 'delete', label: `Delete ${vm.name}`, description: vm.cloud ? 'Removes it from your cloud account' : `Frees about ${vm.local?.sizeGb ?? 0} GB`, icon: 'trash' });
     host.choose(anchor, 'Machines', items, id => {
       if (id === 'delete' && vm) void run(`Deleting ${vm.name}…`, () => vm.cloud ? host.call('cloud_power', { id: vm.key, action: 'delete' }) : host.call<VmStatus>('vm_power', { name: vm.key, action: 'delete' }), `${vm.name} is deleted.`);
+      else if (id === 'lease' && vm?.canLease) void run('Requesting activity lease…', () => host.call('cloud_keep_alive', { id: vm.key, minutes: vm.leaseMinutes }), `Activity lease requested for ${vm.leaseMinutes} minutes.`);
       else if (id.startsWith('vm:')) void run('', () => host.call<VmStatus>('vm_show', { name: id.slice(3) }));
     });
   }

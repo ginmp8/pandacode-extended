@@ -13,17 +13,40 @@ pub mod commands;
 pub mod daytona;
 pub mod deploy;
 pub mod http;
+pub mod sandbox;
+pub mod e2b;
+pub mod modal;
+pub mod vercel_sandbox;
+pub mod codesandbox;
+pub mod runloop;
+pub mod blaxel;
+pub mod tensorlake;
+pub mod freestyle;
+pub mod boat;
+pub mod instabox;
+pub mod gcloud_vm;
 
 use serde::{Deserialize, Serialize};
 
 use crate::secret_store;
 
 const SERVICE: &str = "app.pandacode.cloud";
-pub const PROVIDERS: [&str; 4] = ["daytona", "cloudflare", "aws", "agentcore"];
+/// Serialize connection/settings commits across native windows. Provider validation
+/// may be performed before taking this lock when the connection is rechecked after it.
+pub fn settings_guard() -> crate::Result<std::sync::MutexGuard<'static, ()>> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().map_err(|_| "Cloud settings are temporarily unavailable.".into())
+}
+
+#[cfg(test)]
+pub fn settings_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap()
+}
+pub const PROVIDERS: [&str; 15] = ["daytona", "cloudflare", "aws", "agentcore", "gcloud", "e2b", "modal", "vercel", "codesandbox", "runloop", "blaxel", "tensorlake", "freestyle", "boat", "instabox"];
 
 /// A cloud machine as the panel and tools see it.
-#[derive(Clone, Debug, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Machine {
     pub id: String,
     pub provider: String,
@@ -34,6 +57,22 @@ pub struct Machine {
     /// Has a screen agents can see and control.
     pub desktop: bool,
     pub detail: String,
+}
+
+impl Serialize for Machine {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("Machine", 8)?;
+        value.serialize_field("id", &self.id)?;
+        value.serialize_field("provider", &self.provider)?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("state", &self.state)?;
+        value.serialize_field("os", &self.os)?;
+        value.serialize_field("desktop", &self.desktop)?;
+        value.serialize_field("detail", &self.detail)?;
+        value.serialize_field("capabilities", &sandbox::capabilities(&self.provider))?;
+        value.end()
+    }
 }
 
 /// `daytona:abc` → (`daytona`, `abc`) for known providers.
@@ -62,6 +101,8 @@ pub struct Settings {
     /// Google Cloud uses the gcloud CLI's own login; PandaCode stores the project and region.
     pub gcloud_project: Option<String>,
     pub gcloud_region: Option<String>,
+    /// Non-secret provider choices. API credentials remain separate vault entries.
+    pub providers: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 pub fn settings() -> Settings {
     secret_store::get(SERVICE, "settings").and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()
@@ -101,6 +142,8 @@ mod tests {
     }
     #[test]
     fn settings_round_trip_through_the_secure_store() {
+        let _serial = settings_test_guard();
+        let _guard = settings_guard().unwrap();
         let saved = Settings { daytona_api_url: Some("https://example.test/api".into()), cloudflare_sandboxes: vec!["a".into()], ..Settings::default() };
         save_settings(&saved).unwrap();
         assert_eq!(settings(), saved);

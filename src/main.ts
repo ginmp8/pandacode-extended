@@ -601,10 +601,13 @@ const releaseTranscript = (): void => { if (transcriptScroller.scrollTop > 0) st
 // reach the scroll handler, where any upward scroll means the reader left.
 new MutationObserver(records => { if (records.some(record => !transcriptScroller.contains(record.target))) followTranscript(); })
   .observe($('.conversation-pane'), { childList: true, subtree: true, attributes: true });
-transcriptScroller.addEventListener('scroll', () => {
+transcriptScroller.addEventListener('scroll', event => {
   const top = transcriptScroller.scrollTop;
   if (transcriptGap() <= 2) stickToBottom = true;
-  else if (transcriptPointerScroll && top < lastTranscriptTop) stickToBottom = false;
+  // Browser layout clamps emit trusted scroll events too. Only a real pointer
+  // drag or an explicitly dispatched scroll request changes reading intent;
+  // wheel and keyboard navigation set that intent in their own handlers.
+  else if ((transcriptPointerScroll || !event.isTrusted) && (top < lastTranscriptTop || top <= 1)) stickToBottom = false;
   lastTranscriptTop = top;
   void loadOlderMessages();
 }, { passive: true });

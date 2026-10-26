@@ -1,6 +1,6 @@
 # Upstream integration assessment: PandaCode 0.3.49–0.3.50
 
-Status: **integration candidate; full native/behavioral verification pending**. This document is not a feature-parity claim or a security certification.
+Status: **integration candidate under review; native CI and isolated behavior must be checked at the final commit; physical two-device verification remains pending**. This document is not a feature-parity claim or a security certification.
 
 ## Immutable scope
 - Extended `main` baseline: `479f2e6ac700d216d62ae08681e36aaaa20fa074` (technical version `0.5.2`, display `0.5.2+pc.0.3.48`).
@@ -64,3 +64,11 @@ The full GitHub tree inventory was available as metadata (`truncated=false` for 
 ### Security and compatibility gates still required
 
 The Extended anti-replay SQLite database must remain durable and fail-closed; host authorization and active grants must be rechecked after asynchronous work; local Full access must remain disabled by default; previously hardened preview/network/update paths and bot/task behavior must remain unchanged. Direct route announcements must not cause any unapproved device to initiate a private-address probe. The new grant and old trusted-key state must have an explicitly verified migration and reapproval path. Missing real two-device tests, unsupported native targets or red CI checks block a parity claim and release publication.
+
+## Post-integration security and acceptance work in PR #40
+
+Issue #41 covers explicit approval of bot-created schedules, permission ceilings for unattended work, key-bound trust and scoped grants, and durable denial across interrupted permission writes. Follow-up review also requires a consistent legacy/scoped revocation, verified pairing responses after trust removal, and no untrusted direct-route negotiation.
+
+The native and browser tests must exercise these properties, not only compile successfully. The scoped pairing UI, diagnostics redaction, explicit direct-route opt-in and trace/Markdown browser suites are required in CI before a merge. No user-side installation, updater or automatic deployment is part of this candidate.
+
+**Still not established by CI:** transport behavior on two distinct devices, LAN/Tailscale routing on each supported OS, hardware/device-key rotation, and an end-to-end network failure test during revocation. These are explicit manual acceptance gaps, not passed checks.

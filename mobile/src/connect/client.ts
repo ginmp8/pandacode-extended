@@ -758,15 +758,21 @@ async function subscribeOnce(deviceId: string): Promise<void> {
   const version = securityWrites.version;
   const ids = [...subscribed(deviceId)].slice(0, 500);
   if (!ids.length || !socket.open) return;
-  let reply: { tasks: SubscribedTask[] };
-  try {
-    // Only glanced tasks (no open thread on this host): background work.
-    reply = await call(deviceId, 'subscribe', { sessionIds: ids }, TIMEOUT_MS, !watched.get(deviceId)?.size);
-  } catch {
-    return; // offline; the next presence frame or renewal retries
-  }
+  // Replay pages are ordered before any live events received while subscribe is in flight.
+  // Keep Extended's session-generation checks across every asynchronous boundary.
+  const background = !watched.get(deviceId)?.size;
+  const { reply, tasks, held } = await followReplay(
+    cursors, deviceId, ids,
+    params => call<SubscribeReply>(deviceId, 'subscribe', params, TIMEOUT_MS, background),
+    (list, epoch) => { if (ownsSession(version)) events(deviceId, list, epoch, false); },
+  );
   if (!ownsSession(version)) return;
-  const tasks = Array.isArray(reply?.tasks) ? reply.tasks : [];
+  const showHeld = () => {
+    if (!ownsSession(version)) return;
+    for (const entry of held.entries) events(deviceId, entry.events, entry.epoch, false);
+    if (held.overflow) resubscribe.add(deviceId);
+  };
+  if (!reply) return showHeld(); // offline; a later presence or renewal retries
   patch(s => {
     const live = { ...s.live };
     for (const t of tasks) {

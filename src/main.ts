@@ -2255,6 +2255,10 @@ async function selectSession(id: string, focusComposer = false, preservePrevious
   closeMenus();
   if (document.querySelector('#dialog')?.classList.contains('change-review-dialog')) closeModal();
   const previousTask = session(), changingTask = previousTask?.id !== id;
+  // The app can accept an inspector click before the initial task list loads.
+  // Preserve that explicit choice when the first task is selected; normal task
+  // switches still restore their task-owned panel state.
+  const initialInspector = !previousTask && state.inspector ? state.inspectorTab : undefined;
   if (changingTask) {
     if (previousTask) rememberThread(previousTask.id);
     if (preservePreviousAttachments && previousTask && state.attachments.length) chatFileAttachments.set(previousTask.id, [...state.attachments]);
@@ -2269,6 +2273,7 @@ async function selectSession(id: string, focusComposer = false, preservePrevious
   if (state.projectFilter && state.projectFilter !== s.projectId && !botProjects.has(s.projectId) && !chatTask(s)) setProjectFilter(s.projectId);
   if (state.collapsedFolders.delete(s.projectId)) saveCollapsedFolders();
   state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.archived = s.archived;
+  if (changingTask && initialInspector) { state.inspector = true; state.inspectorTab = initialInspector; }
   state.attachments = changingTask ? (chatFileAttachments.get(s.id) ?? []) : state.attachments;
   if (changingTask) chatFileAttachments.delete(s.id);
   const remembered = changingTask ? threadPages.get(id) : undefined;

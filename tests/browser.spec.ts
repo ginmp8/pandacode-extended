@@ -518,13 +518,13 @@ test('the first task selection preserves a Browser tab opened during startup', a
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
     const source = await response.text();
-    const marker = /switch \\(command\\) \\{/;
+    const marker = /switch \(command\) \{/;
     expect(source).toMatch(marker);
-    await route.fulfill({ response, body: source.replace(marker, \`
+    await route.fulfill({ response, body: source.replace(marker, `
       if (command === 'list_sessions' && window.__holdInitialSessions) {
         await new Promise(resolve => { window.__releaseInitialSessions = resolve; });
       }
-      switch (command) {\`) });
+      switch (command) {`) });
   });
   await page.goto('/');
   try {

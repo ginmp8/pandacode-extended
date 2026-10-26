@@ -91,6 +91,15 @@ while needed and reach the runner through private stdin, never process arguments
 or agent tool output. Existing backups are not retroactively erased.
 Leave a key field blank to retain it; use Remove to clear it.
 
+Saved credentials load asynchronously after Jev registers disabled pending state.
+The workspace can open and ordinary tasks remain usable while the vault responds.
+Jev settings keep Save disabled until configuration arrives; explicit Jev operations
+wait for the same completed load before using saved paths, provider or credentials.
+Closing a waiting settings dialog does not cancel or duplicate the load. Failed
+reads still preserve recovery data, and a newer successful Save takes precedence
+over a delayed startup configuration response. This behavior concerns Jev's startup
+path; it does not promise that the operating system never requests vault access.
+
 ## Use it in the app
 
 The browser panel has a compact **Test with Jev** popover, using its current URL. **Task actions →
@@ -204,6 +213,10 @@ The optional `tests/jev_browser_smoke.py` uses an installed Jev environment to
 launch a disposable local fixture, exercise real browser actions, verify viewport
 and assertions, capture a screenshot, and check cleanup. It never calls a model
 API. See that file's docstring for the opt-in command.
+
+The following counts are inherited validation history. Current Extended startup
+and recovery results are recorded separately in the
+[early-compatibility verification report](verification-pre-0.3.28-0.5.0.md).
 
 Decision assistance was verified with 555 native tests (six existing opt-in tests
 ignored), Clippy with warnings denied, 420 UI regressions, 42 JavaScript unit

@@ -1,0 +1,557 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/aicodeking/pandacode",
+  "upstream_snapshot_commit": "612ca79c8e7db74461040bc27ddf1a3dcebb32ab",
+  "observed_at": "2026-10-26T01:02:10Z",
+  "published_inventory_count": 47,
+  "hash_normalization": "UTF-8 with LF line endings, including trailing newlines. Each complete source note matches the beginning of its published release body after trimming surrounding whitespace; the remainder is the generated Installing appendix. A source note may itself contain an Installing heading.",
+  "source_only_evidence": "The exhausted current public GitHub release/tag inventory contains no 0.2.x records. These 49 notes are retained from the exact 0.3.27 source snapshot; no original 0.2.x commit or publication date is asserted.",
+  "notes": [
+    {
+      "version": "0.2.0",
+      "source_path": "releases/0.2.0.md",
+      "source_sha256": "380c1948e8a3c15e99f151e231d7b099369358d1a7f44a0ae442c30e93b080cc",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.1",
+      "source_path": "releases/0.2.1.md",
+      "source_sha256": "7cb6e0abab5217766f77ce23ed293bdf256f3b67cf68470bc3fe0b30f19720c3",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.2",
+      "source_path": "releases/0.2.2.md",
+      "source_sha256": "b81498f1b9f044da46c06f88b2b282ed3ff9555e6bf238e33410c1f4d47485a1",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.3",
+      "source_path": "releases/0.2.3.md",
+      "source_sha256": "f47420dec460a10675d08ca497eb3c8e156ee9fd7340aff9e739cb9482722225",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.4",
+      "source_path": "releases/0.2.4.md",
+      "source_sha256": "771e1f912b2c8e65ad4892ee5a5bc94672faedae70e152a909f07cdaef5c79c2",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.5",
+      "source_path": "releases/0.2.5.md",
+      "source_sha256": "dc7c85ecf2aeb21c5c6a08e636847262feea7c99dd62c808e5c42a6d6159750f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.6",
+      "source_path": "releases/0.2.6.md",
+      "source_sha256": "282cf1481fcae1ef98d00f077a1cfbd5bd261b4f0a98020ef8acaedcb3ba626d",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.7",
+      "source_path": "releases/0.2.7.md",
+      "source_sha256": "f0ee3651ff37e6ebf7246e3097d484123d80633d28e837918703a3ef82748fbc",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.8",
+      "source_path": "releases/0.2.8.md",
+      "source_sha256": "ddc10b10d4ee1233cc4312b42e98f3e9a1f32600aed4c155c7250520170e68f0",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.9",
+      "source_path": "releases/0.2.9.md",
+      "source_sha256": "51c80d00d666abd26033248bef7dbaff6b97863f276a22987158166e9723bdbb",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.10",
+      "source_path": "releases/0.2.10.md",
+      "source_sha256": "102d906759aeabbae6e25a102b46a799317e1b69f16dc7989fb2e9c3078d8c16",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.11",
+      "source_path": "releases/0.2.11.md",
+      "source_sha256": "3b39bd6b570a9ccd6d79aa482bdee3f93861e6802a42322ca54121cbdf592eba",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.12",
+      "source_path": "releases/0.2.12.md",
+      "source_sha256": "56d3433acab1aa8d49cc8606c95a12dce215de8e295fef843a5352cef05fee34",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.13",
+      "source_path": "releases/0.2.13.md",
+      "source_sha256": "5e62ba56fe7b4a3ded9d2bbc2965ed367bf6800b75a969f7fb28c08fe1544de9",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.14",
+      "source_path": "releases/0.2.14.md",
+      "source_sha256": "9baaca27698254f84f3a910b27346a142a3a492b3e62f19b3cb8bcba243cda70",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.15",
+      "source_path": "releases/0.2.15.md",
+      "source_sha256": "3b25c4f1300c9584dd366899413220c840c15d208ccb683a2384a0c9a069b319",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.16",
+      "source_path": "releases/0.2.16.md",
+      "source_sha256": "4ec9dbd3dfebc8c4d663bf9d2a5905abbcfbc8da5bd86c6de148603333f52838",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.17",
+      "source_path": "releases/0.2.17.md",
+      "source_sha256": "d34442bb12e350b985f682f0eb7bfafd9e7ba2047240545458d6e5abffd9ca64",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.18",
+      "source_path": "releases/0.2.18.md",
+      "source_sha256": "0fe22475aa8519c00a46b8959acb6920d8ac401aac6d31a538ba6587403e4c6f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.19",
+      "source_path": "releases/0.2.19.md",
+      "source_sha256": "7804c11c94477c26db55629be526cb493d362aaa7bee65a6afda3a94033fcb1c",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.20",
+      "source_path": "releases/0.2.20.md",
+      "source_sha256": "4a00a83aa56cd78ba5d0bcb60fa1289175850f1c2a2d8d78ebb8a5c6de0a3024",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.21",
+      "source_path": "releases/0.2.21.md",
+      "source_sha256": "ab70343403ae0e7bc4551b388bedc9d5d28ac4473a4324a37f6ef4e2ff6739e8",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.22",
+      "source_path": "releases/0.2.22.md",
+      "source_sha256": "364ddae2d6f0645e04a504256f05910d997fdd97e8d78f16769d24dfafe63294",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.23",
+      "source_path": "releases/0.2.23.md",
+      "source_sha256": "16fe8831b2b8ade25adafa9eaaa52d2ae6df5ffe977ad763a11181b630bf0c68",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.24",
+      "source_path": "releases/0.2.24.md",
+      "source_sha256": "86099a39e77a26f3aa3f8a9e9b4ffc72401f9624bb1c4b5b92d489073023c1aa",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.25",
+      "source_path": "releases/0.2.25.md",
+      "source_sha256": "c58a62d96a49f3d710d58d93ad4d24ed816dfde900b38e23dc84cd921c60ccb9",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.26",
+      "source_path": "releases/0.2.26.md",
+      "source_sha256": "9b71f8561d7059a800c1b7347c2772e6c9da40555c1fc6bdbfc7e049da9bd92f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.27",
+      "source_path": "releases/0.2.27.md",
+      "source_sha256": "37f126b272b1b0cc40b6fe149e3b7b2649afc80e2ec7703eff40e616e60ed3ec",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.28",
+      "source_path": "releases/0.2.28.md",
+      "source_sha256": "83a9e48737e8f45e33336a3f1de96e9fedde7be68ac75dbbb5aaa2a51628310d",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.29",
+      "source_path": "releases/0.2.29.md",
+      "source_sha256": "b6f14cc31a979d7181733185671682a586d7d30f3061381462d43768fd929f4b",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.30",
+      "source_path": "releases/0.2.30.md",
+      "source_sha256": "b0c9783d5837c62184b8b533fe8b9bee16012903b3f728667a24c15cce42ba33",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.31",
+      "source_path": "releases/0.2.31.md",
+      "source_sha256": "8128a795883475a49491024016d05e1ccb428e78102b9b14cdb31e1f4b0a8bec",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.32",
+      "source_path": "releases/0.2.32.md",
+      "source_sha256": "9f374842e8cddc8ae7375f833e369e417f1a59b3629180008f99befdae61b306",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.33",
+      "source_path": "releases/0.2.33.md",
+      "source_sha256": "d978292d0e4f61a0d0e6bd054f46c00ba281649cb806fc3cc7dde54d83bb324f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.34",
+      "source_path": "releases/0.2.34.md",
+      "source_sha256": "c0fb8ffcbf60ca74172ff85175545a6da8e9de9b30698f3dac1f1f7c45d39c81",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.35",
+      "source_path": "releases/0.2.35.md",
+      "source_sha256": "fe5d60063d6da3a4b9866df25b25bfc05dfb16dfacbfb3f81da64096b4df8a37",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.36",
+      "source_path": "releases/0.2.36.md",
+      "source_sha256": "b5bb5ba51baeaa060950f385b21700bc3816acff7d9695fa44ca1817019cb550",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.37",
+      "source_path": "releases/0.2.37.md",
+      "source_sha256": "18ce47b784845f51de568f8aa0222884dc0d5ad1c06b6fbdaa0d591527150e21",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.38",
+      "source_path": "releases/0.2.38.md",
+      "source_sha256": "7cfb62d209ca91bf18fa64a32bdc488ac6654a6bb80e7e5f2bd42bc143d3a126",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.39",
+      "source_path": "releases/0.2.39.md",
+      "source_sha256": "5362d2dab9efbac30301e8ed93f50b053c705d2323b59d12e0c3341f4d5f78a3",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.40",
+      "source_path": "releases/0.2.40.md",
+      "source_sha256": "3a08f77f3896e62c12238f9024c500e93b9903179f0de678bed1fd5fa64d5540",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.41",
+      "source_path": "releases/0.2.41.md",
+      "source_sha256": "b805ce34b5f648097bef879591de6f57e2ec48425ec959443908a683694be28f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.42",
+      "source_path": "releases/0.2.42.md",
+      "source_sha256": "bf27cd13eeff7d2d68e6643aba9421567537cc54c5c50ad8fd098ad44175ba42",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.43",
+      "source_path": "releases/0.2.43.md",
+      "source_sha256": "89d50845e0da2db203848446d519ac6b664d5904feb3b1dace4de36227bf3b3c",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.44",
+      "source_path": "releases/0.2.44.md",
+      "source_sha256": "02f03b7a71502eccc85c7b8822e4e10c0a290602a292d674a4c81bb7aa3a0992",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.45",
+      "source_path": "releases/0.2.45.md",
+      "source_sha256": "075b522a87f390b473b39b4ead4577968622606e8383d666cd6c0cc76ebf9951",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.46",
+      "source_path": "releases/0.2.46.md",
+      "source_sha256": "e8cf84f8cf34e7ca923cbafb46c1d5ebe077e4e414b329fcc2fca86f7caf0355",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.47",
+      "source_path": "releases/0.2.47.md",
+      "source_sha256": "437829d2a37ca69e87ddfd36673ac25d466da83dd40aaa7c93970a09d3e6079f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.2.48",
+      "source_path": "releases/0.2.48.md",
+      "source_sha256": "e6b3ad59c0264e11279f45b46a0dbf9feef7f70627d69454d916a0282d372f3f",
+      "publication": "source-only"
+    },
+    {
+      "version": "0.3.0",
+      "source_path": "releases/0.3.0.md",
+      "source_sha256": "9ed82cdf80b166e41865b4ce1f6bdad1172f4cefe8e210e9053c27933a0ecb43",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.0",
+      "published_at": "2026-10-18T05:26:32Z",
+      "github_body_sha256": "383712b60815c2f5301381f544addfd814d72643b4ddd54ab100861230c74ba8"
+    },
+    {
+      "version": "0.3.1",
+      "source_path": "releases/0.3.1.md",
+      "source_sha256": "8ee4cb817521e0d7f522854c2fd6fdf2978c6d40714defbe31be8eb2a78c1a59",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.1",
+      "published_at": "2026-10-18T07:27:35Z",
+      "github_body_sha256": "329a70448df3639967dd07af49d6ed6e6ba0b2ff6298299b0961199acee69457"
+    },
+    {
+      "version": "0.3.2",
+      "source_path": "releases/0.3.2.md",
+      "source_sha256": "a662633f0f13d384dbd71ecc5a9a4db7b25385863237e5dcc41ca8dd31871b8d",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.2",
+      "published_at": "2026-10-18T08:16:30Z",
+      "github_body_sha256": "6328507dd9d5566921cc6493e2e78729ca6f53739b984e48b5e7bf3dc5f0cad0"
+    },
+    {
+      "version": "0.3.3",
+      "source_path": "releases/0.3.3.md",
+      "source_sha256": "926129637cfe827ce372aced99459abb4a914451a81ab41086fba9fa60004d97",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.3",
+      "published_at": "2026-10-18T09:13:14Z",
+      "github_body_sha256": "20113b6567923ba2b8d72f5533abcc0b0cd56ba51cc396843e932b9d023647ad"
+    },
+    {
+      "version": "0.3.4",
+      "source_path": "releases/0.3.4.md",
+      "source_sha256": "27888bf78948b846547ad5a140a89a2703fd431fe444048845169cdc95176775",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.4",
+      "published_at": "2026-10-19T14:34:44Z",
+      "github_body_sha256": "e8897c8fa21381a166e3c951130b127cf38cb05eaf614c1b78425527cd1cbda5"
+    },
+    {
+      "version": "0.3.5",
+      "source_path": "releases/0.3.5.md",
+      "source_sha256": "f47ac693d4b8686effd3e420b4cf6b18cef6738abb5cbe9eb57ece76ea05b138",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.5",
+      "published_at": "2026-10-20T03:36:48Z",
+      "github_body_sha256": "eb0a2f7ccd4ccb8ce30cf7724b83437ca5df6f23429367c23fff3f91b48e69ce"
+    },
+    {
+      "version": "0.3.6",
+      "source_path": "releases/0.3.6.md",
+      "source_sha256": "fdcda745410539b47d09eac368d4bf938b7f94d42a6545c5ab031f6c1b86ec92",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.6",
+      "published_at": "2026-10-20T10:32:23Z",
+      "github_body_sha256": "8e76a77668d062547b08c091d98c0c6c13ae28409eae46c38575c8cc8c2ae87b"
+    },
+    {
+      "version": "0.3.7",
+      "source_path": "releases/0.3.7.md",
+      "source_sha256": "8752ca3cdeaa5c3697e96d6864dbaf542c066d643d86864d463091886e48fd8d",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.7",
+      "published_at": "2026-10-20T10:50:10Z",
+      "github_body_sha256": "befaa006b8f9c287c1fbcda74d9a41b5117a848a6a71d4c644c49eaf86d3ca75"
+    },
+    {
+      "version": "0.3.8",
+      "source_path": "releases/0.3.8.md",
+      "source_sha256": "d4ca2cb7320251da5f58fa03b415fc2a403bebc3f127d18dff9387cbdb6f0488",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.8",
+      "published_at": "2026-10-20T13:15:23Z",
+      "github_body_sha256": "2925363a574c4618e9f6a40dd997eae6d39e1c84d1d7e9242d0e69daeef3fe16"
+    },
+    {
+      "version": "0.3.9",
+      "source_path": "releases/0.3.9.md",
+      "source_sha256": "7ffb6c210d80ecb896aaaa0cc66980a8e5b7c3f3512ffed32ecbba11b3f309d5",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.9",
+      "published_at": "2026-10-21T00:26:59Z",
+      "github_body_sha256": "2f4c1dab529aa01f2c0cfbc9f030cf78c986c17bd4001445c75fa7ce258e8285"
+    },
+    {
+      "version": "0.3.10",
+      "source_path": "releases/0.3.10.md",
+      "source_sha256": "1bf738d00e781bf61b86dac5c9043537db5d5d81fe20be1826c57a25edaa0151",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.10",
+      "published_at": "2026-10-21T05:12:59Z",
+      "github_body_sha256": "4b0e7c1685a0b7c1f7ddc15b9fbedcd270edfd9885a39c38ee610add7ff06d39"
+    },
+    {
+      "version": "0.3.11",
+      "source_path": "releases/0.3.11.md",
+      "source_sha256": "82f4e327e59b6162544cf8e6849d6b9865a63b93e3966ab418d2ec6fc7c343c0",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.11",
+      "published_at": "2026-10-21T10:21:49Z",
+      "github_body_sha256": "f3e34da26455aedc0591c4ed230e327e573ef77574dfb2e86097aeaabbaee06a"
+    },
+    {
+      "version": "0.3.12",
+      "source_path": "releases/0.3.12.md",
+      "source_sha256": "cb6207d389337ffeb0e5c785808ae2b83dfac67c031c293bde80fc456756798f",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.12",
+      "published_at": "2026-10-21T14:44:51Z",
+      "github_body_sha256": "0d1eade48495f011b6cc0d16c3ff2add1e00d28044cc5939d034ec27201e457e"
+    },
+    {
+      "version": "0.3.13",
+      "source_path": "releases/0.3.13.md",
+      "source_sha256": "bb99245bbac7ef342b8f6fcebf92c5ee9be2c85a90243b424d4226eeb3084a19",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.13",
+      "published_at": "2026-10-21T15:24:12Z",
+      "github_body_sha256": "35240bd98d8d4507d39acd98ac58629fe754b4aab7f2ca0992a3f2dccaff442e"
+    },
+    {
+      "version": "0.3.14",
+      "source_path": "releases/0.3.14.md",
+      "source_sha256": "374e48dc96391895dcc97e410cdcbee816d777dd245016322e4b76f1bee1a47d",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.14",
+      "published_at": "2026-10-21T16:20:09Z",
+      "github_body_sha256": "ff2e98e0e152d952ef558beac0b95bfb88a811a7cf903f3a89bc71e71f76266f"
+    },
+    {
+      "version": "0.3.15",
+      "source_path": "releases/0.3.15.md",
+      "source_sha256": "8164dedc5484ce917c00b2a45ba299cd2541bbe8830a0cfe7a31a70bb3876043",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.15",
+      "published_at": "2026-10-21T16:54:14Z",
+      "github_body_sha256": "47b1aeefc3fedcad3ff1ef26db17c23481b94370f63d1035ba61be3c5211c904"
+    },
+    {
+      "version": "0.3.16",
+      "source_path": "releases/0.3.16.md",
+      "source_sha256": "366a8001ed789693fe83548e79b218c5a53d16d3b9741e2461b39d91e9fb023a",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.16",
+      "published_at": "2026-10-21T17:44:12Z",
+      "github_body_sha256": "b0592586556b145b0995d58e6cc46b6ea15c68ae50b86b790f7bad70a025c749"
+    },
+    {
+      "version": "0.3.17",
+      "source_path": "releases/0.3.17.md",
+      "source_sha256": "a3fbc53c0fbef3d6aa235fc1b130b2f114ce0a1170cdfb8ec8ba9915d17f042c",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.17",
+      "published_at": "2026-10-22T01:53:26Z",
+      "github_body_sha256": "f41b894949a3915f8a47060011e79e38ef888c34e955e354cff006452817375d"
+    },
+    {
+      "version": "0.3.18",
+      "source_path": "releases/0.3.18.md",
+      "source_sha256": "ebaad53774aab869cfe0835e2364ebc8b469996c490e2b70c16d3ba885b4c52a",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.18",
+      "published_at": "2026-10-22T04:03:46Z",
+      "github_body_sha256": "f51cae8d67b5bf8368a47797b71b90148ec25d6de9ed0373c15bd07ee587a1ed"
+    },
+    {
+      "version": "0.3.19",
+      "source_path": "releases/0.3.19.md",
+      "source_sha256": "d3f760aedbec7a2201d0b8016d5ae3cb92139dfc5810d329bd06677f97bfbe35",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.19",
+      "published_at": "2026-10-22T04:21:59Z",
+      "github_body_sha256": "651258e9a7d4288bd3f6a39776678a36cf418896a23677d9641d3f29dca52e21"
+    },
+    {
+      "version": "0.3.20",
+      "source_path": "releases/0.3.20.md",
+      "source_sha256": "e8a47607535c0f5a1821023a9e239e5c401bcb59876948bde0188b01cb19a038",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.20",
+      "published_at": "2026-10-22T06:30:58Z",
+      "github_body_sha256": "528b5a4fa5b1f75aae134e2974d7a30e0ad8aa5b5045de2c4056ea071c320a74"
+    },
+    {
+      "version": "0.3.21",
+      "source_path": "releases/0.3.21.md",
+      "source_sha256": "6f0b24888e5aeca9f91deb17f5c21225b1cb8ae1b7c91565c1479b526785773b",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.21",
+      "published_at": "2026-10-22T09:59:44Z",
+      "github_body_sha256": "fd4b1230c15a03aab199733839cbab306cde7d23ce6c4762479c17f0b8bbf088"
+    },
+    {
+      "version": "0.3.22",
+      "source_path": "releases/0.3.22.md",
+      "source_sha256": "131c80d63ee193d7425939d012fd379bc9917a98e24f9d4d3a6a2650e36a462b",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.22",
+      "published_at": "2026-10-22T12:29:59Z",
+      "github_body_sha256": "0e616e5c48e9dd441353bc5a81dc66642fe7e7bdf74668384ff2886778056cf2"
+    },
+    {
+      "version": "0.3.23",
+      "source_path": "releases/0.3.23.md",
+      "source_sha256": "e4dedeb16f68c1040aadbfbafeb64ccb56dd2a7ce17036cb01f7fb216b1380cd",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.23",
+      "published_at": "2026-10-22T17:12:47Z",
+      "github_body_sha256": "d6c0effb094e19df6c0e66dfd76293588aa6d81545292ad5b029512bbfa12027"
+    },
+    {
+      "version": "0.3.24",
+      "source_path": "releases/0.3.24.md",
+      "source_sha256": "549198532c593ebb84d632a413721e6001db9d1e753dc82f8ebae4c1f9bd1812",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.24",
+      "published_at": "2026-10-22T18:26:17Z",
+      "github_body_sha256": "413329e2cf7a863fe282d910e3156162410ba406261b12539791be222566b7c2"
+    },
+    {
+      "version": "0.3.25",
+      "source_path": "releases/0.3.25.md",
+      "source_sha256": "a37174801144dab37b6f5f5f84c8db30b99d5c2a98f975b381fdeeee6ef55bf1",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.25",
+      "published_at": "2026-10-22T19:16:02Z",
+      "github_body_sha256": "112444883e1b7aa4e9bed648a8fc85b3f88bcc3ed2775643f75b1bbc44da8599"
+    },
+    {
+      "version": "0.3.26",
+      "source_path": "releases/0.3.26.md",
+      "source_sha256": "dca91de79256126ff394d6172b71c9746584bfa295c2be0f881cef0e5b8c3cb3",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.26",
+      "published_at": "2026-10-22T19:42:27Z",
+      "github_body_sha256": "f620afedd0388929287948fede0be57b674145cea68919a738726b6a3000c64a"
+    },
+    {
+      "version": "0.3.27",
+      "source_path": "releases/0.3.27.md",
+      "source_sha256": "60f0bdac19b31061cbd52ce7169edc9e4d3754cefeb73952bb32b7454b58d99e",
+      "publication": "github-release",
+      "release_url": "https://github.com/aicodeking/pandacode/releases/tag/v0.3.27",
+      "published_at": "2026-10-23T03:37:23Z",
+      "github_body_sha256": "fa0b5fa27fdcc56f28210f74e5cd3c7e4c33efbed55c3f2195b82e422afa560a"
+    }
+  ]
+}

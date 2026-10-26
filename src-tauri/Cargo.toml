@@ -1,6 +1,6 @@
 [package]
 name = "pandacode"
-version = "0.5.0"
+version = "0.6.0"
 description = "A lightweight native workspace for coding agents"
 authors = ["PandaCode contributors"]
 edition = "2021"

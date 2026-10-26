@@ -1233,6 +1233,13 @@ async fn cancel_start(app: &tauri::AppHandle, state: &AppState, local: &str) -> 
     settle_cancel(app, state, local, outcome)
 }
 
+fn ensure_no_local_bot(store: &Store, id: &str) -> Result<()> {
+    if crate::bots::tasks::linked(store, id)?.is_some() {
+        return Err("Choose No bot before running this task on another computer.".into());
+    }
+    Ok(())
+}
+
 /// Makes (or converts an empty draft into) the local mirror row, published and running.
 #[allow(clippy::too_many_arguments)]
 fn mirror_row(store: &Store, device: &str, project_id: &str, provider: &str, model: &str, mode: Option<&str>, effort: Option<&str>, draft: Option<&str>) -> Result<(String, bool)> {

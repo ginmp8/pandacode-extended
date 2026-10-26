@@ -38,6 +38,7 @@ const STABLE: Duration = Duration::from_secs(30);
 pub(super) const MAX_FRAME: usize = 256 * 1024;
 /// The error a call gets when the relay (or a direct link) refused it for the frame rate.
 pub(super) const RATE_LIMITED: &str = "Too many requests to that computer. Try again in a moment.";
+const MAX_STARTS: usize = 8;
 const PEER_QUEUE: usize = 64;
 const MAX_PEERS: usize = 64;
 /// Relay close codes: another socket replaced this one, or the device was revoked.
@@ -287,9 +288,8 @@ async fn refresh_token(app: tauri::AppHandle, old: String) {
     }
 }
 
-/// An opened request and its authenticated peer key. Trust is rechecked at
-/// dispatch and delivery because either may happen after a user revoked it.
-/// An opened request, its pair key, and when it entered this peer's bounded queue.
+/// A request's authenticated peer key and queue time. Identity is rechecked at
+/// dispatch and delivery because revocation may occur while it is queued.
 struct Request {
     message: Value,
     key: crypto::Key,
@@ -329,7 +329,6 @@ struct PendingRequests {
     reads: VecDeque<Request>,
     starts: VecDeque<Request>,
     ordered: VecDeque<Request>,
-    starts: VecDeque<Request>,
 }
 
 impl PendingRequests {
@@ -356,6 +355,12 @@ impl PendingRequests {
 }
 
 
+struct SendStats {
+    payload_bytes: usize,
+    frame_bytes: usize,
+    json_micros: u128,
+    seal_micros: u128,
+}
 
 /// One relay frame: presence, delivery failures and errors, or an encrypted message.
 fn frame(app: &tauri::AppHandle, text: &str) {
@@ -390,14 +395,14 @@ pub(super) fn sealed(app: &tauri::AppHandle, from: &str, to: &str, body: &str) {
     if to != me || from == me {
         return;
     }
-    let Ok(key) = peer_key(app, from) else { return };
+    let Ok((key, authenticated_key)) = peer_key(app, from) else { return };
     let Ok(plain) = crypto::open(&key, from, to, body) else { return };
     let Ok(message) = serde_json::from_slice::<Value>(&plain) else { return };
     if matches!(message["type"].as_str(), Some("res" | "event")) && !fresh(app, from, &message) {
         return;
     }
     match message["type"].as_str() {
-        Some("req") => queue(app, from, (message, key)),
+        Some("req") => queue(app, from, Request::new(message, key, authenticated_key)),
         Some("res") => super::client::resolve(app, from, &message),
         Some("event") => match message["name"].as_str() {
             Some("agent.events") => mirror::events(app, from, &message["data"]),
@@ -416,7 +421,7 @@ const STALE: &str = "That computer's reply was stale or repeated. Update PandaCo
 /// Replies and events carry `ts` and `nonce` like requests; a stale or repeated one is
 /// dropped (a reply fails its call at once instead of timing out).
 fn fresh(app: &tauri::AppHandle, from: &str, message: &Value) -> bool {
-    let checked = remote(app).lock().inbound.check(message["ts"].as_i64(), message["nonce"].as_str(), chrono::Utc::now().timestamp_millis());
+    let checked = remote(app).lock().replay.check(message["ts"].as_i64(), message["nonce"].as_str(), chrono::Utc::now().timestamp_millis());
     if checked.is_err() {
         eprintln!("PandaCode Connect: dropped a stale or repeated {} from {from}.", message["type"].as_str().unwrap_or_default());
         if message["type"] == "res" {
@@ -511,8 +516,7 @@ fn peers() -> std::sync::MutexGuard<'static, (u64, HashMap<String, mpsc::Sender<
 
 /// Queues a request for its peer. Freshness and replays are checked here, on arrival, so
 /// time spent waiting in the queue never makes a valid request expire.
-fn queue(app: &tauri::AppHandle, from: &str, (message, key): (Value, crypto::Key)) {
-    let request = Request::new(message, key);
+fn queue(app: &tauri::AppHandle, from: &str, request: Request) {
     if let Some(id) = request.message["id"].as_str().filter(|id| host::valid_id(id).is_ok()) {
         let repeat = answers().arrive(from, id, Instant::now());
         match repeat {
@@ -520,8 +524,10 @@ fn queue(app: &tauri::AppHandle, from: &str, (message, key): (Value, crypto::Key
             Repeat::Running => return,
             Repeat::Answered(answer) => {
                 // The device may have lost access since: check as a new request would be.
-                let answer = cached_reply(id, answer, still_allowed(app, from, &request.message));
-                let _ = send_sealed(app, from, &request.key, &answer);
+                let allowed = still_allowed(app, from, &request.public_key, &request.message);
+                let answer = cached_reply(id, answer, allowed);
+                let pairing = request.message["method"] == super::grants::REDEEM;
+                let _ = send_sealed(app, from, &request.key, Some(&request.public_key), pairing, true, &answer);
                 return;
             }
         }
@@ -559,12 +565,16 @@ fn queue(app: &tauri::AppHandle, from: &str, (message, key): (Value, crypto::Key
 
 /// `host::handle`'s admission for a repeated request answered from [`Answers`]: remote
 /// control on, the sender in presence, and its grant (for a batch, every call's).
-fn still_allowed(app: &tauri::AppHandle, from: &str, message: &Value) -> Result<()> {
+fn still_allowed(app: &tauri::AppHandle, from: &str, authenticated_key: &str, message: &Value) -> Result<()> {
     {
         let state = remote(app);
         let inner = state.lock();
-        host::gate(inner.settings.host_enabled)?;
-        inner.callable(from)?;
+        host::gate(inner.settings.host_enabled,
+            inner.devices.iter().any(|d| d.id == from && !authenticated_key.is_empty() && d.public_key == authenticated_key),
+            &super::config::device_name())?;
+        if message["method"] != super::grants::REDEEM {
+            host::gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
+        }
     }
     granted_methods(message).into_iter().try_for_each(|method| super::grants::check(app, from, method))
 }
@@ -594,7 +604,8 @@ fn busy(app: &tauri::AppHandle, from: &str, request: Request) {
 
 fn refuse(app: &tauri::AppHandle, from: &str, request: Request, error: &str) {
     let failure = json!({"type": "res", "id": request.message["id"], "ok": false, "error": error});
-    let _ = send_sealed(app, from, &request.key, &failure);
+    let pairing = request.message["method"] == super::grants::REDEEM;
+    let _ = send_sealed(app, from, &request.key, Some(&request.public_key), pairing, true, &failure);
 }
 
 /// Whether a request waited so long that its caller gave up; running it now could run a
@@ -616,14 +627,6 @@ async fn peer(app: tauri::AppHandle, from: String, mut requests: mpsc::Receiver<
     let mut input_open = true;
 
     loop {
-        while let Some(request) = pending.starts.pop_front() {
-            active_starts += 1;
-            let (app, from) = (app.clone(), from.clone());
-            in_flight.push(Box::pin(async move {
-                answer(&app, &from, request).await;
-                Lane::Start
-            }));
-        }
         while active_reads < READS_PER_PEER {
             let Some(request) = pending.reads.pop_front() else { break };
             active_reads += 1;
@@ -675,22 +678,28 @@ async fn answer(app: &tauri::AppHandle, from: &str, request: Request) {
     if expired(&method, queue_wait) {
         return refuse(app, from, request, "This request waited too long on the other computer and was dropped. Try again.");
     }
-    let Request { message, key, .. } = request;
-    let method = method.as_str();
+    let Request { message, key, public_key, .. } = request;
     let start_waiting = Instant::now();
     let _start_permit = if method == "task.start" {
-        Some(STARTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_STARTS))).clone().acquire_owned().await.ok())
+        static STARTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        STARTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_STARTS)))
+            .clone().acquire_owned().await.ok()
     } else { None };
+    let slot_wait = start_waiting.elapsed();
     let handling = Instant::now();
+    let pairing = method == super::grants::REDEEM;
     if let Some(response) = host::handle(app, from, &message, &public_key).await {
-        // Content is released only to the current key that authenticated this request.
-        if let Err(error) = send_sealed(app, from, &key, Some(&public_key), true, &response) {
+        // A remote response is bound to the key that authenticated the original frame,
+        // even when the device is revoked or rotates its key during an await.
+        if let Err(error) = send_sealed(app, from, &key, Some(&public_key), pairing, true, &response) {
             let failure = json!({"type": "res", "id": response["id"], "ok": false, "error": error});
-            let _ = send_sealed(app, from, &key, None, false, &failure);
+            let _ = send_sealed(app, from, &key, Some(&public_key), pairing, true, &failure);
         }
     }
     if std::env::var_os("PANDACODE_CONNECT_TIMING").is_some() {
-        eprintln!("PandaCode Connect timing method={method} queue_wait_ms={} handle_ms={}", queue_wait.as_secs_f64() * 1000.0, handling.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("PandaCode Connect timing method={method} queue_wait_ms={} start_slot_wait_ms={} handle_ms={}",
+            queue_wait.as_secs_f64() * 1000.0, slot_wait.as_secs_f64() * 1000.0,
+            handling.elapsed().as_secs_f64() * 1000.0);
     }
 }
 
@@ -765,7 +774,7 @@ pub(crate) async fn refresh_devices(app: &tauri::AppHandle) -> Result<()> {
 
 /// The pair key with a device, derived from its current presence key. Keys are cached
 /// by (device id, public key), so key changes derive a fresh pair key.
-pub(super) fn peer_key(app: &tauri::AppHandle, device_id: &str) -> Result<crypto::Key> {
+pub(super) fn peer_key(app: &tauri::AppHandle, device_id: &str) -> Result<(crypto::Key, String)> {
     let state = remote(app);
     let public = {
         let inner = state.lock();
@@ -791,32 +800,45 @@ fn stamp(message: &Value, now_ms: i64) -> Value {
 /// Seals a stamped message with a known key and queues it as `{to, body, ref}` on the
 /// device's direct link when one is up, else on the relay socket. Replies go straight out;
 /// only mirrored event frames use the 100 ms flush.
-fn send_sealed(app: &tauri::AppHandle, to: &str, key: &crypto::Key, message: &Value) -> Result<SendStats> {
-    seal_and_send(app, to, key, message, true)
+fn send_sealed(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_key: Option<&str>, pairing: bool, hosting: bool, message: &Value) -> Result<SendStats> {
+    seal_and_send(app, to, key, expected_key, pairing, hosting, message, true)
 }
 
-fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, message: &Value, direct: bool) -> Result<SendStats> {
+fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_key: Option<&str>, pairing: bool, hosting: bool, message: &Value, direct: bool) -> Result<SendStats> {
     let me = remote(app).device_id();
-    let message = stamp_delivery(message, chrono::Utc::now().timestamp_millis());
-    let body = crypto::seal(key, &me, to, message.to_string().as_bytes())?;
+    let json_started = Instant::now();
+    let plain = stamp_delivery(message, chrono::Utc::now().timestamp_millis()).to_string();
+    let payload_bytes = plain.len();
+    let mut json_micros = json_started.elapsed().as_micros();
+    let seal_started = Instant::now();
+    let body = crypto::seal(key, &me, to, plain.as_bytes())?;
+    let seal_micros = seal_started.elapsed().as_micros();
     let mut frame = json!({"to": to, "body": body});
-    if let Some(id) = message["id"].as_str() {
-        frame["ref"] = json!(id);
-    }
+    if let Some(id) = message["id"].as_str() { frame["ref"] = json!(id); }
+    let json_started = Instant::now();
     let frame = frame.to_string();
-    if frame.len() > MAX_FRAME {
-        return Err("That reply is too large to send to another computer.".into());
-    }
+    json_micros += json_started.elapsed().as_micros();
+    if frame.len() > MAX_FRAME { return Err("That reply is too large to send to another computer.".into()); }
     let frame_bytes = frame.len();
     let stats = SendStats { payload_bytes, frame_bytes, json_micros, seal_micros };
-    let id = message["id"].as_str();
-    if let (Some("res"), Some(id)) = (message["type"].as_str(), id) {
+    // Re-check the original peer key, grant and hosting just before releasing data.
+    {
+        let state = remote(app);
+        let inner = state.lock();
+        if hosting && !inner.settings.host_enabled { return Err(host::OFF.into()); }
+        if let Some(expected) = expected_key {
+            let current = inner.devices.iter().any(|d| d.id == to && !expected.is_empty() && d.public_key == expected);
+            if !current || (!pairing && !inner.authenticated(to, expected)) {
+                return Err("This device is no longer trusted with the key that authenticated its request.".into());
+            }
+        }
+    }
+    if let (Some("res"), Some(id)) = (message["type"].as_str(), message["id"].as_str()) {
         answers().answered(to, id, message, payload_bytes);
     }
-    if !direct {
-        return relay(app, frame).map(|_| stats);
-    }
-    let request = id.filter(|_| message["type"] == "req").map(|id| (id, message["method"].as_str().unwrap_or_default()));
+    if !direct || pairing { return relay(app, frame).map(|_| stats); }
+    let request = message["id"].as_str().filter(|_| message["type"] == "req")
+        .map(|id| (id, message["method"].as_str().unwrap_or_default()));
     match routes::send(to, frame, request) {
         Ok(()) => Ok(stats),
         Err(frame) => relay(app, frame).map(|_| stats),
@@ -827,12 +849,6 @@ fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, message: &
 pub(super) fn relay(app: &tauri::AppHandle, frame: String) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
-    if hosting && !inner.settings.host_enabled {
-        return Err(host::OFF.into());
-    }
-    if authenticated_key.is_some_and(|public_key| !inner.authenticated(to, public_key)) {
-        return Err("This device is no longer trusted with the key that authenticated this request.".into());
-    }
     let outbox = inner.outbox.as_ref().ok_or("Not connected to the relay.")?;
     outbox.try_send(frame).map_err(|error| match error {
         mpsc::error::TrySendError::Full(_) => "Too much is waiting to go to the relay. Try again in a moment.",
@@ -856,7 +872,7 @@ fn stamp_delivery(message: &Value, now_ms: i64) -> Value {
 pub(crate) fn send_trusted(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
     remote(app).lock().callable(to)?;
     let (key, public_key) = peer_key(app, to)?;
-    send_sealed(app, to, &key, Some(&public_key), message["type"] == "event", message)
+    send_sealed(app, to, &key, Some(&public_key), false, false, message).map(|_| ())
 }
 
 /// Events produced by a request remain bound to its original authenticating key.
@@ -865,14 +881,24 @@ pub(crate) fn send_authenticated(app: &tauri::AppHandle, to: &str, authenticated
     if current_key != authenticated_key {
         return Err("The requesting device's key changed.".into());
     }
-    send_sealed(app, to, &key, Some(authenticated_key), true, message)
+    send_sealed(app, to, &key, Some(authenticated_key), false, true, message).map(|_| ())
 }
 
-/// Like [`send_to_device`], on the relay only: route announcements.
+/// The sole outbound method that is allowed before the local host has granted trust.
+/// The host will verify the current peer key, code, and scoped grant before replying.
+pub(crate) fn send_pairing(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
+    if message["type"] != "req" || message["method"] != super::grants::REDEEM {
+        return Err("Only a pairing-code redemption may be sent without existing trust.".into());
+    }
+    let (key, public_key) = peer_key(app, to)?;
+    seal_and_send(app, to, &key, Some(&public_key), true, false, message, false).map(|_| ())
+}
+
+/// Like [`send_trusted`], on the relay only: route announcements.
 pub(super) fn send_relay(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
     remote(app).lock().callable(to)?;
-    let key = peer_key(app, to)?;
-    seal_and_send(app, to, &key, message, false).map(|_| ())
+    let (key, public_key) = peer_key(app, to)?;
+    seal_and_send(app, to, &key, Some(&public_key), false, false, message, false).map(|_| ())
 }
 
 #[cfg(test)]
@@ -888,7 +914,7 @@ mod tests {
         let ordered = pending.ordered.iter().map(|request| request.message["method"].as_str().unwrap()).collect::<Vec<_>>();
         let reads = pending.reads.iter().map(|request| request.message["method"].as_str().unwrap()).collect::<Vec<_>>();
         assert_eq!(ordered, ["task.send", "task.stop"]);
-        assert_eq!(reads, ["task.messages", "task.diff"]);
+        assert_eq!(reads, ["task.messages", "task.team"]);
         assert_eq!(pending.starts.len(), 1, "a start never holds the ordered lane");
         let mut active = false;
         let first = pending.next_ordered(&mut active).unwrap();
@@ -897,7 +923,7 @@ mod tests {
         assert!(pending.next_ordered(&mut active).is_none());
         active = false;
         assert_eq!(pending.next_ordered(&mut active).unwrap().message["method"], "task.stop");
-        pending.push(Request { message: json!({"method": "batch"}), key: [0; 32], queued_at: Instant::now() });
+        pending.push(Request::new(json!({"method": "batch"}), [0; 32], "pinned".into()));
         assert_eq!(pending.reads.back().unwrap().message["method"], "batch");
     }
 

@@ -515,16 +515,18 @@ pub(crate) async fn require_installed(provider: &str) -> Result<()> {
 }
 
 /// Starts the task, reporting each stage to the viewer, and the failure as `error`.
-pub(crate) async fn run(app: &tauri::AppHandle, from: &str, start: Start) -> Result<Value> {
-    run_cancellable(app, from, start, Arc::new(AtomicBool::new(false))).await
+pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start) -> Result<Value> {
+    run_cancellable(app, from, authenticated_key, start, Arc::new(AtomicBool::new(false))).await
 }
 
 /// [`run`] that stops when `cancel` is set: it is checked between stages, and a running clone
 /// is killed and its folder removed. Once the task exists it is too late to cancel. A cancelled
 /// start fails with [`CANCELLED`] and sends no `error` stage; the canceller answers the viewer.
-pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, start: Start, cancel: Arc<AtomicBool>) -> Result<Value> {
-    let progress = Arc::new(Progress { app: app.clone(), to: from.to_owned(), start: start.start_id.clone(), repo: match &start.target { Target::Repo(repo) => repo.clone(), Target::ProjectId(_) => String::new() }, last: Mutex::new(None) });
-    let result = start_task(app, from, start, &progress, &cancel).await;
+pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, cancel: Arc<AtomicBool>) -> Result<Value> {
+    super::host::require_authorized(app, from, authenticated_key)?;
+    super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
+    let progress = Arc::new(Progress { authenticated_key: authenticated_key.to_owned(), app: app.clone(), to: from.to_owned(), start: start.start_id.clone(), repo: match &start.target { Target::Repo(repo) => repo.clone(), Target::ProjectId(_) => String::new() }, last: Mutex::new(None) });
+    let result = start_task(app, from, authenticated_key, start, &progress, &cancel).await;
     if let Some(error) = result.as_ref().err().filter(|error| *error != CANCELLED) {
         progress.report("error", None, Some(error));
     }
@@ -554,13 +556,15 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
     Ok((branch, made))
 }
 
-async fn start_task(app: &tauri::AppHandle, from: &str, start: Start, progress: &Arc<Progress>, cancel: &Arc<AtomicBool>) -> Result<Value> {
+async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, progress: &Arc<Progress>, cancel: &Arc<AtomicBool>) -> Result<Value> {
     check(cancel)?;
+    super::host::require_authorized(app, from, authenticated_key)?;
     progress.report("finding", None, None);
     // Before any clone: the images must be ones this caller just sent.
     super::images::claim(app, from, authenticated_key, &start.image_ids)?;
     require_installed(&start.provider).await?;
     check(cancel)?;
+    super::host::require_authorized(app, from, authenticated_key)?;
     let handle = app.clone();
     let (target, wanted, worktree, reporter, flag) = (start.target, start.branch.clone(), start.worktree, progress.clone(), cancel.clone());
     let (project, branch, made) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, String, Option<workspace::Worktree>)> {
@@ -576,11 +580,12 @@ async fn start_task(app: &tauri::AppHandle, from: &str, start: Start, progress: 
     .await
     .map_err(|e| e.to_string())??;
     let root = PathBuf::from(&project.path);
-    if let Err(error) = check(cancel) {
+    if let Err(error) = check(cancel).and_then(|_| super::host::require_authorized(app, from, authenticated_key)) {
         made.iter().for_each(|made| discard(&root, made));
         return Err(error);
     }
     let state = app.state::<AppState>();
+    super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
     let created = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         crate::architect::profiles::create_user_task(&store, &project.id, &start.provider, &start.model, start.mode.as_deref(), None).and_then(|task| {
@@ -597,7 +602,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, start: Start, progress: 
             return Err(error);
         }
     };
-    if let Err(error) = super::host::check_current_request(&task.mode) {
+    if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         let _ = crate::task_deletion::delete_state(&state, &task.id);
         return Err(error);
     }
@@ -606,6 +611,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, start: Start, progress: 
         let store = state.store.clone();
         let id = task.id.clone();
         let attached = tauri::async_runtime::spawn_blocking(move || -> Result<workspace::Worktree> {
+            super::host::check_start_mode(&handle, &device, &key, Some(&mode))?;
             let checkout = made.map_or_else(|| remote_worktree(&root, &branch), Ok)?;
             store.lock().map_err(|e| e.to_string())?.attach_worktree(&id, &checkout.path, &checkout.branch)?;
             Ok(checkout)
@@ -617,7 +623,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, start: Start, progress: 
             return Err(error);
         }
     }
-    if let Err(error) = super::host::check_current_request(&task.mode) {
+    if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         let _ = crate::task_deletion::delete_state(&state, &task.id);
         return Err(error);
     }

@@ -1,6 +1,11 @@
 //! The OS secure store (Keychain, Secret Service, Credential Manager) for app secrets.
 //! Values never enter prompts, logs, the database or the webview.
 
+use serde::{de::DeserializeOwned, Serialize};
+use std::io::Write;
+use std::path::Path;
+use std::sync::Mutex;
+
 #[cfg(test)]
 fn memory() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
     static STORE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
@@ -79,4 +84,62 @@ pub(crate) fn remove(service: &str, account: &str) {
     {
         let _ = (service, account);
     }
+}
+
+/// Serializes read-modify-write of every secrets file in this process.
+static WRITE: Mutex<()> = Mutex::new(());
+
+/// A JSON secrets file's contents. Missing means default; any other failure is an error.
+pub(crate) fn load<T: DeserializeOwned + Default>(path: &Path, label: &str) -> crate::Result<T> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(format!("Could not read {label} at {}: {error}", path.display())),
+    };
+    serde_json::from_str(&text).map_err(|error| format!("{label} at {} are corrupt: {error}", path.display()))
+}
+
+/// Replaces `dir/file` with `change(current)` atomically (0600 temp, fsync, rename) under this
+/// process's lock and an advisory lock on `<name>.lock`, so app processes cannot interleave.
+/// A default result deletes the file; a file that could not be read is never replaced.
+pub(crate) fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(dir: &Path, file: &str, label: &str, change: impl FnOnce(T) -> T) -> crate::Result<()> {
+    let _guard = WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_name = format!("{}.lock", file.trim_end_matches(".json"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(lock_name))
+        .and_then(|file| file.lock().map(|_| file))
+        .map_err(|e| format!("Could not lock {label}: {e}"))?;
+    let path = dir.join(file);
+    let next = change(load(&path, label)?);
+    let saved = if next == T::default() {
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!("Could not remove {label}: {error}")),
+            _ => Ok(()),
+        }
+    } else {
+        let text = serde_json::to_vec(&next).map_err(|e| e.to_string())?;
+        write_atomic(dir, &path, file, &text).map_err(|e| format!("Could not save {label}: {e}"))
+    };
+    drop(lock);
+    saved
+}
+
+fn write_atomic(dir: &Path, path: &Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = dir.join(format!("{file}.{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let written = options.open(&temp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    let renamed = written.and_then(|_| std::fs::rename(&temp, path));
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    renamed
 }

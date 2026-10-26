@@ -102,9 +102,8 @@ struct Entry {
 struct Store {
     #[serde(default)]
     devices: BTreeMap<String, Entry>,
-    /// Set once when an app from before scoped pairing is upgraded: the devices in the first
-    /// presence frame after that are adopted as `full` so nobody is locked out. Cleared by
-    /// that frame whatever it lists, so a device registered later always waits.
+    /// Legacy upstream adoption marker. Extended never trusts newly discovered devices
+    /// through presence; this marker is cleared without creating any grant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     adopt: bool,
 }
@@ -188,8 +187,7 @@ impl Grants {
         }
     }
 
-    /// The one-time upgrade, run on the first presence frame only: devices already on the
-    /// account keep full access.
+    /// A historical upstream adoption marker never authorizes newly observed peers.
     fn adopt(&mut self, peers: &[Peer]) {
         if !self.store.adopt {
             return;
@@ -277,23 +275,55 @@ fn snapshot(app: &tauri::AppHandle) -> Snapshot {
 static GRANTS: Mutex<Option<Grants>> = Mutex::new(None);
 
 /// Runs `f` on the loaded grants and saves them afterwards when it changed them.
-fn with<R>(dir: &Path, f: impl FnOnce(&mut Grants) -> R) -> R {
+fn with<R>(dir: &Path, f: impl FnOnce(&mut Grants) -> R) -> Result<R> {
     let mut guard = GRANTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let grants = guard.get_or_insert_with(|| Grants::load(dir));
+    let original = grants.store.clone();
     let result = f(grants);
     if std::mem::take(&mut grants.dirty) {
         let store = grants.store.clone();
         if let Err(error) = crate::secret_store::update(dir, FILE, LABEL, |_: Store| store) {
-            eprintln!("{error}");
+            // A failed durable grant update must never activate in memory.
+            grants.store = original;
+            return Err(error);
         }
     }
-    result
+    Ok(result)
 }
 
-/// Called by `config::load` once, on the first launch after scoped pairing shipped, for a
-/// computer that already had remote control on.
-pub(crate) fn seed_adopt(_dir: &Path) -> Result<()> {
-    // Existing trust is never silently upgraded to Full. Manual host approval is required.
+/// Preserve explicit, key-pinned trust on upgrade, but never discover or elevate
+/// additional devices from a presence frame. Full is carried over only when the
+/// owner separately opted into the local Full-access permission gate.
+pub(crate) fn seed_trusted(dir: &Path, settings: &config::Settings) -> Result<()> {
+    crate::secret_store::update::<Store>(dir, FILE, LABEL, |mut current| {
+        for (id, key) in &settings.trusted {
+            if key.is_empty() || super::host::valid_id(id).is_err() { continue; }
+            current.devices.entry(id.clone()).or_insert_with(|| Entry {
+                scope: if settings.allow_full_access { Scope::Full } else { Scope::Control },
+                fingerprint: crypto::fingerprint(key),
+                name: String::new(),
+            });
+        }
+        current.adopt = false;
+        current
+    })
+}
+
+/// Keep legacy key pinning and scoped grants consistent. A failed disk write never
+/// changes the active trust map. Revocations update the legacy gate first.
+fn sync_trust(app: &tauri::AppHandle, device: &str, scope: Scope) -> Result<()> {
+    let state = remote(app);
+    let mut inner = state.lock();
+    let key = inner.devices.iter().find(|peer| peer.id == device && !peer.public_key.is_empty())
+        .map(|peer| peer.public_key.clone()).ok_or(super::UNKNOWN_DEVICE)?;
+    let mut updated = inner.settings.clone();
+    if matches!(scope, Scope::Pending | Scope::Blocked) {
+        updated.trusted.remove(device);
+    } else {
+        updated.trusted.insert(device.to_owned(), key);
+    }
+    config::save(&state.dir, &updated)?;
+    inner.settings = updated;
     Ok(())
 }
 
@@ -306,20 +336,20 @@ pub(crate) fn presence(app: &tauri::AppHandle) {
         grants.adopt(&snap.peers);
         adopting
     });
-    if adopted {
+    if adopted.unwrap_or(false) {
         emit_grants(app);
     }
 }
 
 /// Whether the user blocked `device` here.
 pub(crate) fn is_blocked(app: &tauri::AppHandle, device: &str) -> bool {
-    with(&remote(app).dir, |grants| grants.blocks(device))
+    with(&remote(app).dir, |grants| grants.blocks(device)).unwrap_or(true)
 }
 
 fn emit_grants(app: &tauri::AppHandle) {
     let snap = snapshot(app);
     let list = with(&snap.dir, |grants| grants.view(&snap.peers));
-    let _ = app.emit("remote://device-grants", list);
+    if let Ok(list) = list { let _ = app.emit("remote://device-grants", list); }
 }
 
 /// Ok when `device` may call `method` on this host. Locks the remote state itself: call
@@ -327,7 +357,7 @@ fn emit_grants(app: &tauri::AppHandle) {
 pub(crate) fn check(app: &tauri::AppHandle, device: &str, method: &str) -> Result<()> {
     let snap = snapshot(app);
     let peer = snap.peers.iter().find(|peer| peer.id == device).ok_or(super::UNKNOWN_DEVICE)?;
-    let verdict = with(&snap.dir, |grants| grants.decide(peer, method));
+    let verdict = with(&snap.dir, |grants| grants.decide(peer, method))?;
     match verdict {
         Verdict::Allow => Ok(()),
         Verdict::Pending { announce } => {
@@ -346,7 +376,18 @@ pub(crate) fn redeem(app: &tauri::AppHandle, device: &str, params: &Value) -> Re
     let snap = snapshot(app);
     let peer = snap.peers.iter().find(|peer| peer.id == device).ok_or(super::UNKNOWN_DEVICE)?;
     let code = params["code"].as_str().filter(|code| code.len() <= 32).ok_or(INVALID_CODE)?;
-    let scope = with(&snap.dir, |grants| grants.redeem(peer, code, chrono::Utc::now().timestamp()))?;
+    // The local Full-access switch is an admission gate, not a post-grant warning.
+    // A revoked local switch must never leave a newly persisted Full grant behind.
+    let full_enabled = remote(app).lock().settings.allow_full_access;
+    let scope = with(&snap.dir, |grants| {
+        let current = grants.scope_of(peer);
+        let requested = grants.code.as_ref().map(|code| code.scope).unwrap_or_default();
+        if !full_enabled && (current == Scope::Full || requested == Scope::Full) {
+            return Err("Remote Full access is disabled on this computer.".to_owned());
+        }
+        grants.redeem(peer, code, chrono::Utc::now().timestamp())
+    })??;
+    sync_trust(app, device, scope)?;
     let _ = app.emit("remote://pair-code-used", json!({"deviceId": peer.id, "name": peer.name, "scope": scope.name()}));
     emit_grants(app);
     Ok(json!({"scope": scope.name()}))
@@ -366,7 +407,7 @@ fn random_code() -> String {
 #[tauri::command]
 pub async fn remote_device_grants(app: tauri::AppHandle) -> Result<Value> {
     let snap = snapshot(&app);
-    Ok(Value::Array(with(&snap.dir, |grants| grants.view(&snap.peers))))
+    Ok(Value::Array(with(&snap.dir, |grants| grants.view(&snap.peers))?))
 }
 
 fn ensure_full_is_enabled(app: &tauri::AppHandle, scope: Scope) -> Result<()> {
@@ -383,7 +424,14 @@ pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, s
     ensure_full_is_enabled(&app, scope)?;
     let snap = snapshot(&app);
     let peer = snap.peers.iter().find(|peer| peer.id == device_id).ok_or(super::UNKNOWN_DEVICE)?;
-    with(&snap.dir, |grants| grants.set(peer, scope));
+    if matches!(scope, Scope::Pending | Scope::Blocked) {
+        sync_trust(&app, &device_id, scope)?;
+    }
+    ensure_full_is_enabled(&app, scope)?;
+    with(&snap.dir, |grants| grants.set(peer, scope))?;
+    if matches!(scope, Scope::View | Scope::Control | Scope::Full) {
+        sync_trust(&app, &device_id, scope)?;
+    }
     emit_grants(&app);
     Ok(())
 }
@@ -399,14 +447,14 @@ pub async fn remote_pair_code(app: tauri::AppHandle, scope: String) -> Result<Va
     ensure_full_is_enabled(&app, scope)?;
     let snap = snapshot(&app);
     let (digits, now) = (random_code(), chrono::Utc::now().timestamp());
-    let expires = with(&snap.dir, |grants| grants.new_code(scope, digits.clone(), now));
+    let expires = with(&snap.dir, |grants| grants.new_code(scope, digits.clone(), now))?;
     Ok(json!({"code": digits, "scope": scope.name(), "expiresAt": expires * 1000}))
 }
 
 #[tauri::command]
 pub async fn remote_pair_code_cancel(app: tauri::AppHandle) -> Result<()> {
     let snap = snapshot(&app);
-    with(&snap.dir, |grants| grants.code = None);
+    with(&snap.dir, |grants| grants.code = None)?;
     Ok(())
 }
 
@@ -419,6 +467,13 @@ pub async fn remote_pair_redeem(app: tauri::AppHandle, device_id: String, code: 
         return Err("Enter the 6-digit code shown on the other computer.".into());
     }
     super::client::call(&app, &device_id, REDEEM, json!({"code": digits})).await
+}
+
+#[cfg(test)]
+pub(crate) fn test_scope_from_file(dir: &Path, id: &str, key: &str) -> &'static str {
+    let grants = Grants::load(dir);
+    let peer = Peer { id: id.into(), name: String::new(), platform: String::new(), fingerprint: crypto::fingerprint(key), online: true };
+    grants.scope_of(&peer).name()
 }
 
 #[cfg(test)]
@@ -551,7 +606,9 @@ mod tests {
     fn seeding_and_saving_round_trip_through_the_private_file() {
         let dir = std::env::temp_dir().join(format!("pandacode-grants-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        seed_adopt(&dir).unwrap();
+        let mut settings = config::Settings::default();
+        settings.trusted.insert("laptop".into(), "pinned-key".into());
+        seed_trusted(&dir, &settings).unwrap();
         let mut grants = Grants::load(&dir);
         assert!(!grants.store.adopt);
         grants.adopt(&[peer("laptop", "aa11")]);
@@ -559,7 +616,8 @@ mod tests {
         crate::secret_store::update(&dir, FILE, LABEL, |_: Store| store).unwrap();
         let reloaded = Grants::load(&dir);
         assert!(!reloaded.store.adopt);
-        assert_eq!(reloaded.scope_of(&peer("laptop", "aa11")), Scope::Pending);
+        assert_eq!(reloaded.scope_of(&Peer { fingerprint: crypto::fingerprint("pinned-key"), ..peer("laptop", "aa11") }), Scope::Control);
+        assert_eq!(reloaded.scope_of(&peer("new", "cc33")), Scope::Pending);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

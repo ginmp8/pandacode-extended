@@ -355,11 +355,11 @@ impl PendingRequests {
 }
 
 
-struct SendStats {
-    payload_bytes: usize,
-    frame_bytes: usize,
-    json_micros: u128,
-    seal_micros: u128,
+#[derive(Clone, Copy)]
+struct SendOptions {
+    pairing: bool,
+    hosting: bool,
+    direct: bool,
 }
 
 /// One relay frame: presence, delivery failures and errors, or an encrypted message.
@@ -790,6 +790,7 @@ pub(super) fn peer_key(app: &tauri::AppHandle, device_id: &str) -> Result<(crypt
 }
 
 /// Adds `ts` and a fresh `nonce`, so the receiver can refuse replays (docs/remote-access.md).
+#[cfg(test)]
 fn stamp(message: &Value, now_ms: i64) -> Value {
     let mut message = message.clone();
     message["ts"] = json!(now_ms);
@@ -800,27 +801,20 @@ fn stamp(message: &Value, now_ms: i64) -> Value {
 /// Seals a stamped message with a known key and queues it as `{to, body, ref}` on the
 /// device's direct link when one is up, else on the relay socket. Replies go straight out;
 /// only mirrored event frames use the 100 ms flush.
-fn send_sealed(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_key: Option<&str>, pairing: bool, hosting: bool, message: &Value) -> Result<SendStats> {
-    seal_and_send(app, to, key, expected_key, pairing, hosting, message, true)
+fn send_sealed(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_key: Option<&str>, pairing: bool, hosting: bool, message: &Value) -> Result<()> {
+    seal_and_send(app, to, key, expected_key, message, SendOptions { pairing, hosting, direct: true })
 }
 
-fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_key: Option<&str>, pairing: bool, hosting: bool, message: &Value, direct: bool) -> Result<SendStats> {
+fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_key: Option<&str>, message: &Value, options: SendOptions) -> Result<()> {
+    let SendOptions { pairing, hosting, direct } = options;
     let me = remote(app).device_id();
-    let json_started = Instant::now();
     let plain = stamp_delivery(message, chrono::Utc::now().timestamp_millis()).to_string();
     let payload_bytes = plain.len();
-    let mut json_micros = json_started.elapsed().as_micros();
-    let seal_started = Instant::now();
     let body = crypto::seal(key, &me, to, plain.as_bytes())?;
-    let seal_micros = seal_started.elapsed().as_micros();
     let mut frame = json!({"to": to, "body": body});
     if let Some(id) = message["id"].as_str() { frame["ref"] = json!(id); }
-    let json_started = Instant::now();
     let frame = frame.to_string();
-    json_micros += json_started.elapsed().as_micros();
     if frame.len() > MAX_FRAME { return Err("That reply is too large to send to another computer.".into()); }
-    let frame_bytes = frame.len();
-    let stats = SendStats { payload_bytes, frame_bytes, json_micros, seal_micros };
     // Re-check the original peer key, grant and hosting just before releasing data.
     {
         let state = remote(app);
@@ -836,12 +830,12 @@ fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_k
     if let (Some("res"), Some(id)) = (message["type"].as_str(), message["id"].as_str()) {
         answers().answered(to, id, message, payload_bytes);
     }
-    if !direct || pairing { return relay(app, frame).map(|_| stats); }
+    if !direct || pairing { return relay(app, frame); }
     let request = message["id"].as_str().filter(|_| message["type"] == "req")
         .map(|id| (id, message["method"].as_str().unwrap_or_default()));
     match routes::send(to, frame, request) {
-        Ok(()) => Ok(stats),
-        Err(frame) => relay(app, frame).map(|_| stats),
+        Ok(()) => Ok(()),
+        Err(frame) => relay(app, frame),
     }
 }
 
@@ -891,14 +885,14 @@ pub(crate) fn send_pairing(app: &tauri::AppHandle, to: &str, message: &Value) ->
         return Err("Only a pairing-code redemption may be sent without existing trust.".into());
     }
     let (key, public_key) = peer_key(app, to)?;
-    seal_and_send(app, to, &key, Some(&public_key), true, false, message, false).map(|_| ())
+    seal_and_send(app, to, &key, Some(&public_key), message, SendOptions { pairing: true, hosting: false, direct: false }).map(|_| ())
 }
 
 /// Like [`send_trusted`], on the relay only: route announcements.
 pub(super) fn send_relay(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
     remote(app).lock().callable(to)?;
     let (key, public_key) = peer_key(app, to)?;
-    seal_and_send(app, to, &key, Some(&public_key), false, false, message, false).map(|_| ())
+    seal_and_send(app, to, &key, Some(&public_key), message, SendOptions { pairing: false, hosting: false, direct: false }).map(|_| ())
 }
 
 #[cfg(test)]
@@ -913,7 +907,7 @@ mod tests {
         }
         let ordered = pending.ordered.iter().map(|request| request.message["method"].as_str().unwrap()).collect::<Vec<_>>();
         let reads = pending.reads.iter().map(|request| request.message["method"].as_str().unwrap()).collect::<Vec<_>>();
-        assert_eq!(ordered, ["task.send", "task.stop"]);
+        assert_eq!(ordered, ["task.send", "task.stop", "approval.respond"], "approvals must remain ordered with task controls");
         assert_eq!(reads, ["task.messages", "task.team"]);
         assert_eq!(pending.starts.len(), 1, "a start never holds the ordered lane");
         let mut active = false;

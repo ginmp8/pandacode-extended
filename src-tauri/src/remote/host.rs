@@ -593,6 +593,7 @@ fn full_access_off() -> String {
 /// Without "Full access for remote tasks", a prompt, steer or configure that would run a
 /// task stored in `full` is refused, unless it switches the task to another mode. The
 /// task's own mode is the user's and is never changed here.
+#[cfg(test)]
 fn allow_task_mode(stored: &str, requested: Option<&str>, full_access: bool) -> Result<()> {
     if !full_access && stored == "full" && requested.is_none_or(|mode| mode == "full") {
         return Err(full_access_off());
@@ -2881,7 +2882,8 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
-    let (epoch, batches): (String, Vec<(String, Vec<Value>, Vec<Value>)>) = {
+    type SubscriberBatch = (String, Vec<Value>, Vec<Value>);
+    let (epoch, batches): (String, Vec<SubscriberBatch>) = {
         let state = remote(&app);
         let mut inner = state.lock();
         inner.flushing = false;
@@ -3699,6 +3701,7 @@ mod tests {
     fn access_is_checked_when_a_request_runs() {
         let mut inner = super::super::Inner {
             devices: vec![super::super::Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
+            replay: super::super::replay::Replay::memory(),
             ..Default::default()
         };
         let now = 1_000_000_000;
@@ -3869,6 +3872,7 @@ mod tests {
             ..Default::default()
         };
         inner.settings.host_enabled = true;
+        inner.settings.trusted.insert("viewer".into(), "k".into());
         inner.subscribers.insert("viewer".into(), Subscriber { until: Some(Instant::now() + SUBSCRIPTION), sessions: HashSet::from(["h1".to_string()]), ..Default::default() });
         let epoch = inner.journal.epoch.clone();
         journal_and_enqueue(&mut inner, "h1", event("h1", "text", "Hi"), Queue::Event);
@@ -4272,7 +4276,8 @@ mod extended_security_tests {
         // A viewer that falls far behind stops buffering; it catches up at the run end.
         let mut full: Vec<Value> = (0..MAX_BUFFER).map(|i| event("a", "tool", &i.to_string())).collect();
         push_event(&mut full, event("a", "tool", "late"));
-        assert_eq!(full.len(), MAX_BUFFER);
+        assert_eq!(full.len(), MAX_BUFFER + 1, "the overflow marker is retained for recovery");
+        assert!(lagged(full.last().unwrap()));
     }
 
     #[test]

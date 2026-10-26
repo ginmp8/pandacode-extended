@@ -32,6 +32,7 @@ const MAX_REPLAY_PAGES: usize = 20;
 const MAX_HELD: usize = 4096;
 /// Cursors are saved at most this often while events stream, and after every subscribe round.
 const SAVE_EVERY: Duration = Duration::from_secs(5);
+type UnsavedHostPositions = (String, String, Vec<(String, u64)>);
 const NO_REPO: &str = "This project has no GitHub origin, so it can't run on another computer. Add a GitHub remote named origin first.";
 
 #[derive(Debug)]
@@ -251,7 +252,7 @@ impl Viewer {
     }
 
     /// What to save: each changed host's epoch and positions.
-    fn unsaved(&mut self) -> Vec<(String, String, Vec<(String, u64)>)> {
+    fn unsaved(&mut self) -> Vec<UnsavedHostPositions> {
         let dirty = std::mem::take(&mut self.dirty);
         dirty.into_iter().filter_map(|device| {
             let epoch = self.epochs.get(&device)?.clone();

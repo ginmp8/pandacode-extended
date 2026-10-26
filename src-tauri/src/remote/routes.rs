@@ -88,17 +88,11 @@ fn pick_addrs(ips: impl Iterator<Item = IpAddr>) -> Vec<IpAddr> {
     set.into_iter().take(MAX_ADDRS).collect()
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct Settings {
     /// Race a direct route against the relay (on by default).
     direct_routes: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { direct_routes: false }
-    }
 }
 
 /// `connect-routes.json` beside the other Connect settings; missing or unreadable means defaults.
@@ -419,6 +413,7 @@ impl Drop for Listening {
     }
 }
 
+#[derive(Default)]
 struct Routes {
     generation: u64,
     direct_routes: bool,
@@ -431,23 +426,6 @@ struct Routes {
     probing: HashSet<String>,
     inflight: HashMap<String, Sent>,
     listener: Option<Listening>,
-}
-
-impl Default for Routes {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            direct_routes: false,
-            local: Vec::new(),
-            next_id: 0,
-            links: HashMap::new(),
-            states: HashMap::new(),
-            announced: HashMap::new(),
-            probing: HashSet::new(),
-            inflight: HashMap::new(),
-            listener: None,
-        }
-    }
 }
 
 impl Routes {

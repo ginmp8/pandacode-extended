@@ -252,7 +252,7 @@ fn migration_29_preserves_existing_bot_issue_and_attachment_data_and_reopens() {
         assert_eq!(store.messages(&task_id, None).unwrap()[0].content, "Keep this conversation");
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM message_attachments", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
         assert!(store.github_issue_action(&task_id).unwrap().is_some());
-        assert_eq!(store.db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 29);
+        assert_eq!(store.db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), crate::storage::SCHEMA_VERSION);
     }
 }
 

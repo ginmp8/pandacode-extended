@@ -610,7 +610,8 @@ pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, 
     // current presence key must still match the key that opened this ciphertext.
     if method == super::grants::REDEEM {
         let admission = {
-            let inner = remote(app).lock();
+            let state = remote(app);
+            let inner = state.lock();
             if !inner.settings.host_enabled { Err(OFF.to_owned()) }
             else if inner.devices.iter().any(|peer| peer.id == from && !authenticated_key.is_empty() && peer.public_key == authenticated_key) { Ok(()) }
             else { Err(untrusted(&super::config::device_name())) }

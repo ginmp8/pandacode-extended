@@ -29,6 +29,9 @@ const userMessages = (page: Page, text: string) => page.locator('#transcript .us
 
 test('the first prompt to another computer shows at once, with the start stages in its turn', async ({ page }) => {
   await sendToStudio(page, 'Run the slow suite over there');
+  // The remote start is manually paced: hold the preview's final streaming frame
+  // until the browser has observed the complete streamed text.
+  await page.evaluate(() => { (window as any).__holdPreviewCompletion = true; });
   const status = page.locator('#stream-region .live-status');
   // Still connecting: the host has not answered, yet the prompt is in the thread.
   await expect(userMessages(page, 'Run the slow suite over there')).toHaveCount(1);
@@ -50,6 +53,8 @@ test('the first prompt to another computer shows at once, with the start stages 
   // The host's events stream in under the prompt, before the run ends.
   await expect(page.locator('#stream-region .live-text')).toContainText('This is the browser preview');
   await expect(userMessages(page, 'Run the slow suite over there')).toHaveCount(1);
+  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
+  await page.evaluate(() => (window as any).__releasePreviewCompletion());
   // After the run, history (copied from the host) holds exactly one copy.
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
   await expect(page.locator('#transcript .agent-message.message').filter({ hasText: 'Open the native PandaCode app' }).first()).toBeVisible();

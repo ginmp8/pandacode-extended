@@ -1,3 +1,5 @@
+import { expect, test, type Page } from '@playwright/test';
+
 test('Codex executable can be configured without changing other providers', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -9,7 +11,6 @@ test('Codex executable can be configured without changing other providers', asyn
   await expect(form.getByRole('button', { name: 'Apply', exact: true })).toBeVisible();
 });
 
-import { expect, test, type Page } from '@playwright/test';
 
 test('provider connections show Claude credential conflicts and let users prefer the saved login', async ({ page }) => {
   await page.route('**/src/preview.ts*', async route => {

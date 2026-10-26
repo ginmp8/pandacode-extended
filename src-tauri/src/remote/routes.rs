@@ -437,7 +437,7 @@ impl Default for Routes {
     fn default() -> Self {
         Self {
             generation: 0,
-            direct_routes: true,
+            direct_routes: false,
             local: Vec::new(),
             next_id: 0,
             links: HashMap::new(),
@@ -733,7 +733,7 @@ async fn incoming(app: tauri::AppHandle, stream: TcpStream, peer: SocketAddr, ro
     let me = remote(&app).device_id();
     let shaken = tokio::time::timeout(HANDSHAKE, async {
         let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(limits())).await.map_err(|_| REFUSED.to_owned())?;
-        let (device, _) = accept(&mut ws, &me, &route, |id| socket::peer_key(&app, id).ok(), hellos()).await?;
+        let (device, _) = accept(&mut ws, &me, &route, |id| socket::peer_key(&app, id).ok().map(|(key, _)| key), hellos()).await?;
         Ok::<_, String>((ws, device))
     })
     .await;
@@ -817,11 +817,19 @@ fn probe(app: &tauri::AppHandle, host: &str) {
     if !trusted { return; }
     let Some((addrs, port, route, generation)) = routes().start_probe(host, Instant::now()) else { return };
     let key = match socket::peer_key(app, host) {
-        Ok(key) => key,
+        Ok((key, _)) => key,
         Err(error) => return routes().failed(host, &error, now_ms()),
     };
     let (app, host, me) = (app.clone(), host.to_owned(), remote(app).device_id());
     tauri::async_runtime::spawn(async move {
+        // A route can be scheduled before the owner removes device trust.
+        // Recheck immediately before launching any connection attempt.
+        let authorized = {
+            let state = remote(&app);
+            let inner = state.lock();
+            inner.devices.iter().any(|d| d.id == host && inner.settings.is_trusted(&host, &d.public_key))
+        };
+        if !authorized { return; }
         match race(&addrs, port, &me, &host, &key, &route).await {
             Ok((ws, addr)) => run(app, ws, host, me, addr, false, generation).await,
             Err(error) => {
@@ -956,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn announcements_are_validated_and_settings_default_on() {
+    fn announcements_are_validated_and_settings_default_off() {
         let route = crypto::random_token();
         let good = parse_announce(&json!({"addrs": ["192.168.1.2", "8.8.8.8", "nope"], "port": 4242, "routeKey": route, "dedupe": true})).unwrap();
         assert_eq!((good.addrs, good.port, good.dedupe), (vec![ip("192.168.1.2")], 4242, true));
@@ -966,11 +974,11 @@ mod tests {
         assert!(parse_announce(&json!({"addrs": [], "port": 0, "routeKey": ""})).unwrap().addrs.is_empty(), "a withdrawal");
         let dir = std::env::temp_dir().join(format!("pandacode-routes-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(load(&dir).direct_routes);
+        assert!(!load(&dir).direct_routes);
         std::fs::write(dir.join(FILE), r#"{"directRoutes": false}"#).unwrap();
         assert!(!load(&dir).direct_routes);
         std::fs::write(dir.join(FILE), "not json").unwrap();
-        assert!(load(&dir).direct_routes);
+        assert!(!load(&dir).direct_routes);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1203,6 +1211,8 @@ mod tests {
     fn hosts_are_reprobed_every_minute_and_on_a_network_change() {
         let now = Instant::now();
         let mut routes = Routes::default();
+        assert!(!routes.direct_routes, "direct connections must be explicitly enabled");
+        routes.direct_routes = true;
         let announce = Announce { addrs: vec![ip("192.168.1.2")], port: 4000, route: "r".repeat(44), dedupe: true };
         assert!(routes.announce("host", announce.clone(), now), "a new route is probed at once");
         assert!(routes.start_probe("host", now).is_some());

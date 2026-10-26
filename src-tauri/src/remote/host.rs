@@ -100,6 +100,7 @@ struct RequestOrigin {
     app: tauri::AppHandle,
     device: String,
     key: String,
+    method: String,
 }
 
 tokio::task_local! {
@@ -125,14 +126,48 @@ pub(crate) fn is_remote_request() -> bool {
 /// Rechecked by native mutation/launch paths after their awaits, using the task's
 /// current mode under the ordinary agents/store admission locks.
 pub(crate) fn check_current_request(mode: &str) -> Result<()> {
-    REQUEST_ORIGIN.try_with(|origin| require_mode(&origin.app, &origin.device, &origin.key, mode)).unwrap_or(Ok(()))
+    REQUEST_ORIGIN.try_with(|origin| {
+        require_mode(&origin.app, &origin.device, &origin.key, mode)?;
+        super::grants::check(&origin.app, &origin.device, &origin.method)
+    }).unwrap_or(Ok(()))
 }
 
 pub(crate) fn check_start_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: Option<&str>) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
     gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
-    permissions::start_mode(mode, inner.settings.allow_full_access).map(|_| ())
+    permissions::start_mode(mode, inner.settings.allow_full_access).map(|_| ())?;
+    drop(inner);
+    super::grants::check(app, from, "task.start")
+}
+
+const WINDOW_MS: i64 = 60_000;
+const MAX_SEEN: usize = 20_000;
+/// Handshake nonces seen in the last minute. Privileged RPCs use the durable
+/// SQLite receipt ledger in `remote::replay`, never this memory-only guard. Requests outside ±60 s or seen before are refused.
+#[derive(Default)]
+pub(crate) struct Replay {
+    seen: HashMap<String, i64>,
+}
+
+impl Replay {
+    pub(crate) fn check(&mut self, ts: Option<i64>, nonce: Option<&str>, now_ms: i64) -> Result<()> {
+        const REFUSED: &str = "This request expired or was already received. Check that both computers' clocks are right.";
+        let (Some(ts), Some(nonce)) = (ts, nonce) else { return Err(REFUSED.into()) };
+        if !(16..=64).contains(&nonce.len()) || !nonce.chars().all(|c| c.is_ascii_graphic()) || (now_ms - ts).abs() > WINDOW_MS {
+            return Err(REFUSED.into());
+        }
+        // An accepted nonce only needs remembering while its ts is still inside the window.
+        self.seen.retain(|_, seen| *seen >= now_ms - WINDOW_MS);
+        if self.seen.contains_key(nonce) {
+            return Err(REFUSED.into());
+        }
+        if self.seen.len() >= MAX_SEEN {
+            return Err("This computer is busy. Try again in a moment.".into());
+        }
+        self.seen.insert(nonce.to_owned(), ts);
+        Ok(())
+    }
 }
 
 /// Ids are UUIDs or provider request ids: short, printable, no spaces.
@@ -523,9 +558,8 @@ pub(crate) fn fresh_request(inner: &mut super::Inner, message: &Value, now_ms: i
 /// Checked when a queued request is about to run, not when it arrived: remote control is
 /// still on and the sender is still in presence. Returns whether remote tasks may use
 /// Full access.
-fn admit(inner: &super::Inner, from: &str) -> Result<bool> {
-    gate(inner.settings.host_enabled)?;
-    inner.callable(from)?;
+fn admit(inner: &super::Inner, from: &str, authenticated_key: &str) -> Result<bool> {
+    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
     Ok(inner.settings.allow_full_access)
 }
 
@@ -572,20 +606,27 @@ pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, 
     let id = message["id"].as_str().filter(|id| valid_id(id).is_ok())?;
     let method = message["method"].as_str().unwrap_or_default();
     // The Inner lock is released before the grant check (and redeem), which take it themselves.
-    let admitted = admit(&remote(app).lock(), from);
-    // A device waiting for approval redeems the pairing code shown here (grants.rs).
-    if method == "pair.redeem" {
-        return Some(response(id, admitted.and_then(|_| super::grants::redeem(app, from, &message["params"]))));
+    // Pair redemption is the only permitted RPC from an unapproved device.  Its
+    // current presence key must still match the key that opened this ciphertext.
+    if method == super::grants::REDEEM {
+        let admission = {
+            let inner = remote(app).lock();
+            if !inner.settings.host_enabled { Err(OFF.to_owned()) }
+            else if inner.devices.iter().any(|peer| peer.id == from && !authenticated_key.is_empty() && peer.public_key == authenticated_key) { Ok(()) }
+            else { Err(untrusted(&super::config::device_name())) }
+        };
+        return Some(response(id, admission.and_then(|_| super::grants::redeem(app, from, &message["params"]))));
     }
+    let admitted = admit(&remote(app).lock(), from, authenticated_key);
     let admitted = admitted.and_then(|full_access| {
         for method in std::iter::once(method).chain(batch_methods(method, &message["params"])) {
             super::grants::check(app, from, method)?;
         }
         Ok(full_access)
     });
-    let call = admitted.and_then(|full_access| parse(true, method, &message["params"]).and_then(|call| cap_mode(call, full_access)).map(|call| (call, full_access)));
+    let call = admitted.and_then(|full_access| parse(true, method, &message["params"]).and_then(|call| cap_mode(call, full_access)));
     let result = match call {
-        Ok((call, full_access)) => run(app, from, call, full_access).await,
+        Ok(call) => run(app, from, authenticated_key, call).await,
         Err(error) => Err(error),
     };
     Some(response(id, result))
@@ -656,6 +697,8 @@ async fn optional_pull(state: &AppState, session_id: &str) -> Result<Option<(Pat
 
 async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
     require_authorized(app, from, authenticated_key)?;
+    let origin = RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned(), method: call.method_name().to_owned() };
+    REQUEST_ORIGIN.scope(origin, async {
     match call {
         Call::Batch(calls) => {
             let mut results = Vec::with_capacity(calls.len());
@@ -674,6 +717,7 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
         }
         call => run_one(app, from, authenticated_key, call).await,
     }
+    }).await
 }
 
 fn remote_worker_status(status: &str) -> &str {
@@ -1252,6 +1296,7 @@ fn watch_team_events(app: &tauri::AppHandle) {
 
 async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
     require_authorized(app, from, authenticated_key)?;
+    super::grants::check(app, from, call.method_name())?;
     let state = app.state::<AppState>();
     match call {
         Call::Subscribe { session_ids, after, epoch } => {
@@ -1314,7 +1359,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             }
             Ok(models)
         }
-        Call::Start(request) => start_once(app, from, request).await,
+        Call::Start(request) => start_once(app, from, authenticated_key, request).await,
         Call::StartStatus { start_id } => Ok(start_status(host_starts().lock().unwrap_or_else(|e| e.into_inner()).get(&start_id).filter(|start| start.from == from).map(Arc::as_ref))),
         Call::CancelStart { start_id } => {
             let mut starts = host_starts().lock().unwrap_or_else(|e| e.into_inner());
@@ -1607,16 +1652,16 @@ fn claim_start(starts: &mut HashMap<String, Arc<HostStart>>, id: &str, from: &st
 
 /// Runs a start once per `startId`. The start runs on its own, so a lost reply or a
 /// cancelled caller never stops it halfway; every caller waits for its one result.
-async fn start_once(app: &tauri::AppHandle, from: &str, request: start::Start) -> Result<Value> {
-    let Some(id) = request.start_id.clone() else { return start::run(app, from, request).await };
+async fn start_once(app: &tauri::AppHandle, from: &str, authenticated_key: &str, request: start::Start) -> Result<Value> {
+    let Some(id) = request.start_id.clone() else { return start::run(app, from, authenticated_key, request).await };
     let (entry, fresh) = claim_start(&mut host_starts().lock().unwrap_or_else(|e| e.into_inner()), &id, from, Instant::now())?;
     let mut done = entry.result.subscribe();
     if fresh {
-        let (app, from, entry) = (app.clone(), from.to_owned(), entry.clone());
+        let (app, from, key, entry) = (app.clone(), from.to_owned(), authenticated_key.to_owned(), entry.clone());
         tauri::async_runtime::spawn(async move {
             // A panic (or the task being dropped) below still settles the start.
             let settle = Settle(entry.clone());
-            let result = start::run_cancellable(&app, &from, request, entry.cancel.clone()).await;
+            let result = start::run_cancellable(&app, &from, &key, request, entry.cancel.clone()).await;
             // Cancelled after the task was made: it must not run unseen.
             if let (true, Ok(reply)) = (entry.cancel.load(Ordering::SeqCst), &result) {
                 if let Some(session) = reply["sessionId"].as_str() {
@@ -2723,6 +2768,7 @@ pub(crate) fn follow(app: &tauri::AppHandle, device: &str, authenticated_key: &s
     }
     subscriber.sessions.insert(session_id.to_owned());
     inner.journal.watch(session_id);
+    Ok(())
 }
 
 /// Drops subscribers that expired, left the account or lost trust; true if any remain.
@@ -2846,7 +2892,7 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
     };
     // Read after the run end has settled its team (architect::completed follows it), so a
     // team whose workers carry on reports the run's task as still running.
-    let ids: Vec<String> = batches.iter().flat_map(|(_, _, _, finished)| finished.iter().filter(|data| data.get("team").is_none()).filter_map(|data| data["sessionId"].as_str().map(str::to_owned))).collect::<HashSet<_>>().into_iter().collect();
+    let ids: Vec<String> = batches.iter().flat_map(|(_, _, finished)| finished.iter().filter(|data| data.get("team").is_none()).filter_map(|data| data["sessionId"].as_str().map(str::to_owned))).collect::<HashSet<_>>().into_iter().collect();
     let teams = if ids.is_empty() {
         HashMap::new()
     } else {
@@ -2874,10 +2920,10 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
             super::diagnostics::record("subscriber.lagged", format!("{device}: over {MAX_BUFFER} buffered events"));
         }
         for frame in lagged_frames(frames(events), behind, &epoch) {
-            let _ = socket::send_to_device(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
+            let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
         }
         for data in finished {
-            let _ = socket::send_authenticated(&app, &device, &authenticated_key, &json!({"type": "event", "name": "run.finished", "data": data}));
+            let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
         }
     }
     if !amended.is_empty() {
@@ -3622,12 +3668,12 @@ mod tests {
 
     #[test]
     fn host_gate_only_checks_remote_control() {
-        assert_eq!(gate(false), Err(OFF.to_string()));
-        assert_eq!(gate(true), Ok(()));
+        assert_eq!(gate(false, true, "Test host"), Err(OFF.to_string()));
+        assert_eq!(gate(true, true, "Test host"), Ok(()));
     }
 
     #[test]
-    fn a_present_device_keeps_its_subscription_without_a_pin() {
+    fn a_present_device_cannot_keep_its_subscription_without_a_pin() {
         let now = Instant::now();
         let subscriber = Subscriber {
             until: Some(now + Duration::from_secs(60)),
@@ -3641,8 +3687,11 @@ mod tests {
             ..Default::default()
         };
         inner.subscribers.insert("viewer".into(), subscriber);
-        assert!(prune_subscribers(&mut inner, now));
-        assert!(inner.subscribers.contains_key("viewer"));
+        assert!(!prune_subscribers(&mut inner, now));
+        assert!(!inner.subscribers.contains_key("viewer"), "presence must never bypass the pinned-key trust gate");
+        inner.settings.trusted.insert("viewer".into(), "current-key".into());
+        inner.subscribers.insert("viewer".into(), Subscriber { until: Some(now + Duration::from_secs(60)), ..Default::default() });
+        assert!(prune_subscribers(&mut inner, now), "a previously approved peer may remain subscribed");
     }
 
     #[test]
@@ -3653,14 +3702,16 @@ mod tests {
         };
         let now = 1_000_000_000;
         let request = |nonce: &str| json!({"ts": now, "nonce": nonce});
-        assert_eq!(admit(&inner, "viewer"), Err(OFF.to_string()));
+        assert_eq!(admit(&inner, "viewer", "k"), Err(OFF.to_string()));
         inner.settings.host_enabled = true;
-        assert_eq!(admit(&inner, "viewer"), Ok(false));
+        assert!(admit(&inner, "viewer", "k").is_err(), "present is not the same as trusted");
+        inner.settings.trusted.insert("viewer".into(), "k".into());
+        assert_eq!(admit(&inner, "viewer", "k"), Ok(false));
         inner.settings.allow_full_access = true;
-        assert_eq!(admit(&inner, "viewer"), Ok(true));
+        assert_eq!(admit(&inner, "viewer", "k"), Ok(true));
         // Revoked (gone from presence) after the request was queued.
         inner.devices.clear();
-        assert_eq!(admit(&inner, "viewer"), Err(super::super::UNKNOWN_DEVICE.to_string()));
+        assert!(admit(&inner, "viewer", "k").is_err(), "a vanished key cannot authenticate a remote request");
         // Freshness is checked on arrival: a request that then waits a minute in the
         // queue still runs, and a replay of it is refused when it arrives.
         assert_eq!(fresh_request(&mut inner, &request("nonce-0000000000000003"), now), Ok(()));
@@ -4114,7 +4165,7 @@ mod extended_security_tests {
 
     #[test]
     fn requests_are_validated() {
-        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()] }));
+        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None }));
         assert!(parse(true, "subscribe", &json!({})).is_err());
         assert!(parse(true, "subscribe", &json!({"sessionIds": ["a b"]})).is_err());
         assert!(parse(true, "subscribe", &json!({"sessionIds": vec!["s"; MAX_IDS + 1]})).is_err());

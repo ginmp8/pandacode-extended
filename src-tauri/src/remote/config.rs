@@ -123,6 +123,9 @@ pub(crate) struct Settings {
     /// Independent local-only grant. Old settings and new installs both default off.
     #[serde(default)]
     pub allow_full_access: bool,
+    /// Recorded only after previously pinned peers have been imported into scoped grants.
+    #[serde(default)]
+    pub grants_scoped: bool,
     #[serde(default)]
     pub account: Option<Account>,
     /// Devices allowed to drive this one: device id → the public key pinned when trusted.
@@ -137,10 +140,9 @@ impl Settings {
     }
 }
 
-/// Reads the settings, creating the device id once. The first load after scoped pairing
-/// shipped keeps the devices of a computer that already allowed remote control at full
-/// access (`grants::seed_adopt`; only those in the first presence frame after it), so an
-/// upgrade locks nobody out; anything newer waits for approval.
+/// Reads settings and creates a device id once. Existing, explicitly pinned devices
+/// migrate to scoped grants without any presence-based auto-approval. Full requires
+/// the independent local opt-in; any newly observed device must be approved by its host.
 pub(crate) fn load(dir: &Path) -> Settings {
     let path = dir.join(FILE);
     let text = std::fs::read_to_string(&path).ok();
@@ -151,8 +153,8 @@ pub(crate) fn load(dir: &Path) -> Settings {
         changed = true;
     }
     if !settings.grants_scoped {
-        let upgraded = text.is_some() && settings.account.is_some() && settings.host_enabled;
-        let seeded = if upgraded { super::grants::seed_adopt(dir) } else { Ok(()) };
+        let upgraded = text.is_some() && settings.host_enabled;
+        let seeded = if upgraded { super::grants::seed_trusted(dir, &settings) } else { Ok(()) };
         changed |= seeded.is_ok();
         settings.grants_scoped = seeded.is_ok();
         if let Err(error) = seeded {
@@ -403,8 +405,10 @@ mod tests {
         assert!(load(&fresh).grants_scoped && !grants(&fresh));
         let signed_in_off = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&signed_in_off).grants_scoped && !grants(&signed_in_off));
-        let upgraded = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{"id":"gh:1","login":"a"}}"#));
+        let upgraded = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{"id":"gh:1","login":"a"},"trusted":{"existing-device":"pinned-public-key"}}"#));
         assert!(load(&upgraded).grants_scoped && grants(&upgraded));
+        let migrated = super::super::grants::test_scope_from_file(&upgraded, "existing-device", "pinned-public-key");
+        assert_eq!(migrated, "control");
         let later = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"grantsScoped":true,"account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&later).grants_scoped && !grants(&later));
         for dir in [fresh, signed_in_off, upgraded, later] {

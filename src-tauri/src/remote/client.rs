@@ -38,13 +38,24 @@ pub(crate) async fn call_within(app: &tauri::AppHandle, device_id: &str, method:
         if device_id == inner.settings.device_id {
             return Err("That is this computer.".into());
         }
-        inner.callable(device_id)?;
+        if method == super::grants::REDEEM {
+            let peer = inner.devices.iter().find(|d| d.id == device_id && d.host && !d.public_key.is_empty())
+                .ok_or(super::UNKNOWN_DEVICE)?;
+            if !peer.online { return Err(socket::OFFLINE.into()); }
+        } else {
+            inner.callable(device_id)?;
+        }
         inner.pending.insert(id.clone(), (device_id.to_owned(), reply));
     }
     let forget = || remote(app).lock().pending.remove(&id);
     // `ts` and a fresh `nonce` let the host refuse replays (docs/remote-access.md).
     let request = json!({"type": "req", "id": id, "method": method, "params": params, "ts": chrono::Utc::now().timestamp_millis(), "nonce": uuid::Uuid::new_v4().simple().to_string()});
-    if let Err(error) = socket::send_trusted(app, device_id, &request) {
+    let result = if method == super::grants::REDEEM {
+        socket::send_pairing(app, device_id, &request)
+    } else {
+        socket::send_trusted(app, device_id, &request)
+    };
+    if let Err(error) = result {
         forget();
         return Err(error);
     }

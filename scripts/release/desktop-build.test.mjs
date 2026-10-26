@@ -62,7 +62,7 @@ test('Developer ID signing requires a real identity and notarization credentials
   assert.equal(plan.env.APPLE_ID, 'a');
 });
 
-test('Extended 0.5.1 packaging only accepts matching Extended-named Tauri bundles', () => {
+test('Extended 0.5.2 packaging only accepts matching Extended-named Tauri bundles', () => {
   for (const [target, suffix] of [
     ['windows-x86_64', '_x64-setup.exe'],
     ['windows-aarch64', '_arm64-setup.exe'],
@@ -71,17 +71,17 @@ test('Extended 0.5.1 packaging only accepts matching Extended-named Tauri bundle
     ['darwin-aarch64', '_aarch64.dmg'],
     ['darwin-x86_64', '_x64.dmg'],
   ]) {
-    const spaced = `PandaCode Extended_0.5.1${suffix}`;
-    const underscored = `PandaCode_Extended_0.5.1${suffix}`;
-    assert.equal(builtArtifact([spaced, underscored], '0.5.1', target), spaced);
-    assert.equal(builtArtifact([underscored], '0.5.1', target), underscored);
+    const spaced = `PandaCode Extended_0.5.2${suffix}`;
+    const underscored = `PandaCode_Extended_0.5.2${suffix}`;
+    assert.equal(builtArtifact([spaced, underscored], '0.5.2', target), spaced);
+    assert.equal(builtArtifact([underscored], '0.5.2', target), underscored);
     assert.throws(() => builtArtifact([spaced], '0.3.42', target), /did not produce/);
-    assert.throws(() => builtArtifact([`PandaCode_0.5.1${suffix}`], '0.5.1', target), /did not produce/);
+    assert.throws(() => builtArtifact([`PandaCode_0.5.2${suffix}`], '0.5.2', target), /did not produce/);
   }
 });
 
 test('release builds require one matching three-component Extended SemVer', async () => {
-  await assert.doesNotReject(checkVersions('0.5.1'));
+  await assert.doesNotReject(checkVersions('0.5.2'));
   await assert.rejects(checkVersions('0.4.0'), /disagree on the version/);
   await assert.rejects(checkVersions('0.3.42'), /disagree on the version/);
   await assert.rejects(checkVersions('0.4.0.1'), /SemVer core/);

@@ -68,14 +68,14 @@ test.describe('bots', () => {
     await panel(page, 'Unsent Scout').getByRole('alertdialog', { name: 'Delete Unsent Scout?' }).getByRole('button', { name: 'Delete', exact: true }).click();
     await expect(panel(page, 'Unsent Scout')).toBeHidden();
     await expect(crumb(page)).toHaveCount(0);
-    await expect(page.locator('#prompt')).not.toHaveValue('Draft message never sent');
+    await expect(page.locator('#prompt')).toHaveCount(0);
     await expect(page.locator('#toast')).not.toContainText('Conversation not found.');
     const after = await page.evaluate(async () => {
       const { invoke } = await import('/src/preview.ts');
       const sessions = await invoke('list_sessions', {});
       return sessions.map((task: { id: string }) => task.id);
     });
-    expect(after.length).toBeLessThan(before.length + 1);
+    expect(after.length).toBe(before.length - 1);
   });
 
   test('native selects follow light and dark theme tokens in bot profile', async ({ page }) => {

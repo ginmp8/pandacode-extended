@@ -8,9 +8,11 @@ PandaCode Extended is an independently versioned derivative of [PandaCode](https
 
 **Display/distribution identity**: `<extended>+pc.<tracked-upstream>` (e.g. `0.5.0+pc.0.3.47`). `pc` refers to the latest reviewed/tracked original PandaCode version; it does not claim a complete source rebase, binary compatibility or an exact dependency version. SemVer ignores build metadata after `+` when comparing precedence: updating `pc` alone must never create a distinct release under an unchanged Extended core. Fixes to an unpublished candidate keep its approved core version. A distinct release requires a separately approved core version.
 
-**Source provenance**: the historical initial upstream source ancestry is independently recorded as `0.3.28`. Selected later ports do not rewrite that ancestry. The candidate combines the `0.3.42` through `0.3.47` integration with a [supplemental `0.3.28` through `0.3.42` review](upstream-parity-0.3.28-0.3.42.md) and preserves intentional Extended differences; full upstream parity remains unclaimed. `HARDENED-REVISION.json` is the immutable historical review record for the earlier integration through `0.3.42`, not the current product version.
+**Source provenance**: the historical initial upstream source ancestry is independently recorded as `0.3.28`. Selected later ports do not rewrite that ancestry. The candidate adds a focused `0.3.48` integration on top of the `0.3.42` through `0.3.47` integration with a [supplemental `0.3.28` through `0.3.42` review](upstream-parity-0.3.28-0.3.42.md) and preserves intentional Extended differences; full upstream parity remains unclaimed. `HARDENED-REVISION.json` is the immutable historical review record for the earlier integration through `0.3.42`, not the current product version.
 
 `EXTENDED-RELEASE.json` is the current source metadata contract. The product-version script updates its Extended version, display identifier and current release-note path. A product-only patch retains the existing integration coverage document and source identities. Updating the tracked upstream reference requires a reviewed integration, an explicit `reviewed_upstream_range`, immutable source identities in `integration_provenance`, and a coverage document. The release validator checks those separately from the historical review's pinned digest; advancing the active reference must not edit old evidence to match. An upstream announcement alone does not update this metadata.
+
+The `incremental_upstream_review` object records the separately reviewed 0.3.47–0.3.48 increment, with exact original commits and note blob SHA, without replacing the prior 0.5.0 provenance or claiming an unverified reference archive hash. See [incremental integration](upstream-integration-0.6.0.md).
 
 The `historical_upstream_review` supplement records the separate feature-branch baseline, immutable original tag commits, coverage document and hashed release-evidence manifest for issue #24. It retains the newer integration's provenance and keeps the unpublished candidate at `0.5.0`. Source-only notes do not establish a published release date. The validator checks all 15 original source-note digests in the historical range, including the unpublished 0.3.36 note, without rewriting the legacy review record.
 
@@ -21,9 +23,10 @@ The `early_upstream_review` supplement records [issue #26](https://github.com/gi
 | Status | Technical version | Display identifier |
 | --- | --- | --- |
 | [Published Extended release](https://github.com/ginmp8/pandacode-extended/releases/tag/v0.4.0), 2026-10-25 | `0.4.0` | `0.4.0+pc.0.3.42` |
-| Requested integration candidate, not published by this change | `0.5.0` | `0.5.0+pc.0.3.47` |
+| Previous integration candidate (not published by this change) | `0.5.0` | `0.5.0+pc.0.3.47` |
+| Current integration candidate (not published by this change) | `0.6.0` | `0.6.0+pc.0.3.48` |
 
-The user requested `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplements in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24) and [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26). All corrections to this candidate remain part of `0.5.0`; individual corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. The planned `v0.5.0` tag is created only when publication is explicitly authorized.
+The earlier user request selected `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplements in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24) and [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26). All corrections to the current integration candidate remain part of `0.6.0`; individual corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. The planned `v0.6.0` tag is created only when publication is explicitly authorized.
 
 **After publication**, version selection for a distinct future release must be decided from its actual changes and consumer compatibility. Corrections normally use PATCH, compatible additions use MINOR, and incompatible changes require a migration assessment. This document deliberately does not preassign numbers to hypothetical releases.
 
@@ -35,7 +38,8 @@ releases/
   extended/
     0.3.42-hardened.md         # Legacy Extended note, retained
     0.4.0.md                   # Published Extended history, retained
-    0.5.0.md                   # Current Extended candidate note
+    0.5.0.md                   # Previous Extended candidate note
+    0.6.0.md                   # Current Extended candidate note
 ```
 
 - Original PandaCode notes stay at `releases/<upstream-version>.md` and keep existing `website/src/data/release-dates.json` keys such as `0.3.42`.

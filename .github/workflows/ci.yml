@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --workers=2
+          npx playwright test tests/provider-handoff.spec.ts tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --workers=2
       - name: Preserve failed desktop browser diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

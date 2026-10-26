@@ -59,7 +59,7 @@ import { approvalBarHtml } from './approval-bar';
 import { createThreadFind } from './thread-find';
 import type { RemoteHost, RemoteRepoCheck, RemoteStatus, RemoteTarget } from './remote-types';
 import type { RemoteStart } from './remote-progress';
-import { LOCAL, behindDialog, behindText, clearRemoteStart, computerControl, computerItems, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
+import { LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
 import { botAvatar, botsBarHtml, botsListHtml, botsPanelHeadHtml, storedSidebarView, storeSidebarView, syncSeen, type SidebarView } from './sidebar-bots';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
@@ -2939,7 +2939,7 @@ async function send(): Promise<void> {
   const fresh = !s.remoteDevice && newTaskView();
   const target = fresh ? remoteTargets.find(item => item.deviceId === remoteChoice) : undefined;
   if (target) return sendRemote(s, target, draft, text);
-  if (fresh && remoteChoice !== LOCAL && !cloudProvider(remoteChoice)) { renderComposer(); return; }
+  if (fresh && remoteChoice !== LOCAL) { renderComposer(); return; }
   // A failed start elsewhere no longer applies once this task is sent another way.
   clearRemoteStart(s.id);
   // Preparing attachments or awaiting admission blocks only this task.
@@ -4562,7 +4562,7 @@ let renderedRemoteKey = '';
 let pairingPrompt: (() => void) | undefined, pairingLoading = false;
 const remoteChecks = new Set<string>(), remoteStartCancels = new Set<string>(), remoteRetries = new Set<string>(), remoteRetryErrors = new Map<string, string>();
 function remoteDeviceId(s: Session): string | undefined {
-  return s.remoteDevice?.id ?? (!s.cloud && newTaskView() && remoteChoice !== LOCAL && !cloudProvider(remoteChoice) ? remoteChoice : undefined);
+  return s.remoteDevice?.id ?? (newTaskView() && remoteChoice !== LOCAL ? remoteChoice : undefined);
 }
 function remoteTargetFor(s: Session): RemoteTarget | undefined {
   const id = remoteDeviceId(s); if (!id) return undefined;
@@ -4577,7 +4577,7 @@ function remoteOffline(s: Session): boolean {
 }
 /** A New task's chosen computer that is no longer in the account's list, or undefined. */
 function remoteMissing(s: Session): string | undefined {
-  if (s.remoteDevice || s.cloud || !newTaskView() || remoteChoice === LOCAL || cloudProvider(remoteChoice) || !remotePresenceReady) return undefined;
+  if (s.remoteDevice || !newTaskView() || remoteChoice === LOCAL || !remotePresenceReady) return undefined;
   return remoteTargets.some(item => item.deviceId === remoteChoice) ? undefined : remoteChoiceName ?? 'That computer';
 }
 function remoteMissingNote(s: Session): string {
@@ -4631,6 +4631,57 @@ function confirmBehind(name: string, check: RemoteRepoCheck): Promise<boolean> {
   });
 }
 /** A New task sent with another computer chosen: check GitHub, then start it there with the same settings. */
+async function retryRemoteConnection(): Promise<void> {
+  const s = session(), id = s && remoteDeviceId(s); if (!s || !id || remoteRetries.has(id)) return;
+  remoteRetries.add(id); remoteRetryErrors.delete(id); clearComposerNote(s); renderComposer();
+  try {
+    await call('remote_reconnect');
+    await call('remote_resubscribe');
+    await refreshRemoteTargets(remoteSignedIn);
+  } catch (error) {
+    const reason = errorText(error);
+    remoteRetryErrors.set(id, reason);
+    // A running mirror says so in its status line; a New task above its prompt.
+    if (!s.remoteDevice) showComposerNote(s, `Couldn’t reconnect to ${remoteTargetFor(s)?.name ?? remoteMissing(s) ?? 'the other computer'}: ${reason}`);
+  } finally { remoteRetries.delete(id); if (s.id === state.sessionId) renderComposer(); }
+}
+async function stopRemoteStart(s: Session, starting: NonNullable<ReturnType<typeof remoteStart>>): Promise<void> {
+  if (remoteStartCancels.has(s.id)) return;
+  const current = state.streams.get(s.id), previousStatus = current?.status, previousEnding = runEndings.get(s.id);
+  starting.cancelling = true; remoteStartCancels.add(s.id); runEndings.set(s.id, 'stopped');
+  if (current) { current.status = 'Stopping…'; current.revision++; }
+  renderStream(); renderComposer();
+  try {
+    const reply = await call<{ cancelled: boolean; pending?: boolean }>('remote_cancel_start', { sessionId: starting.mirrorId ?? s.id });
+    if (reply.cancelled) {
+      // The draft comes back to the composer; no run ended, so nothing may report one.
+      if (previousEnding) runEndings.set(s.id, previousEnding); else runEndings.delete(s.id);
+      cancelledRemoteStart(s.id);
+      return;
+    }
+    // The host has not answered yet: Stopping… stays until the start fails or attaches (sendRemote then stops it).
+    if (reply.pending) return;
+    // Too late to cancel: the host made the task, so it is stopped like any run.
+    starting.cancelling = false; remoteStartCancels.delete(s.id); remoteStartAttached(starting.mirrorId ?? s.id);
+    if (current) { current.status = 'Stopping agent'; current.revision++; clearAgentInputs(current); }
+    renderStream(); renderComposer();
+    await call('stop_session', { sessionId: starting.mirrorId ?? s.id });
+  } catch (error) {
+    starting.cancelling = false; remoteStartCancels.delete(s.id);
+    if (previousEnding) runEndings.set(s.id, previousEnding); else runEndings.delete(s.id);
+    if (current) { current.status = previousStatus ?? ''; current.revision++; }
+    renderStream(); renderComposer(); throw error;
+  }
+}
+async function stopTask(s: Session): Promise<void> {
+  const starting = remoteStart(s.id);
+  if (starting && starting.stage !== 'error') return stopRemoteStart(s, starting);
+  runEndings.set(s.id, 'stopped');
+  const current = state.streams.get(s.id);
+  if (current) { current.status = 'Stopping agent'; current.revision++; clearAgentInputs(current); renderStream(); }
+  const team = teams.get(s.id);
+  await call(team ? 'architect_control' : 'stop_session', { sessionId: s.id, ...(team ? { action: 'stop' } : {}) });
+}
 async function sendRemote(s: Session, target: RemoteTarget, draft: string, text: string): Promise<void> {
   const filePaths = [...state.attachments], promptItems = attachments.list(s.id), browserItems = state.browserAttachments.get(s.id) ?? [];
   if ((state.moodboardAttachments.get(s.id) ?? []).length) throw new Error(`Moodboards can’t be sent to ${target.name} yet. Remove them, or run on this computer.`);

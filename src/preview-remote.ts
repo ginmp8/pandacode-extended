@@ -5,6 +5,7 @@ const THIS = 'dev-this';
 let signedIn = false, hostEnabled = false, allowFullAccess = false;
 let devices: RemoteDevice[] = [], cancelSignIn: (() => void) | undefined;
 const offline = new Set<string>();
+const revoked = new Set<string>();
 const trusted = new Set<string>(['dev-studio', 'dev-laptop']);
 const status = (): RemoteStatus => ({ configured: true, signedIn, account: signedIn ? { login: 'octocat' } : undefined, device: { id: THIS, name: 'This Mac', fingerprint: '3fa91c07d2b64e584a810ea7b9c3d25f' }, hostEnabled, allowFullAccess, connected: signedIn });
 const sampleDevices = (): RemoteDevice[] => [
@@ -12,7 +13,7 @@ const sampleDevices = (): RemoteDevice[] => [
   { id: 'dev-studio', name: 'Studio iMac', platform: 'macOS', fingerprint: '9b02e4aa71c3d6053f102e49a8410b67', host: true, online: !offline.has('dev-studio'), trusted: trusted.has('dev-studio'), lastSeen: Date.now(), current: false },
   { id: 'dev-nas', name: 'Home NAS', platform: 'Linux', fingerprint: '17aa5e90b3c4d286ea5bb53d782f9104', host: true, online: true, trusted: trusted.has('dev-nas'), lastSeen: Date.now(), current: false },
   { id: 'dev-laptop', name: 'Old laptop', platform: 'Windows', fingerprint: 'c4d81f3e0a9957b2736ca19d52e54086', host: true, online: false, trusted: trusted.has('dev-laptop'), lastSeen: Date.now() - 86_400_000, current: false },
-];
+].filter(device => !revoked.has(device.id));
 export function invokeRemote<T>(command: string, args: Record<string, any>, emit: (name: string, payload: unknown) => void): Promise<T> {
   return Promise.resolve().then(() => handle(command, args, emit) as T);
 }
@@ -37,7 +38,7 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
     case 'remote_set_trusted': if (args.trusted) trusted.add(args.deviceId); else trusted.delete(args.deviceId); return devices = sampleDevices();
     case 'remote_revoke_device': devices = devices.filter(d => d.id !== args.deviceId); emit('remote://presence', devices); return {};
     // Other trusted computers with remote control on; preview.ts mocks remote_repo_check and remote_start_task.
-    case 'remote_targets': return (signedIn ? sampleDevices() : []).filter(d => !d.current && d.host && d.trusted).map((d): RemoteTarget => ({ deviceId: d.id, name: d.name, platform: d.platform, online: d.online }));
+    case 'remote_targets': return (signedIn ? sampleDevices() : []).filter(d => !d.current && d.host && d.trusted).map((d): RemoteTarget => ({ deviceId: d.id, name: d.name, platform: d.platform, online: d.online, lastSeen: d.lastSeen ?? null }));
     default: throw new Error(`Unknown preview command: ${command}`);
   }
 }

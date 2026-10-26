@@ -10,7 +10,7 @@ import { escape, icon } from './dom';
 export type RemoteStartStage = 'connecting' | 'finding' | 'downloading' | 'preparing' | 'starting' | 'error';
 /** `remote://start-progress`, validated natively (`remote/start.rs` `progress_payload`). */
 export interface RemoteStartProgress { deviceId: string; startId?: string | null; repo?: string | null; stage: Exclude<RemoteStartStage, 'connecting'>; percent?: number | null; detail?: string | null }
-export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; retry?: () => void; onStage?: (start: RemoteStart) => void }
+export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; waiting?: boolean; mirrorId?: string; settle?: (error?: Error) => void }
 
 const EVENT = 'remote://start-progress';
 const STAGES: readonly RemoteStartStage[] = ['connecting', 'finding', 'downloading', 'preparing', 'starting', 'error'];
@@ -107,11 +107,25 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
   let ended: Promise<void> = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
   ended.catch(() => undefined);
   try {
-    const result = await start(entry.startId);
+    // Reuse the unique start ID for cancellation and a reply lost after host admission.
+    const call = start(entry.startId);
+    call.catch(() => undefined);
+    const result = await Promise.race([call, ended.then(() => call)]);
+    if (waitingFor(entry) && starts.get(sessionId) === entry) {
+      entry.waiting = true;
+      const mirror = (result as { sessionId?: unknown } | null)?.sessionId;
+      if (typeof mirror === 'string') entry.mirrorId = mirror;
+      ended = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
+      ended.catch(() => undefined);
+      await ended;
+    }
     if (starts.get(sessionId) === entry) starts.delete(sessionId);
     return result;
   } catch (error) {
-    if (starts.get(sessionId) === entry) Object.assign(entry, { stage: 'error', percent: null, detail: entry.stage === 'error' && entry.detail ? entry.detail : message(error) });
+    if (starts.get(sessionId) === entry) {
+      if (entry.cancelling) starts.delete(sessionId);
+      else Object.assign(entry, { stage: 'error', percent: null, waiting: false, detail: entry.stage === 'error' && entry.detail ? entry.detail : message(error) });
+    }
     throw error;
   } finally { entry.settle = undefined; syncRemoteStartStrip(); }
 }

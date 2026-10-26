@@ -80,6 +80,8 @@ async function openApp(page: Page, hold: string[] = [], failures: string[] = [])
 async function openUsage(page: Page): Promise<void> {
   await usageButton(page).click();
   await expect(dialog(page)).toBeVisible();
+  // The dialog shell opens before its lazy usage view mounts.
+  await expect(refresh(page)).toBeVisible();
 }
 
 async function release(page: Page, provider?: string): Promise<void> {

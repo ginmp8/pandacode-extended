@@ -54,6 +54,50 @@ async function openSettings(page: Page, section?: string, name = 'Scout'): Promi
 }
 
 test.describe('bots', () => {
+  test('bot deletion clears an unsent pending conversation instead of stranding a ghost task', async ({ page }) => {
+    await newBot(page, 'Unsent Scout');
+    const before = await page.evaluate(async () => {
+      const { invoke } = await import('/src/preview.ts');
+      const sessions = await invoke('list_sessions', {});
+      return sessions.map((task: { id: string }) => task.id);
+    });
+    await page.locator('#prompt').fill('Draft message never sent');
+    await openSettings(page, undefined, 'Unsent Scout');
+    await panel(page, 'Unsent Scout').getByRole('button', { name: 'More', exact: true }).click();
+    await panel(page, 'Unsent Scout').getByRole('menuitem', { name: 'Delete bot' }).click();
+    await panel(page, 'Unsent Scout').getByRole('alertdialog', { name: 'Delete Unsent Scout?' }).getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect(panel(page, 'Unsent Scout')).toBeHidden();
+    await expect(crumb(page)).toHaveCount(0);
+    await expect(page.locator('#prompt')).not.toHaveValue('Draft message never sent');
+    await expect(page.locator('#toast')).not.toContainText('Conversation not found.');
+    const after = await page.evaluate(async () => {
+      const { invoke } = await import('/src/preview.ts');
+      const sessions = await invoke('list_sessions', {});
+      return sessions.map((task: { id: string }) => task.id);
+    });
+    expect(after.length).toBeLessThan(before.length + 1);
+  });
+
+  test('native selects follow light and dark theme tokens in bot profile', async ({ page }) => {
+    await openBots(page);
+    const control = bots(page).locator('.bots-form select[name=provider]');
+    const surface = async () => control.evaluate(el => {
+      const option = el.options[0];
+      return { theme: getComputedStyle(el).colorScheme, background: getComputedStyle(el).backgroundColor,
+        optionTheme: getComputedStyle(option).colorScheme, optionBackground: getComputedStyle(option).backgroundColor };
+    });
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+    const dark = await surface();
+    expect(dark.theme).toBe('dark');
+    expect(dark.optionTheme).toBe('dark');
+    expect(dark.background).not.toBe('rgb(255, 255, 255)');
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+    const light = await surface();
+    expect(light.theme).toBe('light');
+    expect(light.optionTheme).toBe('light');
+    expect(light.background).not.toBe(dark.background);
+  });
+
   test('the Bots bar switches the sidebar to the bots, each with its latest message', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('#navigation')).toBeVisible();

@@ -502,7 +502,7 @@ pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Re
             inner.uploads = Default::default();
         }
         if let Some(outbox) = &inner.outbox {
-            let _ = outbox.send(json!({"kind": "host", "enabled": enabled}).to_string());
+            let _ = outbox.try_send(json!({"kind": "host", "enabled": enabled}).to_string());
         }
         inner.settings.clone()
     };

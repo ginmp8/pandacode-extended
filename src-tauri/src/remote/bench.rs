@@ -215,6 +215,8 @@ fn broadcast_presence(state: &RelayState, hop: Duration) {
 
 async fn serve(tcp: tokio::net::TcpStream, state: Arc<Mutex<RelayState>>, profile: Profile) {
     let mut device = String::new();
+    // Tungstenite's Callback contract requires an unboxed ErrorResponse.
+    #[expect(clippy::result_large_err, reason = "External Tungstenite handshake callback requires ErrorResponse by value")]
     let callback = |request: &WsRequest, response: WsResponse| {
         device = request.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or_default().to_owned();
         Ok(response)

@@ -44,7 +44,7 @@ export async function check(sourceRoot = root) {
   const range = meta.reviewed_upstream_range;
   assert(range?.from === history.tracked_upstream_version && range.through === meta.tracked_upstream_version, 'Reviewed upstream range drift');
   const incremental = meta.incremental_upstream_review;
-  assert(incremental?.from === '0.3.47' && incremental?.through === meta.tracked_upstream_version
+  assert(incremental?.from === '0.3.47' && incremental?.through === '0.3.48'
     && incremental.extended_base_commit === '430909614339c58ac4a5beea4baa2707f2af27da'
     && incremental.upstream_from_commit === '4187553cb48db96657609948f6b0904556845d45'
     && incremental.upstream_through_commit === '9cc1a9a58d259f7316e4f3ad621e8ca120358d89', 'Incremental upstream identity drift');
@@ -70,6 +70,28 @@ export async function check(sourceRoot = root) {
   const coverage = await read(integration.coverage_document);
   for (const identity of [integration.extended_base_commit, integration.upstream_commit, integration.reference_archive_sha256]) {
     assert(coverage.includes(identity), 'Integration coverage omits source identity');
+  }
+  // A fresh upstream range preserves both the prior source review and immutable notes.
+  const latest = meta.latest_upstream_review;
+  assert(latest?.from === incremental.through && latest.through === meta.tracked_upstream_version
+    && latest.extended_base_commit === '479f2e6ac700d216d62ae08681e36aaaa20fa074'
+    && latest.upstream_from_commit === '9cc1a9a58d259f7316e4f3ad621e8ca120358d89'
+    && latest.upstream_0_3_49_commit === 'e71acdda9eb5d488122081c4dbc49ee1a5b4f9e2'
+    && latest.upstream_through_commit === '15541a51f3f5d8ee32d91349f9d5035a53c4cd19', 'Latest upstream source identities drift');
+  assert(latest.coverage_document === integration.coverage_document
+    && Array.isArray(latest.source_notes) && latest.source_notes.length === 2
+    && Array.isArray(latest.source_note_blobs) && latest.source_note_blobs.length === 2, 'Latest upstream source evidence missing');
+  for (let offset = 0; offset < 2; offset++) {
+    const version = '0.3.' + (49 + offset);
+    const path = 'releases/' + version + '.md';
+    assert(latest.source_notes[offset] === path, 'Latest upstream source-note path drift');
+    const content = await read(path);
+    const sha = createHash('sha1').update('blob ' + Buffer.byteLength(content) + '\0').update(content).digest('hex');
+    assert(latest.source_note_blobs[offset] === sha, 'Latest upstream source-note identity changed: ' + version);
+  }
+  for (const id of [latest.extended_base_commit, latest.upstream_from_commit,
+      latest.upstream_0_3_49_commit, latest.upstream_through_commit, integration.reference_archive_sha256]) {
+    assert(coverage.includes(id), 'Current upstream coverage omits source identity');
   }
   // Supplemental historical review never rewrites the newer integration or the
   // pinned legacy review. Hash every original source note, including source-only .36.

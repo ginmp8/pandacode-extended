@@ -23,9 +23,10 @@ The `early_upstream_review` supplement records [issue #26](https://github.com/gi
 | [Published Extended release](https://github.com/ginmp8/pandacode-extended/releases/tag/v0.4.0), 2026-10-25 | `0.4.0` | `0.4.0+pc.0.3.42` |
 | Previously prepared Extended candidate, retained | `0.5.0` | `0.5.0+pc.0.3.47` |
 | Previous upstream 0.3.48 integration candidate, not published | `0.5.1` | `0.5.1+pc.0.3.48` |
-| Current three-fix candidate, not published | `0.5.2` | `0.5.2+pc.0.3.48` |
+| Previous three-fix candidate, not published | `0.5.2` | `0.5.2+pc.0.3.48` |
+| Current upstream integration candidate (not shipped or fully verified) | `0.6.0` | `0.6.0+pc.0.3.50` |
 
-The 0.5.2 candidate addresses dark-theme native select menus, manual Board stage management, and bot-owned deleted conversation cleanup (issues #32, #33, and #34). It preserves the tracked 0.3.48 upstream reference and all earlier source evidence; this candidate is unpublished and untagged.
+The historical 0.5.2 candidate addresses dark-theme native select menus, manual Board stage management, and bot-owned deleted conversation cleanup (issues #32, #33, and #34). It preserves the tracked 0.3.48 upstream reference and all earlier source evidence; this candidate is unpublished and untagged.
 
 The previous candidate used `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplements in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24) and [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26). The original corrections remained part of `0.5.0`; the newly requested candidate must remain at `0.5.1`; individual corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. The `v0.5.1` tag is created only when publication is explicitly authorized. Incremental source evidence is in [0.5.1 coverage](upstream-integration-0.5.1.md), and the prior 0.5.0 coverage is retained.
 
@@ -62,3 +63,7 @@ releases/
 The Extended desktop release builder rejects a version that does not have exactly three numeric SemVer components. It requires a matching `PandaCode Extended` bundle name and rejects original-PandaCode bundle names, stale versions and mismatched macOS bundle versions. The `+pc.<upstream>` suffix is display-only and must not be inserted into npm/Tauri/Cargo versions, native bundle filenames or release tags. Historical four-component/hardened filenames remain readable for archive and provenance purposes only; they are not valid inputs to the active Extended build.
 
 **Compatibility guardrails:** keep bundle ID `ai.pandacode.desktop`, local data/credential paths, `pandacode` package/CLI/tool identifiers, previous license attribution and current updater/permission restrictions unless separately reviewed. Changing these would require its own migration and validation.
+
+## 0.6.0 candidate source lineage
+
+Issue #38 tracks 0.3.49 Connect and issue #39 tracks 0.3.50 traces. The single review branch and draft PR #40 use source snapshots pinned to upstream commits `e71acdda9eb5d488122081c4dbc49ee1a5b4f9e2` and `15541a51f3f5d8ee32d91349f9d5035a53c4cd19`. Historical 0.3.48 coverage remains immutable; new source identities and unresolved verification risks are recorded in [the 0.6.0 assessment](upstream-integration-0.6.0.md). No tag, artifact, updater or published release is authorized. Native build and security regressions are mandatory before the draft can be considered ready.

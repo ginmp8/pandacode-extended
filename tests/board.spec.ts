@@ -72,6 +72,28 @@ test.describe('project board', () => {
     await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
   });
 
+  test('right-click menu moves idle cards to Review and Completed using persisted stages', async ({ page }) => {
+    await openBoard(page);
+    await queueTask(page, 'Right-click stage management');
+    const task = await savedTask(page, 'Right-click stage management');
+    const item = () => page.locator(`.board-card[data-task-id="${task.id}"]`);
+    await item().click({ button: 'right' });
+    const menu = page.getByRole('dialog', { name: 'Board task actions', exact: true });
+    await expect(menu.getByRole('menuitem', { name: 'Move to Review' })).toBeVisible();
+    await menu.getByRole('menuitem', { name: 'Move to Review' }).click();
+    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Right-click stage management' })).toBeVisible();
+    expect((await savedTask(page, 'Right-click stage management')).taskStage).toBe('review');
+    await item().click({ button: 'right' });
+    await menu.getByRole('menuitem', { name: 'Mark complete' }).click();
+    await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Right-click stage management' })).toBeVisible();
+    expect((await savedTask(page, 'Right-click stage management')).completedAt).toEqual(expect.any(Number));
+    await item().click({ button: 'right' });
+    await menu.getByRole('menuitem', { name: 'Move to Pending' }).click();
+    await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Right-click stage management' })).toBeVisible();
+    expect((await savedTask(page, 'Right-click stage management')).completedAt).toBeNull();
+    expect((await calls(page, 'set_task_stage')).map(item => item.args.stage)).toEqual(['review', 'completed', 'pending']);
+  });
+
   test('moves idle tasks bidirectionally between stages by dragging cards', async ({ page }) => {
     await openBoard(page);
     await queueTask(page, 'Drag between stages');

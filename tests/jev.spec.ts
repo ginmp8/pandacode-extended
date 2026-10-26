@@ -10,7 +10,18 @@ const probe = `
     const report = { id: 'run-1', sessionId: 'session-1', url: 'http://localhost:3000/', goal: 'Check the primary interaction', viewport: 'desktop', status: 'running', verification: 'not_checked', summary: 'Exploring the app', createdAt: Date.now(), durationMs: 1000, steps: 1, checks: [], events: [], ...window.__jevRuns[patch.id || 'run-1'], ...patch };
     window.__jevRuns[report.id] = structuredClone(report); emit('jev-run', structuredClone(report)); return report;
   };
-  if (command === 'jev_configuration') return structuredClone(window.__jevConfig);
+  if (command === 'jev_configuration') {
+    const configuration = structuredClone(window.__jevConfig);
+    const request = window.__jevConfigurationRequests = (window.__jevConfigurationRequests || 0) + 1;
+    if (window.__jevHoldConfiguration === 'all' || window.__jevHoldConfiguration === 'startup' && request === 1) {
+      window.__jevWaitingConfigurations ??= [];
+      await new Promise(resolve => window.__jevWaitingConfigurations.push({ request, resolve }));
+    }
+    window.__jevReturnedConfigurations ??= [];
+    window.__jevReturnedConfigurations.push(request);
+    if (window.__jevFailConfiguration) throw new Error('Could not read Jev credentials. Unlock your credential vault and try again.');
+    return configuration;
+  }
   if (command === 'jev_decision_models' && args.provider === 'openrouter' && window.__jevDelayModels) {
     await new Promise(resolve => { window.__jevReleaseModels = resolve; });
   }
@@ -65,13 +76,16 @@ async function calls(page: Page, command: string): Promise<any[]> {
 async function emit(page: Page, patch: Record<string, unknown>) {
   await page.evaluate(patch => (window as any).__jevEmit(patch), patch);
 }
-async function settings(page: Page) {
+async function openSettings(page: Page) {
   // Closing the Jev dialog returns to the Settings page, which stays open behind it.
   const settingsPage = page.getByRole('region', { name: 'Settings', exact: true });
   if (!await settingsPage.isVisible()) await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await settingsPage.getByRole('tab', { name: 'Tools & add-ons', exact: true }).click();
   await page.getByRole('button', { name: 'Set up Jev', exact: true }).click();
   await expect(dialog(page).getByRole('heading', { name: 'Jev add-on', exact: true })).toBeVisible();
+}
+async function settings(page: Page) {
+  await openSettings(page);
   await expect(page.locator('[data-jev-save]')).toBeEnabled();
 }
 async function tests(page: Page) {
@@ -84,6 +98,139 @@ async function run(page: Page) {
   await page.locator('[data-jev-run]').click();
   await expect(page.locator('.jev-report-status')).toHaveText('Starting browser');
 }
+
+const savedConfiguration = {
+  enabled: true, decisionsEnabled: true, decisionProvider: 'openrouter', decisionModel: 'saved/decision-model',
+  pythonPath: '/configured/python', chromePath: '/configured/chrome', textModel: 'saved/text-model', textBaseUrl: 'https://saved.example.test/v1',
+  typesafeKeySaved: true, textKeySaved: true, openrouterKeySaved: true,
+};
+async function releaseConfigurations(page: Page): Promise<void> {
+  const released = await page.evaluate(() => {
+    const state = window as any;
+    state.__jevHoldConfiguration = undefined;
+    const waiting = state.__jevWaitingConfigurations.splice(0);
+    for (const entry of waiting) entry.resolve();
+    return waiting.map((entry: any) => entry.request) as number[];
+  });
+  await expect.poll(() => page.evaluate(requests => requests.every(request => (window as any).__jevReturnedConfigurations?.includes(request)), released)).toBe(true);
+}
+async function expectNoJevActions(page: Page): Promise<void> {
+  for (const command of ['jev_save_configuration', 'jev_install_runtime', 'jev_start', 'jev_assist_run']) expect(await calls(page, command)).toHaveLength(0);
+}
+
+test('pending Jev hydration leaves ordinary tasks usable and restores saved configuration', async ({ page }) => {
+  await page.addInitScript(configuration => {
+    (window as any).__jevConfig = configuration;
+    (window as any).__jevHoldConfiguration = 'all';
+  }, savedConfiguration);
+  await installProbe(page, true);
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await page.locator('#prompt').fill('Keep the first task draft while Jev is loading.');
+  await page.locator('.task-item[data-id="session-2"]').click();
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-2');
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await page.locator('#prompt').fill('A separate second task draft.');
+  await page.locator('.task-item[data-id="session-1"]').click();
+  await expect(page.locator('#prompt')).toHaveValue('Keep the first task draft while Jev is loading.');
+  await openSettings(page);
+  await expect.poll(() => page.evaluate(() => (window as any).__jevWaitingConfigurations?.length)).toBe(2);
+  await expect(page.locator('.jev-feedback')).toHaveText('Loading settings…');
+  await expect(page.locator('#jev-enabled')).toBeDisabled();
+  await expect(page.locator('#jev-decisions-enabled')).toBeDisabled();
+  await expect(page.locator('[data-jev-save]')).toBeDisabled();
+  await expectNoJevActions(page);
+  await releaseConfigurations(page);
+  await expect(page.locator('[data-jev-save]')).toBeEnabled();
+  await expect(page.locator('#jev-enabled')).toBeChecked();
+  await expect(page.locator('#jev-decisions-enabled')).toBeChecked();
+  await expect(page.locator('#jev-decision-provider')).toHaveValue(savedConfiguration.decisionProvider);
+  await expect(page.locator('#jev-decision-model')).toHaveValue(savedConfiguration.decisionModel);
+  for (const [id, value] of [['python-path', savedConfiguration.pythonPath], ['chrome-path', savedConfiguration.chromePath], ['text-model', savedConfiguration.textModel], ['text-base', savedConfiguration.textBaseUrl]]) await expect(page.locator(`#jev-${id}`)).toHaveValue(value);
+  for (const name of ['typesafe', 'text', 'openrouter']) {
+    await expect(page.locator(`[data-jev-key-status="${name}"]`)).toHaveText('Key saved');
+    await expect(page.locator(`#jev-${name}-key`)).toHaveValue('');
+  }
+  expect(await calls(page, 'jev_decision_models')).toHaveLength(0);
+  await expectNoJevActions(page);
+  await page.locator('[data-jev-settings-close]').click();
+  await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
+  await page.getByRole('button', { name: 'Task actions', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Jev assistance', exact: true })).toBeVisible();
+});
+
+test('a saved Jev choice wins over a stale startup configuration', async ({ page }) => {
+  await page.addInitScript(configuration => {
+    (window as any).__jevConfig = { ...configuration, decisionsEnabled: false };
+    (window as any).__jevHoldConfiguration = 'startup';
+  }, savedConfiguration);
+  await installProbe(page, true);
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await settings(page);
+  await expect(page.locator('#jev-decisions-enabled')).not.toBeChecked();
+  await page.locator('#jev-decisions-enabled').check();
+  await page.locator('[data-jev-save]').click();
+  await expect(page.locator('.jev-feedback')).toContainText('Saved. Your enabled Jev features are available for new runs.');
+  const saved = await calls(page, 'jev_save_configuration');
+  expect(saved).toHaveLength(1);
+  expect(saved[0].args).toEqual({ settings: {
+    enabled: true, decisionsEnabled: true, decisionProvider: savedConfiguration.decisionProvider, decisionModel: savedConfiguration.decisionModel,
+    pythonPath: savedConfiguration.pythonPath, chromePath: savedConfiguration.chromePath, textModel: savedConfiguration.textModel, textBaseUrl: savedConfiguration.textBaseUrl,
+  } });
+  await page.locator('[data-jev-settings-close]').click();
+  await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
+  await page.getByRole('button', { name: 'Task actions', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Jev assistance', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await releaseConfigurations(page);
+  // Reopen the menu so its options use the current availability, not its earlier DOM.
+  await page.getByRole('button', { name: 'Task actions', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Jev assistance', exact: true })).toBeVisible();
+  expect(await calls(page, 'jev_save_configuration')).toHaveLength(1);
+  expect(await calls(page, 'jev_install_runtime')).toHaveLength(0);
+  expect(await calls(page, 'jev_assist_run')).toHaveLength(0);
+});
+
+test('closing pending Jev settings protects the replacement dialog from late hydration', async ({ page }) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.addInitScript(configuration => {
+    (window as any).__jevConfig = configuration;
+    (window as any).__jevHoldConfiguration = 'all';
+  }, savedConfiguration);
+  await installProbe(page, true);
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await openSettings(page);
+  await expect(page.locator('[data-jev-save]')).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => (window as any).__jevWaitingConfigurations?.length)).toBe(2);
+  await page.locator('[data-jev-settings-close]').click();
+  await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
+  await page.getByRole('button', { name: 'Task actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Rename task', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Task name', exact: true }).fill('Keep this replacement draft');
+  const replacement = await page.locator('#task-title').elementHandle();
+  await releaseConfigurations(page);
+  await expect(dialog(page).getByRole('heading', { name: 'Rename task', exact: true })).toBeVisible();
+  await expect(page.locator('#task-title')).toHaveValue('Keep this replacement draft');
+  expect(await replacement!.evaluate(input => input === document.querySelector('#task-title'))).toBe(true);
+  await expect(page.locator('.jev-settings-form')).toHaveCount(0);
+  await expectNoJevActions(page);
+  expect(errors).toEqual([]);
+});
+
+test('a rejected Jev configuration leaves settings unsavable and ordinary work available', async ({ page }) => {
+  await page.addInitScript(() => { (window as any).__jevFailConfiguration = true; });
+  await installProbe(page, true);
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await page.locator('#prompt').fill('Continue ordinary work after a vault error.');
+  await openSettings(page);
+  await expect(page.locator('.jev-feedback')).toContainText('Unlock your credential vault and try again.');
+  await expect(page.locator('[data-jev-save]')).toBeDisabled();
+  await expect(page.locator('#jev-enabled')).toBeDisabled();
+  await expectNoJevActions(page);
+  await page.locator('[data-jev-settings-close]').click();
+  await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await expect(page.locator('#prompt')).toHaveValue('Continue ordinary work after a vault error.');
+});
 
 test('Jev settings persist opt-in and never return saved keys to inputs', async ({ page }) => {
   await installProbe(page, true);

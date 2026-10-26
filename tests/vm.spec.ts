@@ -17,6 +17,18 @@ async function open(page: Page, platform = 'MacIntel', previewHook = ''): Promis
   await page.addInitScript(platform => Object.defineProperty(Navigator.prototype, 'platform', { get: () => platform }), platform);
   const runtimeErrors: string[] = []; errors.set(page, runtimeErrors);
   page.on('pageerror', error => runtimeErrors.push(error.message));
+  // Native vm_frame returns JPEG bytes. Keep the preview's VM lookup/running checks,
+  // but use a recorded 1024×768 preview frame instead of encoding one asynchronously.
+  // The panel still decodes and paints it under the desktop CSP before showing it.
+  const frame = readFileSync('tests/fixtures/vm-screen.jpg').toString('base64');
+  await page.route('**/src/preview-vm.ts*', async route => {
+    const response = await route.fetch(); const source = await response.text();
+    const marker = /async function frame\(\) \{/g;
+    expect(source.match(marker)).toHaveLength(1);
+    await route.fulfill({ response, body: source.replace(marker, `async function frame() {
+      return Uint8Array.from(atob(${JSON.stringify(frame)}), byte => byte.charCodeAt(0)).buffer;
+    `) });
+  });
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch(); const source = await response.text();
     const marker = /async function invoke\(command, args\) \{/;

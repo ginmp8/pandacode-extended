@@ -329,7 +329,6 @@ pub(crate) async fn send(app: &tauri::AppHandle, device: &str, ids: &[String]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 

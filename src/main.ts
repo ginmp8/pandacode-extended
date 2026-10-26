@@ -591,6 +591,25 @@ function followTranscript(): void {
   transcriptScroller.scrollTop = transcriptScroller.scrollHeight;
 }
 function stickTranscript(): void { stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; }
+/** Pin active streaming output before each paint, including late Markdown reflows.
+ * ResizeObserver alone can observe after an intermediate frame's layout change.
+ * Stop at once when the reader scrolls up; run just two frames after completion. */
+let streamFollowFrame = 0;
+let streamFollowTail = 0;
+function maintainStreamingBottom(): void {
+  if (!stickToBottom) return;
+  streamFollowTail = 2;
+  if (streamFollowFrame) return;
+  const tick = (): void => {
+    streamFollowFrame = 0;
+    if (!stickToBottom || !transcriptVisible() || document.hidden) return;
+    const active = state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId);
+    if (!active && streamFollowTail-- <= 0) return;
+    if (transcriptGap() > 1) followTranscript();
+    streamFollowFrame = requestAnimationFrame(tick);
+  };
+  streamFollowFrame = requestAnimationFrame(tick);
+}
 const transcriptResize = new ResizeObserver(followTranscript);
 const observeTranscript = (): void => { transcriptResize.disconnect(); for (const node of [transcriptScroller, ...transcriptScroller.children]) transcriptResize.observe(node); };
 new MutationObserver(observeTranscript).observe(transcriptScroller, { childList: true });
@@ -1475,7 +1494,7 @@ function renderStream(): void {
   status.hidden = Boolean(finishing) || current.approvals.size > 0 || current.inputs.size > 0;
   updateWorkTimer();
   if (readingTool) transcript.scrollTop = scrollTop;
-  else followTranscript();
+  else { followTranscript(); maintainStreamingBottom(); }
 }
 const liveGroupEntries = new WeakMap<HTMLElement, LiveTool[]>();
 /** Patch only changed groups; text frames do not recreate tool controls or open details. */

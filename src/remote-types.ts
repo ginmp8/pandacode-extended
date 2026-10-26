@@ -11,7 +11,7 @@ export interface RemoteHost {
   notify(text: string): void;
   openUrl(url: string): Promise<void>;
 }
-/** A computer a new task can start on (`remote_targets`). */
-export interface RemoteTarget { deviceId: string; name: string; platform: string; online: boolean }
+/** A computer the Run on menu can show, including an offline last-seen row. */
+export interface RemoteTarget { deviceId: string; name: string; platform: string; online: boolean; lastSeen: number | string | null }
 /** `remote_repo_check`: how GitHub compares with this computer's checkout. `repo` is null without a GitHub remote. */
 export interface RemoteRepoCheck { repo: string | null; branch: string; ahead: number; dirty: boolean; pushed: boolean }

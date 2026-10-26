@@ -75,6 +75,19 @@ pub(crate) fn open(key: &Key, from: &str, to: &str, body: &str) -> crate::Result
     XChaCha20Poly1305::new(key.into()).decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad: &aad(from, to) }).map_err(|_| "A frame failed to decrypt.".into())
 }
 
+/// 32 random bytes, base64 (44 characters): route keys and handshake nonces.
+pub(crate) fn random_token() -> String {
+    use chacha20poly1305::aead::rand_core::RngCore;
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    STANDARD.encode(bytes)
+}
+
+/// Compares secrets without stopping at the first differing byte.
+pub(crate) fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

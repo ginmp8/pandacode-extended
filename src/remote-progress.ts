@@ -25,7 +25,7 @@ export function startStageText(start: Pick<RemoteStart, 'stage' | 'repo' | 'perc
     case 'finding': return start.repo ? `Finding ${repo}` : 'Finding the project';
     case 'downloading': return `Downloading ${repo}${start.percent == null ? '' : ` · ${Math.round(start.percent)}%`}`;
     case 'preparing': return 'Preparing checkout';
-    case 'starting': return 'Starting agent';
+    case 'starting': return start.detail || 'Starting agent';
     case 'error': return `Could not start: ${start.detail || 'the other computer did not answer'}`;
   }
 }
@@ -78,10 +78,13 @@ export function onRemoteStartProgress(event: RemoteStartProgress): void {
   if (!start || start.deviceId !== event.deviceId) return;
   // A frame that arrives late never moves a start backwards, except into an error.
   if (event.stage !== 'error' && STAGES.indexOf(event.stage) < STAGES.indexOf(start.stage)) return;
-  Object.assign(start, { stage: event.stage, repo: event.repo ?? start.repo, percent: event.stage === 'downloading' ? event.percent ?? null : null, detail: event.stage === 'error' ? event.detail ?? null : null });
+  Object.assign(start, { stage: event.stage, repo: event.repo ?? start.repo, percent: event.stage === 'downloading' ? event.percent ?? null : null, detail: event.stage === 'error' || event.stage === 'starting' ? event.detail ?? null : null });
   start.onStage?.(start);
+  // A start being cancelled, or one whose reply was lost, ends with this frame.
+  if (event.stage === 'error' && (start.cancelling || start.waiting)) start.settle?.(new Error(start.detail || 'the other computer did not answer'));
   syncRemoteStartStrip();
 }
+const waitingFor = (start: RemoteStart): boolean => start.stage === 'starting' && Boolean(start.detail?.startsWith('Waiting for'));
 
 function listen(): Promise<unknown> {
   // bridge.ts has no typed overload for this event.
@@ -99,6 +102,10 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
   const entry: RemoteStart = { sessionId, startId: crypto.randomUUID(), deviceId: target.deviceId, device: target.name, repo: null, stage: 'connecting', percent: null, detail: null, retry, onStage };
   starts.set(sessionId, entry);
   syncRemoteStartStrip();
+  // Settled early by a cancellation, by the error frame of a start being cancelled, and,
+  // once the reply was lost, by the task attaching or failing.
+  let ended: Promise<void> = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
+  ended.catch(() => undefined);
   try {
     const result = await start(entry.startId);
     if (starts.get(sessionId) === entry) starts.delete(sessionId);
@@ -106,11 +113,24 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
   } catch (error) {
     if (starts.get(sessionId) === entry) Object.assign(entry, { stage: 'error', percent: null, detail: entry.stage === 'error' && entry.detail ? entry.detail : message(error) });
     throw error;
-  } finally { syncRemoteStartStrip(); }
+  } finally { entry.settle = undefined; syncRemoteStartStrip(); }
+}
+
+/** The task of a start whose reply was lost spoke (its first agent event): it attached. */
+export function remoteStartAttached(sessionId: string): void {
+  const start = starts.get(sessionId) ?? [...starts.values()].find(item => item.mirrorId === sessionId);
+  if (start?.waiting) start.settle?.();
+}
+
+/** Ends a start the viewer cancelled (`remote_cancel_start` answered `cancelled: true`). */
+export function cancelledRemoteStart(sessionId: string): void {
+  const start = starts.get(sessionId);
+  if (start?.cancelling) start.settle?.(new Error('Start cancelled.'));
 }
 
 export function clearRemoteStart(sessionId: string): void {
-  if (starts.delete(sessionId)) syncRemoteStartStrip();
+  const start = starts.get(sessionId);
+  if (start && starts.delete(sessionId)) { start.settle?.(new Error('Start cancelled.')); syncRemoteStartStrip(); }
 }
 
 document.addEventListener('click', event => {

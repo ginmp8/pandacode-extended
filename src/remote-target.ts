@@ -2,7 +2,7 @@ import { escape, icon } from './dom';
 import type { RemoteRepoCheck, RemoteTarget } from './remote-types';
 import type { Session } from './types';
 // Start progress for a New task sent to another computer; importing it here loads its strip actions.
-export { clearRemoteStart, remoteStartStrip, startStageText, trackRemoteStart } from './remote-progress';
+export { cancelledRemoteStart, clearRemoteStart, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-progress';
 
 /* The context bar's computer choice (PandaCode Connect). A new task can start on another
  * signed-in computer; a task that runs there shows that computer, locked. */
@@ -12,8 +12,10 @@ export const LOCAL = 'local';
 /** The control beside Local / Worktree; empty when there is nothing to choose. */
 export function computerControl(session: Session, fresh: boolean, targets: RemoteTarget[], chosen: string): string {
   if (session.remoteDevice) {
-    const name = escape(session.remoteDevice.name);
-    return `<span class="composer-computer composer-computer-fixed" aria-label="Computer: ${name} (fixed for this task)" title="This task runs on ${name}. Start a new task to use another computer.">${icon('monitor')}<span>on ${name}</span></span>`;
+    const name = escape(session.remoteDevice.name), target = targets.find(item => item.deviceId === session.remoteDevice!.id);
+    const offline = target && !target.online;
+    const status = offline ? ` · ${escape(offlineText(target))}` : '';
+    return `<span class="composer-computer composer-computer-fixed" aria-label="Computer: ${name} (fixed for this task)${status}" title="This task runs on ${name}. Start a new task to use another computer.${status}">${icon('monitor')}<span>on ${name}${offline ? ' · Offline' : ''}</span></span>`;
   }
   if (!fresh || !targets.length) return '';
   const name = targets.find(target => target.deviceId === chosen)?.name ?? 'This computer';

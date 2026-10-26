@@ -15,12 +15,29 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Listener, Manager};
 
-pub(crate) const METHODS: [&str; 29] = ["subscribe", "tasks.list", "projects.icons", "providers.list", "providers.models", "task.start", "task.messages", "task.team", "task.workerMessages", "task.attachment", "task.workspaceImage", "task.send", "task.stop", "task.steer", "task.configure", "approval.respond", "input.respond", "task.pull", "task.pullDiff", "task.pullMerge", "task.pullDetect", "task.changes", "task.diff", "bots.list", "bot.thread", "bot.message", "bot.pause", "image.put", "batch"];
+pub(crate) const METHODS: [&str; 32] = ["subscribe", "tasks.list", "projects.icons", "providers.list", "providers.models", "task.start", "task.startStatus", "task.cancelStart", "task.messages", "task.team", "task.workerMessages", "task.attachment", "task.workspaceImage", "task.send", "task.stop", "task.steer", "task.configure", "approval.respond", "input.respond", "task.pull", "task.pullDiff", "task.pullMerge", "task.pullDetect", "task.changes", "task.diff", "bots.list", "bot.thread", "bot.message", "bot.pause", "image.put", "batch", "pair.redeem"];
 pub(crate) const OFF: &str = "Remote control is off on this computer";
 pub(crate) const MAX_TEXT: usize = 100 * 1024;
 const SUBSCRIPTION: Duration = Duration::from_secs(10 * 60);
-/// Events wait this long, so one frame carries everything a subscriber missed meanwhile.
-const FLUSH: Duration = Duration::from_millis(100);
+/// After the first event of a burst (sent at once), events wait this long, so one frame
+/// carries everything a subscriber missed meanwhile.
+pub(crate) const FLUSH: Duration = Duration::from_millis(40);
+/// Past a burst's first [`BURST_FRAMES`] frames, frames go at most every 100 ms: the relay
+/// allows 20 frames a second per socket, replies included.
+pub(crate) const SUSTAINED: Duration = Duration::from_millis(100);
+pub(crate) const BURST_FRAMES: u32 = 5;
+/// Events kept per task for viewers that come back (`afterSeq`), and in all.
+const JOURNAL_EVENTS: usize = 2000;
+const JOURNAL_BYTES: usize = 2 * 1024 * 1024;
+const JOURNAL_TOTAL: usize = 32 * 1024 * 1024;
+const JOURNAL_TASKS: usize = 2048;
+/// The part of a subscribe reply that replayed events may fill; the rest comes in later
+/// pages (`more`), each another subscribe from where the viewer now is.
+const REPLAY_BUDGET: usize = PAGE_BUDGET / 3;
+const MISSING_BUDGET: usize = 24 * 1024;
+/// A finished start is remembered this long for a repeated `task.start` or `task.startStatus`.
+const START_MEMORY: Duration = Duration::from_secs(3600);
+const MAX_HOST_STARTS: usize = 256;
 pub(crate) const MAX_IDS: usize = 500;
 const TASKS_DEFAULT: usize = 200;
 const TASKS_MAX: usize = 500;
@@ -46,8 +63,10 @@ const MAX_PULL_CACHE_ENTRIES: usize = 64;
 const MAX_MESSAGE: usize = 120 * 1024;
 /// Messages read per legacy `afterId` `task.messages` page before the budget trims it.
 const PAGE_ROWS: i64 = 400;
-/// Buffered events per subscriber; a viewer that falls this far behind resyncs at run end.
+/// Buffered events per subscriber; past it the buffer ends in a [`LAGGED`] marker and the
+/// viewer is told to subscribe again from where it is (the journal still has the rest).
 const MAX_BUFFER: usize = 4096;
+const LAGGED: &str = "lagged";
 const CUT: &str = "\n…[cut on the host to fit a remote page]";
 /// Harness ids `providers.models` accepts (the same list `storage` allows).
 pub(crate) const PROVIDERS: [&str; 17] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin"];
@@ -126,12 +145,14 @@ pub(crate) fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Call {
-    Subscribe { session_ids: Vec<String> },
+    Subscribe { session_ids: Vec<String>, after: HashMap<String, u64>, epoch: Option<String> },
     TasksList { limit: usize },
     ProjectIcons { project_ids: Vec<String> },
     Providers { force: bool },
     Models { provider: String, force: bool },
     Start(start::Start),
+    StartStatus { start_id: String },
+    CancelStart { start_id: String },
     Messages { session_id: String, page: MessagePaging },
     Team { session_id: String },
     WorkerMessages { session_id: String, worker_id: String, after_id: i64, limit: i64 },
@@ -166,6 +187,8 @@ impl Call {
             Self::Providers { .. } => "providers.list",
             Self::Models { .. } => "providers.models",
             Self::Start(_) => "task.start",
+            Self::StartStatus { .. } => "task.startStatus",
+            Self::CancelStart { .. } => "task.cancelStart",
             Self::Messages { .. } => "task.messages",
             Self::Team { .. } => "task.team",
             Self::WorkerMessages { .. } => "task.workerMessages",
@@ -203,6 +226,7 @@ pub(crate) fn is_read_only_method(method: &str) -> bool {
             | "projects.icons"
             | "providers.list"
             | "providers.models"
+            | "task.startStatus"
             | "task.messages"
             | "task.team"
             | "task.workerMessages"
@@ -394,8 +418,11 @@ pub(crate) fn parse(host_enabled: bool, method: &str, params: &Value) -> Result<
             if ids.len() > MAX_IDS {
                 return Err(format!("Mirror up to {MAX_IDS} tasks per computer."));
             }
-            let session_ids = ids.iter().map(|id| id.as_str().filter(|id| valid_id(id).is_ok()).map(str::to_owned).ok_or("Invalid sessionIds.")).collect::<std::result::Result<_, _>>()?;
-            Call::Subscribe { session_ids }
+            let session_ids: Vec<String> = ids.iter().map(|id| id.as_str().filter(|id| valid_id(id).is_ok()).map(str::to_owned).ok_or("Invalid sessionIds.")).collect::<std::result::Result<_, _>>()?;
+            // Newer viewers say where they left off; anything malformed is ignored (no replay).
+            let after = params["afterSeq"].as_object().map(|after| after.iter().filter(|(id, _)| session_ids.contains(id)).filter_map(|(id, seq)| Some((id.clone(), seq.as_u64()?))).collect()).unwrap_or_default();
+            let epoch = params["epoch"].as_str().filter(|epoch| valid_id(epoch).is_ok() && epoch.len() <= 64).map(str::to_owned);
+            Call::Subscribe { session_ids, after, epoch }
         }
         "tasks.list" => Call::TasksList { limit: task_limit(params)? },
         "projects.icons" => Call::ProjectIcons { project_ids: project_icon_ids(params)? },
@@ -408,6 +435,8 @@ pub(crate) fn parse(host_enabled: bool, method: &str, params: &Value) -> Result<
             Call::Models { provider, force: force_param(params)? }
         }
         "task.start" => Call::Start(start::parse(params)?),
+        "task.startStatus" => Call::StartStatus { start_id: id_param(params, "startId")? },
+        "task.cancelStart" => Call::CancelStart { start_id: id_param(params, "startId")? },
         "task.messages" => Call::Messages { session_id: id_param(params, "sessionId")?, page: message_paging(params)? },
         "task.team" => Call::Team { session_id: id_param(params, "sessionId")? },
         "task.workerMessages" => {
@@ -485,31 +514,88 @@ fn fit_batch_results(results: Vec<Result<Value>>) -> Value {
     json!({"results": results})
 }
 
+/// Checked when a request arrives, before it waits in its peer's queue: it is fresh and
+/// not a replay. Time spent queued must not make a valid request expire.
+pub(crate) fn fresh_request(inner: &mut super::Inner, message: &Value, now_ms: i64) -> Result<()> {
+    inner.replay.check(message["ts"].as_i64(), message["nonce"].as_str(), now_ms)
+}
+
+/// Checked when a queued request is about to run, not when it arrived: remote control is
+/// still on and the sender is still in presence. Returns whether remote tasks may use
+/// Full access.
+fn admit(inner: &super::Inner, from: &str) -> Result<bool> {
+    gate(inner.settings.host_enabled)?;
+    inner.callable(from)?;
+    Ok(inner.settings.allow_full_access)
+}
+
+/// The methods a `batch` request's calls name (each is checked against the device's grant
+/// too), or none for any other method.
+fn batch_methods<'a>(method: &str, params: &'a Value) -> impl Iterator<Item = &'a str> {
+    let calls = if method == "batch" { params["calls"].as_array().map(Vec::as_slice).unwrap_or_default() } else { &[] };
+    calls.iter().take(MAX_BATCH_CALLS).map(|call| call["method"].as_str().unwrap_or_default())
+}
+
+/// Without "Full access for remote tasks", an explicit `full` is refused and a start
+/// without a mode (which would default to full) asks for approvals.
+fn cap_mode(call: Call, full_access: bool) -> Result<Call> {
+    const SAFE: &str = "ask";
+    if full_access {
+        return Ok(call);
+    }
+    let refuse = || Err(full_access_off());
+    Ok(match call {
+        Call::Start(start) if start.mode.as_deref() == Some("full") => return refuse(),
+        Call::Start(start) => Call::Start(start::Start { mode: Some(start.mode.unwrap_or_else(|| SAFE.into())), ..start }),
+        Call::Configure { mode: Some(mode), .. } if mode == "full" => return refuse(),
+        other => other,
+    })
+}
+
+fn full_access_off() -> String {
+    format!("Full access is off for remote tasks on {}.", super::config::device_name())
+}
+
+/// Without "Full access for remote tasks", a prompt, steer or configure that would run a
+/// task stored in `full` is refused, unless it switches the task to another mode. The
+/// task's own mode is the user's and is never changed here.
+fn allow_task_mode(stored: &str, requested: Option<&str>, full_access: bool) -> Result<()> {
+    if !full_access && stored == "full" && requested.is_none_or(|mode| mode == "full") {
+        return Err(full_access_off());
+    }
+    Ok(())
+}
+
 /// The response to one request frame, or None when it has no usable id.
 /// Recheck the key that opened the frame when its queued request is dispatched.
 pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, authenticated_key: &str) -> Option<Value> {
     let id = message["id"].as_str().filter(|id| valid_id(id).is_ok())?;
-    let name = super::config::device_name();
-    let admitted = {
-        let state = remote(app);
-        let mut inner = state.lock();
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let enabled = inner.settings.host_enabled;
-        let trusted = inner.authenticated(from, authenticated_key);
-        // Trust first: an untrusted caller never fills the nonce set.
-        gate(enabled, trusted, &name).and_then(|_| inner.replay.check(message["ts"].as_i64(), message["nonce"].as_str(), now_ms)).map(|_| enabled)
-    };
-    let result = match admitted.and_then(|enabled| parse(enabled, message["method"].as_str().unwrap_or_default(), &message["params"])) {
-        Ok(call) => REQUEST_ORIGIN.scope(
-            RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned() },
-            run(app, from, authenticated_key, call),
-        ).await,
+    let method = message["method"].as_str().unwrap_or_default();
+    // The Inner lock is released before the grant check (and redeem), which take it themselves.
+    let admitted = admit(&remote(app).lock(), from);
+    // A device waiting for approval redeems the pairing code shown here (grants.rs).
+    if method == "pair.redeem" {
+        return Some(response(id, admitted.and_then(|_| super::grants::redeem(app, from, &message["params"]))));
+    }
+    let admitted = admitted.and_then(|full_access| {
+        for method in std::iter::once(method).chain(batch_methods(method, &message["params"])) {
+            super::grants::check(app, from, method)?;
+        }
+        Ok(full_access)
+    });
+    let call = admitted.and_then(|full_access| parse(true, method, &message["params"]).and_then(|call| cap_mode(call, full_access)).map(|call| (call, full_access)));
+    let result = match call {
+        Ok((call, full_access)) => run(app, from, call, full_access).await,
         Err(error) => Err(error),
     };
-    Some(match result {
+    Some(response(id, result))
+}
+
+fn response(id: &str, result: Result<Value>) -> Value {
+    match result {
         Ok(result) => json!({"type": "res", "id": id, "ok": true, "result": result}),
         Err(error) => json!({"type": "res", "id": id, "ok": false, "error": error}),
-    })
+    }
 }
 
 /// The task must exist here; a mirror never forwards a second hop.
@@ -955,12 +1041,7 @@ fn team_event_cache() -> &'static StdMutex<HashMap<String, HashMap<String, Value
 }
 
 fn queue_team_event(app: &tauri::AppHandle, session_id: &str, data: Value) {
-    buffer(app, session_id, |subscriber| {
-        push_event(
-            &mut subscriber.events,
-            team_event_value(session_id, data.clone()),
-        );
-    });
+    journaled(app, session_id, team_event_value(session_id, data), Queue::Event);
 }
 
 fn team_event_value(session_id: &str, data: Value) -> Value {
@@ -1113,11 +1194,7 @@ async fn queue_team_settled(app: tauri::AppHandle, session_id: String, team: Tea
     })
     .await;
     let Ok(Some(data)) = data else { return };
-    buffer(&app, &session_id, |subscriber| {
-        if !subscriber.finished.iter().any(|item| item["sessionId"] == session_id.as_str()) {
-            subscriber.finished.push(data.clone());
-        }
-    });
+    journaled(&app, &session_id, data, Queue::Settled);
 }
 
 /// Architect state is a Tauri app event on desktop. Translate it once the first
@@ -1177,11 +1254,11 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
     require_authorized(app, from, authenticated_key)?;
     let state = app.state::<AppState>();
     match call {
-        Call::Subscribe { session_ids } => {
+        Call::Subscribe { session_ids, after, epoch } => {
             watch_team_events(app);
             let handle = app.clone();
             let requested = session_ids.clone();
-            let tasks = crate::blocking(move || {
+            let (mut tasks, missing) = crate::blocking(move || {
                 let state = handle.state::<AppState>();
                 subscribed_tasks(&state, &requested)
             })
@@ -1197,7 +1274,16 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             }
             subscriber.until = Some(Instant::now() + SUBSCRIPTION);
             subscriber.sessions.extend(session_ids);
-            Ok(json!({"tasks": tasks}))
+            let replay = inner.journal.resume(&mut tasks, &after, epoch.as_deref());
+            drop(inner);
+            if replay.gaps > 0 {
+                super::diagnostics::record("replay.gap", format!("{} of {} tasks for {from}", replay.gaps, after.len()));
+            }
+            let mut reply = json!({"tasks": tasks, "missing": missing, "epoch": replay.epoch});
+            if replay.more {
+                reply["more"] = json!(true);
+            }
+            Ok(reply)
         }
         Call::TasksList { limit } => {
             let handle = app.clone();
@@ -1228,11 +1314,20 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             }
             Ok(models)
         }
-        Call::Start(mut request) => {
-            check_start_mode(app, from, authenticated_key, request.mode.as_deref())?;
-            request.mode = Some(permissions::start_mode(request.mode.as_deref(), remote(app).lock().settings.allow_full_access)?.to_owned());
-            start::run(app, from, authenticated_key, request).await
-        },
+        Call::Start(request) => start_once(app, from, request).await,
+        Call::StartStatus { start_id } => Ok(start_status(host_starts().lock().unwrap_or_else(|e| e.into_inner()).get(&start_id).filter(|start| start.from == from).map(Arc::as_ref))),
+        Call::CancelStart { start_id } => {
+            let mut starts = host_starts().lock().unwrap_or_else(|e| e.into_inner());
+            Ok(match starts.get(&start_id) {
+                Some(start) if start.from == from => cancel_start(start),
+                Some(_) => json!({"cancelled": true}),
+                // Not claimed yet (still waiting for a start slot): leave it cancelled so it never runs.
+                None => {
+                    let (entry, _) = claim_start(&mut starts, &start_id, from, Instant::now())?;
+                    cancel_start(&entry)
+                }
+            })
+        }
         Call::Messages { session_id, page } => {
             let handle = app.clone();
             crate::blocking(move || {
@@ -1356,14 +1451,13 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             if approve { check_current_request(&task.mode)?; }
             else { require_authorized(app, from, authenticated_key)?; }
             crate::respond_approval(app.clone(), state, session_id.clone(), request_id.clone(), approve).await?;
-            // Clear the card in this computer's window, as bot approvals do.
-            let event = AgentEvent { session_id, kind: "approval_cancelled".into(), text: String::new(), request_id: Some(request_id), data: None, tool: None };
-            let _ = app.emit("agent-event", event);
+            answered(app, session_id, "approval_cancelled", request_id);
             Ok(json!({}))
         }
         Call::Answer { session_id, request_id, response } => {
-            check_current_request(&local_task(&state, &session_id).await?.mode)?;
-            crate::respond_user_input(app.clone(), state, session_id, request_id, response).await?;
+            local_task(&state, &session_id).await?;
+            crate::respond_user_input(app.clone(), state, session_id.clone(), request_id.clone(), response).await?;
+            answered(app, session_id, "input_cancelled", request_id);
             Ok(json!({}))
         }
         Call::Pull { session_id } => {
@@ -1471,6 +1565,274 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({}))
         }
         Call::Batch(_) => Err("Nested batch calls are not supported.".into()),
+    }
+}
+
+/// A remote answer clears the card in this window and on every other viewer, as a
+/// harness's own `*_cancelled` would: through the same forwarding as any agent event.
+fn answered(app: &tauri::AppHandle, session_id: String, kind: &str, request_id: String) {
+    let event = AgentEvent { session_id, kind: kind.into(), text: String::new(), request_id: Some(request_id), data: None, tool: None };
+    agent_event(app, &event);
+    let _ = app.emit("agent-event", event);
+}
+
+/// A start by the viewer's `startId`: a repeated `task.start` waits for (or returns) the
+/// first one's result, `task.startStatus` reports it and `task.cancelStart` stops it.
+struct HostStart {
+    from: String,
+    /// Set by `task.cancelStart`; `start::run_cancellable` checks it between steps and stops the clone.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    result: tokio::sync::watch::Sender<Option<Result<Value>>>,
+    at: Instant,
+}
+
+fn host_starts() -> &'static StdMutex<HashMap<String, Arc<HostStart>>> {
+    static STARTS: OnceLock<StdMutex<HashMap<String, Arc<HostStart>>>> = OnceLock::new();
+    STARTS.get_or_init(Default::default)
+}
+
+/// The start under `id`, made now (true) unless this device already asked for it.
+fn claim_start(starts: &mut HashMap<String, Arc<HostStart>>, id: &str, from: &str, now: Instant) -> Result<(Arc<HostStart>, bool)> {
+    starts.retain(|_, start| start.result.borrow().is_none() || now.duration_since(start.at) < START_MEMORY);
+    if let Some(start) = starts.get(id) {
+        return if start.from == from { Ok((start.clone(), false)) } else { Err("Invalid startId.".into()) };
+    }
+    if starts.len() >= MAX_HOST_STARTS {
+        return Err("This computer is busy. Try again in a moment.".into());
+    }
+    let start = Arc::new(HostStart { from: from.to_owned(), cancel: Default::default(), result: tokio::sync::watch::channel(None).0, at: now });
+    starts.insert(id.to_owned(), start.clone());
+    Ok((start, true))
+}
+
+/// Runs a start once per `startId`. The start runs on its own, so a lost reply or a
+/// cancelled caller never stops it halfway; every caller waits for its one result.
+async fn start_once(app: &tauri::AppHandle, from: &str, request: start::Start) -> Result<Value> {
+    let Some(id) = request.start_id.clone() else { return start::run(app, from, request).await };
+    let (entry, fresh) = claim_start(&mut host_starts().lock().unwrap_or_else(|e| e.into_inner()), &id, from, Instant::now())?;
+    let mut done = entry.result.subscribe();
+    if fresh {
+        let (app, from, entry) = (app.clone(), from.to_owned(), entry.clone());
+        tauri::async_runtime::spawn(async move {
+            // A panic (or the task being dropped) below still settles the start.
+            let settle = Settle(entry.clone());
+            let result = start::run_cancellable(&app, &from, request, entry.cancel.clone()).await;
+            // Cancelled after the task was made: it must not run unseen.
+            if let (true, Ok(reply)) = (entry.cancel.load(Ordering::SeqCst), &result) {
+                if let Some(session) = reply["sessionId"].as_str() {
+                    let _ = crate::stop_session(app.clone(), app.state::<AppState>(), session.to_owned()).await;
+                }
+            }
+            if let Err(error) = &result {
+                super::diagnostics::record("start.failed", error.chars().take(200).collect::<String>());
+            }
+            settle.finish(result);
+        });
+    }
+    let result = done.wait_for(Option::is_some).await.ok().and_then(|slot| slot.clone());
+    result.unwrap_or_else(|| Err(START_ENDED.into()))
+}
+
+const START_ENDED: &str = "The start ended unexpectedly.";
+
+/// Settles a host start with its result, or, dropped first (the start panicked or was
+/// dropped), with [`START_ENDED`], so `task.startStatus` never reports it running forever.
+struct Settle(Arc<HostStart>);
+
+impl Settle {
+    fn finish(self, result: Result<Value>) {
+        self.0.result.send_if_modified(|slot| slot.is_none() && slot.replace(result).is_none());
+    }
+}
+
+impl Drop for Settle {
+    fn drop(&mut self) {
+        if self.0.result.borrow().is_none() {
+            super::diagnostics::record("start.failed", START_ENDED);
+            self.0.result.send_if_modified(|slot| slot.is_none() && slot.replace(Err(START_ENDED.into())).is_none());
+        }
+    }
+}
+
+/// `task.startStatus`: running, done (with the host task), failed, or unknown here.
+fn start_status(start: Option<&HostStart>) -> Value {
+    let Some(start) = start else { return json!({"state": "unknown"}) };
+    match &*start.result.borrow() {
+        None => json!({"state": "running"}),
+        Some(Ok(reply)) => json!({"state": "done", "sessionId": reply["sessionId"]}),
+        Some(Err(error)) => json!({"state": "failed", "error": error}),
+    }
+}
+
+/// `task.cancelStart`: a running start is told to stop and its callers get `CANCELLED`
+/// at once; a start that already made its task says so (`cancelled: false`).
+fn cancel_start(start: &HostStart) -> Value {
+    let mut answer = json!({"cancelled": true});
+    start.result.send_if_modified(|slot| match slot {
+        None => {
+            start.cancel.store(true, Ordering::SeqCst);
+            *slot = Some(Err(start::CANCELLED.into()));
+            true
+        }
+        Some(Ok(reply)) => {
+            answer = json!({"cancelled": false, "sessionId": reply["sessionId"]});
+            false
+        }
+        Some(Err(_)) => false,
+    });
+    answer
+}
+
+/// Recent agent events of subscribed tasks, numbered by one process-wide `seq`, so a
+/// viewer that comes back gets exactly what it missed (docs/remote-access.md). `epoch`
+/// is new with every launch, when `seq` starts over.
+pub(crate) struct Journal {
+    pub(crate) epoch: String,
+    seq: u64,
+    bytes: usize,
+    rings: HashMap<String, Ring>,
+}
+
+impl Default for Journal {
+    fn default() -> Self {
+        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new() }
+    }
+}
+
+#[derive(Default)]
+struct Ring {
+    /// `seq` when recording began: anything before it may be missing.
+    since: u64,
+    /// The newest `seq` dropped to stay in bounds.
+    dropped: u64,
+    bytes: usize,
+    events: std::collections::VecDeque<(u64, usize, Value)>,
+}
+
+#[derive(Debug, PartialEq)]
+enum Missed {
+    /// The missed events in order; with `more`, only the first ones, through seq `last`.
+    Events { events: Vec<Value>, more: bool, last: u64 },
+    Gap,
+}
+
+/// What [`Journal::resume`] added to a subscribe reply.
+pub(crate) struct Resumed {
+    pub(crate) epoch: String,
+    /// Some task's replay continues in the next page.
+    pub(crate) more: bool,
+    pub(crate) gaps: usize,
+}
+
+impl Journal {
+    /// Starts recording a task's events, unless it already is.
+    fn watch(&mut self, session: &str) {
+        if self.rings.contains_key(session) {
+            return;
+        }
+        if self.rings.len() >= JOURNAL_TASKS {
+            let quiet = self.rings.iter().min_by_key(|(_, ring)| ring.events.back().map_or(ring.since, |(seq, ..)| *seq)).map(|(id, _)| id.clone());
+            if let Some(ring) = quiet.and_then(|id| self.rings.remove(&id)) {
+                self.bytes -= ring.bytes;
+            }
+        }
+        self.rings.insert(session.to_owned(), Ring { since: self.seq, ..Default::default() });
+    }
+
+    /// Numbers and keeps an event of a recorded (or, with `subscribed`, newly recorded)
+    /// task; the event as sent, with its `seq`, or None when nobody follows the task.
+    fn record(&mut self, session: &str, mut event: Value, subscribed: bool) -> Option<Value> {
+        if !self.rings.contains_key(session) {
+            if !subscribed {
+                return None;
+            }
+            self.watch(session);
+        }
+        self.seq += 1;
+        event["seq"] = json!(self.seq);
+        let size = event.to_string().len();
+        let ring = self.rings.get_mut(session)?;
+        ring.events.push_back((self.seq, size, event.clone()));
+        ring.bytes += size;
+        self.bytes += size;
+        while ring.events.len() > JOURNAL_EVENTS || ring.bytes > JOURNAL_BYTES {
+            let Some((seq, size, _)) = ring.events.pop_front() else { break };
+            (ring.dropped, ring.bytes, self.bytes) = (seq, ring.bytes - size, self.bytes - size);
+        }
+        while self.bytes > JOURNAL_TOTAL {
+            let Some(ring) = self.rings.values_mut().max_by_key(|ring| ring.bytes) else { break };
+            let Some((seq, size, _)) = ring.events.pop_front() else { break };
+            (ring.dropped, ring.bytes, self.bytes) = (seq, ring.bytes - size, self.bytes - size);
+        }
+        Some(event)
+    }
+
+    /// Replaces a recorded event (a run end shaped with its team at send time), so a replay
+    /// says what the live frame said.
+    fn amend(&mut self, session: &str, seq: u64, event: Value) {
+        let Some(ring) = self.rings.get_mut(session) else { return };
+        let Some(slot) = ring.events.iter_mut().find(|(at, ..)| *at == seq) else { return };
+        let size = event.to_string().len();
+        (ring.bytes, self.bytes) = (ring.bytes - slot.1 + size, self.bytes - slot.1 + size);
+        (slot.1, slot.2) = (size, event);
+    }
+
+    /// The events after `after` in order, as many as fit `budget`, or a gap when some are
+    /// gone. With `first`, the page's first replay, one event always goes (cut to fit), so
+    /// every page moves on.
+    fn missed(&self, session: &str, after: u64, budget: usize, first: bool) -> Missed {
+        let Some(ring) = self.rings.get(session).filter(|ring| after >= ring.since && after >= ring.dropped && after <= self.seq) else { return Missed::Gap };
+        let (mut events, mut size, mut last) = (Vec::new(), 2, after);
+        let mut pending = ring.events.iter().filter(|(seq, ..)| *seq > after).peekable();
+        while let Some(&(seq, length, event)) = pending.peek() {
+            // Sizes are summed before deltas are joined, so the page only comes out smaller.
+            let mut event = event.clone();
+            let mut length = *length;
+            if size + length + 1 > budget {
+                if !first || !events.is_empty() {
+                    break;
+                }
+                shrink(&mut event, budget.saturating_sub(size + 1));
+                length = event.to_string().len();
+            }
+            size += length + 1;
+            last = *seq;
+            push_event(&mut events, event);
+            pending.next();
+        }
+        Missed::Events { events, more: pending.peek().is_some(), last }
+    }
+
+    /// Adds to each subscribed task the newest `seq`, and for a viewer that says where it
+    /// left off (same `epoch`), the events it missed or `gap: true`. The replay fills at most
+    /// [`REPLAY_BUDGET`]: a task whose replay goes on is marked `more` and its `seq` is the
+    /// last one replayed, so the viewer's next subscribe continues from there.
+    fn resume(&mut self, tasks: &mut [Value], after: &HashMap<String, u64>, epoch: Option<&str>) -> Resumed {
+        let same = epoch == Some(self.epoch.as_str());
+        let (mut room, mut more, mut gaps) = (REPLAY_BUDGET, false, 0);
+        for task in tasks {
+            let Some(id) = task["sessionId"].as_str().map(str::to_owned) else { continue };
+            self.watch(&id);
+            task["seq"] = json!(self.seq);
+            let Some(&after) = after.get(&id) else { continue };
+            // Past the room, a task's replay starts in the next page.
+            match if same { self.missed(&id, after, room, room == REPLAY_BUDGET) } else { Missed::Gap } {
+                Missed::Events { events, more: rest, last } => {
+                    if !events.is_empty() {
+                        room = room.saturating_sub(json!(events).to_string().len());
+                        task["events"] = json!(events);
+                    }
+                    if rest {
+                        (more, task["more"], task["seq"]) = (true, json!(true), json!(last));
+                    }
+                }
+                Missed::Gap => {
+                    gaps += 1;
+                    task["gap"] = json!(true);
+                }
+            }
+        }
+        Resumed { epoch: self.epoch.clone(), more, gaps }
     }
 }
 
@@ -2078,8 +2440,9 @@ fn fit_project_icons(icons: impl IntoIterator<Item = (String, Option<String>)>) 
 }
 
 /// Each subscribed task that exists here: its status as this window shows it, its newest
-/// message id (so the viewer pulls what it missed) and its title.
-fn subscribed_tasks(state: &AppState, ids: &[String]) -> Result<Vec<Value>> {
+/// message id (so the viewer pulls what it missed) and its title; then the ids that are
+/// not tasks here (deleted, or never were), so the viewer stops waiting on them.
+fn subscribed_tasks(state: &AppState, ids: &[String]) -> Result<(Vec<Value>, Vec<Value>)> {
     let (active_runs, pending_by_session) = {
         let agents = state.agents.lock().map_err(|e| e.to_string())?;
         let mut active_runs = HashMap::new();
@@ -2095,14 +2458,17 @@ fn subscribed_tasks(state: &AppState, ids: &[String]) -> Result<Vec<Value>> {
     };
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let teams = observed_team_states(&store.db, &ids.iter().map(String::as_str).collect::<Vec<_>>())?;
-    let mut tasks = Vec::new();
+    let (mut tasks, mut missing) = (Vec::new(), Vec::new());
     for id in ids {
         let row: Option<(String, String, i64, Option<i64>)> = store
             .db
             .query_row("SELECT status,title,(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1),last_prompt_at FROM sessions WHERE id=?1 AND remote_device IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .optional()
             .map_err(|e| e.to_string())?;
-        let Some((status, title, last_id, last_prompt_at)) = row else { continue };
+        let Some((status, title, last_id, last_prompt_at)) = row else {
+            missing.push(json!(id));
+            continue;
+        };
         let pending = pending_by_session.get(id).cloned().unwrap_or_default();
         let mut task = json!({"sessionId": id, "status": status, "lastId": last_id, "title": title, "pending": pending});
         shape_task_status(&mut task, active_runs.contains_key(id), teams.get(id));
@@ -2118,8 +2484,11 @@ fn subscribed_tasks(state: &AppState, ids: &[String]) -> Result<Vec<Value>> {
         }
         tasks.push(task);
     }
-    fit_list(&mut tasks, PAGE_BUDGET.saturating_sub(json!({"tasks": []}).to_string().len()));
-    Ok(tasks)
+    fit_list(&mut missing, MISSING_BUDGET);
+    // Room is left for the gone ids and what `Journal::resume` adds: a `seq` (and maybe
+    // `gap`) per task and the replayed events.
+    fit_list(&mut tasks, PAGE_BUDGET.saturating_sub(REPLAY_BUDGET + MISSING_BUDGET + 40 * ids.len() + json!({"tasks": [], "missing": [], "epoch": "0".repeat(32)}).to_string().len()));
+    Ok((tasks, missing))
 }
 
 /// Clones the currently answerable events into a small JSON shape for late subscribers.
@@ -2296,18 +2665,29 @@ pub(crate) fn fit_providers(providers: &mut Value) {
     }
 }
 
-/// Appends an event to a subscriber's buffer, joining consecutive text deltas.
+/// Appends an event to a subscriber's buffer, joining consecutive text deltas. A joined
+/// delta takes the newest `seq`, so a viewer's position still covers all of its text.
 pub(crate) fn push_event(events: &mut Vec<Value>, event: Value) {
     if event["kind"] == "text" {
         if let Some(last) = events.last_mut().filter(|last| last["kind"] == "text" && last["sessionId"] == event["sessionId"] && last["data"] == event["data"] && last["requestId"] == event["requestId"]) {
             let joined = format!("{}{}", last["text"].as_str().unwrap_or_default(), event["text"].as_str().unwrap_or_default());
             last["text"] = json!(joined);
+            if let Some(seq) = event.get("seq") {
+                last["seq"] = seq.clone();
+            }
             return;
         }
     }
     if events.len() < MAX_BUFFER {
         events.push(event);
+    } else if !events.last().is_some_and(lagged) {
+        events.push(json!({LAGGED: true}));
     }
+}
+
+/// The marker a full subscriber buffer ends with.
+fn lagged(event: &Value) -> bool {
+    event[LAGGED] == true
 }
 
 /// Events grouped into frames that each fit the budget; an oversized event is cut.
@@ -2342,7 +2722,7 @@ pub(crate) fn follow(app: &tauri::AppHandle, device: &str, authenticated_key: &s
         subscriber.until = Some(Instant::now() + SUBSCRIPTION);
     }
     subscriber.sessions.insert(session_id.to_owned());
-    Ok(())
+    inner.journal.watch(session_id);
 }
 
 /// Drops subscribers that expired, left the account or lost trust; true if any remain.
@@ -2352,57 +2732,117 @@ fn prune_subscribers(inner: &mut super::Inner, now: Instant) -> bool {
     !subscribers.is_empty()
 }
 
-/// Queues an event for every device mirroring its task. Called on the agent-event hot
-/// path: nothing is cloned unless someone mirrors this task.
+/// Numbers an event, keeps it for viewers that come back, and queues it for every device
+/// mirroring its task. Called on the agent-event hot path: nothing is cloned unless
+/// someone follows (or followed) this task.
 pub(crate) fn agent_event(app: &tauri::AppHandle, event: &AgentEvent) {
-    buffer(app, &event.session_id, |subscriber| {
-        if let Ok(value) = serde_json::to_value(event) {
-            push_event(&mut subscriber.events, value);
+    let Some(state) = app.try_state::<super::Remote>() else { return };
+    let delay = {
+        let mut inner = state.lock();
+        if followed(&inner, &event.session_id).is_none() {
+            return;
         }
-    });
+        let Ok(value) = serde_json::to_value(event) else { return };
+        journal_and_enqueue(&mut inner, &event.session_id, value, Queue::Event)
+    };
+    if let Some(delay) = delay {
+        tauri::async_runtime::spawn(flush(app.clone(), delay));
+    }
 }
 
 /// Queues `run.finished` for every device mirroring the task.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool, stopped: bool, text: &str) {
-    buffer(app, session_id, |subscriber| subscriber.finished.push(json!({"sessionId": session_id, "successful": successful, "stopped": stopped, "text": text})));
+    journaled(app, session_id, json!({"sessionId": session_id, "successful": successful, "stopped": stopped, "text": text}), Queue::Finished);
 }
 
-fn buffer(app: &tauri::AppHandle, session_id: &str, mut add: impl FnMut(&mut Subscriber)) {
+/// How a numbered entry is queued: as an agent event, as a run end, or as the run end of a
+/// team that settled (skipped while a run end for the task still waits to be sent).
+#[derive(Clone, Copy, PartialEq)]
+enum Queue {
+    Event,
+    Finished,
+    Settled,
+}
+
+/// Whether anyone follows (or followed) the task: Some(subscribed now).
+fn followed(inner: &super::Inner, session_id: &str) -> Option<bool> {
+    let subscribed = inner.subscribers.values().any(|s| s.sessions.contains(session_id));
+    (inner.settings.host_enabled && (subscribed || inner.journal.rings.contains_key(session_id))).then_some(subscribed)
+}
+
+/// Numbers, keeps and queues a team update or run end, like an agent event, so a viewer
+/// that comes back gets it in its replay too.
+fn journaled(app: &tauri::AppHandle, session_id: &str, value: Value, queue: Queue) {
     let Some(state) = app.try_state::<super::Remote>() else { return };
-    let schedule = {
-        let mut inner = state.lock();
-        if !inner.settings.host_enabled || inner.outbox.is_none() || !inner.subscribers.values().any(|s| s.sessions.contains(session_id)) {
-            return;
-        }
-        if !prune_subscribers(&mut inner, Instant::now()) {
-            return;
-        }
-        for subscriber in inner.subscribers.values_mut().filter(|s| s.sessions.contains(session_id)) {
-            add(subscriber);
-        }
-        !std::mem::replace(&mut inner.flushing, true)
-    };
-    if schedule {
-        tauri::async_runtime::spawn(flush(app.clone()));
+    let delay = journal_and_enqueue(&mut state.lock(), session_id, value, queue);
+    if let Some(delay) = delay {
+        tauri::async_runtime::spawn(flush(app.clone(), delay));
+    }
+}
+
+/// Run ends are journaled as `kind: "run.finished"` entries carrying the frame's fields; the
+/// live `run.finished` frame carries the same object, `seq` included.
+fn journal_and_enqueue(inner: &mut super::Inner, session_id: &str, mut value: Value, queue: Queue) -> Option<Duration> {
+    let subscribed = followed(inner, session_id)?;
+    if queue == Queue::Settled && inner.subscribers.values().any(|s| s.finished.iter().any(|item| item["sessionId"] == session_id)) {
+        return None;
+    }
+    if queue != Queue::Event {
+        value["kind"] = json!("run.finished");
+    }
+    let value = inner.journal.record(session_id, value, subscribed)?;
+    enqueue(inner, session_id, |subscriber| match queue {
+        Queue::Event => push_event(&mut subscriber.events, value.clone()),
+        Queue::Finished | Queue::Settled => subscriber.finished.push(value.clone()),
+    })
+}
+
+/// Adds to the buffers of the task's subscribers; the delay of a flush to schedule, if none is.
+fn enqueue(inner: &mut super::Inner, session_id: &str, mut add: impl FnMut(&mut Subscriber)) -> Option<Duration> {
+    if !inner.settings.host_enabled || inner.outbox.is_none() || !inner.subscribers.values().any(|s| s.sessions.contains(session_id)) {
+        return None;
+    }
+    if !prune_subscribers(inner, Instant::now()) {
+        return None;
+    }
+    for subscriber in inner.subscribers.values_mut().filter(|s| s.sessions.contains(session_id)) {
+        add(subscriber);
+    }
+    if std::mem::replace(&mut inner.flushing, true) {
+        return None;
+    }
+    let delay = flush_delay(inner.flushed_at, inner.flush_frames, Instant::now());
+    if delay.is_zero() {
+        inner.flush_frames = 0;
+    }
+    Some(delay)
+}
+
+/// The first event after a quiet spell goes at once (a turn's first delta shows without
+/// waiting); events right behind it are gathered for [`FLUSH`], and once a burst has sent
+/// `frames` frames, for [`SUSTAINED`].
+pub(crate) fn flush_delay(last: Option<Instant>, frames: u32, now: Instant) -> Duration {
+    match last {
+        Some(at) if now.saturating_duration_since(at) < SUSTAINED => if frames < BURST_FRAMES { FLUSH } else { SUSTAINED },
+        _ => Duration::ZERO,
     }
 }
 
 /// Sends each subscriber one `agent.events` frame (more only past the frame budget),
 /// then its `run.finished` events, so a run's last deltas always arrive before its end.
-async fn flush(app: tauri::AppHandle) {
-    tokio::time::sleep(FLUSH).await;
-    let batches: Vec<(String, String, Vec<Value>, Vec<Value>)> = {
+async fn flush(app: tauri::AppHandle, delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    let (epoch, batches): (String, Vec<(String, Vec<Value>, Vec<Value>)>) = {
         let state = remote(&app);
         let mut inner = state.lock();
         inner.flushing = false;
+        inner.flushed_at = Some(Instant::now());
+        inner.flush_frames = inner.flush_frames.saturating_add(1);
         let hosting = inner.settings.host_enabled;
-        prune_subscribers(&mut inner, Instant::now());
-        // Bind queued content to the key that subscribed. Re-pinning the same
-        // device id while the team snapshot is awaited must not receive this batch.
-        let keys: HashMap<String, String> = inner.devices.iter().filter(|d| inner.authenticated(&d.id, &d.public_key)).map(|d| (d.id.clone(), d.public_key.clone())).collect();
-        inner.subscribers.iter_mut().filter(|_| hosting).filter_map(|(id, s)| {
-            keys.get(id).map(|key| (id.clone(), key.clone(), std::mem::take(&mut s.events), std::mem::take(&mut s.finished)))
-        }).filter(|(_, _, events, finished)| !events.is_empty() || !finished.is_empty()).collect()
+        let batches = inner.subscribers.iter_mut().filter(|_| hosting).map(|(id, s)| (id.clone(), std::mem::take(&mut s.events), std::mem::take(&mut s.finished))).filter(|(_, events, finished)| !events.is_empty() || !finished.is_empty()).collect();
+        (inner.journal.epoch.clone(), batches)
     };
     // Read after the run end has settled its team (architect::completed follows it), so a
     // team whose workers carry on reports the run's task as still running.
@@ -2419,18 +2859,47 @@ async fn flush(app: tauri::AppHandle) {
         .await
         .unwrap_or_default()
     };
-    for (device, authenticated_key, events, mut finished) in batches {
+    let mut amended = HashMap::new();
+    for (device, mut events, mut finished) in batches {
         for data in finished.iter_mut().filter(|data| data.get("team").is_none()) {
             let team = data["sessionId"].as_str().and_then(|id| teams.get(id));
             shape_finished(data, team);
+            if let (Some(seq), Some(id)) = (data["seq"].as_u64(), data["sessionId"].as_str()) {
+                amended.insert(seq, (id.to_owned(), data.clone()));
+            }
         }
-        for frame in frames(events) {
-            let _ = socket::send_authenticated(&app, &device, &authenticated_key, &json!({"type": "event", "name": "agent.events", "data": {"events": frame}}));
+        let behind = events.last().is_some_and(lagged);
+        if behind {
+            events.pop();
+            super::diagnostics::record("subscriber.lagged", format!("{device}: over {MAX_BUFFER} buffered events"));
+        }
+        for frame in lagged_frames(frames(events), behind, &epoch) {
+            let _ = socket::send_to_device(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
         }
         for data in finished {
             let _ = socket::send_authenticated(&app, &device, &authenticated_key, &json!({"type": "event", "name": "run.finished", "data": data}));
         }
     }
+    if !amended.is_empty() {
+        let state = remote(&app);
+        let mut inner = state.lock();
+        for (seq, (id, data)) in amended {
+            inner.journal.amend(&id, seq, data);
+        }
+    }
+}
+
+/// `agent.events` frame data; after a buffer overflowed, the last frame says `lagged`, so
+/// the viewer subscribes again from its position at once and the journal fills the rest.
+fn lagged_frames(frames: Vec<Vec<Value>>, lagged: bool, epoch: &str) -> Vec<Value> {
+    let mut out: Vec<Value> = frames.into_iter().map(|events| json!({"events": events, "epoch": epoch})).collect();
+    if lagged {
+        if out.is_empty() {
+            out.push(json!({"events": [], "epoch": epoch}));
+        }
+        out.last_mut().unwrap()[LAGGED] = json!(true);
+    }
+    out
 }
 
 fn head(text: &str, max: usize) -> &str {
@@ -2769,7 +3238,13 @@ mod tests {
 
     #[test]
     fn requests_are_validated() {
-        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()] }));
+        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None }));
+        // Where a viewer left off: only for requested tasks, and only valid positions.
+        let resume = parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"], "epoch": "e1", "afterSeq": {"s1": 7, "s2": -1, "other": 3}}));
+        assert_eq!(resume, Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::from([("s1".to_string(), 7)]), epoch: Some("e1".into()) }));
+        assert_eq!(parse(true, "task.startStatus", &json!({"startId": "st1"})), Ok(Call::StartStatus { start_id: "st1".into() }));
+        assert_eq!(parse(true, "task.cancelStart", &json!({"startId": "st1"})), Ok(Call::CancelStart { start_id: "st1".into() }));
+        assert!(parse(true, "task.cancelStart", &json!({})).is_err());
         assert!(parse(true, "subscribe", &json!({})).is_err());
         assert!(parse(true, "subscribe", &json!({"sessionIds": ["a b"]})).is_err());
         assert!(parse(true, "subscribe", &json!({"sessionIds": vec!["s"; MAX_IDS + 1]})).is_err());
@@ -3145,6 +3620,106 @@ mod tests {
         assert!(json!(pending).to_string().len() <= MAX_MESSAGE);
     }
 
+    #[test]
+    fn host_gate_only_checks_remote_control() {
+        assert_eq!(gate(false), Err(OFF.to_string()));
+        assert_eq!(gate(true), Ok(()));
+    }
+
+    #[test]
+    fn a_present_device_keeps_its_subscription_without_a_pin() {
+        let now = Instant::now();
+        let subscriber = Subscriber {
+            until: Some(now + Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device {
+                id: "viewer".into(), name: "Phone".into(), platform: "iOS".into(), public_key: "current-key".into(),
+                host: false, online: true, last_seen: Value::Null,
+            }],
+            ..Default::default()
+        };
+        inner.subscribers.insert("viewer".into(), subscriber);
+        assert!(prune_subscribers(&mut inner, now));
+        assert!(inner.subscribers.contains_key("viewer"));
+    }
+
+    #[test]
+    fn access_is_checked_when_a_request_runs() {
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
+            ..Default::default()
+        };
+        let now = 1_000_000_000;
+        let request = |nonce: &str| json!({"ts": now, "nonce": nonce});
+        assert_eq!(admit(&inner, "viewer"), Err(OFF.to_string()));
+        inner.settings.host_enabled = true;
+        assert_eq!(admit(&inner, "viewer"), Ok(false));
+        inner.settings.allow_full_access = true;
+        assert_eq!(admit(&inner, "viewer"), Ok(true));
+        // Revoked (gone from presence) after the request was queued.
+        inner.devices.clear();
+        assert_eq!(admit(&inner, "viewer"), Err(super::super::UNKNOWN_DEVICE.to_string()));
+        // Freshness is checked on arrival: a request that then waits a minute in the
+        // queue still runs, and a replay of it is refused when it arrives.
+        assert_eq!(fresh_request(&mut inner, &request("nonce-0000000000000003"), now), Ok(()));
+        assert!(fresh_request(&mut inner, &request("nonce-0000000000000003"), now + 90_000).is_err(), "replayed or stale");
+        assert!(fresh_request(&mut inner, &request("nonce-0000000000000004"), now + 90_000).is_err(), "stale on arrival");
+    }
+
+    #[test]
+    fn full_access_is_capped_for_remote_tasks() {
+        let start = |mode: Option<&str>| {
+            let mut params = json!({"projectId": "p", "prompt": "go", "provider": "claude", "model": "sonnet"});
+            if let Some(mode) = mode {
+                params["mode"] = json!(mode);
+            }
+            parse(true, "task.start", &params).unwrap()
+        };
+        let mode = |call: Call| match call {
+            Call::Start(start) => start.mode,
+            Call::Configure { mode, .. } => mode,
+            _ => unreachable!(),
+        };
+        assert_eq!(mode(cap_mode(start(None), false).unwrap()).as_deref(), Some("ask"), "the full default asks instead");
+        assert_eq!(mode(cap_mode(start(Some("auto")), false).unwrap()).as_deref(), Some("auto"));
+        assert!(cap_mode(start(Some("full")), false).unwrap_err().starts_with("Full access is off for remote tasks on "));
+        assert_eq!(mode(cap_mode(start(None), true).unwrap()), None);
+        assert_eq!(mode(cap_mode(start(Some("full")), true).unwrap()).as_deref(), Some("full"));
+        let configure = |mode: &str| parse(true, "task.configure", &json!({"sessionId": "s", "mode": mode})).unwrap();
+        assert!(cap_mode(configure("full"), false).is_err());
+        assert_eq!(mode(cap_mode(configure("plan"), false).unwrap()).as_deref(), Some("plan"));
+        assert_eq!(mode(cap_mode(configure("full"), true).unwrap()).as_deref(), Some("full"));
+    }
+
+    #[test]
+    fn a_full_task_takes_no_remote_prompts_without_full_access() {
+        let off = |stored, requested| allow_task_mode(stored, requested, false);
+        assert!(off("full", None).unwrap_err().starts_with("Full access is off for remote tasks on "), "send, steer, model-only configure");
+        assert!(off("full", Some("full")).is_err());
+        assert!(off("full", Some("ask")).is_ok(), "switching it to an approving mode");
+        assert!(off("ask", None).is_ok() && off("auto", None).is_ok());
+        assert!(allow_task_mode("full", None, true).is_ok());
+    }
+
+    #[test]
+    fn replays_and_stale_requests_are_refused() {
+        let mut replay = Replay::default();
+        let now = 1_000_000_000;
+        let nonce = "0123456789abcdef0123";
+        assert!(replay.check(Some(now - 1000), Some(nonce), now).is_ok());
+        assert!(replay.check(Some(now - 1000), Some(nonce), now + 10).is_err(), "same nonce twice");
+        assert!(replay.check(Some(now - 60_001), Some("fresh-nonce-000001"), now).is_err(), "too old");
+        assert!(replay.check(Some(now + 60_001), Some("fresh-nonce-000002"), now).is_err(), "too new");
+        assert!(replay.check(None, Some("fresh-nonce-000003"), now).is_err());
+        assert!(replay.check(Some(now), Some("short"), now).is_err());
+        assert!(replay.check(Some(now), None, now).is_err());
+        // Seen nonces are pruned once their ts leaves the window.
+        assert!(replay.check(Some(now + 61_500), Some("fresh-nonce-000004"), now + 61_500).is_ok());
+        assert!(!replay.seen.contains_key(nonce));
+    }
+
     fn event(session: &str, kind: &str, text: &str) -> Value {
         serde_json::to_value(AgentEvent { session_id: session.into(), kind: kind.into(), text: text.into(), request_id: None, data: None, tool: None }).unwrap()
     }
@@ -3162,10 +3737,229 @@ mod tests {
         tagged["data"] = json!({"messageId": "m2"});
         push_event(&mut events, tagged);
         assert_eq!(events.len(), 6);
-        // A viewer that falls far behind stops buffering; it catches up at the run end.
+        // A joined delta carries the newest seq, so a viewer's position covers all its text.
+        let mut numbered = Vec::new();
+        for seq in [7, 8] {
+            let mut delta = event("a", "text", "x");
+            delta["seq"] = json!(seq);
+            push_event(&mut numbered, delta);
+        }
+        assert_eq!((numbered.len(), numbered[0]["seq"].as_u64(), numbered[0]["text"].as_str()), (1, Some(8), Some("xx")));
+    }
+
+    #[test]
+    fn a_viewer_that_comes_back_gets_exactly_what_it_missed() {
+        let mut journal = Journal::default();
+        assert!(journal.record("a", event("a", "text", "lost"), false).is_none(), "nobody follows the task");
+        let first = journal.record("a", event("a", "text", "Hel"), true).unwrap();
+        assert_eq!(first["seq"], 1);
+        journal.record("b", event("b", "tool", "ls"), true);
+        journal.record("a", event("a", "text", "lo"), false).unwrap();
+        journal.record("a", event("a", "approval", "Run ls"), false).unwrap();
+        // After seq 1: the rest of a's events, in order, deltas joined under the newest seq.
+        let Missed::Events { events: missed, more: false, last: 4 } = journal.missed("a", 1, REPLAY_BUDGET, true) else { panic!("no gap") };
+        assert_eq!(missed.iter().map(|e| (e["kind"].as_str().unwrap(), e["text"].as_str().unwrap(), e["seq"].as_u64().unwrap())).collect::<Vec<_>>(), [("text", "lo", 3), ("approval", "Run ls", 4)]);
+        assert_eq!(journal.missed("a", 4, REPLAY_BUDGET, true), Missed::Events { events: vec![], more: false, last: 4 });
+        // More than fits: the first page, and where the next one starts.
+        let Missed::Events { events, more: true, last: 1 } = journal.missed("a", 0, 10, true) else { panic!("a first page") };
+        assert_eq!(events.len(), 1, "one event always goes first, cut to fit");
+        assert_eq!(journal.missed("a", 0, 10, false), Missed::Events { events: vec![], more: true, last: 0 }, "or waits for the next page");
+        assert_eq!(journal.missed("a", 99, REPLAY_BUDGET, true), Missed::Gap, "a position this journal never gave");
+        assert_eq!(journal.missed("c", 0, REPLAY_BUDGET, true), Missed::Gap, "a task it never recorded");
+        // A task recorded from a later point can't account for what came before.
+        journal.watch("c");
+        journal.record("c", event("c", "tool", "x"), false).unwrap();
+        assert_eq!(journal.missed("c", 2, REPLAY_BUDGET, true), Missed::Gap);
+        assert!(matches!(journal.missed("c", 4, REPLAY_BUDGET, true), Missed::Events { events, .. } if events.len() == 1));
+    }
+
+    #[test]
+    fn a_long_replay_is_paged_instead_of_starving_later_tasks() {
+        let mut journal = Journal::default();
+        let epoch = journal.epoch.clone();
+        let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
+        journal.resume(&mut tasks, &HashMap::new(), None);
+        // a's missed tool output is several pages; b missed one event after it.
+        let chunk = "o".repeat(20 * 1024);
+        for i in 0..12 {
+            journal.record("a", event("a", "tool", &format!("{i}{chunk}")), false).unwrap();
+        }
+        journal.record("b", event("b", "tool", "pwd"), false).unwrap();
+        let mut after = HashMap::from([("a".to_string(), 0u64), ("b".to_string(), 0u64)]);
+        let (mut seen_a, mut seen_b, mut pages) = (Vec::new(), Vec::new(), 0);
+        loop {
+            pages += 1;
+            let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
+            let resumed = journal.resume(&mut tasks, &after, Some(&epoch));
+            assert_eq!(resumed.gaps, 0, "nothing turns into a gap");
+            assert!(json!(tasks).to_string().len() <= REPLAY_BUDGET + 512, "each page fits");
+            for (task, seen) in tasks.iter().zip([&mut seen_a, &mut seen_b]) {
+                seen.extend(task["events"].as_array().cloned().unwrap_or_default());
+                assert!(task.get("gap").is_none());
+                after.insert(task["sessionId"].as_str().unwrap().into(), task["seq"].as_u64().unwrap());
+            }
+            if !resumed.more {
+                break;
+            }
+            assert!(tasks.iter().any(|task| task["more"] == true));
+        }
+        assert!(pages > 2, "paged");
+        assert_eq!(seen_a.iter().map(|e| e["text"].as_str().unwrap().split('o').next().unwrap().to_owned()).collect::<Vec<_>>(), (0..12).map(|i| i.to_string()).collect::<Vec<_>>(), "every event once, in order");
+        assert_eq!(seen_b.iter().map(|e| e["text"].as_str().unwrap()).collect::<Vec<_>>(), ["pwd"]);
+        assert_eq!(after["a"], 13, "caught up to the newest seq");
+    }
+
+    #[test]
+    fn team_updates_and_run_ends_are_journaled_and_replayed() {
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
+            outbox: Some(tokio::sync::mpsc::channel(1).0),
+            ..Default::default()
+        };
+        inner.settings.host_enabled = true;
+        inner.subscribers.insert("viewer".into(), Subscriber { until: Some(Instant::now() + SUBSCRIPTION), sessions: HashSet::from(["h1".to_string()]), ..Default::default() });
+        let epoch = inner.journal.epoch.clone();
+        journal_and_enqueue(&mut inner, "h1", event("h1", "text", "Hi"), Queue::Event);
+        journal_and_enqueue(&mut inner, "h1", team_event_value("h1", json!({"id": "w1", "status": "running"})), Queue::Event);
+        journal_and_enqueue(&mut inner, "h1", json!({"sessionId": "h1", "successful": true, "stopped": false, "text": "Turn complete"}), Queue::Finished);
+        // A team settling while that run end still waits to go adds nothing.
+        journal_and_enqueue(&mut inner, "h1", json!({"sessionId": "h1", "successful": true, "teamSettled": true}), Queue::Settled);
+        let subscriber = &inner.subscribers["viewer"];
+        assert_eq!(subscriber.events.iter().map(|e| (e["kind"].as_str().unwrap(), e["seq"].as_u64().unwrap())).collect::<Vec<_>>(), [("text", 1), ("team", 2)]);
+        assert_eq!(subscriber.finished, vec![json!({"sessionId": "h1", "successful": true, "stopped": false, "text": "Turn complete", "kind": "run.finished", "seq": 3})], "the live frame carries its seq");
+        // The run end is shaped with its team when sent; the replay says the same.
+        inner.journal.amend("h1", 3, json!({"sessionId": "h1", "kind": "run.finished", "status": "running", "seq": 3}));
+        let mut tasks = vec![json!({"sessionId": "h1"})];
+        inner.journal.resume(&mut tasks, &HashMap::from([("h1".to_string(), 0)]), Some(&epoch));
+        assert_eq!(tasks[0]["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "team", "run.finished"]);
+        assert_eq!(tasks[0]["events"][2]["status"], "running");
+        assert_eq!(inner.journal.bytes, inner.journal.rings.values().map(|ring| ring.bytes).sum::<usize>());
+    }
+
+    #[test]
+    fn a_full_buffer_tells_the_viewer_it_lagged() {
         let mut full: Vec<Value> = (0..MAX_BUFFER).map(|i| event("a", "tool", &i.to_string())).collect();
         push_event(&mut full, event("a", "tool", "late"));
-        assert_eq!(full.len(), MAX_BUFFER);
+        push_event(&mut full, event("a", "tool", "later"));
+        assert_eq!(full.len(), MAX_BUFFER + 1, "one marker, nothing more");
+        assert!(lagged(full.last().unwrap()));
+        full.pop();
+        let sent = lagged_frames(frames(full), true, "e1");
+        assert!(sent.len() > 1);
+        assert!(sent[..sent.len() - 1].iter().all(|frame| frame.get(LAGGED).is_none()));
+        assert_eq!((sent.last().unwrap()[LAGGED].as_bool(), sent.last().unwrap()["epoch"].as_str()), (Some(true), Some("e1")), "the last frame says so");
+        assert_eq!(lagged_frames(Vec::new(), true, "e1"), vec![json!({"events": [], "epoch": "e1", "lagged": true})]);
+        assert!(lagged_frames(vec![vec![event("a", "tool", "x")]], false, "e1")[0].get(LAGGED).is_none());
+    }
+
+    #[test]
+    fn a_start_that_panics_still_settles() {
+        let mut starts = HashMap::new();
+        let (entry, _) = claim_start(&mut starts, "st-panic", "viewer", Instant::now()).unwrap();
+        let guarded = entry.clone();
+        let joined = std::thread::spawn(move || {
+            let _settle = Settle(guarded);
+            panic!("start blew up");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert_eq!(start_status(Some(&entry)), json!({"state": "failed", "error": START_ENDED}));
+        // A start that finished keeps its result.
+        let (done, _) = claim_start(&mut starts, "st-ok", "viewer", Instant::now()).unwrap();
+        Settle(done.clone()).finish(Ok(json!({"sessionId": "h1"})));
+        assert_eq!(start_status(Some(&done)), json!({"state": "done", "sessionId": "h1"}));
+    }
+
+    #[test]
+    fn batch_calls_are_checked_one_by_one() {
+        let params = json!({"calls": [{"method": "tasks.list", "params": {}}, {"method": "task.diff", "params": {}}]});
+        assert_eq!(batch_methods("batch", &params).collect::<Vec<_>>(), ["tasks.list", "task.diff"]);
+        assert_eq!(batch_methods("task.send", &params).count(), 0);
+        assert_eq!(batch_methods("batch", &json!({})).count(), 0);
+    }
+
+    #[test]
+    fn the_journal_stays_bounded_and_says_when_it_dropped_events() {
+        let mut journal = Journal::default();
+        for i in 0..JOURNAL_EVENTS + 10 {
+            journal.record("a", event("a", "tool", &i.to_string()), true);
+        }
+        let ring = &journal.rings["a"];
+        assert_eq!((ring.events.len(), ring.dropped), (JOURNAL_EVENTS, 10));
+        assert_eq!(journal.missed("a", 5, usize::MAX, true), Missed::Gap, "events after 5 were dropped");
+        assert!(matches!(journal.missed("a", 10, usize::MAX, true), Missed::Events { events, more: false, .. } if events.len() == JOURNAL_EVENTS));
+        let big = "x".repeat(600 * 1024);
+        for _ in 0..4 {
+            journal.record("b", event("b", "tool", &big), true);
+        }
+        assert!(journal.rings["b"].bytes <= JOURNAL_BYTES && journal.rings["b"].events.len() < 4);
+        assert_eq!(journal.bytes, journal.rings.values().map(|ring| ring.bytes).sum::<usize>());
+    }
+
+    #[test]
+    fn subscribe_replies_carry_seq_replay_or_a_gap() {
+        let mut journal = Journal::default();
+        let epoch = journal.epoch.clone();
+        let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
+        journal.resume(&mut tasks, &HashMap::new(), None);
+        assert_eq!((tasks[0]["seq"].as_u64(), tasks[0].get("gap")), (Some(0), None), "a new viewer gets only the position");
+        journal.record("a", event("a", "tool", "ls"), false).unwrap();
+        journal.record("b", event("b", "tool", "pwd"), false).unwrap();
+        let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
+        journal.resume(&mut tasks, &HashMap::from([("a".to_string(), 0), ("b".to_string(), 2)]), Some(&epoch));
+        assert_eq!(tasks[0]["events"][0]["text"], "ls");
+        assert_eq!((tasks[1].get("events"), tasks[1].get("gap"), tasks[1]["seq"].as_u64()), (None, None, Some(2)), "nothing missed");
+        // Another epoch: this host restarted, so every position is a gap.
+        let mut tasks = vec![json!({"sessionId": "a"})];
+        journal.resume(&mut tasks, &HashMap::from([("a".to_string(), 0)]), Some("old"));
+        assert_eq!((tasks[0]["gap"].as_bool(), tasks[0].get("events")), (Some(true), None));
+    }
+
+    #[test]
+    fn a_burst_sends_its_first_event_at_once() {
+        let now = Instant::now();
+        assert_eq!(flush_delay(None, 0, now), Duration::ZERO);
+        assert_eq!(flush_delay(Some(now - Duration::from_secs(1)), 9, now), Duration::ZERO, "after a quiet spell");
+        assert_eq!(flush_delay(Some(now - Duration::from_millis(5)), 1, now), FLUSH, "right behind the last frame");
+        assert_eq!(flush_delay(Some(now - Duration::from_millis(60)), BURST_FRAMES, now), SUSTAINED, "a long stream");
+        assert_eq!(FLUSH, Duration::from_millis(40));
+        // Worst case, a burst repeated after each quiet spell, stays under the relay's 20 frames/s.
+        let cycle = FLUSH * (BURST_FRAMES - 1) + SUSTAINED;
+        assert!(f64::from(BURST_FRAMES) / cycle.as_secs_f64() < 20.0);
+    }
+
+    #[test]
+    fn a_start_runs_once_per_start_id_and_can_be_cancelled() {
+        let mut starts = HashMap::new();
+        let now = Instant::now();
+        let (first, fresh) = claim_start(&mut starts, "st1", "viewer", now).unwrap();
+        assert!(fresh);
+        let (again, fresh) = claim_start(&mut starts, "st1", "viewer", now).unwrap();
+        assert!(!fresh && Arc::ptr_eq(&first, &again), "a repeated task.start waits for the first");
+        assert!(claim_start(&mut starts, "st1", "phone", now).is_err(), "another device can't take it over");
+        assert_eq!(start_status(None), json!({"state": "unknown"}));
+        assert_eq!(start_status(Some(&first)), json!({"state": "running"}));
+        // Cancelled while running: callers get CANCELLED at once and the start is told to stop.
+        assert_eq!(cancel_start(&first), json!({"cancelled": true}));
+        assert!(first.cancel.load(Ordering::SeqCst));
+        assert_eq!(*first.result.borrow(), Some(Err(start::CANCELLED.to_string())));
+        assert_eq!(start_status(Some(&first)), json!({"state": "failed", "error": start::CANCELLED}));
+        // A start that already made its task says so and is left alone.
+        let (done, _) = claim_start(&mut starts, "st2", "viewer", now).unwrap();
+        done.result.send_replace(Some(Ok(json!({"sessionId": "h1"}))));
+        assert_eq!(cancel_start(&done), json!({"cancelled": false, "sessionId": "h1"}));
+        assert!(!done.cancel.load(Ordering::SeqCst));
+        assert_eq!(start_status(Some(&done)), json!({"state": "done", "sessionId": "h1"}));
+        // A cancel that arrives before its start was claimed leaves it cancelled, so it never runs.
+        let (early, _) = claim_start(&mut starts, "st5", "viewer", now).unwrap();
+        cancel_start(&early);
+        let (late, fresh) = claim_start(&mut starts, "st5", "viewer", now).unwrap();
+        assert!(!fresh && late.cancel.load(Ordering::SeqCst));
+        assert_eq!(*late.result.borrow(), Some(Err(start::CANCELLED.to_string())));
+        // Finished starts are forgotten after an hour; running ones never are.
+        let (_running, _) = claim_start(&mut starts, "st3", "viewer", now).unwrap();
+        claim_start(&mut starts, "st4", "viewer", now + START_MEMORY + Duration::from_secs(1)).unwrap();
+        assert_eq!(starts.keys().map(String::as_str).collect::<HashSet<_>>(), HashSet::from(["st3", "st4"]));
     }
 
     #[test]

@@ -13,6 +13,7 @@ import { applyTeamEvent, decodeTeam, decodeTeamRun, teamBusy, teamRun, type Team
 import { applyEvent, ended, fromList, fromSubscribe, idleLive, lastId, mergeMessages, prependMessages, staleLists, withTeamRun } from '../store/reduce.ts';
 import { cachedLastId, clearThreads, readThread, saveThread } from '../store/threads.ts';
 import { PrefetchQueue, prefetchOrder } from '../store/prefetch.ts';
+import { Cursors, followReplay } from '../store/replay.ts';
 import { clearBlobs } from '../store/attachment-files.ts';
 import type { Variant } from '../store/attachments.ts';
 import { fetchAttachment, resetAttachmentRequests, type AttachmentDeps, type Source } from './attachments.ts';
@@ -33,7 +34,7 @@ import { decodeInbox, encodeInbox, type RestoredInbox } from '../store/inbox-cac
 import { attempt, configured, stopping, unanswered, unconfigured, unpaused, unstopping } from './optimistic.ts';
 import { newestPage, olderByAfterId, pageMessages, type Fetch } from './paging.ts';
 import type { Live } from '../store/reduce.ts';
-import type { AgentEvent, Bot, Changes, ConfigureParams, Device, Diff, MergeMethod, Message, MessagePage, Provider, ProviderModel, PullDetail, RunFinished, StartParams, SubscribedTask, TaskSummary, TasksList } from './types.ts';
+import type { AgentEvent, Bot, Changes, ConfigureParams, Device, Diff, MergeMethod, Message, MessagePage, Provider, ProviderModel, PullDetail, RunFinished, StartParams, SubscribeReply, TaskSummary, TasksList } from './types.ts';
 
 const RENEW_MS = 9 * 60_000;
 const REFRESH_MS = 12 * 3600_000;
@@ -600,15 +601,28 @@ async function frame(text: string): Promise<void> {
     return;
   }
   if (message?.type === 'res') pending.resolve(from, message);
-  else if (message?.type === 'event' && message.name === 'agent.events') events(from, message.data?.events);
+  else if (message?.type === 'event' && message.name === 'agent.events') {
+    events(from, message.data?.events, message.data?.epoch);
+    // The host dropped events it could not buffer: hold what comes next and replay from here.
+    if (message.data?.lagged === true) {
+      cursors.hold(from);
+      void subscribeHost(from);
+    }
+  }
   else if (message?.type === 'event' && message.name === 'run.finished') void finished(from, message.data);
 }
 
 const active = (status?: string) => status === 'running' || status === 'waiting';
 
-function events(host: string, list: unknown) {
+/** Per host: its event journal's epoch and the newest `seq` seen per task, so a subscribe asks
+ * only for what was missed; live events wait while a subscribe's replay is in flight. */
+const cursors = new Cursors();
+
+function events(host: string, raw: unknown, epoch?: unknown, live = true) {
   const ids = subscribed(host);
-  if (!ids.size || !Array.isArray(list)) return;
+  if (!ids.size || !Array.isArray(raw)) return;
+  if (live && cursors.keep(host, epoch, raw as AgentEvent[])) return;
+  const list = cursors.fresh(host, epoch, raw as AgentEvent[]);
   const started = new Set<string>();
   patch(s => {
     const live = { ...s.live };
@@ -761,7 +775,10 @@ async function subscribeOnce(deviceId: string): Promise<void> {
     }
     return { live, tasks: withStatuses(s, deviceId, live) };
   });
-  for (const t of tasks) if (watched.get(deviceId)?.has(t.sessionId) && t.lastId > lastId(state().messages[taskKey(deviceId, t.sessionId)])) void loadMessages(deviceId, t.sessionId).catch(() => undefined);
+  // What arrived live meanwhile is newer than the snapshot.
+  showHeld();
+  // A gap means events were lost: the messages copy catches up.
+  for (const t of tasks) if (watched.get(deviceId)?.has(t.sessionId) && (t.gap === true || t.lastId > lastId(state().messages[taskKey(deviceId, t.sessionId)]))) void loadMessages(deviceId, t.sessionId).catch(() => undefined);
 }
 
 /** One task's task.messages call with these params; a background copy (prefetch) turns foreground once the thread is open. */

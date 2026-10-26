@@ -137,12 +137,29 @@ impl Settings {
     }
 }
 
-/// Reads the settings, creating the device id once.
+/// Reads the settings, creating the device id once. The first load after scoped pairing
+/// shipped keeps the devices of a computer that already allowed remote control at full
+/// access (`grants::seed_adopt`; only those in the first presence frame after it), so an
+/// upgrade locks nobody out; anything newer waits for approval.
 pub(crate) fn load(dir: &Path) -> Settings {
     let path = dir.join(FILE);
-    let mut settings: Settings = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    let text = std::fs::read_to_string(&path).ok();
+    let mut settings: Settings = text.as_deref().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
+    let mut changed = false;
     if uuid::Uuid::parse_str(&settings.device_id).is_err() {
         settings.device_id = uuid::Uuid::new_v4().to_string();
+        changed = true;
+    }
+    if !settings.grants_scoped {
+        let upgraded = text.is_some() && settings.account.is_some() && settings.host_enabled;
+        let seeded = if upgraded { super::grants::seed_adopt(dir) } else { Ok(()) };
+        changed |= seeded.is_ok();
+        settings.grants_scoped = seeded.is_ok();
+        if let Err(error) = seeded {
+            eprintln!("{error}");
+        }
+    }
+    if changed {
         if let Err(error) = save(dir, &settings) {
             eprintln!("Could not save the remote access device id: {error}");
         }
@@ -369,5 +386,29 @@ mod tests {
         assert_eq!(parsed.account.unwrap().avatar_url, "u");
         assert!(parsed.trusted.is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_an_upgraded_host_adopts_its_devices() {
+        let dir = |text: Option<&str>| {
+            let dir = std::env::temp_dir().join(format!("pandacode-remote-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(text) = text {
+                std::fs::write(dir.join(FILE), text).unwrap();
+            }
+            dir
+        };
+        let grants = |dir: &Path| dir.join("connect-grants.json").exists();
+        let fresh = dir(None);
+        assert!(load(&fresh).grants_scoped && !grants(&fresh));
+        let signed_in_off = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","account":{"id":"gh:1","login":"a"}}"#));
+        assert!(load(&signed_in_off).grants_scoped && !grants(&signed_in_off));
+        let upgraded = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{"id":"gh:1","login":"a"}}"#));
+        assert!(load(&upgraded).grants_scoped && grants(&upgraded));
+        let later = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"grantsScoped":true,"account":{"id":"gh:1","login":"a"}}"#));
+        assert!(load(&later).grants_scoped && !grants(&later));
+        for dir in [fresh, signed_in_off, upgraded, later] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

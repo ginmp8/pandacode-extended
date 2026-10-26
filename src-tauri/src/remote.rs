@@ -2,15 +2,19 @@
 //! socket, host RPC for this computer's tasks, and mirrors: local tasks that run on
 //! another of the user's computers. Nothing touches the network until the user signs in.
 mod auth;
+mod bench;
 pub(crate) mod catalog;
 mod client;
 mod config;
 mod crypto;
+pub(crate) mod diagnostics;
+pub(crate) mod grants;
 mod host;
 mod images;
 mod permissions;
 pub(crate) mod mirror;
 mod replay;
+mod routes;
 mod socket;
 mod start;
 
@@ -80,7 +84,8 @@ pub(crate) struct Inner {
     connected: bool,
     /// Bumped on every start/stop so an old socket task knows to exit.
     generation: u64,
-    outbox: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Frames waiting for the socket, bounded so a stalled socket can't hoard memory.
+    outbox: Option<tokio::sync::mpsc::Sender<String>>,
     /// The account's devices, as the latest presence frame lists them.
     devices: Vec<Device>,
     /// Whether presence arrived on this socket; until then `remote_devices` asks the relay.
@@ -90,6 +95,10 @@ pub(crate) struct Inner {
     subscribers: HashMap<String, Subscriber>,
     /// A flush of subscriber events is scheduled.
     flushing: bool,
+    flushed_at: Option<Instant>,
+    flush_frames: u32,
+    journal: host::Journal,
+    viewer: mirror::Viewer,
     replay: replay::Replay,
     /// Pair keys: device id → (the public key it was derived from, key).
     keys: HashMap<String, (String, crypto::Key)>,
@@ -155,6 +164,7 @@ impl Inner {
         self.devices.clear();
         self.presence = false;
         self.subscribers.clear();
+        self.viewer = Default::default();
         self.uploads = Default::default();
         self.catalog = Default::default();
         true

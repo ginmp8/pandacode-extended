@@ -316,7 +316,7 @@ $app.innerHTML = `<div class="workspace">
   </aside>
   <main class="main-pane">
     <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}<button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button><div class="view-switch" role="group" aria-label="Workspace view"><button data-action="conversation-view" aria-label="Conversation view" aria-pressed="true">${icon('chat')}<span>Conversation</span></button><button data-action="board-view" aria-label="Board view" aria-pressed="false">${icon('board')}<span>Board</span></button><button data-action="github-view" aria-label="GitHub view" aria-pressed="false">${icon('github')}<span>GitHub</span></button></div><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}<span class="header-divider" aria-hidden="true"></span>${button('moodboards', 'Project moodboards', 'images')}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('terminal', `Toggle terminal (${shortcut('J')})`, 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false"')}<span class="header-divider" aria-hidden="true"></span>${button('toggle-inspector', `Toggle inspector (${shortcut('B', true)})`, 'panel', 'active', 'id="inspector-toggle"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div></header>
-    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section><div id="task-details-heading" class="task-details-heading" hidden></div><div id="subagents-host" class="subagents-host" hidden></div><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div></section></div>
+    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section><div id="task-details-heading" class="task-details-heading" hidden></div><div id="subagents-host" class="subagents-host" hidden></div><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
@@ -913,6 +913,7 @@ let localChoice: { provider: ProviderId; model: string } | undefined;
 /** Named provider connections (Settings → Providers) and which task uses which. */
 let namedConnections: import('./connections').ConnectionSnapshot = { connections: [], tasks: {} };
 function taskConnection(s: Session): import('./connections').Connection | undefined {
+  if (s.remoteDevice) return undefined;
   const id = namedConnections.tasks[s.id];
   return namedConnections.connections.find(c => c.id === id && c.provider === s.provider);
 }
@@ -1671,7 +1672,13 @@ function renderComposer(): void {
   const previous = state.drafts.get(s.id) ?? '';
   const running = isRunning(), behavior = approvalMode(s.provider, s.mode);
   const team = teams.get(s.id), modelLocked = running && !team;
-  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}"><div id="attachments" class="attachments">${attachmentBar(s)}</div><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-toolbar"><div class="composer-tools">${button('attach', 'Attach files for context', 'plus', '', 'type="button"')}<button type="button" id="model-picker-trigger" class="model-picker" data-action="model" aria-label="Choose harness and model" aria-description="${escape([modelLabel(s), teamModelLabel(s)].filter(Boolean).join(' '))}" aria-haspopup="dialog" aria-expanded="false" title="${team && !team.config.auto ? 'Choose team profile and models' : 'Choose harness and model'}" ${modelLocked ? 'disabled' : ''}><span class="provider-small ${s.provider}">${providerLogo(s.provider)}</span><span class="model-detail" data-model-label>${escape(modelLabel(s))}</span><span class="team-model-count" data-team-model-label ${teamModelLabel(s) ? '' : 'hidden'}>${teamModelLabel(s)}</span>${icon('down')}</button><span class="composer-separator"></span><button type="button" id="mode-picker-trigger" class="mode-picker" data-action="mode" data-mode="${behavior.id}" title="${escape(behavior.description)}" aria-haspopup="dialog" aria-expanded="false" ${running ? 'disabled' : ''}>${icon(behavior.icon)}<span>${escape(behavior.label)}</span>${icon('down')}</button>${teamButton(s)}${tokenSaver.button(s.id)}</div>${running && !team ? `<button type="button" class="steer-button" data-action="steer" title="Send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${icon('spark')}<span>Steer</span></button>` : ''}${running ? '<button type="button" class="send-button stop-button" data-action="stop" title="Stop task (Esc)" aria-label="Stop task">' + icon('stop') + '</button>' : '<button type="submit" class="send-button" title="Send message (' + shortcut('Enter') + ')" aria-label="Send message">' + icon('arrow') + '</button>'}</div></form>${s.archived ? '<div class="composer-footnote"><span>Archived task</span></div>' : ''}`;
+  const target = remoteTargetFor(s), offline = remoteOffline(s), checking = remoteChecks.has(s.id), retrying = target ? remoteRetries.has(target.deviceId) : false;
+  const sendControl = running
+    ? `<button type="button" class="send-button stop-button" data-action="stop" title="Stop task (Esc)" aria-label="${remoteStartCancels.has(s.id) ? 'Stopping…' : 'Stop task'}" ${remoteStartCancels.has(s.id) ? 'disabled' : ''}>${icon('stop')}</button>`
+    : checking ? '<button type="button" class="secondary-button remote-checking" aria-label="Checking…" disabled>Checking…</button>'
+    : offline ? `<button type="button" class="secondary-button remote-composer-retry" data-action="remote-retry" aria-label="${retrying ? 'Reconnecting…' : 'Retry connection'}" ${retrying ? 'disabled' : ''}>${icon('refresh')}<span>${retrying ? 'Reconnecting…' : 'Retry'}</span></button>`
+    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message">${icon('arrow')}</button>`;
+  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}"><div id="attachments" class="attachments">${attachmentBar(s)}</div><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-toolbar"><div class="composer-tools">${button('attach', 'Attach files for context', 'plus', '', 'type="button"')}<button type="button" id="model-picker-trigger" class="model-picker" data-action="model" aria-label="Choose harness and model" aria-description="${escape([modelLabel(s), teamModelLabel(s)].filter(Boolean).join(' '))}" aria-haspopup="dialog" aria-expanded="false" title="${team && !team.config.auto ? 'Choose team profile and models' : 'Choose harness and model'}" ${modelLocked ? 'disabled' : ''}><span class="provider-small ${s.provider}">${providerLogo(s.provider)}</span><span class="model-detail" data-model-label>${escape(modelLabel(s))}</span><span class="team-model-count" data-team-model-label ${teamModelLabel(s) ? '' : 'hidden'}>${teamModelLabel(s)}</span>${icon('down')}</button><span class="composer-separator"></span><button type="button" id="mode-picker-trigger" class="mode-picker" data-action="mode" data-mode="${behavior.id}" title="${escape(behavior.description)}" aria-haspopup="dialog" aria-expanded="false" ${running ? 'disabled' : ''}>${icon(behavior.icon)}<span>${escape(behavior.label)}</span>${icon('down')}</button>${teamButton(s)}${tokenSaver.button(s.id)}</div>${running && !team ? `<button type="button" class="steer-button" data-action="steer" title="Send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${icon('spark')}<span>Steer</span></button>` : ''}${sendControl}</div></form>${s.archived ? '<div class="composer-footnote"><span>Archived task</span></div>' : ''}`;
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="approval-bar"></div>');
@@ -1704,7 +1711,7 @@ function renderComposer(): void {
       // Files and GitHub work share one picker; GitHub leads when the query is a number.
       search: async query => {
         const [files, references] = await Promise.all([
-          call<MentionEntry[]>('search_files', { ...workspaceContext(s), query, limit: 40 }),
+          call<MentionEntry[]>('search_files', { projectId: s.projectId, ...(s.remoteDevice ? {} : { sessionId: s.id }), query, limit: 40 }),
           github.mentionSearch(s.projectId, s.id, query).catch(() => [] as MentionEntry[]),
         ]);
         return /^#?\d+$/.test(query.trim()) ? [...references, ...files] : [...files, ...references];
@@ -1712,6 +1719,8 @@ function renderComposer(): void {
       select: () => state.drafts.set(s.id, prompt.value),
     });
   }
+  syncRemoteConnection();
+  renderedRemoteKey = remoteComposerKey(s);
 }
 function renderBrowserAttachments(): void {
   const target = document.querySelector('.browser-context-attachments'); if (!target) return;
@@ -2258,18 +2267,32 @@ function setMessagePage(page: MessagePage): void {
 /* A task on another computer gets its messages copied from the host when a run ends
  * (remote/mirror.rs), so saved history lacks a prompt just sent there. The prompt stays
  * in the transcript until a saved user message newer than `after` (the host's copy) arrives. */
-const mirrorPrompts = new Map<string, { message: Message; after: number }>();
+const mirrorPrompts = new Map<string, { message: Message; after: number }[]>();
 const latestUserId = (messages: readonly Message[]): number => messages.reduce((max, message) => message.role === 'user' && message.id > max ? message.id : max, 0);
+/** Every prompt (a first message, then steers) waits for its own host copy: each takes the first saved user message newer than its `after`. */
 function withMirrorPrompt(id: string, messages: Message[]): Message[] {
-  const pending = mirrorPrompts.get(id); if (!pending) return messages;
-  if (latestUserId(messages) > pending.after) { mirrorPrompts.delete(id); return messages.filter(message => message !== pending.message); }
-  return messages.includes(pending.message) ? messages : [...messages, pending.message];
+  const pending = mirrorPrompts.get(id); if (!pending?.length) return messages;
+  const saved = messages.filter(message => message.role === 'user' && message.id > 0).map(message => message.id).sort((a, b) => a - b), taken = new Set<number>();
+  const kept = pending.filter(entry => {
+    const copy = saved.find(messageId => messageId > entry.after && !taken.has(messageId));
+    if (copy === undefined) return true;
+    taken.add(copy); return false;
+  });
+  if (kept.length) mirrorPrompts.set(id, kept); else mirrorPrompts.delete(id);
+  const dropped = new Set(pending.filter(entry => !kept.includes(entry)).map(entry => entry.message));
+  const shown = messages.filter(message => !dropped.has(message));
+  return [...shown, ...kept.map(entry => entry.message).filter(message => !shown.includes(message))];
+}
+function addMirrorPrompt(id: string, message: Message, after: number): void { mirrorPrompts.set(id, [...(mirrorPrompts.get(id) ?? []), { message, after }]); }
+function dropMirrorPrompt(id: string, message: Message): void {
+  const kept = (mirrorPrompts.get(id) ?? []).filter(entry => entry.message !== message);
+  if (kept.length) mirrorPrompts.set(id, kept); else mirrorPrompts.delete(id);
 }
 /** The transient user message for a prompt being sent, remembered while it runs on another computer. */
 function sentPrompt(task: Session, content: string, createdAt: number): Message {
   const message: Message = { id: transientId--, sessionId: task.id, role: 'user', content, createdAt };
   const known = task.id === state.sessionId ? state.messages : threadPages.get(task.id)?.messages;
-  if (task.remoteDevice && known) mirrorPrompts.set(task.id, { message, after: latestUserId(known) });
+  if (task.remoteDevice && known) addMirrorPrompt(task.id, message, latestUserId(known));
   return message;
 }
 
@@ -2617,8 +2640,10 @@ function clearComposer(s: Session): void {
 /** Queues the composer's message to send when the agent finishes. */
 async function enqueueFromComposer(): Promise<void> {
   const s = session(); if (!s) return;
+  if (remoteOffline(s)) { renderComposer(); return; }
   const { text, items } = composerPayload(s);
   if (!text && !items.length) return;
+  clearComposerNote(s);
   // Clear at once so the next message can be typed while this one is saved.
   const promptItems = attachments.list(s.id), paths = [...state.attachments];
   clearComposer(s); renderComposer(); document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
@@ -2647,11 +2672,17 @@ const steers = new Map<string, Steer>();
 const steeringQueued = new Set<string>();
 /** Sends text into the running turn and shows it at once as a pending user message. */
 async function steer(s: Session, text: string): Promise<void> {
-  const result = await call<{ id?: string; mode?: SteerMode } | null>('steer_task', { sessionId: s.id, text });
-  const messageId = transientId--, known = result?.id ? steers.get(result.id) : undefined;
-  if (result?.id) steers.set(result.id, { sessionId: s.id, text, mode: known?.mode ?? result.mode ?? 'live', status: known?.status ?? 'pending', messageId });
-  if (s.id !== state.sessionId) return;
-  state.messages = [...state.messages, { id: messageId, sessionId: s.id, role: 'user', content: text, createdAt: Date.now() }]; renderTranscript(true);
+  const message = sentPrompt(s, text, Date.now());
+  if (s.id === state.sessionId) { state.messages = [...state.messages, message]; renderTranscript(true); }
+  try {
+    const result = await call<{ id?: string; mode?: SteerMode } | null>('steer_task', { sessionId: s.id, text });
+    const known = result?.id ? steers.get(result.id) : undefined;
+    if (result?.id) steers.set(result.id, { sessionId: s.id, text, mode: known?.mode ?? result.mode ?? 'live', status: known?.status ?? 'pending', messageId: message.id });
+  } catch (error) {
+    dropMirrorPrompt(s.id, message);
+    if (s.id === state.sessionId) { state.messages = state.messages.filter(item => item !== message); renderTranscript(true); }
+    throw error;
+  }
 }
 function steerEvent(event: AgentEvent): void {
   const data = event.data as { id?: string; status?: SteerStatus; mode?: SteerMode } | undefined;
@@ -2680,16 +2711,19 @@ function steerStateHtml(m: Message): string {
 /** Sends the composer's text into the running turn; anything that cannot steer is queued instead. */
 async function steerFromComposer(): Promise<void> {
   const s = session(); if (!s) return;
+  if (remoteOffline(s)) { renderComposer(); return; }
   const { text, items } = composerPayload(s);
   if (!text) { document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return; }
   if (items.length || teams.get(s.id)) {
     notify(items.length ? 'Attachments travel with queued messages, so this one was queued.' : 'A team takes messages between runs, so this one was queued.');
     return enqueueFromComposer();
   }
-  clearComposer(s); renderComposer();
+  clearComposerNote(s); clearComposer(s); renderComposer();
   try {
     await steer(s, text);
   } catch (error) {
+    // A host that has not approved this device would refuse it queued too: say so, keep the text.
+    if (remoteRefusal(s, error)) { restoreComposer(s, text, [], []); if (s.id === state.sessionId) renderComposer(); return; }
     // Not taken mid-turn: keep it for after the run instead of losing it.
     notify(`${error instanceof Error ? error.message : String(error)} Queued instead.`);
     const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: [] }).catch(() => null);
@@ -2716,7 +2750,7 @@ async function saveQueueEdit(): Promise<void> {
 async function queueAction(action: string, element: HTMLElement): Promise<void> {
   const s = session(); if (!s) return;
   const id = element.closest<HTMLElement>('[data-queue-id]')?.dataset.queueId ?? '';
-  if (action === 'queue-steer') return steerQueued(s, id).catch(error => { if (!isRunning(s.id)) run(dispatchQueue(s.id)); throw error; });
+  if (action === 'queue-steer') return steerQueued(s, id).catch(error => { if (remoteRefusal(s, error)) return; if (!isRunning(s.id)) run(dispatchQueue(s.id)); throw error; });
   if (action === 'queue-send-now') return sendQueuedNow(s, id);
   if (action === 'queue-edit') { state.queueEditing = id; renderComposer(); document.querySelector<HTMLTextAreaElement>('.queue-edit')?.focus(); return; }
   if (action === 'queue-cancel') { state.queueEditing = ''; renderComposer(); return; }
@@ -2774,25 +2808,26 @@ async function dispatchQueue(id: string): Promise<void> {
     setQueue(id, queueOf(id).filter(item => item.id !== entry.id));
     await deliverQueued(task, entry);
   } catch (error) {
-    state.queueHolds.set(id, 'failed'); notify(error instanceof Error ? error.message : String(error));
+    state.queueHolds.set(id, 'failed'); if (!remoteRefusal(task, error)) notify(error instanceof Error ? error.message : String(error));
   } finally { state.queueBusy.delete(id); if (id === state.sessionId) renderComposer(); renderNavigation(); }
 }
 /** Starts a turn with a queued message, for the open task or one in the background. */
 async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void> {
   const promptItems = entry.attachments.filter(item => item.kind !== 'path') as unknown as ReturnType<typeof attachments.list>;
   const paths = entry.attachments.flatMap(item => item.kind === 'path' ? [item.path] : []);
+  let sent: Message | undefined;
   try {
     const files = await Promise.all(paths.map(async path => { const content = await projectFileText(task, path); return `\n\nFile context: ${path}\n\`\`\`\n${content.slice(0, 32768)}\n\`\`\``; }));
     const content = entry.text + files.join('') + attachments.contextFor(promptItems);
     const sentAt = Date.now();
     task.lastPromptAt = sentAt; task.draft = false; pendingPromptActivity.set(task.id, sentAt);
     stream(task.id).lastPromptAt = sentAt; stream(task.id).status = 'Starting agent'; task.status = 'running'; task.taskStage = 'in_progress'; task.completedAt = null;
-    const sent = sentPrompt(task, content, sentAt);
+    sent = sentPrompt(task, content, sentAt);
     if (task.id === state.sessionId) { state.messages = [...state.messages, sent]; render(); } else renderNavigation();
     await call(teams.get(task.id) && !task.remoteDevice ? 'architect_start' : 'send_message', { sessionId: task.id, text: content, imageIds: attachments.imageIds(promptItems), moodboardIds: [] });
   } catch (error) {
     // Put it back at the front and hold, so nothing is lost or sent out of order.
-    pendingPromptActivity.delete(task.id); state.streams.delete(task.id); task.status = 'idle'; mirrorPrompts.delete(task.id);
+    pendingPromptActivity.delete(task.id); state.streams.delete(task.id); task.status = 'idle'; if (sent) dropMirrorPrompt(task.id, sent);
     // A synthetic entry (no id, e.g. continuing after a limit) was never queued.
     if (entry.id) {
       const restored = await call<QueuedMessage>('queue_restore', { entry }).catch(() => null);
@@ -2863,11 +2898,48 @@ async function fileContext(s: Session, path: string): Promise<string> {
   const content = await projectFileText(s, path);
   return `\n\nFile context: ${path}\n\`\`\`\n${content.slice(0, 32768)}${content.length > 32768 ? '\n[Context truncated at 32 KiB]' : ''}\n\`\`\``;
 }
+const mirrorLocalSlash = new Set(['console', 'goal', 'usage', 'hooks', 'preferences', 'imports', 'conversations', 'plugins', 'jobs', 'fork', 'archive', 'delete', 'export', 'worktree', 'cd', 'plan', 'fast', 'diff', 'integrations', 'pwd']);
+function remoteSlashUnavailable(action: string): boolean { return action.startsWith('console:') || mirrorLocalSlash.has(action); }
+/** One line above the prompt for the task, kept across composer redraws until the next send. */
+const composerNotes = new Map<string, string>();
+function showComposerNote(s: Session, text: string): void {
+  composerNotes.set(s.id, text);
+  if (s.id !== state.sessionId) return;
+  syncComposerNote(s); announce(text);
+}
+function clearComposerNote(s: Session): void { if (composerNotes.delete(s.id) && s.id === state.sessionId) syncComposerNote(s); }
+function syncComposerNote(s: Session): void {
+  const composer = document.querySelector('#composer'), old = document.querySelector<HTMLElement>('#composer-area .composer-inline-note:not(.remote-missing-note)');
+  const text = composerNotes.get(s.id), markup = text ? `<div class="composer-inline-note">${escape(text)}</div>` : '';
+  if (old) { if (old.outerHTML !== markup) { if (markup) old.outerHTML = markup; else old.remove(); } }
+  else if (markup && composer) composer.insertAdjacentHTML('beforebegin', markup);
+}
+/** The composer's one live region: notes and connection status are drawn silently and read from here. */
+function announce(text: string): void {
+  const region = document.querySelector<HTMLElement>('#composer-live'); if (!region) return;
+  if (region.textContent === text) region.textContent = '';
+  queueMicrotask(() => { region.textContent = text; });
+}
+/** A host's refusal under scoped pairing (remote/grants.rs), which names the host. */
+const scopeRefusal = (error: unknown): string | null => {
+  const text = errorText(error);
+  return /Waiting for approval on |has blocked this device|can only view tasks on |is not allowed to do that on /.test(text) ? text : null;
+};
+/** Shows a mirror task's scope refusal inline instead of as a toast; false for any other error. */
+function remoteRefusal(s: Session, error: unknown): boolean {
+  const text = s.remoteDevice ? scopeRefusal(error) : null;
+  if (text) showComposerNote(s, text);
+  return Boolean(text);
+}
 async function send(): Promise<void> {
   const draft = document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? ''; const text = draft.trim(); const s = session();
   if (!text || !s || s.archived || taskStage(s) === 'completed' || isRunning() || finishingStreams.has(s.id) || state.messagesLoading || state.messagesError || configuringSessions.has(s.id)) return;
-  const target = !s.remoteDevice && newTaskView() ? remoteTargets.find(item => item.deviceId === remoteChoice) : undefined;
+  clearComposerNote(s);
+  if (remoteOffline(s)) { renderComposer(); return; }
+  const fresh = !s.remoteDevice && newTaskView();
+  const target = fresh ? remoteTargets.find(item => item.deviceId === remoteChoice) : undefined;
   if (target) return sendRemote(s, target, draft, text);
+  if (fresh && remoteChoice !== LOCAL && !cloudProvider(remoteChoice)) { renderComposer(); return; }
   // A failed start elsewhere no longer applies once this task is sent another way.
   clearRemoteStart(s.id);
   // Preparing attachments or awaiting admission blocks only this task.
@@ -2886,6 +2958,10 @@ async function send(): Promise<void> {
       if (!resolved.action && resolved.acceptsAttachments === false && (filePaths.length || browserItems.length || moodboardItems.length || promptItems.length)) throw new Error('This command does not accept attachments. Remove them before running it.');
       if (resolved.action) {
         configuringSessions.delete(s.id);
+        if (s.remoteDevice && remoteSlashUnavailable(resolved.action)) {
+          showComposerNote(s, `${text} needs a checkout on this computer. Run it in a local task, or ask the remote agent in plain text.`);
+          return;
+        }
         if (state.sessionId !== s.id) throw new Error('Return to the task to run this command.');
         const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
         if (prompt?.value !== draft) throw new Error('Your message changed while commands were loading. Send it again.');
@@ -2908,7 +2984,7 @@ async function send(): Promise<void> {
   // Sending by hand is an explicit continue: release a held queue, which then follows this run.
   state.queueHolds.delete(s.id);
   pendingPromptActivity.set(s.id, sentAt); renderNavigation();
-  let browserItemsConsumed = false, moodboardItemsConsumed = false, promptItemsConsumed = false;
+  let browserItemsConsumed = false, moodboardItemsConsumed = false, promptItemsConsumed = false, sent: Message | undefined;
   const isCurrent = () => state.sessionId === s.id;
   try {
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
@@ -2940,7 +3016,7 @@ async function send(): Promise<void> {
     if (bot && !imageIds.length && !moodboardItems.length && !teams.get(s.id)) await call('bot_message', { botId: bot.id, text: content });
     else await call(teams.get(s.id) && !s.remoteDevice && !moodboardItems.length ? 'architect_start' : 'send_message', { sessionId: s.id, text: content, imageIds, moodboardIds: moodboardItems.map(item => item.id) });
   } catch (error) {
-    pendingPromptActivity.delete(s.id); mirrorPrompts.delete(s.id);
+    pendingPromptActivity.delete(s.id); if (sent) dropMirrorPrompt(s.id, sent);
     state.streams.delete(s.id); s.status = 'idle';
     // A rejected first prompt may not have been saved; follow native storage on whether the task is listed.
     if (wasDraft) void call<Session>('get_task', { sessionId: s.id }).then(saved => { listed.draft = saved.draft; renderNavigation(); }).catch(() => undefined);
@@ -2964,6 +3040,7 @@ async function send(): Promise<void> {
       const saved = await latestMessagePage(s.id);
       if (isCurrent() && generation === state.generation) { setMessagePage(saved); state.messagesLoading = false; render(); }
     }
+    if (remoteRefusal(s, error)) return;
     throw error;
   } finally { pendingPromptActivity.delete(s.id); configuringSessions.delete(s.id); }
 }
@@ -3017,6 +3094,7 @@ function completeTurnChanges(event: AgentEvent): void {
   }
 }
 function onAgent(event: AgentEvent): void {
+  remoteStartAttached(event.sessionId);
   if (botsView) queueMicrotask(() => botsView?.agent(event.sessionId, event.kind));
   if ((event.kind === 'done' || event.kind === 'turn_start') && botForThread()) queueMicrotask(renderHeader);
   if (deletedSessions.has(event.sessionId)) return;
@@ -3134,7 +3212,7 @@ function onAgent(event: AgentEvent): void {
       if (!current.inputs.size && current.status === 'Waiting for your answer') updateStreamStatus(current, 'Continuing task');
       if (event.sessionId === state.sessionId) renderStream();
       scheduleNavigation();
-    }));
+    }, Boolean(s?.remoteDevice)));
     current.revision++; updateStreamStatus(current, 'Waiting for your answer');
     if (event.sessionId !== state.sessionId) notify(`${s?.title ?? 'Task'} needs your answer`);
   }
@@ -4475,7 +4553,52 @@ const chatTask = (task: Session | undefined): boolean => Boolean(task && isChatP
 /* PandaCode Connect. A new task can start on another computer: the context bar offers the
  * signed-in account's targets; the started task is an ordinary session with `remoteDevice`. */
 const remoteHost: RemoteHost = { call, listen: (name, callback) => subscribe(name as 'remote://status', callback), notify, openUrl: url => call('open_external_url', { url }) };
-let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL;
+type RemoteAccountDevice = Omit<RemoteTarget, 'deviceId'> & { id: string; current: boolean; host: boolean };
+let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL, remoteSignedIn = false, remoteConnected = false, remotePresenceReady = false;
+/** The chosen computer's last known name, for when it leaves the list (signed out or revoked). */
+let remoteChoiceName: string | undefined;
+/** What the composer was last drawn with, so presence updates redraw it only when this changes. */
+let renderedRemoteKey = '';
+let pairingPrompt: (() => void) | undefined, pairingLoading = false;
+const remoteChecks = new Set<string>(), remoteStartCancels = new Set<string>(), remoteRetries = new Set<string>(), remoteRetryErrors = new Map<string, string>();
+function remoteDeviceId(s: Session): string | undefined {
+  return s.remoteDevice?.id ?? (!s.cloud && newTaskView() && remoteChoice !== LOCAL && !cloudProvider(remoteChoice) ? remoteChoice : undefined);
+}
+function remoteTargetFor(s: Session): RemoteTarget | undefined {
+  const id = remoteDeviceId(s); if (!id) return undefined;
+  const target = remoteTargets.find(item => item.deviceId === id);
+  if (target) return target;
+  return s.remoteDevice && remotePresenceReady ? { deviceId: id, name: s.remoteDevice.name, platform: '', online: false, lastSeen: null } : undefined;
+}
+function remoteOffline(s: Session): boolean {
+  const id = remoteDeviceId(s); if (!id || !remotePresenceReady) return false;
+  const target = remoteTargetFor(s);
+  return !target || !target.online || (remoteSignedIn && !remoteConnected);
+}
+/** A New task's chosen computer that is no longer in the account's list, or undefined. */
+function remoteMissing(s: Session): string | undefined {
+  if (s.remoteDevice || s.cloud || !newTaskView() || remoteChoice === LOCAL || cloudProvider(remoteChoice) || !remotePresenceReady) return undefined;
+  return remoteTargets.some(item => item.deviceId === remoteChoice) ? undefined : remoteChoiceName ?? 'That computer';
+}
+function remoteMissingNote(s: Session): string {
+  const name = remoteMissing(s);
+  return name ? `<div class="composer-inline-note remote-missing-note"><span>${escape(name)} is no longer paired.</span><button type="button" class="remote-note-action" data-action="remote-choose-computer">Choose another</button></div>` : '';
+}
+function remoteComposerKey(s: Session): string {
+  const target = remoteTargetFor(s);
+  return JSON.stringify([s.id, remoteOffline(s), target?.deviceId ?? null, remoteMissing(s) ?? null]);
+}
+/** The status line of a task whose computer is out of reach. Drawn silently; its text is announced from the composer's live region. */
+function syncRemoteConnection(): void {
+  const region = document.querySelector<HTMLElement>('#stream-region'), s = session(), old = region?.querySelector<HTMLElement>(':scope > .remote-connection');
+  if (!region || !s?.remoteDevice || !remoteOffline(s)) { old?.remove(); return; }
+  const target = remoteTargetFor(s)!, retrying = remoteRetries.has(target.deviceId), failure = remoteRetryErrors.get(target.deviceId);
+  const text = retrying ? `Reconnecting to ${target.name}…` : failure ? `Couldn’t reconnect to ${target.name}: ${failure}` : remoteSignedIn && !remoteConnected ? `Reconnecting to ${target.name}…` : `${target.name} is offline · ${lastSeenText(target)}`;
+  const markup = `<div class="remote-connection"><span>${escape(text)}</span><button type="button" class="secondary-button" data-action="remote-retry" aria-label="${retrying ? 'Reconnecting…' : 'Retry connection'}" ${retrying ? 'disabled' : ''}>${icon('refresh')}${retrying ? 'Reconnecting…' : 'Retry'}</button></div>`;
+  if (old?.outerHTML === markup) return;
+  if (old?.querySelector('span')?.textContent !== text) announce(text);
+  if (old) old.outerHTML = markup; else region.insertAdjacentHTML('beforeend', markup);
+}
 async function refreshRemoteTargets(signedIn: boolean): Promise<void> {
   remoteTargets = signedIn ? await call<RemoteTarget[]>('remote_targets').catch(() => remoteTargets) : [];
   if (!remoteTargets.some(target => target.deviceId === remoteChoice && target.online)) remoteChoice = LOCAL;
@@ -4483,11 +4606,11 @@ async function refreshRemoteTargets(signedIn: boolean): Promise<void> {
 }
 async function initRemote(): Promise<void> {
   let signedIn = false;
-  await subscribe('remote://status', (status: RemoteStatus) => { signedIn = status.signedIn; run(refreshRemoteTargets(signedIn)); });
+  await subscribe('remote://status', (status: RemoteStatus) => { signedIn = status.signedIn; remoteConnected = status.connected; run(refreshRemoteTargets(signedIn)); });
   await subscribe('remote://presence', () => run(refreshRemoteTargets(signedIn)));
   // A build without the Connect commands, or a signed-out one, simply offers no other computers.
   const status = await call<RemoteStatus>('remote_status').catch(() => undefined);
-  if (status) { signedIn = status.signedIn; await refreshRemoteTargets(signedIn); }
+  if (status) { signedIn = status.signedIn; remoteConnected = status.connected; await refreshRemoteTargets(signedIn); }
 }
 async function showComputerMenu(anchor: HTMLElement): Promise<void> {
   await showChoices(anchor, { title: 'Run on', width: 280, items: computerItems(remoteTargets, remoteChoice), onSelect: id => {
@@ -4514,7 +4637,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
   // Images and screenshots are copied to the other computer natively (remote/images.rs).
   const imageIds = [...browserItems.filter(a => a.kind === 'screenshot').map(a => a.id), ...attachments.imageIds(promptItems)];
   if (imageIds.length > MAX_IMAGES) throw new Error(`Attach up to ${MAX_IMAGES} images per message, including browser screenshots.`);
-  configuringSessions.add(s.id);
+  configuringSessions.add(s.id); remoteChecks.add(s.id); renderComposer();
   try {
     const check = await call<RemoteRepoCheck>('remote_repo_check', { projectId: s.projectId });
     if (!check.repo) throw new Error(`${project()?.name ?? 'This project'} has no GitHub remote, so it can’t run on another computer.`);
@@ -4528,7 +4651,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     // prompt after the run (remote/mirror.rs); until then `mirrorPrompts` keeps this one.
     const sentAt = Date.now(), sent: Message = { id: transientId--, sessionId: s.id, role: 'user', content, createdAt: sentAt };
     const before = { status: s.status, taskStage: s.taskStage };
-    mirrorPrompts.set(s.id, { message: sent, after: 0 });
+    addMirrorPrompt(s.id, sent, 0);
     const live = stream(s.id); live.lastPromptAt = sentAt; live.status = `Connecting to ${target.name}…`;
     s.status = 'running'; s.taskStage = 'in_progress';
     const sentField = prompt(); if (sentField?.dataset.sessionId === s.id && sentField.value === draft) sentField.value = '';
@@ -4540,7 +4663,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     }
     const onStage = (start: RemoteStart) => {
       // Once the agent has said or done something, its own status wins over a late stage.
-      if (start.stage === 'error' || state.streams.get(s.id) !== live || live.text || live.tools.length) return;
+      if (start.stage === 'error' || remoteStartCancels.has(s.id) || state.streams.get(s.id) !== live || live.text || live.tools.length) return;
       updateStreamStatus(live, startStageText(start)); live.revision++;
       if (state.sessionId === s.id) renderStream();
     };
@@ -4549,10 +4672,10 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
       // The empty New task draft becomes the mirror, so no stray draft is left behind.
       sessionId: s.id, deviceId: target.deviceId, projectId: s.projectId, prompt: content, provider: s.provider, model: s.model, mode: s.mode,
       effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath), branch: s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
-    }), undefined, onStage).catch((error: unknown) => { console.error(error); return undefined; });
+    }), undefined, onStage).catch((error: unknown) => { if (!remoteStartCancels.has(s.id)) console.error(error); return undefined; });
     if (!started || started.sessionId !== s.id) {
       // The prompt leaves the transcript: back to the composer on failure, to the mirror's own row otherwise.
-      mirrorPrompts.delete(s.id);
+      dropMirrorPrompt(s.id, sent);
       if (state.streams.get(s.id) === live) state.streams.delete(s.id);
       // A sessions reload meanwhile may have replaced the draft's object.
       for (const task of new Set([s, state.sessions.find(task => task.id === s.id)])) if (task) Object.assign(task, before);
@@ -4560,10 +4683,11 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
       if (!started) {
         const field = prompt(); if (field?.dataset.sessionId === s.id && !field.value) field.value = draft;
         if (!state.drafts.get(s.id)) state.drafts.set(s.id, draft);
+        if (remoteStartCancels.has(s.id) && runEndings.get(s.id) === 'stopped') runEndings.delete(s.id);
         if (state.sessionId === s.id) render(); else renderNavigation();
         return;
       }
-      mirrorPrompts.set(started.sessionId, { message: { ...sent, sessionId: started.sessionId }, after: 0 });
+      addMirrorPrompt(started.sessionId, { ...sent, sessionId: started.sessionId }, 0);
       if (!state.streams.has(started.sessionId)) state.streams.set(started.sessionId, live);
     }
     const { sessionId } = started;
@@ -4573,7 +4697,18 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     state.attachments = state.attachments.filter(path => !filePaths.includes(path));
     await reloadSessions();
     state.query = ''; await selectSession(sessionId, true);
-  } finally { configuringSessions.delete(s.id); }
+    if (remoteStartCancels.delete(s.id)) {
+      // Stop was pressed while the host could not yet say whether the start was cancelled; it attached, so stop it now.
+      runEndings.set(sessionId, 'stopped');
+      const current = state.streams.get(sessionId);
+      if (current) { current.status = 'Stopping agent'; current.revision++; clearAgentInputs(current); }
+      if (sessionId === state.sessionId) { renderStream(); renderComposer(); }
+      await call('stop_session', { sessionId });
+    }
+  } finally {
+    configuringSessions.delete(s.id); remoteStartCancels.delete(s.id);
+    if (remoteChecks.delete(s.id) && s.id === state.sessionId) renderComposer();
+  }
 }
 /** The sidebar shows tasks or bots; the bar at its bottom switches between them. */
 let sidebarView: SidebarView = storedSidebarView();
@@ -4783,7 +4918,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'architect-setup': await showArchitectSetup(element); break;
     case 'team-toggle': await toggleTeam(); break;
     case 'steer': await steerFromComposer(); break;
-    case 'stop': if (session()) { runEndings.set(state.sessionId, 'stopped'); await call(teams.get(state.sessionId) ? 'architect_control' : 'stop_session', { sessionId: state.sessionId, ...(teams.get(state.sessionId) ? { action: 'stop' } : {}) }); notify('Stopping task…'); } break;
+    case 'remote-retry': await retryRemoteConnection(); break;
+    case 'stop': if (session()) { notify('Stopping task…'); await stopTask(session()!); } break;
     case 'approval-allow': case 'approval-deny': await respondApproval(state.sessionId, element.dataset.request!, name === 'approval-allow'); break;
     case 'approval-allow-all': case 'approval-deny-all': { const sessionId = state.sessionId; for (const id of [...state.streams.get(sessionId)?.approvals.keys() ?? []]) await respondApproval(sessionId, id, name === 'approval-allow-all'); break; }
     case 'approval-group': approvalGroupOpen = !approvalGroupOpen; renderApprovalBar(); break;
@@ -4919,7 +5055,7 @@ document.addEventListener('keydown', event => {
   else if (event.key === 'Enter' && (event.target as HTMLElement).classList.contains('queue-edit') && (event.metaKey || event.ctrlKey)) { event.preventDefault(); run(saveQueueEdit()); }
   else if (event.key === 'Escape' && settingsView && !event.defaultPrevented && !document.querySelector<HTMLDialogElement>('#dialog')?.open && !document.querySelector('.floating-menu')) { event.preventDefault(); closeSettings(); }
   else if (event.key === 'Escape' && state.view !== 'conversation' && state.boardPanel && !event.defaultPrevented) { event.preventDefault(); closeMenus(); state.boardPanel = false; renderBoardView(); }
-  else if (event.key === 'Escape' && isRunning() && !terminalPanel.open && !event.defaultPrevented) { event.preventDefault(); runEndings.set(state.sessionId, 'stopped'); run(call(teams.get(state.sessionId) ? 'architect_control' : 'stop_session', { sessionId: state.sessionId, ...(teams.get(state.sessionId) ? { action: 'stop' } : {}) })); }
+  else if (event.key === 'Escape' && isRunning() && !terminalPanel.open && !event.defaultPrevented) { event.preventDefault(); if (session()) run(stopTask(session()!)); }
 });
 let dialogBackdropPressed = false;
 function outsideDialog(event: MouseEvent): boolean {

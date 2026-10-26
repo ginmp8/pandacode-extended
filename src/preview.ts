@@ -778,10 +778,42 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     invoke, emit, task: session, started: id => Boolean(messages[id]?.length), isTeam: id => Boolean(architect.get(id)), project: id => projects.find(project => project.id === id),
     addProject: name => { const p = { id: crypto.randomUUID(), name, path: `/Users/you/PandaCode Bots/${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` }; projects.push(p); return p; },
   });
+  if (command === 'remote_device_grants' || command === 'remote_set_device_grant' || command.startsWith('remote_pair_')) return (await import('./preview-grants')).previewGrants(command, args) as T;
+  if (command === 'remote_diagnostics' || command === 'remote_diagnostics_export') return (await import('./preview-diagnostics')).previewDiagnostics(command, args) as T;
+  if (command === 'remote_reconnect') {
+    // Tests steer it: `__remoteReconnectHold` waits for `__remoteReconnectRelease()`, `__remoteReconnectFail` is an error text.
+    const w = window as any; w.__remoteReconnects = (w.__remoteReconnects ?? 0) + 1;
+    if (w.__remoteReconnectHold) await new Promise<void>(resolve => { w.__remoteReconnectRelease = () => { w.__remoteReconnectHold = false; resolve(); }; });
+    if (w.__remoteReconnectFail) { const failure = w.__remoteReconnectFail; w.__remoteReconnectFail = undefined; throw new Error(failure); }
+    return undefined as T;
+  }
   if (command === 'remote_repo_check') {
+    const w = window as any;
+    (w.__remoteRepoChecks ??= []).push(args);
+    if (w.__remoteRepoCheckManual) await new Promise<void>(resolve => { w.__remoteRepoCheckRelease = () => { w.__remoteRepoCheckManual = false; resolve(); }; });
     // `window.__remoteBehind` lets tests make GitHub lag this computer.
-    const repo = previewGithub.status(args.projectId).repo, behind = (window as any).__remoteBehind ?? {};
+    const repo = previewGithub.status(args.projectId).repo, behind = w.__remoteBehind ?? {};
     return { repo: repo?.nameWithOwner ?? null, branch: git.branch, ahead: behind.ahead ?? 0, dirty: behind.dirty ?? false, pushed: behind.pushed ?? true } as T;
+  }
+  if (command === 'remote_cancel_start') {
+    const w = window as any;
+    (w.__remoteCancelStarts ??= []).push(args);
+    if (w.__remoteCancelStartFail) throw new Error(w.__remoteCancelStartFail);
+    if (w.__remoteCancelStartHold) await new Promise<void>(resolve => { w.__remoteCancelStartRelease = () => { w.__remoteCancelStartHold = false; resolve(); }; });
+    const { cancelPreviewRemoteStart } = await import('./preview-remote');
+    // `__remoteCancelStartPending`: the host has not answered; `__remoteCancelStartFailLater()` then ends the start with an error frame.
+    if (w.__remoteCancelStartPending) {
+      w.__remoteCancelStartPending = false;
+      const started = (w.__remoteStarts ?? []).at(-1) ?? {};
+      w.__remoteCancelStartFailLater = () => { emit('remote://start-progress', { deviceId: started.deviceId, startId: started.startId ?? null, repo: null, stage: 'error', percent: null, detail: 'Start cancelled.' }); cancelPreviewRemoteStart(String(args.sessionId)); };
+      return { cancelled: false, pending: true } as T;
+    }
+    if (!cancelPreviewRemoteStart(String(args.sessionId))) throw new Error('This remote start is no longer active.');
+    return { cancelled: true } as T;
+  }
+  if (command === 'remote_workspace_image') {
+    ((window as any).__remoteWorkspaceImages ??= []).push({ sessionId: args.sessionId, path: args.path });
+    return invoke<T>('workspace_image', args);
   }
   if (command === 'remote_start_task') {
     if (args.sessionId && taskBotId(args.sessionId)) throw new Error('Choose No bot before running this task on another computer.');
@@ -795,6 +827,18 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     const s = args.sessionId ? session(args.sessionId) : await invoke<Session>('create_session', { projectId: args.projectId, provider: args.provider, model: args.model, mode: args.mode });
     Object.assign(session(s.id), { projectId: args.projectId, provider: args.provider, model: args.model, mode: args.mode, reasoningEffort: args.effort, remoteDevice: { id: target.deviceId, name: target.name }, worktreeBranch: args.branch });
     mirrorSynced.set(s.id, id);
+    const w = window as any;
+    if (w.__remoteStartAmbiguous) {
+      // The reply was lost (remote/mirror.rs): the row stays running and waits; `__remoteStartAttach()` lets the host task appear.
+      w.__remoteStartAmbiguous = false;
+      Object.assign(session(s.id), { status: 'running', draft: false });
+      emit('remote://start-progress', { deviceId: args.deviceId, startId: args.startId ?? null, repo: null, stage: 'starting', percent: null, detail: `Waiting for ${target.name}…` });
+      const { holdPreviewRemoteStart } = await import('./preview-remote');
+      holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), () => { Object.assign(session(s.id), { remoteDevice: null, status: 'idle', draft: true }); emit('sessions-changed', {}); });
+      w.__remoteStartAttach = async () => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); };
+      emit('sessions-changed', {});
+      return { sessionId: s.id } as T;
+    }
     await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] });
     emit('sessions-changed', {});
     return { sessionId: s.id } as T;
@@ -1020,8 +1064,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       savePreviewQueue([...queue, restored]); result = restored; break;
     }
     case 'steer_task': {
-      const s = session(args.sessionId);
+      const s = session(args.sessionId), w = window as any;
       if (!timers.has(s.id) && s.status !== 'running') throw new Error('The agent is not running; the message stays queued.');
+      if (w.__remoteRefuse && s.remoteDevice) throw new Error(w.__remoteRefuse);
+      if (w.__remoteSteerHold && s.remoteDevice) await new Promise<void>(resolve => { w.__remoteSteerRelease = () => { w.__remoteSteerHold = false; resolve(); }; });
       // Claude-family, Codex, Pi, Muse and Devin take it live; others hold it for the next turn of the same run.
       const text = String(args.text).trim(), steerId = `steer-${++id}`;
       const mode = ['claude', 'glm', 'mimo', 'codex', 'pi', 'muse', 'devin'].includes(s.provider) ? 'live' : 'next-turn';
@@ -1251,6 +1297,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'stop_session': {
       if (architect.isActive(args.sessionId)) { result = architect.control(args.sessionId, 'stop'); break; }
+      const w = window as any;
+      if (w.__stopHold) await new Promise<void>(resolve => { w.__stopRelease = () => { w.__stopHold = false; resolve(); }; });
       window.clearTimeout(timers.get(args.sessionId)); timers.delete(args.sessionId);
       finishTiming(args.sessionId);
       const pending = activeTools.get(args.sessionId);

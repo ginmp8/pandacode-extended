@@ -35,7 +35,17 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
     case 'remote_set_host_enabled': hostEnabled = Boolean(args.enabled); devices = sampleDevices(); emit('remote://presence', devices); return status();
     case 'remote_set_full_access': allowFullAccess = Boolean(args.enabled); emit('remote://status', status()); return status();
     case 'remote_devices': return devices = signedIn ? sampleDevices() : [];
-    case 'remote_set_trusted': if (args.trusted) trusted.add(args.deviceId); else trusted.delete(args.deviceId); return devices = sampleDevices();
+    case 'remote_set_trusted': {
+      const device = sampleDevices().find(d => d.id === args.deviceId && !d.current);
+      if (args.trusted) {
+        if (!device || !args.expectedFingerprint || args.expectedFingerprint !== device.fingerprint) throw new Error("This computer's key changed or has not been verified.");
+        trusted.add(args.deviceId);
+      } else {
+        trusted.delete(args.deviceId);
+      }
+      ((window as any).__trustCalls ??= []).push({ ...args });
+      return devices = sampleDevices();
+    }
     case 'remote_revoke_device': devices = devices.filter(d => d.id !== args.deviceId); emit('remote://presence', devices); return {};
     // Other trusted computers with remote control on; preview.ts mocks remote_repo_check and remote_start_task.
     case 'remote_targets': return (signedIn ? sampleDevices() : []).filter(d => !d.current && d.host && d.trusted).map((d): RemoteTarget => ({ deviceId: d.id, name: d.name, platform: d.platform, online: d.online, lastSeen: d.lastSeen ?? null }));

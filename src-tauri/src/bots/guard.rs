@@ -28,7 +28,7 @@ pub(crate) enum Decision {
 const ALWAYS_ASK: &[&str] = &[
     "sudo ", "rm -rf", "rm -fr", "git push --force", "git push -f", "| sh", "|sh", "| bash", "|bash", "mkfs", "dd if=", "chmod -r 777", ":(){", "shutdown", "reboot",
     "credit card", "card number", "password", "transfer money", "wire transfer",
-    "pandacode_bot_notify", "pandacode_cloud_cli",
+    "pandacode_bot_notify", "pandacode_bot_schedule", "pandacode_cloud_cli",
 ];
 
 /// Case-insensitive. Without `*` a pattern matches anywhere in the text; with `*` the

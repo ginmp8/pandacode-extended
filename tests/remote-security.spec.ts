@@ -1,0 +1,57 @@
+import { expect, test } from '@playwright/test';
+
+test('a stale displayed Connect key is rejected before trust is granted', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Remote access' }).click();
+  const panel = page.getByRole('tabpanel', { name: 'Remote access' });
+  await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
+  await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  const row = panel.locator('.remote-device[data-device="dev-nas"]');
+  const trust = panel.getByRole('checkbox', { name: 'Trusted: Home NAS' });
+  await expect(trust).not.toBeChecked();
+  await row.evaluate(element => { (element as HTMLElement).dataset.fingerprint = '00000000000000000000000000000000'; });
+  await trust.check();
+  await expect(trust).not.toBeChecked();
+  await expect(panel.getByRole('alert')).toContainText('key changed');
+  await row.evaluate(element => { (element as HTMLElement).dataset.fingerprint = '17aa5e90b3c4d286ea5bb53d782f9104'; });
+  await trust.check();
+  await expect(trust).toBeChecked();
+  await expect.poll(() => page.evaluate(() => ((window as any).__trustCalls ?? []).at(-1))).toEqual({
+    deviceId: 'dev-nas', trusted: true, expectedFingerprint: '17aa5e90b3c4d286ea5bb53d782f9104',
+  });
+});
+
+test('pairing approval sends the displayed full fingerprint, blocking requires no new key', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  await page.evaluate(async () => {
+    const path = '/src/remote-pairing-prompt.ts';
+    const { mountPairingPrompt } = await import(/* @vite-ignore */ path);
+    const fake: any = { handlers: {}, calls: [] };
+    (window as any).__securityPairing = fake;
+    mountPairingPrompt({
+      call: async (name: string, args: unknown) => { fake.calls.push({ name, args }); },
+      listen: async (name: string, cb: (data: unknown) => void) => { fake.handlers[name] = cb; return () => {}; },
+      notify: () => {},
+      openUrl: async () => {},
+    } as any);
+  });
+  await page.evaluate(() => (window as any).__securityPairing.handlers['remote://device-pending']({
+    deviceId: 'phone', name: 'Pixel', fingerprint: '0123456789abcdef0123456789abcdef',
+  }));
+  await page.locator('.pairing-prompt[data-device="phone"]').getByRole('button', { name: 'Approve' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__securityPairing.calls)).toEqual([{
+    name: 'remote_set_device_grant',
+    args: { deviceId: 'phone', scope: 'control', expectedFingerprint: '0123456789abcdef0123456789abcdef' },
+  }]);
+  await page.evaluate(() => (window as any).__securityPairing.handlers['remote://device-pending']({
+    deviceId: 'phone2', name: 'Second', fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  }));
+  await page.locator('.pairing-prompt[data-device="phone2"]').getByRole('button', { name: 'Block' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__securityPairing.calls.length)).toBe(2);
+  expect(await page.evaluate(() => (window as any).__securityPairing.calls[1])).toEqual({
+    name: 'remote_set_device_grant', args: { deviceId: 'phone2', scope: 'blocked' },
+  });
+});

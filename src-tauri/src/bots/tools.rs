@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 /// Proactive transmission is a separate decision, including in full-access mode.
-pub(crate) const ALWAYS_ASK: &[&str] = &["pandacode_bot_notify"];
+pub(crate) const ALWAYS_ASK: &[&str] = &["pandacode_bot_notify", "pandacode_bot_schedule"];
 
 pub(crate) fn catalog() -> Vec<Value> {
     let text = json!({"type":"string","maxLength":8000});

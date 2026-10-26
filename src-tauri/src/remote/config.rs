@@ -152,6 +152,13 @@ pub(crate) fn load(dir: &Path) -> Settings {
         settings.device_id = uuid::Uuid::new_v4().to_string();
         changed = true;
     }
+    // An interrupted permission update always fails closed on restart, even when
+    // remote.json still contains previously trusted devices.
+    if locked_down(dir) {
+        settings.host_enabled = false;
+        settings.allow_full_access = false;
+        settings.trusted.clear();
+    }
     if !settings.grants_scoped {
         let upgraded = text.is_some() && settings.host_enabled;
         let seeded = if upgraded { super::grants::seed_trusted(dir, &settings) } else { Ok(()) };
@@ -169,10 +176,74 @@ pub(crate) fn load(dir: &Path) -> Settings {
     settings
 }
 
+const LOCKDOWN: &str = "connect-access-lockdown";
+
+/// Durable denial fence, written before any revocation. If a later settings
+/// write fails or the process crashes, boot cannot trust an older remote.json.
+pub(crate) fn begin_lockdown(dir: &Path) -> crate::Result<()> {
+    use std::io::Write;
+    let path = dir.join(LOCKDOWN);
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&path)
+        .map_err(|e| format!("Could not record the Connect permission revocation: {e}"))?;
+    file.write_all(b"deny\n").and_then(|_| file.sync_all())
+        .map_err(|e| format!("Could not persist the Connect permission revocation: {e}"))?;
+    sync_parent(dir)
+}
+
+pub(crate) fn locked_down(dir: &Path) -> bool {
+    match std::fs::symlink_metadata(dir.join(LOCKDOWN)) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+pub(crate) fn end_lockdown(dir: &Path) -> crate::Result<()> {
+    match std::fs::remove_file(dir.join(LOCKDOWN)) {
+        Ok(()) => sync_parent(dir),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not clear the Connect permission revocation: {error}")),
+    }
+}
+
+fn sync_parent(dir: &Path) -> crate::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir).and_then(|file| file.sync_all())
+        .map_err(|e| format!("Could not sync Connect settings directory: {e}"))?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Store complete settings before publishing any permission increase in memory.
 pub(crate) fn save(dir: &Path, settings: &Settings) -> crate::Result<()> {
-    let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let text = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
     let temp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&temp, text).and_then(|_| std::fs::rename(&temp, dir.join(FILE))).map_err(|e| format!("Could not save remote access settings: {e}"))
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(&text)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, dir.join(FILE))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("Could not save remote access settings: {error}"));
+    }
+    sync_parent(dir)
+}
+
+/// Serialize a permission mutation under the caller's Remote lock. Revocations
+/// take effect in memory immediately and remain denied across an interrupted save.
+pub(crate) fn update_access(dir: &Path, current: &mut Settings, next: Settings, revoke: bool) -> crate::Result<()> {
+    if revoke {
+        *current = next.clone();
+        begin_lockdown(dir)?;
+    }
+    save(dir, &next)?;
+    end_lockdown(dir)?;
+    *current = next;
+    Ok(())
 }
 
 /// The device key as stored: `Ok(None)` only when there is none. A keychain failure (a denied
@@ -387,6 +458,45 @@ mod tests {
         assert!(!parsed.allow_full_access, "legacy remote control does not grant Full access");
         assert_eq!(parsed.account.unwrap().avatar_url, "u");
         assert!(parsed.trusted.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_interrupted_revocation_never_restores_persisted_permissions() {
+        let dir = std::env::temp_dir().join(format!("pandacode-deny-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = Settings { host_enabled: true, allow_full_access: true, grants_scoped: true, ..Default::default() };
+        saved.device_id = uuid::Uuid::new_v4().to_string();
+        saved.trusted.insert("old-device".into(), "old-pinned-key".into());
+        save(&dir, &saved).unwrap();
+        begin_lockdown(&dir).unwrap();
+        // Fail the main settings rename while leaving the independent denial marker.
+        std::fs::create_dir(dir.join(format!("{FILE}.tmp"))).unwrap();
+        let mut denied = saved.clone();
+        denied.host_enabled = false;
+        denied.allow_full_access = false;
+        denied.trusted.clear();
+        assert!(update_access(&dir, &mut saved, denied.clone(), true).is_err());
+        assert_eq!(saved, denied, "revocation is immediate even if persistence fails");
+        let restarted = load(&dir);
+        assert!(!restarted.host_enabled && !restarted.allow_full_access);
+        assert!(restarted.trusted.is_empty());
+        std::fs::remove_dir(dir.join(format!("{FILE}.tmp"))).unwrap();
+        save(&dir, &saved).unwrap();
+        end_lockdown(&dir).unwrap();
+        assert_eq!(load(&dir), denied);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_permission_grants_do_not_change_live_state() {
+        let dir = std::env::temp_dir().join(format!("pandacode-grant-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(dir.join(format!("{FILE}.tmp"))).unwrap();
+        let mut current = Settings::default();
+        let next = Settings { host_enabled: true, allow_full_access: true, ..Default::default() };
+        assert!(update_access(&dir, &mut current, next, false).is_err());
+        assert!(!current.host_enabled && !current.allow_full_access);
         let _ = std::fs::remove_dir_all(dir);
     }
 

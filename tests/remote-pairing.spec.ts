@@ -35,7 +35,7 @@ test('a device that asks for access waits on top, shows its key and is approved 
   await expect(laptop).not.toHaveClass(/remote-pending/);
   await expect(laptop.getByRole('combobox', { name: 'Access for Old laptop' })).toHaveValue('view');
   await expect(laptop.getByRole('button', { name: 'Approve Old laptop' })).toHaveCount(0);
-  expect((await calls(page, '__grantCalls')).at(-1)).toEqual({ deviceId: 'dev-laptop', scope: 'view' });
+  expect((await calls(page, '__grantCalls')).at(-1)).toEqual({ deviceId: 'dev-laptop', scope: 'view', expectedFingerprint: 'c4d81f3e0a9957b2736ca19d52e54086' });
   await expect(rows.first()).not.toHaveAttribute('data-device', 'dev-laptop');
 });
 
@@ -47,7 +47,7 @@ test('a waiting device can be blocked, and the picker changes any device afterwa
   expect((await calls(page, '__grantCalls')).at(-1)).toEqual({ deviceId: 'dev-nas', scope: 'blocked' });
 
   await nas.getByRole('combobox', { name: 'Access for Home NAS' }).selectOption('control');
-  await expect.poll(async () => (await calls(page, '__grantCalls')).at(-1)).toEqual({ deviceId: 'dev-nas', scope: 'control' });
+  await expect.poll(async () => (await calls(page, '__grantCalls')).at(-1)).toEqual({ deviceId: 'dev-nas', scope: 'control', expectedFingerprint: '17aa5e90b3c4d286ea5bb53d782f9104' });
   await expect(nas.getByRole('combobox', { name: 'Access for Home NAS' })).toHaveValue('control');
   const options = await nas.getByRole('combobox', { name: 'Access for Home NAS' }).locator('option').allTextContents();
   expect(options).toEqual(['View only', 'Control', 'Full access', 'Blocked']);
@@ -141,7 +141,7 @@ test('a first request shows a prompt with the grouped key; Approve sends the cho
   await prompt.getByRole('combobox', { name: 'Access for Pixel' }).selectOption('full');
   await prompt.getByRole('button', { name: 'Approve' }).click();
   await expect(prompt).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).__fakeHost.calls)).toEqual([['remote_set_device_grant', { deviceId: 'phone', scope: 'full' }]]);
+  expect(await page.evaluate(() => (window as any).__fakeHost.calls)).toEqual([['remote_set_device_grant', { deviceId: 'phone', scope: 'full', expectedFingerprint: '0123456789abcdef0123456789abcdef' }]]);
 });
 
 test('the prompt can block, decide later, and goes away when Settings decided first', async ({ page }) => {

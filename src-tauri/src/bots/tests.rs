@@ -563,14 +563,48 @@ fn local_server_parses_requests_and_guards_hosts() {
     assert!(std::str::from_utf8(&engine.body).unwrap().trim_end().ends_with("export default createMd4cModule;"));
 }
 
+
+#[test]
+fn scheduled_bot_work_cannot_inherit_later_full_access() {
+    let f = fixture();
+    let bot = bot(&f);
+    let item = schedule::ScheduleInput { prompt: "Read a status page".into(), kind: "interval".into(), interval_minutes: Some(30), ..Default::default() };
+    let generated = schedule::create(&f.store, &bot.id, &item, "bot", 0).unwrap();
+    assert_eq!(schedule::execution_mode(&f.store, &generated, "full").unwrap(), "plan");
+    assert_eq!(schedule::execution_mode(&f.store, &generated, "review").unwrap(), "plan");
+    let user = schedule::create(&f.store, &bot.id, &item, "user", 0).unwrap();
+    assert_eq!(schedule::execution_mode(&f.store, &user, "full").unwrap(), "ask");
+    assert_eq!(schedule::execution_mode(&f.store, &user, "ask").unwrap(), "ask");
+    f.store.db.execute("DELETE FROM bot_activity WHERE kind='schedule' AND json_extract(detail,'$.scheduleId')=?1", [&user.id]).unwrap();
+    assert_eq!(schedule::execution_mode(&f.store, &user, "full").unwrap(), "ask");
+    assert_eq!(schedule::execution_mode(&f.store, &user, "plan").unwrap(), "plan");
+}
+
+#[test]
+fn user_schedules_keep_the_original_explicit_mode_only() {
+    let f = fixture();
+    let mut profile = input("User schedule");
+    profile.mode = "full".into();
+    let bot = create(&f.store, &profile, &f.root).unwrap();
+    let item = schedule::ScheduleInput { prompt: "Review a PR".into(), kind: "daily".into(), time_of_day: Some("09:30".into()), ..Default::default() };
+    let schedule = schedule::create(&f.store, &bot.id, &item, "user", 0).unwrap();
+    assert_eq!(schedule::execution_mode(&f.store, &schedule, "full").unwrap(), "full");
+    assert_eq!(schedule::execution_mode(&f.store, &schedule, "ask").unwrap(), "ask");
+    assert_eq!(schedule::execution_mode(&f.store, &schedule, "plan").unwrap(), "plan");
+    let generated = schedule::create(&f.store, &bot.id, &item, "bot", 0).unwrap();
+    assert_eq!(schedule::execution_mode(&f.store, &generated, "full").unwrap(), "plan");
+}
+
 #[test]
 fn only_registered_bot_tools_skip_approval() {
     assert!(super::tools::self_scoped("pandacode_bot_remember"));
     assert!(!super::tools::self_scoped("pandacode_bot_notify"));
+    assert!(!super::tools::self_scoped("pandacode_bot_schedule"));
     assert!(!super::tools::self_scoped("pandacode_bot_anything_else"));
     assert!(!super::tools::self_scoped("pandacode_open_browser"));
     assert!(super::tools::catalog().iter().all(|tool| tool["name"].as_str().is_some_and(|name| super::tools::self_scoped(name) || super::tools::ALWAYS_ASK.contains(&name))));
     assert!(guard::dangerous("Allow pandacode_bot_notify?"));
+    assert!(guard::dangerous("Allow pandacode_bot_schedule?"));
 }
 
 #[test]
@@ -578,7 +612,7 @@ fn outbound_bot_tools_cannot_be_covered_by_broad_allow_rules() {
     let f = fixture();
     let bot = bot(&f);
     guard::add_rule(&f.store, &bot.id, "*pandacode*", "allow").unwrap();
-    for action in ["Allow pandacode_bot_notify?", "Allow pandacode_cloud_cli?"] {
+    for action in ["Allow pandacode_bot_notify?", "Allow pandacode_bot_schedule?", "Allow pandacode_cloud_cli?"] {
         assert_eq!(guard::decide(&f.store, &bot.id, action).unwrap(), guard::Decision::Ask);
     }
     assert_eq!(guard::decide(&f.store, &bot.id, "Allow pandacode_bot_remember?").unwrap(), guard::Decision::Allow);

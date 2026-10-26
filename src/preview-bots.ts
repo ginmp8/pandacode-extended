@@ -157,8 +157,14 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     }
     case 'bot_task_links': result = Object.fromEntries(taskBots); break;
     case 'bot_set_paused': { const entry = store(args.botId); entry.bot = { ...entry.bot, paused: Boolean(args.paused) }; log(entry, 'updated', args.paused ? 'Paused' : 'Resumed'); result = structuredClone(entry.bot); changed(); break; }
-    case 'bot_reset': { const entry = store(args.botId); entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared'); result = structuredClone(entry.bot); changed(); break; }
-    case 'bot_delete': store(args.botId); bots.delete(args.botId); for (const [id, botId] of taskBots) if (botId === args.botId) forgetBotTask(id); changed(); break;
+    case 'bot_reset': { const entry = store(args.botId); const threads = [...new Set(entry.threads.map(thread => thread.sessionId))];
+      for (const sessionId of threads) await host.invoke('delete_session', { sessionId });
+      entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared');
+      result = structuredClone(entry.bot); changed(); host.emit('sessions-changed', null); break; }
+    case 'bot_delete': { const entry = store(args.botId); const threads = [...new Set(entry.threads.map(thread => thread.sessionId))];
+      for (const sessionId of threads) await host.invoke('delete_session', { sessionId });
+      bots.delete(args.botId); for (const [id, botId] of taskBots) if (botId === args.botId) forgetBotTask(id);
+      changed(); host.emit('sessions-changed', null); break; }
     case 'bot_remember': {
       const entry = store(args.botId); const content = String(args.content ?? '').trim().slice(0, 2000);
       if (!content) throw new Error('A memory needs some text.');

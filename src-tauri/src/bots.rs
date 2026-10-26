@@ -424,6 +424,12 @@ pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
     get(store, id)
 }
 
+fn owned_thread_session_ids(store: &Store, bot_id: &str) -> Result<Vec<String>> {
+    let mut statement = store.db.prepare("SELECT session_id FROM bot_threads WHERE bot_id=?1 ORDER BY session_id").map_err(|e| e.to_string())?;
+    statement.query_map([bot_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 /// Reset deletes the bot's conversations, memories, schedules and activity together.
 pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
     let bot = get(store, id)?;
@@ -780,7 +786,14 @@ pub async fn bot_set_paused(app: tauri::AppHandle, window: tauri::WebviewWindow,
 pub async fn bot_reset(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String) -> Result<Bot> {
     guard_main(&window)?;
     gateway::stop_bot(&app, &bot_id).await;
-    let bot = reset(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id)?;
+    let (bot, deleted_ids) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let ids = owned_thread_session_ids(&store, &bot_id)?;
+        (reset(&store, &bot_id)?, ids)
+    };
+    if !deleted_ids.is_empty() {
+        let _ = app.emit("sessions-deleted", serde_json::json!({ "sessionIds": deleted_ids }));
+    }
     let _ = app.emit("bots-changed", ());
     let _ = app.emit("sessions-changed", ());
     Ok(bot)
@@ -791,7 +804,15 @@ pub async fn bot_delete(app: tauri::AppHandle, window: tauri::WebviewWindow, sta
     guard_main(&window)?;
     gateway::stop_bot(&app, &bot_id).await;
     channels::stop_bot_channels(&app, &bot_id).await;
-    delete(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id)?;
+    let deleted_ids = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let ids = owned_thread_session_ids(&store, &bot_id)?;
+        delete(&store, &bot_id)?;
+        ids
+    };
+    if !deleted_ids.is_empty() {
+        let _ = app.emit("sessions-deleted", serde_json::json!({ "sessionIds": deleted_ids }));
+    }
     let _ = app.emit("bots-changed", ());
     let _ = app.emit("sessions-changed", ());
     Ok(())

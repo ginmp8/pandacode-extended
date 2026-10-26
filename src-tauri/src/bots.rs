@@ -426,8 +426,8 @@ pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
 
 fn owned_thread_session_ids(store: &Store, bot_id: &str) -> Result<Vec<String>> {
     let mut statement = store.db.prepare("SELECT session_id FROM bot_threads WHERE bot_id=?1 ORDER BY session_id").map_err(|e| e.to_string())?;
-    statement.query_map([bot_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let rows = statement.query_map([bot_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
 /// Reset deletes the bot's conversations, memories, schedules and activity together.

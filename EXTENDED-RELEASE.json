@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "product": "PandaCode Extended",
-  "extended_version": "0.5.1",
+  "extended_version": "0.5.2",
   "tracked_upstream_version": "0.3.48",
   "source_base_upstream_version": "0.3.28",
   "upstream_code_rebased": false,
   "full_upstream_parity": false,
-  "display_version": "0.5.1+pc.0.3.48",
-  "release_note": "releases/extended/0.5.1.md",
+  "display_version": "0.5.2+pc.0.3.48",
+  "release_note": "releases/extended/0.5.2.md",
   "reviewed_upstream_range": {
     "from": "0.3.42",
     "through": "0.3.48"

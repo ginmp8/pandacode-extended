@@ -169,12 +169,19 @@ let jevTestRequest = 0;
 let architectSetupRequest = 0;
 let overlayOpenRequest = 0;
 let jevDecisionsEnabled = false;
+let jevSettingsSaved = false;
 function setJevAvailability(enabled: boolean): void {
   jevDecisionsEnabled = enabled;
   architectView?.setAssistEnabled(enabled);
 }
-void call<import('./jev').JevConfiguration>('jev_configuration').then(config => setJevAvailability(Boolean(config.decisionsEnabled))).catch(() => { /* Optional integrations never block startup. */ });
-window.addEventListener('pandacode:jev-settings', event => setJevAvailability(Boolean((event as CustomEvent<import('./jev').JevConfiguration>).detail.decisionsEnabled)));
+void call<import('./jev').JevConfiguration>('jev_configuration').then(config => {
+  // Credential loading can finish after Settings has already saved a newer choice.
+  if (!jevSettingsSaved) setJevAvailability(Boolean(config.decisionsEnabled));
+}).catch(() => { /* Optional integrations never block startup. */ });
+window.addEventListener('pandacode:jev-settings', event => {
+  jevSettingsSaved = true;
+  setJevAvailability(Boolean((event as CustomEvent<import('./jev').JevConfiguration>).detail.decisionsEnabled));
+});
 async function ensureArchitectView(): Promise<ArchitectView> {
   return architectLoading ??= import('./architect').then(({ ArchitectView }) => {
     architectView = new ArchitectView({ setup: anchor => run(showArchitectSetup(anchor)), loadModels, updated: onArchitect, report, onFork: forkAtMessage, fileContext: sessionId => ({ projectId: state.projectId, sessionId }), assist: (sessionId, kind) => run(openJevAssist(kind, sessionId)) });

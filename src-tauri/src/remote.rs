@@ -525,11 +525,12 @@ pub async fn remote_sign_out(app: tauri::AppHandle) -> Result<Value> {
         let inner = state.lock();
         (inner.token.clone(), inner.settings.device_id.clone())
     };
-    // Free this computer's slot on the account; signing out locally never waits on it.
+    // A slow or disconnected relay must not keep remote control active while
+    // the user is signing out. Deny in memory and persist before any await.
+    sign_out_local_checked(&app, None)?;
     if let (Some(build), Some(token)) = (config::build(), token) {
         let _ = auth::relay(&build, &token, reqwest::Method::DELETE, &format!("/v1/devices/{me}")).await;
     }
-    sign_out_local_checked(&app, None)?;
     Ok(remote(&app).status())
 }
 
@@ -644,13 +645,10 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
         let inner = state.lock();
         (inner.token.clone().ok_or("Sign in to PandaCode Connect first.")?, inner.settings.device_id.clone())
     };
-    auth::relay(&build, &token, reqwest::Method::DELETE, &format!("/v1/devices/{device_id}")).await.inspect_err(|error| {
-        if error == auth::SIGNED_OUT {
-            sign_out_local(&app, Some(&token));
-        }
-    })?;
-    if device_id == me {
-        sign_out_local_checked(&app, Some(&token))?;
+    // Revoke locally before network I/O. A slow relay can no longer prolong
+    // the device's active authority on this computer.
+    let local_result = if device_id == me {
+        sign_out_local_checked(&app, Some(&token))
     } else {
         let state = remote(&app);
         let result = {
@@ -667,8 +665,14 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
             result
         };
         emit_presence(&app);
-        result?;
+        result
+    };
+    let remote_result = auth::relay(&build, &token, reqwest::Method::DELETE, &format!("/v1/devices/{device_id}")).await;
+    if remote_result.as_ref().is_err_and(|error| error == auth::SIGNED_OUT) {
+        sign_out_local(&app, Some(&token));
     }
+    local_result?;
+    remote_result?;
     Ok(json!({}))
 }
 

@@ -9,6 +9,19 @@ export { cancelledRemoteStart, clearRemoteStart, remoteStart, remoteStartAttache
 
 export const LOCAL = 'local';
 
+export function lastSeenText(target: Pick<RemoteTarget, 'lastSeen'>): string {
+  const raw = target.lastSeen;
+  const time = typeof raw === 'number' ? (raw < 1e12 ? raw * 1000 : raw) : typeof raw === 'string' ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(time)) return 'last seen unknown';
+  const elapsed = Math.max(0, Date.now() - time);
+  if (elapsed < 60_000) return 'last seen just now';
+  if (elapsed < 3_600_000) return `last seen ${Math.floor(elapsed / 60_000)}m ago`;
+  if (elapsed < 86_400_000) return `last seen ${Math.floor(elapsed / 3_600_000)}h ago`;
+  return `last seen ${new Date(time).toLocaleDateString()}`;
+}
+export function offlineText(target: RemoteTarget): string { return `Offline · ${lastSeenText(target)}`; }
+
+
 /** The control beside Local / Worktree; empty when there is nothing to choose. */
 export function computerControl(session: Session, fresh: boolean, targets: RemoteTarget[], chosen: string): string {
   if (session.remoteDevice) {

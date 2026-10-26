@@ -534,7 +534,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   await expect(groups.nth(1).locator(':scope > summary')).toContainText('Running 1 command');
   await expect(groups.nth(0)).toHaveJSProperty('open',false);
   await expect(groups.nth(1)).toHaveJSProperty('open',false);
-  const sequence = () => activity.locator('[data-commentary], details.tool-group').evaluateAll(elements => elements.map(element => element.matches('.tool-group') ? element.querySelector('.tool-group-label')!.textContent : element.textContent));
+  const sequence = () => activity.locator('[data-commentary], details.tool-group').evaluateAll(elements => elements.map(element => element.matches('.tool-group') ? element.querySelector('.tool-group-label')!.textContent : element.textContent).map(text => text?.trimEnd()));
   const originalSequence = await sequence();
   expect(originalSequence).toEqual([
     expect.stringContaining('I will inspect the current launcher.'),

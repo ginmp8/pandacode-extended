@@ -931,3 +931,8 @@ html[data-theme="dark"] body .dialog-plate{box-shadow:0 40px 100px -30px rgb(0 0
 .avatar-upload{padding:6px 12px;border-radius:999px;border:1px solid var(--border);color:var(--muted);font-size:.8rem}
 .avatar-upload:hover{color:var(--text);border-color:color-mix(in srgb,var(--accent) 70%,var(--border))}
 .avatar-error{flex-basis:100%;color:var(--danger);font-size:.78rem}
+
+/* Native select popups must use the active theme, including OS-rendered options. */
+html[data-theme="dark"] :is(select, select option, select optgroup){color-scheme:dark;color:var(--text);background-color:var(--raised)}
+html[data-theme="light"] :is(select, select option, select optgroup){color-scheme:light;color:var(--text);background-color:var(--raised)}
+html[data-theme] dialog select{color:var(--text);background-color:var(--raised)}

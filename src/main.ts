@@ -2088,7 +2088,11 @@ async function persistTaskStage(task: Session, previousStage: TaskStage, stage: 
 }
 async function changeTaskStage(id: string, stage: TaskStage): Promise<void> {
   const task = state.sessions.find(item => item.id === id);
-  if (!task || task.archived || isRunning(id) || configuringSessions.has(id) || taskStage(task) === stage || stage === 'in_progress') return;
+  if (!task || taskStage(task) === stage) return;
+  if (task.archived || isRunning(id) || configuringSessions.has(id) || finishingStreams.has(id) || task.goalState?.status === 'active' || stage === 'in_progress') {
+    notify(stage === 'in_progress' ? 'Start the task to move it to In progress.' : 'Stop active work or restore the task before changing its stage.');
+    return;
+  }
   configuringSessions.add(id);
   try {
     if (stage === 'completed' && task.worktreePath) {
@@ -2332,7 +2336,13 @@ async function reloadSessions(): Promise<void> {
   const [sessions, detailResult] = await Promise.all([call<Session[]>('list_sessions'),
     Promise.allSettled([selectedId ? call<Session>('get_task', { sessionId: selectedId }) : Promise.resolve(null)]).then(results => results[0])]);
   if (request !== sessionsReload) return;
-  if (detailResult.status === 'rejected' && !deletedSessions.has(selectedId)) throw detailResult.reason;
+  if (detailResult.status === 'rejected' && !deletedSessions.has(selectedId)) {
+    const disappeared = selectedId && !sessions.some(task => task.id === selectedId)
+      && !state.sessions.some(task => task.id === selectedId && task.draft);
+    if (!disappeared) throw detailResult.reason;
+    // Deletion may race this refresh; do not resurrect a bot-owned ghost task.
+    removeDeletedSessions([selectedId]);
+  }
   const details = detailResult.status === 'fulfilled' ? detailResult.value : null;
   // The open draft is not listed natively until its first prompt; keep it while it is still a draft.
   const listedIds = new Set(sessions.map(task => task.id));
@@ -4671,6 +4681,28 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   }
 }
 mountExternalLinks(document, url => call('open_external_url', { url }), report);
+document.addEventListener('contextmenu', event => {
+  const card = (event.target as Element).closest<HTMLElement>('#project-board .board-card[data-task-id]');
+  if (!card) return;
+  event.preventDefault();
+  const task = state.sessions.find(item => item.id === card.dataset.taskId);
+  if (!task) return;
+  const busy = isRunning(task.id) || configuringSessions.has(task.id) || finishingStreams.has(task.id) || task.goalState?.status === 'active';
+  void showChoices(card, { title: 'Board task actions', actions: true, items: [
+    ...(['pending', 'review', 'completed'] as TaskStage[]).filter(stage => stage !== taskStage(task)).map(stage => ({
+      id: stage, label: stage === 'completed' ? 'Mark complete' : stage === 'review' ? 'Move to Review' : 'Move to Pending',
+      icon: stage === 'completed' ? 'check' : 'arrow', disabled: busy || task.archived,
+      description: busy ? 'Stop active work before changing the stage.' : task.archived ? 'Restore the task first.' : undefined,
+    })),
+    { id: 'archive', label: task.archived ? 'Restore task' : 'Archive task', icon: 'archive', disabled: busy },
+    { id: 'delete', label: 'Delete task…', icon: 'trash', danger: true, disabled: busy },
+  ], onSelect: choice => {
+    closeChoiceMenu();
+    if (choice === 'archive') run(archiveTask(task, true));
+    else if (choice === 'delete') showDeleteTask(task.id, chatTask(task));
+    else run(changeTaskStage(task.id, choice as TaskStage));
+  } });
+});
 document.addEventListener('dragstart', event => {
   const card = (event.target as Element).closest<HTMLElement>('.board-card[draggable="true"]');
   if (!card || !event.dataTransfer) return;

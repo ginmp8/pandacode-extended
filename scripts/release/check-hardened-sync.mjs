@@ -90,6 +90,38 @@ export async function check(sourceRoot = root) {
   for (const identity of [historical.extended_base_commit, historical.upstream_from_commit, historical.upstream_through_commit, historical.release_evidence_sha256]) {
     assert(historicalCoverage.includes(identity), 'Historical coverage omits source identity');
   }
+  // The earlier audit supplements both existing reviews. Its 0.2.x notes have
+  // source evidence, but no publication record in the verified public inventory.
+  const early = meta.early_upstream_review;
+  assert(early?.from === '0.2.0' && early.through === '0.3.27', 'Early coverage range drift');
+  assert(early.extended_base_commit === '68e4d0615ec864a2dd9e9630e0e3410432e27207'
+    && early.upstream_snapshot_commit === '612ca79c8e7db74461040bc27ddf1a3dcebb32ab', 'Early coverage commit drift');
+  assert(early.coverage_document === 'docs/upstream-parity-before-0.3.28.md'
+    && early.release_evidence === 'docs/upstream-release-evidence-before-0.3.28.json', 'Early coverage path drift');
+  const earlyText = (await read(early.release_evidence)).replaceAll('\r\n', '\n');
+  assert(createHash('sha256').update(earlyText).digest('hex') === early.release_evidence_sha256, 'Early release evidence digest drift');
+  const earlyEvidence = JSON.parse(earlyText);
+  assert(earlyEvidence.schema_version === 1 && earlyEvidence.repository === 'https://github.com/aicodeking/pandacode'
+    && earlyEvidence.upstream_snapshot_commit === early.upstream_snapshot_commit, 'Early release evidence identity drift');
+  const earlyVersions = [...Array.from({ length: 49 }, (_, patch) => `0.2.${patch}`), ...Array.from({ length: 28 }, (_, patch) => `0.3.${patch}`)];
+  assert(Array.isArray(earlyEvidence.notes) && earlyEvidence.notes.length === earlyVersions.length, 'Early release evidence coverage gap');
+  for (const [offset, upstream] of earlyVersions.entries()) {
+    const note = earlyEvidence.notes[offset];
+    assert(note.version === upstream && note.source_path === `releases/${upstream}.md`, 'Early release evidence sequence drift');
+    const noteText = (await read(note.source_path)).replaceAll('\r\n', '\n');
+    assert(createHash('sha256').update(noteText).digest('hex') === note.source_sha256, 'Early source note changed: ' + upstream);
+    if (upstream.startsWith('0.2.')) {
+      assert(note.publication === 'source-only' && !note.published_at && !note.release_url && !note.github_body_sha256, 'Early source-only note claims publication');
+    } else {
+      assert(note.publication === 'github-release' && note.release_url === `https://github.com/aicodeking/pandacode/releases/tag/v${upstream}`
+        && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(note.published_at ?? '')
+        && /^[a-f0-9]{64}$/.test(note.github_body_sha256 ?? ''), 'Early published release evidence missing: ' + upstream);
+    }
+  }
+  const earlyCoverage = await read(early.coverage_document);
+  for (const identity of [early.extended_base_commit, early.upstream_snapshot_commit, early.release_evidence_sha256]) {
+    assert(earlyCoverage.includes(identity), 'Early coverage omits source identity');
+  }
   assert([lock.version, lock.packages?.['']?.version].every(x => x === v), 'npm package/lock version drift');
   assert(tauri.version === v, 'Tauri version drift');
   assert([mobile.version, mobileLock.version, mobileLock.packages?.['']?.version, mobileApp.expo?.version].every(x => x === v), 'Mobile version drift');
@@ -110,10 +142,11 @@ export async function check(sourceRoot = root) {
   for (const older of legacy) {
     assert(!rootFiles.includes(older + '.md') && extendedFiles.includes(older + '.md'), 'Legacy release note misplaced: ' + older);
   }
-  const references = new Set(evidence.notes.map(note => note.version));
+  const references = new Set([...earlyVersions, ...evidence.notes.map(note => note.version)]);
+  const sourceOnly = new Set([...earlyEvidence.notes, ...evidence.notes].filter(note => note.publication === 'source-only').map(note => note.version));
   for (let patch = first; patch <= last; patch++) references.add(`${major}.${minor}.${patch}`);
   for (const upstream of references) {
-    assert(rootFiles.includes(upstream + '.md') && (upstream === '0.3.36' || Boolean(dates[upstream])), 'Missing upstream historical reference ' + upstream);
+    assert(rootFiles.includes(upstream + '.md') && (sourceOnly.has(upstream) || Boolean(dates[upstream])), 'Missing upstream historical reference ' + upstream);
   }
   return { version: v, display: meta.display_version, upstream: meta.tracked_upstream_version, sourceBase: meta.source_base_upstream_version, upstreamNotes: references.size, extendedNotes: extendedFiles.length };
 }

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -7,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { check } from './check-hardened-sync.mjs';
 
 test('Extended core/display version, historical ancestry, layout patch and separated release histories stay consistent', async () => {
-  assert.deepEqual(await check(), { version: '0.5.0', display: '0.5.0+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 20, extendedNotes: 8 });
+  assert.deepEqual(await check(), { version: '0.5.0', display: '0.5.0+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 97, extendedNotes: 8 });
 });
 
 const source = new URL('../../', import.meta.url);
@@ -15,7 +16,8 @@ const fixturePaths = ['HARDENED-REVISION.json', 'EXTENDED-RELEASE.json', 'packag
   'mobile/package.json', 'mobile/package-lock.json', 'mobile/app.json',
   'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'website/src/data/release-dates.json',
   'src/styles.css', 'src/team-progress.css', 'tests/architect.spec.ts', 'docs/upstream-integration-0.5.0.md',
-  'docs/upstream-parity-0.3.28-0.3.42.md', 'docs/upstream-release-evidence-0.3.28-0.3.42.json', 'releases'];
+  'docs/upstream-parity-0.3.28-0.3.42.md', 'docs/upstream-release-evidence-0.3.28-0.3.42.json',
+  'docs/upstream-parity-before-0.3.28.md', 'docs/upstream-release-evidence-before-0.3.28.json', 'releases'];
 
 async function fixture(run) {
   const directory = await mkdtemp(join(tmpdir(), 'extended-release-'));
@@ -121,13 +123,13 @@ test('the version command advances desktop and mobile together without rewriting
     await writeFile(join(directory, 'releases/extended/0.5.1.md'), '# Extended 0.5.1\n\nProduct-only patch.\n');
     const metadata = JSON.parse(await readFile(join(directory, 'EXTENDED-RELEASE.json'), 'utf8'));
     assert.equal(metadata.integration_provenance.coverage_document, 'docs/upstream-integration-0.5.0.md');
-    assert.deepEqual(await check(directory), { version: '0.5.1', display: '0.5.1+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 20, extendedNotes: 9 });
+    assert.deepEqual(await check(directory), { version: '0.5.1', display: '0.5.1+pc.0.3.47', upstream: '0.3.47', sourceBase: '0.3.28', upstreamNotes: 97, extendedNotes: 9 });
   });
 });
 
 test('the historical evidence identity is unchanged by Windows checkout line endings', async () => {
   await fixture(async directory => {
-    for (const file of ['HARDENED-REVISION.json', 'docs/upstream-release-evidence-0.3.28-0.3.42.json', 'releases/0.3.28.md', 'releases/0.3.36.md']) {
+    for (const file of ['HARDENED-REVISION.json', 'docs/upstream-release-evidence-0.3.28-0.3.42.json', 'docs/upstream-release-evidence-before-0.3.28.json', 'releases/0.2.4.md', 'releases/0.3.27.md', 'releases/0.3.28.md', 'releases/0.3.36.md']) {
       const path = join(directory, file);
       await writeFile(path, (await readFile(path, 'utf8')).replaceAll('\n', '\r\n'));
     }
@@ -155,4 +157,40 @@ test('historical review cannot silently omit a release or rewrite its frozen evi
     await editJson(directory, 'docs/upstream-release-evidence-0.3.28-0.3.42.json', value => { value.notes.splice(8, 1); });
     await assert.rejects(check(directory), /Historical release evidence digest drift/);
   });
+});
+
+test('early historical review cannot omit its range, change its baseline or rewrite original notes', async () => {
+  for (const [edit, expected] of [
+    [value => { delete value.early_upstream_review; }, /Early coverage range drift/],
+    [value => { value.early_upstream_review.from = '0.3.0'; }, /Early coverage range drift/],
+    [value => { value.early_upstream_review.extended_base_commit = value.historical_upstream_review.extended_base_commit; }, /Early coverage commit drift/],
+    [value => { value.early_upstream_review.release_evidence = '../outside.json'; }, /Early coverage path drift/],
+  ]) {
+    await fixture(async directory => {
+      await editJson(directory, 'EXTENDED-RELEASE.json', edit);
+      await assert.rejects(check(directory), expected);
+    });
+  }
+  for (const version of ['0.2.4', '0.3.27']) {
+    await fixture(async directory => {
+      await writeFile(join(directory, `releases/${version}.md`), '# Rewritten reference\n');
+      await assert.rejects(check(directory), new RegExp(`Early source note changed: ${version.replaceAll('.', '\\.')}`));
+    });
+  }
+});
+
+test('early source-only evidence cannot invent publication or silently drop a note even with a new digest', async () => {
+  for (const [edit, expected] of [
+    [value => { value.notes.splice(4, 1); }, /Early release evidence coverage gap/],
+    [value => { value.notes[0].published_at = '2026-10-01T00:00:00Z'; }, /Early source-only note claims publication/],
+    [value => { value.notes[49].release_url = 'https://example.invalid/release'; }, /Early published release evidence missing/],
+  ]) {
+    await fixture(async directory => {
+      const path = 'docs/upstream-release-evidence-before-0.3.28.json';
+      await editJson(directory, path, edit);
+      const digest = createHash('sha256').update(await readFile(join(directory, path))).digest('hex');
+      await editJson(directory, 'EXTENDED-RELEASE.json', value => { value.early_upstream_review.release_evidence_sha256 = digest; });
+      await assert.rejects(check(directory), expected);
+    });
+  }
 });

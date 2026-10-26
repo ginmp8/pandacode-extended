@@ -14,7 +14,7 @@ mod images;
 mod permissions;
 pub(crate) mod mirror;
 mod replay;
-mod routes;
+pub(crate) mod routes;
 mod socket;
 mod start;
 

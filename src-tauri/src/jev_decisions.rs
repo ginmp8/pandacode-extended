@@ -912,6 +912,10 @@ pub async fn run_for_task(
     request: Request,
     stopped: Arc<AtomicBool>,
 ) -> Result<Report> {
+    crate::jev::ready().await?;
+    if stopped.load(Ordering::Acquire) {
+        return Err("Jev decision cancelled.".into());
+    }
     let state = app.state::<AppState>();
     if state.shutdown.load(Ordering::SeqCst) != 0 {
         return Err("PandaCode is closing.".into());
@@ -979,6 +983,7 @@ pub async fn jev_assist_prepare(
     session_id: String,
     request: Request,
 ) -> Result<Preview> {
+    crate::jev::ready().await?;
     crate::blocking(move || prepare_for_task(&app, &session_id, &request)).await
 }
 #[tauri::command]

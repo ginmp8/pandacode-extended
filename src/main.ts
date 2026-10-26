@@ -582,7 +582,7 @@ transcriptScroller.tabIndex = 0;
 /* Following the latest output is an intent, not a measurement. Growing content and a resizing
  * composer never clear it: only the reader scrolling up or opening a fold does, and reaching
  * the bottom sets it again. The observer re-pins before paint, so nothing jumps for a frame. */
-let stickToBottom = true, lastTranscriptTop = 0, transcriptPointerScroll = false;
+let stickToBottom = true, lastTranscriptTop = 0, transcriptPointerScroll = false, readerScrollingUp = false, readerSawUpwardScroll = false;
 const transcriptGap = (): number => transcriptScroller.scrollHeight - transcriptScroller.scrollTop - transcriptScroller.clientHeight;
 const readingTranscriptTool = (): boolean => Boolean(document.activeElement?.closest('.tool-activity, .turn-activity, .turn-changes, .agent-input'));
 function followTranscript(): void {
@@ -590,19 +590,19 @@ function followTranscript(): void {
   if (readingTranscriptTool()) { if (transcriptGap() > 2) stickToBottom = false; return; }
   transcriptScroller.scrollTop = transcriptScroller.scrollHeight;
 }
-function stickTranscript(): void { stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; }
+function stickTranscript(): void { readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; }
 /** Pin active streaming output before each paint, including late Markdown reflows.
  * ResizeObserver alone can observe after an intermediate frame's layout change.
  * Stop at once when the reader scrolls up; run just two frames after completion. */
 let streamFollowFrame = 0;
 let streamFollowTail = 0;
 function maintainStreamingBottom(): void {
-  if (!stickToBottom) return;
+  if (!stickToBottom || readerScrollingUp) return;
   streamFollowTail = 2;
   if (streamFollowFrame) return;
   const tick = (): void => {
     streamFollowFrame = 0;
-    if (!stickToBottom || !transcriptVisible() || document.hidden) return;
+    if (!stickToBottom || readerScrollingUp || !transcriptVisible() || document.hidden) return;
     const active = state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId);
     if (!active && streamFollowTail-- <= 0) return;
     if (transcriptGap() > 1) followTranscript();
@@ -614,7 +614,12 @@ const transcriptResize = new ResizeObserver(followTranscript);
 const observeTranscript = (): void => { transcriptResize.disconnect(); for (const node of [transcriptScroller, ...transcriptScroller.children]) transcriptResize.observe(node); };
 new MutationObserver(observeTranscript).observe(transcriptScroller, { childList: true });
 observeTranscript();
-const releaseTranscript = (): void => { if (transcriptScroller.scrollTop > 0) stickToBottom = false; };
+const releaseTranscript = (): void => {
+  if (transcriptScroller.scrollHeight <= transcriptScroller.clientHeight + 2) return;
+  readerScrollingUp = true;
+  readerSawUpwardScroll = false;
+  stickToBottom = false;
+};
 // Rebuilding or measuring the composer briefly shrinks it; a layout read then grows the transcript
 // and clamps its scroll up. Re-pin in the mutation's microtask, before that clamp can paint or
 // reach the scroll handler, where any upward scroll means the reader left.
@@ -622,15 +627,25 @@ new MutationObserver(records => { if (records.some(record => !transcriptScroller
   .observe($('.conversation-pane'), { childList: true, subtree: true, attributes: true });
 transcriptScroller.addEventListener('scroll', event => {
   const top = transcriptScroller.scrollTop;
-  if (transcriptGap() <= 2) stickToBottom = true;
-  // Browser layout clamps emit trusted scroll events too. Only a real pointer
-  // drag or an explicitly dispatched scroll request changes reading intent;
-  // wheel and keyboard navigation set that intent in their own handlers.
-  else if ((transcriptPointerScroll || !event.isTrusted) && (top < lastTranscriptTop || top <= 1)) stickToBottom = false;
+  if (readerScrollingUp && top < lastTranscriptTop - 1) readerSawUpwardScroll = true;
+  if (transcriptGap() <= 2) {
+    // Auto-follow can produce a delayed scroll event after an upward wheel.
+    // Do not resume until an actual upward move was observed AND the reader
+    // subsequently returns downward to the end (also supports history scripts).
+    if (!readerScrollingUp || (readerSawUpwardScroll && top > lastTranscriptTop + 1)) {
+      readerScrollingUp = false;
+      readerSawUpwardScroll = false;
+      stickToBottom = true;
+    }
+  } else if ((transcriptPointerScroll || !event.isTrusted) && (top < lastTranscriptTop || top <= 1)) {
+    readerScrollingUp = true;
+    readerSawUpwardScroll = true;
+    stickToBottom = false;
+  }
   lastTranscriptTop = top;
   void loadOlderMessages();
 }, { passive: true });
-transcriptScroller.addEventListener('click', event => { if ((event.target as Element).closest('summary')) stickToBottom = false; }, true);
+transcriptScroller.addEventListener('click', event => { if ((event.target as Element).closest('summary')) { readerScrollingUp = true; stickToBottom = false; } }, true);
 // Programmatic scroll clamping during composer resize is not a reader scrolling up.
 // Scrollbar drags, unlike reflow, carry an active pointer gesture.
 transcriptScroller.addEventListener('pointerdown', event => {
@@ -2451,7 +2466,7 @@ async function selectSession(id: string, focusComposer = false, preservePrevious
   if (changingTask) run(restoreSelectedFile());
   const requestedMessages = state.messages;
   const requestedStream = state.streams.get(id), requestedFinishing = finishingStreams.get(id);
-  stickToBottom = true; render();
+  readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true; render();
   if (remembered) stickTranscript();
   if (focusComposer) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
   let page: MessagePage, details: Session;
@@ -3034,7 +3049,7 @@ async function send(): Promise<void> {
     if (state.drafts.get(s.id) === draft) state.drafts.delete(s.id);
     const sent = sentPrompt(s, content, sentAt);
     if (isCurrent()) {
-      stickToBottom = true;
+      readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true;
       state.messages = [...state.messages, sent];
       state.attachments = state.attachments.filter(path => !filePaths.includes(path)); render();
       const sentRows = $('#transcript').querySelectorAll<HTMLElement>('.user-message');
@@ -4738,7 +4753,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     const sentField = prompt(); if (sentField?.dataset.sessionId === s.id && sentField.value === draft) sentField.value = '';
     if (state.drafts.get(s.id) === draft) state.drafts.delete(s.id);
     if (state.sessionId === s.id) {
-      stickToBottom = true; state.messages = [...state.messages, sent]; render();
+      readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true; state.messages = [...state.messages, sent]; render();
       const shown = $('#transcript').querySelectorAll<HTMLElement>('.user-message');
       if (shown.length) enterView(shown[shown.length - 1], 12);
     }

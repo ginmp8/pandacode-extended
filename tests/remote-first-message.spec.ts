@@ -59,11 +59,14 @@ test('the first prompt to another computer shows at once, with the start stages 
 
   // A follow-up on the mirror shows at once too, streams live, and ends with one copy.
   const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  await page.evaluate(() => { (window as any).__holdPreviewCompletion = true; });
   await prompt.fill('Now the fast suite');
   await prompt.press('Enter');
   await expect(userMessages(page, 'Now the fast suite')).toHaveCount(1);
   await expect(page.locator('#stream-region .live-text')).toContainText('This is the browser preview');
   await expect(userMessages(page, 'Now the fast suite')).toHaveCount(1);
+  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
+  await page.evaluate(() => (window as any).__releasePreviewCompletion());
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
   await expect(page.locator('#transcript .user-message[data-message-id^="-"]')).toHaveCount(0);
   await expect(userMessages(page, 'Now the fast suite')).toHaveCount(1);

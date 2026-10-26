@@ -1291,7 +1291,19 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
           agent({ sessionId: s.id, kind: 'tool', text: 'Bash completed', tool: { ...tool } });
           activeTools.delete(s.id);
         }
-        if (cursor < output.length) timers.set(s.id, window.setTimeout(tick, 24)); else finish(s.id, output);
+        if (cursor < output.length) {
+          timers.set(s.id, window.setTimeout(tick, 24));
+        } else if ((window as any).__holdPreviewCompletion) {
+          // Preview-only test latch: leave the finished text visible until the test
+          // confirms it was streamed, rather than racing the transcript redraw.
+          (window as any).__holdPreviewCompletion = false;
+          (window as any).__releasePreviewCompletion = () => {
+            (window as any).__releasePreviewCompletion = undefined;
+            finish(s.id, output);
+          };
+        } else {
+          finish(s.id, output);
+        }
       };
       timers.set(s.id, window.setTimeout(tick, 200)); break;
     }

@@ -1,3 +1,14 @@
+test('Codex executable can be configured without changing other providers', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('region', { name: 'Settings', exact: true }).getByRole('tab', { name: 'Providers', exact: true }).click();
+  const form = page.locator('form[data-provider="codex"]');
+  await expect(page.locator('#codex-connection')).toContainText('official Codex app-server');
+  await page.locator('#codex-connection > details > summary').click();
+  await expect(form.getByLabel('Codex executable', { exact: true })).toBeVisible();
+  await expect(form.getByRole('button', { name: 'Apply', exact: true })).toBeVisible();
+});
+
 import { expect, test, type Page } from '@playwright/test';
 
 test('provider connections show Claude credential conflicts and let users prefer the saved login', async ({ page }) => {

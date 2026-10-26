@@ -10,9 +10,9 @@ test('compares upstream semver, not lexicographic strings', () => {
 });
 test('reports whether a later upstream release needs manual reconciliation', async () => {
   const fetcher = async () => ({ ok: true, json: async () => ({ tag_name: 'v0.3.48' }) });
-  assert.deepEqual(await checkUpstream(fetcher), { latest: 'v0.3.48', tracked: '0.3.47', behind: true });
-  const same = async () => ({ ok: true, json: async () => ({ tag_name: 'v0.3.47' }) });
-  assert.equal((await checkUpstream(same)).behind, false);
+  assert.deepEqual(await checkUpstream(fetcher), { latest: 'v0.3.48', tracked: '0.3.48', behind: false });
+  const same = async () => ({ ok: true, json: async () => ({ tag_name: 'v0.3.49' }) });
+  assert.equal((await checkUpstream(same)).behind, true);
 });
 test('fails rather than interpreting malformed or unavailable upstream metadata as current', async () => {
   await assert.rejects(checkUpstream(async () => ({ ok: false, status: 403 })), /HTTP 403/);

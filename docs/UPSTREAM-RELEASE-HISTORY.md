@@ -1,6 +1,6 @@
 # PandaCode Extended — original upstream release history
 
-An upstream PandaCode release note describes the original project. Versions `0.3.29`–`0.3.47` are retained as upstream references; the [0.5.0 integration coverage](upstream-integration-0.5.0.md) separately maps the implemented `0.3.42`–`0.3.47` changes and Extended differences. See [Extended source releases](https://github.com/ginmp8/pandacode-extended/releases) for published builds/tags and [upstream releases](https://github.com/aicodeking/pandacode/releases) for original release notes.
+An upstream PandaCode release note describes the original project. Versions `0.3.29`–`0.3.48` are retained as upstream references; the [0.5.0 integration coverage](upstream-integration-0.5.0.md) separately maps the implemented `0.3.42`–`0.3.47` changes and Extended differences. See [Extended source releases](https://github.com/ginmp8/pandacode-extended/releases) for published builds/tags and [upstream releases](https://github.com/aicodeking/pandacode/releases) for original release notes.
 
 | Upstream reference | Note | Extended status |
 |---|---|---|
@@ -23,7 +23,8 @@ An upstream PandaCode release note describes the original project. Versions `0.3
 | 0.3.45 | [Upstream 0.3.45](../releases/0.3.45.md) | Sidebar sections, inspector tabs and inline diffs in Extended 0.5.0 |
 | 0.3.46 | [Upstream 0.3.46](../releases/0.3.46.md) | Immediate remote prompts and stream continuity in Extended 0.5.0 |
 | 0.3.47 | [Upstream 0.3.47](../releases/0.3.47.md) | Richer Connect task/team data, paging and bounded read concurrency in Extended 0.5.0 |
+| 0.3.48 | [Upstream 0.3.48](../releases/0.3.48.md) | Centered harness handoff disclosure in Extended 0.5.1 |
 
-The current Extended source candidate is [`0.5.0+pc.0.3.47`](../releases/extended/0.5.0.md), while original source ancestry remains upstream `0.3.28`. Its [integration record](upstream-integration-0.5.0.md) identifies the reviewed inputs, feature paths and verification requirements. Full upstream parity remains unclaimed. The published `0.4.0` note and legacy Extended notes stay in [`releases/extended/`](../releases/extended/). [`HARDENED-REVISION.json`](../HARDENED-REVISION.json) and the [0.3.42 validation report](../security-review/0.3.42-hardened/REPORT.md) retain their historical bytes and do not attest this candidate's test results.
+The current Extended source candidate is [`0.5.1+pc.0.3.48`](../releases/extended/0.5.1.md), while original source ancestry remains upstream `0.3.28`. Its [incremental integration record](upstream-integration-0.5.1.md) identifies the reviewed inputs, feature paths and verification requirements. Full upstream parity remains unclaimed. The published `0.4.0` note and legacy Extended notes stay in [`releases/extended/`](../releases/extended/). [`HARDENED-REVISION.json`](../HARDENED-REVISION.json) and the [0.3.42 validation report](../security-review/0.3.42-hardened/REPORT.md) retain their historical bytes and do not attest this candidate's test results.
 
 The [read-only upstream version watch](../.github/workflows/upstream-version-watch.yml) checks GitHub's latest official stable tag daily and fails if a newer version exists. It never updates dependencies, merges code, runs upstream executables or publishes a release automatically. Each new release requires an independently reviewed code integration, tests and explicit publication decision.

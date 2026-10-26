@@ -279,7 +279,7 @@ static GRANTS: Mutex<Option<(std::path::PathBuf, Grants)>> = Mutex::new(None);
 /// must never reuse another directory's in-memory authorization.
 fn with<R>(dir: &Path, f: impl FnOnce(&mut Grants) -> R) -> Result<R> {
     let mut guard = GRANTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.as_ref().is_none_or(|(loaded, _)| loaded != dir) {
+    if guard.as_ref().is_none_or(|(loaded, _)| loaded.as_path() != dir) {
         *guard = Some((dir.to_owned(), Grants::load(dir)));
     }
     let grants = &mut guard.as_mut().expect("grant store initialized").1;

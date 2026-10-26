@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "product": "PandaCode Extended",
-  "extended_version": "0.5.0",
-  "tracked_upstream_version": "0.3.47",
+  "extended_version": "0.5.1",
+  "tracked_upstream_version": "0.3.48",
   "source_base_upstream_version": "0.3.28",
   "upstream_code_rebased": false,
   "full_upstream_parity": false,
-  "display_version": "0.5.0+pc.0.3.47",
-  "release_note": "releases/extended/0.5.0.md",
+  "display_version": "0.5.1+pc.0.3.48",
+  "release_note": "releases/extended/0.5.1.md",
   "reviewed_upstream_range": {
     "from": "0.3.42",
-    "through": "0.3.47"
+    "through": "0.3.48"
   },
   "integration_provenance": {
     "extended_base_commit": "5d4cb69b0a97c46eef544303137c73a81f4c5b59",
@@ -39,5 +39,16 @@
     "release_evidence": "docs/upstream-release-evidence-before-0.3.28.json",
     "release_evidence_sha256": "4a9d40bf2b695b0c533fc15eaac026878603d24d712693fcc43b10f835d44720",
     "issue": "https://github.com/ginmp8/pandacode-extended/issues/26"
+  },
+  "incremental_upstream_review": {
+    "from": "0.3.47",
+    "through": "0.3.48",
+    "extended_base_commit": "430909614339c58ac4a5beea4baa2707f2af27da",
+    "upstream_from_commit": "4187553cb48db96657609948f6b0904556845d45",
+    "upstream_through_commit": "9cc1a9a58d259f7316e4f3ad621e8ca120358d89",
+    "source_note": "releases/0.3.48.md",
+    "source_note_blob_sha": "639bd02d0f5513aad54bd253c6f496676b824962",
+    "coverage_document": "docs/upstream-integration-0.5.1.md",
+    "issue": "https://github.com/ginmp8/pandacode-extended/issues/30"
   }
 }

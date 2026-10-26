@@ -43,6 +43,21 @@ export async function check(sourceRoot = root) {
   assert(history.upstream_code_rebased === false && history.feature_parity_with_upstream_0_3_42 === false, 'Legacy provenance claim drift');
   const range = meta.reviewed_upstream_range;
   assert(range?.from === history.tracked_upstream_version && range.through === meta.tracked_upstream_version, 'Reviewed upstream range drift');
+  const incremental = meta.incremental_upstream_review;
+  assert(incremental?.from === '0.3.47' && incremental?.through === meta.tracked_upstream_version
+    && incremental.extended_base_commit === '430909614339c58ac4a5beea4baa2707f2af27da'
+    && incremental.upstream_from_commit === '4187553cb48db96657609948f6b0904556845d45'
+    && incremental.upstream_through_commit === '9cc1a9a58d259f7316e4f3ad621e8ca120358d89', 'Incremental upstream identity drift');
+  assert(incremental.source_note === 'releases/0.3.48.md'
+    && incremental.source_note_blob_sha === '639bd02d0f5513aad54bd253c6f496676b824962'
+    && incremental.coverage_document === 'docs/upstream-integration-0.5.1.md', 'Incremental upstream evidence path drift');
+  const incrementNote = await read(incremental.source_note);
+  const noteBlob = createHash('sha1').update('blob ' + Buffer.byteLength(incrementNote) + '\0').update(incrementNote).digest('hex');
+  assert(noteBlob === incremental.source_note_blob_sha, 'Incremental upstream source note changed');
+  const incrementalCoverage = await read(incremental.coverage_document);
+  for (const identity of [incremental.extended_base_commit, incremental.upstream_from_commit, incremental.upstream_through_commit, incremental.source_note_blob_sha]) {
+    assert(incrementalCoverage.includes(identity), 'Incremental coverage omits source identity');
+  }
   const [major, minor, first] = upstreamReference(range.from).split('.').map(Number);
   const [lastMajor, lastMinor, last] = upstreamReference(range.through).split('.').map(Number);
   assert(major === lastMajor && minor === lastMinor && last >= first && last - first <= 1000, 'Invalid reviewed upstream range');

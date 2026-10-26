@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { check } from './check-hardened-sync.mjs';
 
 test('Extended core/display version, historical ancestry, layout patch and separated release histories stay consistent', async () => {
-  assert.deepEqual(await check(), { version: '0.5.1', display: '0.5.1+pc.0.3.48', upstream: '0.3.48', sourceBase: '0.3.28', upstreamNotes: 98, extendedNotes: 9 });
+  assert.deepEqual(await check(), { version: '0.5.2', display: '0.5.2+pc.0.3.48', upstream: '0.3.48', sourceBase: '0.3.28', upstreamNotes: 98, extendedNotes: 10 });
 });
 
 const source = new URL('../../', import.meta.url);

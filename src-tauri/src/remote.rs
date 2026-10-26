@@ -92,6 +92,8 @@ pub(crate) struct Inner {
     presence: bool,
     /// Outstanding calls to hosts: request id → (device id, reply).
     pending: HashMap<String, (String, Reply)>,
+    /// Pairing responses can arrive before trust, but only for the exact request and key.
+    pairing_pending: HashMap<String, (String, String)>,
     subscribers: HashMap<String, Subscriber>,
     /// A flush of subscriber events is scheduled.
     flushing: bool,
@@ -115,6 +117,7 @@ impl Inner {
     fn fail_pending(&mut self, device: Option<&str>, error: &str) {
         let ids: Vec<String> = self.pending.iter().filter(|(_, (d, _))| device.is_none_or(|device| d == device)).map(|(id, _)| id.clone()).collect();
         for id in ids {
+            self.pairing_pending.remove(&id);
             if let Some((_, reply)) = self.pending.remove(&id) {
                 let _ = reply.send(Err(error.to_owned()));
             }
@@ -125,6 +128,7 @@ impl Inner {
     fn fail_ref(&mut self, to: &str, reference: Option<&str>, error: &str) {
         let Some(id) = reference else { return self.fail_pending(Some(to), error) };
         if self.pending.get(id).is_some_and(|(device, _)| device == to) {
+            self.pairing_pending.remove(id);
             if let Some((_, reply)) = self.pending.remove(id) {
                 let _ = reply.send(Err(error.to_owned()));
             }
@@ -146,6 +150,19 @@ impl Inner {
     fn authenticated(&self, device_id: &str, received_key: &str) -> bool {
         self.settings.is_trusted(device_id, received_key)
             && self.devices.iter().any(|device| device.id == device_id && device.public_key == received_key)
+    }
+
+    /// Incoming events and ordinary results always require current pinned trust.
+    /// The one exception is a response to an explicitly initiated pairing-code
+    /// redemption, bound to its request ID, device ID and unchanged presence key.
+    fn allows_incoming(&self, from: &str, key: &str, kind: &str, id: Option<&str>) -> bool {
+        if self.authenticated(from, key) { return true; }
+        if kind != "res" { return false; }
+        id.is_some_and(|id| {
+            self.pending.get(id).is_some_and(|(device, _)| device == from)
+                && self.pairing_pending.get(id).is_some_and(|(device, expected)| device == from && expected == key)
+                && self.devices.iter().any(|device| device.id == from && device.public_key == key && !key.is_empty())
+        })
     }
 
     /// Forgets the sign-in and stops the socket. With `used`, only while that is still the
@@ -231,6 +248,7 @@ impl Remote {
             "device": {"id": inner.settings.device_id, "name": config::device_name(), "fingerprint": fingerprint},
             "hostEnabled": inner.settings.host_enabled,
             "allowFullAccess": inner.settings.allow_full_access,
+            "directRoutes": routes::enabled(&self.dir),
             "connected": inner.connected,
         });
         if let Some(account) = &inner.settings.account {
@@ -342,6 +360,22 @@ async fn retry_token(app: tauri::AppHandle) {
     }
 }
 
+/// Cross-file revocation: disable effective permission immediately under Remote's
+/// lock, record a denial fence, save the legacy state, update scoped grants, then
+/// remove the fence. An interrupted step never claims success or reopens on boot.
+fn persist_scoped_revocation(
+    state: &Remote,
+    inner: &mut Inner,
+    next: config::Settings,
+    update_scopes: impl FnOnce(&std::path::Path) -> Result<()>,
+) -> Result<()> {
+    inner.settings = next.clone();
+    config::begin_lockdown(&state.dir)?;
+    config::save(&state.dir, &next)?;
+    update_scopes(&state.dir)?;
+    config::end_lockdown(&state.dir)
+}
+
 /// Forget authorization in memory immediately, and persist a denial fence before
 /// returning to a local UI. A failed write is an error, never a successful sign-out.
 fn sign_out_local_checked(app: &tauri::AppHandle, used: Option<&str>) -> Result<()> {
@@ -354,7 +388,7 @@ fn sign_out_local_checked(app: &tauri::AppHandle, used: Option<&str>) -> Result<
         next.host_enabled = false;
         next.allow_full_access = false;
         next.trusted.clear();
-        config::update_access(&state.dir, &mut inner.settings, next, true)
+        persist_scoped_revocation(&state, &mut inner, next, grants::clear_on_sign_out)
     };
     secret_store::remove(config::SERVICE, &state.accounts.token);
     emit_status(app);
@@ -531,7 +565,11 @@ pub async fn remote_set_full_access(app: tauri::AppHandle, enabled: bool) -> Res
         let mut inner = state.lock();
         let mut settings = inner.settings.clone();
         settings.allow_full_access = enabled;
-        config::update_access(&state.dir, &mut inner.settings, settings, !enabled)
+        if enabled {
+            config::update_access(&state.dir, &mut inner.settings, settings, false)
+        } else {
+            persist_scoped_revocation(&state, &mut inner, settings, grants::downgrade_full_access)
+        }
     };
     emit_status(&app);
     result?;
@@ -578,7 +616,12 @@ pub async fn remote_set_trusted(app: tauri::AppHandle, device_id: String, truste
         } else {
             next.trusted.remove(&device_id);
         }
-        let result = config::update_access(&state.dir, &mut inner.settings, next, !trusted);
+        let result = if trusted {
+            config::update_access(&state.dir, &mut inner.settings, next, false)
+        } else {
+            inner.fail_pending(Some(&device_id), "This computer is no longer trusted.");
+            persist_scoped_revocation(&state, &mut inner, next, |dir| grants::revoke_legacy_trust(dir, &device_id))
+        };
         if !trusted {
             inner.subscribers.remove(&device_id);
             inner.uploads.forget(&device_id);
@@ -614,7 +657,8 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
             let mut inner = state.lock();
             let mut next = inner.settings.clone();
             next.trusted.remove(&device_id);
-            let result = config::update_access(&state.dir, &mut inner.settings, next, true);
+            inner.fail_pending(Some(&device_id), "This computer was revoked.");
+            let result = persist_scoped_revocation(&state, &mut inner, next, |dir| grants::revoke_legacy_trust(dir, &device_id));
             inner.devices.retain(|device| device.id != device_id);
             inner.subscribers.remove(&device_id);
             inner.uploads.forget(&device_id);
@@ -738,6 +782,31 @@ mod tests {
 #[cfg(test)]
 mod permission_regression_tests {
     use super::*;
+
+    #[test]
+    fn revoked_device_cannot_send_events_or_responses_to_pending_calls() {
+        let mut inner = Inner::default();
+        inner.devices.push(Device {
+            id: "peer".into(), name: "Test peer".into(), platform: "test".into(),
+            public_key: "key-1".into(), host: true, online: true, last_seen: Value::Null,
+        });
+        inner.settings.trusted.insert("peer".into(), "key-1".into());
+        assert!(inner.allows_incoming("peer", "key-1", "event", None));
+        assert!(inner.allows_incoming("peer", "key-1", "res", Some("call")));
+        inner.settings.trusted.clear();
+        assert!(!inner.allows_incoming("peer", "key-1", "event", None));
+        assert!(!inner.allows_incoming("peer", "key-1", "res", Some("call")));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        inner.pending.insert("pair-1".into(), ("peer".into(), tx));
+        inner.pairing_pending.insert("pair-1".into(), ("peer".into(), "key-1".into()));
+        assert!(inner.allows_incoming("peer", "key-1", "res", Some("pair-1")));
+        assert!(!inner.allows_incoming("peer", "key-1", "event", Some("pair-1")));
+        assert!(!inner.allows_incoming("peer", "key-2", "res", Some("pair-1")));
+        inner.devices[0].public_key = "key-2".into();
+        assert!(!inner.allows_incoming("peer", "key-1", "res", Some("pair-1")));
+        inner.fail_pending(Some("peer"), "revoked");
+        assert!(inner.pairing_pending.is_empty());
+    }
 
     #[test]
     fn stale_or_missing_displayed_fingerprint_never_trusts_a_new_key() {

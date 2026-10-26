@@ -15,7 +15,7 @@ export function previewDiagnostics(command: string, args: Record<string, any>): 
     { device: 'Travel laptop', route: 'relay', state: 'failed', rttMs: null, since: now - 3_600_000, lastError: 'That computer is offline.' },
   ];
   const events = [
-    { at: now - 5_000, kind: 'route.direct', detail: 'Studio iMac up at 192.168.1.20' },
+    { at: now - 5_000, kind: 'route.direct', detail: 'Studio iMac up at [ip]' },
     { at: now - 60_000, kind: 'socket.open', detail: 'relay.example.com' },
     { at: now - 61_000, kind: 'socket.connecting', detail: 'attempt 2' },
     { at: now - 120_000, kind: 'socket.close', detail: 'closed by peer' },

@@ -20,9 +20,27 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
   const failure = (title: string, detail: string) => `<div class="remote-load-error" role="alert">${icon('alert')}<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span><button type="button" class="secondary-button" data-retry>Retry</button></div>`;
   const grantOf = (id: string) => grants.find(grant => grant.deviceId === id);
 
+  const optionList = (selected: GrantScope, block = false): string =>
+    [...APPROVE_SCOPES, ...(block ? [{ id: 'blocked' as GrantScope, label: 'Blocked' }] : [])]
+      .map(option => `<option value="${option.id}"${selected === option.id ? ' selected' : ''}>${option.label}</option>`).join('');
+  const codeText = (digits: string) => digits.slice(0, 3) + (digits.length > 3 ? ' ' + digits.slice(3, 6) : '');
+
   function deviceRow(device: RemoteDevice): string {
-    return `<div class="setting-row remote-device" data-device="${escape(device.id)}" data-fingerprint="${escape(device.fingerprint)}"><div><strong><span class="remote-dot" data-online="${device.online}" role="img" aria-label="${device.online ? 'Online' : 'Offline'}"></span>${escape(device.name)}${device.current ? ' <span class="remote-badge">This computer</span>' : ''}</strong><small>${escape(device.platform)} · ${device.host ? 'remote control on' : 'remote control off'} · key <code>${escape(device.fingerprint)}</code></small></div>${device.current ? '' : `<label class="remote-trust"><span>Trusted ${infoMark(TRUST_TIP, 'About trusting a computer')}</span><input type="checkbox" class="settings-switch" data-trust="${escape(device.id)}" aria-label="Trusted: ${escape(device.name)}" ${device.trusted ? 'checked' : ''}></label>`}${device.current ? '' : `<button type="button" class="secondary-button" data-revoke="${escape(device.id)}" aria-label="Revoke ${escape(device.name)}">Revoke</button>`}</div>`;
+    const grant = grantOf(device.id);
+    const pending = !device.current && grant?.scope === 'pending';
+    const waiting = pending && grant?.requested;
+    const scope = grant?.scope ?? (device.trusted ? 'control' : 'pending');
+    const name = escape(device.name);
+    const key = escape(groupFingerprint(grant?.fingerprint || device.fingerprint));
+    const actions = device.current ? '' : pending
+      ? `<select data-pick="${escape(device.id)}" aria-label="Approve ${name} as">${optionList((picks[device.id] as GrantScope) || 'control')}</select><button type="button" class="primary-button" data-approve="${escape(device.id)}" aria-label="Approve ${name}">Approve</button><button type="button" class="secondary-button" data-block="${escape(device.id)}" aria-label="Block ${name}">Block</button>`
+      : `<select data-scope="${escape(device.id)}" aria-label="Access for ${name}"${grant ? '' : ' disabled'}>${optionList(scope, true)}</select><button type="button" class="secondary-button" data-revoke="${escape(device.id)}" aria-label="Revoke ${name}">Revoke</button>`;
+    const trustToggle = device.current ? '' : `<label class="remote-trust"><span>Trusted</span><input type="checkbox" class="settings-switch" data-trust="${escape(device.id)}" aria-label="Trusted: ${name}" ${device.trusted ? 'checked' : ''}></label>`;
+    return `<div class="setting-row remote-device${waiting ? ' remote-pending' : ''}" data-device="${escape(device.id)}" data-fingerprint="${escape(grant?.fingerprint || device.fingerprint)}">
+      <div class="remote-device-identity"><strong><span class="remote-dot" data-online="${device.online}" role="img" aria-label="${device.online ? 'Online' : 'Offline'}"></span>${name}${device.current ? ' <span class="remote-badge">This computer</span>' : ''}</strong><small>${waiting ? 'asks for access · ' : pending ? 'not approved · ' : ''}${escape(device.platform)} · key <code>${key}</code></small></div>
+      ${device.current ? '' : `<div class="remote-device-actions">${trustToggle}${actions}</div>`}</div>`;
   }
+
   function body(): string {
     if (!status) {
       if (statusError) return failure('Couldn’t load remote access.', statusError);
@@ -31,14 +49,30 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     if (!status) return failure('Couldn’t load remote access.', 'Try again.');
     if (!status.configured) return '<p class="remote-note" role="status">Remote access is not configured in this build.</p>';
     if (!status.signedIn) {
-      const flow = code ? `<div class="remote-code"><p>Enter this code at <strong>${escape(code.verificationUri)}</strong>:</p><div class="remote-code-row"><output class="remote-user-code" aria-label="Device code">${escape(code.userCode)}</output><button type="button" class="secondary-button" data-copy>${icon('copy')}Copy code</button></div><p class="remote-note" role="status">Waiting for you to approve in the browser… The code expires at ${new Date(expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p><button type="button" class="secondary-button" data-cancel>Cancel</button></div>` : '';
+      const flow = code ? `<div class="remote-code"><p>Enter this code at <strong>${escape(code.verificationUri)}</strong>:</p><div class="remote-code-row"><output class="remote-user-code" aria-label="Device code">${escape(code.userCode)}</output><button type="button" class="secondary-button" data-copy> ${icon('copy')}Copy code</button></div><p class="remote-note" role="status">Waiting for you to approve in the browser… The code expires at ${new Date(expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p><button type="button" class="secondary-button" data-cancel>Cancel</button></div>` : '';
       return `<div class="setting-row"><div><strong>PandaCode Connect</strong><small>Sign in with GitHub to reach your other computers. Task content is end-to-end encrypted; the relay sees only ciphertext.</small></div><button type="button" class="secondary-button" data-sign-in ${signingIn ? 'disabled' : ''}>${icon('github')}Sign in with GitHub</button></div>${flow}`;
     }
-    return `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Signed in with GitHub · ${status.connected ? 'connected' : 'connecting…'}</small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
+    const ordered = [...devices].sort((a, b) => Number(grantOf(b.id)?.scope === 'pending' && grantOf(b.id)?.requested) - Number(grantOf(a.id)?.scope === 'pending' && grantOf(a.id)?.requested));
+    const pairable = devices.filter(device => !device.current && device.host);
+    if (!pairable.some(device => device.id === pairTarget)) pairTarget = pairable[0]?.id ?? '';
+    const pairingForm = `<div class="remote-pairing-form">
+      <h3 class="settings-heading">Pair another computer</h3>
+      <div class="setting-row"><label for="remote-pair-target">Computer to pair with</label><div class="remote-device-actions">
+      <select id="remote-pair-target" aria-label="Computer to pair with">${pairable.map(device => `<option value="${escape(device.id)}"${device.id === pairTarget ? ' selected' : ''}>${escape(device.name)}</option>`).join('')}</select>
+      <input id="remote-pair-input" class="remote-pair-input" type="text" inputmode="numeric" autocomplete="off" maxlength="7" aria-label="Pairing code from the other computer" placeholder="000 000" value="${escape(codeText(pairInput))}">
+      <button type="button" class="secondary-button" data-pair ${pairInput.length !== 6 || pairing || !pairTarget ? 'disabled' : ''}>Pair</button></div></div>
+      ${status.hostEnabled ? `<div class="setting-row"><div><strong>Allow pairing with this computer</strong><small>A six-digit, single-use code is valid for 10 minutes.</small></div><div class="remote-device-actions"><select id="remote-code-scope" aria-label="Access the pairing code gives">${optionList(codeScope)}</select><button type="button" class="secondary-button" data-code-new>Show pairing code</button></div></div>${pairCode ? `<div class="remote-code"><output aria-label="Pairing code" class="remote-user-code">${escape(codeText(pairCode.code))}</output><small>Gives ${escape(SCOPE_LABELS[pairCode.scope].toLowerCase())} once. Expires at ${new Date(pairCode.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</small><button type="button" class="secondary-button" data-code-cancel>Cancel</button></div>` : ''}` : ''}
+    </div>`;
+    return `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Signed in with GitHub · ${status.connected ? 'connected' : 'connecting…'} · key <code class="remote-key">${escape(groupFingerprint(status.device.fingerprint))}</code></small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
       <div class="setting-row"><div><strong>Allow remote control of this computer ${infoMark(ALLOW_TIP, 'About remote control')}</strong><small>Your other signed-in computers can see and drive tasks here.</small></div><input type="checkbox" class="settings-switch" id="remote-host" aria-label="Allow remote control of this computer" ${status.hostEnabled ? 'checked' : ''}></div>
-      <div class="setting-row"><div><strong>Full access for remote tasks ${infoMark(FULL_ACCESS_TIP, 'About Full access for remote tasks')}</strong><small>Allow trusted computers to choose Full access or Claude Code Approve for me explicitly.</small></div><input type="checkbox" class="settings-switch" id="remote-full-access" aria-label="Full access for remote tasks" ${status.allowFullAccess ? 'checked' : ''}></div>
-      <h3 class="settings-heading">Devices</h3><div class="settings-group remote-devices">${devices.length ? devices.map(deviceRow).join('') : '<p class="remote-note">No devices yet.</p>'}</div>`;
+      <div class="setting-row"><div><strong>Full access for remote tasks ${infoMark(FULL_ACCESS_TIP, 'About Full access for remote tasks')}</strong><small>Separately authorize Full access on this computer; disabling removes stored Full grants.</small></div><input type="checkbox" class="settings-switch" id="remote-full-access" aria-label="Full access for remote tasks" ${status.allowFullAccess ? 'checked' : ''}></div>
+      <div class="setting-row"><div><strong>Use direct LAN/Tailscale connections</strong><small>Optional: probe private addresses only for devices trusted on this computer; relay remains the fallback.</small></div><input type="checkbox" class="settings-switch" id="remote-direct-routes" aria-label="Use direct LAN/Tailscale connections" ${status.directRoutes ? 'checked' : ''}></div>
+      <h3 class="settings-heading">Devices ${infoMark(SCOPE_HELP, 'About device access')}</h3>
+      ${devicesError ? failure('Couldn’t load devices.', devicesError) : grantsError ? failure('Couldn’t load device access.', grantsError) : ''}
+      <div class="settings-group remote-devices">${ordered.length ? ordered.map(deviceRow).join('') : '<p class="remote-note">No devices yet.</p>'}</div>
+      ${pairingForm}`;
   }
+
   function render(): void {
     if (disposed) return;
     const active = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement : undefined;
@@ -116,11 +150,26 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
       void host.call<{ scope: GrantScope }>('remote_pair_redeem', { deviceId: pairTarget, code: pairInput }).then(result => { pairInput = ''; host.notify(`Paired with ${name}: ${(SCOPE_LABELS[result.scope] ?? result.scope).toLowerCase()}`); }, e => { error = message(e); }).finally(() => { pairing = false; render(); });
     }
   });
+  root.addEventListener('change', event => {
+    const control = event.target as HTMLInputElement | HTMLSelectElement;
+    if (control.dataset.scope) setGrant(control.dataset.scope, control.value);
+    else if (control.dataset.pick) picks[control.dataset.pick] = control.value;
+    else if (control.id === 'remote-code-scope') codeScope = control.value as GrantScope;
+    else if (control.id === 'remote-pair-target') pairTarget = control.value;
+  });
   root.addEventListener('input', event => {
     const input = event.target as HTMLInputElement;
-    if (input.dataset.trust) void host.call<RemoteDevice[]>('remote_set_trusted', { deviceId: input.dataset.trust, trusted: input.checked, ...(input.checked ? { expectedFingerprint: input.closest<HTMLElement>('.remote-device')?.dataset.fingerprint } : {}) }).then(next => { devices = next; render(); }, e => { input.checked = !input.checked; fail(e); });
+    if (input.id === 'remote-pair-input') {
+      pairInput = input.value.replace(/\D/g, '').slice(0, 6);
+      input.value = codeText(pairInput);
+      input.setSelectionRange(input.value.length, input.value.length);
+      const pair = main.querySelector<HTMLButtonElement>('[data-pair]');
+      if (pair) pair.disabled = pairInput.length !== 6 || pairing || !pairTarget;
+    }
+    else if (input.dataset.trust) void host.call<RemoteDevice[]>('remote_set_trusted', { deviceId: input.dataset.trust, trusted: input.checked, ...(input.checked ? { expectedFingerprint: input.closest<HTMLElement>('.remote-device')?.dataset.fingerprint } : {}) }) .then(next => { devices = next; void loadGrants().then(render); }, e => { input.checked = !input.checked; fail(e); });
     else if (input.id === 'remote-host') void host.call<RemoteStatus>('remote_set_host_enabled', { enabled: input.checked }).then(next => { apply(next); render(); }, e => { input.checked = !input.checked; fail(e); });
-    else if (input.id === 'remote-full-access') void host.call<RemoteStatus>('remote_set_full_access', { enabled: input.checked }).then(next => { apply(next); render(); }, e => { input.checked = !input.checked; fail(e); });
+    else if (input.id === 'remote-full-access') void host.call<RemoteStatus>('remote_set_full_access', { enabled: input.checked }).then(next => { apply(next); void loadGrants().then(render); }, e => { input.checked = !input.checked; fail(e); });
+    else if (input.id === 'remote-direct-routes') void host.call<RemoteStatus>('remote_set_direct_routes', { enabled: input.checked }).then(next => { apply(next); render(); }, e => { input.checked = !input.checked; fail(e); });
   });
   const unlisten: Promise<() => void>[] = [
     host.listen('remote://status', next => { if (!signingIn || next.signedIn) { apply(next); render(); } }),

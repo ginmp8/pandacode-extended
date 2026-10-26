@@ -100,6 +100,46 @@ fn load(dir: &Path) -> Settings {
     std::fs::read_to_string(dir.join(FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
 
+pub(super) fn enabled(dir: &Path) -> bool {
+    load(dir).direct_routes
+}
+
+/// Store explicit local opt-in durably before making the direct route available.
+fn save_settings(dir: &Path, settings: &Settings) -> Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(settings).map_err(|e| e.to_string())?;
+    let temp = dir.join(format!("{FILE}.tmp"));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, dir.join(FILE))?;
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(temp);
+        return Err(format!("Could not save the direct-route setting: {error}"));
+    }
+    Ok(())
+}
+
+/// Local Tauri IPC only: never available through a remote host method.
+#[tauri::command]
+pub async fn remote_set_direct_routes(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
+    let state = remote(&app);
+    // Serialize successive switches with other Connect state transitions.
+    {
+        let _inner = state.lock();
+        let mut next = load(&state.dir);
+        next.direct_routes = enabled;
+        save_settings(&state.dir, &next)?;
+    }
+    super::emit_status(&app);
+    Ok(state.status())
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -711,7 +751,16 @@ async fn incoming(app: tauri::AppHandle, stream: TcpStream, peer: SocketAddr, ro
     let me = remote(&app).device_id();
     let shaken = tokio::time::timeout(HANDSHAKE, async {
         let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(limits())).await.map_err(|_| REFUSED.to_owned())?;
-        let (device, _) = accept(&mut ws, &me, &route, |id| socket::peer_key(&app, id).ok().map(|(key, _)| key), hellos()).await?;
+        let (device, _) = accept(&mut ws, &me, &route, |id| {
+            if super::grants::is_blocked(&app, id) { return None; }
+            let authorized = {
+                let state = remote(&app);
+                let inner = state.lock();
+                inner.settings.host_enabled && inner.devices.iter().any(|peer| peer.id == id && inner.settings.is_trusted(id, &peer.public_key))
+            };
+            if !authorized { return None; }
+            socket::peer_key(&app, id).ok().map(|(key, _)| key)
+        }, hellos()).await?;
         Ok::<_, String>((ws, device))
     })
     .await;
@@ -725,10 +774,15 @@ async fn incoming(app: tauri::AppHandle, stream: TcpStream, peer: SocketAddr, ro
 /// An authenticated link: registered (replacing any older one to the device), pumped, and on
 /// failure the device falls back to the relay at once.
 async fn run<S: AsyncRead + AsyncWrite + Unpin>(app: tauri::AppHandle, ws: WebSocketStream<S>, device: String, me: String, addr: SocketAddr, accepted: bool, generation: u64) {
+    // A direct connection must never become an authorization bypass. Recheck
+    // after the asynchronous handshake and refuse a device revoked in flight.
+    if super::grants::is_blocked(&app, &device) { return; }
     let public_key = {
         let state = remote(&app);
         let inner = state.lock();
-        inner.devices.iter().find(|d| d.id == device).map(|d| d.public_key.clone()).unwrap_or_default()
+        inner.devices.iter()
+            .find(|d| d.id == device && inner.settings.is_trusted(&device, &d.public_key))
+            .map(|d| d.public_key.clone()).unwrap_or_default()
     };
     let (tx, rx) = mpsc::channel(OUTBOX);
     let id = {
@@ -792,7 +846,7 @@ fn probe(app: &tauri::AppHandle, host: &str) {
         let inner = state.lock();
         inner.devices.iter().any(|d| d.id == host && inner.settings.is_trusted(host, &d.public_key))
     };
-    if !trusted { return; }
+    if !trusted || super::grants::is_blocked(app, host) { return; }
     let Some((addrs, port, route, generation)) = routes().start_probe(host, Instant::now()) else { return };
     let key = match socket::peer_key(app, host) {
         Ok((key, _)) => key,
@@ -807,7 +861,7 @@ fn probe(app: &tauri::AppHandle, host: &str) {
             let inner = state.lock();
             inner.devices.iter().any(|d| d.id == host && inner.settings.is_trusted(&host, &d.public_key))
         };
-        if !authorized { return; }
+        if !authorized || super::grants::is_blocked(&app, &host) { return; }
         match race(&addrs, port, &me, &host, &key, &route).await {
             Ok((ws, addr)) => run(app, ws, host, me, addr, false, generation).await,
             Err(error) => {
@@ -939,6 +993,20 @@ mod tests {
         assert_eq!(picked, [ip("100.100.1.1"), ip("192.168.1.2"), ip("fd00::2")]);
         assert_eq!(pick_addrs((0..20u8).map(|n| IpAddr::V4(Ipv4Addr::new(10, 0, 0, n)))).len(), MAX_ADDRS);
         assert!(local_addrs().iter().all(|ip| announceable(*ip) && !ip.is_loopback()));
+    }
+
+    #[test]
+    fn direct_routes_need_explicit_local_opt_in_and_failed_writes_never_enable_them() {
+        let dir = std::env::temp_dir().join(format!("pandacode-direct-setting-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!enabled(&dir));
+        save_settings(&dir, &Settings { direct_routes: true }).unwrap();
+        assert!(enabled(&dir));
+        save_settings(&dir, &Settings { direct_routes: false }).unwrap();
+        assert!(!enabled(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(save_settings(&dir, &Settings { direct_routes: true }).is_err());
+        assert!(!enabled(&dir));
     }
 
     #[test]

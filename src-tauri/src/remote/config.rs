@@ -236,6 +236,9 @@ pub(crate) fn save(dir: &Path, settings: &Settings) -> crate::Result<()> {
 /// Serialize a permission mutation under the caller's Remote lock. Revocations
 /// take effect in memory immediately and remain denied across an interrupted save.
 pub(crate) fn update_access(dir: &Path, current: &mut Settings, next: Settings, revoke: bool) -> crate::Result<()> {
+    if !revoke && locked_down(dir) {
+        return Err("An interrupted Connect permission revocation must be completed before permissions can be granted again. Sign out locally and reconnect.".into());
+    }
     if revoke {
         *current = next.clone();
         begin_lockdown(dir)?;
@@ -485,6 +488,19 @@ mod tests {
         save(&dir, &saved).unwrap();
         end_lockdown(&dir).unwrap();
         assert_eq!(load(&dir), denied);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_persisted_denial_fence_cannot_be_undone_by_enabling_access() {
+        let dir = std::env::temp_dir().join(format!("pandacode-fence-enable-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        begin_lockdown(&dir).unwrap();
+        let mut state = Settings::default();
+        let next = Settings { host_enabled: true, allow_full_access: true, ..Default::default() };
+        assert!(update_access(&dir, &mut state, next, false).is_err());
+        assert!(!state.host_enabled && !state.allow_full_access);
+        assert!(locked_down(&dir));
         let _ = std::fs::remove_dir_all(dir);
     }
 

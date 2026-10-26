@@ -55,3 +55,62 @@ test('pairing approval sends the displayed full fingerprint, blocking requires n
     name: 'remote_set_device_grant', args: { deviceId: 'phone2', scope: 'blocked' },
   });
 });
+
+test('the local direct route setting is opt-in and can be disabled again', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Remote access' }).click();
+  const panel = page.getByRole('tabpanel', { name: 'Remote access' });
+  await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
+  await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  const direct = panel.getByRole('checkbox', { name: 'Use direct LAN/Tailscale connections' });
+  await expect(direct).not.toBeChecked();
+  await direct.check();
+  await expect(direct).toBeChecked();
+  await direct.uncheck();
+  await expect(direct).not.toBeChecked();
+});
+
+
+test('removing and restoring Trusted never silently restores a previous Full grant', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Remote access' }).click();
+  const panel = page.getByRole('tabpanel', { name: 'Remote access' });
+  await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
+  await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  const row = panel.locator('.remote-device[data-device="dev-studio"]');
+  const trusted = row.getByRole('checkbox', { name: 'Trusted: Studio iMac' });
+  await expect(trusted).toBeChecked();
+  await expect(row.getByRole('combobox', { name: 'Access for Studio iMac' })).toHaveValue('full');
+  await trusted.uncheck();
+  await expect(row.getByRole('button', { name: 'Approve Studio iMac' })).toBeVisible();
+  await trusted.check();
+  await expect(row.getByRole('button', { name: 'Approve Studio iMac' })).toBeVisible();
+  await row.getByRole('combobox', { name: 'Approve Studio iMac as' }).selectOption('control');
+  await row.getByRole('button', { name: 'Approve Studio iMac' }).click();
+  await expect(row.getByRole('combobox', { name: 'Access for Studio iMac' })).toHaveValue('control');
+});
+
+test('remote Full scopes require the separate local opt-in and are downgraded when it is turned off', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Remote access' }).click();
+  const panel = page.getByRole('tabpanel', { name: 'Remote access' });
+  await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
+  await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  const studio = panel.locator('.remote-device[data-device="dev-studio"]');
+  const select = studio.getByRole('combobox', { name: 'Access for Studio iMac' });
+  await expect(select).toHaveValue('full');
+  const full = panel.getByRole('checkbox', { name: 'Full access for remote tasks' });
+  await full.check();
+  await full.uncheck();
+  await expect(select).toHaveValue('control');
+  await full.check();
+  await expect(select).toHaveValue('control');
+  await select.selectOption('full');
+  await expect(select).toHaveValue('full');
+});

@@ -513,6 +513,35 @@ test.describe('native element picker script', () => {
 });
 
 
+test('the first task selection preserves a Browser tab opened during startup', async ({ page }) => {
+  await page.addInitScript(() => { (window as any).__holdInitialSessions = true; });
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const marker = /switch \\(command\\) \\{/;
+    expect(source).toMatch(marker);
+    await route.fulfill({ response, body: source.replace(marker, \`
+      if (command === 'list_sessions' && window.__holdInitialSessions) {
+        await new Promise(resolve => { window.__releaseInitialSessions = resolve; });
+      }
+      switch (command) {\`) });
+  });
+  await page.goto('/');
+  try {
+    await openBrowser(page);
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseInitialSessions)).toBe('function');
+  } finally {
+    // Always unblock the real preview command, including when the assertion fails.
+    await page.evaluate(() => {
+      (window as any).__holdInitialSessions = false;
+      (window as any).__releaseInitialSessions?.();
+    });
+  }
+  await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
+  await expect(browserUrl(page)).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Browser', exact: true })).toBeVisible();
+});
+
 test('Linux offers explicit system browsing without changing native Browser QA or file previews', async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Linux x86_64' }));
   await installPreviewProbe(page);

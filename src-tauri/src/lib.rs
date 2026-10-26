@@ -3458,6 +3458,7 @@ pub fn run() {
                 remote::grants::remote_pair_code,
                 remote::grants::remote_pair_code_cancel,
                 remote::grants::remote_pair_redeem,
+                remote::routes::remote_set_direct_routes,
                 remote::routes::remote_reconnect,
                 remote::diagnostics::remote_diagnostics,
                 remote::diagnostics::remote_diagnostics_export,

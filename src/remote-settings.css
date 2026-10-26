@@ -20,3 +20,21 @@
 .remote-key{font:.8rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text)}
 .remote-diagnostics-section{margin-top:1rem}
 .remote-device-actions :is(select,button,input):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* Compact one-line device controls, including approval waiting rows. */
+.remote-device{min-height:0!important;padding:5px 12px!important;gap:8px!important}
+.remote-device-identity{min-width:0;flex:1}
+.remote-device-identity strong,.remote-device-identity small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-device-identity small{color:var(--muted);font-size:.72rem}
+.remote-device-actions{min-width:0}
+.remote-device-actions select{min-width:90px}
+.remote-pairing-form .setting-row{min-width:0}
+.remote-pairing-form .remote-code{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.remote-pairing-form .remote-code small{font-size:.78rem;color:var(--muted);flex:1}
+.remote-code .remote-user-code{white-space:nowrap}
+@media(max-width:650px){
+  .remote-device{flex-wrap:wrap;min-height:auto!important}
+  .remote-device-actions{flex-wrap:wrap;max-width:100%}
+  .remote-device-actions select{flex:1}
+  .remote-pairing-form .setting-row{flex-wrap:wrap}
+}

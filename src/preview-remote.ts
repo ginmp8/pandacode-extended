@@ -1,13 +1,14 @@
 /** Browser preview for PandaCode Connect: in-memory sample account and computers, no network. Native builds use src-tauri/src/remote. */
 import type { RemoteDevice, RemoteSignIn, RemoteStatus, RemoteTarget } from './remote-types';
+import { downgradePreviewFullGrants, revokePreviewGrant } from './preview-grants';
 
 const THIS = 'dev-this';
-let signedIn = false, hostEnabled = false, allowFullAccess = false;
+let signedIn = false, hostEnabled = false, allowFullAccess = false, directRoutes = false;
 let devices: RemoteDevice[] = [], cancelSignIn: (() => void) | undefined;
 const offline = new Set<string>();
 const revoked = new Set<string>();
 const trusted = new Set<string>(['dev-studio', 'dev-laptop']);
-const status = (): RemoteStatus => ({ configured: true, signedIn, account: signedIn ? { login: 'octocat' } : undefined, device: { id: THIS, name: 'This Mac', fingerprint: '3fa91c07d2b64e584a810ea7b9c3d25f' }, hostEnabled, allowFullAccess, connected: signedIn });
+const status = (): RemoteStatus => ({ configured: true, signedIn, account: signedIn ? { login: 'octocat' } : undefined, device: { id: THIS, name: 'This Mac', fingerprint: '3fa91c07d2b64e584a810ea7b9c3d25f' }, hostEnabled, allowFullAccess, directRoutes, connected: signedIn });
 const sampleDevices = (): RemoteDevice[] => [
   { id: THIS, name: 'This Mac', platform: 'macOS', fingerprint: '3fa91c07d2b64e584a810ea7b9c3d25f', host: hostEnabled, online: true, trusted: true, lastSeen: Date.now(), current: true },
   { id: 'dev-studio', name: 'Studio iMac', platform: 'macOS', fingerprint: '9b02e4aa71c3d6053f102e49a8410b67', host: true, online: !offline.has('dev-studio'), trusted: trusted.has('dev-studio'), lastSeen: Date.now(), current: false },
@@ -21,6 +22,7 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
   const w = window as any;
   switch (command) {
     case 'remote_status':
+      w.__previewAllowFullAccess = allowFullAccess;
       if (w.__remoteStatusFailures > 0) { w.__remoteStatusFailures--; throw new Error('The relay is unavailable.'); }
       w.__remoteOnline = (id: string, online: boolean) => setPreviewOnline(id, online, emit);
       w.__remoteRevoke = (id: string) => { revoked.add(id); devices = sampleDevices(); emit('remote://presence', devices); };
@@ -33,7 +35,8 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
     case 'remote_sign_in_cancel': cancelSignIn?.(); cancelSignIn = undefined; return {};
     case 'remote_sign_out': signedIn = false; hostEnabled = false; devices = []; emit('remote://status', status()); return status();
     case 'remote_set_host_enabled': hostEnabled = Boolean(args.enabled); devices = sampleDevices(); emit('remote://presence', devices); return status();
-    case 'remote_set_full_access': allowFullAccess = Boolean(args.enabled); emit('remote://status', status()); return status();
+    case 'remote_set_full_access': allowFullAccess = Boolean(args.enabled); w.__previewAllowFullAccess = allowFullAccess; if (!allowFullAccess) downgradePreviewFullGrants(); emit('remote://status', status()); return status();
+    case 'remote_set_direct_routes': directRoutes = Boolean(args.enabled); emit('remote://status', status()); return status();
     case 'remote_devices': return devices = signedIn ? sampleDevices() : [];
     case 'remote_set_trusted': {
       const device = sampleDevices().find(d => d.id === args.deviceId && !d.current);
@@ -42,11 +45,12 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
         trusted.add(args.deviceId);
       } else {
         trusted.delete(args.deviceId);
+        revokePreviewGrant(args.deviceId);
       }
       ((window as any).__trustCalls ??= []).push({ ...args });
       return devices = sampleDevices();
     }
-    case 'remote_revoke_device': devices = devices.filter(d => d.id !== args.deviceId); emit('remote://presence', devices); return {};
+    case 'remote_revoke_device': revoked.add(args.deviceId); trusted.delete(args.deviceId); revokePreviewGrant(args.deviceId); devices = sampleDevices(); emit('remote://presence', devices); return {};
     // Other trusted computers with remote control on; preview.ts mocks remote_repo_check and remote_start_task.
     case 'remote_targets': return (signedIn ? sampleDevices() : []).filter(d => !d.current && d.host && d.trusted).map((d): RemoteTarget => ({ deviceId: d.id, name: d.name, platform: d.platform, online: d.online, lastSeen: d.lastSeen ?? null }));
     default: throw new Error(`Unknown preview command: ${command}`);

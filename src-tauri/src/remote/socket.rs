@@ -112,6 +112,7 @@ pub(super) fn current(app: &tauri::AppHandle, generation: u64) -> bool {
 fn fail_relayed(inner: &mut Inner) {
     let lost: Vec<String> = inner.pending.iter().filter(|(_, (device, _))| !routes::direct(device)).map(|(id, _)| id.clone()).collect();
     for id in lost {
+        inner.pairing_pending.remove(&id);
         if let Some((_, reply)) = inner.pending.remove(&id) {
             let _ = reply.send(Err(super::client::LOST.to_owned()));
         }
@@ -398,6 +399,12 @@ pub(super) fn sealed(app: &tauri::AppHandle, from: &str, to: &str, body: &str) {
     let Ok((key, authenticated_key)) = peer_key(app, from) else { return };
     let Ok(plain) = crypto::open(&key, from, to, body) else { return };
     let Ok(message) = serde_json::from_slice::<Value>(&plain) else { return };
+    if matches!(message["type"].as_str(), Some("res" | "event")) {
+        // Decryption proves a current presence key, not continued authorization.
+        // Pairing replies are the only narrowly tracked exception to pinned trust.
+        let allowed = remote(app).lock().allows_incoming(from, &authenticated_key, message["type"].as_str().unwrap_or_default(), message["id"].as_str());
+        if !allowed || super::grants::is_blocked(app, from) { return; }
+    }
     if matches!(message["type"].as_str(), Some("res" | "event")) && !fresh(app, from, &message) {
         return;
     }

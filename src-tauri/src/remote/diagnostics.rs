@@ -134,6 +134,21 @@ fn route_list(routes: &Value) -> Vec<Value> {
     }
 }
 
+/// Sanitize network details at the IPC boundary, not only when copying a report.
+fn sanitized_routes(value: &Value) -> Vec<Value> {
+    route_list(value).into_iter().map(|mut route| {
+        for field in ["deviceId", "device", "lastError"] {
+            if let Some(value) = route[field].as_str() {
+                route[field] = json!(scrub(value));
+            }
+        }
+        if !route["addr"].is_null() {
+            route["addr"] = json!("[redacted]");
+        }
+        route
+    }).collect()
+}
+
 fn route_connected(route: &Value) -> bool {
     matches!(route["state"].as_str(), Some("connected" | "direct" | "open" | "ready" | "active"))
 }
@@ -183,9 +198,9 @@ fn build_snapshot(app: &tauri::AppHandle) -> Value {
     let devices = remote.devices_view();
     let signed_in = status["signedIn"] == true;
     let connected = status["connected"] == true;
-    let routes = super::routes::route_states();
+    let routes = json!(sanitized_routes(&super::routes::route_states()));
     let log = lock();
-    let relay_url = super::config::build().map(|b| host_only(&b.relay)).unwrap_or_default();
+    let relay_url = super::config::build().map(|b| scrub(&host_only(&b.relay))).unwrap_or_default();
     let stages = derive_stages(signed_in, connected, log.last_error.as_deref(), &devices, &routes);
     json!({
         "relay": {
@@ -196,7 +211,7 @@ fn build_snapshot(app: &tauri::AppHandle) -> Value {
             "reconnects": log.reconnects,
         },
         "routes": routes,
-        "devices": devices.iter().map(|d| json!({"name": d["name"], "platform": d["platform"], "online": d["online"], "current": d["current"], "lastSeen": d["lastSeen"]})).collect::<Vec<_>>(),
+        "devices": devices.iter().map(|d| json!({"name": scrub(d["name"].as_str().unwrap_or_default()), "platform": scrub(d["platform"].as_str().unwrap_or_default()), "online": d["online"], "current": d["current"], "lastSeen": d["lastSeen"]})).collect::<Vec<_>>(),
         "stages": stages,
         "events": events_json(&log, SNAPSHOT_EVENTS),
     })
@@ -284,6 +299,19 @@ mod tests {
         assert_eq!(l.events[0].detail, "a1 direct via [ip]:4000");
         let long = report(&json!({"events": (0..20).map(|n| json!({"at": n, "kind": "route.up", "detail": format!("event {n}")})).collect::<Vec<_>>()}));
         assert!(long.contains("event 19") && long.contains("event 0"), "the export is not cut to one detail's length");
+    }
+
+    #[test]
+    fn diagnostic_ipc_never_exposes_private_addresses_or_secret_paths() {
+        let raw = json!([{
+            "deviceId": "peer", "device": "peer", "route": "relay", "state": "fallback",
+            "addr": "192.168.1.17:41001",
+            "lastError": "failed 10.1.1.12:4031 while opening /Users/alice/secret/file",
+        }]);
+        let routes = sanitized_routes(&raw);
+        let shown = serde_json::to_string(&routes).unwrap();
+        assert!(shown.contains("[redacted]"));
+        assert!(!shown.contains("192.168") && !shown.contains("10.1.1") && !shown.contains("/Users"), "{shown}");
     }
 
     #[test]

@@ -272,12 +272,17 @@ fn snapshot(app: &tauri::AppHandle) -> Snapshot {
     Snapshot { dir: state.dir.clone(), host: config::device_name(), peers }
 }
 
-static GRANTS: Mutex<Option<Grants>> = Mutex::new(None);
+static GRANTS: Mutex<Option<(std::path::PathBuf, Grants)>> = Mutex::new(None);
 
 /// Runs `f` on the loaded grants and saves them afterwards when it changed them.
+/// The cache is tied to the settings directory: tests and account migrations
+/// must never reuse another directory's in-memory authorization.
 fn with<R>(dir: &Path, f: impl FnOnce(&mut Grants) -> R) -> Result<R> {
     let mut guard = GRANTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let grants = guard.get_or_insert_with(|| Grants::load(dir));
+    if guard.as_ref().is_none_or(|(loaded, _)| loaded != dir) {
+        *guard = Some((dir.to_owned(), Grants::load(dir)));
+    }
+    let grants = &mut guard.as_mut().expect("grant store initialized").1;
     let original = grants.store.clone();
     let result = f(grants);
     if std::mem::take(&mut grants.dirty) {
@@ -328,6 +333,38 @@ fn sync_trust(app: &tauri::AppHandle, device: &str, scope: Scope, expected_finge
         updated.trusted.insert(device.to_owned(), key);
     }
     config::update_access(&state.dir, &mut inner.settings, updated, revoke)
+}
+
+/// Remove a revoked legacy trust grant from the independent scoped store before
+/// lifting the durability fence. Trusting the same key again is not a regrant.
+pub(crate) fn revoke_legacy_trust(dir: &Path, device: &str) -> Result<()> {
+    with(dir, |grants| {
+        if !grants.store.devices.get(device).is_some_and(|entry| entry.scope == Scope::Blocked) {
+            grants.store.devices.remove(device);
+        }
+        grants.dirty = true;
+    })
+}
+
+/// Disabling the local Full switch must not leave reusable Full grants on disk.
+pub(crate) fn downgrade_full_access(dir: &Path) -> Result<()> {
+    with(dir, |grants| {
+        for entry in grants.store.devices.values_mut() {
+            if entry.scope == Scope::Full {
+                entry.scope = Scope::Control;
+            }
+        }
+        grants.dirty = true;
+    })
+}
+
+/// Account sign-out invalidates scoped grants as well as the legacy trust map.
+pub(crate) fn clear_on_sign_out(dir: &Path) -> Result<()> {
+    with(dir, |grants| {
+        grants.store.devices.clear();
+        grants.code = None;
+        grants.dirty = true;
+    })
 }
 
 /// Called on every presence frame (never on the HTTP device list): the first one after an
@@ -381,15 +418,27 @@ pub(crate) fn redeem(app: &tauri::AppHandle, device: &str, params: &Value) -> Re
     let code = params["code"].as_str().filter(|code| code.len() <= 32).ok_or(INVALID_CODE)?;
     // The local Full-access switch is an admission gate, not a post-grant warning.
     // A revoked local switch must never leave a newly persisted Full grant behind.
-    let full_enabled = remote(app).lock().settings.allow_full_access;
-    let scope = with(&snap.dir, |grants| {
-        let current = grants.scope_of(peer);
-        let requested = grants.code.as_ref().map(|code| code.scope).unwrap_or_default();
-        if !full_enabled && (current == Scope::Full || requested == Scope::Full) {
-            return Err("Remote Full access is disabled on this computer.".to_owned());
+    let scope = {
+        let state = remote(app);
+        let inner = state.lock();
+        if !inner.settings.host_enabled {
+            return Err("Remote control is disabled on this computer.".into());
         }
-        grants.redeem(peer, code, chrono::Utc::now().timestamp())
-    })??;
+        // Serialize the Full-access switch and the grant write under Remote's lock.
+        // Also refuse a key that rotated after the initial pair.redeem admission.
+        if !inner.devices.iter().any(|seen| seen.id == device && crypto::fingerprint(&seen.public_key) == peer.fingerprint && !peer.fingerprint.is_empty()) {
+            return Err("The device key changed during pairing. Compare the new fingerprint.".into());
+        }
+        let full_enabled = inner.settings.allow_full_access;
+        with(&snap.dir, |grants| {
+            let current = grants.scope_of(peer);
+            let requested = grants.code.as_ref().map(|code| code.scope).unwrap_or_default();
+            if !full_enabled && (current == Scope::Full || requested == Scope::Full) {
+                return Err("Remote Full access is disabled on this computer.".to_owned());
+            }
+            grants.redeem(peer, code, chrono::Utc::now().timestamp())
+        })??
+    };
     sync_trust(app, device, scope, Some(&peer.fingerprint))?;
     let _ = app.emit("remote://pair-code-used", json!({"deviceId": peer.id, "name": peer.name, "scope": scope.name()}));
     emit_grants(app);
@@ -431,6 +480,10 @@ pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, s
     let result = {
         let mut inner = state.lock();
         if device_id == inner.settings.device_id { return Err("That is this computer.".into()); }
+        let earlier_lockdown = config::locked_down(&state.dir);
+        if earlier_lockdown && matches!(scope, Scope::View | Scope::Control | Scope::Full) {
+            return Err("Connect permissions remain locked after an interrupted revocation. Sign out locally before approving another device.".into());
+        }
         if scope == Scope::Full && !inner.settings.allow_full_access {
             return Err("Enable remote Full access locally before granting a device Full access.".into());
         }
@@ -468,7 +521,8 @@ pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, s
             config::save(&state.dir, &active)?;
             config::end_lockdown(&state.dir)?;
             inner.settings = active;
-        } else {
+        } else if !earlier_lockdown {
+            // A denial must not clear a fence left by another interrupted revoke.
             config::end_lockdown(&state.dir)?;
         }
         Ok(())
@@ -654,6 +708,25 @@ mod tests {
         assert_eq!(grants.scope_of(&first), Scope::Blocked);
         assert_eq!(grants.scope_of(&changed), Scope::Blocked);
         assert_eq!(grants.decide(&changed, "tasks.list"), Verdict::Denied(Scope::Blocked));
+    }
+
+    #[test]
+    fn legacy_untrust_cannot_reactivate_a_saved_full_grant() {
+        let dir = std::env::temp_dir().join(format!("pandacode-revoke-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = peer("device", "fingerprint");
+        // Exercise the real persistent helpers rather than only the Scope enum.
+        with(&dir, |grants| grants.set(&p, Scope::Full)).unwrap();
+        assert_eq!(with(&dir, |grants| grants.scope_of(&p)).unwrap(), Scope::Full);
+        revoke_legacy_trust(&dir, "device").unwrap();
+        assert_eq!(with(&dir, |grants| grants.scope_of(&p)).unwrap(), Scope::Pending);
+        assert_eq!(Grants::load(&dir).scope_of(&p), Scope::Pending);
+        with(&dir, |grants| grants.set(&p, Scope::Full)).unwrap();
+        downgrade_full_access(&dir).unwrap();
+        assert_eq!(Grants::load(&dir).scope_of(&p), Scope::Control);
+        clear_on_sign_out(&dir).unwrap();
+        assert_eq!(Grants::load(&dir).scope_of(&p), Scope::Pending);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

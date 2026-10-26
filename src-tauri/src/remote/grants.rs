@@ -607,7 +607,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandacode-grants-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut settings = config::Settings::default();
-        settings.trusted.insert("laptop".into(), "pinned-key".into());
+        let pinned_key = crypto::public_key(&crypto::generate());
+        settings.trusted.insert("laptop".into(), pinned_key.clone());
         seed_trusted(&dir, &settings).unwrap();
         let mut grants = Grants::load(&dir);
         assert!(!grants.store.adopt);
@@ -616,7 +617,7 @@ mod tests {
         crate::secret_store::update(&dir, FILE, LABEL, |_: Store| store).unwrap();
         let reloaded = Grants::load(&dir);
         assert!(!reloaded.store.adopt);
-        assert_eq!(reloaded.scope_of(&Peer { fingerprint: crypto::fingerprint("pinned-key"), ..peer("laptop", "aa11") }), Scope::Control);
+        assert_eq!(reloaded.scope_of(&Peer { fingerprint: crypto::fingerprint(&pinned_key), ..peer("laptop", "aa11") }), Scope::Control);
         assert_eq!(reloaded.scope_of(&peer("new", "cc33")), Scope::Pending);
         #[cfg(unix)]
         {

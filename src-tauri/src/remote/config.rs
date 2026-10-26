@@ -405,9 +405,11 @@ mod tests {
         assert!(load(&fresh).grants_scoped && !grants(&fresh));
         let signed_in_off = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&signed_in_off).grants_scoped && !grants(&signed_in_off));
-        let upgraded = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{"id":"gh:1","login":"a"},"trusted":{"existing-device":"pinned-public-key"}}"#));
+        let pinned_key = super::super::crypto::public_key(&super::super::crypto::generate());
+        let upgraded_text = format!(r#"{{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{{"id":"gh:1","login":"a"}},"trusted":{{"existing-device":"{pinned_key}"}}}}"#);
+        let upgraded = dir(Some(&upgraded_text));
         assert!(load(&upgraded).grants_scoped && grants(&upgraded));
-        let migrated = super::super::grants::test_scope_from_file(&upgraded, "existing-device", "pinned-public-key");
+        let migrated = super::super::grants::test_scope_from_file(&upgraded, "existing-device", &pinned_key);
         assert_eq!(migrated, "control");
         let later = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"grantsScoped":true,"account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&later).grants_scoped && !grants(&later));

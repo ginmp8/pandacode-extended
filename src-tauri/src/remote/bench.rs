@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{
     self,
     client::IntoClientRequest,
-    handshake::server::{ErrorResponse, Request as WsRequest, Response as WsResponse},
+    handshake::server::{Request as WsRequest, Response as WsResponse},
     Message,
 };
 
@@ -215,7 +215,7 @@ fn broadcast_presence(state: &RelayState, hop: Duration) {
 
 async fn serve(tcp: tokio::net::TcpStream, state: Arc<Mutex<RelayState>>, profile: Profile) {
     let mut device = String::new();
-    let callback = |request: &WsRequest, response: WsResponse| -> Result<WsResponse, ErrorResponse> {
+    let callback = |request: &WsRequest, response: WsResponse| {
         device = request.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or_default().to_owned();
         Ok(response)
     };

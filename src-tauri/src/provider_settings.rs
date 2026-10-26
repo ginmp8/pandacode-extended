@@ -865,7 +865,7 @@ mod tests {
     }
     #[test]
     fn rejects_command_strings_directories_and_unknown_providers() {
-        assert!(validated_executable("codex", "").is_err());
+        assert!(validated_executable("unknown", "").is_err());
         assert!(validated_executable("opencode", "opencode --flag").is_err());
         assert!(validated_executable("opencode", "/tmp").is_err());
         assert!(validated_executable("antigravity", "/tmp/foo\nbar").is_err());

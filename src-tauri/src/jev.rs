@@ -30,6 +30,7 @@ const MAX_LIVE_FRAME: u64 = 256 * 1024;
 const WATCH_TTL: Duration = Duration::from_secs(10);
 const HISTORY: usize = 20;
 const SECRET_SERVICE: &str = "app.pandacode.jev";
+const SETUP_WARNING: &str = "Saved Jev settings or credentials could not be read. Browser testing is disabled. Unlock the OS secure store or recover the existing settings file, then restart PandaCode. The original settings file has been preserved.";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -242,32 +243,230 @@ struct Runtime {
     installing: bool,
     setup_warning: Option<String>,
 }
-static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
-fn runtime() -> Result<std::sync::MutexGuard<'static, Runtime>> {
+#[derive(Clone, Copy)]
+enum Initialization {
+    Pending,
+    Complete,
+    Failed,
+}
+
+struct Instance {
+    runtime: Mutex<Runtime>,
+    initialized: tokio::sync::watch::Sender<Initialization>,
+}
+
+impl Instance {
+    fn pending(parent: &Path) -> Result<Arc<Self>> {
+        let dir = parent.join("jev");
+        private_dir(&dir)?;
+        let (initialized, _) = tokio::sync::watch::channel(Initialization::Pending);
+        Ok(Arc::new(Self {
+            runtime: Mutex::new(Runtime {
+                dir,
+                saved: Saved::default(),
+                active: HashMap::new(),
+                installing: false,
+                setup_warning: None,
+            }),
+            initialized,
+        }))
+    }
+
+    fn initialize(
+        self: &Arc<Self>,
+        load: impl FnOnce(&Path) -> (Saved, Option<String>) + Send + 'static,
+    ) {
+        let dir = match self.runtime.lock() {
+            Ok(state) => state.dir.clone(),
+            Err(_) => {
+                self.initialized.send_replace(Initialization::Failed);
+                return;
+            }
+        };
+        let instance = self.clone();
+        // Initialization belongs to the instance, not to a command waiting for
+        // it. Cancelling a waiter must never restart a credential migration.
+        tauri::async_runtime::spawn(async move {
+            let loaded = crate::blocking(move || {
+                let loaded = load(&dir.join("settings.json"));
+                cleanup_interrupted_profiles(&dir);
+                Ok(loaded)
+            })
+            .await;
+            instance.publish(loaded);
+        });
+    }
+
+    fn publish(&self, loaded: Result<(Saved, Option<String>)>) {
+        let completed = match self.runtime.lock() {
+            Ok(mut state) => {
+                let (saved, warning) =
+                    loaded.unwrap_or_else(|_| (Saved::default(), Some(SETUP_WARNING.into())));
+                state.saved = saved;
+                state.setup_warning = warning;
+                Initialization::Complete
+            }
+            Err(_) => Initialization::Failed,
+        };
+        self.initialized.send_replace(completed);
+    }
+
+    async fn ready(&self) -> Result<()> {
+        let mut initialized = self.initialized.subscribe();
+        loop {
+            match *initialized.borrow_and_update() {
+                Initialization::Complete => return Ok(()),
+                Initialization::Failed => return Err("Jev settings are unavailable.".into()),
+                Initialization::Pending => {}
+            }
+            initialized
+                .changed()
+                .await
+                .map_err(|_| "Jev settings are unavailable.".to_owned())?;
+        }
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Runtime>> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Jev settings are unavailable.".into())
+    }
+
+    async fn configuration(&self) -> Result<Configuration> {
+        self.ready().await?;
+        Ok(Configuration::from(&self.lock()?.saved))
+    }
+
+    async fn snapshot(&self) -> Result<(PathBuf, Saved, Option<String>)> {
+        self.ready().await?;
+        let state = self.lock()?;
+        Ok((
+            state.dir.clone(),
+            state.saved.clone(),
+            state.setup_warning.clone(),
+        ))
+    }
+
+    async fn save(
+        self: &Arc<Self>,
+        settings: Settings,
+        typesafe_key: Option<String>,
+        text_key: Option<String>,
+        openrouter_key: Option<String>,
+    ) -> Result<Configuration> {
+        self.ready().await?;
+        let instance = self.clone();
+        crate::blocking(move || {
+            let mut state = instance.lock()?;
+            if state.installing {
+                return Err(
+                    "Wait for the Jev installation to finish before changing its settings.".into(),
+                );
+            }
+            let path = state.dir.join("settings.json");
+            let mut next = saved_for_update(&path, &state.saved, state.setup_warning.is_some())?;
+            next.settings = settings;
+            if let Some(value) = typesafe_key {
+                next.typesafe_key = value;
+            }
+            if let Some(value) = text_key {
+                next.text_key = value;
+            }
+            if let Some(value) = openrouter_key {
+                next.openrouter_key = value;
+            }
+            let next = validate_saved(next)?;
+            if next.settings.decisions_enabled
+                && next.settings.decision_provider == "openrouter"
+                && next.openrouter_key.is_empty()
+            {
+                return Err("Add your OpenRouter API key to use it for decisions.".into());
+            }
+            let next = persist_saved(&path, &next)?;
+            if !next.settings.enabled {
+                for active in state.active.values() {
+                    active.stopped.store(true, Ordering::SeqCst);
+                }
+            }
+            state.saved = next;
+            state.setup_warning = None;
+            Ok(Configuration::from(&state.saved))
+        })
+        .await
+    }
+
+    async fn begin_install(&self, app_state: &AppState) -> Result<(PathBuf, Settings)> {
+        self.ready().await?;
+        let _admission = app_state
+            .agents
+            .lock()
+            .map_err(|_| "Task registry is unavailable.")?;
+        admission(app_state.shutdown.load(Ordering::SeqCst))?;
+        let mut state = self.lock()?;
+        if state.installing {
+            return Err("Jev is already being installed.".into());
+        }
+        if !state.active.is_empty() {
+            return Err("Stop browser tests before changing their runtime.".into());
+        }
+        state.installing = true;
+        Ok((state.dir.clone(), state.saved.settings.clone()))
+    }
+
+    async fn begin_test(
+        &self,
+        app_state: &AppState,
+        report: &Report,
+        stopped: Arc<AtomicBool>,
+        parent_stopped: Option<&AtomicBool>,
+    ) -> Result<(PathBuf, Saved)> {
+        self.ready().await?;
+        if parent_stopped.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err("The agent has stopped.".into());
+        }
+        // Shares task deletion and shutdown admission. Recheck ownership after
+        // hydration, before reserving the browser test or copying credentials.
+        with_task_admission(app_state, &report.session_id, |_| {
+            let mut state = self.lock()?;
+            reserve(&mut state, report, stopped)?;
+            Ok((state.dir.clone(), state.saved.clone()))
+        })
+    }
+}
+
+static RUNTIME: OnceLock<Arc<Instance>> = OnceLock::new();
+fn instance() -> Result<&'static Arc<Instance>> {
     RUNTIME
         .get()
-        .ok_or("Jev settings are not initialized.")?
-        .lock()
-        .map_err(|_| "Jev settings are unavailable.".into())
+        .ok_or_else(|| "Jev settings are not initialized.".into())
+}
+fn runtime() -> Result<std::sync::MutexGuard<'static, Runtime>> {
+    instance()?.lock()
+}
+pub(crate) async fn ready() -> Result<()> {
+    instance()?.ready().await
 }
 
 pub fn setup(parent: &Path) -> Result<()> {
-    let dir = parent.join("jev");
-    private_dir(&dir)?;
-    let path = dir.join("settings.json");
-    let (saved, setup_warning) = load_saved(&path);
-    cleanup_interrupted_profiles(&dir);
+    let instance = Instance::pending(parent)?;
     RUNTIME
-        .set(Mutex::new(Runtime {
-            dir,
-            saved,
-            active: HashMap::new(),
-            installing: false,
-            setup_warning,
-        }))
-        .map_err(|_| "Jev settings are already initialized.".into())
+        .set(instance.clone())
+        .map_err(|_| "Jev settings are already initialized.".to_owned())?;
+    instance.initialize(load_saved);
+    Ok(())
 }
 fn load_saved(path: &Path) -> (Saved, Option<String>) {
+    load_saved_with(
+        path,
+        |account| crate::secret_store::get(SECRET_SERVICE, account),
+        persist_saved,
+    )
+}
+fn load_saved_with(
+    path: &Path,
+    mut read_key: impl FnMut(&str) -> Option<String>,
+    migrate: impl FnOnce(&Path, &Saved) -> Result<Saved>,
+) -> (Saved, Option<String>) {
     if !path.exists() {
         return (Saved::default(), None);
     }
@@ -276,9 +475,9 @@ fn load_saved(path: &Path) -> (Saved, Option<String>) {
             if uuid::Uuid::parse_str(&reference.id).is_err() {
                 return Err("Invalid Jev credential reference.".into());
             }
-            let read = |name: &str, present: bool| -> Result<String> {
+            let mut read = |name: &str, present: bool| -> Result<String> {
                 if !present { return Ok(String::new()); }
-                crate::secret_store::get(SECRET_SERVICE, &format!("{}.{name}", reference.id))
+                read_key(&format!("{}.{name}", reference.id))
                     .ok_or_else(|| "Jev credentials are unavailable in the OS secure store.".into())
             };
             saved.typesafe_key = read("typesafe", reference.typesafe)?;
@@ -288,13 +487,13 @@ fn load_saved(path: &Path) -> (Saved, Option<String>) {
         } else if !saved.typesafe_key.is_empty() || !saved.text_key.is_empty() || !saved.openrouter_key.is_empty() {
             // Commit a new vault generation before replacing the legacy file.
             // On failure the original file and its keys remain recoverable.
-            persist_saved(path, &saved)
+            migrate(path, &saved)
         } else {
             Ok(saved)
         }
     }) {
         Ok(saved) => (saved, None),
-        Err(_) => (Saved::default(), Some("Saved Jev settings or credentials could not be read. Browser testing is disabled. Unlock the OS secure store or recover the existing settings file, then restart PandaCode. The original settings file has been preserved.".into())),
+        Err(_) => (Saved::default(), Some(SETUP_WARNING.into())),
     }
 }
 
@@ -376,7 +575,7 @@ pub(crate) fn active_for_tasks(ids: &[String]) -> Result<bool> {
     let Some(runtime) = RUNTIME.get() else {
         return Ok(false);
     };
-    let state = runtime.lock().map_err(|_| "Jev settings are unavailable.")?;
+    let state = runtime.runtime.lock().map_err(|_| "Jev settings are unavailable.")?;
     Ok(has_active_tasks(&state, ids))
 }
 fn has_active_tasks(state: &Runtime, ids: &[String]) -> bool {
@@ -591,7 +790,7 @@ fn validate_request(mut request: Request) -> Result<Request> {
 
 #[tauri::command]
 pub async fn jev_configuration() -> Result<Configuration> {
-    Ok(Configuration::from(&runtime()?.saved))
+    instance()?.configuration().await
 }
 #[tauri::command]
 pub async fn jev_save_configuration(
@@ -600,40 +799,9 @@ pub async fn jev_save_configuration(
     text_key: Option<String>,
     openrouter_key: Option<String>,
 ) -> Result<Configuration> {
-    crate::blocking(move || {
-        let mut state = runtime()?;
-        if state.installing {
-            return Err(
-                "Wait for the Jev installation to finish before changing its settings.".into(),
-            );
-        }
-        let path = state.dir.join("settings.json");
-        let mut next = saved_for_update(&path, &state.saved, state.setup_warning.is_some())?;
-        next.settings = settings;
-        if let Some(value) = typesafe_key {
-            next.typesafe_key = value;
-        }
-        if let Some(value) = text_key {
-            next.text_key = value;
-        }
-        if let Some(value) = openrouter_key {
-            next.openrouter_key = value;
-        }
-        let next = validate_saved(next)?;
-        if next.settings.decisions_enabled && next.settings.decision_provider == "openrouter" && next.openrouter_key.is_empty() {
-            return Err("Add your OpenRouter API key to use it for decisions.".into());
-        }
-        let next = persist_saved(&path, &next)?;
-        if !next.settings.enabled {
-            for active in state.active.values() {
-                active.stopped.store(true, Ordering::SeqCst);
-            }
-        }
-        state.saved = next;
-        state.setup_warning = None;
-        Ok(Configuration::from(&state.saved))
-    })
-    .await
+    instance()?
+        .save(settings, typesafe_key, text_key, openrouter_key)
+        .await
 }
 
 #[tauri::command]
@@ -788,14 +956,7 @@ async fn process_output(
     result
 }
 async fn doctor() -> Result<Doctor> {
-    let (dir, saved, setup_warning) = {
-        let state = runtime()?;
-        (
-            state.dir.clone(),
-            state.saved.clone(),
-            state.setup_warning.clone(),
-        )
-    };
+    let (dir, saved, setup_warning) = instance()?.snapshot().await?;
     let python = venv_python(&dir);
     let mut result = if python.is_file() {
         let runner = write_runner(&dir)?;
@@ -857,23 +1018,7 @@ impl Drop for InstallGuard {
 }
 #[tauri::command]
 pub async fn jev_install_runtime(app: tauri::AppHandle) -> Result<Doctor> {
-    let (dir, settings) = {
-        let app_state = app.state::<AppState>();
-        let _admission = app_state
-            .agents
-            .lock()
-            .map_err(|_| "Task registry is unavailable.")?;
-        admission(app_state.shutdown.load(Ordering::SeqCst))?;
-        let mut state = runtime()?;
-        if state.installing {
-            return Err("Jev is already being installed.".into());
-        }
-        if !state.active.is_empty() {
-            return Err("Stop browser tests before changing their runtime.".into());
-        }
-        state.installing = true;
-        (state.dir.clone(), state.saved.settings.clone())
-    };
+    let (dir, settings) = instance()?.begin_install(&app.state::<AppState>()).await?;
     let _guard = InstallGuard;
     let uv = crate::providers::executable("uv");
     let python = venv_python(&dir);
@@ -1357,16 +1502,14 @@ async fn start(
     }
     let report = Report::starting(session_id, &request);
     let stopped = Arc::new(AtomicBool::new(false));
-    let (dir, saved) = {
-        // Shares the agent updater's admission lock. An agent update cannot pass
-        // its idle check between this lifecycle check and reserving the browser test.
-        let app_state = app.state::<AppState>();
-        with_task_admission(&app_state, session_id, |_| {
-            let mut state = runtime()?;
-            reserve(&mut state, &report, stopped.clone())?;
-            Ok((state.dir.clone(), state.saved.clone()))
-        })?
-    };
+    let (dir, saved) = instance()?
+        .begin_test(
+            &app.state::<AppState>(),
+            &report,
+            stopped.clone(),
+            parent_stopped.as_deref(),
+        )
+        .await?;
     let response = report.clone();
     let _ = app.emit("jev-run", &report);
     tauri::async_runtime::spawn(async move {
@@ -1764,6 +1907,10 @@ async fn execute(
     }
     let _ = app.emit("jev-run", &report);
 }
+
+#[cfg(test)]
+#[path = "jev/startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {

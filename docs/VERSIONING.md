@@ -14,6 +14,8 @@ PandaCode Extended is an independently versioned derivative of [PandaCode](https
 
 The `historical_upstream_review` supplement records the separate feature-branch baseline, immutable original tag commits, coverage document and hashed release-evidence manifest for issue #24. It retains the newer integration's provenance and keeps the unpublished candidate at `0.5.0`. Source-only notes do not establish a published release date. The validator checks all 15 original source-note digests in the historical range, including the unpublished 0.3.36 note, without rewriting the legacy review record.
 
+The `early_upstream_review` supplement records [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26), the current feature-branch baseline, the exact original `0.3.27` snapshot and the [review before 0.3.28](upstream-parity-before-0.3.28.md). Its manifest verifies 77 additional source-note digests: 49 source-only notes `0.2.0–0.2.48` and 28 published releases `0.3.0–0.3.27`. The current public inventory does not establish original `0.2.*` tags or publication dates; the snapshot identity must not be presented as their individual release commits. This supplement retains both existing reviews, the tracked `0.3.47` reference and the `0.3.28` ancestry. The combined validator covers 97 distinct original notes without requiring invented dates for source-only evidence.
+
 ## Current release candidate
 
 | Status | Technical version | Display identifier |
@@ -21,7 +23,7 @@ The `historical_upstream_review` supplement records the separate feature-branch 
 | [Published Extended release](https://github.com/ginmp8/pandacode-extended/releases/tag/v0.4.0), 2026-10-25 | `0.4.0` | `0.4.0+pc.0.3.42` |
 | Requested integration candidate, not published by this change | `0.5.0` | `0.5.0+pc.0.3.47` |
 
-The user requested `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplement in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24). All corrections to this candidate remain part of `0.5.0`; individual corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. The planned `v0.5.0` tag is created only when publication is explicitly authorized.
+The user requested `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplements in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24) and [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26). All corrections to this candidate remain part of `0.5.0`; individual corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. The planned `v0.5.0` tag is created only when publication is explicitly authorized.
 
 **After publication**, version selection for a distinct future release must be decided from its actual changes and consumer compatibility. Corrections normally use PATCH, compatible additions use MINOR, and incompatible changes require a migration assessment. This document deliberately does not preassign numbers to hypothetical releases.
 

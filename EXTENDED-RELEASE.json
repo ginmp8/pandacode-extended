@@ -29,5 +29,15 @@
     "release_evidence": "docs/upstream-release-evidence-0.3.28-0.3.42.json",
     "release_evidence_sha256": "1222807342583b683749d2014d200a8ea52bbe78479c9f9fb5581d30d8067e71",
     "issue": "https://github.com/ginmp8/pandacode-extended/issues/24"
+  },
+  "early_upstream_review": {
+    "from": "0.2.0",
+    "through": "0.3.27",
+    "extended_base_commit": "68e4d0615ec864a2dd9e9630e0e3410432e27207",
+    "upstream_snapshot_commit": "612ca79c8e7db74461040bc27ddf1a3dcebb32ab",
+    "coverage_document": "docs/upstream-parity-before-0.3.28.md",
+    "release_evidence": "docs/upstream-release-evidence-before-0.3.28.json",
+    "release_evidence_sha256": "4a9d40bf2b695b0c533fc15eaac026878603d24d712693fcc43b10f835d44720",
+    "issue": "https://github.com/ginmp8/pandacode-extended/issues/26"
   }
 }

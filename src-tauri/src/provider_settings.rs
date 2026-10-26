@@ -352,7 +352,7 @@ pub async fn provider_configuration() -> Result<Configuration> {
 fn validated_executable(provider: &str, path: &str) -> Result<Option<String>> {
     if !matches!(
         provider,
-        "opencode" | "antigravity" | "glm" | "grok" | "mimo" | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin"
+        "codex" | "opencode" | "antigravity" | "glm" | "grok" | "mimo" | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin"
     ) {
         return Err("This provider does not support an executable override.".into());
     }
@@ -879,6 +879,13 @@ mod tests {
         assert_eq!(serde_json::to_value(&settings).unwrap()["mimoEndpoint"], "token-plan-ams");
         let unknown: Settings = serde_json::from_value(serde_json::json!({"executablePaths":{},"mimoEndpoint":"https://evil.example/anthropic"})).unwrap();
         assert!(unknown.mimo_endpoint.filter(|id| crate::providers::mimo_endpoint_url(id).is_some()).is_none());
+    }
+
+    #[test]
+    fn codex_executable_override_uses_existing_validation() {
+        assert!(validated_executable("codex", "relative/codex").is_err());
+        assert!(validated_executable("codex", "/nonexistent/codex").is_err());
+        assert_eq!(validated_executable("codex", "").unwrap(), None);
     }
 
     #[test]

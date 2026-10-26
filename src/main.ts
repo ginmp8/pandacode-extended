@@ -148,6 +148,7 @@ let menuEpoch = 0;
 let pendingMenuOpen: { anchor: HTMLElement; release: () => void } | undefined;
 let openingProjectForTask: { id: string; generation: number } | undefined;
 let creatingTask = false;
+let workspaceReady = false;
 let creatingChat = false;
 let recoveringChatId: string | undefined;
 const chatFileAttachments = new Map<string, string[]>();
@@ -581,7 +582,7 @@ transcriptScroller.tabIndex = 0;
 /* Following the latest output is an intent, not a measurement. Growing content and a resizing
  * composer never clear it: only the reader scrolling up or opening a fold does, and reaching
  * the bottom sets it again. The observer re-pins before paint, so nothing jumps for a frame. */
-let stickToBottom = true, lastTranscriptTop = 0;
+let stickToBottom = true, lastTranscriptTop = 0, transcriptPointerScroll = false;
 const transcriptGap = (): number => transcriptScroller.scrollHeight - transcriptScroller.scrollTop - transcriptScroller.clientHeight;
 const readingTranscriptTool = (): boolean => Boolean(document.activeElement?.closest('.tool-activity, .turn-activity, .turn-changes, .agent-input'));
 function followTranscript(): void {
@@ -603,11 +604,18 @@ new MutationObserver(records => { if (records.some(record => !transcriptScroller
 transcriptScroller.addEventListener('scroll', () => {
   const top = transcriptScroller.scrollTop;
   if (transcriptGap() <= 2) stickToBottom = true;
-  else if (top < lastTranscriptTop) stickToBottom = false;
+  else if (transcriptPointerScroll && top < lastTranscriptTop) stickToBottom = false;
   lastTranscriptTop = top;
   void loadOlderMessages();
 }, { passive: true });
 transcriptScroller.addEventListener('click', event => { if ((event.target as Element).closest('summary')) stickToBottom = false; }, true);
+// Programmatic scroll clamping during composer resize is not a reader scrolling up.
+// Scrollbar drags, unlike reflow, carry an active pointer gesture.
+transcriptScroller.addEventListener('pointerdown', event => {
+  if (event.target === transcriptScroller) transcriptPointerScroll = true;
+});
+window.addEventListener('pointerup', () => { transcriptPointerScroll = false; });
+window.addEventListener('pointercancel', () => { transcriptPointerScroll = false; });
 // A page consisting mostly of folded tools may be shorter than the viewport.
 // Let upward wheel/keyboard intent fetch its history even without a scroll event.
 transcriptScroller.addEventListener('wheel', event => { if (event.deltaY < 0) { releaseTranscript(); void loadOlderMessages(); } }, { passive: true });
@@ -3895,7 +3903,7 @@ async function showDeploy(anchor: HTMLElement): Promise<void> {
   } });
 }
 async function createTask(projectId = state.projectId, reuseDraft = true): Promise<void> {
-  if (creatingTask) return;
+  if (creatingTask || !workspaceReady) return;
   const projects = state.projects.filter(p => !isChatProject(p));
   const active = projects.find(p => p.id === projectId)
     ?? projects.find(p => p.id === localStorage.getItem('pandacode.project')) ?? userProjects()[0];
@@ -5213,6 +5221,10 @@ async function boot(): Promise<void> {
     if (state.sessions.some(task => task.projectId === project.id && task.issue?.kind === 'issue')) run(retryLinkedIssueActionsOnConnect(project.id));
   }
   if (!preview && !state.providers.some(p => p.installed)) notify('Open Settings to check your installed agent CLIs.');
+  workspaceReady = true;
+  // Sidebar actions must not accept clicks before provider/project discovery.
+  // This also makes early user clicks wait for the real event handler/boot state.
+  document.querySelector<HTMLButtonElement>('.new-task-button')?.removeAttribute('disabled');
 }
 // PandaCode's own updates: checked on GitHub Releases, installed when no agent is working.
 const updates = startAppUpdates({ busy: () => state.sessions.some(task => isRunning(task.id)), notify });
@@ -5234,5 +5246,7 @@ const agentUpdates = initializeAgentUpdates({
   providersChanged: async () => { await discoverSettingsProviders(); refreshModelLabels(); slashPicker?.refresh(true); },
 });
 window.addEventListener('pagehide', () => agentUpdates.dispose(), { once: true });
-renderThemeToggle(); render(); renderInspector(); run(boot());
+renderThemeToggle(); render(); renderInspector();
+document.querySelector<HTMLButtonElement>('.new-task-button')?.setAttribute('disabled', '');
+run(boot());
 if (!preview) initializeNativeAppearance();

@@ -188,13 +188,10 @@ impl Remote {
         self.key.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn save(&self, _settings: &config::Settings) {
-        // Mutations can interleave before they persist. Save the current state
-        // under its lock so an older snapshot cannot restore a revoked grant.
-        let inner = self.lock();
-        if let Err(error) = config::save(&self.dir, &inner.settings) {
-            eprintln!("{error}");
-        }
+    fn save(&self, _settings: &config::Settings) -> Result<()> {
+        // Never save an out-of-date snapshot: the persisted state must be the
+        // one guarded by the Remote lock, and errors must reach callers.
+        config::save(&self.dir, &self.lock().settings)
     }
 
     /// The device's X25519 key from the keychain. Never creates one.
@@ -345,21 +342,32 @@ async fn retry_token(app: tauri::AppHandle) {
     }
 }
 
-/// Forgets the account on this computer: closes the socket and drops the token.
-/// With `used`, only if that request's token is still the current one.
-fn sign_out_local(app: &tauri::AppHandle, used: Option<&str>) {
-    let remote = remote(app);
-    let settings = {
-        let mut inner = remote.lock();
-        if !inner.clear_sign_in(used) {
-            return;
-        }
-        inner.settings.clone()
+/// Forget authorization in memory immediately, and persist a denial fence before
+/// returning to a local UI. A failed write is an error, never a successful sign-out.
+fn sign_out_local_checked(app: &tauri::AppHandle, used: Option<&str>) -> Result<()> {
+    let state = remote(app);
+    let result = {
+        let mut inner = state.lock();
+        if !inner.clear_sign_in(used) { return Ok(()); }
+        let mut next = inner.settings.clone();
+        next.account = None;
+        next.host_enabled = false;
+        next.allow_full_access = false;
+        next.trusted.clear();
+        config::update_access(&state.dir, &mut inner.settings, next, true)
     };
-    secret_store::remove(config::SERVICE, &remote.accounts.token);
-    remote.save(&settings);
+    secret_store::remove(config::SERVICE, &state.accounts.token);
     emit_status(app);
     emit_presence(app);
+    result
+}
+
+/// Network-triggered sign-outs have no UI result to return; keep the denial
+/// active and record failures instead of ignoring them.
+fn sign_out_local(app: &tauri::AppHandle, used: Option<&str>) {
+    if let Err(error) = sign_out_local_checked(app, used) {
+        eprintln!("Could not persist the Connect sign-out: {error}");
+    }
 }
 
 /// Hooked into every agent event: forwards it to devices mirroring that task.
@@ -454,7 +462,7 @@ pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
                 inner.settings.device_id = uuid::Uuid::new_v4().to_string();
                 inner.settings.clone()
             };
-            state.save(&settings);
+            state.save(&settings)?;
             auth::register(&build, &github_token, device(settings.device_id)).await?
         }
         other => other?,
@@ -470,7 +478,7 @@ pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
         inner.settings.account = Some(account);
         inner.settings.clone()
     };
-    state.save(&settings);
+    state.save(&settings)?;
     socket::start(&app);
     emit_status(&app);
     Ok(state.status())
@@ -487,27 +495,31 @@ pub async fn remote_sign_out(app: tauri::AppHandle) -> Result<Value> {
     if let (Some(build), Some(token)) = (config::build(), token) {
         let _ = auth::relay(&build, &token, reqwest::Method::DELETE, &format!("/v1/devices/{me}")).await;
     }
-    sign_out_local(&app, None);
+    sign_out_local_checked(&app, None)?;
     Ok(remote(&app).status())
 }
 
 #[tauri::command]
 pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
     let state = remote(&app);
-    let settings = {
+    let result = {
         let mut inner = state.lock();
-        inner.settings.host_enabled = enabled;
+        let mut next = inner.settings.clone();
+        next.host_enabled = enabled;
+        let result = config::update_access(&state.dir, &mut inner.settings, next, !enabled);
         if !enabled {
             inner.subscribers.clear();
             inner.uploads = Default::default();
         }
-        if let Some(outbox) = &inner.outbox {
-            let _ = outbox.try_send(json!({"kind": "host", "enabled": enabled}).to_string());
+        if !enabled || result.is_ok() {
+            if let Some(outbox) = &inner.outbox {
+                let _ = outbox.try_send(json!({"kind": "host", "enabled": enabled}).to_string());
+            }
         }
-        inner.settings.clone()
+        result
     };
-    state.save(&settings);
     emit_status(&app);
+    result?;
     Ok(state.status())
 }
 
@@ -515,17 +527,14 @@ pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Re
 #[tauri::command]
 pub async fn remote_set_full_access(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
     let state = remote(&app);
-    {
+    let result = {
         let mut inner = state.lock();
         let mut settings = inner.settings.clone();
         settings.allow_full_access = enabled;
-        // Do not claim a successful grant if it cannot be persisted. A failed
-        // revocation still takes effect in this running process.
-        if !enabled { inner.settings.allow_full_access = false; }
-        config::save(&state.dir, &settings)?;
-        inner.settings = settings;
-    }
+        config::update_access(&state.dir, &mut inner.settings, settings, !enabled)
+    };
     emit_status(&app);
+    result?;
     Ok(state.status())
 }
 
@@ -538,33 +547,48 @@ pub async fn remote_devices(app: tauri::AppHandle) -> Result<Vec<Value>> {
     Ok(remote(&app).devices_view())
 }
 
-/// Pins (or forgets) a device's current public key, for both directions: only trusted
-/// devices may drive this one, and this one calls only trusted hosts.
+/// The fingerprint is captured when the user views the key. A different
+/// authenticated presence key must never be pinned by a stale approval.
+pub(crate) fn verified_fingerprint(public_key: &str, expected: Option<&str>) -> Result<()> {
+    let actual = crypto::fingerprint(public_key);
+    if actual.is_empty() || expected.is_none_or(|value| value.len() != 32 || !crypto::same(value, &actual)) {
+        return Err("This computer's key changed or has not been verified. Compare the new fingerprint before approving.".into());
+    }
+    Ok(())
+}
+
+/// Pins (or forgets) a device's current public key, for both directions.
 #[tauri::command]
-pub async fn remote_set_trusted(app: tauri::AppHandle, device_id: String, trusted: bool) -> Result<Vec<Value>> {
+pub async fn remote_set_trusted(app: tauri::AppHandle, device_id: String, trusted: bool, expected_fingerprint: Option<String>) -> Result<Vec<Value>> {
     valid_device_id(&device_id)?;
     if trusted && !remote(&app).lock().presence {
         socket::refresh_devices(&app).await?;
     }
     let state = remote(&app);
-    let settings = {
+    let result = {
         let mut inner = state.lock();
         if device_id == inner.settings.device_id {
             return Err("That is this computer.".into());
         }
+        let mut next = inner.settings.clone();
         if trusted {
-            let key = inner.devices.iter().find(|d| d.id == device_id).map(|d| d.public_key.clone()).filter(|key| !crypto::fingerprint(key).is_empty()).ok_or(UNKNOWN_DEVICE)?;
-            inner.settings.trusted.insert(device_id, key);
+            let key = inner.devices.iter().find(|d| d.id == device_id).map(|d| d.public_key.clone()).ok_or(UNKNOWN_DEVICE)?;
+            verified_fingerprint(&key, expected_fingerprint.as_deref())?;
+            next.trusted.insert(device_id.clone(), key);
         } else {
-            inner.settings.trusted.remove(&device_id);
+            next.trusted.remove(&device_id);
+        }
+        let result = config::update_access(&state.dir, &mut inner.settings, next, !trusted);
+        if !trusted {
             inner.subscribers.remove(&device_id);
             inner.uploads.forget(&device_id);
             inner.catalog.forget(&device_id);
+            inner.keys.remove(&device_id);
         }
-        inner.settings.clone()
+        result
     };
-    state.save(&settings);
     emit_presence(&app);
+    result?;
     Ok(state.devices_view())
 }
 
@@ -583,22 +607,23 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
         }
     })?;
     if device_id == me {
-        sign_out_local(&app, Some(&token));
+        sign_out_local_checked(&app, Some(&token))?;
     } else {
-        {
-            let state = remote(&app);
+        let state = remote(&app);
+        let result = {
             let mut inner = state.lock();
+            let mut next = inner.settings.clone();
+            next.trusted.remove(&device_id);
+            let result = config::update_access(&state.dir, &mut inner.settings, next, true);
             inner.devices.retain(|device| device.id != device_id);
             inner.subscribers.remove(&device_id);
             inner.uploads.forget(&device_id);
             inner.keys.remove(&device_id);
             inner.catalog.forget(&device_id);
-            inner.settings.trusted.remove(&device_id);
-            let settings = inner.settings.clone();
-            drop(inner);
-            state.save(&settings);
-        }
+            result
+        };
         emit_presence(&app);
+        result?;
     }
     Ok(json!({}))
 }
@@ -707,5 +732,22 @@ mod tests {
         inner.token = Some("again".into());
         assert!(inner.clear_sign_in(None));
         assert!(inner.token.is_none());
+    }
+}
+
+#[cfg(test)]
+mod permission_regression_tests {
+    use super::*;
+
+    #[test]
+    fn stale_or_missing_displayed_fingerprint_never_trusts_a_new_key() {
+        let original = crypto::public_key(&crypto::generate());
+        let rotated = crypto::public_key(&crypto::generate());
+        let reviewed = crypto::fingerprint(&original);
+        assert!(verified_fingerprint(&original, Some(&reviewed)).is_ok());
+        assert!(verified_fingerprint(&rotated, Some(&reviewed)).is_err());
+        assert!(verified_fingerprint(&original, None).is_err());
+        assert!(verified_fingerprint(&original, Some("bad")).is_err());
+        assert!(verified_fingerprint("not a valid public key", Some(&reviewed)).is_err());
     }
 }

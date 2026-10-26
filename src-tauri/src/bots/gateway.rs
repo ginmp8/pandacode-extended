@@ -199,7 +199,7 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
 }
 
 /// A schedule or check-in: one ongoing scheduled conversation per bot.
-pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &str, prompt: &str) -> Result<()> {
+pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &str, prompt: &str, schedule_id: Option<&str>) -> Result<()> {
     let state = app.state::<AppState>();
     let (bot, session_id, turn) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -207,8 +207,18 @@ pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &
         if bot.paused {
             return Err("This bot is paused.".into());
         }
+        let mode = if let Some(schedule_id) = schedule_id {
+            let schedule = super::schedule::get(&store, schedule_id)?;
+            if schedule.bot_id != bot.id { return Err("That schedule does not belong to this bot.".into()); }
+            super::schedule::execution_mode(&store, &schedule, &bot.mode)?
+        } else { "plan" };
         let (session, _) = super::thread_session(&store, &bot, "schedule", "schedule", &format!("{} · Scheduled work", bot.name))?;
-        super::log(&store, &bot.id, "scheduled", label, json!({"sessionId": session}))?;
+        // A busy scheduled thread must not queue work under a different mode.
+        if matches!(store.session(&session)?.status.as_str(), "running" | "waiting") {
+            return Err("This bot's scheduled conversation is busy. Try again after it finishes.".into());
+        }
+        store.update(&session, None, None, None, Some(mode.to_owned()))?;
+        super::log(&store, &bot.id, "scheduled", label, json!({"sessionId": session, "mode": mode}))?;
         let turn = compose(&store, &bot, &session, "schedule", "", &format!("{label}\n\n{prompt}"))?;
         (bot, session, turn)
     };

@@ -20,6 +20,9 @@ export function previewGrants(command: string, args: Record<string, any>): unkno
       const grant = (grants ??= sample()).find(g => g.deviceId === args.deviceId);
       if (!grant) throw new Error('That computer is not on this account.');
       if (!['pending', 'view', 'control', 'full', 'blocked'].includes(args.scope)) throw new Error('Unknown access level.');
+      if (args.scope !== 'blocked' && args.scope !== 'pending' && (!args.expectedFingerprint || args.expectedFingerprint !== grant.fingerprint)) {
+        throw new Error("This computer's key changed or has not been verified.");
+      }
       grant.scope = args.scope; grant.requested = args.scope === 'blocked';
       (w.__grantCalls ??= []).push({ ...args });
       return undefined;

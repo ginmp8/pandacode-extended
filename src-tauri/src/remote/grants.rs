@@ -311,20 +311,23 @@ pub(crate) fn seed_trusted(dir: &Path, settings: &config::Settings) -> Result<()
 
 /// Keep legacy key pinning and scoped grants consistent. A failed disk write never
 /// changes the active trust map. Revocations update the legacy gate first.
-fn sync_trust(app: &tauri::AppHandle, device: &str, scope: Scope) -> Result<()> {
+fn sync_trust(app: &tauri::AppHandle, device: &str, scope: Scope, expected_fingerprint: Option<&str>) -> Result<()> {
     let state = remote(app);
     let mut inner = state.lock();
-    let key = inner.devices.iter().find(|peer| peer.id == device && !peer.public_key.is_empty())
-        .map(|peer| peer.public_key.clone()).ok_or(super::UNKNOWN_DEVICE)?;
     let mut updated = inner.settings.clone();
-    if matches!(scope, Scope::Pending | Scope::Blocked) {
+    let revoke = matches!(scope, Scope::Pending | Scope::Blocked);
+    if revoke {
         updated.trusted.remove(device);
     } else {
+        if scope == Scope::Full && !inner.settings.allow_full_access {
+            return Err("Remote Full access is disabled on this computer.".into());
+        }
+        let key = inner.devices.iter().find(|peer| peer.id == device)
+            .map(|peer| peer.public_key.clone()).ok_or(super::UNKNOWN_DEVICE)?;
+        super::verified_fingerprint(&key, expected_fingerprint)?;
         updated.trusted.insert(device.to_owned(), key);
     }
-    config::save(&state.dir, &updated)?;
-    inner.settings = updated;
-    Ok(())
+    config::update_access(&state.dir, &mut inner.settings, updated, revoke)
 }
 
 /// Called on every presence frame (never on the HTTP device list): the first one after an
@@ -387,7 +390,7 @@ pub(crate) fn redeem(app: &tauri::AppHandle, device: &str, params: &Value) -> Re
         }
         grants.redeem(peer, code, chrono::Utc::now().timestamp())
     })??;
-    sync_trust(app, device, scope)?;
+    sync_trust(app, device, scope, Some(&peer.fingerprint))?;
     let _ = app.emit("remote://pair-code-used", json!({"deviceId": peer.id, "name": peer.name, "scope": scope.name()}));
     emit_grants(app);
     Ok(json!({"scope": scope.name()}))
@@ -419,21 +422,59 @@ fn ensure_full_is_enabled(app: &tauri::AppHandle, scope: Scope) -> Result<()> {
 
 /// Sets a device's scope; `pending` devices become usable once given another scope.
 #[tauri::command]
-pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, scope: String) -> Result<()> {
+pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, scope: String, expected_fingerprint: Option<String>) -> Result<()> {
+    super::valid_device_id(&device_id)?;
     let scope = Scope::parse(&scope)?;
-    ensure_full_is_enabled(&app, scope)?;
-    let snap = snapshot(&app);
-    let peer = snap.peers.iter().find(|peer| peer.id == device_id).ok_or(super::UNKNOWN_DEVICE)?;
-    if matches!(scope, Scope::Pending | Scope::Blocked) {
-        sync_trust(&app, &device_id, scope)?;
-    }
-    ensure_full_is_enabled(&app, scope)?;
-    with(&snap.dir, |grants| grants.set(peer, scope))?;
-    if matches!(scope, Scope::View | Scope::Control | Scope::Full) {
-        sync_trust(&app, &device_id, scope)?;
-    }
+    let state = remote(&app);
+    // Keep presence identity fixed across both persisted stores and the final
+    // trust activation. A new key cannot win a race after the UI's approval.
+    let result = {
+        let mut inner = state.lock();
+        if device_id == inner.settings.device_id { return Err("That is this computer.".into()); }
+        if scope == Scope::Full && !inner.settings.allow_full_access {
+            return Err("Enable remote Full access locally before granting a device Full access.".into());
+        }
+        let device = inner.devices.iter().find(|peer| peer.id == device_id).cloned();
+        let approving = matches!(scope, Scope::View | Scope::Control | Scope::Full);
+        let peer = if let Some(device) = &device {
+            if approving {
+                super::verified_fingerprint(&device.public_key, expected_fingerprint.as_deref())?;
+            }
+            Peer { id: device.id.clone(), name: device.name.clone(), platform: device.platform.clone(), fingerprint: crypto::fingerprint(&device.public_key), online: device.online }
+        } else if approving {
+            return Err(super::UNKNOWN_DEVICE.into());
+        } else {
+            // Revocation and blocking work even after a device left presence or
+            // rotated its key. A blocked entry applies to any key for this id.
+            Peer { id: device_id.clone(), name: String::new(), platform: String::new(), fingerprint: String::new(), online: false }
+        };
+        let mut denied = inner.settings.clone();
+        denied.trusted.remove(&device_id);
+        inner.settings = denied.clone();
+        inner.subscribers.remove(&device_id);
+        inner.uploads.forget(&device_id);
+        inner.catalog.forget(&device_id);
+        inner.keys.remove(&device_id);
+        // Two-file transaction: the denial marker and the legacy trust removal
+        // commit before any scoped grant. On failure, live access remains denied;
+        // after a crash, the marker keeps the next boot denied.
+        config::begin_lockdown(&state.dir)?;
+        config::save(&state.dir, &denied)?;
+        with(&state.dir, |grants| grants.set(&peer, scope))?;
+        if approving {
+            let mut active = denied.clone();
+            let key = device.as_ref().map(|device| device.public_key.clone()).ok_or(super::UNKNOWN_DEVICE)?;
+            active.trusted.insert(device_id.clone(), key);
+            config::save(&state.dir, &active)?;
+            config::end_lockdown(&state.dir)?;
+            inner.settings = active;
+        } else {
+            config::end_lockdown(&state.dir)?;
+        }
+        Ok(())
+    };
     emit_grants(&app);
-    Ok(())
+    result
 }
 
 /// Shows a one-time code (valid 10 minutes) that gives a new device `scope` when entered
@@ -600,6 +641,19 @@ mod tests {
         grants.note_pending(&peer("new", "cc33"));
         assert!(grants.blocks("phone"));
         assert!(!grants.blocks("laptop") && !grants.blocks("new") && !grants.blocks("unknown"));
+    }
+
+
+    #[test]
+    fn a_blocked_device_is_denied_even_when_its_key_rotated() {
+        let mut grants = Grants::default();
+        let first = peer("device", "aa11");
+        grants.set(&first, Scope::Full);
+        let changed = peer("device", "different-fingerprint");
+        grants.set(&changed, Scope::Blocked);
+        assert_eq!(grants.scope_of(&first), Scope::Blocked);
+        assert_eq!(grants.scope_of(&changed), Scope::Blocked);
+        assert_eq!(grants.decide(&changed, "tasks.list"), Verdict::Denied(Scope::Blocked));
     }
 
     #[test]

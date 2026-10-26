@@ -105,7 +105,7 @@ pub(crate) fn list(store: &Store, bot_id: &str) -> Result<Vec<Schedule>> {
     rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
 }
 
-fn get(store: &Store, id: &str) -> Result<Schedule> {
+pub(crate) fn get(store: &Store, id: &str) -> Result<Schedule> {
     store
         .db
         .query_row(&format!("SELECT {COLUMNS} FROM bot_schedules WHERE id=?1"), [id], row)
@@ -115,7 +115,7 @@ fn get(store: &Store, id: &str) -> Result<Schedule> {
 }
 
 pub(crate) fn create(store: &Store, bot_id: &str, input: &ScheduleInput, created_by: &str, now: i64) -> Result<Schedule> {
-    super::get(store, bot_id)?;
+    let bot = super::get(store, bot_id)?;
     let title = input.title.trim().chars().take(120).collect::<String>();
     let prompt = input.prompt.trim().chars().take(8000).collect::<String>();
     if prompt.is_empty() {
@@ -140,8 +140,34 @@ pub(crate) fn create(store: &Store, bot_id: &str, input: &ScheduleInput, created
         )
         .map_err(|e| e.to_string())?;
     let schedule = get(store, &id)?;
-    super::log(store, bot_id, "schedule", &format!("Scheduled: {}", schedule.title), json!({"scheduleId": id, "by": created_by}))?;
+    super::log(store, bot_id, "schedule", &format!("Scheduled: {}", schedule.title), json!({"scheduleId": id, "by": created_by, "permissionMode": bot.mode}))?;
     Ok(schedule)
+}
+
+/// Unattended work cannot acquire later bot permissions. The durable creation
+/// audit bounds user-approved jobs; old or missing metadata is never Full access.
+/// Bot-created schedules, including jobs from remote-originated turns, stay read-only.
+pub(crate) fn execution_mode(store: &Store, schedule: &Schedule, current: &str) -> Result<&'static str> {
+    if schedule.created_by != "user" || current == "plan" {
+        return Ok("plan");
+    }
+    let original: Option<String> = store.db.query_row(
+        "SELECT json_extract(detail,'$.permissionMode') FROM bot_activity
+         WHERE bot_id=?1 AND kind='schedule' AND json_extract(detail,'$.scheduleId')=?2
+         ORDER BY id ASC LIMIT 1",
+        params![schedule.bot_id, schedule.id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?.flatten();
+    Ok(match original.as_deref() {
+        Some("plan") => "plan",
+        Some("ask") if current == "ask" => "ask",
+        Some("auto") if current == "auto" => "auto",
+        Some("review") if current == "review" => "review",
+        Some("full") if current == "full" => "full",
+        // An upgraded bot mode cannot make an older schedule privileged.
+        // Legacy user schedules can still ask for approval.
+        _ => "ask",
+    })
 }
 
 pub(crate) fn set_enabled(store: &Store, id: &str, enabled: bool, now: i64) -> Result<Schedule> {
@@ -212,12 +238,12 @@ pub(crate) fn start(app: tauri::AppHandle) {
             };
             for schedule in due.0 {
                 let label = format!("Scheduled: {}", schedule.title);
-                if let Err(error) = gateway::run_scheduled(&app, &schedule.bot_id, &label, &schedule.prompt).await {
+                if let Err(error) = gateway::run_scheduled(&app, &schedule.bot_id, &label, &schedule.prompt, Some(&schedule.id)).await {
                     super::note(&app, &schedule.bot_id, "error", &format!("{label} could not start: {error}"), json!({"scheduleId": schedule.id}));
                 }
             }
             for bot in due.1 {
-                let _ = gateway::run_scheduled(&app, &bot.id, "Check-in", HEARTBEAT_PROMPT).await;
+                let _ = gateway::run_scheduled(&app, &bot.id, "Check-in", HEARTBEAT_PROMPT, None).await;
             }
             let _ = app.emit("bots-changed", ());
         }
@@ -248,5 +274,5 @@ pub async fn bot_schedule_delete(app: tauri::AppHandle, state: State<'_, AppStat
 #[tauri::command]
 pub async fn bot_run_schedule_now(app: tauri::AppHandle, state: State<'_, AppState>, schedule_id: String) -> Result<()> {
     let schedule = get(&*state.store.lock().map_err(|e| e.to_string())?, &schedule_id)?;
-    gateway::run_scheduled(&app, &schedule.bot_id, &format!("Run now: {}", schedule.title), &schedule.prompt).await
+    gateway::run_scheduled(&app, &schedule.bot_id, &format!("Run now: {}", schedule.title), &schedule.prompt, Some(&schedule.id)).await
 }

@@ -21,7 +21,7 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
   const grantOf = (id: string) => grants.find(grant => grant.deviceId === id);
 
   function deviceRow(device: RemoteDevice): string {
-    return `<div class="setting-row remote-device" data-device="${escape(device.id)}"><div><strong><span class="remote-dot" data-online="${device.online}" role="img" aria-label="${device.online ? 'Online' : 'Offline'}"></span>${escape(device.name)}${device.current ? ' <span class="remote-badge">This computer</span>' : ''}</strong><small>${escape(device.platform)} · ${device.host ? 'remote control on' : 'remote control off'} · key <code>${escape(device.fingerprint)}</code></small></div>${device.current ? '' : `<label class="remote-trust"><span>Trusted ${infoMark(TRUST_TIP, 'About trusting a computer')}</span><input type="checkbox" class="settings-switch" data-trust="${escape(device.id)}" aria-label="Trusted: ${escape(device.name)}" ${device.trusted ? 'checked' : ''}></label>`}${device.current ? '' : `<button type="button" class="secondary-button" data-revoke="${escape(device.id)}" aria-label="Revoke ${escape(device.name)}">Revoke</button>`}</div>`;
+    return `<div class="setting-row remote-device" data-device="${escape(device.id)}" data-fingerprint="${escape(device.fingerprint)}"><div><strong><span class="remote-dot" data-online="${device.online}" role="img" aria-label="${device.online ? 'Online' : 'Offline'}"></span>${escape(device.name)}${device.current ? ' <span class="remote-badge">This computer</span>' : ''}</strong><small>${escape(device.platform)} · ${device.host ? 'remote control on' : 'remote control off'} · key <code>${escape(device.fingerprint)}</code></small></div>${device.current ? '' : `<label class="remote-trust"><span>Trusted ${infoMark(TRUST_TIP, 'About trusting a computer')}</span><input type="checkbox" class="settings-switch" data-trust="${escape(device.id)}" aria-label="Trusted: ${escape(device.name)}" ${device.trusted ? 'checked' : ''}></label>`}${device.current ? '' : `<button type="button" class="secondary-button" data-revoke="${escape(device.id)}" aria-label="Revoke ${escape(device.name)}">Revoke</button>`}</div>`;
   }
   function body(): string {
     if (!status) {
@@ -88,7 +88,8 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
   }
   function setGrant(deviceId: string, scope: string): void {
     error = '';
-    void host.call('remote_set_device_grant', { deviceId, scope }).then(() => loadGrants()).then(() => render(), e => { error = message(e); void loadGrants().then(render); });
+    const expectedFingerprint = root.querySelector<HTMLElement>(`.remote-device[data-device="${CSS.escape(deviceId)}"]`)?.dataset.fingerprint;
+    void host.call('remote_set_device_grant', { deviceId, scope, ...(scope === 'blocked' || scope === 'pending' ? {} : { expectedFingerprint }) }).then(() => loadGrants()).then(() => render(), e => { error = message(e); void loadGrants().then(render); });
   }
   function showCode(next: PairCode | undefined): void {
     pairCode = next; window.clearTimeout(expiry);
@@ -117,7 +118,7 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
   });
   root.addEventListener('input', event => {
     const input = event.target as HTMLInputElement;
-    if (input.dataset.trust) void host.call<RemoteDevice[]>('remote_set_trusted', { deviceId: input.dataset.trust, trusted: input.checked }).then(next => { devices = next; render(); }, e => { input.checked = !input.checked; fail(e); });
+    if (input.dataset.trust) void host.call<RemoteDevice[]>('remote_set_trusted', { deviceId: input.dataset.trust, trusted: input.checked, ...(input.checked ? { expectedFingerprint: input.closest<HTMLElement>('.remote-device')?.dataset.fingerprint } : {}) }).then(next => { devices = next; render(); }, e => { input.checked = !input.checked; fail(e); });
     else if (input.id === 'remote-host') void host.call<RemoteStatus>('remote_set_host_enabled', { enabled: input.checked }).then(next => { apply(next); render(); }, e => { input.checked = !input.checked; fail(e); });
     else if (input.id === 'remote-full-access') void host.call<RemoteStatus>('remote_set_full_access', { enabled: input.checked }).then(next => { apply(next); render(); }, e => { input.checked = !input.checked; fail(e); });
   });

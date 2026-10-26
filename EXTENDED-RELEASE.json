@@ -1,23 +1,23 @@
 {
   "schema_version": 1,
   "product": "PandaCode Extended",
-  "extended_version": "0.5.2",
-  "tracked_upstream_version": "0.3.48",
+  "extended_version": "0.6.0",
+  "tracked_upstream_version": "0.3.50",
   "source_base_upstream_version": "0.3.28",
   "upstream_code_rebased": false,
   "full_upstream_parity": false,
-  "display_version": "0.5.2+pc.0.3.48",
-  "release_note": "releases/extended/0.5.2.md",
+  "display_version": "0.6.0+pc.0.3.50",
+  "release_note": "releases/extended/0.6.0.md",
   "reviewed_upstream_range": {
     "from": "0.3.42",
-    "through": "0.3.48"
+    "through": "0.3.50"
   },
   "integration_provenance": {
-    "extended_base_commit": "5d4cb69b0a97c46eef544303137c73a81f4c5b59",
-    "upstream_commit": "4187553cb48db96657609948f6b0904556845d45",
-    "reference_archive_sha256": "73a8dbe02d03c4aef37ff50362af266fa72c0f4b4dfb44d935ee649b1e3e85f1",
-    "reference_files_verified": 1146,
-    "coverage_document": "docs/upstream-integration-0.5.0.md"
+    "extended_base_commit": "479f2e6ac700d216d62ae08681e36aaaa20fa074",
+    "upstream_commit": "15541a51f3f5d8ee32d91349f9d5035a53c4cd19",
+    "reference_archive_sha256": "db23e5aaa2b11c940874606156920be0ee3118046b2b49d1e17fbf8174932b8c",
+    "reference_files_verified": 1232,
+    "coverage_document": "docs/upstream-integration-0.6.0.md"
   },
   "historical_upstream_review": {
     "from": "0.3.28",
@@ -50,5 +50,33 @@
     "source_note_blob_sha": "639bd02d0f5513aad54bd253c6f496676b824962",
     "coverage_document": "docs/upstream-integration-0.5.1.md",
     "issue": "https://github.com/ginmp8/pandacode-extended/issues/30"
+  },
+  "previous_integration_provenance": {
+    "extended_base_commit": "5d4cb69b0a97c46eef544303137c73a81f4c5b59",
+    "upstream_commit": "4187553cb48db96657609948f6b0904556845d45",
+    "reference_archive_sha256": "73a8dbe02d03c4aef37ff50362af266fa72c0f4b4dfb44d935ee649b1e3e85f1",
+    "reference_files_verified": 1146,
+    "coverage_document": "docs/upstream-integration-0.5.0.md"
+  },
+  "latest_upstream_review": {
+    "from": "0.3.48",
+    "through": "0.3.50",
+    "extended_base_commit": "479f2e6ac700d216d62ae08681e36aaaa20fa074",
+    "upstream_from_commit": "9cc1a9a58d259f7316e4f3ad621e8ca120358d89",
+    "upstream_0_3_49_commit": "e71acdda9eb5d488122081c4dbc49ee1a5b4f9e2",
+    "upstream_through_commit": "15541a51f3f5d8ee32d91349f9d5035a53c4cd19",
+    "source_notes": [
+      "releases/0.3.49.md",
+      "releases/0.3.50.md"
+    ],
+    "source_note_blobs": [
+      "abe3a8415558e2f176c0213b84d0040b23983f6c",
+      "74919eec0d2bd79d21f81a9cc89563fa64d58e8c"
+    ],
+    "coverage_document": "docs/upstream-integration-0.6.0.md",
+    "issues": [
+      "https://github.com/ginmp8/pandacode-extended/issues/38",
+      "https://github.com/ginmp8/pandacode-extended/issues/39"
+    ]
   }
 }

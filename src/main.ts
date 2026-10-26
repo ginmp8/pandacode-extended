@@ -1258,7 +1258,26 @@ function renderTranscript(preservePosition = false): void {
   const turns = groupTurns(visibleMessages());
   const previousMarkdown = new Map([...transcript.querySelectorAll<HTMLElement>('[data-markdown]')]
     .map(node => [node.dataset.markdown!, node]));
+  // A saved response can finish while a reader measures a historical message.
+  // Preserve unchanged persisted user articles, not just their Markdown children:
+  // detaching the article during the transcript rebuild invalidates in-flight
+  // element handles and can interrupt reading position/selection.
+  const previousUsers = new Map([...transcript.querySelectorAll<HTMLElement>('.user-message[data-message-id]')]
+    .filter(node => Number(node.dataset.messageId) > 0)
+    .map(node => [node.dataset.messageId!, node]));
   transcript.innerHTML = `${state.messages.length ? '' : '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>'}${turns.map(turn => (turn.user ? messageHtml(turn.user) : '') + (turn.handoff ? messageHtml(turn.handoff) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity) : '') + turn.errors.map(message => messageHtml(message)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool')) : '') + workerSlot(turn) + changesRow(s.id, turn.changes)).join('')}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
+  // A full saved-history refresh must not temporarily invalidate the same
+  // message element being inspected. User text is static once persisted; refresh
+  // only its action controls when agent state changes.
+  transcript.querySelectorAll<HTMLElement>('.user-message[data-message-id]').forEach(node => {
+    const old = previousUsers.get(node.dataset.messageId!);
+    if (!old || old.querySelector('.message-content')?.textContent !== node.querySelector('.message-content')?.textContent) return;
+    const oldActions = old.querySelector<HTMLElement>('.message-actions');
+    const newActions = node.querySelector<HTMLElement>('.message-actions');
+    if (oldActions && newActions && oldActions.outerHTML !== newActions.outerHTML) oldActions.replaceWith(newActions);
+    old.className = node.className;
+    node.replaceWith(old);
+  });
   const byId = new Map(state.messages.map(message => [String(message.id), message]));
   transcript.querySelectorAll<HTMLElement>('[data-markdown]').forEach(el => {
     const message = byId.get(el.dataset.markdown!);

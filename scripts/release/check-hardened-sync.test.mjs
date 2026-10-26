@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { check } from './check-hardened-sync.mjs';
 
 test('Extended core/display version, historical ancestry, layout patch and separated release histories stay consistent', async () => {
-  assert.deepEqual(await check(), { version: '0.5.2', display: '0.5.2+pc.0.3.48', upstream: '0.3.48', sourceBase: '0.3.28', upstreamNotes: 98, extendedNotes: 10 });
+  assert.deepEqual(await check(), { version: '0.6.0', display: '0.6.0+pc.0.3.50', upstream: '0.3.50', sourceBase: '0.3.28', upstreamNotes: 100, extendedNotes: 11 });
 });
 
 const source = new URL('../../', import.meta.url);
@@ -17,7 +17,7 @@ const fixturePaths = ['HARDENED-REVISION.json', 'EXTENDED-RELEASE.json', 'packag
   'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'website/src/data/release-dates.json',
   'src/styles.css', 'src/team-progress.css', 'tests/architect.spec.ts', 'docs/upstream-integration-0.5.0.md',
   'docs/upstream-parity-0.3.28-0.3.42.md', 'docs/upstream-release-evidence-0.3.28-0.3.42.json',
-  'docs/upstream-parity-before-0.3.28.md', 'docs/upstream-release-evidence-before-0.3.28.json', 'docs/upstream-integration-0.5.1.md', 'releases'];
+  'docs/upstream-parity-before-0.3.28.md', 'docs/upstream-release-evidence-before-0.3.28.json', 'docs/upstream-integration-0.5.1.md', 'docs/upstream-integration-0.6.0.md', 'releases'];
 
 async function fixture(run) {
   const directory = await mkdtemp(join(tmpdir(), 'extended-release-'));
@@ -74,7 +74,7 @@ test('a tracked upstream advance requires bounded source identities, range and c
     await assert.rejects(check(directory), /Incremental upstream source note changed/);
   });
   await fixture(async directory => {
-    await writeFile(join(directory, 'docs/upstream-integration-0.5.0.md'), '# Missing source identities\\n');
+    await writeFile(join(directory, 'docs/upstream-integration-0.6.0.md'), '# Missing source identities\\n');
     await assert.rejects(check(directory), /Integration coverage omits source identity/);
   });
 });
@@ -116,22 +116,22 @@ test('the version command advances desktop and mobile together without rewriting
     }
     const historical = await readFile(join(directory, 'HARDENED-REVISION.json'), 'utf8');
     const published = await readFile(join(directory, 'releases/extended/0.4.0.md'), 'utf8');
-    execFileSync(process.execPath, [join(directory, 'scripts/release/set-version.mjs'), '0.5.2'], { stdio: 'pipe' });
+    execFileSync(process.execPath, [join(directory, 'scripts/release/set-version.mjs'), '1.2.3'], { stdio: 'pipe' });
     for (const path of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'mobile/package.json', 'mobile/package-lock.json']) {
       const value = JSON.parse(await readFile(join(directory, path), 'utf8'));
-      assert.equal(value.version, '0.5.2', path);
-      if (value.packages?.['']) assert.equal(value.packages[''].version, '0.5.2', path);
+      assert.equal(value.version, '1.2.3', path);
+      if (value.packages?.['']) assert.equal(value.packages[''].version, '1.2.3', path);
     }
     const app = JSON.parse(await readFile(join(directory, 'mobile/app.json'), 'utf8'));
-    assert.equal(app.expo.version, '0.5.2');
+    assert.equal(app.expo.version, '1.2.3');
     assert.equal(app.expo.updates.enabled, false);
     assert.equal(await readFile(join(directory, 'HARDENED-REVISION.json'), 'utf8'), historical);
     assert.equal(await readFile(join(directory, 'releases/extended/0.4.0.md'), 'utf8'), published);
     // Follow the documented workflow: add the new product note, retaining reviewed upstream evidence.
-    await writeFile(join(directory, 'releases/extended/0.5.2.md'), '# Extended 0.5.2\n\nProduct-only patch.\n');
+    await writeFile(join(directory, 'releases/extended/1.2.3.md'), '# Extended 1.2.3\n\nProduct-only patch.\n');
     const metadata = JSON.parse(await readFile(join(directory, 'EXTENDED-RELEASE.json'), 'utf8'));
-    assert.equal(metadata.integration_provenance.coverage_document, 'docs/upstream-integration-0.5.0.md');
-    assert.deepEqual(await check(directory), { version: '0.5.2', display: '0.5.2+pc.0.3.48', upstream: '0.3.48', sourceBase: '0.3.28', upstreamNotes: 98, extendedNotes: 10 });
+    assert.equal(metadata.integration_provenance.coverage_document, 'docs/upstream-integration-0.6.0.md');
+    assert.deepEqual(await check(directory), { version: '1.2.3', display: '1.2.3+pc.0.3.50', upstream: '0.3.50', sourceBase: '0.3.28', upstreamNotes: 100, extendedNotes: 12 });
   });
 });
 

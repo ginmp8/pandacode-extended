@@ -1,6 +1,6 @@
 # PandaCode Extended
 
-**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended release candidate is [`0.5.0+pc.0.3.47`](releases/extended/0.5.0.md) (technical version `0.5.0`, tracked upstream reference `0.3.47`). It combines the upstream `0.3.42`–`0.3.47` integration with historical feature reviews; see the [newer integration map](docs/upstream-integration-0.5.0.md), [0.3.28–0.3.42 coverage](docs/upstream-parity-0.3.28-0.3.42.md), [coverage before 0.3.28](docs/upstream-parity-before-0.3.28.md), and [versioning policy](docs/VERSIONING.md). The canonical repository is [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended).
+**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended release candidate is [`0.6.0+pc.0.3.48`](releases/extended/0.6.0.md) (technical version `0.6.0`, tracked upstream reference `0.3.48`). It adds the [0.3.48 harness-switch layout fix](docs/upstream-integration-0.6.0.md) to the existing upstream `0.3.42`–`0.3.47` integration and historical reviews; see the [previous integration map](docs/upstream-integration-0.5.0.md), [0.3.28–0.3.42 coverage](docs/upstream-parity-0.3.28-0.3.42.md), [coverage before 0.3.28](docs/upstream-parity-before-0.3.28.md), and [versioning policy](docs/VERSIONING.md). The canonical repository is [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended).
 
 Historical security work: [release notes](releases/extended/0.3.42-hardened.md), [upstream history](docs/UPSTREAM-RELEASE-HISTORY.md), and [security review](security-review/0.3.42-hardened/REPORT.md).
 
@@ -163,7 +163,7 @@ still require network access.
 
 Updates are a deliberate manual operation: review the new source, reproduce
 these protections, build it, and then replace the installed application. The
-package version is `0.5.0` (displayed as `0.5.0+pc.0.3.47`); this is
+package version is `0.6.0` (displayed as `0.6.0+pc.0.3.48`); this is
 an independently labeled fork distribution, not an official upstream release.
 Back up application data before replacing a previous installation.
 
@@ -193,7 +193,7 @@ cd pandacode-extended
 npm ci --ignore-scripts
 npm run build
 npm run package
-# For a Windows x64 installer with a distinct Extended 0.5.0 asset name:
+# For a Windows x64 installer with a distinct Extended 0.6.0 asset name:
 # npm run release:build -- windows-x86_64
 # For local development: npm run desktop
 ```

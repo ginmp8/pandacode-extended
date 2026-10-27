@@ -153,7 +153,8 @@ pub(super) fn with_authorized_request_effect<T>(
 fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str, mode: &str, require_full: bool) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
-    authorize_request_mode(&state.dir, &inner, from, authenticated_key, method, mode, require_full)
+    let request = RequestAuthorization::new(&state.dir, &inner, from, authenticated_key, method);
+    authorize_request_mode(&request, mode, require_full)
 }
 
 fn authorize_mode(inner: &super::Inner, from: &str, authenticated_key: &str, mode: &str) -> Result<()> {

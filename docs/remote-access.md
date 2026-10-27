@@ -236,9 +236,9 @@ more power than local ones.
 | `task.attachment` | `{ sessionId, id, variant: "thumb" or "full", offset? }` | `{ data, mime, total, offset, done }`; base64 image chunks, only from a saved message owned by that task. |
 | `task.workspaceImage` | `{ sessionId, path, variant: "thumb" or "full", offset? }` | The same chunk shape, using the existing workspace image path/format/size checks. |
 | `image.put` | `{ uploadId, index, size, data }` | Uploads one base64 chunk; the completed upload returns a host-generated `imageId`. |
-| `task.send` | `{ sessionId, text, imageIds? }` | `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
+| `task.send` | `{ sessionId, text, imageIds? }` | Rejects bot-owned conversation sessions at every peer scope; use Full-only `bot.message`. `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
 | `task.stop` | `{ sessionId }` | `{}` |
-| `task.steer` | `{ sessionId, text }` | `{}` (as `steer_task`) |
+| `task.steer` | `{ sessionId, text }` | Rejects bot-owned conversation sessions at every peer scope; use Full-only `bot.message`. Otherwise `{}` (as `steer_task`). |
 | `task.configure` | `{ sessionId, provider?, model?, effort?, mode? }` | `{}`. `provider` and `model` together (a provider not installed there is refused as in `task.start`); `effort: null` clears it; `mode` changes permissions. |
 | `approval.respond` | `{ sessionId, requestId, approve: boolean }` | `{}` |
 | `input.respond` | `{ sessionId, requestId, response }` | `{}` (as `respond_user_input`) |
@@ -250,7 +250,7 @@ more power than local ones.
 | `task.diff` | `{ sessionId, path?, staged? }` | `{ diff, truncated }`, capped at 120 KiB. |
 | `bots.list` | `{}` | Bot summaries and their desktop conversations, with bounded avatars. |
 | `bot.thread` | `{ botId }` | `{ sessionId }`; opens or creates that bot's desktop conversation. |
-| `bot.message` | `{ botId, text }` | `{ sessionId }`; uses the existing bot brief, memory and approval path. Busy remote bot sends are refused rather than queued without caller provenance. |
+| `bot.message` | `{ botId, text }` | Full access only; returns `{ sessionId }` and uses the existing bot brief, memory and approval path. Busy remote bot sends are refused rather than queued without caller provenance. |
 | `bot.pause` | `{ botId, paused }` | `{}`; pausing stops running bot work. Resuming a Full access bot requires the host's separate Full access grant. |
 | `batch` | `{ calls: [{ method, params }] }` (1–8) | `{ results: [{ ok, result? , error? }] }`; only the explicit read-method allowlist is accepted, with a shared 180 KiB reply budget. Nested or mutating batches are refused. |
 

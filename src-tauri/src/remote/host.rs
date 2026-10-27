@@ -645,6 +645,44 @@ async fn local_task(state: &AppState, session_id: &str) -> Result<crate::storage
     .await
 }
 
+const BOT_PROMPT_REFUSAL: &str = "This is a bot conversation. Use the bot message action with Full access so the bot's context and memory are applied.";
+
+/// Whether this session is an explicit bot conversation, whose prompts need
+/// the bot-aware messaging policy.
+fn is_bot_thread(db: &rusqlite::Connection, session_id: &str) -> Result<bool> {
+    db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM bot_threads WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn reject_generic_bot_prompt(bot_thread: bool) -> Result<()> {
+    if bot_thread {
+        return Err(BOT_PROMPT_REFUSAL.into());
+    }
+    Ok(())
+}
+
+fn preflight_generic_send(bot_thread: bool, continue_send: impl FnOnce() -> Result<()>) -> Result<()> {
+    reject_generic_bot_prompt(bot_thread)?;
+    continue_send()
+}
+
+async fn local_prompt_task(state: &AppState, session_id: &str) -> Result<(crate::storage::Session, bool)> {
+    let store = state.store.clone();
+    let lookup_id = session_id.to_owned();
+    crate::blocking(move || {
+        let store = store.lock().map_err(|e| e.to_string())?;
+        let task = local_session_from(&store, &lookup_id)?;
+        let bot_thread = is_bot_thread(&store.db, &lookup_id)?;
+        Ok((task, bot_thread))
+    })
+    .await
+}
+
 fn local_session_from(store: &crate::storage::Store, session_id: &str) -> Result<crate::storage::Session> {
     let task = store.session(session_id)?;
     if task.remote_device.is_some() {
@@ -1426,13 +1464,16 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
         }
         Call::PutImage(chunk) => images::put(app, from, authenticated_key, chunk).await,
         Call::Send { session_id, text, image_ids } => {
-            check_current_request(&local_task(&state, &session_id).await?.mode)?;
-            // Keep deferred prompts on the viewer: an anonymous host queue would lose
-            // the authenticated origin and could run after this grant was revoked.
-            if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
-                return Err("This remote task is running. Keep the message queued on this computer, or use Steer.".into());
-            }
-            images::claim(app, from, authenticated_key, &image_ids)?;
+            let (task, bot_thread) = local_prompt_task(&state, &session_id).await?;
+            preflight_generic_send(bot_thread, || {
+                check_current_request(&task.mode)?;
+                // Keep deferred prompts on the viewer: an anonymous host queue would lose
+                // the authenticated origin and could run after this grant was revoked.
+                if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
+                    return Err("This remote task is running. Keep the message queued on this computer, or use Steer.".into());
+                }
+                images::claim(app, from, authenticated_key, &image_ids)
+            })?;
             crate::send_message(app.clone(), state, session_id, text, Some(image_ids), None).await?;
             let _ = app.emit("sessions-changed", ());
             Ok(json!({"queued": false}))
@@ -1457,7 +1498,9 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({}))
         }
         Call::Steer { session_id, text } => {
-            check_current_request(&local_task(&state, &session_id).await?.mode)?;
+            let (task, bot_thread) = local_prompt_task(&state, &session_id).await?;
+            reject_generic_bot_prompt(bot_thread)?;
+            check_current_request(&task.mode)?;
             message_queue::steer_task(app.clone(), state, session_id, text).await
         }
         Call::Configure { session_id, model, effort, mode } => {
@@ -4132,6 +4175,89 @@ mod extended_security_tests {
         assert!(authorize_mode(&inner, "peer", "new-key", "ask").is_ok());
         inner.devices.clear();
         assert!(authorize_mode(&inner, "peer", "new-key", "ask").is_err());
+    }
+
+    #[test]
+    fn bot_thread_generic_prompts_are_blocked_before_side_effects() {
+        let dir = std::env::temp_dir().join(format!("pandacode-host-bot-send-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut inner = super::super::Inner::default();
+        inner.devices.push(super::super::Device {
+            id: "peer".into(), name: "Peer".into(), platform: "test".into(),
+            public_key: "pinned-key".into(), host: true, online: true, last_seen: Value::Null,
+        });
+        inner.settings.trusted.insert("peer".into(), "pinned-key".into());
+        inner.settings.host_enabled = true;
+        // With Full off, task.send is still authorized by the Control grant,
+        // as is task.steer, while bot.message remains reserved for Full.
+        assert!(super::super::grants::seed_trusted(&dir, &inner.settings).is_ok());
+        assert!(super::super::grants::authorize(&dir, &inner, "peer", "pinned-key", "task.send").is_ok());
+        assert!(super::super::grants::authorize(&dir, &inner, "peer", "pinned-key", "task.steer").is_ok());
+        assert!(super::super::grants::authorize(&dir, &inner, "peer", "pinned-key", "bot.message").is_err());
+
+        let image_id = uuid::Uuid::new_v4().to_string();
+        let call = parse(true, "task.send", &json!({"sessionId": "bot-desktop-thread", "text": "hi", "imageIds": [image_id]})).unwrap();
+        assert_eq!(call.method_name(), "task.send");
+        let Call::Send { session_id, image_ids, .. } = call else { unreachable!() };
+        assert_eq!(image_ids.len(), 1, "exercise the image-bearing generic send path");
+        let steer = parse(true, "task.steer", &json!({"sessionId": "bot-desktop-thread", "text": "also steer"})).unwrap();
+        assert_eq!(steer.method_name(), "task.steer");
+        let Call::Steer { session_id: steer_session, .. } = steer else { unreachable!() };
+
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE bot_threads(session_id TEXT PRIMARY KEY); INSERT INTO bot_threads VALUES ('bot-desktop-thread');").unwrap();
+        let bot_send = is_bot_thread(&db, &session_id).unwrap();
+        let mut image_claimed = false;
+        assert_eq!(
+            preflight_generic_send(bot_send, || {
+                image_claimed = true;
+                Ok(())
+            }),
+            Err(BOT_PROMPT_REFUSAL.into()),
+            "an image-bearing bot send is rejected before images::claim and send_message"
+        );
+        assert!(!image_claimed, "the denied bot send leaves its uploaded image unclaimed");
+        let bot_steer = is_bot_thread(&db, &steer_session).unwrap();
+        assert_eq!(
+            reject_generic_bot_prompt(bot_steer),
+            Err(BOT_PROMPT_REFUSAL.into()),
+            "Control cannot steer around the bot gateway"
+        );
+        assert!(
+            reject_generic_bot_prompt(false).is_ok(),
+            "ordinary task steering remains unchanged"
+        );
+        let mut ordinary_image_claimed = false;
+        assert!(
+            preflight_generic_send(false, || {
+                ordinary_image_claimed = true;
+                Ok(())
+            })
+            .is_ok(),
+            "ordinary sends may still claim their images"
+        );
+        assert!(ordinary_image_claimed);
+
+        let full_dir = std::env::temp_dir().join(format!("pandacode-host-bot-steer-full-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&full_dir).unwrap();
+        let mut full_inner = super::super::Inner::default();
+        full_inner.devices.push(super::super::Device {
+            id: "peer".into(), name: "Peer".into(), platform: "test".into(),
+            public_key: "pinned-key".into(), host: true, online: true, last_seen: Value::Null,
+        });
+        full_inner.settings.trusted.insert("peer".into(), "pinned-key".into());
+        full_inner.settings.host_enabled = true;
+        full_inner.settings.allow_full_access = true;
+        assert!(super::super::grants::seed_trusted(&full_dir, &full_inner.settings).is_ok());
+        assert!(preflight_generic_send(bot_send, || Ok(())).is_err(), "Full bot-message scope still cannot use generic send_message");
+        assert!(
+            super::super::grants::authorize(&full_dir, &full_inner, "peer", "pinned-key", "bot.message").is_ok(),
+            "Full can use the dedicated bot gateway"
+        );
+        assert_eq!(reject_generic_bot_prompt(bot_steer), Err(BOT_PROMPT_REFUSAL.into()), "Full cannot bypass the gateway through generic steer");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&full_dir);
     }
 
     #[test]

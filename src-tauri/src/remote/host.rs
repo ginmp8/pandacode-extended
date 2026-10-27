@@ -109,19 +109,31 @@ tokio::task_local! {
     static REQUEST_ORIGIN: RequestOrigin;
 }
 
-fn authorize_request_mode(
-    dir: &Path,
-    inner: &super::Inner,
-    from: &str,
-    authenticated_key: &str,
-    method: &str,
-    mode: &str,
-    require_full: bool,
-) -> Result<()> {
-    super::grants::authorize(dir, inner, from, authenticated_key, method)?;
-    authorize_mode(inner, from, authenticated_key, mode)?;
+pub(super) struct RequestAuthorization<'a> {
+    dir: &'a Path,
+    inner: &'a super::Inner,
+    from: &'a str,
+    authenticated_key: &'a str,
+    method: &'a str,
+}
+
+impl<'a> RequestAuthorization<'a> {
+    pub(super) fn new(
+        dir: &'a Path,
+        inner: &'a super::Inner,
+        from: &'a str,
+        authenticated_key: &'a str,
+        method: &'a str,
+    ) -> Self {
+        Self { dir, inner, from, authenticated_key, method }
+    }
+}
+
+fn authorize_request_mode(request: &RequestAuthorization<'_>, mode: &str, require_full: bool) -> Result<()> {
+    super::grants::authorize(request.dir, request.inner, request.from, request.authenticated_key, request.method)?;
+    authorize_mode(request.inner, request.from, request.authenticated_key, mode)?;
     if require_full {
-        super::grants::authorize_full(dir, inner, from, authenticated_key)?;
+        super::grants::authorize_full(request.dir, request.inner, request.from, request.authenticated_key)?;
     }
     Ok(())
 }
@@ -129,16 +141,12 @@ fn authorize_request_mode(
 /// Authorization plus a synchronous effect. Remote mutations must keep the
 /// Remote lock across this call so revocation cannot pass it before the effect.
 pub(super) fn with_authorized_request_effect<T>(
-    dir: &Path,
-    inner: &super::Inner,
-    from: &str,
-    authenticated_key: &str,
-    method: &str,
+    request: RequestAuthorization<'_>,
     mode: &str,
     require_full: bool,
     effect: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    authorize_request_mode(dir, inner, from, authenticated_key, method, mode, require_full)?;
+    authorize_request_mode(&request, mode, require_full)?;
     effect()
 }
 
@@ -184,11 +192,7 @@ pub(super) fn with_current_full_request<T>(mode: &str, effect: impl FnOnce() -> 
         let state = remote(&origin.app);
         let inner = state.lock();
         with_authorized_request_effect(
-            &state.dir,
-            &inner,
-            &origin.device,
-            &origin.key,
-            &origin.method,
+            RequestAuthorization::new(&state.dir, &inner, &origin.device, &origin.key, &origin.method),
             mode,
             true,
             || effect.take().ok_or_else(|| "The authorization effect was already used.".to_owned())?(),

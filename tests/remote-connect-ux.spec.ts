@@ -87,7 +87,7 @@ test('presence loss keeps the chosen computer and lists offline devices with Ret
   await page.addInitScript(() => { (window as any).__remoteStartStep = 0; });
   await chooseStudioOnNewTask(page);
   const computer = page.locator('#composer-computer');
-  await expect(computer).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(computer).toHaveAttribute('aria-haspopup', 'dialog');
   await page.evaluate(() => (window as any).__remoteOnline('dev-studio', false));
   await expect(computer).toHaveAccessibleName(/Computer: Studio iMac.*Offline/);
   await expect(computer).not.toHaveAccessibleName(/This computer/);
@@ -159,8 +159,8 @@ test('remote settings distinguish loading, empty, and retryable status/device fa
   await expect(panel.getByText('No devices yet.')).toHaveCount(0);
   await panel.getByRole('button', { name: 'Retry' }).click();
   await expect(panel.getByRole('button', { name: 'Sign in with GitHub' })).toBeVisible();
-  // The app's presence refresh asks first; the settings panel asks second.
-  await page.evaluate(() => { (window as any).__remoteDevicesFailures = 2; });
+  // Only Settings loads remote_devices; the composer loads remote_targets separately.
+  await page.evaluate(() => { (window as any).__remoteDevicesFailures = 1; });
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('alert')).toContainText('Couldn’t load devices');
   await expect(panel.getByText('No devices yet.')).toHaveCount(0);

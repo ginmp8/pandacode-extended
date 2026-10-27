@@ -55,7 +55,7 @@ test('a waiting device can be blocked, and the picker changes any device afterwa
 
 test('this computer shows its key grouped, and every device has an access help mark', async ({ page }) => {
   const panel = await openSignedIn(page);
-  await expect(panel.locator('.remote-key')).toHaveText('3fa9 1c07 d2b6 4e58');
+  await expect(panel.locator('.remote-key')).toHaveText('3fa9 1c07 d2b6 4e58 4a81 0ea7 b9c3 d25f');
   await expect(panel.getByRole('img', { name: 'About device access' })).toHaveAttribute('data-tip', /View only.*Control.*Full access.*Blocked/);
   await expect(panel.locator('.remote-pending')).toHaveCount(0);
 });

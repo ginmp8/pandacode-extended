@@ -23,22 +23,24 @@ export function offlineText(target: RemoteTarget): string { return `Offline · $
 
 
 /** The control beside Local / Worktree; empty when there is nothing to choose. */
-export function computerControl(session: Session, fresh: boolean, targets: RemoteTarget[], chosen: string): string {
+export function computerControl(session: Session, fresh: boolean, targets: RemoteTarget[], chosen: string, chosenName?: string): string {
   if (session.remoteDevice) {
     const name = escape(session.remoteDevice.name), target = targets.find(item => item.deviceId === session.remoteDevice!.id);
     const offline = target && !target.online;
     const status = offline ? ` · ${escape(offlineText(target))}` : '';
     return `<span class="composer-computer composer-computer-fixed" aria-label="Computer: ${name} (fixed for this task)${status}" title="This task runs on ${name}. Start a new task to use another computer.${status}">${icon('monitor')}<span>on ${name}${offline ? ' · Offline' : ''}</span></span>`;
   }
-  if (!fresh || !targets.length) return '';
-  const name = targets.find(target => target.deviceId === chosen)?.name ?? 'This computer';
-  return `<button type="button" id="composer-computer" class="composer-computer" data-action="computer-menu" aria-label="Computer: ${escape(name)}" aria-haspopup="dialog" aria-expanded="false" title="Where this task runs">${icon('monitor')}<span>${escape(name)}</span>${icon('down')}</button>`;
+  if (!fresh || (!targets.length && chosen === LOCAL)) return '';
+  const target = targets.find(item => item.deviceId === chosen);
+  const name = chosen === LOCAL ? 'This computer' : target?.name ?? chosenName ?? 'That computer';
+  const status = chosen === LOCAL ? '' : !target ? ' · Not paired' : !target.online ? ` · ${offlineText(target)}` : '';
+  return `<button type="button" id="composer-computer" class="composer-computer" data-action="computer-menu" aria-label="Computer: ${escape(name + status)}" aria-haspopup="dialog" aria-expanded="false" title="Where this task runs">${icon('monitor')}<span>${escape(name)}${target && !target.online ? ' · Offline' : !target && chosen !== LOCAL ? ' · Not paired' : ''}</span>${icon('down')}</button>`;
 }
 
 export function computerItems(targets: RemoteTarget[], chosen: string) {
   return [
     { id: LOCAL, label: 'This computer', icon: 'monitor', selected: chosen === LOCAL },
-    ...targets.map(target => ({ id: target.deviceId, label: target.name, description: target.online ? target.platform : 'Offline', icon: 'monitor', selected: target.deviceId === chosen, disabled: !target.online })),
+    ...targets.map(target => ({ id: target.deviceId, label: target.name, description: target.online ? target.platform : offlineText(target), icon: 'monitor', selected: target.deviceId === chosen, disabled: !target.online })),
   ];
 }
 

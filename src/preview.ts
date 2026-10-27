@@ -787,6 +787,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     if (w.__remoteReconnectFail) { const failure = w.__remoteReconnectFail; w.__remoteReconnectFail = undefined; throw new Error(failure); }
     return undefined as T;
   }
+  if (command === 'remote_resubscribe') {
+    const w = window as any;
+    (w.__remoteResubscribes ??= []).push(args);
+    if (w.__remoteResubscribeHold) await new Promise<void>(resolve => { w.__remoteResubscribeRelease = () => { w.__remoteResubscribeHold = false; resolve(); }; });
+    if (w.__remoteResubscribeFail) { const failure = w.__remoteResubscribeFail; w.__remoteResubscribeFail = undefined; throw new Error(failure); }
+    return undefined as T;
+  }
   if (command === 'remote_repo_check') {
     const w = window as any;
     (w.__remoteRepoChecks ??= []).push(args);
@@ -1256,6 +1263,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'send_message': {
       if (resolveSlash(session(args.sessionId).provider, String(args.text)).action) throw new Error('This command opens a PandaCode control.');
       const s = session(args.sessionId); assertIdle(s);
+      const w = window as any;
+      if (s.remoteDevice && w.__remoteSendHold) await new Promise<void>(resolve => { w.__remoteSendRelease = () => { w.__remoteSendHold = false; resolve(); }; });
+      if (s.remoteDevice && w.__remoteRefuse) throw new Error(w.__remoteRefuse);
+      assertIdle(s);
       if (s.mode === 'review' && !['claude', 'glm', 'mimo'].includes(s.provider)) throw new Error('Approve for me needs Claude Code’s auto mode; this harness has no agent-reviewed approvals. Choose another permission mode.');
       let moodboardContext = '';
       for (const boardId of args.moodboardIds ?? []) {

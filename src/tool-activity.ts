@@ -47,10 +47,11 @@ function toolNote(tool: ToolActivity, hasCard: boolean): string {
 const RAW_LABEL = 'Raw input and output';
 const CODE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 7-5 5 5 5m8-10 5 5-5 5M13.5 4l-3 16"/></svg>';
 
-/** The recorded input/output hide behind a quiet `</>` button in the card's corner; with no card they show open. */
-function rawRecord(tool: ToolActivity, hasCard: boolean): string {
+/** Raw records always require the reader to open the quiet `</>` disclosure,
+ * including tools with no result card. Choreography never opts into raw details. */
+function rawRecord(tool: ToolActivity): string {
   const sections = (tool.input.trim() ? section('input', tool.input) : '') + (tool.output.trim() ? section('output', tool.output) : '');
-  return sections ? `<details class="tool-trace-raw"${hasCard ? '' : ' open'}><summary aria-label="${RAW_LABEL}" title="${RAW_LABEL}">${CODE_ICON}</summary><div class="tool-trace-raw-body">${sections}</div></details>` : '';
+  return sections ? `<details class="tool-trace-raw"><summary aria-label="${RAW_LABEL}" title="${RAW_LABEL}">${CODE_ICON}</summary><div class="tool-trace-raw-body">${sections}</div></details>` : '';
 }
 
 /** Caller owns the stable key and restores native details.open when replacing activity rows. */
@@ -62,7 +63,7 @@ export function renderToolActivity(content: string | ToolActivity, key: string):
   const lead = icon(tool.status === 'failed' ? 'alert' : trace.icon ?? kindIcon(trace.kind), 'tool-trace-icon');
   const preview = toolPreview(named);
   // The card and its raw `</>` toggle share a frame so the toggle can sit in the card's corner.
-  const body = preview ? `<div class="tool-trace-frame">${preview}${rawRecord(tool, true)}</div>${toolNote(tool, true)}` : `<div class="tool-trace-frame">${toolNote(tool, false)}${rawRecord(tool, false)}</div>`;
+  const body = preview ? `<div class="tool-trace-frame">${preview}${rawRecord(tool)}</div>${toolNote(tool, true)}` : `<div class="tool-trace-frame">${toolNote(tool, false)}${rawRecord(tool)}</div>`;
   return `<details class="tool-activity tool-trace" data-tool-key="${escape(key)}" data-tool-status="${escape(tool.status)}" data-tool-kind="${trace.kind}" data-tool-name="${escape(named.name)}"><summary title="${escape(named.name || 'Tool')}">${lead}${traceRowHtml(trace)}${icon('chevron', 'tool-trace-chevron')}</summary><div class="tool-activity-body">${body}</div></details>`;
 }
 

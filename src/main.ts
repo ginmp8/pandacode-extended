@@ -133,6 +133,7 @@ let inspectorDiff: import('./diff-viewer').DiffViewerController | undefined;
 let inspectorDiffEpoch = 0;
 let transientId = -1;
 const savedMarkdownSources = new WeakMap<HTMLElement, string>();
+const savedActivitySources = new WeakMap<HTMLElement, string>();
 let olderMessagesRequest: { sessionId: string; generation: number; beforeId: number } | undefined;
 const pendingApprovals = new Set<string>();
 const configuringSessions = new Set<string>();
@@ -419,7 +420,7 @@ const worktrees = createWorktrees({
   git: () => state.git, gitError: () => state.gitError,
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
   attachable: () => newTaskView(),
-  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice) + botTaskControl(task, fresh),
+  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, remoteChoiceName) + botTaskControl(task, fresh),
   running: () => isRunning(),
   afterAttach: async (saved, live) => {
     const index = state.sessions.findIndex(s => s.id === saved.id); if (index >= 0) state.sessions[index] = saved;
@@ -1227,10 +1228,20 @@ function changesRow(sessionId: string, changes: TurnChanges | undefined): string
   const card = changes && !state.sessions.find(task => task.id === sessionId)?.remoteDevice ? renderTurnChanges(sessionId, changes, sessionId === state.sessionId && projectRunner.available()) : '';
   return card ? `<div class="turn-changes-row">${card}</div>` : '';
 }
+/** Refresh mutable controls/author labels without touching the selected message text. */
+function refreshMessageChrome(old: HTMLElement, next: HTMLElement): void {
+  for (const selector of ['.message-actions', '.message-meta']) {
+    const before = old.querySelector<HTMLElement>(selector), after = next.querySelector<HTMLElement>(selector);
+    if (before && after && before.outerHTML !== after.outerHTML) before.replaceWith(after);
+  }
+  old.className = next.className;
+}
 function renderTranscript(preservePosition = false): void {
   closeContentMenus();
   $('.conversation-pane').classList.toggle('new-task-page', newTaskView());
   const transcript = $('#transcript');
+  const sameSession = transcript.dataset.sessionId === state.sessionId;
+  transcript.dataset.sessionId = state.sessionId;
   const restoreAnchor = preservePosition || !stickToBottom ? captureTranscriptAnchor(transcript) : undefined;
   transcript.removeAttribute('aria-busy');
   const toolViews = captureTools(transcript), groupViews = captureToolGroups(transcript), turnViews = captureTurns(transcript), changeViews = captureChangeCards(transcript), scrollTop = transcript.scrollTop;
@@ -1256,36 +1267,65 @@ function renderTranscript(preservePosition = false): void {
     return;
   }
   const turns = groupTurns(visibleMessages());
-  const previousMarkdown = new Map([...transcript.querySelectorAll<HTMLElement>('[data-markdown]')]
+  const byId = new Map(state.messages.map(message => [String(message.id), message]));
+  const previousMarkdown = new Map((sameSession ? [...transcript.querySelectorAll<HTMLElement>('[data-markdown]')] : [])
     .map(node => [node.dataset.markdown!, node]));
-  // A saved response can finish while a reader measures a historical message.
-  // Preserve unchanged persisted user articles, not just their Markdown children:
-  // detaching the article during the transcript rebuild invalidates in-flight
-  // element handles and can interrupt reading position/selection.
-  const previousUsers = new Map([...transcript.querySelectorAll<HTMLElement>('.user-message[data-message-id]')]
+  // Reattaching the same article after innerHTML replacement still clears the
+  // reader's Selection. Reconcile around unchanged persisted articles without
+  // disconnecting them, and never carry their DOM across a task switch.
+  const previousArticles = new Map((sameSession ? [...transcript.querySelectorAll<HTMLElement>(':scope > .message[data-message-id]')] : [])
     .filter(node => Number(node.dataset.messageId) > 0)
     .map(node => [node.dataset.messageId!, node]));
-  transcript.innerHTML = `${state.messages.length ? '' : '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>'}${turns.map(turn => (turn.user ? messageHtml(turn.user) : '') + (turn.handoff ? messageHtml(turn.handoff) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity) : '') + turn.errors.map(message => messageHtml(message)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool')) : '') + workerSlot(turn) + changesRow(s.id, turn.changes)).join('')}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
-  // A full saved-history refresh must not temporarily invalidate the same
-  // message element being inspected. User text is static once persisted; refresh
-  // only its action controls when agent state changes.
-  transcript.querySelectorAll<HTMLElement>('.user-message[data-message-id]').forEach(node => {
-    const old = previousUsers.get(node.dataset.messageId!);
-    if (!old || old.querySelector('.message-content')?.textContent !== node.querySelector('.message-content')?.textContent) return;
-    const oldActions = old.querySelector<HTMLElement>('.message-actions');
-    const newActions = node.querySelector<HTMLElement>('.message-actions');
-    if (oldActions && newActions && oldActions.outerHTML !== newActions.outerHTML) oldActions.replaceWith(newActions);
-    old.className = node.className;
-    node.replaceWith(old);
+  const previousActivities = new Map((sameSession ? [...transcript.querySelectorAll<HTMLElement>(':scope > details.turn-activity')] : [])
+    .map(node => [node.dataset.turnKey!, node]));
+  const activitySources = new Map<string, string>();
+  for (const turn of turns) {
+    if (turn.activity.length && turn.activity.every(message => message.id > 0 && message.sessionId === s.id)) {
+      activitySources.set(turn.key, JSON.stringify(turn.activity.map(message => [message.id, message.sessionId, message.role, message.content, message.createdAt, message.authorProvider, message.coordinationKind])));
+    }
+  }
+  const template = document.createElement('template');
+  template.innerHTML = `${state.messages.length ? '' : '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>'}${turns.map(turn => (turn.user ? messageHtml(turn.user) : '') + (turn.handoff ? messageHtml(turn.handoff) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity) : '') + turn.errors.map(message => messageHtml(message)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool')) : '') + workerSlot(turn) + changesRow(s.id, turn.changes)).join('')}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
+  const next = [...template.content.children].map(element => {
+    const node = element as HTMLElement;
+    if (node.matches('details.turn-activity')) {
+      const source = activitySources.get(node.dataset.turnKey!);
+      const old = previousActivities.get(node.dataset.turnKey!);
+      if (source !== undefined && old && savedActivitySources.get(old) === source) {
+        // A completed turn contains narrative Markdown and raw tool disclosures.
+        // Keep the entire unchanged body connected, including the reader's Range.
+        const oldSummary = old.querySelector(':scope > summary'), newSummary = node.querySelector(':scope > summary');
+        if (oldSummary && newSummary && oldSummary.outerHTML !== newSummary.outerHTML) oldSummary.replaceWith(newSummary);
+        const articles = new Map([...old.querySelectorAll<HTMLElement>('.message[data-message-id]')].map(article => [article.dataset.messageId!, article]));
+        node.querySelectorAll<HTMLElement>('.message[data-message-id]').forEach(article => {
+          const previous = articles.get(article.dataset.messageId!);
+          if (previous) refreshMessageChrome(previous, article);
+        });
+        old.className = node.className;
+        return old;
+      }
+      if (source !== undefined) savedActivitySources.set(node, source);
+    }
+    const old = previousArticles.get(node.dataset.messageId ?? '');
+    const message = byId.get(node.dataset.messageId ?? '');
+    const oldContent = old?.querySelector<HTMLElement>('.message-content');
+    const newContent = node.querySelector<HTMLElement>('.message-content');
+    if (!old || !message || message.sessionId !== s.id || !oldContent || !newContent
+      || old.classList.contains('user-message') !== node.classList.contains('user-message')
+      || (message.role === 'user' ? oldContent.textContent !== newContent.textContent : savedMarkdownSources.get(oldContent) !== message.content)) return node;
+    refreshMessageChrome(old, node);
+    return old;
   });
-  const byId = new Map(state.messages.map(message => [String(message.id), message]));
+  const retained = new Set<Node>(next);
+  for (const child of [...transcript.childNodes]) if (!retained.has(child)) child.remove();
+  next.forEach((node, index) => { if (transcript.children[index] !== node) transcript.insertBefore(node, transcript.children[index] ?? null); });
   transcript.querySelectorAll<HTMLElement>('[data-markdown]').forEach(el => {
     const message = byId.get(el.dataset.markdown!);
     if (!message) return;
     const previous = previousMarkdown.get(el.dataset.markdown!);
     if (previous && savedMarkdownSources.get(previous) === message.content) {
       // Prepending history must not reparse responses the reader already loaded.
-      el.replaceWith(previous);
+      if (el !== previous) el.replaceWith(previous);
       bindFileLinkContext(previous, workspaceContext());
     } else {
       savedMarkdownSources.set(el, message.content);
@@ -1355,7 +1395,9 @@ function liveTurnStaysOpen(turn: HTMLElement): boolean {
 }
 /** Live turns are left out unless asked for or being read: the saved turn starts folded (see foldSavedTurn). */
 function captureTurns(root: ParentNode, live = false): TurnView[] {
-  return [...root.querySelectorAll<HTMLDetailsElement>('.turn-activity')].filter(turn => live || !turn.classList.contains('live-activity') || liveTurnStaysOpen(turn)).map(turn => ({ key: turn.dataset.turnKey!, open: turn.open && turn.dataset.folded === undefined, focused: document.activeElement === turn.querySelector('.turn-activity-summary'), toolKeys: [...turn.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey!) }));
+  // A saved turn may have folded once and then been reopened by the reader;
+  // its old animation marker must not override the current disclosure state.
+  return [...root.querySelectorAll<HTMLDetailsElement>('.turn-activity')].filter(turn => live || !turn.classList.contains('live-activity') || liveTurnStaysOpen(turn)).map(turn => ({ key: turn.dataset.turnKey!, open: turn.open && (!turn.classList.contains('live-activity') || turn.dataset.folded === undefined), focused: document.activeElement === turn.querySelector('.turn-activity-summary'), toolKeys: [...turn.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey!) }));
 }
 /** A run that ended without a finishing frame folds here, as the live header would have. */
 function foldSavedTurn(root: ParentNode, live: TurnView): void {
@@ -1576,7 +1618,18 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
         const template = document.createElement('template'); template.innerHTML = html;
         const fresh = template.content.firstElementChild!;
         node.querySelector('.tool-group-summary')!.innerHTML = fresh.querySelector('.tool-group-summary')!.innerHTML;
-        node.querySelector('.tool-group-body')!.innerHTML = fresh.querySelector('.tool-group-body')!.innerHTML;
+        const body = node.querySelector<HTMLElement>('.tool-group-body')!;
+        const oldTools = new Map([...body.children].map(tool => [(tool as HTMLElement).dataset.toolKey, tool]));
+        const oldEntries = new Map(previousEntries?.map(entry => [entry.key, entry]));
+        const nextTools = [...fresh.querySelector('.tool-group-body')!.children].map((tool, index) => {
+          const entry = run.items[index], old = oldTools.get(entry.key);
+          // Another tool finishing must not detach a summary under the pointer,
+          // or discard selection and focus in an unchanged raw result.
+          return old && oldEntries.get(entry.key) === entry ? old : tool;
+        });
+        const keptTools = new Set(nextTools);
+        for (const tool of [...body.children]) if (!keptTools.has(tool)) tool.remove();
+        nextTools.forEach((tool, index) => { if (body.children[index] !== tool) body.insertBefore(tool, body.children[index] ?? null); });
         restoreTools(node, views);
       }
       liveGroupEntries.set(node, run.items);
@@ -1727,8 +1780,13 @@ function renderComposer(): void {
   closeContentMenus();
   const oldPrompt = document.querySelector<HTMLTextAreaElement>('#prompt');
   if (oldPrompt?.dataset.sessionId && !deletedSessions.has(oldPrompt.dataset.sessionId)) state.drafts.set(oldPrompt.dataset.sessionId, oldPrompt.value);
-  // Re-rendering replaces the textarea; keep typing focus and the caret, since people type while agents work.
-  const typing = oldPrompt && document.activeElement === oldPrompt ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
+  // A DOM text selection can coexist with the textarea's activeElement. Giving
+  // the rebuilt prompt its old caret would erase what the reader selected.
+  const selection = window.getSelection(), transcript = document.getElementById('transcript');
+  const readingTranscript = selection && !selection.isCollapsed && transcript
+    && Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index)).some(range => range.intersectsNode(transcript));
+  // Otherwise keep typing focus and the caret, since people type while agents work.
+  const typing = oldPrompt && document.activeElement === oldPrompt && !readingTranscript ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
   const s = session();
   if (!s) { $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
   syncOverlayContext({ projectId: s.projectId, provider: s.provider, model: s.model || 'default', mode: s.mode, reasoningEffort: s.reasoningEffort ?? null });
@@ -1746,7 +1804,7 @@ function renderComposer(): void {
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="approval-bar"></div>');
-  $('#composer').insertAdjacentHTML('beforebegin', remoteStartStrip(s.id) + (running ? '' : limitBanner(s, Date.now(), limitConnections(s, namedConnections))) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team, sendable: !botProjects.has(s.projectId) && !s.archived, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued }));
+  $('#composer').insertAdjacentHTML('beforebegin', remoteMissingNote(s) + remoteStartStrip(s.id) + (running ? '' : limitBanner(s, Date.now(), limitConnections(s, namedConnections))) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team, sendable: !botProjects.has(s.projectId) && !s.archived, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued }));
   renderApprovalBar(); resizePrompt();
   void github.status(s.projectId);
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
@@ -1783,6 +1841,7 @@ function renderComposer(): void {
       select: () => state.drafts.set(s.id, prompt.value),
     });
   }
+  syncComposerNote(s);
   syncRemoteConnection();
   renderedRemoteKey = remoteComposerKey(s);
 }
@@ -4618,7 +4677,8 @@ const chatTask = (task: Session | undefined): boolean => Boolean(task && isChatP
  * signed-in account's targets; the started task is an ordinary session with `remoteDevice`. */
 const remoteHost: RemoteHost = { call, listen: (name, callback) => subscribe(name as 'remote://status', callback), notify, openUrl: url => call('open_external_url', { url }) };
 type RemoteAccountDevice = Omit<RemoteTarget, 'deviceId'> & { id: string; current: boolean; host: boolean };
-let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL, remoteSignedIn = false, remoteConnected = false, remotePresenceReady = false;
+let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL, remoteSignedIn = false, remoteConnected = false, remotePresenceReady = false, remoteTargetsAvailable = false;
+let remoteRefreshRevision = 0;
 /** The chosen computer's last known name, for when it leaves the list (signed out or revoked). */
 let remoteChoiceName: string | undefined;
 /** What the composer was last drawn with, so presence updates redraw it only when this changes. */
@@ -4637,7 +4697,7 @@ function remoteTargetFor(s: Session): RemoteTarget | undefined {
 function remoteOffline(s: Session): boolean {
   const id = remoteDeviceId(s); if (!id || !remotePresenceReady) return false;
   const target = remoteTargetFor(s);
-  return !target || !target.online || (remoteSignedIn && !remoteConnected);
+  return !remoteTargetsAvailable || !target || !target.online || !remoteSignedIn || !remoteConnected;
 }
 /** A New task's chosen computer that is no longer in the account's list, or undefined. */
 function remoteMissing(s: Session): string | undefined {
@@ -4664,24 +4724,41 @@ function syncRemoteConnection(): void {
   if (old) old.outerHTML = markup; else region.insertAdjacentHTML('beforeend', markup);
 }
 async function refreshRemoteTargets(signedIn: boolean): Promise<void> {
-  remoteTargets = signedIn ? await call<RemoteTarget[]>('remote_targets').catch(() => remoteTargets) : [];
-  if (!remoteTargets.some(target => target.deviceId === remoteChoice && target.online)) remoteChoice = LOCAL;
+  const revision = ++remoteRefreshRevision;
+  let targets: RemoteTarget[];
+  try {
+    targets = signedIn ? await call<RemoteTarget[]>('remote_targets') : [];
+  } catch {
+    if (revision !== remoteRefreshRevision) return;
+    // Keep the explicit choice and fail closed until its availability is known again.
+    remoteTargetsAvailable = false; remotePresenceReady = true;
+    const task = session();
+    if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
+    else syncRemoteConnection();
+    return;
+  }
+  if (revision !== remoteRefreshRevision || signedIn !== remoteSignedIn) return;
+  remoteChoiceName = remoteTargets.find(target => target.deviceId === remoteChoice)?.name ?? remoteChoiceName;
+  remoteTargets = targets; remoteTargetsAvailable = true; remotePresenceReady = true;
   renderHeader();
+  const task = session();
+  if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
+  else syncRemoteConnection();
 }
 async function initRemote(): Promise<void> {
-  let signedIn = false;
-  await subscribe('remote://status', (status: RemoteStatus) => { signedIn = status.signedIn; remoteConnected = status.connected; run(refreshRemoteTargets(signedIn)); });
-  await subscribe('remote://presence', () => run(refreshRemoteTargets(signedIn)));
+  await subscribe('remote://status', (status: RemoteStatus) => { remoteSignedIn = status.signedIn; remoteConnected = status.connected; run(refreshRemoteTargets(remoteSignedIn)); });
+  await subscribe('remote://presence', () => run(refreshRemoteTargets(remoteSignedIn)));
   // A build without the Connect commands, or a signed-out one, simply offers no other computers.
   const status = await call<RemoteStatus>('remote_status').catch(() => undefined);
-  if (status) { signedIn = status.signedIn; remoteConnected = status.connected; await refreshRemoteTargets(signedIn); }
+  if (status) { remoteSignedIn = status.signedIn; remoteConnected = status.connected; await refreshRemoteTargets(remoteSignedIn); }
 }
 async function showComputerMenu(anchor: HTMLElement): Promise<void> {
   await showChoices(anchor, { title: 'Run on', width: 280, items: computerItems(remoteTargets, remoteChoice), onSelect: id => {
     closeChoiceMenu();
     const task = session();
     if (id !== LOCAL && task && taskBots.has(task.id)) { notify('Choose No bot before running this task on another computer.'); return; }
-    remoteChoice = id; renderHeader();
+    remoteChoice = id; remoteChoiceName = remoteTargets.find(item => item.deviceId === id)?.name; renderHeader();
+    if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
     if (task && newTaskView()) run(adaptPickerToComputer(task, id, remoteTargets.find(item => item.deviceId === id)?.name ?? 'That computer'));
   } });
 }
@@ -4967,6 +5044,11 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'open-bot': if (element.dataset.bot) await openBot(element.dataset.bot); break;
     case 'bot-task-menu': await showBotTaskMenu(element); break;
     case 'computer-menu': await showComputerMenu(element); break;
+    case 'remote-choose-computer': {
+      const anchor = document.querySelector<HTMLElement>('#composer-computer');
+      if (anchor) await showComputerMenu(anchor);
+      break;
+    }
     case 'toggle-bots-view': setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
     case 'import-conversations': await showConversationImport(); break;
     case 'agent-updates': await agentUpdates.show(); break;

@@ -18,9 +18,9 @@ export const APPROVE_SCOPES: { id: GrantScope; label: string }[] = [
 export const SCOPE_LABELS: Record<GrantScope, string> = { pending: 'Waiting for approval', view: 'View only', control: 'Control', full: 'Full access', blocked: 'Blocked' };
 export const SCOPE_HELP = 'View only: see tasks, changes and diffs. Control: also send prompts, stop tasks and answer approvals. Full access: also start tasks, merge pull requests and message bots. Blocked: refused.';
 
-/** The first 16 hex digits of a key fingerprint in groups of four, to compare by eye on both computers. */
+/** The complete key fingerprint in groups of four, matching native approval admission. */
 export function groupFingerprint(fingerprint: string): string {
-  return (fingerprint.slice(0, 16).match(/.{1,4}/g) ?? []).join(' ');
+  return (fingerprint.match(/.{1,4}/g) ?? []).join(' ');
 }
 
 const options = (selected: GrantScope) => APPROVE_SCOPES.map(scope => `<option value="${scope.id}"${scope.id === selected ? ' selected' : ''}>${scope.label}</option>`).join('');

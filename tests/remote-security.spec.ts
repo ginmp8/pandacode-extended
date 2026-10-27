@@ -11,12 +11,15 @@ test('a stale displayed Connect key is rejected before trust is granted', async 
   const row = panel.locator('.remote-device[data-device="dev-nas"]');
   const trust = panel.getByRole('checkbox', { name: 'Trusted: Home NAS' });
   await expect(trust).not.toBeChecked();
+  await expect(row.locator('code')).toHaveText('17aa 5e90 b3c4 d286 ea5b b53d 782f 9104');
   await row.evaluate(element => { (element as HTMLElement).dataset.fingerprint = '00000000000000000000000000000000'; });
-  await trust.check();
+  // Exactly one user action: check() may retry after the rejected control is rerendered.
+  await trust.evaluate(element => (element as HTMLInputElement).click());
   await expect(trust).not.toBeChecked();
   await expect(panel.getByRole('alert')).toContainText('key changed');
+  expect(await page.evaluate(() => (window as any).__trustCalls ?? [])).toHaveLength(0);
   await row.evaluate(element => { (element as HTMLElement).dataset.fingerprint = '17aa5e90b3c4d286ea5bb53d782f9104'; });
-  await trust.check();
+  await trust.evaluate(element => (element as HTMLInputElement).click());
   await expect(trust).toBeChecked();
   await expect.poll(() => page.evaluate(() => ((window as any).__trustCalls ?? []).at(-1))).toEqual({
     deviceId: 'dev-nas', trusted: true, expectedFingerprint: '17aa5e90b3c4d286ea5bb53d782f9104',
@@ -41,6 +44,7 @@ test('pairing approval sends the displayed full fingerprint, blocking requires n
   await page.evaluate(() => (window as any).__securityPairing.handlers['remote://device-pending']({
     deviceId: 'phone', name: 'Pixel', fingerprint: '0123456789abcdef0123456789abcdef',
   }));
+  await expect(page.locator('.pairing-prompt[data-device="phone"] code')).toHaveText('0123 4567 89ab cdef 0123 4567 89ab cdef');
   await page.locator('.pairing-prompt[data-device="phone"]').getByRole('button', { name: 'Approve' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__securityPairing.calls)).toEqual([{
     name: 'remote_set_device_grant',

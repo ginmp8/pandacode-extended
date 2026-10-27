@@ -7,11 +7,13 @@ same streaming, composer, approvals and model picker as a local one; there is no
 view. Nothing is sent anywhere until the user signs in.
 
 **Full access for remote tasks** is a separate switch in Settings → Remote access,
-off for new installs and existing settings. A trusted device cannot start, send to,
-steer, approve, answer agent questions, or configure a Full access task until this
-computer grants that option locally. It can still stop the task or change its mode
-to an approving mode. Remote calls cannot change the option. Omitting a start mode
-uses `ask` even when the option is on; enabling it never upgrades a task implicitly.
+off for new installs and existing settings. Starting tasks requires a Full device
+grant; calling `bot.message` requires both a Full device grant and this local switch.
+Setting a task to `full` or `review` also requires both. A Control device may still
+configure ordinary model/effort settings and nonprivileged modes, stop tasks, and
+steer ordinary running tasks; bot-owned conversation rules are listed with the RPCs
+below. Remote calls cannot change the local option. Omitting a start mode uses
+`ask` even when the option is on; enabling it never upgrades a task implicitly.
 Native admission checks the current grant, hosting state and pinned caller key
 again after asynchronous preparation. Revocation blocks new actions and does not
 undo work already admitted.
@@ -236,10 +238,10 @@ more power than local ones.
 | `task.attachment` | `{ sessionId, id, variant: "thumb" or "full", offset? }` | `{ data, mime, total, offset, done }`; base64 image chunks, only from a saved message owned by that task. |
 | `task.workspaceImage` | `{ sessionId, path, variant: "thumb" or "full", offset? }` | The same chunk shape, using the existing workspace image path/format/size checks. |
 | `image.put` | `{ uploadId, index, size, data }` | Uploads one base64 chunk; the completed upload returns a host-generated `imageId`. |
-| `task.send` | `{ sessionId, text, imageIds? }` | Rejects bot-owned conversation sessions at every peer scope; use Full-only `bot.message`. `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
+| `task.send` | `{ sessionId, text, imageIds? }` | Rejects bot-owned conversation sessions at every peer scope; send through `bot.message`, which requires a Full device grant and the host's local Full-access switch. `{ queued: false }` when admitted. A busy host refuses the request; keep it in the viewer's queue or use explicit steering. Anonymous host-side queue entries are not created because they would lose the caller identity needed to recheck revocation and Full access. |
 | `task.stop` | `{ sessionId }` | `{}` |
-| `task.steer` | `{ sessionId, text }` | Rejects bot-owned conversation sessions at every peer scope; use Full-only `bot.message`. Otherwise `{}` (as `steer_task`). |
-| `task.configure` | `{ sessionId, provider?, model?, effort?, mode? }` | `{}`. `provider` and `model` together (a provider not installed there is refused as in `task.start`); `effort: null` clears it; `mode` changes permissions. |
+| `task.steer` | `{ sessionId, text }` | Ordinary running tasks use Control authorization (subject to the task's current mode). Steering a bot-owned conversation requires a Full device grant and the host's local Full-access switch. Returns `{ "steered": true, "id": "...", "mode": "..." }` (as `steer_task`). |
+| `task.configure` | `{ sessionId, provider?, model?, effort?, mode? }` | `{}`. Control may configure provider/model and effort or select a nonprivileged mode. Setting mode to `full` or `review` requires a Full device grant and the host's local Full-access switch. `provider` and `model` must be supplied together (a provider not installed there is refused as in `task.start`); `effort: null` clears it; `mode` changes permissions. |
 | `approval.respond` | `{ sessionId, requestId, approve: boolean }` | `{}` |
 | `input.respond` | `{ sessionId, requestId, response }` | `{}` (as `respond_user_input`) |
 | `task.pull` | `{ sessionId }` | `{ pull }` with linked pull request details, or `null`. |

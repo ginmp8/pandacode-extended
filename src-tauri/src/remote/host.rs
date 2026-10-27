@@ -102,17 +102,50 @@ struct RequestOrigin {
     device: String,
     key: String,
     method: String,
+    full_configure: bool,
 }
 
 tokio::task_local! {
     static REQUEST_ORIGIN: RequestOrigin;
 }
 
-fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str, mode: &str) -> Result<()> {
+fn authorize_request_mode(
+    dir: &Path,
+    inner: &super::Inner,
+    from: &str,
+    authenticated_key: &str,
+    method: &str,
+    mode: &str,
+    require_full: bool,
+) -> Result<()> {
+    super::grants::authorize(dir, inner, from, authenticated_key, method)?;
+    authorize_mode(inner, from, authenticated_key, mode)?;
+    if require_full {
+        super::grants::authorize_full(dir, inner, from, authenticated_key)?;
+    }
+    Ok(())
+}
+
+/// Authorization plus a synchronous effect. Remote mutations must keep the
+/// Remote lock across this call so revocation cannot pass it before the effect.
+pub(super) fn with_authorized_request_effect<T>(
+    dir: &Path,
+    inner: &super::Inner,
+    from: &str,
+    authenticated_key: &str,
+    method: &str,
+    mode: &str,
+    require_full: bool,
+    effect: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    authorize_request_mode(dir, inner, from, authenticated_key, method, mode, require_full)?;
+    effect()
+}
+
+fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str, mode: &str, require_full: bool) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
-    super::grants::authorize(&state.dir, &inner, from, authenticated_key, method)?;
-    authorize_mode(&inner, from, authenticated_key, mode)
+    authorize_request_mode(&state.dir, &inner, from, authenticated_key, method, mode, require_full)
 }
 
 fn authorize_mode(inner: &super::Inner, from: &str, authenticated_key: &str, mode: &str) -> Result<()> {
@@ -129,8 +162,52 @@ pub(crate) fn is_remote_request() -> bool {
 /// current mode under the ordinary agents/store admission locks.
 pub(crate) fn check_current_request(mode: &str) -> Result<()> {
     REQUEST_ORIGIN.try_with(|origin| {
-        require_mode(&origin.app, &origin.device, &origin.key, &origin.method, mode)
+        require_mode(&origin.app, &origin.device, &origin.key, &origin.method, mode, origin.full_configure)
     }).unwrap_or(Ok(()))
+}
+
+/// Rechecks a Full-only authorization independently of the request's ordinary
+/// method scope. Local commands have no remote origin and remain unchanged.
+pub(super) fn check_current_full_request() -> Result<()> {
+    REQUEST_ORIGIN.try_with(|origin| {
+        let state = remote(&origin.app);
+        let inner = state.lock();
+        super::grants::authorize_full(&state.dir, &inner, &origin.device, &origin.key)
+    }).unwrap_or(Ok(()))
+}
+
+/// Hold the authorization lock through a Full-only synchronous effect so a
+/// concurrent grant demotion cannot slip between recheck and the side effect.
+pub(super) fn with_current_full_request<T>(mode: &str, effect: impl FnOnce() -> Result<T>) -> Result<T> {
+    let mut effect = Some(effect);
+    match REQUEST_ORIGIN.try_with(|origin| {
+        let state = remote(&origin.app);
+        let inner = state.lock();
+        with_authorized_request_effect(
+            &state.dir,
+            &inner,
+            &origin.device,
+            &origin.key,
+            &origin.method,
+            mode,
+            true,
+            || effect.take().ok_or_else(|| "The authorization effect was already used.".to_owned())?(),
+        )
+    }) {
+        Ok(result) => result,
+        Err(_) => effect.take().ok_or_else(|| "The authorization effect was already used.".to_owned())?(),
+    }
+}
+
+fn requires_full_configure_mode(mode: Option<&str>) -> bool {
+    matches!(mode, Some("full" | "review"))
+}
+
+fn preflight_bot_steer(bot_thread: bool, require_full: impl FnOnce() -> Result<()>) -> Result<()> {
+    if bot_thread {
+        require_full()?;
+    }
+    Ok(())
 }
 
 pub(crate) fn check_start_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: Option<&str>) -> Result<()> {
@@ -730,7 +807,8 @@ async fn optional_pull(state: &AppState, session_id: &str) -> Result<Option<(Pat
 
 async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
     require_method(app, from, authenticated_key, call.method_name())?;
-    let origin = RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned(), method: call.method_name().to_owned() };
+    let full_configure = matches!(&call, Call::Configure { mode: Some(mode), .. } if requires_full_configure_mode(Some(mode.as_str())));
+    let origin = RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned(), method: call.method_name().to_owned(), full_configure };
     REQUEST_ORIGIN.scope(origin, async {
     match call {
         Call::Batch(calls) => {
@@ -1499,7 +1577,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
         }
         Call::Steer { session_id, text } => {
             let (task, bot_thread) = local_prompt_task(&state, &session_id).await?;
-            reject_generic_bot_prompt(bot_thread)?;
+            preflight_bot_steer(bot_thread, check_current_full_request)?;
             check_current_request(&task.mode)?;
             message_queue::steer_task(app.clone(), state, session_id, text).await
         }
@@ -1509,6 +1587,9 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 let remote = remote(app);
                 let inner = remote.lock();
                 let effective = permissions::configure_mode(&task.mode, mode.as_deref(), inner.settings.allow_full_access)?;
+                if requires_full_configure_mode(mode.as_deref()) {
+                    super::grants::authorize_full(&remote.dir, &inner, from, authenticated_key)?;
+                }
                 authorize_mode(&inner, from, authenticated_key, effective)?;
                 crate::providers::review_supported(model.as_ref().map_or(task.provider.as_str(), |(provider, _)| provider.as_str()), effective)?;
             }
@@ -4178,7 +4259,7 @@ mod extended_security_tests {
     }
 
     #[test]
-    fn bot_thread_generic_prompts_are_blocked_before_side_effects() {
+    fn bot_thread_generic_send_stays_blocked_and_steer_requires_full() {
         let dir = std::env::temp_dir().join(format!("pandacode-host-bot-send-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut inner = super::super::Inner::default();
@@ -4218,15 +4299,9 @@ mod extended_security_tests {
         );
         assert!(!image_claimed, "the denied bot send leaves its uploaded image unclaimed");
         let bot_steer = is_bot_thread(&db, &steer_session).unwrap();
-        assert_eq!(
-            reject_generic_bot_prompt(bot_steer),
-            Err(BOT_PROMPT_REFUSAL.into()),
-            "Control cannot steer around the bot gateway"
-        );
-        assert!(
-            reject_generic_bot_prompt(false).is_ok(),
-            "ordinary task steering remains unchanged"
-        );
+        let control_steer = || super::super::grants::authorize_full(&dir, &inner, "peer", "pinned-key");
+        assert!(preflight_bot_steer(bot_steer, control_steer).is_err(), "Control cannot steer a bot thread");
+        assert!(preflight_bot_steer(false, || Err("must not run".into())).is_ok(), "ordinary task steering remains unchanged");
         let mut ordinary_image_claimed = false;
         assert!(
             preflight_generic_send(false, || {
@@ -4254,7 +4329,12 @@ mod extended_security_tests {
             super::super::grants::authorize(&full_dir, &full_inner, "peer", "pinned-key", "bot.message").is_ok(),
             "Full can use the dedicated bot gateway"
         );
-        assert_eq!(reject_generic_bot_prompt(bot_steer), Err(BOT_PROMPT_REFUSAL.into()), "Full cannot bypass the gateway through generic steer");
+        assert!(preflight_bot_steer(bot_steer, || super::super::grants::authorize_full(&full_dir, &full_inner, "peer", "pinned-key")).is_ok(), "Full can steer a bot thread");
+
+        assert!(requires_full_configure_mode(Some("full")));
+        assert!(requires_full_configure_mode(Some("review")));
+        assert!(!requires_full_configure_mode(Some("ask")));
+        assert!(!requires_full_configure_mode(None), "model and effort changes do not request Full mode");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&full_dir);

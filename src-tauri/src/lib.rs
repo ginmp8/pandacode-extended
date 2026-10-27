@@ -850,8 +850,15 @@ async fn update_session(
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let task = store.session(&session_id)?;
-    remote::check_current_request(mode.as_deref().unwrap_or(&task.mode))?;
-    store.update(&session_id, title, archived, model, mode)
+    let mode_for_check = mode.as_deref().unwrap_or(&task.mode).to_owned();
+    let privileged_mode = matches!(mode.as_deref(), Some("full" | "review"));
+    let persist = || store.update(&session_id, title, archived, model, mode);
+    if privileged_mode {
+        remote::grants::with_current_full_request(&mode_for_check, persist)
+    } else {
+        remote::check_current_request(&mode_for_check)?;
+        persist()
+    }
 }
 #[tauri::command]
 async fn get_messages(

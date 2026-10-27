@@ -1761,7 +1761,7 @@ async fn start_once(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         tauri::async_runtime::spawn(async move {
             // A panic (or the task being dropped) below still settles the start.
             let settle = Settle(entry.clone());
-            let origin = RequestOrigin { app: app.clone(), device: from.clone(), key: key.clone(), method: "task.start".into() };
+            let origin = RequestOrigin { app: app.clone(), device: from.clone(), key: key.clone(), method: "task.start".into(), full_configure: false };
             let result = REQUEST_ORIGIN.scope(origin, start::run_cancellable(&app, &from, &key, request, entry.cancel.clone())).await;
             // Cancelled after the task was made: it must not run unseen.
             if let (true, Ok(reply)) = (entry.cancel.load(Ordering::SeqCst), &result) {
@@ -4262,19 +4262,20 @@ mod extended_security_tests {
     fn bot_thread_generic_send_stays_blocked_and_steer_requires_full() {
         let dir = std::env::temp_dir().join(format!("pandacode-host-bot-send-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        let key = super::super::crypto::public_key(&super::super::crypto::generate());
         let mut inner = super::super::Inner::default();
         inner.devices.push(super::super::Device {
             id: "peer".into(), name: "Peer".into(), platform: "test".into(),
-            public_key: "pinned-key".into(), host: true, online: true, last_seen: Value::Null,
+            public_key: key.clone(), host: true, online: true, last_seen: Value::Null,
         });
-        inner.settings.trusted.insert("peer".into(), "pinned-key".into());
+        inner.settings.trusted.insert("peer".into(), key.clone());
         inner.settings.host_enabled = true;
         // With Full off, task.send is still authorized by the Control grant,
         // as is task.steer, while bot.message remains reserved for Full.
         assert!(super::super::grants::seed_trusted(&dir, &inner.settings).is_ok());
-        assert!(super::super::grants::authorize(&dir, &inner, "peer", "pinned-key", "task.send").is_ok());
-        assert!(super::super::grants::authorize(&dir, &inner, "peer", "pinned-key", "task.steer").is_ok());
-        assert!(super::super::grants::authorize(&dir, &inner, "peer", "pinned-key", "bot.message").is_err());
+        assert!(super::super::grants::authorize(&dir, &inner, "peer", &key, "task.send").is_ok());
+        assert!(super::super::grants::authorize(&dir, &inner, "peer", &key, "task.steer").is_ok());
+        assert!(super::super::grants::authorize(&dir, &inner, "peer", &key, "bot.message").is_err());
 
         let image_id = uuid::Uuid::new_v4().to_string();
         let call = parse(true, "task.send", &json!({"sessionId": "bot-desktop-thread", "text": "hi", "imageIds": [image_id]})).unwrap();
@@ -4299,7 +4300,7 @@ mod extended_security_tests {
         );
         assert!(!image_claimed, "the denied bot send leaves its uploaded image unclaimed");
         let bot_steer = is_bot_thread(&db, &steer_session).unwrap();
-        let control_steer = || super::super::grants::authorize_full(&dir, &inner, "peer", "pinned-key");
+        let control_steer = || super::super::grants::authorize_full(&dir, &inner, "peer", &key);
         assert!(preflight_bot_steer(bot_steer, control_steer).is_err(), "Control cannot steer a bot thread");
         assert!(preflight_bot_steer(false, || Err("must not run".into())).is_ok(), "ordinary task steering remains unchanged");
         let mut ordinary_image_claimed = false;
@@ -4318,18 +4319,18 @@ mod extended_security_tests {
         let mut full_inner = super::super::Inner::default();
         full_inner.devices.push(super::super::Device {
             id: "peer".into(), name: "Peer".into(), platform: "test".into(),
-            public_key: "pinned-key".into(), host: true, online: true, last_seen: Value::Null,
+            public_key: key.clone(), host: true, online: true, last_seen: Value::Null,
         });
-        full_inner.settings.trusted.insert("peer".into(), "pinned-key".into());
+        full_inner.settings.trusted.insert("peer".into(), key.clone());
         full_inner.settings.host_enabled = true;
         full_inner.settings.allow_full_access = true;
         assert!(super::super::grants::seed_trusted(&full_dir, &full_inner.settings).is_ok());
         assert!(preflight_generic_send(bot_send, || Ok(())).is_err(), "Full bot-message scope still cannot use generic send_message");
         assert!(
-            super::super::grants::authorize(&full_dir, &full_inner, "peer", "pinned-key", "bot.message").is_ok(),
+            super::super::grants::authorize(&full_dir, &full_inner, "peer", &key, "bot.message").is_ok(),
             "Full can use the dedicated bot gateway"
         );
-        assert!(preflight_bot_steer(bot_steer, || super::super::grants::authorize_full(&full_dir, &full_inner, "peer", "pinned-key")).is_ok(), "Full can steer a bot thread");
+        assert!(preflight_bot_steer(bot_steer, || super::super::grants::authorize_full(&full_dir, &full_inner, "peer", &key)).is_ok(), "Full can steer a bot thread");
 
         assert!(requires_full_configure_mode(Some("full")));
         assert!(requires_full_configure_mode(Some("review")));

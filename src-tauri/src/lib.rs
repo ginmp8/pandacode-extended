@@ -44,6 +44,7 @@ mod moodboards;
 mod attachments;
 mod prompt_attachments;
 mod overlay;
+mod panda_router;
 mod provider_settings;
 mod remote;
 mod providers;
@@ -892,10 +893,11 @@ fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<providers::S
         .transpose()
         .map_err(|error| error.to_string())?;
     let store = state.store.lock().map_err(|error| error.to_string())?;
-    if live.is_none() {
+    // A mirror's children run on its host: they settle there while its turn is open.
+    let task = live.is_none().then(|| store.session(session_id)).transpose()?;
+    if let Some(task) = task.filter(|task| task.remote_device.is_none() || !matches!(task.status.as_str(), "running" | "waiting")) {
         // Retry a completion write that may have failed without reviving old
         // children just because their final snapshot could not reach disk.
-        let task = store.session(session_id)?;
         store.finish_subagents(
             session_id,
             if task.status == "error" {
@@ -3378,6 +3380,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             provider_settings::setup(&dir).map_err(std::io::Error::other)?;
             connections::setup(&dir).map_err(std::io::Error::other)?;
+            model_routing::setup(&dir);
             // Optional integration storage must never prevent the workspace from opening.
             if jev::setup(&dir).is_err() {
                 eprintln!("Jev settings are unavailable; browser testing remains disabled.");
@@ -3477,6 +3480,10 @@ pub fn run() {
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 support::open_support,
                 support::support_details,
+                model_routing::model_routing_status,
+                model_routing::model_routing_configure,
+                model_routing::model_routing_prepare,
+                model_routing::model_routing_route,
                 local_sign_app,
                 agent_updates::check_agent_updates,
                 agent_updates::update_agent,

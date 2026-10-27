@@ -3,13 +3,15 @@ import './bots-settings.css';
 import { escape, icon } from './dom';
 import { providerLogo } from './provider-logos';
 import { infoMark } from './tooltip';
-import type { Provider, ProviderId, ProviderModel } from './types';
+import type { Provider, ProviderId, ProviderModel, ReasoningEffort } from './types';
 import { advertisedModelsOnly, modelChoices } from './model-catalog';
 import { connectInput, guideToggled } from './bots-connect';
 import { readSoulFile, MAX_SOUL_BYTES } from './bot-soul';
 import { mountBotCapabilities } from './bot-capabilities';
 import { avatarPicker, botAvatarHtml, handleAvatarPicker } from './bot-avatars';
 import { renderPanel, panelClick, panelSubmit, panelChange, invalidateActivity, type PanelContext, type Tab } from './bots-panels';
+
+export { age };
 
 export interface Bot {
   id: string; name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; projectId: string;
@@ -21,7 +23,12 @@ export interface Bot {
   /** The latest thing said in that conversation, flattened to one line. */
   lastMessage?: { role: 'user' | 'assistant'; text: string; at: number } | null;
 }
-export interface BotInput { name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; }
+export interface BackupModel { provider: ProviderId; model: string; }
+export interface BotInput {
+  name: string; role: string; instructions: string; goals: string; soul?: string; avatar: string; provider: ProviderId; model: string; mode: string; heartbeatMinutes: number;
+  /** Optional for older callers; native code fills the defaults. */
+  color?: string; reasoningEffort?: string; backupModels?: BackupModel[]; fallbackMode?: 'ask' | 'auto'; notify?: boolean; whileWorking?: 'queue' | 'steer'; showPlan?: boolean;
+}
 export interface Memory { id: string; content: string; source: 'user' | 'bot'; createdAt: number; }
 export interface Schedule { id: string; botId: string; title: string; prompt: string; kind: 'once' | 'interval' | 'daily' | 'weekdays'; intervalMinutes: number | null; timeOfDay: string | null; nextRunAt: number | null; lastRunAt: number | null; enabled: boolean; createdBy: 'user' | 'bot'; createdAt: number; }
 export type ChannelKind = 'web' | 'telegram' | 'slack' | 'discord' | 'whatsapp';
@@ -31,6 +38,39 @@ export interface Thread { channelId: string; externalId: string; sessionId: stri
 export interface Rule { id: string; pattern: string; decision: 'allow' | 'ask' | 'deny'; createdAt: number; }
 export interface Activity { id: number; kind: string; summary: string; detail: Record<string, unknown>; at: number; }
 export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; independentTasks?: { id: string; title: string; updatedAt: number }[]; rules: Rule[]; serverPort: number; }
+
+/** A message held by `ask` failover (`bot-failover` event, `bot_failover_pending`); answer with `bot_failover_decide`. */
+export interface FailoverAsk { botId: string; sessionId: string; cause: 'limit' | 'provider-error'; provider: ProviderId; model: string; target: BackupModel; resetsAt: number | null; }
+/** Display names for harnesses and models; ids show when left out. */
+export interface ModelNames { harness?(provider: ProviderId): string; model?(provider: ProviderId, model: string): string; }
+
+/** The hold card: Send to {model} / Wait for the reset (Dismiss when no reset time is known), with "Next time, switch without asking" (`data-failover-always`). */
+export function failoverCardHtml(ask: FailoverAsk, names: ModelNames = {}): string {
+  const harness = names.harness?.(ask.provider) ?? ask.provider;
+  const target = names.model?.(ask.target.provider, ask.target.model) ?? ask.target.model;
+  const limit = ask.cause === 'limit';
+  // Only a known reset time resumes the message; otherwise waiting would never end.
+  const waits = limit && Boolean(ask.resetsAt);
+  const reset = ask.resetsAt ? new Date(ask.resetsAt).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+  const title = limit ? `${harness} usage limit reached` : `${harness} provider error`;
+  const body = waits ? `Your message has not started. Send it to another model now, or wait until ${reset}.` : 'Your message has not started. Send it to another model now, or dismiss this hold and retry manually.';
+  return `<section class="bot-failover" role="group" aria-label="${escape(title)}" data-failover-session="${escape(ask.sessionId)}">
+    <header><span class="bot-failover-icon">${icon('alert')}</span><strong>${escape(title)}</strong><small>Message on hold</small></header>
+    <p>${escape(body)}</p>
+    <div class="bot-failover-actions"><button type="button" class="primary-button" data-failover="send">Send to ${escape(target)}</button>
+      <button type="button" class="secondary-button" data-failover="wait">${waits ? 'Wait for the reset' : 'Dismiss'}</button></div>
+    <label class="bot-failover-always"><input type="checkbox" data-failover-always> Next time, switch without asking</label></section>`;
+}
+
+/** A `model-switch` activity (`bot_model_switches`, `bot-model-switch` event) as a centered compact system row. */
+export function modelSwitchMarkerHtml(activity: Pick<Activity, 'summary' | 'detail' | 'at'>, names: ModelNames = {}): string {
+  const detail = activity.detail as { cause?: string; back?: boolean; provider?: ProviderId; model?: string };
+  const model = detail.provider && detail.model ? names.model?.(detail.provider, detail.model) ?? detail.model : '';
+  const text = !model ? activity.summary
+    : detail.cause === 'limit' ? (detail.back ? `Usage limit ended. Switched back to ${model}.` : `Usage limit reached. Switched to ${model}.`)
+    : detail.back ? `Switched back to ${model} after the provider error.` : `Provider error. Switched to ${model}.`;
+  return `<div class="model-switch-marker" role="note"><span>${escape(text)}</span><time>${new Date(activity.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div>`;
+}
 
 export interface BotsOptions {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -60,7 +100,7 @@ export type Section = Tab | 'profile' | 'skills';
 type Nav = 'profile' | 'skills' | 'channels' | 'schedules' | 'memory' | 'activity';
 const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
   { id: 'profile', label: 'Profile', icon: 'bot', text: 'Who the bot is, how it works and what runs it.' },
-  { id: 'channels', label: 'Channels', icon: 'globe', text: 'Talk to it from a browser, Telegram, Slack, Discord or WhatsApp.' },
+  { id: 'channels', label: 'Connections', icon: 'globe', text: 'Talk to it from a browser, Telegram, Slack, Discord or WhatsApp.' },
   { id: 'schedules', label: 'Schedules', icon: 'refresh', text: 'Recurring or one-off work the bot starts on its own.' },
   { id: 'memory', label: 'Memory', icon: 'leaf', text: 'Kept across conversations. The bot adds its own as it learns.' },
   { id: 'skills', label: 'Skills & MCP', icon: 'widget', text: 'Reviewed skill versions and configured server names used by this bot.' },
@@ -73,6 +113,8 @@ const heading = (title: string, more = '') => `<h3 class="bs-heading">${escape(t
 const MODES = [{ id: 'ask', label: 'Ask before acting' }, { id: 'auto', label: 'Auto-approve edits' }, { id: 'review', label: 'Approve for me' }, { id: 'plan', label: 'Plan only' }, { id: 'full', label: 'Full access' }];
 const providerModes = (provider: ProviderId) => MODES.filter(mode => mode.id === 'review' ? ['claude', 'glm', 'mimo'].includes(provider) : !(mode.id === 'auto' && ['github-copilot', 'devin'].includes(provider)));
 const CHECK_INS = [{ minutes: 0, label: 'Off' }, { minutes: 30, label: 'Every 30 minutes' }, { minutes: 60, label: 'Every hour' }, { minutes: 180, label: 'Every 3 hours' }, { minutes: 360, label: 'Every 6 hours' }, { minutes: 1440, label: 'Once a day' }];
+const PURPOSE_MAX = 2000;
+const SAVE_TEXT = { '': '', saving: 'Saving…', saved: 'Saved', error: 'Not saved' } as const;
 
 /** Starting points, in the spirit of the named bots this feature follows. */
 export const TEMPLATES: { id: string; avatar: string; name: string; role: string; instructions: string; goals: string; heartbeatMinutes: number }[] = [
@@ -84,16 +126,7 @@ export const TEMPLATES: { id: string; avatar: string; name: string; role: string
   { id: 'blank', avatar: 'panda:0', name: '', role: '', instructions: '', goals: '', heartbeatMinutes: 0 },
 ];
 
-export function age(at: number | null, now = Date.now()): string {
-  if (!at) return '';
-  const minutes = Math.round((at - now) / 60000);
-  const format = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto', style: 'short' });
-  if (Math.abs(minutes) < 1) return at > now ? 'in a moment' : 'just now';
-  if (Math.abs(minutes) < 60) return format.format(minutes, 'minute');
-  if (Math.abs(minutes) < 1440) return format.format(Math.round(minutes / 60), 'hour');
-  return format.format(Math.round(minutes / 1440), 'day');
-}
-export function avatar(bot: Pick<Bot, 'avatar' | 'name'>, cls = ''): string { return botAvatarHtml(bot.avatar, bot.name, cls); }
+export function avatar(bot: Pick<Bot, 'avatar' | 'name' | 'color'>, cls = ''): string { return botAvatarHtml(bot.avatar, bot.name, cls, bot.color ?? ''); }
 
 export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   let bots: Bot[] = [];
@@ -101,7 +134,11 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   let selected = options.initialBot ?? '';
   let section: Nav = navFor(options.initialTab ?? 'profile');
   let editing: 'new' | null = options.startNew ? 'new' : null;
-  let template = TEMPLATES[0];
+  let draft = newDraft();
+  let nameError = '', creating = false, avatarOpen = false, advancedOpen = false;
+  let saveTimer = 0, saving = false;
+  let pendingSave: { botId: string; input: BotInput } | null = null;
+  let saveState: keyof typeof SAVE_TEXT = '';
   let confirming: { title: string; text: string; button: string; action: () => Promise<void> } | null = null;
   let loading = true, busy = false, disposed = false, request = 0, moreOpen = false;
   let formModelGeneration = 0, soulImportGeneration = 0;
@@ -174,6 +211,8 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         && !catalog.some(model => model.id === preferred) ? 'default' : preferred;
       select.innerHTML = modelOptions(providerId, catalog, desired);
       select.value = botModelChoices(providerId, catalog, desired).some(model => model.id === desired) ? desired : 'default';
+      const form = select.closest('form');
+      if (form) syncEfforts(form);
     };
     apply(modelCatalogs.get(providerId) ?? provider.models);
     if (modelCatalogs.has(providerId)) return;
@@ -203,8 +242,23 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     list.innerHTML = `<div class="bots-list-head"><span>Bots</span><button type="button" class="icon-button" data-bots-action="new" aria-label="New bot" title="New bot">${icon('plus')}</button></div><div class="bots-rows">${rows || '<p class="bots-empty-note">No bots yet.</p>'}</div>`;
   }
 
-  function renderForm(bot: Bot | null): string {
-    const source = bot ?? { ...template, soul: '', provider: (installed()[0]?.id ?? 'claude') as ProviderId, model: '', mode: 'ask' };
+  function catalogFor(provider: ProviderId): ProviderModel[] { return modelCatalogs.get(provider) ?? options.providers.find(item => item.id === provider)?.models ?? []; }
+  function harnessName(provider: ProviderId): string { return options.providers.find(item => item.id === provider)?.name ?? provider; }
+  function modelName(provider: ProviderId, model: string): string { return botModelChoices(provider, catalogFor(provider), model).find(item => item.id === model)?.name ?? model; }
+  /** The chosen model's reasoning levels; disabled when it has none. Keeps a saved level the catalog does not list yet. */
+  function effortSelect(provider: ProviderId, model: string, current: string): string {
+    const levels: ReasoningEffort[] = catalogFor(provider).find(item => item.id === model)?.reasoningEfforts ?? [];
+    const all = current && !levels.some(item => item.id === current) ? [...levels, { id: current, name: current, description: '' }] : levels;
+    return `<select name="reasoningEffort" aria-label="Reasoning" ${all.length ? '' : 'disabled'}><option value="">Default</option>${all.map(item => `<option value="${escape(item.id)}" ${item.id === current ? 'selected' : ''}>${escape(item.name)}</option>`).join('')}</select>`;
+  }
+  function syncEfforts(form: HTMLFormElement): void {
+    const select = form.querySelector<HTMLSelectElement>('select[name=reasoningEffort]');
+    const provider = form.querySelector<HTMLSelectElement>('select[name=provider]')?.value as ProviderId;
+    const model = form.querySelector<HTMLSelectElement>('select[name=model]')?.value ?? '';
+    if (select && provider) select.outerHTML = effortSelect(provider, model, select.value);
+  }
+  /** Settings rows carry their own titles, so there the selects come bare. */
+  function harnessControls(providerId: ProviderId | '', modelId: string, labelled = true): { provider: Provider | undefined; harness: string; model: string } {
     const providers = options.providers;
     const hasInstalledProvider = providers.some(item => item.installed);
     const provider = providers.find(item => item.id === source.provider) ?? providers.find(item => item.installed) ?? providers[0];
@@ -226,25 +280,106 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       </div>
       ${heading('Personality', infoMark('Optional tone, values and conversational style. Personality never grants permissions or overrides safety rules.', 'About personality'))}
       <div class="bs-group"><div class="bs-row stacked"><span class="bs-row-text"><strong>Soul</strong></span><textarea name="soul" rows="5" aria-label="Soul" placeholder="How the bot sounds and relates to you">${escape(source.soul)}</textarea><div class="bots-soul-actions"><button type="button" class="secondary-button" data-bots-action="import-soul">Import soul.md</button><button type="button" class="secondary-button" data-bots-action="remove-soul">Remove personality</button><input type="file" data-soul-file accept=".md,.txt,text/plain,text/markdown" hidden><span class="field-help" data-live>UTF-8 text, up to 64 KB. Imported once; the file stays on your computer.</span></div></div></div>
-      ${heading('Agent')}
+      ${heading('Brain')}
       <div class="bs-group">
         ${row('Harness', '', `<select name="provider" aria-label="Harness">${providers.map(item => `<option value="${item.id}" ${item.id === provider?.id ? 'selected' : ''} ${!item.installed && hasInstalledProvider ? 'disabled' : ''}>${escape(item.name)}${!item.installed ? ' · Not installed' : ''}</option>`).join('')}</select>`)}
         ${row('Model', '', `<select name="model" aria-label="Model" data-preferred-model="${escape(model)}">${provider ? modelOptions(provider.id, models, advertisedModelsOnly(provider.id) && model !== 'default' && !models.some(item => item.id === model) ? 'default' : model) : `<option value="default">Default</option>`}</select>`)}
         ${row('Permissions', '', `<select name="mode" aria-label="Permissions">${unavailableMode ? `<option value="${escape(mode)}" selected>${escape(mode)} · Unavailable for this harness</option>` : ''}${visibleModes.map(item => `<option value="${item.id}" ${item.id === mode ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`)}
+      </div>
+      ${heading('Rules')}
+      <div class="bs-group">
+        <input type="hidden" name="mode" value="${escape(mode)}">
+        <div class="bp-rules-row"><div class="bs-row-text"><strong>How it can work</strong><small>Choose when PandaCode asks before a change.</small></div><div class="bp-rule-options" role="radiogroup" aria-label="Rules">${permissionOptions(bot.provider, mode)}</div></div>
+        ${row('Notifications', 'Message you when it finishes work you were not watching', toggle('notify', bot.notify !== false, 'Notifications'))}
+        <details class="bs-advanced" ${advancedOpen ? 'open' : ''}><summary>Advanced</summary>
+          ${row('While working', 'What a new message does while the bot is busy', `<select name="whileWorking" aria-label="While working"><option value="queue" ${bot.whileWorking !== 'steer' ? 'selected' : ''}>Queue it</option><option value="steer" ${bot.whileWorking === 'steer' ? 'selected' : ''}>Steer the current work</option></select>`)}
+          ${row('Show the plan before long tasks', '', toggle('showPlan', bot.showPlan === true, 'Show the plan before long tasks'))}
+        </details>
       </div>
       ${heading('Check-ins', infoMark('On each check-in the bot reviews its goals and memory using read-only steps, and messages you only when something needs attention.', 'About check-ins'))}
       <div class="bs-group">
         ${row('Check in', '', checkIns)}
         ${row('Standing goals', 'One per line. Check-ins work toward these.', `<textarea name="goals" rows="2" maxlength="16000" aria-label="Standing goals">${escape(source.goals)}</textarea>`, true)}
       </div>
-      <div class="dialog-footer">${!bot && bots.length ? '<button type="button" class="secondary-button" data-bots-action="cancel-edit">Cancel</button>' : ''}<button type="submit" class="primary-button">${bot ? 'Save' : 'Create bot'}</button></div>
     </form>`;
   }
 
   function readForm(form: HTMLFormElement): BotInput {
     const data = new FormData(form);
     const text = (name: string) => String(data.get(name) ?? '').trim();
-    return { name: text('name'), role: text('role'), instructions: text('instructions'), goals: text('goals'), soul: text('soul'), avatar: text('avatar'), provider: text('provider') as ProviderId, model: text('model'), mode: text('mode'), heartbeatMinutes: Number(text('heartbeatMinutes')) || 0 };
+    let backupModels: BackupModel[] = [];
+    try { const parsed: unknown = JSON.parse(text('backupModels') || '[]'); if (Array.isArray(parsed)) backupModels = parsed; } catch { /* An unreadable list saves as none. */ }
+    return {
+      name: text('name'), role: text('role'), instructions: text('instructions'), goals: text('goals'), soul: text('soul'), avatar: text('avatar'), color: text('color'),
+      provider: text('provider') as ProviderId, model: text('model'), mode: text('mode') || 'ask', heartbeatMinutes: Number(text('heartbeatMinutes')) || 0,
+      reasoningEffort: text('reasoningEffort'), backupModels, fallbackMode: text('fallbackMode') === 'auto' ? 'auto' : 'ask',
+      notify: data.has('notify'), whileWorking: text('whileWorking') === 'steer' ? 'steer' : 'queue', showPlan: data.has('showPlan'),
+    };
+  }
+
+  function setSaved(state: keyof typeof SAVE_TEXT): void {
+    saveState = state;
+    const status = pane.querySelector<HTMLElement>('.bs-saved');
+    if (status) { status.dataset.state = state; status.innerHTML = state === 'saved' ? `${icon('check')}${SAVE_TEXT.saved}` : SAVE_TEXT[state]; }
+  }
+  /** Reads the profile form now, so a change made just before closing still saves; `delay` batches typing. */
+  function queueSave(delay = 0): void {
+    const form = pane.querySelector<HTMLFormElement>('.bots-profile');
+    if (!form || !detail) return;
+    const input = readForm(form);
+    const nameField = form.querySelector<HTMLInputElement>('input[name=name]')!;
+    const nameNote = form.querySelector<HTMLElement>('#bp-name-error')!;
+    nameNote.hidden = Boolean(input.name);
+    nameNote.textContent = input.name ? '' : 'Give the bot a name.';
+    if (input.name) { nameField.removeAttribute('aria-invalid'); nameField.removeAttribute('aria-describedby'); }
+    else { nameField.setAttribute('aria-invalid', 'true'); nameField.setAttribute('aria-describedby', 'bp-name-error'); return; }
+    pendingSave = { botId: detail.bot.id, input };
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => void flushSave(), delay);
+  }
+  /** One save at a time; the latest queued state follows when it finishes, even after the view closes. */
+  async function flushSave(): Promise<void> {
+    window.clearTimeout(saveTimer);
+    if (!pendingSave || saving) return;
+    const { botId, input } = pendingSave;
+    pendingSave = null;
+    saving = true;
+    if (!disposed) setSaved('saving');
+    try {
+      const saved = await options.call<Bot>('bot_update', { botId, input });
+      if (disposed) return;
+      if (detail?.bot.id === saved.id) detail = { ...detail, bot: { ...detail.bot, ...saved } };
+      bots = bots.map(item => item.id === saved.id ? { ...item, ...saved } : item);
+      setSaved('saved');
+      refreshHeader();
+    } catch (cause) {
+      if (disposed) options.notify(message(cause)); else { setSaved('error'); error = message(cause); render(); }
+    } finally {
+      saving = false;
+      if (pendingSave) void flushSave();
+    }
+  }
+  /** The header follows the profile without redrawing the fields being typed in. */
+  function refreshHeader(): void {
+    const bar = pane.querySelector('.bp-bar');
+    if (!bar || !detail) return;
+    const fresh = document.createElement('div');
+    fresh.innerHTML = renderHeader(detail.bot);
+    bar.replaceWith(fresh.firstElementChild!);
+    renderList();
+  }
+  /** Changes made outside a field (avatar, backups, a confirmed permission) show at once, then save. */
+  function patchBot(patch: Partial<Bot>, redraw = true): void {
+    if (!detail) return;
+    // Keep edits made just before a click on a profile action. Redrawing from
+    // `detail.bot` alone can discard a checkbox/select change whose save is in flight.
+    const form = pane.querySelector<HTMLFormElement>('.bots-profile');
+    const fields: Partial<BotInput> = form ? readForm(form) : {};
+    // An invalid blank name is not a profile change; don't briefly erase the sidebar/header name.
+    if (form && !fields.name?.trim()) fields.name = detail.bot.name;
+    detail = { ...detail, bot: { ...detail.bot, ...fields, ...patch } };
+    if (redraw) render();
+    queueSave();
   }
 
   /** Identity and live state on the left; the conversation, pause, and the rare destructive actions on the right. */
@@ -280,10 +415,29 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const confirm = confirming ? `<div class="bots-confirm" role="alertdialog" aria-label="${escape(confirming.title)}"><b>${escape(confirming.title)}</b><p>${escape(confirming.text)}</p><div class="dialog-footer"><button type="button" class="secondary-button" data-bots-action="confirm-cancel">Cancel</button><button type="button" class="primary-button danger" data-bots-action="confirm-run">${escape(confirming.button)}</button></div></div>` : '';
     const alert = error ? `<p class="bots-error" role="alert">${escape(error)}</p>` : '';
     if (loading) { pane.innerHTML = '<p class="dialog-loading" role="status">Loading bots…</p>'; return; }
+    // Keep a half-typed setting (a new memory, a schedule prompt) and its caret through background refreshes.
+    const typing = pane.contains(document.activeElement) ? document.activeElement as HTMLInputElement | HTMLTextAreaElement : null;
+    const kept = typing?.matches('textarea,input:not([type=checkbox],[type=hidden])') ? { name: typing!.name || typing!.getAttribute('aria-label') || '', value: typing!.value, start: typing!.selectionStart, end: typing!.selectionEnd } : null;
+    const rail = pane.querySelector('.bc-rail')?.scrollLeft ?? 0;
+    // Any other control (a swatch in the icon popover, a switch) gets focus back by position.
+    const FOCUSABLE = 'button,input:not([type=hidden]),select,textarea,summary';
+    const focusAt = typing ? [...pane.querySelectorAll(FOCUSABLE)].indexOf(typing) : -1;
+    const focusTag = typing?.tagName;
+    // A selected bot whose detail is loading or failed shows only that state, never the create form.
+    if (!detail && selected && editing !== 'new' && !single) { pane.innerHTML = alert || '<p class="dialog-loading" role="status">Loading bot…</p>'; return; }
     if (editing === 'new' || !detail) {
-      pane.innerHTML = alert + (single && !detail ? '<p class="bots-empty-note">This bot no longer exists.</p>' : renderForm(null));
-      hydrateFormModels();
-      return;
+      pane.innerHTML = alert + (single && !detail ? '<p class="bots-empty-note">This bot no longer exists.</p>' : renderCreate());
+      const list = pane.querySelector<HTMLElement>('.bc-rail');
+      if (list) { list.scrollLeft = rail; railFades(list); }
+    } else {
+      const nav = `<div class="bs-nav" role="tablist" aria-orientation="vertical" aria-label="Bot settings">${SECTIONS.map(item => `<button type="button" role="tab" id="bs-tab-${item.id}" data-section="${item.id}" aria-controls="bs-panel" aria-selected="${item.id === section}" tabindex="${item.id === section ? 0 : -1}">${icon(item.icon)}<span>${item.label}</span>${badge(item.id)}</button>`).join('')}</div>`;
+      const current = SECTIONS.find(item => item.id === section)!;
+      const body = section === 'profile' ? renderProfile(detail.bot)
+        : section === 'activity' ? `${heading('Conversations')}${renderPanel('conversations', detail, context)}${heading('Rules', infoMark('Answer the bot\'s requests for you. Deny wins over allow, and * matches anything, as in npm test*. Risky actions such as sudo, force pushes, deleting files or anything about passwords always ask, whatever the rules say.', 'About rules'))}${renderPanel('rules', detail, context)}${heading('Activity log')}${renderPanel('activity', detail, context)}`
+        : renderPanel(section, detail, context);
+      const saved = section === 'profile' ? `<span class="bs-saved" role="status" aria-live="polite" data-state="${saveState}"></span>` : '';
+      pane.innerHTML = `${renderHeader(detail.bot)}${confirm}${alert}<div class="bs-body">${nav}<div class="bots-panel" id="bs-panel" role="tabpanel" aria-labelledby="bs-tab-${section}"><div class="bs-panel-head"><h2>${current.label}${saved}</h2><p>${escape(current.text)}</p></div>${body}</div></div>`;
+      setSaved(saveState);
     }
     // Keep a half-typed setting (a new memory, a schedule prompt) through background refreshes.
     const typing = pane.contains(document.activeElement) ? document.activeElement as HTMLInputElement | HTMLTextAreaElement : null;
@@ -299,24 +453,83 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     if (section === 'skills') disposeCapabilities = mountBotCapabilities(pane.querySelector<HTMLElement>('[data-bot-capabilities]')!, detail.bot, options);
     if (kept?.name) {
       const again = [...pane.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].find(field => (field.name || field.getAttribute('aria-label')) === kept.name);
-      if (again) { again.value = kept.value; again.focus(); }
+      if (again) { again.value = kept.value; again.focus(); if (kept.start !== null && 'setSelectionRange' in again) try { again.setSelectionRange(kept.start, kept.end); } catch { /* Not a text field. */ } }
+    } else if (focusAt >= 0) {
+      const again = pane.querySelectorAll<HTMLElement>(FOCUSABLE)[focusAt];
+      if (again?.tagName === focusTag) again.focus();
     }
+  }
+  /** Edge fades show only where the carousel has more to scroll to. */
+  function railFades(list: HTMLElement): void {
+    list.classList.toggle('fade-start', list.scrollLeft > 1);
+    list.classList.toggle('fade-end', list.scrollLeft < list.scrollWidth - list.clientWidth - 1);
+  }
+
+  /** Reads the create form into the draft; a suggestion stays picked only while its text is unchanged. */
+  function readDraft(form: HTMLFormElement): void {
+    const data = new FormData(form);
+    const text = (name: string) => String(data.get(name) ?? '');
+    const next = { ...draft, name: text('name'), purpose: text('purpose'), avatar: text('avatar') || draft.avatar, color: text('color'), provider: text('provider') as ProviderId, model: text('model'), reasoningEffort: text('reasoningEffort') };
+    const picked = SUGGESTIONS.find(item => item.id === next.suggestion);
+    draft = picked && picked.name === next.name.trim() && picked.purpose === next.purpose.trim() ? next : { ...next, suggestion: '', role: '', heartbeatMinutes: 0 };
+  }
+  function previewDraft(form: HTMLFormElement): void {
+    form.querySelector('.bc-preview')!.innerHTML = botAvatarHtml(draft.avatar, draft.name || 'Bot', 'bc-avatar', draft.color);
+    form.querySelector('.bc-count')!.textContent = `${draft.purpose.length} / ${PURPOSE_MAX}`;
+    for (const card of pane.querySelectorAll('[data-suggestion]')) card.setAttribute('aria-pressed', String((card as HTMLElement).dataset.suggestion === draft.suggestion));
+  }
+  function createBot(form: HTMLFormElement): void {
+    readDraft(form);
+    const name = draft.name.trim(), purpose = draft.purpose.trim();
+    if (!name) { nameError = 'Give the bot a name.'; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); return; }
+    nameError = '';
+    const input: BotInput = { name, role: draft.role, instructions: purpose, goals: '', avatar: draft.avatar, color: draft.color, provider: draft.provider as ProviderId, model: draft.model, mode: 'ask', heartbeatMinutes: draft.heartbeatMinutes, reasoningEffort: draft.reasoningEffort, backupModels: [], fallbackMode: 'ask', notify: true, whileWorking: 'queue', showPlan: false };
+    creating = true; render();
+    void work(async () => {
+      try {
+        const bot = await options.call<Bot>('bot_create', { input });
+        selected = bot.id; editing = null; section = 'profile'; draft = newDraft();
+        await load();
+        options.openChat(bot.id);
+      } finally { creating = false; if (!disposed && pane.querySelector('.bc-form')) render(); }
+    });
   }
 
   const click = (event: MouseEvent) => {
     if (handleAvatarPicker(event)) return;
-    // A click anywhere outside the More menu closes it, like any menu.
-    if (moreOpen && !(event.target instanceof Element && event.target.closest('.bp-more'))) { moreOpen = false; render(); }
+    // A click anywhere outside the More menu or the icon popover closes it, like any menu.
+    const inside = (selector: string) => event.target instanceof Element && event.target.closest(selector);
+    if (moreOpen && !inside('.bp-more')) { moreOpen = false; render(); }
+    if (avatarOpen && !inside('.bp-avatar-wrap')) { avatarOpen = false; render(); }
     const target = event.target instanceof Element ? event.target.closest<HTMLElement>('button,[data-bot]') : null;
     if (!target || !host.contains(target) || (target as HTMLButtonElement).disabled) return;
-    if (target.dataset.bot) { selected = target.dataset.bot; editing = null; confirming = null; void load(); return; }
-    if (target.dataset.section) { section = target.dataset.section as Nav; confirming = null; render(); return; }
-    if (target.dataset.template) {
-      template = TEMPLATES.find(item => item.id === target.dataset.template) ?? TEMPLATES[0];
-      render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); return;
+    if (target.dataset.bot) { selected = target.dataset.bot; editing = null; confirming = null; if (detail?.bot.id !== selected) { detail = null; render(); } void load(); return; }
+    if (target.dataset.section) { section = target.dataset.section as Nav; confirming = null; avatarOpen = false; render(); return; }
+    if (target.dataset.suggestion) {
+      const picked = SUGGESTIONS.find(item => item.id === target.dataset.suggestion)!;
+      const form = pane.querySelector<HTMLFormElement>('.bc-form');
+      if (form) readDraft(form);
+      draft = { ...draft, name: picked.name, purpose: picked.purpose, role: picked.role, avatar: picked.avatar, color: '', heartbeatMinutes: picked.heartbeatMinutes, suggestion: picked.id };
+      nameError = ''; render(); pane.querySelector<HTMLElement>(`[data-suggestion="${picked.id}"]`)?.focus(); return;
     }
-    const action = target.dataset.botsAction;
     const bot = detail?.bot;
+    if (bot && target.dataset.permission) {
+      const mode = target.dataset.permission;
+      if (!permissionChoices(bot.provider, bot.mode).some(item => item.id === mode)) return;
+      if (mode === 'full' && bot.mode !== 'full') {
+        context.confirm(`Give ${bot.name} full access?`, 'It can run any command and change any file this computer allows, without asking first.', 'Allow full access', async () => patchBot({ mode }));
+        return;
+      }
+      patchBot({ mode }); return;
+    }
+    if (bot && target.dataset.backupMove) {
+      const from = Number(target.dataset.backupMove), to = from + Number(target.dataset.step);
+      const list = [...(bot.backupModels ?? [])];
+      [list[from], list[to]] = [list[to], list[from]];
+      patchBot({ backupModels: list }); pane.querySelector<HTMLElement>(`[data-backup-move="${to}"][data-step="${target.dataset.step}"]:not(:disabled)`)?.focus(); return;
+    }
+    if (bot && target.dataset.backupRemove) { patchBot({ backupModels: (bot.backupModels ?? []).filter((_, index) => index !== Number(target.dataset.backupRemove)) }); return; }
+    const action = target.dataset.botsAction;
     if (moreOpen && action !== 'more') moreOpen = false;
     if (action === 'new') { editing = 'new'; template = TEMPLATES[0]; confirming = null; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); }
     else if (action === 'import-soul') pane.querySelector<HTMLInputElement>('[data-soul-file]')?.click();
@@ -366,14 +579,16 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       });
       return;
     }
-    if (target.matches('.bots-form select[name=provider]')) {
-      const provider = options.providers.find(item => item.id === (target as HTMLSelectElement).value);
-      const select = pane.querySelector<HTMLSelectElement>('.bots-form select[name=model]');
-      const mode = pane.querySelector<HTMLSelectElement>('.bots-form select[name=mode]');
-      if (provider && select) {
-        const preferred = options.defaultModel(provider.id) || 'default';
-        select.dataset.preferredModel = preferred;
-        void loadFormModels(provider.id, select, preferred);
+    const form = target.closest<HTMLFormElement>('.bc-form,.bots-profile');
+    if (form && target.matches('select[name=provider]')) providerChanged(form, (target as HTMLSelectElement).value as ProviderId);
+    else if (form && target.matches('select[name=model]')) syncEfforts(form);
+    if (form?.matches('.bc-form')) { readDraft(form); return; }
+    if (form && detail) {
+      const bot = detail.bot;
+      if (target.matches('[data-backup-add]')) {
+        const value = (target as HTMLSelectElement).value;
+        if (value) patchBot({ backupModels: [...(bot.backupModels ?? []), JSON.parse(value) as BackupModel] });
+        return;
       }
       if (provider && mode) {
         const choices = providerModes(provider.id);
@@ -381,18 +596,44 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         const unavailable = !choices.some(item => item.id === current);
         mode.innerHTML = (unavailable ? `<option value="${escape(current)}" selected>${escape(current)} · Unavailable for this harness</option>` : '') + choices.map(item => `<option value="${item.id}" ${item.id === current ? 'selected' : ''}>${item.label}</option>`).join('');
       }
+      if (target.matches('input[name=name],input[name=role],textarea')) return; // Saved by the `input` listener.
+      queueSave();
       return;
     }
     if (section !== 'profile' && section !== 'skills') panelChange(target, section, context);
+  };
+  const typed = (event: Event) => {
+    const target = event.target as HTMLElement;
+    connectInput(target);
+    const form = target.closest<HTMLFormElement>('.bc-form,.bots-profile');
+    if (form?.matches('.bc-form')) {
+      readDraft(form); previewDraft(form);
+      if (nameError && draft.name.trim()) { nameError = ''; form.querySelector('#bc-name-error')?.remove(); form.querySelector('input[name=name]')?.removeAttribute('aria-invalid'); }
+    } else if (form && detail) {
+      // The icon pickers report through their hidden inputs: show the choice at once, then save.
+      // The popover stays as it is (and keeps focus), so only the icon itself is redrawn.
+      if (target.matches('input[name=avatar],input[name=color]')) {
+        patchBot({ [(target as HTMLInputElement).name]: (target as HTMLInputElement).value }, false);
+        const icon = pane.querySelector('.bp-avatar-button .bot-avatar');
+        if (icon && detail) icon.outerHTML = avatar(detail.bot, 'bp-avatar');
+        return;
+      }
+      if (target.matches('input[name=name],input[name=role],textarea')) queueSave(600);
+    }
   };
   host.addEventListener('click', click);
   host.addEventListener('submit', submit);
   host.addEventListener('change', change);
   const typed = (event: Event) => { if (event.target instanceof HTMLTextAreaElement && event.target.name === 'soul') soulImportGeneration++; connectInput(event.target as HTMLElement); };
   host.addEventListener('input', typed);
-  // `toggle` does not bubble, so listen while capturing.
-  const toggled = (event: Event) => { if (event.target instanceof HTMLDetailsElement) guideToggled(event.target); };
+  // `toggle` and `scroll` do not bubble, so listen while capturing.
+  const toggled = (event: Event) => {
+    if (!(event.target instanceof HTMLDetailsElement)) return;
+    if (event.target.matches('.bs-advanced')) advancedOpen = event.target.open; else guideToggled(event.target);
+  };
   host.addEventListener('toggle', toggled, true);
+  const scrolled = (event: Event) => { if (event.target instanceof HTMLElement && event.target.matches('.bc-rail')) railFades(event.target); };
+  host.addEventListener('scroll', scrolled, true);
   /** The section list moves like the app's Settings sidebar: arrow keys, Home and End. */
   const navKeys = (event: KeyboardEvent): boolean => {
     const tabs = [...pane.querySelectorAll<HTMLButtonElement>('.bs-nav [role=tab]')];
@@ -405,7 +646,12 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     pane.querySelector<HTMLElement>(`#bs-tab-${section}`)?.focus();
     return true;
   };
-  const keys = (event: KeyboardEvent) => { if (navKeys(event)) return; if (event.key === 'Escape' && moreOpen) { event.preventDefault(); event.stopPropagation(); moreOpen = false; render(); pane.querySelector<HTMLElement>('[data-bots-action="more"]')?.focus(); } };
+  const keys = (event: KeyboardEvent) => {
+    if (navKeys(event) || event.key !== 'Escape' || !(moreOpen || avatarOpen)) return;
+    event.preventDefault(); event.stopPropagation();
+    const trigger = moreOpen ? '[data-bots-action="more"]' : '.bp-avatar-button';
+    moreOpen = avatarOpen = false; render(); pane.querySelector<HTMLElement>(trigger)?.focus();
+  };
   host.addEventListener('keydown', keys);
   render();
   void load();

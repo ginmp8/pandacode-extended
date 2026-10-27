@@ -415,6 +415,23 @@ pub(super) fn authorize(dir: &Path, inner: &super::Inner, device: &str, authenti
     allowed(&verdict)
 }
 
+/// Rechecks the current device grant and local Full switch without executing a
+/// particular Full-only operation. `task.start` is the canonical Full-only
+/// method in the remote method table.
+pub(super) fn authorize_full(dir: &Path, inner: &super::Inner, device: &str, authenticated_key: &str) -> Result<()> {
+    authorize(dir, inner, device, authenticated_key, "task.start")
+}
+
+/// Current-request helpers live with the host's authenticated request context,
+/// but the queue uses this module as the public(crate) authorization surface.
+pub(crate) fn check_current_full_request() -> Result<()> {
+    super::host::check_current_full_request()
+}
+
+pub(crate) fn with_current_full_request<T>(mode: &str, effect: impl FnOnce() -> Result<T>) -> Result<T> {
+    super::host::with_current_full_request(mode, effect)
+}
+
 /// Pairing replies may be retried after the owner changes a grant. Never replay
 /// an old successful scope as though it still described current authorization.
 pub(super) fn authorize_pairing_response(dir: &Path, inner: &super::Inner, device: &str, authenticated_key: &str, response: &Value) -> Result<()> {
@@ -720,6 +737,235 @@ mod tests {
         config::begin_lockdown(&fixture.dir).unwrap();
         assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "tasks.list").is_err(), "the durable fence is authoritative even before restart");
         fixture.assert_restart_denied();
+    }
+
+    #[test]
+    fn full_scope_recheck_requires_current_full_grant_and_local_switch() {
+        let mut fixture = AccessFixture::new(Scope::Control);
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure").is_ok());
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.steer").is_ok());
+        assert!(authorize_full(&fixture.dir, &fixture.inner, "peer", &fixture.key).is_err(), "Control cannot perform a Full-only action");
+
+        with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Full)).unwrap();
+        assert!(authorize_full(&fixture.dir, &fixture.inner, "peer", &fixture.key).is_ok());
+
+        // A later demotion must still leave ordinary Control methods available,
+        // while a Full-only effect is denied at its final authorization check.
+        with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Control)).unwrap();
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.steer").is_ok());
+        assert!(authorize_full(&fixture.dir, &fixture.inner, "peer", &fixture.key).is_err(), "a demoted grant is not cached");
+
+        with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Full)).unwrap();
+        fixture.inner.settings.allow_full_access = false;
+        assert!(authorize_full(&fixture.dir, &fixture.inner, "peer", &fixture.key).is_err(), "the local switch remains authoritative");
+    }
+
+    #[test]
+    fn configure_and_bot_steer_effects_recheck_current_full_authority() {
+        let mut fixture = AccessFixture::new(Scope::Full);
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "ask").unwrap();
+
+        let mut full_steer_enqueued = false;
+        super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.steer",
+            "ask",
+            true,
+            || { full_steer_enqueued = true; Ok(()) },
+        ).unwrap();
+        assert!(full_steer_enqueued, "Full bot steering reaches the enqueue effect");
+
+        super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.configure",
+            "full",
+            true,
+            || store.update(&task.id, None, None, None, Some("full".into())),
+        ).unwrap();
+        assert_eq!(store.session(&task.id).unwrap().mode, "full", "Full can configure a privileged mode while both gates are on");
+
+        // A downgrade that wins before the final mutation leaves the old mode
+        // intact, even though admission previously succeeded under Full.
+        store.update(&task.id, None, None, None, Some("ask".into())).unwrap();
+        with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Control)).unwrap();
+        let mut run_input_enqueued = false;
+        let steer = super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.steer",
+            "ask",
+            true,
+            || { run_input_enqueued = true; Ok(()) },
+        );
+        assert!(steer.is_err());
+        assert!(!run_input_enqueued, "a revoked bot steer never reaches the RunInput enqueue effect");
+
+        for mode in ["full", "review"] {
+            let configure = super::super::host::with_authorized_request_effect(
+                &fixture.dir,
+                &fixture.inner,
+                "peer",
+                &fixture.key,
+                "task.configure",
+                mode,
+                true,
+                || store.update(&task.id, None, None, None, Some(mode.into())),
+            );
+            assert!(configure.is_err(), "Control cannot persist {mode} mode while the host switch is on");
+            assert_eq!(store.session(&task.id).unwrap().mode, "ask", "the denied mode write leaves the task unchanged");
+        }
+
+        // Control still reaches ordinary steering and model configuration.
+        let mut ordinary_steer_enqueued = false;
+        super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.steer",
+            "ask",
+            false,
+            || { ordinary_steer_enqueued = true; Ok(()) },
+        ).unwrap();
+        assert!(ordinary_steer_enqueued);
+        super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.configure",
+            "ask",
+            false,
+            || store.update(&task.id, None, None, Some("haiku".into()), None),
+        ).unwrap();
+        assert_eq!(store.session(&task.id).unwrap().model, "haiku");
+        super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.configure",
+            "plan",
+            false,
+            || store.update(&task.id, None, None, None, Some("plan".into())),
+        ).unwrap();
+        assert_eq!(store.session(&task.id).unwrap().mode, "plan");
+
+        // A Full grant alone still cannot set review after the local switch is off.
+        with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Full)).unwrap();
+        fixture.inner.settings.allow_full_access = false;
+        let review = super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.configure",
+            "review",
+            true,
+            || store.update(&task.id, None, None, None, Some("review".into())),
+        );
+        assert!(review.is_err(), "the local Full switch remains required at persistence");
+        assert_eq!(store.session(&task.id).unwrap().mode, "plan");
+    }
+
+    #[test]
+    fn privileged_effect_and_grant_demotion_linearize_on_remote_lock() {
+        use std::sync::mpsc::{self, TryRecvError};
+        use std::time::Duration;
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        let fixture = AccessFixture::new(Scope::Full);
+        // Production holds Remote's mutex around with_authorized_request_effect;
+        // model that caller-owned lock here so the test can force a revoke race.
+        let remote_lock = std::sync::Mutex::new(());
+        let (effect_started_tx, effect_started_rx) = mpsc::channel();
+        let (release_effect_tx, release_effect_rx) = mpsc::channel();
+        let (effect_finished_tx, effect_finished_rx) = mpsc::channel();
+        let (demotion_blocked_tx, demotion_blocked_rx) = mpsc::channel();
+        let (demotion_finished_tx, demotion_finished_rx) = mpsc::channel();
+        let effect_dir = fixture.dir.clone();
+        let effect_key = fixture.key.clone();
+        let effect_inner = super::super::Inner { settings: fixture.inner.settings.clone(), devices: fixture.inner.devices.clone(), ..Default::default() };
+        let demotion_dir = fixture.dir.clone();
+        let demotion_peer = fixture.peer.clone();
+        let effect_lock = &remote_lock;
+        let demotion_lock = &remote_lock;
+
+        std::thread::scope(|threads| {
+            let effect = threads.spawn(move || {
+                let _remote = effect_lock.lock().unwrap();
+                super::super::host::with_authorized_request_effect(
+                    &effect_dir,
+                    &effect_inner,
+                    "peer",
+                    &effect_key,
+                    "task.configure",
+                    "full",
+                    true,
+                    || {
+                        effect_started_tx.send(()).unwrap();
+                        release_effect_rx.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+                        effect_finished_tx.send(()).map_err(|error| error.to_string())?;
+                        Ok(())
+                    },
+                )
+            });
+
+            let demotion = threads.spawn(move || {
+                effect_started_rx.recv_timeout(WAIT).expect("privileged effect did not start");
+                let blocked = match demotion_lock.try_lock() {
+                    Ok(guard) => {
+                        drop(guard);
+                        false
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => true,
+                    Err(std::sync::TryLockError::Poisoned(error)) => panic!("remote lock poisoned: {error}"),
+                };
+                demotion_blocked_tx.send(blocked).unwrap();
+
+                let _remote = demotion_lock.lock().unwrap();
+                with(&demotion_dir, |grants| grants.set(&demotion_peer, Scope::Control)).unwrap();
+                demotion_finished_tx.send(()).unwrap();
+            });
+
+            assert!(demotion_blocked_rx.recv_timeout(WAIT).expect("demotion did not try the remote lock"), "demotion acquired the lock before the privileged effect finished");
+            assert!(matches!(demotion_finished_rx.try_recv(), Err(TryRecvError::Empty)), "demotion completed while the privileged effect held the lock");
+
+            release_effect_tx.send(()).unwrap();
+            effect_finished_rx.recv_timeout(WAIT).expect("privileged effect did not finish");
+            demotion_finished_rx.recv_timeout(WAIT).expect("demotion did not finish after the effect released the lock");
+            effect.join().unwrap().unwrap();
+            demotion.join().unwrap();
+        });
+
+        let _remote = remote_lock.lock().unwrap();
+        let mut next_effect_ran = false;
+        let next = super::super::host::with_authorized_request_effect(
+            &fixture.dir,
+            &fixture.inner,
+            "peer",
+            &fixture.key,
+            "task.configure",
+            "full",
+            true,
+            || {
+                next_effect_ran = true;
+                Ok(())
+            },
+        );
+        assert!(next.is_err(), "the following privileged effect must see the demoted grant");
+        assert!(!next_effect_ran, "the denied effect must not run");
     }
 
     #[test]

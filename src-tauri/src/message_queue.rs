@@ -207,11 +207,26 @@ pub async fn steer_task(app: tauri::AppHandle, state: State<'_, AppState>, sessi
     let reply = {
         let agents = state.agents.lock().map_err(|e| e.to_string())?;
         let agent = agents.get(&session_id).ok_or("The agent is not running; the message stays queued.")?;
-        crate::remote::check_current_request(&state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.mode)?;
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let task = store.session(&session_id)?;
+        let bot_thread = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM bot_threads WHERE session_id=?1)",
+            [&session_id],
+            |row| row.get::<_, bool>(0),
+        ).map_err(|error| error.to_string())?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let id = uuid::Uuid::new_v4().to_string();
-        agent.send(RunInput::Steer { id, text: text.clone(), reply: tx }).map_err(|_| "The agent has stopped.".to_string())?;
-        rx
+        let input = RunInput::Steer { id, text: text.clone(), reply: tx };
+        let enqueue = || {
+            agent.send(input).map_err(|_| "The agent has stopped.".to_string())?;
+            Ok(rx)
+        };
+        if bot_thread {
+            crate::remote::grants::with_current_full_request(&task.mode, enqueue)?
+        } else {
+            crate::remote::check_current_request(&task.mode)?;
+            enqueue()?
+        }
     };
     let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply)
         .await

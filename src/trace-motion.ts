@@ -123,6 +123,7 @@ export function choreograph(host: HTMLElement, turnKey: string, options: { answe
     if (pinned.get(turnKey)?.has(tool.dataset.toolKey!)) { delete tool.dataset.auto; continue; }
     tool.dataset.auto = '';
     const want = keep.has(tool);
+    if (!want && tool.closest('.tool-group[data-earlier]:not([open])')) { tool.open = false; delete tool.dataset.closing; continue; }
     if (want && (!tool.open || tool.dataset.closing !== undefined)) expand(tool);
     else if (!want && tool.open) first ? (tool.open = false) : collapse(tool);
   }

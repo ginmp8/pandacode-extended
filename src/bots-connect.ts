@@ -127,7 +127,7 @@ export function channelGuide(detail: BotDetail, channel: Channel): string {
       const callback = publicUrl ? `${publicUrl}/whatsapp/${channel.id}` : '';
       body = `<ol>
         <li><b>Give Meta a way in.</b> Meta delivers messages over HTTPS, so this computer needs a public address. The quickest is a free Cloudflare tunnel; run these in Terminal and keep the second one open:${copy('brew install cloudflared', 'Copy', 'Install')}${copy(`cloudflared tunnel --url http://127.0.0.1:${port}`, 'Copy', 'Start')}It prints an address ending in <code>trycloudflare.com</code>. That address changes each time the tunnel starts; for a fixed one, use Tailscale Funnel instead:${copy(`tailscale funnel --bg ${port}`, 'Copy', 'Or')}</li>
-        <li><label class="bots-field"><span>Paste that https address</span><span class="bots-inline-form"><input data-public-url="${escape(channel.id)}" placeholder="https://….trycloudflare.com" value="${escape(typedUrl)}" autocomplete="off" spellcheck="false"><button type="button" class="secondary-button" data-save-public="${escape(channel.id)}">Save</button></span></label></li>
+        <li><label class="bots-field"><span>Paste that https address</span><span class="bots-inline-form"><input name="publicUrl-${escape(channel.id)}" data-public-url="${escape(channel.id)}" placeholder="https://….trycloudflare.com" value="${escape(typedUrl)}" autocomplete="off" spellcheck="false"><button type="button" class="secondary-button" data-save-public="${escape(channel.id)}">Save</button></span></label></li>
         <li><b>In Meta</b>, open WhatsApp → <b>Configuration</b> → Webhook → <b>Edit</b> and paste:${callback ? `${copy(callback, 'Copy', 'Callback URL')}` : ' <i>(the callback URL appears here after you save the address)</i>'}${copy(String(channel.config.verifyToken ?? ''), 'Copy', 'Verify token')}Press <b>Verify and save</b>, then under Webhook fields press <b>Manage</b> and subscribe to <b>messages</b>. The status above turns to “Webhook verified”.</li>
         <li>${identity?.link ? link(identity.link, 'Message your WhatsApp number') : 'Message your WhatsApp business number from your phone.'}</li>${pairStep}</ol>`; break;
     }
@@ -135,7 +135,7 @@ export function channelGuide(detail: BotDetail, channel: Channel): string {
       body = `<ol><li><button type="button" class="primary-button bots-step-button" data-web-open="${escape(channel.id)}">Open web chat</button> On this computer, that’s it.</li>
         <li><label class="bots-switch-row"><input type="checkbox" class="bots-switch" data-remote="${escape(channel.id)}" ${channel.config.remote ? 'checked' : ''}><span><b>Use from my phone and other devices</b><small>Allows the page through a private tunnel. The link still works only with its token.</small></span></label></li>
         ${channel.config.remote ? `<li>Install Tailscale on this computer and your phone and sign in to both. Then run this in Terminal:${copy(`tailscale serve --bg ${port}`, 'Copy', 'Run')}It shows an address like <code>https://your-mac.tailnet.ts.net</code>.</li>
-        <li><label class="bots-field"><span>Paste that https address</span><span class="bots-inline-form"><input data-public-url="${escape(channel.id)}" placeholder="https://your-mac.tailnet.ts.net" value="${escape(typedUrl)}" autocomplete="off" spellcheck="false"><button type="button" class="secondary-button" data-save-public="${escape(channel.id)}">Save</button></span></label></li>
+        <li><label class="bots-field"><span>Paste that https address</span><span class="bots-inline-form"><input name="publicUrl-${escape(channel.id)}" data-public-url="${escape(channel.id)}" placeholder="https://your-mac.tailnet.ts.net" value="${escape(typedUrl)}" autocomplete="off" spellcheck="false"><button type="button" class="secondary-button" data-save-public="${escape(channel.id)}">Save</button></span></label></li>
         ${publicUrl ? `<li><button type="button" class="primary-button bots-step-button" data-phone-link="${escape(channel.id)}">Copy link for my phone</button> Open it on your phone; add it to your home screen to use it like an app.</li>` : ''}` : ''}</ol>`; break;
   }
   const fallback = channel.kind === 'web' ? Boolean(channel.config.remote) : !paired;
@@ -176,7 +176,10 @@ export function connectClick(target: HTMLElement, context: PanelContext): boolea
   }
   if (data.savePublic) {
     const field = target.closest('li')?.querySelector<HTMLInputElement>(`[data-public-url="${CSS.escape(data.savePublic)}"]`);
-    void context.work(async () => { await context.call('bot_channel_configure', { channelId: data.savePublic, config: { publicUrl: field?.value ?? '' } }); values.delete(`public:${data.savePublic}`); await done('Address saved'); });
+    const key = `public:${data.savePublic}`;
+    const publicUrl = field?.value ?? values.get(key) ?? '';
+    values.set(key, publicUrl);
+    void context.work(async () => { await context.call('bot_channel_configure', { channelId: data.savePublic, config: { publicUrl } }); values.delete(key); await done('Address saved'); });
     return true;
   }
   return false;

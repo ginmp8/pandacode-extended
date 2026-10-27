@@ -78,7 +78,7 @@ async function installControlledStreaming(page: Page): Promise<void> {
 
 async function startTurn(page: Page, view: View, expandActivity = true): Promise<string> {
   if (view === 'board') {
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     const board = page.getByRole('region', { name: 'Project board', exact: true });
     await board.getByRole('button', { name: 'Add task', exact: true }).click();
     await page.locator('#dialog').getByRole('textbox', { name: 'Task title', exact: true }).fill('Controlled streaming response');
@@ -524,6 +524,16 @@ test.describe('streamed responses', () => {
 
       const firstGroup = liveGroups(page).first();
       const firstTool = page.locator(`#stream-region .tool-activity[data-tool-key="tool:${firstToolId}"]`);
+      // Steps narrated past fold to their summary in the conversation and stay folded as new work arrives.
+      if (view === 'conversation') {
+        await expect(firstGroup).not.toHaveAttribute('open', '');
+        await expect(firstGroup.locator('.tool-group-summary')).toBeVisible();
+        await page.evaluate(({ id, thirdToolId }) => (window as any).__streamFixtures[id].updateTool('running', thirdToolId), { id, thirdToolId });
+        await expect(firstGroup).not.toHaveAttribute('open', '');
+        await expect(firstTool).not.toHaveAttribute('open', '');
+        await firstGroup.locator('.tool-group-summary').click();
+      }
+      await expect(firstGroup).toHaveAttribute('open', '');
       await firstTool.locator(':scope > summary').click();
       await firstTool.locator('.tool-trace-raw > summary').click();
       await page.evaluate(({ id, toolId }) => (window as any).__streamFixtures[id].updateTool('running', toolId), { id, toolId: firstToolId });
@@ -584,7 +594,12 @@ test.describe('streamed responses', () => {
       await expect(liveGroups(page).locator('.tool-group-label')).toHaveText(['Read 5 files', 'Read 1 file', 'Read 1 file']);
       await expect.poll(() => liveSequence(page)).toEqual(['I’m checking the project files.', '5 tools', '1 tool', 'The files look good. I’m checking one last detail.', '1 tool']);
       await expect(page.locator('#stream-region .tool-activity')).toHaveCount(7);
-      for (const group of await liveGroups(page).all()) await expect(group).toHaveAttribute('open', '');
+      // In the conversation, groups the agent narrated past fold to their summary; the board keeps every group open.
+      const groups = await liveGroups(page).all();
+      for (const [index, group] of groups.entries()) {
+        if (view === 'board' || index === groups.length - 1) await expect(group).toHaveAttribute('open', '');
+        else await expect(group).not.toHaveAttribute('open', '');
+      }
       await expect(page.locator('#stream-region [data-commentary]')).toBeVisible();
       await expect(live(page)).toBeVisible();
       if (view === 'board') {
@@ -794,7 +809,7 @@ test.describe('streamed responses', () => {
     const id = await startTurn(page, 'conversation');
     await push(page, id, 'First stream segment. ');
     await expect(live(page)).toContainText('First stream segment.');
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     await push(page, id, 'Arrived with the panel closed. ');
     await page.locator(`[data-action="board-open"][data-id="${id}"]`).click();
     await expect(live(page)).toContainText('First stream segment. Arrived with the panel closed.');
@@ -802,7 +817,7 @@ test.describe('streamed responses', () => {
     await push(page, id, 'Arrived in the background. ');
     await expect(transcript(page)).not.toContainText('First stream segment.');
     await expect(transcript(page)).toContainText('The project is a small native workspace');
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Conversation', exact: true }).click();
     await page.locator(`.task-item[data-id="${id}"]`).click();
     await expect(live(page)).toContainText('First stream segment. Arrived with the panel closed. Arrived in the background.');
     await push(page, id, 'Final segment.');

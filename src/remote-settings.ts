@@ -69,7 +69,7 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
       <div class="setting-row"><div><strong>Use direct LAN/Tailscale connections</strong><small>Optional: probe private addresses only for devices trusted on this computer; relay remains the fallback.</small></div><input type="checkbox" class="settings-switch" id="remote-direct-routes" aria-label="Use direct LAN/Tailscale connections" ${status.directRoutes ? 'checked' : ''}></div>
       <h3 class="settings-heading">Devices ${infoMark(SCOPE_HELP, 'About device access')}</h3>
       ${devicesError ? failure('Couldn’t load devices.', devicesError) : grantsError ? failure('Couldn’t load device access.', grantsError) : ''}
-      <div class="settings-group remote-devices">${ordered.length ? ordered.map(deviceRow).join('') : '<p class="remote-note">No devices yet.</p>'}</div>
+      <div class="settings-group remote-devices">${ordered.length ? ordered.map(deviceRow).join('') : devicesLoaded && !devicesError ? '<p class="remote-note">No devices yet.</p>' : loading && !devicesError ? '<p class="remote-note" role="status">Loading devices…</p>' : ''}</div>
       ${pairingForm}`;
   }
 

@@ -244,13 +244,30 @@ function editCard(tool: CardTool, fields: Fields): string {
 
 // ── Search: grep, glob, ls ───────────────────────────────────────────────────
 
-function queryPattern(pattern: string): RegExp | undefined {
-  if (!pattern) return;
-  try { return new RegExp(pattern, 'gi'); } catch { return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'); }
+/** Only literal search terms earn highlighting. The tool already ran the search;
+ * executing its arbitrary regex again on the UI thread could block rendering.
+ * Keep escaped literals such as `icon\\(`, but leave regex operators to the tool. */
+function literalPattern(pattern: string): string | undefined {
+  let literal = '';
+  const syntax = '\\^$.*+?()[]{}|';
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index];
+    if (char === '\\') {
+      const escaped = pattern[++index];
+      if (!escaped || !(syntax + '/').includes(escaped)) return;
+      literal += escaped;
+    } else {
+      if (syntax.includes(char)) return;
+      literal += char;
+    }
+  }
+  return literal || undefined;
 }
-/** Escapes text while wrapping query matches in <mark>; split before escaping so markup cannot leak. */
-export function highlight(text: string, pattern?: RegExp): string {
-  if (!pattern) return escape(text);
+/** Escapes text while marking literal, case-insensitive matches. Escaping every
+ * metacharacter keeps this regex a literal search regardless of the tool input. */
+export function highlight(text: string, literal?: string): string {
+  if (!literal || literal.length > text.length) return escape(text);
+  const pattern = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
   let html = '', last = 0;
   for (const match of text.matchAll(pattern)) {
     if (!match[0]) break;
@@ -277,12 +294,12 @@ function searchCard(tool: CardTool, fields: Fields, output: string): string {
   const counted = [...groups.values()].some(hits => hits.length);
   const top = counted ? `<div class="tc-head"><span class="tc-head-meta">${escape(`${plural(total, 'match', 'matches')} in ${plural(files.length, 'file')}`)}</span></div>` : '';
   if (!files.length) return output.trim() ? excerpt(output, 2) : `<p class="tc-empty">No matches</p>`;
-  const re = queryPattern(isGlob || isList ? '' : pattern);
+  const literal = literalPattern(isGlob || isList ? '' : pattern);
   const items: Row[] = files.slice(0, ROWS).map(([path, hits]) => {
     const isDir = path.endsWith('/');
     const clean = path.replace(/\/$/, '');
     const shown = hits.slice(0, MATCHES_PER_FILE);
-    const bodyHtml = shown.length ? `<span class="tc-hits">${shown.map(hit => `<span class="tc-hit">${hit.n !== undefined ? `<span class="tc-gutter">${hit.n}</span>` : ''}<span class="tc-code">${highlight(clip(hit.text, 160), re)}</span></span>`).join('')}${hits.length > shown.length ? `<span class="tc-hit-more">+${hits.length - shown.length} more in file</span>` : ''}</span>` : '';
+    const bodyHtml = shown.length ? `<span class="tc-hits">${shown.map(hit => `<span class="tc-hit">${hit.n !== undefined ? `<span class="tc-gutter">${hit.n}</span>` : ''}<span class="tc-code">${highlight(clip(hit.text, 160), literal)}</span></span>`).join('')}${hits.length > shown.length ? `<span class="tc-hit-more">+${hits.length - shown.length} more in file</span>` : ''}</span>` : '';
     return { mark: fileMark(clean, isDir), title: basename(clean), meta: dirname(clean), time: hits.length > 1 ? String(hits.length) : '', bodyHtml };
   });
   return top + rows(items, files.length, files.length - ROWS === 1 ? 'more file' : 'more files');

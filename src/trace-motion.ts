@@ -19,14 +19,41 @@ const EASE_OUT = 'cubic-bezier(.22,1,.36,1)';
 const EASE_IN_OUT = 'cubic-bezier(.4,0,.2,1)';
 const BLUR_IN: Keyframe[] = [{ opacity: 0, filter: 'blur(4px)' }, { opacity: 1, filter: 'blur(0)' }];
 
-const still = (): boolean => document.hidden || matchMedia('(prefers-reduced-motion: reduce)').matches;
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const still = (): boolean => document.hidden || reducedMotion.matches;
+// CSS media queries do not stop Web Animations already in flight. Keep their
+// cleanup callbacks so a preference change also settles heights and disclosures.
+const activeAnimations = new Map<Animation, () => void>();
+function animate(element: Element, frames: Keyframe[], options: KeyframeAnimationOptions, done = () => {}): void {
+  if (still()) { done(); return; }
+  const animation = element.animate(frames, options);
+  const finish = () => {
+    if (!activeAnimations.delete(animation)) return;
+    animation.onfinish = null;
+    animation.oncancel = null;
+    done();
+  };
+  activeAnimations.set(animation, finish);
+  animation.onfinish = finish;
+  animation.oncancel = finish;
+}
+function settleMotion(): void {
+  if (!still()) return;
+  for (const [animation, finish] of [...activeAnimations]) {
+    animation.cancel();
+    // cancel events are queued; apply the final UI state in this same frame.
+    finish();
+  }
+}
+reducedMotion.addEventListener('change', settleMotion);
+document.addEventListener('visibilitychange', settleMotion);
 const seen = new Map<string, Set<string>>();
 // Tools the reader opened or closed by hand keep that state for the rest of the turn.
 const pinned = new Map<string, Set<string>>();
 
 document.addEventListener('click', event => {
-  const summary = (event.target as Element | null)?.closest?.('.live-activity details.tool-trace > summary');
-  const tool = summary?.parentElement as HTMLElement | undefined;
+  const summary = (event.target as Element | null)?.closest?.('.live-activity details.tool-trace > summary, .live-activity .tool-trace-raw > summary');
+  const tool = summary?.closest<HTMLElement>('details.tool-trace');
   const turnKey = tool?.closest<HTMLElement>('[data-turn-key]')?.dataset.turnKey;
   if (!tool?.dataset.toolKey || !turnKey) return;
   pinned.set(turnKey, (pinned.get(turnKey) ?? new Set()).add(tool.dataset.toolKey));
@@ -35,7 +62,7 @@ document.addEventListener('click', event => {
 
 /** A new step row (or, after `delay`, the header's new sentence) arrives out of a soft blur. */
 export function enterText(element: Element, delay = 0): void {
-  if (!still()) element.animate(BLUR_IN, { duration: ENTER_MS, delay, easing: EASE_OUT, fill: 'backwards' });
+  animate(element, BLUR_IN, { duration: ENTER_MS, delay, easing: EASE_OUT, fill: 'backwards' });
 }
 /** The header's sentence follows its row a beat later, as in the reference. */
 export function enterHeader(element: Element): void { enterText(element, HEADER_DELAY_MS); }
@@ -47,10 +74,7 @@ function body(details: HTMLDetailsElement): HTMLElement | null {
 /** Height from the current height to `to`, with overflow clipped while it runs. */
 function resize(element: HTMLElement, frames: Keyframe[], duration: number, easing: string, done: () => void): void {
   element.style.overflow = 'hidden';
-  const animation = element.animate(frames, { duration, easing });
-  const finish = () => { element.style.overflow = ''; done(); };
-  animation.onfinish = finish;
-  animation.oncancel = finish;
+  animate(element, frames, { duration, easing }, () => { element.style.overflow = ''; done(); });
 }
 
 function expand(details: HTMLDetailsElement): void {
@@ -60,7 +84,7 @@ function expand(details: HTMLDetailsElement): void {
   if (!content || still()) return;
   resize(content, [{ height: '0px', opacity: 0 }, { height: `${content.offsetHeight}px`, opacity: 1 }], EXPAND_MS, EASE_OUT, () => {});
   content.querySelectorAll('.trace-row, .tool-trace-more, .tc-row').forEach((row, index) => {
-    row.animate([{ opacity: 0, transform: 'translateY(-3px)' }, { opacity: 1, transform: 'none' }], { duration: EXPAND_MS, delay: index * ROW_STAGGER_MS, easing: EASE_OUT, fill: 'backwards' });
+    animate(row, [{ opacity: 0, transform: 'translateY(-3px)' }, { opacity: 1, transform: 'none' }], { duration: EXPAND_MS, delay: index * ROW_STAGGER_MS, easing: EASE_OUT, fill: 'backwards' });
   });
 }
 
@@ -92,10 +116,10 @@ export function choreograph(host: HTMLElement, turnKey: string, options: { answe
     known.add(key);
   }
   if (options.expandAll) return;
-  const withCard = tools.filter(tool => tool.dataset.toolStatus !== 'running' && tool.querySelector(':scope > .tool-activity-body > :not(.tool-activity-note, .tool-trace-raw)'));
+  const withCard = tools.filter(tool => tool.dataset.toolStatus !== 'running' && tool.querySelector(':scope > .tool-activity-body > .tool-trace-frame > .tool-trace-card'));
   const keep = new Set(options.answering ? [] : withCard.slice(-OPEN_CARDS));
   for (const tool of tools) {
-    // `data-auto` marks cards opened for the reader; their raw record stays out of the way (tool-trace.css).
+    // Only result cards open automatically; raw records keep their own manual disclosure.
     if (pinned.get(turnKey)?.has(tool.dataset.toolKey!)) { delete tool.dataset.auto; continue; }
     tool.dataset.auto = '';
     const want = keep.has(tool);

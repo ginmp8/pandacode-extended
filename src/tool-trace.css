@@ -123,8 +123,6 @@ html[data-theme="dark"] .tool-activity .tool-trace-card pre{background:var(--bg)
 .live-activity:not([data-folded]) .live-tools>.tool-group:last-of-type .tool-trace:last-child>summary .tool-trace-object{color:var(--text)}
 /* No chevron until there is a result to open, like the reference. */
 .is-steps .tool-trace[data-tool-status="running"]:not([open])>summary>.tool-trace-chevron{visibility:hidden}
-/* Cards opened by the choreography read like the reference; a card the reader opens keeps its raw record. */
-.live-activity .tool-trace[data-auto]>.tool-activity-body:has(>:not(.tool-activity-note,.tool-trace-raw))>.tool-trace-raw{display:none}
 /* The folded summary's marks, measured at 10.0 s: bare 16px icons, 4px apart, 10px after the text. */
 .is-steps .turn-activity-label .tool-trace-stack{gap:4px;margin-left:0}
 .is-steps .turn-activity-label .tool-trace-stack :is(.icon,.brand-icon){width:16px;height:16px;padding:0;border:0;border-radius:0;background:none}

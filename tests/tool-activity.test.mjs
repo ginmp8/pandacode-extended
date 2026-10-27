@@ -65,11 +65,25 @@ test('status events have no empty disclosure and empty tool output is explained'
   assert.doesNotMatch(renderToolActivity({ ...activity, output: '', status: 'running' }, 'live'), /Waiting for output/);
 });
 
-test('a failed call says so once (red icon + card badge), and a card-less record shows its raw sections open', () => {
+test('a failed call says so once (red icon + card badge)', () => {
   const failed = renderToolActivity({ ...activity, status: 'failed', output: 'boom' }, 'f');
   assert.doesNotMatch(failed, /tool-activity-status/);
   assert.match(failed, /tc-badge is-failed/);
-  assert.match(renderToolActivity({ ...activity, name: 'odd_tool', input: 'x', output: '' }, 'o'), /<details class="tool-trace-raw" open>/);
+});
+
+test('raw input and output require manual disclosure with or without a result card', () => {
+  for (const call of [
+    activity,
+    { ...activity, name: 'odd_tool', input: 'x', output: '' },
+    { ...activity, name: 'Skill', input: '{"skill":"simplify","args":"private argument"}', output: 'Launching skill: simplify' },
+    { ...activity, status: 'failed', output: 'failure details' },
+  ]) {
+    const html = renderToolActivity(call, 'record');
+    assert.match(html, /<details class="tool-trace-raw"><summary aria-label="Raw input and output"/);
+    assert.doesNotMatch(html, /<details class="tool-trace-raw"[^>]*\bopen\b/);
+    assert.match(html, /data-tool-section="input"/);
+    if (call.output) assert.match(html, /data-tool-section="output"/);
+  }
 });
 
 test('groups at most five consecutive calls without crossing narratives or statuses', () => {

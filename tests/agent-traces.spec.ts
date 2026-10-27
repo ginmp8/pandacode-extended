@@ -15,6 +15,10 @@ async function open(page: Page, title: string) {
   await page.goto('/?trace');
   await page.locator('.task-item', { hasText: title }).click();
   await expect(page.locator('.task-item.selected .task-title')).toHaveText(title);
+  await expect(page.locator('#prompt')).toBeEnabled();
+  // install() keeps time flowing. Pause after startup so slow pointer actions
+  // cannot advance the next replay event between a phase check and its click.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
 }
 
 async function send(page: Page, text: string) {
@@ -22,14 +26,13 @@ async function send(page: Page, text: string) {
   await page.locator('#prompt').press('Enter');
 }
 
-/** The preview bridge adds its own latency, so phases follow the replay's events rather than absolute times:
- * advance the fake clock in 50 ms steps until `ready` holds. */
-async function advanceUntil(page: Page, ready: () => Promise<boolean>) {
-  for (let step = 0; step < 400; step++) {
+/** Follow replay events, including bridge latency, with time paused between assertions/interactions.
+ * runFor executes every timer in order and yields to the browser event loop; a real-time sleep adds
+ * uncontrolled runner delay. Tool phases last at least 300 ms; timing measurements use 50 ms steps. */
+async function advanceUntil(page: Page, ready: () => Promise<boolean>, stepMs = 100) {
+  for (let elapsed = 0; elapsed < 20_000; elapsed += stepMs) {
     if (await ready()) return;
-    await page.clock.runFor(50);
-    // Rendering frames (and the Web Animations they drive) need real time; the fake clock does not supply it.
-    await page.waitForTimeout(16);
+    await page.clock.runFor(stepMs);
   }
   throw new Error('The replay never reached the expected state');
 }
@@ -78,15 +81,15 @@ test('Morning brief replays the reference: header mirrors the step, two newest c
 
   // Measured at 30 fps: GitHub and Linear stay open while the answer's first block streams, fold ~1.05 s
   // after it starts, and the turn folds to its summary ~2.45 s after it starts.
-  await advanceUntil(page, async () => ((await page.locator('#stream-region .live-text').textContent()) ?? '').includes('Meetings'));
+  await advanceUntil(page, async () => ((await page.locator('#stream-region .live-text').textContent()) ?? '').includes('Meetings'), 50);
   const answerAt = await page.evaluate(() => Date.now());
   await expect(page.locator(STEP)).toHaveCount(5);
   expect(await openSteps(page)).toEqual([3, 4]);
-  await advanceUntil(page, async () => (await keptSteps(page)).length === 0);
+  await advanceUntil(page, async () => (await keptSteps(page)).length === 0, 50);
   const cardsAt = await page.evaluate(() => Date.now());
   expect(cardsAt - answerAt).toBeGreaterThanOrEqual(900);
   expect(cardsAt - answerAt).toBeLessThanOrEqual(1300);
-  await advanceUntil(page, async () => ((await page.locator('.turn-activity-label').first().textContent()) ?? '').includes('Ran 2 searches'));
+  await advanceUntil(page, async () => ((await page.locator('.turn-activity-label').first().textContent()) ?? '').includes('Ran 2 searches'), 50);
   const turnAt = await page.evaluate(() => Date.now());
   expect(turnAt - answerAt).toBeGreaterThanOrEqual(2250);
   expect(turnAt - answerAt).toBeLessThanOrEqual(2750);
@@ -126,6 +129,13 @@ test('Morning brief leaves cards the reader toggled by hand alone, and stays ope
   await page.locator(STEP).nth(1).locator(':scope > summary').click();
   await expect.poll(() => openSteps(page)).toEqual([1]);
   await advanceUntil(page, async () => ((await page.locator('#stream-region .live-text').textContent()) ?? '').includes('Meetings'));
+  // Automatic cards fold after the answer's opening delay. A paused clock needs
+  // explicit advancement; Granola must remain open throughout that transition.
+  await advanceUntil(page, async () => {
+    const open = await openSteps(page);
+    expect(open).toContain(1);
+    return open.length === 1;
+  });
   await expect.poll(() => openSteps(page)).toEqual([1]);
   // The run ends without folding the turn the reader is in; the card stays open in saved history.
   await advanceUntil(page, async () => !await page.locator('#stream-region .live-activity').count() && !await page.locator('.task-item.selected.running').count());

@@ -37,7 +37,9 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
     case 'remote_set_host_enabled': hostEnabled = Boolean(args.enabled); devices = sampleDevices(); emit('remote://presence', devices); return status();
     case 'remote_set_full_access': allowFullAccess = Boolean(args.enabled); w.__previewAllowFullAccess = allowFullAccess; if (!allowFullAccess) downgradePreviewFullGrants(); emit('remote://status', status()); return status();
     case 'remote_set_direct_routes': directRoutes = Boolean(args.enabled); emit('remote://status', status()); return status();
-    case 'remote_devices': return devices = signedIn ? sampleDevices() : [];
+    case 'remote_devices':
+      if (w.__remoteDevicesFailures > 0) { w.__remoteDevicesFailures--; throw new Error('The device list is unavailable.'); }
+      return devices = signedIn ? sampleDevices() : [];
     case 'remote_set_trusted': {
       const device = sampleDevices().find(d => d.id === args.deviceId && !d.current);
       if (args.trusted) {

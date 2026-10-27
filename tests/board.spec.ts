@@ -257,7 +257,8 @@ test.describe('project board', () => {
       localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
     });
     await page.reload();
-    await expect.poll(async () => page.evaluate(() => document.querySelector('.task-item.selected') !== null)).toBe(true);
+    await expect(page.locator('.new-task-button')).toBeEnabled({ timeout: 15_000 });
+    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant', { timeout: 15_000 });
     expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(0);
     await page.evaluate(() => { (window as any).__previewGithubDisconnected = false; window.dispatchEvent(new Event('focus')); });
     await expect.poll(async () => (await calls(page, 'github_retry_linked_issue_actions')).length).toBe(1);

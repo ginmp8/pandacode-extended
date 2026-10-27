@@ -1,5 +1,5 @@
 //! Panda Router: picks the model for a task, in process. A native port of PandaOrchestrator v4.3
-//! (github.com/aicodeking/PandaOrchestrator @ 83e408c): an int8 ONNX task profiler (or a keyword heuristic
+//! (github.com/ginmp8/PandaOrchestrator @ 83e408c): an int8 ONNX task profiler (or a keyword heuristic
 //! when the model files are not installed), the learned success head, and the v4 policy with its
 //! escalation ladder. Nothing here touches the network; `model_routing` downloads the profiler and owns
 //! the process-wide router.
@@ -34,7 +34,7 @@ pub const ASSETS: &[(&str, &str)] = &[
     ("model.int8.onnx", "b52d463905808efd892c91917e3010985359e259fe7a514ae083967c98fa2216"),
     ("tokenizer.json", "ca870c678352403d107496dc78899fa666ed0f56fef63e88ae398fafe5d78c45"),
 ];
-pub const ASSET_BASE_URL: &str = "https://raw.githubusercontent.com/aicodeking/PandaOrchestrator/83e408c794ef1d09b6d13b6ad8734e984f552402/artifacts/panda-router-v4/";
+pub const ASSET_BASE_URL: &str = "https://raw.githubusercontent.com/ginmp8/PandaOrchestrator/83e408c794ef1d09b6d13b6ad8734e984f552402/artifacts/panda-router-v4/";
 /// Directory (under app data) for the files in `ASSETS`; versioned so v2 files are never reused.
 pub const ASSET_DIR: &str = "panda-router/v4";
 

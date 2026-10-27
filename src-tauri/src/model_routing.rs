@@ -1,8 +1,7 @@
 //! Model routing (Settings → Agents → Model routing, and `profileId: "auto"` in teams): settings,
-//! the profiler download and one process-wide Panda Router. The only network request is the
-//! profiler download from `panda_router::ASSET_BASE_URL`, sha256-verified, started on an explicit
-//! Settings click or when a route runs with routing enabled. Team routes never wait for it: they use
-//! the keyword heuristic until the profiler is ready.
+//! optional profiler acquisition and one process-wide Panda Router. Profiler network access is
+//! sha256-verified and only starts from an explicit Settings action. Task/team routing never starts
+//! network access and uses the keyword heuristic until verified local profiler assets are present.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -342,9 +341,12 @@ async fn router(rt: &'static Runtime, wait: bool) -> Arc<Router> {
     }
     let dir = rt.assets();
     if !assets_present(&dir) {
-        let download = background_download(rt);
-        if let (true, Some(download)) = (wait, download) {
-            let _ = tokio::time::timeout(DOWNLOAD_WAIT, download).await;
+        // Security boundary: normal routing is local-only. Only explicit Settings flows pass wait=true
+        // and may acquire the pinned, checksum-verified profiler assets.
+        if wait {
+            if let Some(download) = background_download(rt) {
+                let _ = tokio::time::timeout(DOWNLOAD_WAIT, download).await;
+            }
         }
         if !assets_present(&dir) {
             return HEURISTIC.clone();

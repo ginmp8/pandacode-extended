@@ -37,7 +37,7 @@ Out of scope: vendor cloud VMs, one-time card numbers and payment rails, health 
 - **Conversations are ordinary PandaCode tasks** in the bot's workspace project, so streaming, approvals, the queue, steering, usage limits and history all work unchanged. `bot_threads` maps `(bot, channel, external thread)` to a task.
 - **The bot brief** (identity, role, instructions, goals, memories, channel etiquette) is sent as a folded context block at the start of each conversation, and again when memories change.
 - **Replies** are captured when a bot task's run finishes and sent back to the thread it came from. Long replies are split per channel limits.
-- **Bot tools** (MCP host, scoped to the bot): `bot_remember`, `bot_forget`, `bot_recall`, `bot_schedule`, `bot_list_schedules`, `bot_cancel_schedule`, `bot_notify`. They are registered only in a bot's own tasks and act only on that bot, so they never ask for approval (`bots::tools::self_scoped`, honored by the Claude permission bridge; Codex hosts leave them out of `approval_tools`).
+- **Bot tools** (MCP host, scoped to the bot): `bot_remember`, `bot_forget`, `bot_recall`, `bot_schedule`, `bot_list_schedules`, `bot_cancel_schedule`, `bot_notify`. They are registered only in a bot's own tasks and act only on that bot, with explicit approval boundaries: `bot_schedule` and `bot_notify` always request fresh approval, including Full access, and cannot inherit a broad allow rule. The remaining self-scoped memory and schedule-management tools retain their existing policy.
 - **The sidebar's Bots section** lists every bot with its status. A row opens the bot's conversation (created on first use by `bot_desktop_thread`) in the main workspace exactly like a task: the same transcript, streaming, approvals, queue and composer, including the model picker, so you can switch harness or model for that conversation. The header names the bot with its state, a pause button and Settings. Prompts typed there go through the gateway like any channel, so the brief, memories and `/stop` apply. Plus adds a bot, which then opens in its conversation. Bot workspaces are kept out of the project tree and project pickers.
 - **Settings** open as a modal from the header, the sidebar's gear, or the setup buttons on an empty conversation: Profile (name, instructions, goals, default harness and model, permissions, check-ins), Conversations (this app, channel threads and scheduled work, each opening as a task), Memory, Schedules, Channels, Rules and Activity, with pause, reset and delete. The Bots window shows the same settings beside a list of every bot.
 
@@ -47,8 +47,8 @@ A bot can run commands on the user's computer and can be messaged from outside i
 
 1. **Pairing.** A channel only accepts messages from paired senders. An unknown sender gets a one-time code; the user approves it in the app. Web UI access needs a per-bot token.
 2. **Permission mode.** Bots default to approvals for edits and commands. Full access is an explicit per-bot choice.
-3. **Guard.** Approval requests are decided by the bot's rules (deny wins, then the always-ask list, then allow); anything else is asked. The Guard sees what the harness asks about. Full access preserves broad local execution, but the outbound notify and cloud CLI tools always require a fresh approval in this revision; broad allow rules cannot bypass that boundary.
-4. **Approvals in context.** Only a generic pending-action notice goes to the channel, without action arguments or content. Review the full action on the desktop; `yes` or `no` answers it. `always` cannot grant permanent permission to the outbound notify or cloud CLI tools.
+3. **Guard.** Approval requests are decided by the bot's rules (deny wins, then the always-ask list, then allow); anything else is asked. The Guard sees what the harness asks about. Full access preserves broad local execution, but schedule creation, outbound notify and cloud CLI tools always require a fresh approval in this revision; broad allow rules cannot bypass that boundary.
+4. **Approvals in context.** Only a generic pending-action notice goes to the channel, without action arguments or content. Review the full action on the desktop; `yes` or `no` answers it. `always` cannot grant permanent permission to schedule creation, outbound notify or cloud CLI tools.
 5. **Kill switch.** `/stop` in a paired channel or Pause in the app stops the bot's running work and its schedules.
 6. **Audit.** Every decision is logged in `bot_activity`.
 
@@ -78,6 +78,14 @@ Unknown senders get a four-digit pairing code and wait until approved in **Bots 
 | UI | `src/bots.ts`, `src/bots-panels.ts`, `src/bots.css`, preview mock `src/preview-bots.ts`, tests `tests/bots.spec.ts` |
 
 Bot tasks deliver their queued messages natively when a run ends, so the window skips `dispatchQueue` for bot projects. Bots run while PandaCode is running. Quitting stops their work; a schedule that came due while the app was closed runs once at the next start, and its missed repeats are skipped.
+
+## Scheduled work authorization and recovery
+
+Schema 32 stores each schedule's original permission ceiling in `bot_schedule_authorizations`, independently of the bounded activity log. Bot-created schedules and heartbeats run in Plan. User-created schedules cannot acquire permissions from later bot configuration changes; legacy user schedules without sufficient provenance and missing policies after migration fail closed to Plan.
+
+Admission rechecks the current bot, schedule and ceiling under the native runner locks. The session claim, initiating message, accepted-occurrence receipt, schedule advancement and delivered brief are one SQLite transaction. A busy task or failed write leaves the occurrence due for retry. A once schedule becomes inactive only after acceptance. Explicit Run Now requests are separate from timer occurrences: they do not consume the next scheduled run or reactivate a completed once schedule.
+
+After a restart, an accepted but unfinished turn is shown as interrupted and is not submitted again automatically. This provides atomic acceptance and prevents automatic duplicate submission; it does not guarantee exactly-once effects in an external provider after a crash.
 
 ## Testing
 

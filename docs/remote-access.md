@@ -157,7 +157,7 @@ sockets cost no duration. Device rows live in the Durable Object's SQLite storag
 | Frame size | 256 KiB | Message pages and event frames are capped at 180 KiB of JSON. |
 | Frame rate per socket | 20/s sustained, burst 100 | Token bucket. Over the limit → `error` and drop. |
 | Auth calls | 10/min per IP | Workers rate-limit binding |
-| Idle socket | kept (hibernated). The client pings every 30 s. | |
+| Idle socket | kept (hibernated). The desktop client pings every 25 s. | |
 
 ## End-to-end encryption
 
@@ -224,7 +224,7 @@ more power than local ones.
 
 | Method | Params | Result |
 |---|---|---|
-| `subscribe` | `{ sessionIds: [...] }` (≤ 500) | `{ tasks: [{ sessionId, status, lastId, title }] }` for those that exist. Adds the ids to this device's subscription for 10 minutes; the viewer renews every 9 minutes and on every presence frame. An expired subscription starts over. |
+| `subscribe` | `{ sessionIds: [...], epoch?, afterSeq?: { [sessionId]: number } }` (≤ 500 session ids) | `{ epoch, more, tasks: [{ sessionId, status, lastId, title, seq, events, more?, gap? }] }` for those that exist. The viewer drains bounded replay pages using the returned cursor, holds live frames until replay settles, and resynchronizes gaps. Adds the ids to this device's subscription for 10 minutes; the viewer renews every 9 minutes and on every presence frame. An expired subscription starts over. |
 | `tasks.list` | `{ limit?: number }` (default 200, maximum 500; 0 lists projects only) | Task/project summaries, pending approval and input payloads, live timing and active team state, bounded to one reply. |
 | `projects.icons` | `{ projectIds: [...] }` (1–50) | `{ icons: { [projectId]: dataUrl or null } }`; icons larger than 64 KiB are omitted. |
 | `providers.list` | `{ force?: boolean }` | the host's `list_providers` result: `[{ id, name, installed, path, version, models }]`. `force` drops the same ACP catalog caches. If it would not fit one reply, the longest `models` lists are halved until it does. |

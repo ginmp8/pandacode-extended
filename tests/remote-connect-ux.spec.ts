@@ -311,15 +311,20 @@ test('a start whose reply timed out can still be stopped', async ({ page }) => {
 
 test('pending-approval and permission refusals show inline and keep the text', async ({ page }) => {
   test.slow(); // waits for the mirror's first run to end before sending
+  await page.addInitScript(() => { (window as any).__holdPreviewCompletion = true; });
   await startMirror(page);
   const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
   const note = page.locator('#composer-area .composer-inline-note');
+  // Keep this run active through the refusal check, even when a CI click is slow.
+  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
   await expect(page.getByRole('button', { name: 'Steer the running turn' })).toBeVisible();
   await page.evaluate(() => { (window as any).__remoteRefuse = 'This device can only view tasks on Studio iMac.'; });
   await prompt.fill('Steer without permission');
   await page.getByRole('button', { name: 'Steer the running turn' }).click();
   await expect(note).toContainText('can only view tasks on Studio iMac.');
+  await expect(prompt).toHaveValue('Steer without permission');
   await expect(page.locator('#toast')).not.toContainText('can only view');
+  await page.evaluate(() => (window as any).__releasePreviewCompletion());
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 15_000 });
   await page.evaluate(() => { (window as any).__remoteRefuse = 'Waiting for approval on Studio iMac.'; });
   await prompt.fill('Needs approval');

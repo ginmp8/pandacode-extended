@@ -115,7 +115,10 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
         if crate::remote::is_remote_request() {
             return Err("This remote bot is running. Wait for it to finish before sending another message.".into());
         }
-        message_queue::add(&*state.store.lock().map_err(|e| e.to_string())?, session_id, &text, &json!([]))?;
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        crate::remote::check_current_request("ask")?;
+        super::check_task_admission(&store, &store.session(session_id)?)?;
+        message_queue::add(&store, session_id, &text, &json!([]))?;
         return Ok(());
     }
     crate::launch_task_in_project(app.clone(), state, session_id.to_owned(), Some(text), None, Some(bot.project_id.clone())).await
@@ -139,6 +142,7 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
     let state = app.state::<AppState>();
     let (bot, session_id, created, kind) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
+        crate::remote::check_current_request("ask")?;
         let bot = super::get(&store, &inbound.bot_id)?;
         validate_channel(&store, &bot.id, &inbound.channel_id)?;
         if !inbound.trusted && !channels::is_approved(&store, &inbound.channel_id, &inbound.sender_id)? {
@@ -151,17 +155,20 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
     let waiting = pending().lock().map_err(|e| e.to_string())?.get(&session_id).is_some_and(|list| !list.is_empty());
     match parse_command(&text, waiting) {
         Command::Stop => {
-            stop_bot(app, &bot.id).await;
+            stop_bot(app, &bot.id).await?;
+            crate::remote::check_current_request("ask")?;
             reply(app, &bot, &inbound.channel_id, &inbound.thread, "Stopped. I'll wait for your next message.").await;
             return Ok(session_id);
         }
         Command::Help => {
+            crate::remote::check_current_request("ask")?;
             reply(app, &bot, &inbound.channel_id, &inbound.thread, HELP).await;
             return Ok(session_id);
         }
         Command::NewThread => {
             {
                 let store = state.store.lock().map_err(|e| e.to_string())?;
+                crate::remote::check_current_request("ask")?;
                 store.db.execute("DELETE FROM bot_threads WHERE session_id=?1", [&session_id]).map_err(|e| e.to_string())?;
             }
             reply(app, &bot, &inbound.channel_id, &inbound.thread, "Starting a fresh conversation. What's next?").await;
@@ -172,6 +179,7 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
             return Ok(session_id);
         }
         Command::ApprovalIdRequired => {
+            crate::remote::check_current_request("ask")?;
             reply(app, &bot, &inbound.channel_id, &inbound.thread,
                 "Approval requires the exact request ID from its notice (example: yes <request-id>). A bare yes/no never approves a different action.").await;
             return Ok(session_id);
@@ -179,18 +187,42 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
         Command::Message => {}
     }
     if bot.paused {
+        crate::remote::check_current_request("ask")?;
         reply(app, &bot, &inbound.channel_id, &inbound.thread, &format!("{} is paused. Resume it in PandaCode to continue.", bot.name)).await;
         return Err("This bot is paused.".into());
     }
-    let turn = {
+    let (bot, turn) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
+        crate::remote::check_current_request("ask")?;
+        let bot = super::get(&store, &bot.id)?;
+        if bot.paused {
+            return Err("This bot is paused.".into());
+        }
         validate_channel(&store, &bot.id, &inbound.channel_id)?;
         // Proactive messages go to the thread the user last wrote from.
         if inbound.channel_id != super::DESKTOP {
             super::set_notify_target(&store, &bot.id, Some(&inbound.channel_id), Some(&inbound.thread))?;
         }
-        super::log(&store, &bot.id, "inbound", &format!("{} ({kind}): {}", inbound.sender_name, text.chars().take(160).collect::<String>()), json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}))?;
-        compose(&store, &bot, &session_id, &kind, &inbound.sender_name, &text)?
+        super::log(
+            &store,
+            &bot.id,
+            "inbound",
+            &format!(
+                "{} ({kind}): {}",
+                inbound.sender_name,
+                text.chars().take(160).collect::<String>()
+            ),
+            json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}),
+        )?;
+        let turn = compose(
+            &store,
+            &bot,
+            &session_id,
+            &kind,
+            &inbound.sender_name,
+            &text,
+        )?;
+        (bot, turn)
     };
     start_or_queue(app, &bot, &session_id, turn).await?;
     let _ = app.emit("bots-changed", ());
@@ -199,30 +231,39 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
 }
 
 /// A schedule or check-in: one ongoing scheduled conversation per bot.
-pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &str, prompt: &str, schedule_id: Option<&str>) -> Result<()> {
+pub(crate) async fn run_scheduled(
+    app: &tauri::AppHandle,
+    admission: super::schedule::Admission,
+) -> Result<()> {
     let state = app.state::<AppState>();
     let (bot, session_id, turn) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let bot = super::get(&store, bot_id)?;
-        if bot.paused {
-            return Err("This bot is paused.".into());
-        }
-        let mode = if let Some(schedule_id) = schedule_id {
-            let schedule = super::schedule::get(&store, schedule_id)?;
-            if schedule.bot_id != bot.id { return Err("That schedule does not belong to this bot.".into()); }
-            super::schedule::execution_mode(&store, &schedule, &bot.mode)?
-        } else { "plan" };
-        let (session, _) = super::thread_session(&store, &bot, "schedule", "schedule", &format!("{} · Scheduled work", bot.name))?;
-        // A busy scheduled thread must not queue work under a different mode.
-        if matches!(store.session(&session)?.status.as_str(), "running" | "waiting") {
-            return Err("This bot's scheduled conversation is busy. Try again after it finishes.".into());
-        }
-        store.update(&session, None, None, None, Some(mode.to_owned()))?;
-        super::log(&store, &bot.id, "scheduled", label, json!({"sessionId": session, "mode": mode}))?;
-        let turn = compose(&store, &bot, &session, "schedule", "", &format!("{label}\n\n{prompt}"))?;
+        let work = super::schedule::resolve(&store, &admission, crate::storage::now())?;
+        let bot = work.bot;
+        let (session, _) = super::thread_session(
+            &store,
+            &bot,
+            "schedule",
+            "schedule",
+            &format!("{} · Scheduled work", bot.name),
+        )?;
+        // Compose the current brief only after native admission obtains its
+        // locks; a busy attempt must not mark undelivered context as delivered.
+        let turn = format!("{}\n\n{}", work.label, work.prompt);
         (bot, session, turn)
     };
-    start_or_queue(app, &bot, &session_id, turn).await?;
+    // Never queue only a scheduled prompt: its occurrence and permission ceiling
+    // must reach the same native admission that claims the task. Busy/failure
+    // leaves the occurrence due for the next scheduler tick.
+    crate::launch_scheduled_task(
+        app.clone(),
+        state,
+        session_id,
+        turn,
+        bot.project_id,
+        admission,
+    )
+    .await?;
     let _ = app.emit("bots-changed", ());
     Ok(())
 }
@@ -307,9 +348,29 @@ fn queued_prompt(attachments: &Value) -> (String, Vec<String>) {
 }
 
 /// Answers an approval natively and clears its card in the desktop app.
-async fn answer(app: &tauri::AppHandle, session_id: &str, request_id: &str, approved: bool) -> Result<()> {
-    crate::respond_approval(app.clone(), app.state::<AppState>(), session_id.to_owned(), request_id.to_owned(), approved).await?;
-    let event = crate::providers::AgentEvent { session_id: session_id.into(), kind: "approval_cancelled".into(), text: String::new(), request_id: Some(request_id.into()), data: None, tool: None };
+async fn answer(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    request_id: &str,
+    approved: bool,
+) -> Result<()> {
+    crate::respond_approval(
+        app.clone(),
+        app.state::<AppState>(),
+        session_id.to_owned(),
+        request_id.to_owned(),
+        approved,
+    )
+    .await?;
+    crate::remote::check_current_request("ask")?;
+    let event = crate::providers::AgentEvent {
+        session_id: session_id.into(),
+        kind: "approval_cancelled".into(),
+        text: String::new(),
+        request_id: Some(request_id.into()),
+        data: None,
+        tool: None,
+    };
     let _ = app.emit("agent-event", event);
     Ok(())
 }
@@ -370,6 +431,7 @@ pub(crate) async fn approval_requested(app: &tauri::AppHandle, session_id: &str,
 async fn answer_approval(app: &tauri::AppHandle, bot: &Bot, session_id: &str, token: &str, approved: bool, always: bool) -> Result<()> {
     let request = {
         let mut map = pending().lock().map_err(|e| e.to_string())?;
+        crate::remote::check_current_request("ask")?;
         let list = map.get_mut(session_id).ok_or("No matching approval is pending.")?;
         let request = take_matching(list, token).ok_or("No matching approval is pending.")?;
         if list.is_empty() { map.remove(session_id); }
@@ -382,10 +444,20 @@ async fn answer_approval(app: &tauri::AppHandle, bot: &Bot, session_id: &str, to
     // If desktop already answered this request, do NOT reuse the decision for
     // another pending request. The opaque ID is consumed exactly once.
     answer(app, session_id, &request.request_id, approved).await?;
+    crate::remote::check_current_request("ask")?;
     let always = always && !guard::dangerous(&request.action);
     if always && approved {
         let state = app.state::<AppState>();
-        let added = state.store.lock().map_err(|e| e.to_string()).and_then(|store| guard::add_rule(&store, &bot.id, &guard::pattern_for(&request.action), "allow"));
+        let added = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            crate::remote::check_current_request("ask")?;
+            guard::add_rule(
+                &store,
+                &bot.id,
+                &guard::pattern_for(&request.action),
+                "allow",
+            )
+        };
         if let Err(error) = added {
             super::note(app, &bot.id, "error", &format!("Could not save the rule: {error}"), json!({}));
         }
@@ -425,22 +497,39 @@ pub(crate) async fn notify(app: &tauri::AppHandle, bot: &Bot, text: &str) -> Res
 }
 
 /// Stops every running conversation of a bot.
-pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
+pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) -> Result<()> {
+    crate::remote::check_current_request("ask")?;
     let sessions: Vec<String> = {
         let state = app.state::<AppState>();
-        let Ok(store) = state.store.lock() else { return };
-        super::threads(&store, bot_id).map(|threads| threads.into_iter().map(|thread| thread.session_id).collect()).unwrap_or_default()
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        super::threads(&store, bot_id)?
+            .into_iter()
+            .map(|thread| thread.session_id)
+            .collect()
     };
+    crate::terminal::close_harness_sessions(&app.state::<AppState>().terminals, &sessions)?;
     for session in sessions {
-        let running = app.state::<AppState>().agents.lock().map(|agents| agents.contains_key(&session)).unwrap_or(false);
+        crate::remote::check_current_request("ask")?;
+        let running = app
+            .state::<AppState>()
+            .agents
+            .lock()
+            .map_err(|error| error.to_string())?
+            .contains_key(&session);
         if running {
-            let _ = crate::stop_session(app.clone(), app.state::<AppState>(), session.clone()).await;
+            crate::stop_session(app.clone(), app.state::<AppState>(), session.clone()).await?;
         }
-        if let Ok(mut map) = pending().lock() {
-            map.remove(&session);
-        }
+        // A stop may await remote/native work. A revoked or downgraded caller
+        // cannot continue clearing approvals or stopping another conversation.
+        crate::remote::check_current_request("ask")?;
+        pending()
+            .lock()
+            .map_err(|error| error.to_string())?
+            .remove(&session);
     }
+    crate::remote::check_current_request("ask")?;
     super::note(app, bot_id, "stopped", "Stopped running work", json!({}));
+    Ok(())
 }
 
 #[cfg(test)]

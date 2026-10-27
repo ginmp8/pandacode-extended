@@ -78,6 +78,10 @@ pub(crate) struct Subscriber {
 #[derive(Default)]
 pub(crate) struct Inner {
     settings: config::Settings,
+    /// A failed permission transaction also denies the running process when the
+    /// filesystem could not record the durable fence. Only a complete local
+    /// sign-out may recover an earlier failed transaction.
+    access_locked_down: bool,
     token: Option<String>,
     /// Signed in, but the keychain refused the token read at startup; retried in the background.
     unreadable: bool,
@@ -114,6 +118,25 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    fn access_available(&self, dir: &std::path::Path) -> Result<()> {
+        if self.access_locked_down || config::locked_down(dir) {
+            return Err(config::ACCESS_LOCKED.into());
+        }
+        Ok(())
+    }
+
+    fn deny_access(&mut self) {
+        self.access_locked_down = true;
+        self.settings.host_enabled = false;
+        self.settings.allow_full_access = false;
+        self.settings.trusted.clear();
+        self.subscribers.clear();
+        self.uploads = Default::default();
+        self.catalog = Default::default();
+        self.keys.clear();
+        self.fail_pending(None, config::ACCESS_LOCKED);
+    }
+
     fn fail_pending(&mut self, device: Option<&str>, error: &str) {
         let ids: Vec<String> = self.pending.iter().filter(|(_, (d, _))| device.is_none_or(|device| d == device)).map(|(id, _)| id.clone()).collect();
         for id in ids {
@@ -137,6 +160,7 @@ impl Inner {
 
     /// Calls and task content go only to a device trusted here with its current key.
     fn callable(&self, device_id: &str) -> Result<()> {
+        if self.access_locked_down { return Err(config::ACCESS_LOCKED.into()); }
         let device = self.devices.iter().find(|d| d.id == device_id).ok_or(UNKNOWN_DEVICE)?;
         if !self.settings.is_trusted(device_id, &device.public_key) {
             let name = if device.name.is_empty() { "That computer" } else { &device.name };
@@ -148,7 +172,7 @@ impl Inner {
     /// Revalidate the key that authenticated this message, not a cached trust
     /// decision. Queued requests and in-flight replies can outlive revocation.
     fn authenticated(&self, device_id: &str, received_key: &str) -> bool {
-        self.settings.is_trusted(device_id, received_key)
+        !self.access_locked_down && self.settings.is_trusted(device_id, received_key)
             && self.devices.iter().any(|device| device.id == device_id && device.public_key == received_key)
     }
 
@@ -156,6 +180,7 @@ impl Inner {
     /// The one exception is a response to an explicitly initiated pairing-code
     /// redemption, bound to its request ID, device ID and unchanged presence key.
     fn allows_incoming(&self, from: &str, key: &str, kind: &str, id: Option<&str>) -> bool {
+        if self.access_locked_down { return false; }
         if self.authenticated(from, key) { return true; }
         if kind != "res" { return false; }
         id.is_some_and(|id| {
@@ -292,7 +317,7 @@ pub(crate) fn setup(app: &tauri::AppHandle, dir: &std::path::Path) {
         // No in-memory fallback: requests, responses and events stay refused.
         replay::Replay::default()
     });
-    app.manage(Remote { dir: dir.to_owned(), accounts, inner: Mutex::new(Inner { settings, token, unreadable, replay, ..Default::default() }), key: Mutex::new(key) });
+    app.manage(Remote { dir: dir.to_owned(), accounts, inner: Mutex::new(Inner { settings, access_locked_down: config::locked_down(dir), token, unreadable, replay, ..Default::default() }), key: Mutex::new(key) });
     if signed_in && config::build().is_some() {
         socket::start(app);
     }
@@ -364,16 +389,47 @@ async fn retry_token(app: tauri::AppHandle) {
 /// lock, record a denial fence, save the legacy state, update scoped grants, then
 /// remove the fence. An interrupted step never claims success or reopens on boot.
 fn persist_scoped_revocation(
-    state: &Remote,
+    dir: &std::path::Path,
     inner: &mut Inner,
     next: config::Settings,
+    recover: bool,
     update_scopes: impl FnOnce(&std::path::Path) -> Result<()>,
 ) -> Result<()> {
+    let earlier_lockdown = inner.access_locked_down || config::locked_down(dir);
+    inner.access_locked_down = true;
     inner.settings = next.clone();
-    config::begin_lockdown(&state.dir)?;
-    config::save(&state.dir, &next)?;
-    update_scopes(&state.dir)?;
-    config::end_lockdown(&state.dir)
+    let result = (|| {
+        config::begin_lockdown(dir)?;
+        config::save(dir, &next)?;
+        update_scopes(dir)?;
+        if recover || !earlier_lockdown { config::end_lockdown(dir)?; }
+        Ok(())
+    })();
+    if result.is_err() {
+        inner.deny_access();
+        // In particular, restore a fence if removing it succeeded but syncing
+        // the directory failed. An unwritable filesystem remains an error.
+        let _ = config::begin_lockdown(dir);
+    } else {
+        inner.access_locked_down = earlier_lockdown && !recover;
+    }
+    result
+}
+
+/// Single-file permission changes share the same in-memory denial as scoped
+/// transactions. An unrelated successful revoke cannot clear an earlier fence.
+fn update_access(dir: &std::path::Path, inner: &mut Inner, next: config::Settings, revoke: bool) -> Result<()> {
+    if !revoke { inner.access_available(dir)?; }
+    let earlier_lockdown = inner.access_locked_down || config::locked_down(dir);
+    inner.access_locked_down = true;
+    let result = config::update_access(dir, &mut inner.settings, next, revoke);
+    if result.is_err() {
+        inner.deny_access();
+        let _ = config::begin_lockdown(dir);
+    } else {
+        inner.access_locked_down = earlier_lockdown || config::locked_down(dir);
+    }
+    result
 }
 
 /// Forget authorization in memory immediately, and persist a denial fence before
@@ -388,7 +444,7 @@ fn sign_out_local_checked(app: &tauri::AppHandle, used: Option<&str>) -> Result<
         next.host_enabled = false;
         next.allow_full_access = false;
         next.trusted.clear();
-        persist_scoped_revocation(&state, &mut inner, next, grants::clear_on_sign_out)
+        persist_scoped_revocation(&state.dir, &mut inner, next, true, grants::clear_on_sign_out)
     };
     secret_store::remove(config::SERVICE, &state.accounts.token);
     emit_status(app);
@@ -541,7 +597,7 @@ pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Re
         let mut inner = state.lock();
         let mut next = inner.settings.clone();
         next.host_enabled = enabled;
-        let result = config::update_access(&state.dir, &mut inner.settings, next, !enabled);
+        let result = update_access(&state.dir, &mut inner, next, !enabled);
         if !enabled {
             inner.subscribers.clear();
             inner.uploads = Default::default();
@@ -567,9 +623,9 @@ pub async fn remote_set_full_access(app: tauri::AppHandle, enabled: bool) -> Res
         let mut settings = inner.settings.clone();
         settings.allow_full_access = enabled;
         if enabled {
-            config::update_access(&state.dir, &mut inner.settings, settings, false)
+            update_access(&state.dir, &mut inner, settings, false)
         } else {
-            persist_scoped_revocation(&state, &mut inner, settings, grants::downgrade_full_access)
+            persist_scoped_revocation(&state.dir, &mut inner, settings, false, grants::downgrade_full_access)
         }
     };
     emit_status(&app);
@@ -618,10 +674,10 @@ pub async fn remote_set_trusted(app: tauri::AppHandle, device_id: String, truste
             next.trusted.remove(&device_id);
         }
         let result = if trusted {
-            config::update_access(&state.dir, &mut inner.settings, next, false)
+            update_access(&state.dir, &mut inner, next, false)
         } else {
             inner.fail_pending(Some(&device_id), "This computer is no longer trusted.");
-            persist_scoped_revocation(&state, &mut inner, next, |dir| grants::revoke_legacy_trust(dir, &device_id))
+            persist_scoped_revocation(&state.dir, &mut inner, next, false, |dir| grants::revoke_legacy_trust(dir, &device_id))
         };
         if !trusted {
             inner.subscribers.remove(&device_id);
@@ -656,7 +712,7 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
             let mut next = inner.settings.clone();
             next.trusted.remove(&device_id);
             inner.fail_pending(Some(&device_id), "This computer was revoked.");
-            let result = persist_scoped_revocation(&state, &mut inner, next, |dir| grants::revoke_legacy_trust(dir, &device_id));
+            let result = persist_scoped_revocation(&state.dir, &mut inner, next, false, |dir| grants::revoke_legacy_trust(dir, &device_id));
             inner.devices.retain(|device| device.id != device_id);
             inner.subscribers.remove(&device_id);
             inner.uploads.forget(&device_id);

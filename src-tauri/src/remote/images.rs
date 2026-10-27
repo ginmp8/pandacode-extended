@@ -193,18 +193,22 @@ pub(crate) fn store(dir: &Path, bytes: &[u8]) -> Result<String> {
 
 /// Host side of `image.put`.
 pub(crate) async fn put(app: &tauri::AppHandle, from: &str, authenticated_key: &str, chunk: Chunk) -> Result<Value> {
-    super::host::require_authorized(app, from, authenticated_key)?;
+    super::host::require_method(app, from, authenticated_key, "image.put")?;
     let owner = format!("{from}:{authenticated_key}");
     let whole = super::remote(app).lock().uploads.add(&owner, chunk, Instant::now())?;
     let Some(bytes) = whole else { return Ok(json!({})) };
     let dir = capture_dir(app)?;
     let id = tauri::async_runtime::spawn_blocking({
         let dir = dir.clone();
-        move || store(&dir, &bytes)
+        let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
+        move || {
+            super::host::require_method(&handle, &device, &key, "image.put")?;
+            store(&dir, &bytes)
+        }
     })
     .await
     .map_err(|e| e.to_string())??;
-    if let Err(error) = super::host::require_authorized(app, from, authenticated_key).and_then(|_| super::remote(app).lock().uploads.stored(&owner, &id, Instant::now())) {
+    if let Err(error) = super::host::require_method(app, from, authenticated_key, "image.put").and_then(|_| super::remote(app).lock().uploads.stored(&owner, &id, Instant::now())) {
         let _ = std::fs::remove_file(dir.join(format!("{id}.png")));
         return Err(error);
     }
@@ -213,11 +217,13 @@ pub(crate) async fn put(app: &tauri::AppHandle, from: &str, authenticated_key: &
 
 /// Host side of a message naming images: they must be this sender's uploads.
 pub(crate) fn claim(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ids: &[String]) -> Result<()> {
-    super::host::require_authorized(app, from, authenticated_key)?;
+    let state = super::remote(app);
+    let mut inner = state.lock();
+    super::grants::authorize(&state.dir, &inner, from, authenticated_key, "image.put")?;
     if ids.is_empty() {
         return Ok(());
     }
-    super::remote(app).lock().uploads.claim(&format!("{from}:{authenticated_key}"), ids, Instant::now())
+    inner.uploads.claim(&format!("{from}:{authenticated_key}"), ids, Instant::now())
 }
 
 /// One of this computer's captures, checked like `send_message` checks it.

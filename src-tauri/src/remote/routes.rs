@@ -681,7 +681,7 @@ async fn listen(app: &tauri::AppHandle, generation: u64) {
     let want = {
         let state = remote(app);
         let inner = state.lock();
-        inner.token.is_some() && inner.settings.host_enabled
+        inner.access_available(&state.dir).is_ok() && inner.token.is_some() && inner.settings.host_enabled
     };
     let (addrs, wanted) = {
         let routes = routes();
@@ -756,7 +756,7 @@ async fn incoming(app: tauri::AppHandle, stream: TcpStream, peer: SocketAddr, ro
             let authorized = {
                 let state = remote(&app);
                 let inner = state.lock();
-                inner.settings.host_enabled && inner.devices.iter().any(|peer| peer.id == id && inner.settings.is_trusted(id, &peer.public_key))
+                inner.access_available(&state.dir).is_ok() && inner.settings.host_enabled && inner.devices.iter().any(|peer| peer.id == id && inner.authenticated(id, &peer.public_key))
             };
             if !authorized { return None; }
             socket::peer_key(&app, id).ok().map(|(key, _)| key)
@@ -780,8 +780,9 @@ async fn run<S: AsyncRead + AsyncWrite + Unpin>(app: tauri::AppHandle, ws: WebSo
     let public_key = {
         let state = remote(&app);
         let inner = state.lock();
+        if inner.access_available(&state.dir).is_err() || (accepted && !inner.settings.host_enabled) { return; }
         inner.devices.iter()
-            .find(|d| d.id == device && inner.settings.is_trusted(&device, &d.public_key))
+            .find(|d| d.id == device && inner.authenticated(&device, &d.public_key))
             .map(|d| d.public_key.clone()).unwrap_or_default()
     };
     let (tx, rx) = mpsc::channel(OUTBOX);
@@ -844,7 +845,7 @@ fn probe(app: &tauri::AppHandle, host: &str) {
     let trusted = {
         let state = remote(app);
         let inner = state.lock();
-        inner.devices.iter().any(|d| d.id == host && inner.settings.is_trusted(host, &d.public_key))
+        inner.access_available(&state.dir).is_ok() && inner.devices.iter().any(|d| d.id == host && inner.authenticated(host, &d.public_key))
     };
     if !trusted || super::grants::is_blocked(app, host) { return; }
     let Some((addrs, port, route, generation)) = routes().start_probe(host, Instant::now()) else { return };
@@ -859,7 +860,7 @@ fn probe(app: &tauri::AppHandle, host: &str) {
         let authorized = {
             let state = remote(&app);
             let inner = state.lock();
-            inner.devices.iter().any(|d| d.id == host && inner.settings.is_trusted(&host, &d.public_key))
+            inner.access_available(&state.dir).is_ok() && inner.devices.iter().any(|d| d.id == host && inner.authenticated(&host, &d.public_key))
         };
         if !authorized || super::grants::is_blocked(&app, &host) { return; }
         match race(&addrs, port, &me, &host, &key, &route).await {
@@ -877,10 +878,12 @@ fn prune(app: &tauri::AppHandle) {
     let devices: HashMap<String, String> = {
         let state = remote(app);
         let inner = state.lock();
-        if !inner.presence {
-            return;
+        if inner.access_available(&state.dir).is_err() {
+            HashMap::new()
+        } else {
+            if !inner.presence { return; }
+            inner.devices.iter().filter(|d| inner.authenticated(&d.id, &d.public_key)).map(|d| (d.id.clone(), d.public_key.clone())).collect()
         }
-        inner.devices.iter().filter(|d| inner.settings.is_trusted(&d.id, &d.public_key)).map(|d| (d.id.clone(), d.public_key.clone())).collect()
     };
     let mut routes = routes();
     routes.links.retain(|id, link| devices.get(id) == Some(&link.public_key));
@@ -926,7 +929,7 @@ fn announce(app: &tauri::AppHandle) {
     let targets: Vec<String> = {
         let state = remote(app);
         let inner = state.lock();
-        inner.devices.iter().filter(|d| d.online && d.id != inner.settings.device_id && inner.settings.is_trusted(&d.id, &d.public_key)).map(|d| d.id.clone()).collect()
+        inner.devices.iter().filter(|d| d.online && d.id != inner.settings.device_id && inner.authenticated(&d.id, &d.public_key)).map(|d| d.id.clone()).collect()
     };
     let event = json!({"type": "event", "name": ANNOUNCE, "data": data});
     for device in targets {

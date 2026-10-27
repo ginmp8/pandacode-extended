@@ -812,7 +812,7 @@ mod tests {
     }
     #[tokio::test]
     async fn outbound_tools_ask_even_in_full_mode() {
-        for name in ["pandacode_cloud_cli", "pandacode_bot_notify"] {
+        for name in ["pandacode_cloud_cli", "pandacode_bot_notify", "pandacode_bot_schedule"] {
         let count = Arc::new(AtomicUsize::new(0));
         let called = count.clone();
         let protected = ToolHost {

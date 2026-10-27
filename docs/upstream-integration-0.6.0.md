@@ -15,10 +15,10 @@ See [issue #38](https://github.com/ginmp8/pandacode-extended/issues/38) for path
 
 | Upstream behavior | Intended integration | Current verification |
 | --- | --- | --- |
-| Encrypted direct LAN/Tailscale route plus relay fallback | Adapt with verified device trust before private-address probing, preserve relay | Source port staged; not independently verified |
-| Host approval, View/Control/Full grants and single-use 10-minute code | Preserve Extended default-off Full access, revocation, per-key identity, retry limits | Source port staged; not independently verified |
-| Diagnostic route/stage/latency and redacted report | Preserve local privacy and no telemetry | Source port staged; not independently verified |
-| Reconnection replay and resynchronization | Reconcile desktop and mobile event paging, dedup and stop semantics | Source port staged; not independently verified |
+| Encrypted direct LAN/Tailscale route plus relay fallback | Adapt with verified device trust before private-address probing, preserve relay | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Host approval, View/Control/Full grants and single-use 10-minute code | Preserve Extended default-off Full access, revocation, per-key identity, retry limits | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Diagnostic route/stage/latency and redacted report | Preserve local privacy and no telemetry | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Reconnection replay and resynchronization | Reconcile desktop and mobile event paging, dedup and stop semantics | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
 
 The upstream's **known limitation** explicitly allows an unapproved non-blocked device to cause direct-route probing of private addresses it announces. **Do not import that behavior unchanged.** Security review is a hard gate for this upstream release. The mobile client still uses relay transport.
 
@@ -29,12 +29,12 @@ See [issue #39](https://github.com/ginmp8/pandacode-extended/issues/39) for path
 
 | Upstream behavior | Intended integration | Current verification |
 | --- | --- | --- |
-| Thin live trace rail, active step, finished summary | Integrate with existing Extended conversation grouping | Source port staged; not independently verified |
-| Two recent cards expanded, earlier collapsed | Respect manual disclosure and accessibility | Source port staged; not independently verified |
-| Rich escaped cards, shell tail/exit, diffs, search/web/MCP/team tools | Bound untrusted output, preserve escapes and privacy | Source port staged; not independently verified |
-| Inline local brands, cited source chips | Validate URLs; no remote tracking pixels | Source port staged; not independently verified |
-| Live incomplete links and code spans | Keep partial streaming text visible, no unsafe DOM | Source port staged; not independently verified |
-| Trace-only animation and reduced motion | Keep existing no-motion behavior elsewhere | Source port staged; not independently verified |
+| Thin live trace rail, active step, finished summary | Integrate with existing Extended conversation grouping | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Two recent cards expanded, earlier collapsed | Respect manual disclosure and accessibility | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Rich escaped cards, shell tail/exit, diffs, search/web/MCP/team tools | Bound untrusted output, preserve escapes and privacy | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Inline local brands, cited source chips | Validate URLs; no remote tracking pixels | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Live incomplete links and code spans | Keep partial streaming text visible, no unsafe DOM | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
+| Trace-only animation and reduced motion | Keep existing no-motion behavior elsewhere | Implemented source and regression paths are mapped in the [correction record](pr40-audit-corrections.md); acceptance requires the corrected HEAD and applicable platform checks |
 
 New upstream components: `src/{tool-cards.ts,tool-cards.css,trace-brands.ts,trace-motion.ts,trace-motion.css,preview-traces.ts}`; tests: `tests/{agent-traces.spec.ts,tool-cards.test.mjs,trace-brands.test.mjs}`. Other changed files include `src/main.ts`, `src/preview.ts`, `src/tool-trace.ts`, `src/enriched-markdown.ts` and `src/streaming-markdown.ts`.
 
@@ -46,10 +46,12 @@ No auto-updater or automatic npx download; no new telemetry, broadened filesyste
 2. Preserve all Extended security and identity contracts. Confirm call-path trust checks **after** awaits and before dispatch/effects, not only at connection start.
 3. Run `npm run build`, `npm test`, `npm run test:release`, `npm run site:build`, targeted Playwright and relevant native/mobile suites; show exact SHA and CI jobs. Never weaken tests to turn green.
 4. Review isolated two-device behavior for direct transport, key changes, revocation, replay, pairing-code races and report redaction. Mark cross-platform/native validation unknown unless executed.
-5. Use one integration branch, one PR targeting `main`, **linear Conventional Commits**. CI queries at least 60 seconds apart. No merge, tag or release without approval.
+5. Use one integration branch, one PR targeting `main`, **linear Conventional Commits**. CI validation rounds at least 120 seconds apart. No merge, tag or release without approval.
 
-## Acquisition / evidence limitation
-The full GitHub tree inventory was available as metadata (`truncated=false` for both source refs), and canonical release notes plus changed-file metadata were inspected. The execution environment could not clone/download GitHub repository snapshots via Git CLI/HTTP (DNS resolution failed), so no independent complete local source tree, Rust build or test execution exists. API reads and API writes alone do not justify full parity or passing-test claims.
+## Historical acquisition limitation
+At the initial integration step, the full GitHub tree inventory was available as metadata (`truncated=false` for both source refs), and canonical release notes plus changed-file metadata were inspected. The execution environment could not clone/download GitHub repository snapshots via Git CLI/HTTP (DNS resolution failed), so that initial step did not establish an independent complete local source tree, Rust build or test execution. API reads and API writes alone did not justify full parity or passing-test claims.
+
+The subsequent independent audit obtained complete detached Extended and upstream clones, pinned to the commits above, and compared source, assertions and browser behavior. Its findings are tracked in #42 and the [correction record](pr40-audit-corrections.md). Earlier tool limitations are historical evidence, not the current acquisition status.
 
 ## Current candidate source and archive verification
 
@@ -72,3 +74,7 @@ Issue #41 covers explicit approval of bot-created schedules, permission ceilings
 The native and browser tests must exercise these properties, not only compile successfully. The scoped pairing UI, diagnostics redaction, explicit direct-route opt-in and trace/Markdown browser suites are required in CI before a merge. No user-side installation, updater or automatic deployment is part of this candidate.
 
 **Still not established by CI:** transport behavior on two distinct devices, LAN/Tailscale routing on each supported OS, hardware/device-key rotation, and an end-to-end network failure test during revocation. These are explicit manual acceptance gaps, not passed checks.
+
+## Review state and acceptance
+
+The owner explicitly authorized Ready for review. This opens the candidate to review; it does not establish compliance with the original issues or authorize their closure, merge, a new version or a release. The original draft wording and this operational instruction are interpreted with the technical gates intact. Physical-device/platform gaps above remain open even when automated CI is green.

@@ -376,10 +376,12 @@ test.describe('bots', () => {
     await expect(guide).toContainText('cloudflared tunnel --url http://127.0.0.1:47321');
     await expect(guide).toContainText('the callback URL appears here after you save the address');
     await expect(guide).toContainText('pandacode-preview0123456789');
-    await guide.getByPlaceholder('https://….trycloudflare.com').fill('http://not-secure.example');
+    const address = guide.getByPlaceholder('https://….trycloudflare.com');
+    await address.fill('http://not-secure.example');
     await guide.getByRole('button', { name: 'Save' }).click();
     await expect(panel(page).getByRole('alert').first()).toContainText('https://');
-    await guide.getByPlaceholder('https://….trycloudflare.com').fill('https://quiet-river.trycloudflare.com/');
+    await address.fill('https://quiet-river.trycloudflare.com/');
+    await expect(address).toHaveValue('https://quiet-river.trycloudflare.com/');
     await guide.getByRole('button', { name: 'Save' }).click();
     const callback = guide.locator('code', { hasText: '/whatsapp/' });
     await expect(callback).toHaveText(/^https:\/\/quiet-river\.trycloudflare\.com\/whatsapp\/[0-9a-f-]{36}$/);

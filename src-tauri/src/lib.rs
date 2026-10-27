@@ -40,6 +40,7 @@ mod local_servers;
 mod local_signing;
 mod message_queue;
 mod message_attachments;
+mod model_routing;
 mod moodboards;
 mod attachments;
 mod prompt_attachments;
@@ -3571,6 +3572,19 @@ pub fn run() {
                 bots::bot_activity,
                 bots::bot_project_ids,
                 bots::bot_message,
+                bots::shared_channels::bot_shared_channels,
+                bots::shared_channels::bot_shared_channel_detail,
+                bots::shared_channels::bot_shared_channel_create,
+                bots::shared_channels::bot_shared_channel_update,
+                bots::shared_channels::bot_shared_channel_archive,
+                bots::shared_channels::bot_shared_channel_post,
+                bots::shared_channels::bot_shared_channel_stop,
+                bots::shared_channels::bot_shared_channel_continue,
+                bots::shared_channels::bot_shared_channel_reassign,
+                bots::shared_channels::bot_message_markers,
+                bots::failover::bot_failover_decide,
+                bots::failover::bot_failover_pending,
+                bots::failover::bot_model_switches,
                 bots::schedule::bot_schedule_create,
                 bots::schedule::bot_schedule_set_enabled,
                 bots::schedule::bot_schedule_delete,

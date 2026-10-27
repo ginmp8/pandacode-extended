@@ -165,7 +165,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 31;
+pub const SCHEMA_VERSION: i64 = 32;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -463,6 +463,12 @@ impl Store {
                 // Connect viewer cursors: where this computer left off in each host's event
                 // journal, so a restart replays what it missed (docs/remote-access.md).
                 migration.execute_batch("CREATE TABLE IF NOT EXISTS remote_cursors(device TEXT NOT NULL,session TEXT NOT NULL,epoch TEXT NOT NULL,seq INTEGER NOT NULL CHECK(seq>=0),PRIMARY KEY(device,session)); PRAGMA user_version=31;").map_err(|e| e.to_string())?;
+            }
+            if version < 32 {
+                crate::bots::schedule::migrate(&migration)?;
+                migration
+                    .execute_batch("PRAGMA user_version=32;")
+                    .map_err(|error| error.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }
@@ -1494,6 +1500,26 @@ impl Store {
         kind: Option<crate::architect::internal_turns::CoordinationKind>,
         bot_brief: Option<&crate::bots::tasks::TaskBrief>,
     ) -> Result<i64> {
+        self.begin_task_turn_admitted(sid, content, kind, bot_brief, None)
+    }
+
+    pub(crate) fn begin_scheduled_task_turn(
+        &self,
+        sid: &str,
+        content: &str,
+        admission: &crate::bots::schedule::Admission,
+    ) -> Result<i64> {
+        self.begin_task_turn_admitted(sid, content, None, None, Some(admission))
+    }
+
+    fn begin_task_turn_admitted(
+        &self,
+        sid: &str,
+        content: &str,
+        kind: Option<crate::architect::internal_turns::CoordinationKind>,
+        bot_brief: Option<&crate::bots::tasks::TaskBrief>,
+        scheduled: Option<&crate::bots::schedule::Admission>,
+    ) -> Result<i64> {
         if content.trim().is_empty() || content.len() > 128 * 1024 {
             return Err("Write a message under 128 KiB first.".into());
         }
@@ -1529,7 +1555,12 @@ impl Store {
         } else {
             self.start_turn_message(sid, content)?
         };
-        if let Some(brief) = bot_brief { crate::bots::tasks::mark(self, sid, brief)?; }
+        if let Some(brief) = bot_brief {
+            crate::bots::tasks::mark(self, sid, brief)?;
+        }
+        if let Some(admission) = scheduled {
+            crate::bots::schedule::accept(self, sid, message_id, admission, now())?;
+        }
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(message_id)
     }

@@ -1312,6 +1312,7 @@ struct RunAdmission<'a> {
     command: Option<PreparedCommand>,
     goal: Option<goal_state::GoalRequest>,
     team: Option<architect::Admission>,
+    scheduled: Option<&'a bots::schedule::Admission>,
 }
 
 struct PreparedRun {
@@ -1370,6 +1371,19 @@ fn prepare_task_run_in_project(
     let store = state.store.lock().map_err(|e| e.to_string())?;
     architect::validate_admission(&store, &session_id, admission.team.as_ref())?;
     let mut session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    bots::check_task_admission(&store, &session)?;
+    let scheduled_work = if let Some(scheduled) = admission.scheduled {
+        if admission.team.is_some() || admission.goal.is_some() {
+            return Err("Scheduled work must use an ordinary bot conversation.".into());
+        }
+        // The permission ceiling belongs to this occurrence. Never read it from
+        // a shared mutable session mode prepared by another scheduled request.
+        let work = bots::schedule::admission_work(&store, &session_id, scheduled, storage::now())?;
+        session.mode = work.mode.to_owned();
+        Some(work)
+    } else {
+        None
+    };
     remote::check_current_request(&session.mode)?;
     if admission.goal.is_some() && session.provider != "codex" {
         return Err(
@@ -1384,7 +1398,9 @@ fn prepare_task_run_in_project(
     }
     // Resolve the saved task details under the same lock as the execution
     // claim, so Start cannot race a details edit or completion action.
-    let text = text
+    let text = scheduled_work
+        .map(|work| work.prompt)
+        .or(text)
         .unwrap_or_else(|| {
             if session.task_description.trim().is_empty() {
                 session.title.clone()
@@ -1469,7 +1485,9 @@ fn prepare_task_run_in_project(
         if let Some(selected) = selected_skills { format!("{prompt}{}", selected.text) } else { prompt }
     } else { prompt };
     let turn_started = std::time::Instant::now();
-    let turn_message_id = if admission.goal.is_some() {
+    let turn_message_id = if let Some(scheduled) = admission.scheduled {
+        store.begin_scheduled_task_turn(&session_id, &text, scheduled)?
+    } else if admission.goal.is_some() {
         if matches!(admission.goal, Some(goal_state::GoalRequest::Set { .. })) {
             store.begin_task_turn_with_context(&session_id, &text, None, bot_brief.as_ref())?
         } else {
@@ -1565,6 +1583,30 @@ async fn launch_task_in_project(
     .await
 }
 
+pub(crate) async fn launch_scheduled_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    text: String,
+    project_id: String,
+    scheduled: bots::schedule::Admission,
+) -> Result<()> {
+    launch_operation_admitted(
+        app,
+        state,
+        session_id,
+        Some(text),
+        None,
+        OperationAdmission {
+            expected_project: Some(project_id),
+            goal: None,
+            team: None,
+            scheduled: Some(scheduled),
+        },
+    )
+    .await
+}
+
 async fn launch_operation(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1584,6 +1626,7 @@ async fn launch_operation(
             expected_project,
             goal,
             team: None,
+            scheduled: None,
         },
     )
     .await
@@ -1607,6 +1650,7 @@ pub(crate) fn launch_team_task<'a>(
             expected_project: None,
             goal: None,
             team: Some(admission),
+            scheduled: None,
         },
     ))
 }
@@ -1615,6 +1659,7 @@ struct OperationAdmission {
     expected_project: Option<String>,
     goal: Option<task_controls::GoalLaunch>,
     team: Option<architect::Admission>,
+    scheduled: Option<bots::schedule::Admission>,
 }
 
 async fn launch_operation_admitted(
@@ -1629,6 +1674,7 @@ async fn launch_operation_admitted(
         expected_project,
         goal,
         team: team_admission,
+        scheduled,
     } = admission;
     if state.shutdown.load(Ordering::SeqCst) != 0 {
         return Err("PandaCode is shutting down.".into());
@@ -1697,6 +1743,7 @@ async fn launch_operation_admitted(
             command,
             goal: goal_request,
             team: team_admission,
+            scheduled: scheduled.as_ref(),
         },
     )?;
     if turn_message_id > 0 && (!attachment_ids.is_empty() || attachment_text.contains("(moodboard ID: ")) {
@@ -2183,7 +2230,9 @@ async fn stop_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<()> {
-    if remote::mirror::stop(&app, &state, &session_id).await?.is_some() {
+    let routed = remote::mirror::stop(&app, &state, &session_id).await?;
+    remote::check_current_request("ask")?;
+    if routed.is_some() {
         return Ok(());
     }
     let is_team = {
@@ -2191,6 +2240,7 @@ async fn stop_session(
         architect::load(&store, &session_id)?.is_some()
     };
     if is_team {
+        remote::check_current_request("ask")?;
         architect::architect_control(app, state, session_id, "stop".into()).await?;
         return Ok(());
     }
@@ -2200,6 +2250,7 @@ async fn stop_session(
         .map_err(|e| e.to_string())?
         .get(&session_id)
     {
+        remote::check_current_request("ask")?;
         tx.send(RunInput::Stop)
             .map_err(|_| "Agent has stopped.".to_string())?;
     }

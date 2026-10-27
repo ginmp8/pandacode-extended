@@ -324,8 +324,28 @@ pub fn merge_flag(method: &str) -> Result<&'static str, String> {
 /// Merge the pull request on GitHub, then read it back so the task's link shows it merged.
 /// Local branches and worktrees are left alone; GitHub's branch settings decide the rest.
 pub fn merge(root: &Path, number: i64, method: &str) -> Result<TaskLink, String> {
+    merge_checked(root, number, method, || Ok(()))
+}
+
+/// Remote callers supply their current authorization check. Looking up the PR
+/// can block on the network, so check after it and immediately before the merge
+/// command, rather than relying on authorization at request admission.
+pub(crate) fn merge_checked(root: &Path, number: i64, method: &str, authorize: impl FnOnce() -> Result<(), String>) -> Result<TaskLink, String> {
+    merge_after_lookup(number, method, || detail(root, number), authorize, |flag, head| {
+        run_gh(root, &["pr", "merge", &number.to_string(), flag, "--match-head-commit", head], Duration::from_secs(60)).map(|_| ())
+    })?;
+    lookup(root, number)
+}
+
+pub(crate) fn merge_after_lookup(
+    number: i64,
+    method: &str,
+    lookup: impl FnOnce() -> Result<PullDetail, String>,
+    authorize: impl FnOnce() -> Result<(), String>,
+    execute: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
     let flag = merge_flag(method)?;
-    let current = detail(root, number)?;
+    let current = lookup()?;
     if current.state != "open" {
         return Err(format!("Pull request #{number} is {}.", current.state));
     }
@@ -339,8 +359,8 @@ pub fn merge(root: &Path, number: i64, method: &str) -> Result<TaskLink, String>
     if current.head_sha.is_empty() {
         return Err("GitHub did not return the pull request head SHA. Refresh and try again.".into());
     }
-    run_gh(root, &["pr", "merge", &number.to_string(), flag, "--match-head-commit", &current.head_sha], Duration::from_secs(60))?;
-    lookup(root, number)
+    authorize()?;
+    execute(flag, &current.head_sha)
 }
 
 #[cfg(test)]

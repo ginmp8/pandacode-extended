@@ -3,6 +3,922 @@ use super::channels::{self, discord, http, slack, telegram, web, whatsapp};
 use super::{brief, gateway, guard, schedule, *};
 use serde_json::json;
 
+fn scheduled_native_run(
+    state: &crate::AppState,
+    session_id: &str,
+    admission: &schedule::Admission,
+) -> crate::Result<crate::PreparedRun> {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::prepare_task_run_in_project(
+        state,
+        session_id.into(),
+        Some("Scheduled test work".into()),
+        vec![],
+        tx,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        crate::RunAdmission {
+            scheduled: Some(admission),
+            ..Default::default()
+        },
+    )
+}
+
+fn scheduled_state() -> (Fixture, std::sync::Arc<crate::AppState>, Bot, String) {
+    let f = fixture();
+    let (state, _) = crate::concurrent_task_tests::test_state();
+    let (bot, session) = {
+        let store = state.store.lock().unwrap();
+        let mut profile = input("Scheduled native bot");
+        profile.mode = "full".into();
+        let bot = create(&store, &profile, &f.root).unwrap();
+        let (session, _) =
+            thread_session(&store, &bot, "schedule", "schedule", "Scheduled work").unwrap();
+        (bot, session)
+    };
+    (f, state, bot, session)
+}
+
+fn due_once(store: &Store, bot: &Bot, created_by: &str) -> schedule::Schedule {
+    let now = crate::storage::now();
+    schedule::create(
+        store,
+        &bot.id,
+        &schedule::ScheduleInput {
+            prompt: "Do the approved work".into(),
+            kind: "once".into(),
+            run_at: Some(now - 1),
+            ..Default::default()
+        },
+        created_by,
+        now,
+    )
+    .unwrap()
+}
+
+fn finish_scheduled(state: &crate::AppState, session: &str) {
+    let mut agents = state.agents.lock().unwrap();
+    let store = state.store.lock().unwrap();
+    store.finish_task_turn(session, true, false).unwrap();
+    agents.remove(session);
+}
+
+#[test]
+fn scheduled_authorization_outlives_activity_retention_and_creation_is_atomic() {
+    let f = fixture();
+    let mut profile = input("Durable Plan");
+    profile.mode = "plan".into();
+    let bot = create(&f.store, &profile, &f.root).unwrap();
+    let item = schedule::create(
+        &f.store,
+        &bot.id,
+        &schedule::ScheduleInput {
+            prompt: "Keep the original ceiling".into(),
+            kind: "interval".into(),
+            interval_minutes: Some(30),
+            ..Default::default()
+        },
+        "user",
+        0,
+    )
+    .unwrap();
+    let transaction = f.store.db.unchecked_transaction().unwrap();
+    for _ in 0..5000 {
+        f.store.db.execute("INSERT INTO bot_activity(bot_id,kind,summary,detail,at) VALUES(?1,'inbound','routine','{}',0)", [&bot.id]).unwrap();
+    }
+    log(
+        &f.store,
+        &bot.id,
+        "inbound",
+        "Prune old activity",
+        json!({}),
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        f.store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM bot_activity WHERE kind='schedule'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        schedule::execution_mode(&f.store, &item, "full").unwrap(),
+        "plan"
+    );
+    assert_eq!(
+        schedule::execution_mode(&f.store, &item, "review").unwrap(),
+        "plan"
+    );
+
+    for table in ["bot_schedule_authorizations", "bot_activity"] {
+        let before = schedule::list(&f.store, &bot.id).unwrap().len();
+        f.store.db.execute_batch(&format!("CREATE TRIGGER refuse_policy BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'policy write failed'); END;")).unwrap();
+        let result = schedule::create(
+            &f.store,
+            &bot.id,
+            &schedule::ScheduleInput {
+                prompt: "Must not persist after failure".into(),
+                kind: "interval".into(),
+                interval_minutes: Some(30),
+                ..Default::default()
+            },
+            "user",
+            0,
+        );
+        assert!(result.is_err());
+        assert_eq!(schedule::list(&f.store, &bot.id).unwrap().len(), before);
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM bot_schedule_authorizations",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            before as i64
+        );
+        f.store
+            .db
+            .execute_batch("DROP TRIGGER refuse_policy;")
+            .unwrap();
+    }
+}
+
+#[test]
+fn migration_32_preserves_known_ceilings_and_safely_adopts_legacy_schedules() {
+    let f = fixture();
+    let path = f.root.join("schedule-migration.db");
+    let ids = {
+        let store = Store::open(&path).unwrap();
+        let mut profile = input("Legacy schedules");
+        profile.mode = "plan".into();
+        let bot = create(&store, &profile, &f.root.join("bots")).unwrap();
+        let plan = due_once(&store, &bot, "user");
+        profile.mode = "full".into();
+        let full_bot = update(&store, &bot.id, &profile).unwrap();
+        let full = due_once(&store, &full_bot, "user");
+        let unknown = due_once(&store, &full_bot, "user");
+        let generated = due_once(&store, &full_bot, "bot");
+        let malformed = due_once(&store, &full_bot, "user");
+        store.db.execute("UPDATE bot_activity SET detail=json_set(detail,'$.permissionMode','unknown-mode') WHERE json_extract(detail,'$.scheduleId')=?1", [&malformed.id]).unwrap();
+        store
+            .db
+            .execute(
+                "DELETE FROM bot_activity WHERE json_extract(detail,'$.scheduleId')=?1",
+                [&unknown.id],
+            )
+            .unwrap();
+        store.db.execute_batch("DROP TABLE bot_scheduled_runs; DROP TABLE bot_schedule_authorizations; PRAGMA user_version=31;").unwrap();
+        // Normal writes reject malformed JSON. Inject a deliberately corrupted
+        // legacy row only in this temporary database, then restore enforcement
+        // before migration: corrupt logs must not confer authority or block it.
+        let corrupt_activity = "INSERT INTO bot_activity(bot_id,kind,summary,detail,at) VALUES(?1,'schedule','malformed','not-json',0)";
+        assert!(store.db.execute(corrupt_activity, [&bot.id]).is_err());
+        store.db.pragma_update(None, "ignore_check_constraints", true).unwrap();
+        store.db.execute(corrupt_activity, [&bot.id]).unwrap();
+        store.db.pragma_update(None, "ignore_check_constraints", false).unwrap();
+        assert!(store.db.execute(corrupt_activity, [&bot.id]).is_err());
+        [plan.id, full.id, unknown.id, generated.id, malformed.id]
+    };
+    for _ in 0..2 {
+        let store = Store::open(&path).unwrap();
+        for (id, expected) in ids.iter().zip(["plan", "full", "plan", "plan", "plan"]) {
+            assert_eq!(
+                schedule::execution_mode(&store, &schedule::get(&store, id).unwrap(), "full")
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            store
+                .db
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            crate::storage::SCHEMA_VERSION
+        );
+    }
+}
+
+#[test]
+fn pause_closes_admission_before_the_stop_scan_can_await() {
+    let (_f, state, bot, session) = scheduled_state();
+    let (admission, desktop) = {
+        let store = state.store.lock().unwrap();
+        let admission =
+            schedule::Admission::schedule(&due_once(&store, &bot, "user"), false).unwrap();
+        let (desktop, _) = thread_session(&store, &bot, DESKTOP, DESKTOP, "Desktop").unwrap();
+        (admission, desktop)
+    };
+    let scanning = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let finish_scan = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let pausing = {
+        let state = state.clone();
+        let id = bot.id.clone();
+        let scanning = scanning.clone();
+        let finish_scan = finish_scan.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(pause_with_stop(&state, &id, true, async {
+                    // This is the production stop/await boundary, after it could
+                    // have observed an idle conversation but before Pause returns.
+                    scanning.wait();
+                    finish_scan.wait();
+                    Ok(())
+                }))
+        })
+    };
+    scanning.wait();
+    let lifecycle = lifecycle_lock(&bot.id).unwrap();
+    let operation_is_serialized = lifecycle.try_lock().is_err();
+    let scheduled = scheduled_native_run(&state, &session, &admission);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let ordinary = crate::prepare_task_run(
+        &state,
+        desktop.clone(),
+        Some("Start while pausing".into()),
+        vec![],
+        tx,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let console_denied = {
+        let store = state.store.lock().unwrap();
+        tasks::check_console_context(&store, &store.session(&desktop).unwrap()).is_err()
+    };
+    finish_scan.wait();
+    assert!(pausing.join().unwrap().unwrap().paused);
+    assert!(
+        operation_is_serialized,
+        "Resume/reset/delete must wait for this operation"
+    );
+    assert!(
+        scheduled.is_err(),
+        "a captured Full schedule cannot slip past the stop snapshot"
+    );
+    assert!(
+        ordinary.is_err(),
+        "ordinary owned threads must honor the same admission gate"
+    );
+    assert!(console_denied);
+    assert!(state.agents.lock().unwrap().is_empty());
+    let store = state.store.lock().unwrap();
+    assert!(store.messages(&session, None).unwrap().is_empty());
+    assert!(store.messages(&desktop, None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_pause_keeps_admission_closed_until_explicit_resume() {
+    let (_f, state, bot, session) = scheduled_state();
+    let admission = {
+        let store = state.store.lock().unwrap();
+        schedule::Admission::schedule(&due_once(&store, &bot, "user"), false).unwrap()
+    };
+    assert!(pause_with_stop(&state, &bot.id, true, async {
+        Err("Stopping failed".into())
+    })
+    .await
+    .is_err());
+    assert!(get(&state.store.lock().unwrap(), &bot.id).unwrap().paused);
+    assert!(scheduled_native_run(&state, &session, &admission).is_err());
+    let resumed = pause_with_stop(&state, &bot.id, false, async {
+        panic!("Resume must not stop an agent")
+    })
+    .await
+    .unwrap();
+    assert!(!resumed.paused);
+    assert_eq!(
+        scheduled_native_run(&state, &session, &admission)
+            .unwrap()
+            .config
+            .mode,
+        "full"
+    );
+}
+
+#[test]
+fn legacy_pruned_authorization_cannot_be_recreated_by_full_mode_and_allow_rules() {
+    let f = fixture();
+    let path = f.root.join("pruned-legacy.db");
+    let (bot_id, schedule_id) = {
+        let store = Store::open(&path).unwrap();
+        let mut profile = input("Legacy Plan");
+        profile.mode = "plan".into();
+        let bot = create(&store, &profile, &f.root.join("bots")).unwrap();
+        let item = due_once(&store, &bot, "user");
+        profile.mode = "full".into();
+        update(&store, &bot.id, &profile).unwrap();
+        guard::add_rule(&store, &bot.id, "write_file", "allow").unwrap();
+        let transaction = store.db.unchecked_transaction().unwrap();
+        for _ in 0..5000 {
+            store.db.execute("INSERT INTO bot_activity(bot_id,kind,summary,detail,at) VALUES(?1,'inbound','routine','{}',0)", [&bot.id]).unwrap();
+        }
+        log(&store, &bot.id, "inbound", "Prune old policy", json!({})).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM bot_activity WHERE kind='schedule'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        store.db.execute_batch("DROP TABLE bot_scheduled_runs; DROP TABLE bot_schedule_authorizations; PRAGMA user_version=31;").unwrap();
+        (bot.id, item.id)
+    };
+    let (state, _) = crate::concurrent_task_tests::test_state();
+    let (admission, session) = {
+        let mut store = state.store.lock().unwrap();
+        *store = Store::open(&path).unwrap();
+        let bot = get(&store, &bot_id).unwrap();
+        assert_eq!(bot.mode, "full");
+        assert_eq!(
+            guard::decide(&store, &bot_id, "write_file report.md").unwrap(),
+            guard::Decision::Allow
+        );
+        let item = schedule::get(&store, &schedule_id).unwrap();
+        let (session, _) =
+            thread_session(&store, &bot, "schedule", "schedule", "Scheduled work").unwrap();
+        (
+            schedule::Admission::schedule(&item, false).unwrap(),
+            session,
+        )
+    };
+    let prepared = scheduled_native_run(&state, &session, &admission).unwrap();
+    assert_eq!(
+        prepared.config.mode, "plan",
+        "unproven legacy policy must not reach approval-rule execution as Ask"
+    );
+    let store = state.store.lock().unwrap();
+    assert_eq!(store.session(&session).unwrap().mode, "plan");
+    assert_eq!(
+        store
+            .db
+            .query_row(
+                "SELECT permission_mode FROM bot_scheduled_runs WHERE message_id=?1",
+                [prepared.turn_message_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "plan"
+    );
+}
+
+#[test]
+fn native_schedule_admission_binds_each_prompt_to_its_own_ceiling() {
+    let (_f, state, bot, session) = scheduled_state();
+    let (restricted, full) = {
+        let store = state.store.lock().unwrap();
+        let a = due_once(&store, &bot, "bot");
+        let b = due_once(&store, &bot, "user");
+        // Both admissions target one shared conversation; a persisted Full mode
+        // must not authorize A's bot-authored prompt.
+        store
+            .update(&session, None, None, None, Some("full".into()))
+            .unwrap();
+        (
+            schedule::Admission::schedule(&a, false).unwrap(),
+            schedule::Admission::schedule(&b, true).unwrap(),
+        )
+    };
+    let a = scheduled_native_run(&state, &session, &restricted).unwrap();
+    assert_eq!(a.config.mode, "plan");
+    assert!(a.config.prompt.contains("Do the approved work"));
+    assert!(
+        !a.config.prompt.contains("Scheduled test work"),
+        "the admission uses the stored schedule prompt, not a substituted caller prompt"
+    );
+    assert!(
+        scheduled_native_run(&state, &session, &full).is_err(),
+        "busy admission must not queue a bare privileged prompt"
+    );
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.session(&session).unwrap().mode, "plan");
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT permission_mode FROM bot_scheduled_runs WHERE message_id=?1",
+                    [a.turn_message_id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "plan"
+        );
+    }
+    finish_scheduled(&state, &session);
+    let b = scheduled_native_run(&state, &session, &full).unwrap();
+    assert_eq!(b.config.mode, "full");
+    assert_ne!(a.turn_message_id, b.turn_message_id);
+}
+
+#[test]
+fn concurrent_scheduled_claims_cannot_exchange_prompt_authority() {
+    let (_f, state, bot, session) = scheduled_state();
+    let admissions = {
+        let store = state.store.lock().unwrap();
+        [
+            (
+                schedule::Admission::schedule(&due_once(&store, &bot, "bot"), false).unwrap(),
+                "plan",
+            ),
+            (
+                schedule::Admission::schedule(&due_once(&store, &bot, "user"), true).unwrap(),
+                "full",
+            ),
+        ]
+    };
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers: Vec<_> = admissions
+        .iter()
+        .cloned()
+        .map(|(admission, expected)| {
+            let state = state.clone();
+            let session = session.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let result =
+                    scheduled_native_run(&state, &session, &admission).map(|run| run.config.mode);
+                (admission, expected, result)
+            })
+        })
+        .collect();
+    barrier.wait();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, _, result)| result.is_ok())
+            .count(),
+        1
+    );
+    for (_, expected, result) in &results {
+        if let Ok(mode) = result {
+            assert_eq!(mode.as_str(), *expected);
+        }
+    }
+    finish_scheduled(&state, &session);
+    let (retry, expected, _) = results
+        .into_iter()
+        .find(|(_, _, result)| result.is_err())
+        .unwrap();
+    assert_eq!(
+        scheduled_native_run(&state, &session, &retry)
+            .unwrap()
+            .config
+            .mode,
+        expected
+    );
+    let store = state.store.lock().unwrap();
+    assert_eq!(
+        store
+            .db
+            .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert!(crate::message_queue::list(&store, Some(&session))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn native_schedule_rechecks_current_policy_pause_and_cancellation() {
+    for change in ["mode", "pause", "disable", "delete"] {
+        let (_f, state, bot, session) = scheduled_state();
+        let admission = {
+            let store = state.store.lock().unwrap();
+            let item = due_once(&store, &bot, "user");
+            let admission = schedule::Admission::schedule(&item, false).unwrap();
+            match change {
+                "mode" => {
+                    store
+                        .db
+                        .execute("UPDATE bots SET mode='plan' WHERE id=?1", [&bot.id])
+                        .unwrap();
+                }
+                "pause" => {
+                    set_paused(&store, &bot.id, true).unwrap();
+                }
+                "disable" => {
+                    schedule::set_enabled(&store, &item.id, false, crate::storage::now()).unwrap();
+                }
+                "delete" => {
+                    schedule::delete(&store, &bot.id, &item.id).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            admission
+        };
+        let result = scheduled_native_run(&state, &session, &admission);
+        if change == "mode" {
+            assert_eq!(
+                result.unwrap().config.mode,
+                "plan",
+                "current restriction intersects the original ceiling"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "{change} must revoke a prepared occurrence"
+            );
+            assert!(state.agents.lock().unwrap().is_empty());
+            let store = state.store.lock().unwrap();
+            assert!(store.messages(&session, None).unwrap().is_empty());
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn busy_once_retries_and_is_accepted_exactly_once_without_queueing() {
+    let (_f, state, bot, session) = scheduled_state();
+    let (item, admission) = {
+        let store = state.store.lock().unwrap();
+        let item = due_once(&store, &bot, "bot");
+        let admission = schedule::Admission::schedule(&item, false).unwrap();
+        (item, admission)
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::prepare_task_run(
+        &state,
+        session.clone(),
+        Some("An existing turn".into()),
+        vec![],
+        tx,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .unwrap();
+    assert!(scheduled_native_run(&state, &session, &admission).is_err());
+    {
+        let store = state.store.lock().unwrap();
+        let pending = schedule::get(&store, &item.id).unwrap();
+        assert!(pending.enabled);
+        assert_eq!(pending.next_run_at, item.next_run_at);
+        assert!(pending.last_run_at.is_none());
+        assert_ne!(
+            brief_version_of(&store, &session).unwrap(),
+            get(&store, &bot.id).unwrap().memory_version,
+            "a busy attempt must not consume its brief"
+        );
+        assert!(crate::message_queue::list(&store, Some(&session))
+            .unwrap()
+            .is_empty());
+    }
+    finish_scheduled(&state, &session);
+    let prepared = scheduled_native_run(&state, &session, &admission).unwrap();
+    assert_eq!(prepared.config.mode, "plan");
+    assert!(prepared.config.prompt.contains(brief::HEADER));
+    finish_scheduled(&state, &session);
+    assert!(
+        scheduled_native_run(&state, &session, &admission).is_err(),
+        "the same occurrence cannot be claimed again"
+    );
+    let store = state.store.lock().unwrap();
+    let done = schedule::get(&store, &item.id).unwrap();
+    assert!(!done.enabled && done.next_run_at.is_none() && done.last_run_at.is_some());
+    assert_eq!(
+        store
+            .db
+            .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .messages(&session, None)
+            .unwrap()
+            .iter()
+            .filter(|message| message.content.starts_with("Scheduled:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn due_selection_keeps_other_bots_eligible_while_old_work_retries() {
+    let f = fixture();
+    let busy = bot(&f);
+    let ready = create(&f.store, &input("Ready bot"), &f.root).unwrap();
+    for _ in 0..21 {
+        schedule::create(
+            &f.store,
+            &busy.id,
+            &schedule::ScheduleInput {
+                prompt: "Old busy work".into(),
+                kind: "once".into(),
+                run_at: Some(1),
+                ..Default::default()
+            },
+            "bot",
+            0,
+        )
+        .unwrap();
+    }
+    let next = schedule::create(
+        &f.store,
+        &ready.id,
+        &schedule::ScheduleInput {
+            prompt: "Independent work".into(),
+            kind: "once".into(),
+            run_at: Some(2),
+            ..Default::default()
+        },
+        "bot",
+        0,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let due = schedule::due(&f.store, 3).unwrap().0;
+        assert!(
+            due.iter().any(|item| item.id == next.id),
+            "unaccepted old work must not starve another bot"
+        );
+        assert_eq!(due.len(), 22);
+    }
+}
+
+#[test]
+fn scheduled_acceptance_rolls_back_all_writes_and_retry_is_safe() {
+    for (table, operation) in [
+        ("messages", "INSERT"),
+        ("bot_scheduled_runs", "INSERT"),
+        ("bot_schedules", "UPDATE"),
+        ("bot_threads", "UPDATE"),
+        ("bot_activity", "INSERT"),
+    ] {
+        let (_f, state, bot, session) = scheduled_state();
+        let (item, admission) = {
+            let store = state.store.lock().unwrap();
+            let item = due_once(&store, &bot, "bot");
+            let admission = schedule::Admission::schedule(&item, false).unwrap();
+            store.db.execute_batch(&format!("CREATE TRIGGER refuse_acceptance BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'acceptance write failed'); END;")).unwrap();
+            (item, admission)
+        };
+        assert!(
+            scheduled_native_run(&state, &session, &admission).is_err(),
+            "{table} failure must reach the caller"
+        );
+        assert!(state.agents.lock().unwrap().is_empty());
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(store.session(&session).unwrap().status, "idle");
+            assert!(store.messages(&session, None).unwrap().is_empty());
+            assert_eq!(schedule::get(&store, &item.id).unwrap(), item);
+            assert_ne!(
+                brief_version_of(&store, &session).unwrap(),
+                get(&store, &bot.id).unwrap().memory_version
+            );
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            store
+                .db
+                .execute_batch("DROP TRIGGER refuse_acceptance;")
+                .unwrap();
+        }
+        assert!(scheduled_native_run(&state, &session, &admission).is_ok());
+        let store = state.store.lock().unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn scheduled_commit_is_atomic_across_restart_before_and_after_acceptance() {
+    let f = fixture();
+    let path = f.root.join("schedule-restart.db");
+    let (session, id, admission) = {
+        let store = Store::open(&path).unwrap();
+        let bot = create(&store, &input("Restart"), &f.root.join("bots")).unwrap();
+        let item = due_once(&store, &bot, "bot");
+        let (session, _) =
+            thread_session(&store, &bot, "schedule", "schedule", "Scheduled work").unwrap();
+        let admission = schedule::Admission::schedule(&item, false).unwrap();
+        // A failed commit leaves no accepted turn and the item is still due
+        // when the process reopens the database.
+        store.db.execute_batch("CREATE TRIGGER refuse_receipt BEFORE INSERT ON bot_scheduled_runs BEGIN SELECT RAISE(ABORT,'receipt failed'); END;").unwrap();
+        assert!(store
+            .begin_scheduled_task_turn(&session, "Retry after restart", &admission)
+            .is_err());
+        store
+            .db
+            .execute_batch("DROP TRIGGER refuse_receipt;")
+            .unwrap();
+        (session, item.id, admission)
+    };
+    {
+        let store = Store::open(&path).unwrap();
+        assert!(schedule::get(&store, &id).unwrap().enabled);
+        assert!(store.messages(&session, None).unwrap().is_empty());
+        store
+            .begin_scheduled_task_turn(&session, "Retry after restart", &admission)
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.session(&session).unwrap().status, "interrupted");
+    assert!(!schedule::get(&store, &id).unwrap().enabled);
+    assert_eq!(store.messages(&session, None).unwrap().len(), 1);
+    assert!(store
+        .begin_scheduled_task_turn(&session, "Must not duplicate", &admission)
+        .is_err());
+    assert_eq!(store.messages(&session, None).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .db
+            .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn recurring_manual_runs_and_heartbeats_share_atomic_admission() {
+    for kind in ["interval", "daily", "weekdays"] {
+        let (_f, state, bot, session) = scheduled_state();
+        let (item, admission) = {
+            let store = state.store.lock().unwrap();
+            let item = schedule::create(
+                &store,
+                &bot.id,
+                &schedule::ScheduleInput {
+                    prompt: "Recurring work".into(),
+                    kind: kind.into(),
+                    interval_minutes: Some(30),
+                    time_of_day: Some("09:30".into()),
+                    ..Default::default()
+                },
+                "user",
+                crate::storage::now(),
+            )
+            .unwrap();
+            // Explicit Run Now works for a disabled future recurring schedule.
+            schedule::set_enabled(&store, &item.id, false, crate::storage::now()).unwrap();
+            let admission = schedule::Admission::schedule(&item, true).unwrap();
+            (item, admission)
+        };
+        let prepared = scheduled_native_run(&state, &session, &admission).unwrap();
+        assert_eq!(prepared.config.mode, "full");
+        finish_scheduled(&state, &session);
+        assert!(
+            scheduled_native_run(&state, &session, &admission).is_err(),
+            "a manual receipt cannot be replayed"
+        );
+        let store = state.store.lock().unwrap();
+        let after = schedule::get(&store, &item.id).unwrap();
+        assert!(
+            !after.enabled,
+            "Run Now must not reenable a paused recurring schedule"
+        );
+        assert_eq!(
+            after.next_run_at, item.next_run_at,
+            "Run Now must not consume the next timer occurrence"
+        );
+        assert_eq!(after.last_run_at, item.last_run_at);
+        let enabled = schedule::set_enabled(&store, &item.id, true, crate::storage::now()).unwrap();
+        let timer = schedule::Admission::schedule(&enabled, false).unwrap();
+        assert!(
+            schedule::resolve(&store, &timer, enabled.next_run_at.unwrap()).is_ok(),
+            "the next timer is not a replay of Run Now"
+        );
+    }
+
+    for kind in ["once", "interval", "daily", "weekdays"] {
+        let (_f, state, bot, session) = scheduled_state();
+        let (item, manual, timer) = {
+            let store = state.store.lock().unwrap();
+            let now = crate::storage::now();
+            let item = if kind == "once" {
+                due_once(&store, &bot, "bot")
+            } else {
+                schedule::create(
+                    &store,
+                    &bot.id,
+                    &schedule::ScheduleInput {
+                        prompt: "Overdue recurring work".into(),
+                        kind: kind.into(),
+                        interval_minutes: Some(30),
+                        time_of_day: Some("09:30".into()),
+                        ..Default::default()
+                    },
+                    "bot",
+                    now - 7 * DAY,
+                )
+                .unwrap()
+            };
+            assert!(item.next_run_at.unwrap() <= now);
+            let manual = schedule::Admission::schedule(&item, true).unwrap();
+            let timer = schedule::Admission::schedule(&item, false).unwrap();
+            (item, manual, timer)
+        };
+        assert_eq!(
+            scheduled_native_run(&state, &session, &manual)
+                .unwrap()
+                .config
+                .mode,
+            "plan"
+        );
+        finish_scheduled(&state, &session);
+        assert_eq!(
+            scheduled_native_run(&state, &session, &timer)
+                .unwrap()
+                .config
+                .mode,
+            "plan"
+        );
+        finish_scheduled(&state, &session);
+        assert!(scheduled_native_run(&state, &session, &manual).is_err());
+        assert!(scheduled_native_run(&state, &session, &timer).is_err());
+        let manual_again = {
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT COUNT(*) FROM bot_scheduled_runs", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+            let after = schedule::get(&store, &item.id).unwrap();
+            assert!(after.last_run_at.is_some());
+            if kind == "once" {
+                assert!(!after.enabled && after.next_run_at.is_none());
+            } else {
+                assert!(after.enabled && after.next_run_at.unwrap() > after.last_run_at.unwrap());
+            }
+            schedule::Admission::schedule(&after, true).unwrap()
+        };
+        // A fresh explicit Run Now request remains possible after a once timer
+        // has completed, but replaying the same request never starts twice.
+        assert_eq!(
+            scheduled_native_run(&state, &session, &manual_again)
+                .unwrap()
+                .config
+                .mode,
+            "plan"
+        );
+        finish_scheduled(&state, &session);
+        assert!(scheduled_native_run(&state, &session, &manual_again).is_err());
+    }
+
+    let (_f, state, bot, session) = scheduled_state();
+    let admission = {
+        let store = state.store.lock().unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE bots SET heartbeat_minutes=30,next_heartbeat_at=?2 WHERE id=?1",
+                params![bot.id, crate::storage::now() - 1],
+            )
+            .unwrap();
+        schedule::Admission::heartbeat(&get(&store, &bot.id).unwrap()).unwrap()
+    };
+    let prepared = scheduled_native_run(&state, &session, &admission).unwrap();
+    assert_eq!(
+        prepared.config.mode, "plan",
+        "a Full bot's heartbeat remains read-only"
+    );
+    finish_scheduled(&state, &session);
+    assert!(scheduled_native_run(&state, &session, &admission).is_err());
+    let store = state.store.lock().unwrap();
+    assert!(get(&store, &bot.id).unwrap().next_heartbeat_at.unwrap() > crate::storage::now());
+}
+
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 24 * 60 * MINUTE;
 
@@ -398,7 +1314,7 @@ fn schedules_compute_their_next_local_run() {
 }
 
 #[test]
-fn schedules_validate_and_advance() {
+fn schedules_validate_and_advance_only_with_an_accepted_turn() {
     let f = fixture();
     let bot = bot(&f);
     let once = schedule::ScheduleInput { title: "Reminder".into(), prompt: "Remind me to stretch".into(), kind: "once".into(), run_at: Some(10 * MINUTE), ..Default::default() };
@@ -408,9 +1324,21 @@ fn schedules_validate_and_advance() {
     assert!(schedule::create(&f.store, &bot.id, &empty, "user", 0).is_err());
     let (due, _) = schedule::due(&f.store, 11 * MINUTE).unwrap();
     assert_eq!(due.len(), 1);
-    schedule::advance(&f.store, &due[0], 11 * MINUTE).unwrap();
+    let (session, _) =
+        thread_session(&f.store, &bot, "schedule", "schedule", "Scheduled work").unwrap();
+    let admission = schedule::Admission::schedule(&due[0], false).unwrap();
+    f.store
+        .begin_scheduled_task_turn(&session, "Accepted reminder", &admission)
+        .unwrap();
     let after = &schedule::list(&f.store, &bot.id).unwrap()[0];
-    assert!(!after.enabled, "one-off schedules turn off after running");
+    assert!(
+        !after.enabled,
+        "one-off schedules turn off only with a persisted accepted turn"
+    );
+    assert_eq!(
+        f.store.messages(&session, None).unwrap()[0].content,
+        "Accepted reminder"
+    );
     assert!(schedule::due(&f.store, 20 * MINUTE).unwrap().0.is_empty());
 }
 
@@ -576,8 +1504,26 @@ fn scheduled_bot_work_cannot_inherit_later_full_access() {
     assert_eq!(schedule::execution_mode(&f.store, &user, "full").unwrap(), "ask");
     assert_eq!(schedule::execution_mode(&f.store, &user, "ask").unwrap(), "ask");
     f.store.db.execute("DELETE FROM bot_activity WHERE kind='schedule' AND json_extract(detail,'$.scheduleId')=?1", [&user.id]).unwrap();
-    assert_eq!(schedule::execution_mode(&f.store, &user, "full").unwrap(), "ask");
-    assert_eq!(schedule::execution_mode(&f.store, &user, "plan").unwrap(), "plan");
+    assert_eq!(
+        schedule::execution_mode(&f.store, &user, "full").unwrap(),
+        "ask"
+    );
+    assert_eq!(
+        schedule::execution_mode(&f.store, &user, "plan").unwrap(),
+        "plan"
+    );
+    f.store
+        .db
+        .execute(
+            "DELETE FROM bot_schedule_authorizations WHERE schedule_id=?1",
+            [&user.id],
+        )
+        .unwrap();
+    assert_eq!(
+        schedule::execution_mode(&f.store, &user, "full").unwrap(),
+        "plan",
+        "unexpected policy loss must fail read-only"
+    );
 }
 
 #[test]

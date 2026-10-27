@@ -821,6 +821,9 @@ pub async fn architect_control(
     Ok(team)
 }
 fn control_state(state: &AppState, session_id: &str, action: &str) -> Result<TeamSnapshot> {
+    // A remote bot pause can reach this after awaiting another stop operation.
+    // Preserve the originating method's current authorization at each attempt.
+    crate::remote::check_current_request("ask")?;
     let team = {
         let agents = state.agents.lock().map_err(|e| e.to_string())?;
         let store = state.store.lock().map_err(|e| e.to_string())?;

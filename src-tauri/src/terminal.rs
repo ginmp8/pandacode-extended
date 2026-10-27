@@ -958,6 +958,36 @@ pub fn close(terms: &Terminals, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Close only harnesses belonging to the supplied owned conversations. Removing
+/// them denies new input immediately; process termination and PTY destruction
+/// happen outside the registry lock, just like an individual terminal close.
+pub(crate) fn close_harness_sessions(
+    terms: &Terminals,
+    sessions: &[String],
+) -> Result<usize, String> {
+    let removed: Vec<Terminal> = {
+        let mut registry = terms.lock().map_err(|error| error.to_string())?;
+        crate::remote::check_current_request("ask")?;
+        let sessions: HashSet<&str> = sessions.iter().map(String::as_str).collect();
+        let ids: Vec<String> = registry
+            .iter()
+            .filter_map(|(id, terminal)| {
+                terminal
+                    .harness_session
+                    .as_deref()
+                    .filter(|session| sessions.contains(session))
+                    .map(|_| id.clone())
+            })
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| registry.remove(&id))
+            .collect()
+    };
+    let count = removed.len();
+    drop(removed);
+    Ok(count)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1405,6 +1435,131 @@ mod tests {
             shell.exited.recv_timeout(Duration::from_secs(2)).is_ok(),
             "Shell ignoring SIGHUP survived terminal close"
         );
+    }
+
+    #[test]
+    fn bot_pause_closes_only_owned_harnesses_and_drops_them_outside_registry_lock() {
+        let (state, project) = crate::concurrent_task_tests::test_state();
+        let root =
+            std::env::temp_dir().join(format!("pandacode-bot-console-{}", crate::storage::id()));
+        let (owned, linked, other) = {
+            let store = state.store.lock().unwrap();
+            let bot = crate::bots::create(
+                &store,
+                &crate::bots::BotInput {
+                    name: "Console owner".into(),
+                    provider: "codex".into(),
+                    model: "default".into(),
+                    mode: "ask".into(),
+                    ..Default::default()
+                },
+                &root,
+            )
+            .unwrap();
+            crate::bots::thread_session(&store, &bot, "desktop", "desktop", "Desktop").unwrap();
+            crate::bots::thread_session(&store, &bot, "schedule", "schedule", "Scheduled").unwrap();
+            let linked = store
+                .create_session(&project, "codex", "default", "ask")
+                .unwrap();
+            crate::bots::tasks::assign(&store, &linked.id, Some(&bot.id)).unwrap();
+            let other = store
+                .create_session(&project, "codex", "default", "ask")
+                .unwrap();
+            // Use exactly the ownership query used by stop_bot, not project or
+            // profile membership: an ordinary linked task remains independent.
+            let owned: Vec<String> = crate::bots::threads(&store, &bot.id)
+                .unwrap()
+                .into_iter()
+                .map(|thread| thread.session_id)
+                .collect();
+            (owned, linked.id, other.id)
+        };
+        assert_eq!(owned.len(), 2);
+        let terms: Terminals = Arc::new(Mutex::new(HashMap::new()));
+        let mut fixtures = Vec::new();
+        for (id, session) in [
+            ("owned-desktop", Some(owned[0].clone())),
+            ("owned-scheduled", Some(owned[1].clone())),
+            ("ordinary-shell", None),
+            ("linked-task", Some(linked.clone())),
+            ("other-task", Some(other.clone())),
+        ] {
+            let mut fixture = shell("trap '' HUP; printf ready; while read line; do :; done");
+            let mut terminal = fixture.terms.lock().unwrap().remove(&fixture.id).unwrap();
+            terminal.harness_session = session;
+            terms.lock().unwrap().insert(id.to_owned(), terminal);
+            fixture.terms = terms.clone();
+            fixture.id = id.to_owned();
+            fixtures.push(fixture);
+        }
+
+        struct DropProbe {
+            writer: Box<dyn Write + Send>,
+            terms: std::sync::Weak<Mutex<HashMap<String, Terminal>>>,
+            report: mpsc::Sender<bool>,
+        }
+        impl Write for DropProbe {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writer.write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.writer.flush()
+            }
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let unlocked = self
+                    .terms
+                    .upgrade()
+                    .is_some_and(|terms| terms.try_lock().is_ok());
+                let _ = self.report.send(unlocked);
+            }
+        }
+        let (drop_tx, drop_rx) = mpsc::channel();
+        {
+            let registry = terms.lock().unwrap();
+            let mut writer = registry["owned-desktop"].writer.lock().unwrap();
+            let inner = std::mem::replace(&mut *writer, Box::new(std::io::sink()));
+            *writer = Box::new(DropProbe {
+                writer: inner,
+                terms: Arc::downgrade(&terms),
+                report: drop_tx,
+            });
+        }
+        assert_eq!(close_harness_sessions(&terms, &owned).unwrap(), 2);
+        assert!(
+            drop_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            "terminal destruction must not hold the registry lock"
+        );
+        for fixture in &fixtures[..2] {
+            assert!(write(&terms, &fixture.id, "more input\n").is_err());
+            fixture
+                .exited
+                .recv_timeout(Duration::from_secs(3))
+                .expect("owned harness survived Pause");
+        }
+        assert!(!harness_running(&terms, &owned[0]).unwrap());
+        assert!(!harness_running(&terms, &owned[1]).unwrap());
+        for fixture in &fixtures[2..] {
+            assert!(terms.lock().unwrap().contains_key(&fixture.id));
+            assert!(write(&terms, &fixture.id, "still available\n").is_ok());
+            assert!(matches!(
+                fixture.exited.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        }
+        assert!(harness_running(&terms, &linked).unwrap());
+        assert!(harness_running(&terms, &other).unwrap());
+        assert_eq!(
+            close_harness_sessions(&terms, &owned).unwrap(),
+            0,
+            "repeated stop is idempotent"
+        );
+        for fixture in &fixtures[2..] {
+            close(&terms, &fixture.id).unwrap();
+            fixture.exited.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

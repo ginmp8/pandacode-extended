@@ -57,32 +57,37 @@ fn ip_addr() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*|\b(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}\b").unwrap())
 }
 
-/// Absolute paths (Unix after a space, quote, bracket or `=`, or Windows drive paths) left
-/// once the home directory became `~`.
+/// Quoted paths can contain punctuation that also separates diagnostic fields.
+/// Remove the whole quoted value before considering unquoted paths.
+fn quoted_path() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#""(?:/|~[/\\]|[A-Za-z]:[/\\]|\\\\|file:///)[^"\r\n]*"|'(?:/|~[/\\]|[A-Za-z]:[/\\]|\\\\|file:///)[^'\r\n]*'"#).unwrap())
+}
+
+/// Unix, abbreviated-home, Windows/UNC and file-URL paths. Without quotes,
+/// punctuation and spaces may be part of the path, so redact the remaining
+/// line. A double-slash path must not mistake a URL's `://` for a filesystem.
 fn abs_path() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(^|[\s"'(\[=])(?:/[^\s"')\]]+|[A-Za-z]:\\[^\s"')\]]*)"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?m)(^|[\s"'(\[=:])(?:/[^/\s]|~[/\\]|[A-Za-z]:[/\\]|\\\\|file:///)[^\r\n]*|(^|[\s"'(\[=])//[^\r\n]+"#).unwrap())
 }
 
-fn home() -> Option<String> {
-    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok().map(|h| h.trim_end_matches(['/', '\\']).to_owned()).filter(|h| h.len() > 1)
-}
-
-/// Secrets, URL queries, IP addresses and absolute paths out of `text`; the home dir becomes `~`.
-fn redact(text: &str, home: Option<&str>) -> String {
+/// Secrets, URL queries, IP addresses and complete filesystem paths out of `text`.
+fn redact(text: &str) -> String {
     let mut out = text.to_owned();
-    if let Some(home) = home {
-        out = out.replace(home, "~");
-    }
     out = query().replace_all(&out, "$1").into_owned();
+    // Remove paths before token/blob replacement can split a long path and
+    // strand its later (possibly space-containing) components in the report.
+    out = quoted_path().replace_all(&out, "\"[path]\"").into_owned();
+    out = abs_path().replace_all(&out, "$1$2[path]").into_owned();
     out = secret_pairs().replace_all(&out, "$1$2[redacted]").into_owned();
     out = long_blob().replace_all(&out, "[redacted]").into_owned();
-    out = abs_path().replace_all(&out, "$1[path]").into_owned();
     ip_addr().replace_all(&out, "[ip]").into_owned()
 }
 
-fn scrub_with(text: &str, home: Option<&str>) -> String {
-    let mut out = redact(text, home);
+/// Removes tokens, keys, nonces, URL queries, IP addresses and paths from text, cut to [`DETAIL_MAX`].
+pub(crate) fn scrub(text: &str) -> String {
+    let mut out = redact(text);
     let mut end = out.len().min(DETAIL_MAX);
     while !out.is_char_boundary(end) {
         end -= 1;
@@ -92,11 +97,6 @@ fn scrub_with(text: &str, home: Option<&str>) -> String {
         out.push('…');
     }
     out
-}
-
-/// Removes tokens, keys, nonces, URL queries, IP addresses and paths from text, cut to [`DETAIL_MAX`].
-pub(crate) fn scrub(text: &str) -> String {
-    scrub_with(text, home().as_deref())
 }
 
 fn record_at(log: &mut Log, at: i64, kind: &str, detail: String) {
@@ -245,7 +245,7 @@ fn report(snapshot: &Value) -> String {
         out += &format!("  {} {} {}\n", e["at"].as_i64().map(clock).unwrap_or_default(), text(&e["kind"]), text(&e["detail"]));
     }
     // Not `scrub`: that cuts to one detail's length.
-    redact(&out, home().as_deref())
+    redact(&out)
 }
 
 #[tauri::command]
@@ -277,23 +277,24 @@ mod tests {
 
     #[test]
     fn scrubs_secrets_paths_and_queries() {
-        let s = scrub_with("open wss://relay.example.com/ws?token=abc123&x=1 token=hunter2 Authorization: Bearer abc.def nonce \"zzzz\" in /Users/me/proj", Some("/Users/me"));
+        let s = scrub("open wss://relay.example.com/ws?token=abc123&x=1 token=hunter2 Authorization: Bearer abc.def nonce \"zzzz\" in /Users/me/proj");
         assert!(!s.contains("abc123") && !s.contains("hunter2") && !s.contains("abc.def") && !s.contains("zzzz"), "{s}");
-        assert!(s.contains("~/proj"), "{s}");
+        assert!(!s.contains("/Users") && !s.contains("~/proj") && !s.contains("proj"), "{s}");
+        assert!(s.contains("[path]"), "{s}");
         assert!(s.contains("wss://relay.example.com/ws"), "{s}");
-        let blob = scrub_with("key ghp_abcdefghijklmnopqrstuv and eyJhbGciOi.eyJzdWIi.sig plus AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
+        let blob = scrub("key ghp_abcdefghijklmnopqrstuv and eyJhbGciOi.eyJzdWIi.sig plus AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
         assert!(!blob.contains("ghp_") && !blob.contains("eyJ") && !blob.contains("AAAAAAAA"), "{blob}");
-        assert!(scrub_with(&"é".repeat(1000), None).chars().count() <= DETAIL_MAX + 1);
+        assert!(scrub(&"é".repeat(1000)).chars().count() <= DETAIL_MAX + 1);
     }
 
     #[test]
     fn scrubs_addresses_and_paths_outside_home() {
-        let s = scrub_with("a1 direct via 192.168.1.20:4000, b2 via [fe80::1c2a:3b]:4000 and 2001:db8:0:0:1:0:0:1; opened /Volumes/Work/proj and C:\\Data\\x at 12:00:00.000", Some("/Users/me"));
+        let s = scrub("at 12:00:00.000 a1 direct via 192.168.1.20:4000, b2 via [fe80::1c2a:3b]:4000 and 2001:db8:0:0:1:0:0:1; opened /Volumes/Work/proj and C:\\Data\\x");
         for leaked in ["192.168", "fe80", "2001:db8", "/Volumes", "Data"] {
             assert!(!s.contains(leaked), "{leaked} in {s}");
         }
         assert!(s.contains("[ip]:4000") && s.contains("12:00:00.000") && s.contains("[path]"), "{s}");
-        assert!(scrub_with("wss://relay.example.com/ws remote::route ~/proj", Some("/Users/me")).contains("wss://relay.example.com/ws remote::route ~/proj"));
+        assert_eq!(scrub("wss://relay.example.com/ws remote::route ~/proj"), "wss://relay.example.com/ws remote::route [path]");
         let mut l = Log::default();
         record_at(&mut l, 1, "route.up", "a1 direct via 10.0.0.7:4000".into());
         assert_eq!(l.events[0].detail, "a1 direct via [ip]:4000");
@@ -312,6 +313,51 @@ mod tests {
         let shown = serde_json::to_string(&routes).unwrap();
         assert!(shown.contains("[redacted]"));
         assert!(!shown.contains("192.168") && !shown.contains("10.1.1") && !shown.contains("/Users"), "{shown}");
+    }
+
+    #[test]
+    fn complete_home_paths_are_removed_from_logs_ipc_and_export() {
+        let paths = [
+            "/Users/me/customer-secret/project",
+            "~/customer-secret/project",
+            "/Users/me/client name/contrato secreto.txt",
+            "/Volumes/Área privada/cliente/file.txt",
+            r"C:\Users\me\customer-secret\project",
+            r"C:\Client Name\contrato secreto.txt",
+            r"\\private-server\customer-secret\project",
+            "file:///Users/me/customer-secret/project",
+            "/Users/me/client,confidential/invoice.txt",
+            "/Users/me/client;confidential/invoice.txt",
+            r"C:\Users\me\client,confidential\invoice.txt",
+            r"C:\Users\me\client;confidential\invoice.txt",
+            "//private-server/customer-secret/project",
+        ];
+        for path in paths {
+            let detail = format!("could not open \"{path}\"; connection failed");
+            let scrubbed = scrub(&detail);
+            assert!(scrubbed.contains("[path]") && scrubbed.contains("connection failed"), "{scrubbed}");
+            for private in ["customer-secret", "client name", "contrato", "Área privada", "Client Name", "private-server", "confidential", "invoice"] {
+                assert!(!scrubbed.contains(private), "{private} leaked in {scrubbed}");
+            }
+            let mut log = Log::default();
+            record_at(&mut log, 1, "socket.error", detail.clone());
+            let routes = sanitized_routes(&json!([{"device":"peer","lastError":detail}]));
+            let snapshot = json!({"events":events_json(&log, SNAPSHOT_EVENTS),"routes":routes,"relay":{"lastError":log.last_error}});
+            let ipc = snapshot.to_string();
+            let exported = report(&snapshot);
+            for shown in [ipc, exported] {
+                for private in ["customer-secret", "client name", "contrato", "Área privada", "Client Name", "private-server", "confidential", "invoice"] {
+                    assert!(!shown.contains(private), "{private} leaked in {shown}");
+                }
+            }
+        }
+        let json_error = r#"{"path":"/Users/me/customer-secret/a b.txt","error":"failed"}"#;
+        assert!(!scrub(json_error).contains("customer-secret"));
+        for path in ["/Users/me/client,confidential/invoice.txt", "//private-server/customer-secret/project", r"C:\Users\me\client;confidential\invoice.txt"] {
+            assert_eq!(scrub(&format!("open {path}")), "open [path]");
+            assert_eq!(scrub(&format!("open '{path}'; connection failed")), "open \"[path]\"; connection failed");
+        }
+        assert_eq!(scrub("open /Users/me/customer secret/project\nretry wss://relay.example/ws?token=short"), "open [path]\nretry wss://relay.example/ws");
     }
 
     #[test]

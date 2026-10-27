@@ -86,12 +86,13 @@ pub(crate) fn gate(host_enabled: bool, trusted: bool, host_name: &str) -> Result
     Ok(())
 }
 
-/// Long-running preparation must recheck before it starts a new privileged
-/// action: trust or hosting can be revoked while a provider/clone is awaited.
-pub(crate) fn require_authorized(app: &tauri::AppHandle, from: &str, authenticated_key: &str) -> Result<()> {
+/// Revalidate the complete authority for this effect, including the method's
+/// scope. This also works in a blocking task, where task-local provenance is not
+/// inherited automatically.
+pub(crate) fn require_method(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
-    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())
+    super::grants::authorize(&state.dir, &inner, from, authenticated_key, method)
 }
 
 /// Authenticated request provenance survives asynchronous provider discovery but
@@ -107,9 +108,10 @@ tokio::task_local! {
     static REQUEST_ORIGIN: RequestOrigin;
 }
 
-fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: &str) -> Result<()> {
+fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str, mode: &str) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
+    super::grants::authorize(&state.dir, &inner, from, authenticated_key, method)?;
     authorize_mode(&inner, from, authenticated_key, mode)
 }
 
@@ -127,18 +129,16 @@ pub(crate) fn is_remote_request() -> bool {
 /// current mode under the ordinary agents/store admission locks.
 pub(crate) fn check_current_request(mode: &str) -> Result<()> {
     REQUEST_ORIGIN.try_with(|origin| {
-        require_mode(&origin.app, &origin.device, &origin.key, mode)?;
-        super::grants::check(&origin.app, &origin.device, &origin.method)
+        require_mode(&origin.app, &origin.device, &origin.key, &origin.method, mode)
     }).unwrap_or(Ok(()))
 }
 
 pub(crate) fn check_start_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: Option<&str>) -> Result<()> {
     let state = remote(app);
     let inner = state.lock();
-    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
+    super::grants::authorize(&state.dir, &inner, from, authenticated_key, "task.start")?;
     permissions::start_mode(mode, inner.settings.allow_full_access).map(|_| ())?;
-    drop(inner);
-    super::grants::check(app, from, "task.start")
+    Ok(())
 }
 
 const WINDOW_MS: i64 = 60_000;
@@ -610,19 +610,12 @@ pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, 
     // Pair redemption is the only permitted RPC from an unapproved device.  Its
     // current presence key must still match the key that opened this ciphertext.
     if method == super::grants::REDEEM {
-        let admission = {
-            let state = remote(app);
-            let inner = state.lock();
-            if !inner.settings.host_enabled { Err(OFF.to_owned()) }
-            else if inner.devices.iter().any(|peer| peer.id == from && !authenticated_key.is_empty() && peer.public_key == authenticated_key) { Ok(()) }
-            else { Err(untrusted(&super::config::device_name())) }
-        };
-        return Some(response(id, admission.and_then(|_| super::grants::redeem(app, from, &message["params"]))));
+        return Some(response(id, super::grants::redeem(app, from, authenticated_key, &message["params"])));
     }
     let admitted = admit(&remote(app).lock(), from, authenticated_key);
     let admitted = admitted.and_then(|full_access| {
         for method in std::iter::once(method).chain(batch_methods(method, &message["params"])) {
-            super::grants::check(app, from, method)?;
+            super::grants::check(app, from, authenticated_key, method)?;
         }
         Ok(full_access)
     });
@@ -698,7 +691,7 @@ async fn optional_pull(state: &AppState, session_id: &str) -> Result<Option<(Pat
 }
 
 async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
-    require_authorized(app, from, authenticated_key)?;
+    require_method(app, from, authenticated_key, call.method_name())?;
     let origin = RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned(), method: call.method_name().to_owned() };
     REQUEST_ORIGIN.scope(origin, async {
     match call {
@@ -1297,8 +1290,7 @@ fn watch_team_events(app: &tauri::AppHandle) {
 }
 
 async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
-    require_authorized(app, from, authenticated_key)?;
-    super::grants::check(app, from, call.method_name())?;
+    require_method(app, from, authenticated_key, call.method_name())?;
     let state = app.state::<AppState>();
     match call {
         Call::Subscribe { session_ids, after, epoch } => {
@@ -1312,7 +1304,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             .await?;
             let state = remote(app);
             let mut inner = state.lock();
-            gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
+            super::grants::authorize(&state.dir, &inner, from, authenticated_key, "subscribe")?;
             let subscriber = inner.subscribers.entry(from.to_owned()).or_default();
             // Added to, not replaced: a task started a moment ago may not be in the list yet.
             // An expired (or overgrown) subscription starts over.
@@ -1456,7 +1448,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 Ok(team_states(&store.db, &[id.as_str()])?.get(&id).is_some_and(TeamState::active))
             })
             .await?;
-            require_authorized(app, from, authenticated_key)?;
+            require_method(app, from, authenticated_key, "task.stop")?;
             if team_active {
                 crate::architect::architect_control(app.clone(), state, session_id, "stop".into()).await?;
             } else {
@@ -1480,7 +1472,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             if let Some((provider, _)) = &model {
                 start::require_installed(provider).await?;
             }
-            require_authorized(app, from, authenticated_key)?;
+            require_method(app, from, authenticated_key, "task.configure")?;
             if let Some(mode) = mode {
                 crate::update_session(app.clone(), state.clone(), session_id.clone(), None, None, None, Some(mode)).await?;
             }
@@ -1496,13 +1488,14 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
         Call::Approve { session_id, request_id, approve } => {
             let task = local_task(&state, &session_id).await?;
             if approve { check_current_request(&task.mode)?; }
-            else { require_authorized(app, from, authenticated_key)?; }
+            else { require_method(app, from, authenticated_key, "approval.respond")?; }
             crate::respond_approval(app.clone(), state, session_id.clone(), request_id.clone(), approve).await?;
             answered(app, session_id, "approval_cancelled", request_id);
             Ok(json!({}))
         }
         Call::Answer { session_id, request_id, response } => {
             local_task(&state, &session_id).await?;
+            require_method(app, from, authenticated_key, "input.respond")?;
             crate::respond_user_input(app.clone(), state, session_id.clone(), request_id.clone(), response).await?;
             answered(app, session_id, "input_cancelled", request_id);
             Ok(json!({}))
@@ -1528,8 +1521,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             let cache_session_id = session_id.clone();
             let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
             crate::blocking(move || {
-                require_authorized(&handle, &device, &key)?;
-                let link = crate::github_pull::merge(&root, number, &method)?;
+                let link = crate::github_pull::merge_checked(&root, number, &method, || require_method(&handle, &device, &key, "task.pullMerge"))?;
                 store.lock().map_err(|e| e.to_string())?.set_task_link(&session_id, "pull", Some(&link)).map(|_| ())
             })
             .await?;
@@ -1570,9 +1562,9 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
             let store = state.store.clone();
             let (session_id, created) = tauri::async_runtime::spawn_blocking(move || {
-                require_authorized(&handle, &device, &key)?;
                 let store = store.lock().map_err(|e| e.to_string())?;
                 let bot = crate::bots::get(&store, &bot_id)?;
+                require_method(&handle, &device, &key, "bot.thread")?;
                 crate::bots::thread_session(&store, &bot, crate::bots::DESKTOP, crate::bots::DESKTOP, &format!("{} · You", bot.name))
             })
             .await
@@ -1588,26 +1580,8 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotPause { bot_id, paused } => {
-            require_authorized(app, from, authenticated_key)?;
-            if !paused {
-                let store = state.store.lock().map_err(|e| e.to_string())?;
-                check_current_request(&crate::bots::get(&store, &bot_id)?.mode)?;
-            }
-            if paused {
-                crate::bots::gateway::stop_bot(app, &bot_id).await;
-            }
-            let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
-            let store = state.store.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                require_authorized(&handle, &device, &key)?;
-                let store = store.lock().map_err(|e| e.to_string())?;
-                if !paused {
-                    require_mode(&handle, &device, &key, &crate::bots::get(&store, &bot_id)?.mode)?;
-                }
-                crate::bots::set_paused(&store, &bot_id, paused).map(|_| ())
-            })
-            .await
-            .map_err(|e| e.to_string())??;
+            require_method(app, from, authenticated_key, "bot.pause")?;
+            crate::bots::set_paused_checked(app, &bot_id, paused).await?;
             let _ = app.emit("bots-changed", ());
             Ok(json!({}))
         }
@@ -1663,7 +1637,8 @@ async fn start_once(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         tauri::async_runtime::spawn(async move {
             // A panic (or the task being dropped) below still settles the start.
             let settle = Settle(entry.clone());
-            let result = start::run_cancellable(&app, &from, &key, request, entry.cancel.clone()).await;
+            let origin = RequestOrigin { app: app.clone(), device: from.clone(), key: key.clone(), method: "task.start".into() };
+            let result = REQUEST_ORIGIN.scope(origin, start::run_cancellable(&app, &from, &key, request, entry.cancel.clone())).await;
             // Cancelled after the task was made: it must not run unseen.
             if let (true, Ok(reply)) = (entry.cancel.load(Ordering::SeqCst), &result) {
                 if let Some(session) = reply["sessionId"].as_str() {
@@ -2051,7 +2026,7 @@ async fn detect_pull(app: &tauri::AppHandle, state: &AppState, from: &str, authe
     let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
     let saved = crate::blocking(move || {
         let store = store.lock().map_err(|e| e.to_string())?;
-        require_authorized(&handle, &device, &key)?;
+        require_method(&handle, &device, &key, "task.pullDetect")?;
         if store.session(&session_id_owned)?.pull_request.is_some_and(|current| current.number == saved_link.number) {
             return Ok(false);
         }
@@ -2763,7 +2738,7 @@ pub(crate) fn frames(events: Vec<Value>) -> Vec<Vec<Value>> {
 pub(crate) fn follow(app: &tauri::AppHandle, device: &str, authenticated_key: &str, session_id: &str) -> Result<()> {
     let state = remote(app);
     let mut inner = state.lock();
-    gate(inner.settings.host_enabled, inner.authenticated(device, authenticated_key), &super::config::device_name())?;
+    super::grants::authorize(&state.dir, &inner, device, authenticated_key, "subscribe")?;
     let subscriber = inner.subscribers.entry(device.to_owned()).or_default();
     if subscriber.until.is_none_or(|until| until <= Instant::now()) {
         subscriber.until = Some(Instant::now() + SUBSCRIPTION);

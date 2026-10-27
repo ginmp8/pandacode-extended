@@ -84,6 +84,7 @@ pub(crate) fn mark(store: &Store, session_id: &str, brief: &TaskBrief) -> Result
 }
 
 pub(crate) fn check_console_context(store: &Store, task: &Session) -> Result<()> {
+    super::check_task_admission(store, task)?;
     if prepare(store, task, task.resume_id.is_none())?.is_some() {
         return Err("Send a normal message in this task to apply its bot profile before opening the harness console.".into());
     }

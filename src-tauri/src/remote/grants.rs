@@ -12,7 +12,7 @@ use crate::Result;
 use chacha20poly1305::aead::{rand_core::RngCore, OsRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::Emitter;
@@ -118,6 +118,12 @@ struct Peer {
     online: bool,
 }
 
+impl From<&super::Device> for Peer {
+    fn from(device: &super::Device) -> Self {
+        Self { id: device.id.clone(), name: device.name.clone(), platform: device.platform.clone(), fingerprint: crypto::fingerprint(&device.public_key), online: device.online }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum Verdict {
     Allow,
@@ -209,7 +215,10 @@ impl Grants {
         expires
     }
 
-    fn redeem(&mut self, peer: &Peer, input: &str, now: i64) -> Result<Scope> {
+    /// Consume a valid code without activating its grant. The cross-store
+    /// transaction below is the only place that publishes the resulting scope.
+    /// A failed commit burns the code too; the owner must issue a new one.
+    fn take_code(&mut self, peer: &Peer, input: &str, now: i64) -> Result<Scope> {
         if self.scope_of(peer) == Scope::Blocked {
             return Err(INVALID_CODE.into());
         }
@@ -229,6 +238,12 @@ impl Grants {
         let granted = self.code.take().map(|code| code.scope).unwrap_or_default();
         let current = self.scope_of(peer);
         let scope = if current.rank() >= granted.rank() { current } else { granted };
+        Ok(scope)
+    }
+
+    #[cfg(test)]
+    fn redeem(&mut self, peer: &Peer, input: &str, now: i64) -> Result<Scope> {
+        let scope = self.take_code(peer, input, now)?;
         self.set(peer, scope);
         Ok(scope)
     }
@@ -260,7 +275,6 @@ fn refusal(scope: Scope, host: &str) -> String {
 
 struct Snapshot {
     dir: PathBuf,
-    host: String,
     peers: Vec<Peer>,
 }
 
@@ -269,20 +283,17 @@ fn snapshot(app: &tauri::AppHandle) -> Snapshot {
     let state = remote(app);
     let inner = state.lock();
     let peers = inner.devices.iter().filter(|device| device.id != inner.settings.device_id).map(|device| Peer { id: device.id.clone(), name: device.name.clone(), platform: device.platform.clone(), fingerprint: crypto::fingerprint(&device.public_key), online: device.online }).collect();
-    Snapshot { dir: state.dir.clone(), host: config::device_name(), peers }
+    Snapshot { dir: state.dir.clone(), peers }
 }
 
-static GRANTS: Mutex<Option<(std::path::PathBuf, Grants)>> = Mutex::new(None);
+static GRANTS: std::sync::LazyLock<Mutex<HashMap<PathBuf, Grants>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Runs `f` on the loaded grants and saves them afterwards when it changed them.
 /// The cache is tied to the settings directory: tests and account migrations
 /// must never reuse another directory's in-memory authorization.
 fn with<R>(dir: &Path, f: impl FnOnce(&mut Grants) -> R) -> Result<R> {
     let mut guard = GRANTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.as_ref().is_none_or(|(loaded, _)| loaded.as_path() != dir) {
-        *guard = Some((dir.to_owned(), Grants::load(dir)));
-    }
-    let grants = &mut guard.as_mut().expect("grant store initialized").1;
+    let grants = guard.entry(dir.to_owned()).or_insert_with(|| Grants::load(dir));
     let original = grants.store.clone();
     let result = f(grants);
     if std::mem::take(&mut grants.dirty) {
@@ -314,27 +325,6 @@ pub(crate) fn seed_trusted(dir: &Path, settings: &config::Settings) -> Result<()
     })
 }
 
-/// Keep legacy key pinning and scoped grants consistent. A failed disk write never
-/// changes the active trust map. Revocations update the legacy gate first.
-fn sync_trust(app: &tauri::AppHandle, device: &str, scope: Scope, expected_fingerprint: Option<&str>) -> Result<()> {
-    let state = remote(app);
-    let mut inner = state.lock();
-    let mut updated = inner.settings.clone();
-    let revoke = matches!(scope, Scope::Pending | Scope::Blocked);
-    if revoke {
-        updated.trusted.remove(device);
-    } else {
-        if scope == Scope::Full && !inner.settings.allow_full_access {
-            return Err("Remote Full access is disabled on this computer.".into());
-        }
-        let key = inner.devices.iter().find(|peer| peer.id == device)
-            .map(|peer| peer.public_key.clone()).ok_or(super::UNKNOWN_DEVICE)?;
-        super::verified_fingerprint(&key, expected_fingerprint)?;
-        updated.trusted.insert(device.to_owned(), key);
-    }
-    config::update_access(&state.dir, &mut inner.settings, updated, revoke)
-}
-
 /// Remove a revoked legacy trust grant from the independent scoped store before
 /// lifting the durability fence. Trusting the same key again is not a regrant.
 pub(crate) fn revoke_legacy_trust(dir: &Path, device: &str) -> Result<()> {
@@ -349,6 +339,9 @@ pub(crate) fn revoke_legacy_trust(dir: &Path, device: &str) -> Result<()> {
 /// Disabling the local Full switch must not leave reusable Full grants on disk.
 pub(crate) fn downgrade_full_access(dir: &Path) -> Result<()> {
     with(dir, |grants| {
+        if grants.code.as_ref().is_some_and(|code| code.scope == Scope::Full) {
+            grants.code = None;
+        }
         for entry in grants.store.devices.values_mut() {
             if entry.scope == Scope::Full {
                 entry.scope = Scope::Control;
@@ -392,56 +385,160 @@ fn emit_grants(app: &tauri::AppHandle) {
     if let Ok(list) = list { let _ = app.emit("remote://device-grants", list); }
 }
 
-/// Ok when `device` may call `method` on this host. Locks the remote state itself: call
-/// it after `admit`'s guard is dropped, for a batch also once per inner method.
-pub(crate) fn check(app: &tauri::AppHandle, device: &str, method: &str) -> Result<()> {
-    let snap = snapshot(app);
-    let peer = snap.peers.iter().find(|peer| peer.id == device).ok_or(super::UNKNOWN_DEVICE)?;
-    let verdict = with(&snap.dir, |grants| grants.decide(peer, method))?;
+fn decision(dir: &Path, inner: &super::Inner, device: &str, authenticated_key: &str, method: &str) -> Result<(Peer, Verdict)> {
+    inner.access_available(dir)?;
+    super::host::gate(inner.settings.host_enabled, inner.authenticated(device, authenticated_key), &config::device_name())?;
+    if !super::host::METHODS.contains(&method) || method == REDEEM {
+        return Err("That remote method is not available.".into());
+    }
+    if !inner.settings.allow_full_access && !Scope::Control.allows(method) {
+        return Err("Remote Full access is disabled on this computer.".into());
+    }
+    let peer = Peer::from(inner.devices.iter().find(|peer| peer.id == device && peer.public_key == authenticated_key).ok_or(super::UNKNOWN_DEVICE)?);
+    let verdict = with(dir, |grants| grants.decide(&peer, method))?;
+    Ok((peer, verdict))
+}
+
+fn allowed(verdict: &Verdict) -> Result<()> {
     match verdict {
         Verdict::Allow => Ok(()),
-        Verdict::Pending { announce } => {
-            if announce {
-                let _ = app.emit("remote://device-pending", json!({"deviceId": peer.id, "name": peer.name, "fingerprint": peer.fingerprint}));
-                emit_grants(app);
-            }
-            Err(format!("Waiting for approval on {}.", snap.host))
-        }
-        Verdict::Denied(scope) => Err(refusal(scope, &snap.host)),
+        Verdict::Pending { .. } => Err(format!("Waiting for approval on {}.", config::device_name())),
+        Verdict::Denied(scope) => Err(refusal(*scope, &config::device_name())),
     }
 }
 
-/// Host side of `pair.redeem`: the device sent the code shown here. Returns `{scope}`.
-pub(crate) fn redeem(app: &tauri::AppHandle, device: &str, params: &Value) -> Result<Value> {
-    let snap = snapshot(app);
-    let peer = snap.peers.iter().find(|peer| peer.id == device).ok_or(super::UNKNOWN_DEVICE)?;
-    let code = params["code"].as_str().filter(|code| code.len() <= 32).ok_or(INVALID_CODE)?;
-    // The local Full-access switch is an admission gate, not a post-grant warning.
-    // A revoked local switch must never leave a newly persisted Full grant behind.
-    let scope = {
+/// One authoritative decision while the caller holds Remote: original key,
+/// current presence, legacy pin, scoped grant, local Full switch and both denial
+/// fences. Remote is always acquired before GRANTS, including permission writes.
+pub(super) fn authorize(dir: &Path, inner: &super::Inner, device: &str, authenticated_key: &str, method: &str) -> Result<()> {
+    let (_, verdict) = decision(dir, inner, device, authenticated_key, method)?;
+    allowed(&verdict)
+}
+
+/// Pairing replies may be retried after the owner changes a grant. Never replay
+/// an old successful scope as though it still described current authorization.
+pub(super) fn authorize_pairing_response(dir: &Path, inner: &super::Inner, device: &str, authenticated_key: &str, response: &Value) -> Result<()> {
+    if response["ok"] != true { return Ok(()); }
+    let (peer, verdict) = decision(dir, inner, device, authenticated_key, "tasks.list")?;
+    allowed(&verdict)?;
+    let reported = response["result"]["scope"].as_str().ok_or("The pairing response has no access level.")?;
+    let reported = Scope::parse(reported)?;
+    let current = with(dir, |grants| grants.scope_of(&peer))?;
+    if reported != current || (reported == Scope::Full && !inner.settings.allow_full_access) {
+        return Err("This computer's access changed after pairing. Refresh its current access level.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn check(app: &tauri::AppHandle, device: &str, authenticated_key: &str, method: &str) -> Result<()> {
+    let (peer, verdict) = {
         let state = remote(app);
         let inner = state.lock();
-        if !inner.settings.host_enabled {
-            return Err("Remote control is disabled on this computer.".into());
+        decision(&state.dir, &inner, device, authenticated_key, method)?
+    };
+    if let Verdict::Pending { announce } = &verdict {
+        if *announce {
+            let _ = app.emit("remote://device-pending", json!({"deviceId": peer.id, "name": peer.name, "fingerprint": peer.fingerprint}));
+            emit_grants(app);
         }
-        // Serialize the Full-access switch and the grant write under Remote's lock.
-        // Also refuse a key that rotated after the initial pair.redeem admission.
-        if !inner.devices.iter().any(|seen| seen.id == device && crypto::fingerprint(&seen.public_key) == peer.fingerprint && !peer.fingerprint.is_empty()) {
+    }
+    allowed(&verdict)
+}
+
+/// Both local approvals and code redemption use this fenced transaction. A
+/// scope written to disk is never effective until the matching trust write and
+/// fence removal succeed. On any failure all access stays denied in memory.
+fn set_scope_with(
+    dir: &Path,
+    inner: &mut super::Inner,
+    peer: &Peer,
+    scope: Scope,
+    key: Option<&str>,
+    mut save_settings: impl FnMut(&Path, &config::Settings) -> Result<()>,
+) -> Result<()> {
+    let earlier_lockdown = inner.access_locked_down || config::locked_down(dir);
+    let approving = matches!(scope, Scope::View | Scope::Control | Scope::Full);
+    if approving {
+        inner.access_available(dir)?;
+        if scope == Scope::Full && !inner.settings.allow_full_access {
+            return Err("Remote Full access is disabled on this computer.".into());
+        }
+        let key = key.ok_or(super::UNKNOWN_DEVICE)?;
+        super::verified_fingerprint(key, Some(&peer.fingerprint))?;
+        if !inner.devices.iter().any(|device| device.id == peer.id && device.public_key == key) {
             return Err("The device key changed during pairing. Compare the new fingerprint.".into());
         }
-        let full_enabled = inner.settings.allow_full_access;
-        with(&snap.dir, |grants| {
-            let current = grants.scope_of(peer);
-            let requested = grants.code.as_ref().map(|code| code.scope).unwrap_or_default();
-            if !full_enabled && (current == Scope::Full || requested == Scope::Full) {
-                return Err("Remote Full access is disabled on this computer.".to_owned());
-            }
-            grants.redeem(peer, code, chrono::Utc::now().timestamp())
-        })??
+    }
+    let mut active = inner.settings.clone();
+    active.trusted.remove(&peer.id);
+    inner.settings = active.clone();
+    inner.access_locked_down = true;
+    inner.subscribers.remove(&peer.id);
+    inner.uploads.forget(&peer.id);
+    inner.catalog.forget(&peer.id);
+    inner.keys.remove(&peer.id);
+    inner.fail_pending(Some(&peer.id), "This computer's Connect permissions changed.");
+    let result = (|| {
+        config::begin_lockdown(dir)?;
+        save_settings(dir, &active)?;
+        with(dir, |grants| grants.set(peer, scope))?;
+        if approving {
+            active.trusted.insert(peer.id.clone(), key.ok_or(super::UNKNOWN_DEVICE)?.to_owned());
+            save_settings(dir, &active)?;
+        }
+        if !earlier_lockdown { config::end_lockdown(dir)?; }
+        Ok(())
+    })();
+    if result.is_err() {
+        inner.deny_access();
+        let _ = config::begin_lockdown(dir);
+    } else {
+        inner.settings = active;
+        inner.access_locked_down = earlier_lockdown;
+    }
+    result
+}
+
+fn redeem_with(
+    dir: &Path,
+    inner: &mut super::Inner,
+    device: &str,
+    authenticated_key: &str,
+    code: &str,
+    now: i64,
+    save_settings: impl FnMut(&Path, &config::Settings) -> Result<()>,
+) -> Result<(Peer, Scope)> {
+    inner.access_available(dir)?;
+    if !inner.settings.host_enabled { return Err(super::host::OFF.into()); }
+    let device = inner.devices.iter().find(|peer| peer.id == device && !authenticated_key.is_empty() && peer.public_key == authenticated_key).ok_or("The device key changed during pairing. Compare the new fingerprint.")?;
+    let peer = Peer::from(device);
+    super::verified_fingerprint(authenticated_key, Some(&peer.fingerprint))?;
+    let scope = with(dir, |grants| {
+        let current = grants.scope_of(&peer);
+        let requested = grants.code.as_ref().map(|code| code.scope).unwrap_or_default();
+        if !inner.settings.allow_full_access && (current == Scope::Full || requested == Scope::Full) {
+            return Err("Remote Full access is disabled on this computer.".to_owned());
+        }
+        grants.take_code(&peer, code, now)
+    })??;
+    set_scope_with(dir, inner, &peer, scope, Some(authenticated_key), save_settings)?;
+    Ok((peer, scope))
+}
+
+/// Host side of `pair.redeem`. The key that opened the original ciphertext is
+/// carried through the entire commit, under the same lock as presence/revokes.
+pub(crate) fn redeem(app: &tauri::AppHandle, device: &str, authenticated_key: &str, params: &Value) -> Result<Value> {
+    let code = params["code"].as_str().filter(|code| code.len() <= 32).ok_or(INVALID_CODE)?;
+    let result = {
+        let state = remote(app);
+        let mut inner = state.lock();
+        redeem_with(&state.dir, &mut inner, device, authenticated_key, code, chrono::Utc::now().timestamp(), config::save)
     };
-    sync_trust(app, device, scope, Some(&peer.fingerprint))?;
-    let _ = app.emit("remote://pair-code-used", json!({"deviceId": peer.id, "name": peer.name, "scope": scope.name()}));
+    super::emit_status(app);
+    super::emit_presence(app);
     emit_grants(app);
+    let (peer, scope) = result?;
+    let _ = app.emit("remote://pair-code-used", json!({"deviceId": peer.id, "name": peer.name, "scope": scope.name()}));
     Ok(json!({"scope": scope.name()}))
 }
 
@@ -462,13 +559,6 @@ pub async fn remote_device_grants(app: tauri::AppHandle) -> Result<Value> {
     Ok(Value::Array(with(&snap.dir, |grants| grants.view(&snap.peers))?))
 }
 
-fn ensure_full_is_enabled(app: &tauri::AppHandle, scope: Scope) -> Result<()> {
-    if scope == Scope::Full && !remote(app).lock().settings.allow_full_access {
-        return Err("Enable remote Full access locally before granting a device Full access.".into());
-    }
-    Ok(())
-}
-
 /// Sets a device's scope; `pending` devices become usable once given another scope.
 #[tauri::command]
 pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, scope: String, expected_fingerprint: Option<String>) -> Result<()> {
@@ -480,20 +570,13 @@ pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, s
     let result = {
         let mut inner = state.lock();
         if device_id == inner.settings.device_id { return Err("That is this computer.".into()); }
-        let earlier_lockdown = config::locked_down(&state.dir);
-        if earlier_lockdown && matches!(scope, Scope::View | Scope::Control | Scope::Full) {
-            return Err("Connect permissions remain locked after an interrupted revocation. Sign out locally before approving another device.".into());
-        }
-        if scope == Scope::Full && !inner.settings.allow_full_access {
-            return Err("Enable remote Full access locally before granting a device Full access.".into());
-        }
         let device = inner.devices.iter().find(|peer| peer.id == device_id).cloned();
         let approving = matches!(scope, Scope::View | Scope::Control | Scope::Full);
         let peer = if let Some(device) = &device {
             if approving {
                 super::verified_fingerprint(&device.public_key, expected_fingerprint.as_deref())?;
             }
-            Peer { id: device.id.clone(), name: device.name.clone(), platform: device.platform.clone(), fingerprint: crypto::fingerprint(&device.public_key), online: device.online }
+            Peer::from(device)
         } else if approving {
             return Err(super::UNKNOWN_DEVICE.into());
         } else {
@@ -501,32 +584,10 @@ pub async fn remote_set_device_grant(app: tauri::AppHandle, device_id: String, s
             // rotated its key. A blocked entry applies to any key for this id.
             Peer { id: device_id.clone(), name: String::new(), platform: String::new(), fingerprint: String::new(), online: false }
         };
-        let mut denied = inner.settings.clone();
-        denied.trusted.remove(&device_id);
-        inner.settings = denied.clone();
-        inner.subscribers.remove(&device_id);
-        inner.uploads.forget(&device_id);
-        inner.catalog.forget(&device_id);
-        inner.keys.remove(&device_id);
-        // Two-file transaction: the denial marker and the legacy trust removal
-        // commit before any scoped grant. On failure, live access remains denied;
-        // after a crash, the marker keeps the next boot denied.
-        config::begin_lockdown(&state.dir)?;
-        config::save(&state.dir, &denied)?;
-        with(&state.dir, |grants| grants.set(&peer, scope))?;
-        if approving {
-            let mut active = denied.clone();
-            let key = device.as_ref().map(|device| device.public_key.clone()).ok_or(super::UNKNOWN_DEVICE)?;
-            active.trusted.insert(device_id.clone(), key);
-            config::save(&state.dir, &active)?;
-            config::end_lockdown(&state.dir)?;
-            inner.settings = active;
-        } else if !earlier_lockdown {
-            // A denial must not clear a fence left by another interrupted revoke.
-            config::end_lockdown(&state.dir)?;
-        }
-        Ok(())
+        set_scope_with(&state.dir, &mut inner, &peer, scope, device.as_ref().map(|device| device.public_key.as_str()), config::save)
     };
+    super::emit_status(&app);
+    super::emit_presence(&app);
     emit_grants(&app);
     result
 }
@@ -539,10 +600,16 @@ pub async fn remote_pair_code(app: tauri::AppHandle, scope: String) -> Result<Va
     if !matches!(scope, Scope::View | Scope::Control | Scope::Full) {
         return Err("A pairing code can give view, control or full access.".into());
     }
-    ensure_full_is_enabled(&app, scope)?;
-    let snap = snapshot(&app);
     let (digits, now) = (random_code(), chrono::Utc::now().timestamp());
-    let expires = with(&snap.dir, |grants| grants.new_code(scope, digits.clone(), now))?;
+    let expires = {
+        let state = remote(&app);
+        let inner = state.lock();
+        inner.access_available(&state.dir)?;
+        if scope == Scope::Full && !inner.settings.allow_full_access {
+            return Err("Enable remote Full access locally before granting a device Full access.".into());
+        }
+        with(&state.dir, |grants| grants.new_code(scope, digits.clone(), now))?
+    };
     Ok(json!({"code": digits, "scope": scope.name(), "expiresAt": expires * 1000}))
 }
 
@@ -583,6 +650,288 @@ mod tests {
         let peer = peer(id, fingerprint);
         grants.set(&peer, scope);
         peer
+    }
+
+    struct AccessFixture {
+        dir: PathBuf,
+        inner: super::super::Inner,
+        key: String,
+        peer: Peer,
+    }
+
+    impl AccessFixture {
+        fn new(scope: Scope) -> Self {
+            let dir = std::env::temp_dir().join(format!("pandacode-connect-access-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let key = crypto::public_key(&crypto::generate());
+            let device = super::super::Device { id: "peer".into(), name: "Peer".into(), platform: "test".into(), public_key: key.clone(), host: true, online: true, last_seen: Value::Null };
+            let peer = Peer::from(&device);
+            let mut settings = config::Settings { device_id: uuid::Uuid::new_v4().to_string(), host_enabled: true, allow_full_access: true, grants_scoped: true, ..Default::default() };
+            settings.trusted.insert(peer.id.clone(), key.clone());
+            config::save(&dir, &settings).unwrap();
+            with(&dir, |grants| grants.set(&peer, scope)).unwrap();
+            Self { dir, inner: super::super::Inner { settings, devices: vec![device], ..Default::default() }, key, peer }
+        }
+
+        fn code(&self, scope: Scope) {
+            with(&self.dir, |grants| grants.new_code(scope, "314159".into(), 1_000)).unwrap();
+        }
+
+        fn assert_denied(&self) {
+            for method in super::super::host::METHODS.into_iter().filter(|method| *method != REDEEM) {
+                assert!(authorize(&self.dir, &self.inner, "peer", &self.key, method).is_err(), "{method} remained authorized");
+            }
+            assert!(!self.inner.authenticated("peer", &self.key));
+            assert!(!self.inner.allows_incoming("peer", &self.key, "event", None));
+            assert!(!self.inner.allows_incoming("peer", &self.key, "res", Some("old-request")));
+        }
+
+        fn assert_restart_denied(&self) {
+            let restarted = super::super::Inner { settings: config::load(&self.dir), devices: self.inner.devices.clone(), ..Default::default() };
+            for method in FULL_ONLY {
+                assert!(authorize(&self.dir, &restarted, "peer", &self.key, method).is_err(), "{method} reopened after restart");
+            }
+            assert!(restarted.settings.trusted.is_empty());
+            assert!(!restarted.settings.host_enabled);
+        }
+    }
+
+    impl Drop for AccessFixture {
+        fn drop(&mut self) {
+            GRANTS.lock().unwrap().remove(&self.dir);
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn effective_authority_requires_local_full_and_both_denial_fences() {
+        let mut fixture = AccessFixture::new(Scope::Full);
+        for method in FULL_ONLY {
+            assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, method).is_ok());
+        }
+        fixture.inner.settings.allow_full_access = false;
+        for method in FULL_ONLY {
+            assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, method).is_err(), "{method} ignored the local Full switch");
+        }
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.send").is_ok(), "the local Full gate does not remove an otherwise valid Control action");
+        fixture.inner.access_locked_down = true;
+        fixture.assert_denied();
+        fixture.inner.access_locked_down = false;
+        config::begin_lockdown(&fixture.dir).unwrap();
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "tasks.list").is_err(), "the durable fence is authoritative even before restart");
+        fixture.assert_restart_denied();
+    }
+
+    #[test]
+    fn failed_full_revocation_denies_rpc_events_and_restart_until_complete_sign_out() {
+        let mut fixture = AccessFixture::new(Scope::Full);
+        fixture.code(Scope::Full);
+        // Fail the real scoped file's advisory-lock open after remote.json has
+        // saved Full OFF. This used to restore the old cached Full grant.
+        std::fs::remove_file(fixture.dir.join("connect-grants.lock")).unwrap();
+        std::fs::create_dir(fixture.dir.join("connect-grants.lock")).unwrap();
+        let mut next = fixture.inner.settings.clone();
+        next.allow_full_access = false;
+        assert!(super::super::persist_scoped_revocation(&fixture.dir, &mut fixture.inner, next, false, downgrade_full_access).is_err());
+        assert_eq!(Grants::load(&fixture.dir).scope_of(&fixture.peer), Scope::Full, "the regression must actually retain the stale on-disk Full grant");
+        assert!(config::locked_down(&fixture.dir));
+        fixture.assert_denied();
+        fixture.assert_restart_denied();
+
+        std::fs::remove_dir(fixture.dir.join("connect-grants.lock")).unwrap();
+        // Neither another revoke nor a permission increase may lift this fence.
+        let mut next = fixture.inner.settings.clone();
+        next.host_enabled = false;
+        super::super::update_access(&fixture.dir, &mut fixture.inner, next, true).unwrap();
+        assert!(config::locked_down(&fixture.dir));
+        let mut next = fixture.inner.settings.clone();
+        next.host_enabled = true;
+        assert!(super::super::update_access(&fixture.dir, &mut fixture.inner, next, false).is_err());
+
+        let mut signed_out = fixture.inner.settings.clone();
+        signed_out.account = None;
+        signed_out.host_enabled = false;
+        signed_out.allow_full_access = false;
+        signed_out.trusted.clear();
+        super::super::persist_scoped_revocation(&fixture.dir, &mut fixture.inner, signed_out, true, clear_on_sign_out).unwrap();
+        assert!(!config::locked_down(&fixture.dir) && !fixture.inner.access_locked_down);
+        assert_eq!(Grants::load(&fixture.dir).scope_of(&fixture.peer), Scope::Pending);
+        assert!(!fixture.inner.settings.host_enabled && fixture.inner.settings.trusted.is_empty());
+    }
+
+    #[test]
+    fn pairing_failure_at_either_settings_write_never_activates_the_new_grant() {
+        for fail_at in [1, 2] {
+            let mut fixture = AccessFixture::new(Scope::Control);
+            fixture.code(Scope::Full);
+            let mut writes = 0;
+            let result = redeem_with(&fixture.dir, &mut fixture.inner, "peer", &fixture.key, "314159", 1_001, |dir, settings| {
+                writes += 1;
+                if writes == fail_at { std::fs::create_dir(dir.join("remote.json.tmp")).unwrap(); }
+                config::save(dir, settings)
+            });
+            assert!(result.is_err(), "write {fail_at} should fail");
+            assert_eq!(writes, fail_at);
+            assert!(config::locked_down(&fixture.dir));
+            assert!(with(&fixture.dir, |grants| grants.code.is_none()).unwrap(), "an attempted commit consumes the code even when persistence fails");
+            assert_eq!(Grants::load(&fixture.dir).scope_of(&fixture.peer), if fail_at == 1 { Scope::Control } else { Scope::Full });
+            fixture.assert_denied();
+            fixture.assert_restart_denied();
+        }
+    }
+
+    #[test]
+    fn pairing_scoped_write_and_fence_clear_failures_remain_denied() {
+        for fail_scopes in [true, false] {
+            let mut fixture = AccessFixture::new(Scope::Control);
+            fixture.code(Scope::Full);
+            if fail_scopes {
+                std::fs::remove_file(fixture.dir.join("connect-grants.lock")).unwrap();
+                std::fs::create_dir(fixture.dir.join("connect-grants.lock")).unwrap();
+            }
+            let mut writes = 0;
+            let result = redeem_with(&fixture.dir, &mut fixture.inner, "peer", &fixture.key, "314159", 1_001, |dir, settings| {
+                writes += 1;
+                config::save(dir, settings)?;
+                if !fail_scopes && writes == 2 {
+                    std::fs::remove_file(dir.join("connect-access-lockdown")).unwrap();
+                    std::fs::create_dir(dir.join("connect-access-lockdown")).unwrap();
+                }
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert!(config::locked_down(&fixture.dir));
+            fixture.assert_denied();
+            fixture.assert_restart_denied();
+        }
+    }
+
+    #[test]
+    fn pairing_binds_the_ciphertext_key_and_invalid_attempts_do_not_revoke_trust() {
+        let mut fixture = AccessFixture::new(Scope::Control);
+        fixture.code(Scope::Full);
+        assert!(redeem_with(&fixture.dir, &mut fixture.inner, "peer", &fixture.key, "000000", 1_001, config::save).is_err());
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.send").is_ok());
+        assert!(!config::locked_down(&fixture.dir));
+        let replacement = crypto::public_key(&crypto::generate());
+        fixture.inner.devices[0].public_key = replacement.clone();
+        assert!(redeem_with(&fixture.dir, &mut fixture.inner, "peer", &fixture.key, "314159", 1_001, config::save).is_err(), "a queued old-key request cannot approve the new presence key");
+        assert!(with(&fixture.dir, |grants| grants.code.is_some()).unwrap());
+        assert!(authorize(&fixture.dir, &fixture.inner, "peer", &replacement, "task.send").is_err());
+        let stale_peer = fixture.peer.clone();
+        assert!(set_scope_with(&fixture.dir, &mut fixture.inner, &stale_peer, Scope::Full, Some(&replacement), config::save).is_err(), "a stale displayed fingerprint cannot approve a rotated key");
+    }
+
+    #[test]
+    fn concurrent_pairing_redemptions_commit_only_once() {
+        let fixture = AccessFixture::new(Scope::Control);
+        fixture.code(Scope::Full);
+        let state = std::sync::Mutex::new(super::super::Inner { settings: fixture.inner.settings.clone(), devices: fixture.inner.devices.clone(), ..Default::default() });
+        let ready = std::sync::Barrier::new(2);
+        let (dir, key) = (&fixture.dir, &fixture.key);
+        let results = std::thread::scope(|threads| {
+            let calls: Vec<_> = (0..2).map(|_| threads.spawn(|| {
+                ready.wait();
+                redeem_with(dir, &mut state.lock().unwrap(), "peer", key, "314159", 1_001, config::save).is_ok()
+            })).collect();
+            calls.into_iter().map(|thread| thread.join().unwrap()).filter(|ok| *ok).count()
+        });
+        assert_eq!(results, 1);
+        assert_eq!(Grants::load(&fixture.dir).scope_of(&fixture.peer), Scope::Full);
+        assert!(authorize(&fixture.dir, &state.lock().unwrap(), "peer", &fixture.key, "task.pullMerge").is_ok());
+        assert!(with(&fixture.dir, |grants| grants.code.is_none()).unwrap());
+    }
+
+    #[test]
+    fn pairing_responses_do_not_replay_an_obsolete_successful_scope() {
+        for scope in [Scope::Control, Scope::View, Scope::Pending, Scope::Blocked] {
+            let mut fixture = AccessFixture::new(Scope::Full);
+            let response = json!({"type":"res", "id":"pair-request", "ok":true, "result":{"scope":"full"}});
+            assert!(authorize_pairing_response(&fixture.dir, &fixture.inner, "peer", &fixture.key, &response).is_ok());
+            set_scope_with(&fixture.dir, &mut fixture.inner, &fixture.peer, scope, Some(&fixture.key), config::save).unwrap();
+            assert!(authorize_pairing_response(&fixture.dir, &fixture.inner, "peer", &fixture.key, &response).is_err(), "{scope:?} must not announce the previous Full grant");
+        }
+        let mut fixture = AccessFixture::new(Scope::Full);
+        let response = json!({"ok":true, "result":{"scope":"full"}});
+        fixture.inner.settings.allow_full_access = false;
+        assert!(authorize_pairing_response(&fixture.dir, &fixture.inner, "peer", &fixture.key, &response).is_err());
+        assert!(authorize_pairing_response(&fixture.dir, &fixture.inner, "peer", &fixture.key, &json!({"ok":false,"error":INVALID_CODE})).is_ok(), "replaying a refusal never advertises authority");
+    }
+
+    #[test]
+    fn unwritable_denial_fence_still_locks_the_running_process() {
+        let mut fixture = AccessFixture::new(Scope::Full);
+        let moved = fixture.dir.with_extension("unavailable");
+        std::fs::rename(&fixture.dir, &moved).unwrap();
+        let mut next = fixture.inner.settings.clone();
+        next.allow_full_access = false;
+        let result = super::super::persist_scoped_revocation(&fixture.dir, &mut fixture.inner, next, false, downgrade_full_access);
+        std::fs::rename(&moved, &fixture.dir).unwrap();
+        assert!(result.is_err(), "no durable-revocation success is claimed when storage is unavailable");
+        assert!(!config::locked_down(&fixture.dir), "this scenario must exercise the in-memory fence independently");
+        fixture.assert_denied();
+        let mut next = fixture.inner.settings.clone();
+        next.allow_full_access = true;
+        assert!(super::super::update_access(&fixture.dir, &mut fixture.inner, next, false).is_err());
+    }
+
+    #[test]
+    fn pull_merge_rechecks_real_authority_after_delayed_lookup() {
+        for change in ["control", "pending", "blocked", "full-off", "host-off", "key-rotation", "lockdown"] {
+            let fixture = AccessFixture::new(Scope::Full);
+            let state = std::sync::Mutex::new(super::super::Inner { settings: fixture.inner.settings.clone(), devices: fixture.inner.devices.clone(), ..Default::default() });
+            let effects = std::sync::atomic::AtomicUsize::new(0);
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            std::thread::scope(|threads| {
+                let (dir, key, state_ref, effects_ref) = (&fixture.dir, &fixture.key, &state, &effects);
+                let pending = threads.spawn(move || crate::github_pull::merge_after_lookup(42, "squash", || {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                    crate::github_pull::parse_detail(&json!({"number":42,"state":"OPEN","mergeable":"MERGEABLE","headRefOid":"verified-head"}))
+                }, || authorize(dir, &state_ref.lock().unwrap(), "peer", key, "task.pullMerge"), |_, _| {
+                    effects_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }));
+                entered_rx.recv().unwrap();
+                {
+                    let mut inner = state.lock().unwrap();
+                    match change {
+                        "control" | "pending" | "blocked" => set_scope_with(&fixture.dir, &mut inner, &fixture.peer, Scope::parse(change).unwrap(), Some(&fixture.key), config::save).unwrap(),
+                        "full-off" => {
+                            let mut next = inner.settings.clone();
+                            next.allow_full_access = false;
+                            super::super::persist_scoped_revocation(&fixture.dir, &mut inner, next, false, downgrade_full_access).unwrap();
+                        }
+                        "host-off" => {
+                            let mut next = inner.settings.clone();
+                            next.host_enabled = false;
+                            super::super::update_access(&fixture.dir, &mut inner, next, true).unwrap();
+                        }
+                        "key-rotation" => inner.devices[0].public_key = crypto::public_key(&crypto::generate()),
+                        "lockdown" => config::begin_lockdown(&fixture.dir).unwrap(),
+                        _ => unreachable!(),
+                    }
+                }
+                resume_tx.send(()).unwrap();
+                assert!(pending.join().unwrap().is_err(), "{change} must cancel the prepared merge");
+            });
+            assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 0, "no merge command after {change}");
+        }
+    }
+
+    #[test]
+    fn authorized_merge_keeps_the_verified_head_and_executes_once() {
+        let fixture = AccessFixture::new(Scope::Full);
+        let effects = std::cell::Cell::new(0);
+        crate::github_pull::merge_after_lookup(42, "squash", || {
+            crate::github_pull::parse_detail(&json!({"number":42,"state":"OPEN","mergeable":"MERGEABLE","headRefOid":"verified-head"}))
+        }, || authorize(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.pullMerge"), |flag, head| {
+            assert_eq!((flag, head), ("--squash", "verified-head"));
+            effects.set(effects.get() + 1);
+            Ok(())
+        }).unwrap();
+        assert_eq!(effects.get(), 1);
     }
 
     #[test]

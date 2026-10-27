@@ -177,6 +177,7 @@ pub(crate) fn load(dir: &Path) -> Settings {
 }
 
 const LOCKDOWN: &str = "connect-access-lockdown";
+pub(crate) const ACCESS_LOCKED: &str = "Connect permissions remain locked after an interrupted permission update. Sign out locally before enabling access or approving another device.";
 
 /// Durable denial fence, written before any revocation. If a later settings
 /// write fails or the process crashes, boot cannot trust an older remote.json.
@@ -236,15 +237,18 @@ pub(crate) fn save(dir: &Path, settings: &Settings) -> crate::Result<()> {
 /// Serialize a permission mutation under the caller's Remote lock. Revocations
 /// take effect in memory immediately and remain denied across an interrupted save.
 pub(crate) fn update_access(dir: &Path, current: &mut Settings, next: Settings, revoke: bool) -> crate::Result<()> {
-    if !revoke && locked_down(dir) {
-        return Err("An interrupted Connect permission revocation must be completed before permissions can be granted again. Sign out locally and reconnect.".into());
+    let earlier_lockdown = locked_down(dir);
+    if !revoke && earlier_lockdown {
+        return Err(ACCESS_LOCKED.into());
     }
     if revoke {
         *current = next.clone();
-        begin_lockdown(dir)?;
     }
+    // Elevations also need a fence: a rename can succeed before directory sync
+    // reports failure. Such an error must not activate the new grant on restart.
+    begin_lockdown(dir)?;
     save(dir, &next)?;
-    end_lockdown(dir)?;
+    if !earlier_lockdown { end_lockdown(dir)?; }
     *current = next;
     Ok(())
 }

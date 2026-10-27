@@ -402,7 +402,11 @@ pub(super) fn sealed(app: &tauri::AppHandle, from: &str, to: &str, body: &str) {
     if matches!(message["type"].as_str(), Some("res" | "event")) {
         // Decryption proves a current presence key, not continued authorization.
         // Pairing replies are the only narrowly tracked exception to pinned trust.
-        let allowed = remote(app).lock().allows_incoming(from, &authenticated_key, message["type"].as_str().unwrap_or_default(), message["id"].as_str());
+        let allowed = {
+            let state = remote(app);
+            let inner = state.lock();
+            inner.access_available(&state.dir).is_ok() && inner.allows_incoming(from, &authenticated_key, message["type"].as_str().unwrap_or_default(), message["id"].as_str())
+        };
         if !allowed || super::grants::is_blocked(app, from) { return; }
     }
     if matches!(message["type"].as_str(), Some("res" | "event")) && !fresh(app, from, &message) {
@@ -534,7 +538,7 @@ fn queue(app: &tauri::AppHandle, from: &str, request: Request) {
             Repeat::Running => return,
             Repeat::Answered(answer) => {
                 // The device may have lost access since: check as a new request would be.
-                let allowed = still_allowed(app, from, &request.public_key, &request.message);
+                let allowed = still_allowed(app, from, &request.public_key, &request.message, &answer);
                 let answer = cached_reply(id, answer, allowed);
                 let pairing = request.message["method"] == super::grants::REDEEM;
                 let _ = send_sealed(app, from, &request.key, Some(&request.public_key), pairing, true, &answer);
@@ -575,18 +579,15 @@ fn queue(app: &tauri::AppHandle, from: &str, request: Request) {
 
 /// `host::handle`'s admission for a repeated request answered from [`Answers`]: remote
 /// control on, the sender in presence, and its grant (for a batch, every call's).
-fn still_allowed(app: &tauri::AppHandle, from: &str, authenticated_key: &str, message: &Value) -> Result<()> {
-    {
-        let state = remote(app);
-        let inner = state.lock();
-        host::gate(inner.settings.host_enabled,
-            inner.devices.iter().any(|d| d.id == from && !authenticated_key.is_empty() && d.public_key == authenticated_key),
-            &super::config::device_name())?;
-        if message["method"] != super::grants::REDEEM {
-            host::gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
-        }
+fn still_allowed(app: &tauri::AppHandle, from: &str, authenticated_key: &str, message: &Value, response: &Value) -> Result<()> {
+    let state = remote(app);
+    let inner = state.lock();
+    if message["method"] == super::grants::REDEEM {
+        // A cached pairing success cannot announce authority that was revoked
+        // since the original redemption. Pending peers may submit a new code.
+        return super::grants::authorize_pairing_response(&state.dir, &inner, from, authenticated_key, response);
     }
-    granted_methods(message).into_iter().try_for_each(|method| super::grants::check(app, from, method))
+    granted_methods(message).into_iter().try_for_each(|method| super::grants::authorize(&state.dir, &inner, from, authenticated_key, method))
 }
 
 /// The methods a request needs a grant for: its own and each batch call's. `pair.redeem` needs
@@ -698,7 +699,12 @@ async fn answer(app: &tauri::AppHandle, from: &str, request: Request) {
     let slot_wait = start_waiting.elapsed();
     let handling = Instant::now();
     let pairing = method == super::grants::REDEEM;
-    if let Some(response) = host::handle(app, from, &message, &public_key).await {
+    if let Some(mut response) = host::handle(app, from, &message, &public_key).await {
+        // Preparation and reads can outlive a grant downgrade too. Do not
+        // release or cache a result, including a pairing scope, using old access.
+        if let Err(error) = still_allowed(app, from, &public_key, &message, &response) {
+            response = json!({"type": "res", "id": response["id"], "ok": false, "error": error});
+        }
         // A remote response is bound to the key that authenticated the original frame,
         // even when the device is revoked or rotates its key during an await.
         if let Err(error) = send_sealed(app, from, &key, Some(&public_key), pairing, true, &response) {
@@ -829,6 +835,7 @@ fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_k
     {
         let state = remote(app);
         let inner = state.lock();
+        inner.access_available(&state.dir)?;
         if hosting && !inner.settings.host_enabled { return Err(host::OFF.into()); }
         if let Some(expected) = expected_key {
             let current = inner.devices.iter().any(|d| d.id == to && !expected.is_empty() && d.public_key == expected);

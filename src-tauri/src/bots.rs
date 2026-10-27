@@ -18,7 +18,9 @@ use crate::{storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tauri::{Emitter, Manager, State};
 
 pub(crate) const SCHEMA: &str = "
@@ -419,9 +421,83 @@ pub(crate) fn update(store: &Store, id: &str, input: &BotInput) -> Result<Bot> {
 }
 
 pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
+    let bot = get(store, id)?;
+    // The caller holds the store lock used by native task admission. A remote
+    // resume must still be authorized for the bot's current execution mode.
+    crate::remote::check_current_request(if paused { "ask" } else { &bot.mode })?;
     store.db.execute("UPDATE bots SET paused=?2,updated_at=?3 WHERE id=?1", params![id, paused, crate::storage::now()]).map_err(|e| e.to_string())?;
     log(store, id, if paused { "paused" } else { "resumed" }, if paused { "Paused" } else { "Resumed" }, json!({}))?;
     get(store, id)
+}
+
+/// Serialize pause/resume/reset/delete for one bot across their awaits. A
+/// concurrent Resume cannot reopen admission halfway through reset or deletion.
+fn lifecycle_lock(id: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
+    type Locks = HashMap<String, Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: OnceLock<Mutex<Locks>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|error| error.to_string())?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(id.to_owned(), Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn pause_state(state: &AppState, id: &str, paused: bool) -> Result<(Bot, bool)> {
+    // Match native and console admission lock order. An admission either
+    // finishes before this gate closes and is included in stop, or sees paused.
+    let _agents = state.agents.lock().map_err(|error| error.to_string())?;
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    let was_paused = get(&store, id)?.paused;
+    Ok((set_paused(&store, id, paused)?, was_paused))
+}
+
+/// Close admission before any stop snapshot/await. On failure or cancellation
+/// the persisted pause remains closed; reopening always requires a new action.
+async fn pause_with_stop(
+    state: &AppState,
+    id: &str,
+    paused: bool,
+    stop: impl std::future::Future<Output = Result<()>>,
+) -> Result<Bot> {
+    let _operation = lifecycle_lock(id)?.lock_owned().await;
+    pause_state(state, id, paused)?;
+    if paused {
+        stop.await?;
+    }
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    let bot = get(&store, id)?;
+    crate::remote::check_current_request(if paused { "ask" } else { &bot.mode })?;
+    Ok(bot)
+}
+
+pub(crate) async fn set_paused_checked(
+    app: &tauri::AppHandle,
+    id: &str,
+    paused: bool,
+) -> Result<Bot> {
+    let state = app.state::<AppState>();
+    let result = pause_with_stop(&state, id, paused, gateway::stop_bot(app, id)).await;
+    let _ = app.emit("bots-changed", ());
+    result
+}
+
+/// Applies to owned conversations, forks, linked tasks and harness consoles.
+/// It must run under the same store/agents locks as the actual execution claim.
+pub(crate) fn check_task_admission(store: &Store, task: &crate::storage::Session) -> Result<()> {
+    let paused: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bots WHERE paused=1 AND (project_id=?1 OR id IN (SELECT bot_id FROM bot_tasks WHERE session_id=?2)))",
+        params![task.project_id, task.id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if paused {
+        return Err("This bot is paused. Resume it before continuing this task.".into());
+    }
+    Ok(())
 }
 
 fn owned_thread_session_ids(store: &Store, bot_id: &str) -> Result<Vec<String>> {
@@ -772,24 +848,33 @@ pub async fn bot_set_capabilities(app: tauri::AppHandle, window: tauri::WebviewW
 }
 
 #[tauri::command]
-pub async fn bot_set_paused(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String, paused: bool) -> Result<Bot> {
+pub async fn bot_set_paused(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    bot_id: String,
+    paused: bool,
+) -> Result<Bot> {
     guard_main(&window)?;
-    if paused {
-        gateway::stop_bot(&app, &bot_id).await;
-    }
-    let bot = set_paused(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, paused)?;
-    let _ = app.emit("bots-changed", ());
-    Ok(bot)
+    set_paused_checked(&app, &bot_id, paused).await
 }
 
 #[tauri::command]
 pub async fn bot_reset(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String) -> Result<Bot> {
     guard_main(&window)?;
-    gateway::stop_bot(&app, &bot_id).await;
+    let _operation = lifecycle_lock(&bot_id)?.lock_owned().await;
+    let (_, was_paused) = pause_state(&state, &bot_id, true)?;
+    gateway::stop_bot(&app, &bot_id).await?;
     let (bot, deleted_ids) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
+        crate::remote::check_current_request("ask")?;
         let ids = owned_thread_session_ids(&store, &bot_id)?;
-        (reset(&store, &bot_id)?, ids)
+        let bot = reset(&store, &bot_id)?;
+        let bot = if was_paused {
+            bot
+        } else {
+            set_paused(&store, &bot_id, false)?
+        };
+        (bot, ids)
     };
     if !deleted_ids.is_empty() {
         let _ = app.emit("sessions-deleted", serde_json::json!({ "sessionIds": deleted_ids }));
@@ -802,10 +887,13 @@ pub async fn bot_reset(app: tauri::AppHandle, window: tauri::WebviewWindow, stat
 #[tauri::command]
 pub async fn bot_delete(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String) -> Result<()> {
     guard_main(&window)?;
-    gateway::stop_bot(&app, &bot_id).await;
+    let _operation = lifecycle_lock(&bot_id)?.lock_owned().await;
+    pause_state(&state, &bot_id, true)?;
+    gateway::stop_bot(&app, &bot_id).await?;
     channels::stop_bot_channels(&app, &bot_id).await;
     let deleted_ids = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
+        crate::remote::check_current_request("ask")?;
         let ids = owned_thread_session_ids(&store, &bot_id)?;
         delete(&store, &bot_id)?;
         ids

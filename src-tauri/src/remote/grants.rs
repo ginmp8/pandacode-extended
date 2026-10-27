@@ -422,12 +422,6 @@ pub(super) fn authorize_full(dir: &Path, inner: &super::Inner, device: &str, aut
     authorize(dir, inner, device, authenticated_key, "task.start")
 }
 
-/// Current-request helpers live with the host's authenticated request context,
-/// but the queue uses this module as the public(crate) authorization surface.
-pub(crate) fn check_current_full_request() -> Result<()> {
-    super::host::check_current_full_request()
-}
-
 pub(crate) fn with_current_full_request<T>(mode: &str, effect: impl FnOnce() -> Result<T>) -> Result<T> {
     super::host::with_current_full_request(mode, effect)
 }
@@ -658,6 +652,7 @@ pub(crate) fn test_scope_from_file(dir: &Path, id: &str, key: &str) -> &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::host::RequestAuthorization;
 
     fn peer(id: &str, fingerprint: &str) -> Peer {
         Peer { id: id.into(), name: format!("Device {id}"), platform: "iOS".into(), fingerprint: fingerprint.into(), online: true }
@@ -769,11 +764,7 @@ mod tests {
 
         let mut full_steer_enqueued = false;
         super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.steer",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.steer"),
             "ask",
             true,
             || { full_steer_enqueued = true; Ok(()) },
@@ -781,11 +772,7 @@ mod tests {
         assert!(full_steer_enqueued, "Full bot steering reaches the enqueue effect");
 
         super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.configure",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure"),
             "full",
             true,
             || store.update(&task.id, None, None, None, Some("full".into())),
@@ -798,11 +785,7 @@ mod tests {
         with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Control)).unwrap();
         let mut run_input_enqueued = false;
         let steer = super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.steer",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.steer"),
             "ask",
             true,
             || { run_input_enqueued = true; Ok(()) },
@@ -812,11 +795,7 @@ mod tests {
 
         for mode in ["full", "review"] {
             let configure = super::super::host::with_authorized_request_effect(
-                &fixture.dir,
-                &fixture.inner,
-                "peer",
-                &fixture.key,
-                "task.configure",
+                RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure"),
                 mode,
                 true,
                 || store.update(&task.id, None, None, None, Some(mode.into())),
@@ -828,33 +807,21 @@ mod tests {
         // Control still reaches ordinary steering and model configuration.
         let mut ordinary_steer_enqueued = false;
         super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.steer",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.steer"),
             "ask",
             false,
             || { ordinary_steer_enqueued = true; Ok(()) },
         ).unwrap();
         assert!(ordinary_steer_enqueued);
         super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.configure",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure"),
             "ask",
             false,
             || store.update(&task.id, None, None, Some("haiku".into()), None),
         ).unwrap();
         assert_eq!(store.session(&task.id).unwrap().model, "haiku");
         super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.configure",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure"),
             "plan",
             false,
             || store.update(&task.id, None, None, None, Some("plan".into())),
@@ -865,11 +832,7 @@ mod tests {
         with(&fixture.dir, |grants| grants.set(&fixture.peer, Scope::Full)).unwrap();
         fixture.inner.settings.allow_full_access = false;
         let review = super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.configure",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure"),
             "review",
             true,
             || store.update(&task.id, None, None, None, Some("review".into())),
@@ -906,11 +869,7 @@ mod tests {
             let effect = threads.spawn(move || {
                 let _remote = effect_lock.lock().unwrap();
                 super::super::host::with_authorized_request_effect(
-                    &effect_dir,
-                    &effect_inner,
-                    "peer",
-                    &effect_key,
-                    "task.configure",
+                    RequestAuthorization::new(&effect_dir, &effect_inner, "peer", &effect_key, "task.configure"),
                     "full",
                     true,
                     || {
@@ -952,11 +911,7 @@ mod tests {
         let _remote = remote_lock.lock().unwrap();
         let mut next_effect_ran = false;
         let next = super::super::host::with_authorized_request_effect(
-            &fixture.dir,
-            &fixture.inner,
-            "peer",
-            &fixture.key,
-            "task.configure",
+            RequestAuthorization::new(&fixture.dir, &fixture.inner, "peer", &fixture.key, "task.configure"),
             "full",
             true,
             || {

@@ -427,6 +427,8 @@ test.describe('project board', () => {
     await page.unroute('**/src/preview.ts*');
     await installPreviewProbe(page, `Object.assign(sessions[1], { taskStage: 'completed', taskDescription: 'A completed navigation task.', completedAt: now });`);
     await page.reload();
+    // Wait until the reloaded preview has bound navigation actions, not just rendered the shell.
+    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
     await openBoard(page);
     await column(page, 'Settled').getByRole('button', { name: 'Open task: Refine the navigation', exact: true }).click();
     await showView(page, 'Conversation');

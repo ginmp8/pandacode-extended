@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { check } from './check-hardened-sync.mjs';
 
 test('Extended core/display version, historical ancestry, layout patch and separated release histories stay consistent', async () => {
-  assert.deepEqual(await check(), { version: '0.6.0', display: '0.6.0+pc.0.3.50', upstream: '0.3.50', sourceBase: '0.3.28', upstreamNotes: 100, extendedNotes: 11 });
+  assert.deepEqual(await check(), { version: '0.7.0', display: '0.7.0+pc.0.3.50', upstream: '0.3.50', sourceBase: '0.3.28', upstreamNotes: 100, extendedNotes: 12 });
 });
 
 const source = new URL('../../', import.meta.url);
@@ -131,7 +131,7 @@ test('the version command advances desktop and mobile together without rewriting
     await writeFile(join(directory, 'releases/extended/1.2.3.md'), '# Extended 1.2.3\n\nProduct-only patch.\n');
     const metadata = JSON.parse(await readFile(join(directory, 'EXTENDED-RELEASE.json'), 'utf8'));
     assert.equal(metadata.integration_provenance.coverage_document, 'docs/upstream-integration-0.6.0.md');
-    assert.deepEqual(await check(directory), { version: '1.2.3', display: '1.2.3+pc.0.3.50', upstream: '0.3.50', sourceBase: '0.3.28', upstreamNotes: 100, extendedNotes: 12 });
+    assert.deepEqual(await check(directory), { version: '1.2.3', display: '1.2.3+pc.0.3.50', upstream: '0.3.50', sourceBase: '0.3.28', upstreamNotes: 100, extendedNotes: 13 });
   });
 });
 

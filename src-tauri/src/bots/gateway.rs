@@ -132,14 +132,18 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
         if crate::remote::is_remote_request() {
             return Err("This remote bot is running. Wait for it to finish before sending another message.".into());
         }
-        let store = state.store.lock().map_err(|e| e.to_string())?;
-        crate::remote::check_current_request("ask")?;
-        super::check_task_admission(&store, &store.session(session_id)?)?;
-        if !force_queue && steer_while_busy(bot, &image_ids, sender_id) {
-            drop(store);
+        let steer = !force_queue && steer_while_busy(bot, &image_ids, sender_id);
+        {
+            // Complete all synchronous authorization and admission checks before an await.
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            crate::remote::check_current_request("ask")?;
+            super::check_task_admission(&store, &store.session(session_id)?)?;
+            if !steer {
+                message_queue::add(&store, session_id, &text, &image_attachments(&image_ids))?;
+            }
+        }
+        if steer {
             message_queue::steer_task(app.clone(), state, session_id.to_owned(), text).await?;
-        } else {
-            message_queue::add(&store, session_id, &text, &image_attachments(&image_ids))?;
         }
         return Ok(());
     }

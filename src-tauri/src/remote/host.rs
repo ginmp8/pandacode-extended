@@ -1494,7 +1494,8 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             }
             let reply = subscribe_reply(tasks, &missing, &replay);
             Ok(add_gap_subagents(reply, |id| {
-                let store = app.state::<AppState>().store.lock().map_err(|e| e.to_string())?;
+                let app_state = app.state::<AppState>();
+                let store = app_state.store.lock().map_err(|e| e.to_string())?;
                 store.subagents(id)
             }))
         }

@@ -659,6 +659,8 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
             let refused = ready_in_place_checked(&root, &project.name, &branch, claim.is_none(), || progress.authorize())?;
             if let Some(reason) = refused {
                 // Never switch or modify a busy, dirty, or differently checked-out project.
+                progress.authorize()?;
+                check(cancel)?;
                 let checkout = remote_worktree(&root, &branch)?;
                 (Some(checkout), Some(worktree_note(&reason)), None)
             } else {
@@ -698,7 +700,10 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         made.iter().for_each(|made| discard(&root, made));
         return Err(error);
     }
-    cancel.commit()?;
+    if let Err(error) = cancel.commit() {
+        made.iter().for_each(|checkout| discard(&root, checkout));
+        return Err(error);
+    }
     let state = app.state::<AppState>();
     let created = {
         let store = state.store.lock().map_err(|e| e.to_string())?;

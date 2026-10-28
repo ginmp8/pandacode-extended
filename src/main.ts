@@ -2030,6 +2030,7 @@ async function respondApproval(sessionId: string, id: string, approved: boolean)
     if (!current.approvals.size && current.status === 'Waiting for approval') current.status = 'Continuing task';
   } finally { pendingApprovals.delete(approvalKey); current.revision++; renderStream(); renderNavigation(); renderApprovalBar(); }
 }
+let lastSteerComposerMarkup: { taskId: string; html: string } | undefined;
 function renderComposer(): void {
   refreshTeamProgress();
   retryRouting(session());
@@ -2048,9 +2049,9 @@ function renderComposer(): void {
   // Otherwise keep typing focus and the caret, since people type while agents work.
   const typing = oldPrompt && document.activeElement === oldPrompt && !readingTranscript ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
   const s = session();
-  if (!s) { $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
+  if (!s) { lastSteerComposerMarkup = undefined; $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
   syncOverlayContext({ projectId: s.projectId, provider: s.provider, model: s.model || 'default', mode: s.mode, reasoningEffort: s.reasoningEffort ?? null });
-  if (taskStage(s) === 'completed') { $('#composer-area').innerHTML = `<div class="board-completed-note">This task is settled.${state.view === 'conversation' ? '<button type="button" class="secondary-button" data-action="board-reopen">Reopen task</button>' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
+  if (taskStage(s) === 'completed') { lastSteerComposerMarkup = undefined; $('#composer-area').innerHTML = `<div class="board-completed-note">This task is settled.${state.view === 'conversation' ? '<button type="button" class="secondary-button" data-action="board-reopen">Reopen task</button>' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
   const previous = state.drafts.get(s.id) ?? '';
   const running = isRunning(), behavior = approvalMode(s.provider, s.mode);
   // A bot's next model can be picked mid-turn; it applies from the next turn.
@@ -2071,16 +2072,32 @@ function renderComposer(): void {
   nextMarkup.innerHTML = composerMarkup;
   const nextSteer = nextMarkup.content.querySelector<HTMLButtonElement>('.steer-button');
   const restoreSteerFocus = Boolean(previousSteer && document.activeElement === previousSteer);
-  if (previousSteer && nextSteer && previousTaskId === s.id) {
-    for (const { name } of [...previousSteer.attributes]) if (!nextSteer.hasAttribute(name)) previousSteer.removeAttribute(name);
-    for (const { name, value } of [...nextSteer.attributes]) if (previousSteer.getAttribute(name) !== value) previousSteer.setAttribute(name, value);
-    if (previousSteer.innerHTML !== nextSteer.innerHTML) previousSteer.innerHTML = nextSteer.innerHTML;
-    // Park the live button in a connected sibling while replacing its form.
-    // A detached button can drop a pointer click during frequent remote updates.
-    composerRoot.parentElement!.append(previousSteer);
+  const liveForm = composerRoot.querySelector<HTMLFormElement>('#composer');
+  const freshForm = nextMarkup.content.querySelector<HTMLFormElement>('#composer');
+  const sameSteerComposer = Boolean(liveForm && freshForm && previousSteer && nextSteer && previousTaskId === s.id
+    && lastSteerComposerMarkup?.taskId === s.id && lastSteerComposerMarkup.html === composerMarkup);
+  if (sameSteerComposer && liveForm && freshForm) {
+    // Streaming/presence updates refresh the surrounding strips, but must not
+    // move the unchanged form: even parking/reinserting Steer destabilizes pointer clicks.
+    for (const child of [...composerRoot.childNodes]) if (child !== liveForm) child.remove();
+    let beforeForm = true;
+    for (const child of [...nextMarkup.content.childNodes]) {
+      if (child === freshForm) { beforeForm = false; continue; }
+      if (beforeForm) composerRoot.insertBefore(child, liveForm);
+      else composerRoot.append(child);
+    }
+  } else {
+    if (previousSteer && nextSteer && previousTaskId === s.id) {
+      for (const { name } of [...previousSteer.attributes]) if (!nextSteer.hasAttribute(name)) previousSteer.removeAttribute(name);
+      for (const { name, value } of [...nextSteer.attributes]) if (previousSteer.getAttribute(name) !== value) previousSteer.setAttribute(name, value);
+      if (previousSteer.innerHTML !== nextSteer.innerHTML) previousSteer.innerHTML = nextSteer.innerHTML;
+      // Preserve the button identity when the form genuinely needs new markup.
+      composerRoot.parentElement!.append(previousSteer);
+    }
+    composerRoot.replaceChildren(nextMarkup.content);
+    if (previousSteer && nextSteer && previousTaskId === s.id) nextSteer.replaceWith(previousSteer);
   }
-  composerRoot.replaceChildren(nextMarkup.content);
-  if (previousSteer && nextSteer && previousTaskId === s.id) nextSteer.replaceWith(previousSteer);
+  lastSteerComposerMarkup = { taskId: s.id, html: composerMarkup };
   if (restoreSteerFocus && previousSteer?.isConnected) previousSteer.focus({ preventScroll: true });
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.

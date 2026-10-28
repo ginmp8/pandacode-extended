@@ -3451,7 +3451,14 @@ test('⌘F finds text in the thread, in your messages and the agent’s, and ste
 test('the prompt sits in the same place in every thread', async ({ page }) => {
   await expect(page.locator('#composer')).toBeVisible();
   const bottoms: number[] = [];
-  const measure = async () => { await expect(page.locator('#composer')).toBeVisible(); bottoms.push(Math.round((await page.locator('#composer').boundingBox())!.y + (await page.locator('#composer').boundingBox())!.height)); };
+  const measure = async () => {
+    const composer = page.locator('#composer');
+    await expect(composer).toBeVisible();
+    // Measure atomically in one DOM read, avoiding a race between transient composer remounts.
+    const bottom = await composer.evaluate(element => Math.round(element.getBoundingClientRect().bottom));
+    expect(bottom).toBeGreaterThan(0);
+    bottoms.push(bottom);
+  };
   const ids = await page.locator('#navigation .task-item').evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.id!));
   expect(ids.length).toBeGreaterThan(1);
   for (const id of ids) {

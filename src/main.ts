@@ -1081,7 +1081,9 @@ function closeChoiceMenu(): void { cancelPendingMenu(); const close = choiceMenu
 function closeMenus(): void { ++architectSetupRequest; ++jevTestRequest; jevTestCleanup?.(); architectSetupCleanup?.(); closeModelPicker(); closeProjectPicker(); closeChoiceMenu(); }
 function closeContentMenus(): void {
   const anchor = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
-  if (jevTestCleanup || anchor?.id === 'task-menu-trigger' || anchor?.classList.contains('task-item') && anchor.isConnected) return;
+  // Navigation choices survive unrelated composer refreshes; outside clicks and view changes still dismiss them.
+  const navigationAnchor = anchor?.isConnected && (anchor.id === 'view-menu' || anchor.classList.contains('task-item'));
+  if (jevTestCleanup || anchor?.id === 'task-menu-trigger' || navigationAnchor) return;
   closeMenus();
 }
 function beginMenuOpen(anchor: HTMLElement): { epoch: number; release: () => void } {

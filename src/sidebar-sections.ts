@@ -19,6 +19,8 @@ export interface SectionInput {
   /** The open thread stays in the section it was opened from (running work still goes to
    * Active), so a click on its row (Reopen, Settle, a finished run) never moves it. */
   hold?: HeldSection;
+  /** Original on-screen position while the selected row is held in Finished/Settled. */
+  holdIndex?: number;
 }
 export type HeldSection = 'active' | 'review' | 'rest' | 'completed';
 /** The section a sidebar group belongs to: Pinned, Chats and Tasks are `rest`. */
@@ -38,7 +40,7 @@ export interface Sections {
 
 /** Each task lands in exactly one section. Running work, pinned or open, is always Active; pinned
  * tasks otherwise stay pinned unless settled; finished work stays in Finished until it is settled. */
-export function sidebarSections({ tasks, active, stage, selectedId, hold }: SectionInput): Sections {
+export function sidebarSections({ tasks, active, stage, selectedId, hold, holdIndex }: SectionInput): Sections {
   const sections: Sections = { active: [], review: [], rest: [], completed: [] };
   for (const task of tasks) {
     const running = active(task), done = stage(task) === 'completed', open = task.id === selectedId;
@@ -53,6 +55,16 @@ export function sidebarSections({ tasks, active, stage, selectedId, hold }: Sect
   sections.active.sort(compareStarted);
   sections.review.sort(compareResponded);
   sections.completed.sort(compareCompleted);
+  // Reopening or settling the selected task must not move its row out from under
+  // the pointer. Retain only the visible row position, never its persisted stage.
+  if ((hold === 'review' || hold === 'completed') && selectedId &&
+      typeof holdIndex === 'number' && Number.isInteger(holdIndex) && holdIndex >= 0) {
+    const rows = sections[hold], current = rows.findIndex(task => task.id === selectedId);
+    if (current >= 0) {
+      const [selected] = rows.splice(current, 1);
+      rows.splice(Math.min(holdIndex, rows.length), 0, selected);
+    }
+  }
   return sections;
 }
 

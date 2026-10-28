@@ -74,6 +74,26 @@ test('the open thread holds its section, so a click on its row never moves it; r
   assert.deepEqual(ids(split([idea], { selectedId: 'other', hold: 'active' }).rest), ['idea']);
 });
 
+test('reopening the selected Settled row retains its visual position until another task opens', () => {
+  const tasks = [
+    task('new', { taskStage: 'completed', completedAt: 30 }),
+    task('opened', { taskStage: 'review', completedAt: null, lastResponseAt: 40 }),
+    task('old', { taskStage: 'completed', completedAt: 10 }),
+  ];
+  const held = split(tasks, { selectedId: 'opened', hold: 'completed', holdIndex: 1 });
+  assert.deepEqual(ids(held.completed), ['new', 'opened', 'old']);
+  assert.deepEqual(ids(held.review), []);
+  // The underlying reopened stage becomes visible after a different selection.
+  const released = split(tasks, { selectedId: 'other' });
+  assert.deepEqual(ids(released.completed), ['new', 'old']);
+  assert.deepEqual(ids(released.review), ['opened']);
+  const running = split(tasks.map(task => task.id === 'opened' ? { ...task, running: true } : task), {
+    selectedId: 'opened', hold: 'completed', holdIndex: 1,
+  });
+  assert.deepEqual(ids(running.active), ['opened']);
+  assert.deepEqual(ids(running.completed), ['new', 'old']);
+});
+
 test('sectionOf maps sidebar groups to the section a thread holds', () => {
   assert.equal(sectionOf('active'), 'active');
   assert.equal(sectionOf('review'), 'review');

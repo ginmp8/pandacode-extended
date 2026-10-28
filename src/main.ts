@@ -1269,7 +1269,7 @@ function renderNavigation(): void {
     // Row actions sit beside the row's button (buttons cannot nest), over its right edge. They
     // are not Tab stops: ⌘↩ completes and the menu key or ⇧F10 opens the menu.
     const title = escape(s.title), id = escape(s.id), busy = isRunning(s.id) || configuringSessions.has(s.id);
-    const taskTitle = `<span class="task-title-row">${stageDot}${taskTitle}</span>`;
+    const taskTitle = `<span class="task-title-row">${stageDot}<span class="task-title">${title}</span></span>`;
     const tick = state.archived || busy ? '' : `<button class="task-action task-check${done ? ' checked' : ''}" data-action="${done ? 'sidebar-reopen' : 'sidebar-complete'}" data-task="${id}" tabindex="-1" aria-label="${done ? 'Reopen' : 'Mark complete'}: ${title}" title="${done ? 'Reopen task' : 'Mark complete'}">${icon('check')}</button>`;
     // The archive view restores and deletes directly; elsewhere Archive and Delete sit in the row's menu.
     const extra = state.archived

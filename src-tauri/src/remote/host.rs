@@ -705,6 +705,14 @@ fn cap_mode(call: Call, full_access: bool) -> Result<Call> {
     })
 }
 
+/// Applies request-level packing support before selecting reply and replay budgets.
+fn request_call(message: &Value, full_access: bool) -> Result<Call> {
+    let method = message["method"].as_str().unwrap_or_default();
+    parse(true, method, &message["params"])
+        .and_then(|call| cap_mode(call, full_access))
+        .map(|call| plain_budget(call, message["z"] == 1))
+}
+
 fn full_access_off() -> String {
     format!("Full access is off for remote tasks on {}.", super::config::device_name())
 }
@@ -738,7 +746,7 @@ pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, 
         }
         Ok(full_access)
     });
-    let call = admitted.and_then(|full_access| parse(true, method, &message["params"]).and_then(|call| cap_mode(call, full_access)));
+    let call = admitted.and_then(|full_access| request_call(message, full_access));
     let result = match call {
         Ok(call) => run(app, from, authenticated_key, call).await,
         Err(error) => Err(error),
@@ -2566,6 +2574,7 @@ fn tasks_list(state: &AppState, limit: usize) -> Result<Value> {
                 "sessionId": task.id,
                 "title": task.title,
                 "status": task.status,
+                "hasFinishedTurn": task.has_finished_turn,
                 "projectId": task.project_id,
                 "projectName": project_name,
                 "provider": task.provider,
@@ -2670,17 +2679,17 @@ fn subscribed_tasks(state: &AppState, ids: &[String]) -> Result<(Vec<Value>, Vec
     let teams = observed_team_states(&store.db, &ids.iter().map(String::as_str).collect::<Vec<_>>())?;
     let (mut tasks, mut missing) = (Vec::new(), Vec::new());
     for id in ids {
-        let row: Option<(String, String, i64, Option<i64>)> = store
+        let row: Option<(String, String, i64, Option<i64>, bool)> = store
             .db
-            .query_row("SELECT status,title,(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1),last_prompt_at FROM sessions WHERE id=?1 AND remote_device IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .query_row("SELECT status,title,(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1),last_prompt_at,has_finished_turn FROM sessions WHERE id=?1 AND remote_device IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
             .optional()
             .map_err(|e| e.to_string())?;
-        let Some((status, title, last_id, last_prompt_at)) = row else {
+        let Some((status, title, last_id, last_prompt_at, has_finished_turn)) = row else {
             missing.push(json!(id));
             continue;
         };
         let pending = pending_by_session.get(id).cloned().unwrap_or_default();
-        let mut task = json!({"sessionId": id, "status": status, "lastId": last_id, "title": title, "pending": pending});
+        let mut task = json!({"sessionId": id, "status": status, "hasFinishedTurn": has_finished_turn, "lastId": last_id, "title": title, "pending": pending});
         shape_task_status(&mut task, active_runs.contains_key(id), teams.get(id));
         if let Some(run) = active_runs.get(id) {
             add_live_timing(
@@ -2888,7 +2897,7 @@ fn page_attachments(db: &rusqlite::Connection, session_id: &str, rows: &[Value])
     if !table {
         return Ok(by_message);
     }
-    // The same rows and shape as attachments::message_attachment_rows, for every message at once.
+    // All attachments for this page share one range query.
     let mut statement = db
         .prepare("SELECT message_id,id,kind,name,mime,bytes,width,height FROM message_attachments WHERE session_id=?1 AND message_id BETWEEN ?2 AND ?3 ORDER BY message_id,rowid")
         .map_err(|e| e.to_string())?;
@@ -3097,7 +3106,36 @@ pub(crate) fn agent_event(app: &tauri::AppHandle, event: &AgentEvent) {
 
 /// Queues `run.finished` for every device mirroring the task.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool, stopped: bool, text: &str) {
-    journaled(app, session_id, json!({"sessionId": session_id, "successful": successful, "stopped": stopped, "text": text}), Queue::Finished);
+    let has_finished_turn = app
+        .try_state::<AppState>()
+        .and_then(|state| {
+            let store = state.store.lock().ok()?;
+            store
+                .db
+                .query_row(
+                    "SELECT has_finished_turn FROM sessions WHERE id=?1",
+                    [session_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .ok()
+        })
+        .unwrap_or(false);
+    journaled(
+        app,
+        session_id,
+        finished_payload(session_id, successful, stopped, text, has_finished_turn),
+        Queue::Finished,
+    );
+}
+
+fn finished_payload(
+    session_id: &str,
+    successful: bool,
+    stopped: bool,
+    text: &str,
+    has_finished_turn: bool,
+) -> Value {
+    json!({"sessionId": session_id, "successful": successful, "stopped": stopped, "hasFinishedTurn": has_finished_turn, "text": text})
 }
 
 /// How a numbered entry is queued: as an agent event, as a run end, or as the run end of a
@@ -4085,6 +4123,69 @@ mod tests {
     }
 
     #[test]
+    fn finished_turn_is_carried_by_host_task_snapshots_and_run_end() {
+        let root = std::env::temp_dir().join(format!(
+            "pandacode-finished-host-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&root).unwrap();
+        let finished = store
+            .create_session(&project.id, "codex", "default", "ask")
+            .unwrap();
+        let unfinished = store
+            .create_session(&project.id, "codex", "default", "ask")
+            .unwrap();
+        store.mark_finished_turn(&finished.id).unwrap();
+        let state = AppState {
+            store: Arc::new(StdMutex::new(store)),
+            agents: Default::default(),
+            terminals: Default::default(),
+            shutdown: std::sync::atomic::AtomicU8::new(0),
+        };
+
+        let listing = tasks_list(&state, 10).unwrap();
+        let listed = listing["tasks"].as_array().unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|task| task["sessionId"].as_str() == Some(finished.id.as_str()))
+                .unwrap()["hasFinishedTurn"],
+            true
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .find(|task| task["sessionId"].as_str() == Some(unfinished.id.as_str()))
+                .unwrap()["hasFinishedTurn"],
+            false
+        );
+
+        let (snapshots, missing) = subscribed_tasks(&state, &[finished.id.clone(), unfinished.id.clone()]).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(
+            snapshots
+                .iter()
+                .find(|task| task["sessionId"].as_str() == Some(finished.id.as_str()))
+                .unwrap()["hasFinishedTurn"],
+            true
+        );
+        assert_eq!(
+            snapshots
+                .iter()
+                .find(|task| task["sessionId"].as_str() == Some(unfinished.id.as_str()))
+                .unwrap()["hasFinishedTurn"],
+            false
+        );
+        assert_eq!(
+            finished_payload("host", true, false, "Turn complete", true)["hasFinishedTurn"],
+            true
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn remote_pending_requests_keep_answer_payloads_within_one_message_budget() {
         let request_id = "run-id:provider-id";
         let requests = HashMap::from([(
@@ -4612,17 +4713,29 @@ mod tests {
         assert_eq!(budget(json!({"sessionId": "s", "tail": true, "budget": 1})), Ok(MIN_PAGE_BUDGET));
         assert_eq!(budget(json!({"sessionId": "s", "budget": u64::MAX})), Ok(PACKED_PAGE_MAX));
         assert_eq!(budget(json!({"sessionId": "s", "budget": "big"})), Err("Invalid budget.".into()));
-        let big = || Call::Messages { session_id: "s".into(), page: MessagePaging::Tail { limit: 1 }, budget: PACKED_PAGE_MAX };
-        assert_eq!(plain_budget(big(), true), big());
-        assert!(matches!(plain_budget(big(), false), Call::Messages { budget: PAGE_BUDGET, .. }));
-        assert!(matches!(plain_budget(Call::Batch(vec![Ok(big())]), false), Call::Batch(calls) if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))));
-        // A batch reply is measured plain, so its pages stay plain-sized for packing viewers too.
-        assert!(matches!(plain_budget(Call::Batch(vec![Ok(big())]), true), Call::Batch(calls) if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))));
-        // A packing viewer gets a bigger replay, except inside a batch.
-        let subscribe = || Call::Subscribe { session_ids: vec!["s".into()], after: HashMap::new(), epoch: None, replay: REPLAY_BUDGET };
-        assert!(matches!(plain_budget(subscribe(), true), Call::Subscribe { replay: PACKED_REPLAY_BUDGET, .. }));
-        assert!(matches!(plain_budget(subscribe(), false), Call::Subscribe { replay: REPLAY_BUDGET, .. }));
-        assert!(matches!(plain_budget(Call::Batch(vec![Ok(subscribe())]), true), Call::Batch(calls) if matches!(calls[0], Ok(Call::Subscribe { replay: REPLAY_BUDGET, .. }))));
+        let request = |method: &str, params: Value, packed: bool| {
+            let mut message = json!({"method": method, "params": params});
+            if packed {
+                message["z"] = json!(1);
+            }
+            request_call(&message, true)
+        };
+        let big_page = json!({"sessionId": "s", "tail": true, "budget": u64::MAX});
+        assert!(matches!(request("task.messages", big_page.clone(), false), Ok(Call::Messages { budget: PAGE_BUDGET, .. })));
+        assert!(matches!(request("task.messages", big_page.clone(), true), Ok(Call::Messages { budget: PACKED_PAGE_MAX, .. })));
+
+        let subscribe = json!({"sessionIds": ["s"]});
+        assert!(matches!(request("subscribe", subscribe.clone(), false), Ok(Call::Subscribe { replay: REPLAY_BUDGET, .. })));
+        assert!(matches!(request("subscribe", subscribe.clone(), true), Ok(Call::Subscribe { replay: PACKED_REPLAY_BUDGET, .. })));
+
+        // Batch replies are measured plain, so their pages and replays stay plain-sized even when packed.
+        let batch = json!({"calls": [
+            {"method": "task.messages", "params": big_page},
+            {"method": "subscribe", "params": subscribe}
+        ]});
+        assert!(matches!(request("batch", batch, true), Ok(Call::Batch(calls))
+            if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))
+                && matches!(calls[1], Ok(Call::Subscribe { replay: REPLAY_BUDGET, .. }))));
     }
 
     #[test]

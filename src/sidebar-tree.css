@@ -256,8 +256,8 @@ html[data-theme=dark] .toast-undo{color:var(--accent)}
    in a narrow sidebar only the project icon stays (the name is in the row's tooltip). */
 .sidebar .navigation{container:sidebar-nav / inline-size}
 .sidebar .flat-group .task-top>.task-app-icon{width:var(--icon-sm);height:var(--icon-sm)}
-.sidebar .task-project-name{flex:0 1 auto;min-width:4.5em;max-width:35%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--text-2xs);color:var(--faint)}
-@container sidebar-nav (max-width:264px){.sidebar .task-project-name{display:none}}
+.sidebar .task-project-name{flex:0 1 auto;min-width:5em;max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--text-2xs);color:var(--faint)}
+@container sidebar-nav (max-width:240px){.sidebar .task-project-name{display:none}}
 
 /* Foldable Active, Finished, Chats and Tasks sections use the native sidebar hierarchy. */
 .sidebar .section-fold{position:relative;width:100%;--press:1}

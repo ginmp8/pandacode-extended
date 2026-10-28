@@ -545,18 +545,50 @@ fn run_ended(app: &tauri::AppHandle, from: &str, data: &Value) {
     let Some(session) = data["sessionId"].as_str() else { return };
     let Some(local) = app.state::<AppState>().store.lock().ok().and_then(|store| local_id(&store, from, session)) else { return };
     let (successful, stopped) = (data["successful"].as_bool().unwrap_or(false), data["stopped"].as_bool().unwrap_or(false));
+    let finished_turn_signal = data["hasFinishedTurn"].clone();
     let text: String = data["text"].as_str().unwrap_or("Turn complete").chars().take(200).collect();
     let app = app.clone();
-    tauri::async_runtime::spawn(async move { end_turn(&app, &local, successful, stopped, &text).await });
+    tauri::async_runtime::spawn(async move {
+        end_turn(
+            &app,
+            &local,
+            successful,
+            stopped,
+            &finished_turn_signal,
+            &text,
+        )
+        .await
+    });
 }
 
 /// Copies the run's messages, always (a turn that ended here first, by Stop or an offline
 /// host, still gets them), then ends the turn unless it already ended.
-async fn end_turn(app: &tauri::AppHandle, local: &str, successful: bool, stopped: bool, text: &str) {
+async fn end_turn(
+    app: &tauri::AppHandle,
+    local: &str,
+    successful: bool,
+    stopped: bool,
+    finished_turn_signal: &Value,
+    text: &str,
+) {
     if let Err(error) = sync(app, local).await {
         eprintln!("PandaCode Connect: could not copy a remote task's messages: {error}");
     }
+    if let Err(error) = lock(&app.state::<AppState>())
+        .and_then(|store| apply_finished_turn_signal(&store, local, finished_turn_signal))
+    {
+        eprintln!("PandaCode Connect: could not persist a remote task's completion signal: {error}");
+    }
     finish(app, local, successful, stopped, text);
+}
+
+/// Only an explicit durable host signal sets the local bit; status and outcome labels are not evidence.
+fn apply_finished_turn_signal(store: &Store, local: &str, signal: &Value) -> Result<bool> {
+    if signal.as_bool() == Some(true) {
+        store.mark_finished_turn(local)
+    } else {
+        Ok(false)
+    }
 }
 
 fn active(state: &AppState, local: &str) -> bool {
@@ -1125,9 +1157,18 @@ async fn follow_host(app: &tauri::AppHandle, device: &str, sessions: &[String], 
     }
     let pending = catch_up(app, device, &first, sessions, &latest);
     show_held(app, device);
+    let no_finished_turn_signal = Value::Null;
     for (local, ended) in pending {
         match ended {
-            Some((successful, stopped)) => end_turn(app, &local, successful, stopped, if successful { "Turn complete" } else if stopped { "Turn stopped" } else { "Turn failed" }).await,
+            Some((successful, stopped)) => end_turn(
+                app,
+                &local,
+                successful,
+                stopped,
+                &no_finished_turn_signal,
+                if successful { "Turn complete" } else if stopped { "Turn stopped" } else { "Turn failed" },
+            )
+            .await,
             None => changed |= sync(app, &local).await.is_ok(),
         }
     }
@@ -1228,6 +1269,12 @@ fn catch_up(app: &tauri::AppHandle, device: &str, reply: &Value, requested: &[St
             store.db.query_row("SELECT status,remote_synced_id,remote_backfill_base IS NOT NULL OR EXISTS(SELECT 1 FROM messages WHERE session_id=sessions.id AND remote_cut IS NOT NULL) FROM sessions WHERE id=?1", [&local], |r| Ok((local.clone(), r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?))).ok()
         });
         let Some((local, current, synced, unfinished)) = row else { continue };
+        if let Err(error) = lock(&app.state::<AppState>())
+            .and_then(|store| apply_finished_turn_signal(&store, &local, &task["hasFinishedTurn"]))
+            .map(|marked| changed |= marked)
+        {
+            eprintln!("PandaCode Connect: could not persist a task snapshot's completion signal: {error}");
+        }
         match reconcile(&current, status) {
             Reconcile::Ended { successful, stopped } => {
                 pending.push((local, Some((successful, stopped))));
@@ -1984,6 +2031,26 @@ mod tests {
         assert_eq!(store.session(&local).unwrap().status, "interrupted");
         assert!(!finish_once(&store, &local, true, false).unwrap(), "a second end changes nothing");
         assert_eq!(store.session(&local).unwrap().status, "interrupted");
+    }
+
+    #[test]
+    fn mirror_completion_signal_uses_explicit_host_bit_and_never_clears() {
+        let (store, local) = store();
+        store.status(&local, "running").unwrap();
+        assert!(finish_once(&store, &local, true, false).unwrap());
+        assert!(
+            !store.session(&local).unwrap().has_finished_turn,
+            "idle reconciliation is status-only"
+        );
+
+        assert!(
+            !apply_finished_turn_signal(&store, &local, &Value::Null).unwrap(),
+            "missing host metadata is not inferred"
+        );
+        assert!(!apply_finished_turn_signal(&store, &local, &json!(false)).unwrap());
+        assert!(apply_finished_turn_signal(&store, &local, &json!(true)).unwrap());
+        assert!(!apply_finished_turn_signal(&store, &local, &json!(false)).unwrap());
+        assert!(store.session(&local).unwrap().has_finished_turn);
     }
 
     #[test]

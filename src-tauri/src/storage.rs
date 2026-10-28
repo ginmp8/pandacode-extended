@@ -73,6 +73,9 @@ pub struct Session {
     pub context_usage: Option<ContextUsage>,
     pub mode: String,
     pub status: String,
+    /// Whether an ordinary task turn has explicitly completed successfully.
+    /// This is monotonic task history, independent of stage and message timestamps.
+    pub has_finished_turn: bool,
     pub created_at: i64,
     pub updated_at: i64,
     /// Unix milliseconds of the latest saved nonempty assistant response.
@@ -166,7 +169,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 34;
+pub const SCHEMA_VERSION: i64 = 35;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -500,6 +503,21 @@ impl Store {
                 }
                 migration.execute_batch("PRAGMA user_version=34;").map_err(|e| e.to_string())?;
             }
+            if version < 35 {
+                let exists: bool = migration
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='has_finished_turn')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if !exists {
+                    migration
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN has_finished_turn INTEGER NOT NULL DEFAULT 0 CHECK(has_finished_turn IN (0,1));")
+                        .map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("PRAGMA user_version=35;").map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
@@ -711,6 +729,7 @@ impl Store {
             model: r.get(4)?,
             mode: r.get(5)?,
             status: r.get(6)?,
+            has_finished_turn: r.get(30)?,
             created_at: r.get(7)?,
             updated_at: r.get(8)?,
             archived: r.get(9)?,
@@ -745,7 +764,7 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<Session>> {
         // Lists only need a card preview. Full details remain in SQLite and are
         // fetched for the selected task or directly for an agent's Start prompt.
-        let mut stmt=self.db.prepare(&format!("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,substr(task_description,1,512),completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER} LIMIT 500")).map_err(|e|e.to_string())?;
+        let mut stmt=self.db.prepare(&format!("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,substr(task_description,1,512),completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device,has_finished_turn FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER} LIMIT 500")).map_err(|e|e.to_string())?;
         let rows = stmt
             .query_map([], Self::session_row)
             .map_err(|e| e.to_string())?;
@@ -756,7 +775,7 @@ impl Store {
         Ok(sessions)
     }
     pub fn session(&self, sid: &str) -> Result<Session> {
-        let mut session = self.db.query_row("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,task_description,completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device FROM sessions WHERE id=?1",[sid],Self::session_row).optional().map_err(|e|e.to_string())?.ok_or_else(||String::from("Conversation not found."))?;
+        let mut session = self.db.query_row("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,task_description,completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device,has_finished_turn FROM sessions WHERE id=?1",[sid],Self::session_row).optional().map_err(|e|e.to_string())?.ok_or_else(||String::from("Conversation not found."))?;
         self.attach_links(std::slice::from_mut(&mut session))?;
         Ok(session)
     }
@@ -1594,6 +1613,8 @@ impl Store {
         Ok(message_id)
     }
 
+    /// Updates the task's terminal status without claiming how that outcome was reached.
+    /// Reconciliation callers use this when only a remote status snapshot is available.
     pub fn finish_task_turn(&self, sid: &str, successful: bool, stopped: bool) -> Result<()> {
         self.finish_task_operation(sid, successful, stopped, None)
     }
@@ -1630,6 +1651,34 @@ impl Store {
             .map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Records an explicit successful Connect completion or authoritative host snapshot.
+    /// The update is idempotent and never clears a previously finished turn.
+    pub fn mark_finished_turn(&self, sid: &str) -> Result<bool> {
+        let changed = self
+            .db
+            .execute(
+                "UPDATE sessions SET has_finished_turn=1 WHERE id=?1 AND has_finished_turn=0 AND goal_state IS NULL",
+                [sid],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(changed > 0)
+    }
+
+    /// Records a local completion only for an explicit, successful ordinary task turn.
+    /// Goal tasks are excluded by `mark_finished_turn`; restore operations are excluded here.
+    pub fn record_successful_ordinary_turn(
+        &self,
+        sid: &str,
+        successful: bool,
+        stopped: bool,
+        restore_stage: Option<&str>,
+    ) -> Result<bool> {
+        if !successful || stopped || restore_stage.is_some() {
+            return Ok(false);
+        }
+        self.mark_finished_turn(sid)
     }
 
     pub fn finish_turn(&self, sid: &str, message_id: i64, duration_ms: i64) -> Result<()> {
@@ -2246,6 +2295,58 @@ mod tests {
             .begin_task_turn(&task.id, "Cannot run archived")
             .is_err());
         assert!(store.set_task_stage(&task.id, "pending").is_err());
+    }
+
+    #[test]
+    fn finished_turn_is_explicit_monotonic_and_excludes_goal_tasks() {
+        let (store, task) = empty_session();
+        store.finish_task_turn(&task.id, true, false).unwrap();
+        assert!(
+            !store.session(&task.id).unwrap().has_finished_turn,
+            "status-only idle is not evidence"
+        );
+
+        store.finish_task_operation(&task.id, false, false, None).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, false, false, None).unwrap(),
+            "errors do not finish a turn"
+        );
+        store.finish_task_operation(&task.id, true, true, None).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, true, true, None).unwrap(),
+            "stops do not finish a turn"
+        );
+        store.finish_task_operation(&task.id, true, false, Some("pending")).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, true, false, Some("pending")).unwrap(),
+            "maintenance restore does not finish a turn"
+        );
+
+        store.finish_task_operation(&task.id, true, false, None).unwrap();
+        assert!(
+            store.record_successful_ordinary_turn(&task.id, true, false, None).unwrap(),
+            "the explicit ordinary success path records the signal"
+        );
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, true, false, None).unwrap(),
+            "the signal is idempotent"
+        );
+        assert_eq!(
+            serde_json::to_value(store.session(&task.id).unwrap()).unwrap()["hasFinishedTurn"],
+            true
+        );
+        store.finish_task_operation(&task.id, false, false, None).unwrap();
+        assert!(
+            store.session(&task.id).unwrap().has_finished_turn,
+            "later failures never clear task history"
+        );
+
+        let goal = store.create_session(&task.project_id, "claude", "sonnet", "full").unwrap();
+        store.db.execute(r#"UPDATE sessions SET goal_state='{"status":"paused"}' WHERE id=?1"#, [&goal.id]).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&goal.id, true, false, None).unwrap(),
+            "goal tasks are not ordinary completions"
+        );
     }
 
     #[test]
@@ -3157,6 +3258,50 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(newest, SCHEMA_VERSION, "bump SCHEMA_VERSION with every new migration step");
+    }
+
+    #[test]
+    fn migration_35_defaults_old_rows_to_false_without_backfill_and_reopens_cleanly() {
+        let directory = std::env::temp_dir().join(format!("pandacode-finished-migration-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        let session_id = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&directory).unwrap();
+            let task = store
+                .create_session(&project.id, "codex", "default", "ask")
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "UPDATE sessions SET task_stage='review',status='idle',last_response_at=123456,has_finished_turn=1 WHERE id=?1",
+                    [&task.id],
+                )
+                .unwrap();
+            store
+                .db
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN has_finished_turn; PRAGMA user_version=34;",
+                )
+                .unwrap();
+            task.id
+        };
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .db
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                35
+            );
+            let task = store.session(&session_id).unwrap();
+            assert!(!task.has_finished_turn, "legacy status/timestamp data is not backfilled");
+            assert_eq!(task.task_stage, "review");
+            assert_eq!(task.last_response_at, Some(123456));
+            assert_eq!(serde_json::to_value(task).unwrap()["hasFinishedTurn"], false);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

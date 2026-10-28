@@ -233,13 +233,16 @@ test('launcher discovers full model names on demand and launches the chosen harn
   await expect(page.locator('.launcher-task')).toHaveCount(4);
   expect(await page.evaluate(() => (window as any).__overlayCalls.filter((call:any) => call.command === 'list_provider_models'))).toHaveLength(0);
   await page.getByRole('button',{name:'Choose harness and model'}).click();
+  const picker = page.getByRole('dialog',{name:'Harness and model'});
   await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
-  const claude = page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true});
+  const claude = picker.getByRole('listbox',{name:'Models',exact:true}).getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true});
   await expect(claude).toBeVisible();
-  await expect(claude.locator('.provider-logo')).toHaveCount(1);
+  await expect(picker.getByRole('tab',{name:'Claude Code',exact:true}).locator('.provider-logo')).toHaveCount(1);
+  await expect(claude.locator('.provider-logo')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Antigravity · Default',exact:true})).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'list_provider_models' && call.args.provider === 'antigravity'))).toBe(false);
-  await page.getByRole('searchbox',{name:'Search harnesses and models'}).fill('Claude Sonnet 5');
+  await page.getByRole('combobox',{name:'Search harnesses and models'}).fill('Claude Sonnet 5');
+  await expect(claude.locator('.provider-logo')).toHaveCount(1);
   await claude.click();
   await expect(page.getByRole('dialog',{name:'Harness and model'})).toHaveCount(0);
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
@@ -261,14 +264,15 @@ test('launcher keeps an unavailable saved harness visible but disabled without d
   await page.goto('/?view=launcher');
   await expect(page.locator('.launcher-task')).toHaveCount(4);
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  const unavailable = page.getByRole('button',{name:'Antigravity · Default',exact:true});
+  const unavailable = page.getByRole('option',{name:'Antigravity · Default',exact:true});
   await expect(unavailable).toBeVisible();
   await expect(unavailable).toHaveAttribute('aria-current','true');
   await expect(unavailable).toBeDisabled();
   expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'list_provider_models' && call.args.provider === 'antigravity'))).toBe(false);
   await unavailable.dispatchEvent('click');
   expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'overlay_select_model'))).toBe(false);
-  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await page.getByRole('listbox',{name:'Models',exact:true}).getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
 });
 
@@ -542,7 +546,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   await expect(narratives.nth(1)).toBeVisible();
   const groups = activity.locator('details.tool-group');
   await expect(groups).toHaveCount(2);
-  await expect(groups.nth(0).locator(':scope > summary')).toContainText('Read 2 files');
+  await expect(groups.nth(0).locator(':scope > summary')).toContainText('Reading 2 files…');
   await expect(groups.nth(1).locator(':scope > summary')).toContainText('Running 1 command');
   await expect(groups.nth(0)).toHaveJSProperty('open',false);
   await expect(groups.nth(1)).toHaveJSProperty('open',false);
@@ -550,7 +554,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   const originalSequence = await sequence();
   expect(originalSequence).toEqual([
     expect.stringContaining('I will inspect the current launcher.'),
-    expect.stringContaining('Read 2 files'),
+    expect.stringContaining('Reading 2 files…'),
     expect.stringContaining('The client is ready; I will verify the behavior.'),
     expect.stringContaining('Running 1 command'),
   ]);
@@ -580,6 +584,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   });
   await page.clock.runFor(1600);
   await expect(page.locator('.launcher-thread-response:visible')).toContainText('The launch flow is verified.');
+  await expect(groups.nth(0).locator(':scope > summary')).toContainText('Read 2 files');
   await expect(activity).toHaveJSProperty('open',true);
   await page.getByRole('button',{name:'Back to active agents'}).click();
   await page.locator('.launcher-task[data-task="preview-active"]').click();

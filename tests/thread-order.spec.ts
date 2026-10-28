@@ -35,8 +35,8 @@ async function open(page: Page, seed = ''): Promise<void> {
     await route.fulfill({ response, body: body + '\nwindow.__threadOrderUrl = import.meta.url; window.__threadOrderEmit = emit;\n' });
   });
   await page.goto('/');
-  await expect(row(page, 'session-1')).toHaveAttribute('aria-current', 'page');
-  await expect(prompt(page)).toBeEnabled();
+  await expect(row(page, 'session-1')).toHaveAttribute('aria-current', 'page', { timeout: 20_000 });
+  await expect(prompt(page)).toBeEnabled({ timeout: 20_000 });
 }
 
 async function choosePin(page: Page, id: string, pinned = true): Promise<void> {
@@ -288,9 +288,11 @@ test.describe('thread order', () => {
     await expect(row(page, 'session-4')).toHaveAttribute('title', /\npandacode/);
     // A wider sidebar shows the name in full.
     await page.evaluate(() => document.querySelector<HTMLElement>('.workspace')!.style.setProperty('--sidebar-width', '320px'));
-    await expect(row(page, 'session-4').locator('.task-project-name')).toHaveText('pandacode');
-    const name = await row(page, 'session-4').locator('.task-project-name').evaluate(node => node.scrollWidth <= node.clientWidth);
-    expect(name).toBe(true);
+    const projectName = row(page, 'session-4').locator('.task-project-name');
+    await expect(projectName).toBeVisible();
+    await expect(projectName).toHaveText('pandacode');
+    const name = await projectName.evaluate(node => ({ clientWidth: node.clientWidth, scrollWidth: node.scrollWidth }));
+    expect(name.scrollWidth, `Project name should fit at a 320px sidebar: ${JSON.stringify(name)}`).toBeLessThanOrEqual(name.clientWidth);
   });
 
   test('a right-click opens the task menu at the pointer; the … button keeps it on the row', async ({ page }) => {

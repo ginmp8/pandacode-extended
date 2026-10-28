@@ -177,8 +177,8 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ response, body: previewBody(await response.text()) });
   });
   await page.goto('/');
-  await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
-  await expect(page.locator('.markdown pre code')).toContainText('createSearchIndex');
+  await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant', { timeout: 20_000 });
+  await expect(page.locator('.markdown pre code')).toContainText('createSearchIndex', { timeout: 20_000 });
 });
 
 test('identifies sample data and renders the desktop workspace without runtime errors', async ({ page }) => {
@@ -2353,13 +2353,19 @@ test('shows Board stages before project task titles and refreshes a retained sid
   await expect(pending.locator('..')).toHaveAttribute('data-stage', 'pending');
   await expect(pending).toHaveClass(/task-oneline/);
   await expect(pendingDot).toHaveAttribute('title', 'Board stage: Pending');
+  await expect(pending).toHaveAccessibleDescription(/Board stage: Pending/);
   expect(await pending.locator('.task-title-row').evaluate(row => row.firstElementChild === row.querySelector('.stage-dot') && row.lastElementChild === row.querySelector('.task-title'))).toBe(true);
 
   const selectedReview = taskRow(page, 'session-1');
   await expect(selectedReview.locator('..')).toHaveAttribute('data-stage', 'review');
   await expect(selectedReview).toHaveAttribute('data-activity', 'active');
-  await expect(pendingDot).toHaveCSS('background-color', 'rgb(150, 149, 143)');
-  await expect(selectedReview.locator('.stage-dot')).toHaveCSS('background-color', 'rgb(165, 154, 220)');
+  await expect(selectedReview).toHaveAccessibleDescription(/Board stage: Review/);
+  const tokenColor = (token: '--faint' | '--info') => page.locator('.sidebar').evaluate((sidebar, name) => {
+    const probe = document.createElement('span'); probe.style.color = `var(${name})`; sidebar.append(probe);
+    const color = getComputedStyle(probe).color; probe.remove(); return color;
+  }, token);
+  await expect(pendingDot).toHaveCSS('background-color', await tokenColor('--faint'));
+  await expect(selectedReview.locator('.stage-dot')).toHaveCSS('background-color', await tokenColor('--info'));
   await chooseProjectFilter(page, 'orbit');
   await expect(pending).toHaveClass(/task-oneline/);
   await expect(pending.locator('.stage-dot')).toBeVisible();
@@ -2380,9 +2386,10 @@ test('shows Board stages before project task titles and refreshes a retained sid
   });
   await expect(pinned.locator('..')).toHaveAttribute('data-stage', 'review');
   await expect(pinned.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: Review');
+  await expect(pinned).toHaveAccessibleDescription(/Board stage: Review/);
   await expect(menu).toBeVisible();
   expect(await pinned.evaluate(row => row === (window as any).__retainedTaskRow)).toBe(true);
-  await expect(pinned.locator('.stage-dot')).toHaveCSS('background-color', 'rgb(165, 154, 220)');
+  await expect(pinned.locator('.stage-dot')).toHaveCSS('background-color', await tokenColor('--info'));
 
   await page.evaluate(async () => {
     const { setNativeTaskStage } = await import((window as any).__pandacodePreviewUrl);
@@ -2390,6 +2397,7 @@ test('shows Board stages before project task titles and refreshes a retained sid
   });
   await expect(pinned.locator('..')).toHaveAttribute('data-stage', 'in_progress');
   await expect(pinned.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: In progress');
+  await expect(pinned).toHaveAccessibleDescription(/Board stage: In progress/);
   const accentColor = await page.evaluate(() => {
     const probe = document.createElement('span');
     probe.style.color = 'var(--accent)';

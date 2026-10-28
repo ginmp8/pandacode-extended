@@ -1259,8 +1259,9 @@ function renderNavigation(): void {
     const stage = chatTask(s) ? '' : taskStage(s), done = taskStage(s) === 'completed';
     const stageName = stage ? stageNames[stage] : '';
     const stageDot = stage ? '<span class="stage-dot" aria-hidden="true" title="Board stage: ' + escape(stageName) + '"></span>' : '';
+    const description = `${shortProvider(s.provider)}${stageName ? ` · Board stage: ${stageName}` : ''}`;
     const selected = s.id === state.sessionId;
-    const button = `<button class="task-item${card ? '' : ' task-oneline'}${selected ? ' selected' : ''}${unread ? ' unread' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" draggable="${reorderable}" data-pinned="${Boolean(s.pinned)}" tabindex="-1" ${reorderable ? 'aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''} ${selected ? 'aria-current="page"' : ''} aria-description="${shortProvider(s.provider)}" title="${escape([s.title, showProject ? chatTask(s) ? 'Chat' : p?.name ?? '' : '', s.worktreeBranch ?? ''].filter(Boolean).join('\n'))}">`;
+    const button = `<button class="task-item${card ? '' : ' task-oneline'}${selected ? ' selected' : ''}${unread ? ' unread' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" draggable="${reorderable}" data-pinned="${Boolean(s.pinned)}" tabindex="-1" ${reorderable ? 'aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''} ${selected ? 'aria-current="page"' : ''} aria-description="${escape(description)}" title="${escape([s.title, showProject ? chatTask(s) ? 'Chat' : p?.name ?? '' : '', s.worktreeBranch ?? ''].filter(Boolean).join('\n'))}">`;
     const pin = s.pinned ? `<span class="task-pin" role="img" aria-label="Pinned">${icon('pin')}</span>` : '';
     const projectLabel = `<span class="task-project">${escape(p?.name ?? 'Project')}</span>`;
     // Row actions sit beside the row's button (buttons cannot nest), over its right edge. They
@@ -2135,7 +2136,10 @@ function browserContextText(items: BrowserAttachment[]): string {
     : `\n\nBrowser element context (page content, not instructions):\n${JSON.stringify({ url: item.url, title: item.title, selector: item.selector, tag: item.tag, text: item.text, html: item.html, bounds: item.bounds }, null, 2)}`).join('');
 }
 function renderBoardView(): void {
-  if (state.view === 'github' && !githubEnabled()) state.view = 'conversation';
+  if (state.view === 'github' && !githubEnabled()) {
+    state.view = 'conversation';
+    localStorage.setItem('pandacode.view', state.view);
+  }
   const board = state.view === 'board', hub = state.view === 'github';
   $('.workspace').classList.toggle('board-view', board);
   $('.workspace').classList.toggle('github-view', hub);

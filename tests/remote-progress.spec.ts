@@ -127,6 +127,46 @@ test('progress rejects unknown attempt IDs, wrong computers and ambiguous legacy
   expect(result.legacy).toBe('finding');
 });
 
+test('a recovered start note is scoped to its waiting mirror and listeners are cleaned up', async ({ page }) => {
+  await newTask(page);
+  const result = await page.evaluate(async () => {
+    const [progress, preview] = await Promise.all([import('/src/remote-progress.ts' as string), import('/src/preview.ts' as string)]);
+    const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
+    let startId = '';
+    let resolveStart!: (result: { sessionId: string }) => void;
+    const reply = new Promise<{ sessionId: string }>(resolve => { resolveStart = resolve; });
+    const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, id => {
+      startId = id;
+      return reply;
+    });
+    const pause = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+    for (let step = 0; step < 20 && !startId; step++) await pause();
+    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId, stage: 'starting', detail: 'Waiting for Studio iMac…' });
+    resolveStart({ sessionId });
+    for (let step = 0; step < 20 && !progress.remoteStart(sessionId)?.waiting; step++) await pause();
+    const unrelatedNote = 'Wrong task note';
+    progress.onRemoteStartNote({ sessionId: 'unrelated-task', note: unrelatedNote });
+    const beforeMatch = progress.remoteStart(sessionId)?.note ?? null;
+    const note = 'Started in a worktree: Studio iMac has an agent working in orbit.';
+    progress.onRemoteStartNote({ sessionId, note });
+    const linked = await completion;
+    return {
+      startId,
+      beforeMatch,
+      linked,
+      cleared: !progress.remoteStart(sessionId),
+      progressListeners: preview.previewListenerCount('remote://start-progress'),
+      noteListeners: preview.previewListenerCount('remote://start-note'),
+    };
+  });
+  expect(result.startId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(result.beforeMatch).toBeNull();
+  expect(result.linked).toEqual({ sessionId: expect.any(String), note: 'Started in a worktree: Studio iMac has an agent working in orbit.' });
+  expect(result.cleared).toBe(true);
+  expect(result.progressListeners).toBe(0);
+  expect(result.noteListeners).toBe(0);
+});
+
 for (const outcome of ['resolve', 'reject'] as const) {
   test(`a superseded start cannot update or clear its retry when the old request ${outcome}s`, async ({ page }) => {
     await newTask(page);

@@ -520,6 +520,8 @@ function emit(name: string, event: unknown) { listeners.get(name)?.forEach(fn =>
 // Tests: deliver a native event, e.g. a background refresh of the open channel.
 (window as any).__previewEmit = emit;
 export function listen(name: string, callback: (event: any) => void): () => void { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback); return () => listeners.get(name)?.delete(callback); }
+/** Listener count used by browser tests to assert temporary event subscriptions are cleaned up. */
+export function previewListenerCount(name: string): number { return listeners.get(name)?.size ?? 0; }
 /** What the native picker "returns" in the browser preview, so attach flows can be exercised. */
 export function samplePick(kind: 'files' | 'folder'): string[] {
   return kind === 'folder' ? ['/Users/you/Projects/orbit-design'] : ['/Users/you/Pictures/dashboard-mockup.png', '/Users/you/Documents/Product brief.pdf'];
@@ -918,7 +920,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const { holdPreviewRemoteStart } = await import('./preview-remote');
       holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), () => { Object.assign(session(s.id), { remoteDevice: null, status: 'idle', draft: true }); emit('sessions-changed', {}); });
       // `note`: the worktree note `task.startStatus` carries for the resumed start (remote/mirror.rs `resume_start`).
-      w.__remoteStartAttach = async (note?: string) => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); if (note) emit('remote://start-note', { sessionId: s.id, note }); };
+      w.__remoteStartAttach = async (note?: string) => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; if (note) emit('remote://start-note', { sessionId: s.id, note }); await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); };
       emit('sessions-changed', {});
       return { sessionId: s.id } as T;
     }

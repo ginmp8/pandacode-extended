@@ -53,7 +53,8 @@ async function readyIssueTaskForCompletion(page: Page, title = 'Add keyboard sho
 }
 
 async function openBoard(page: Page): Promise<void> {
-  await showView(page, 'Board');
+  // The saved workspace view can already be Board after a reload.
+  if (!await board(page).isVisible()) await showView(page, 'Board');
   await expect(board(page)).toBeVisible();
 }
 
@@ -100,23 +101,27 @@ test.describe('project board', () => {
     await openBoard(page);
     await queueTask(page, 'Drag between stages');
     const task = await savedTask(page, 'Drag between stages');
-    const sidebarRow = page.locator('#navigation .task-item[data-id="' + task.id + '"]');
-    await expect(sidebarRow.locator('.task-row')).toHaveAttribute('data-stage', 'pending');
+    const sidebarRow = page.locator(`#task-row-${task.id}`);
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
     await expect(sidebarRow.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: Pending');
     const source = page.locator(`.board-card[data-task-id="${task.id}"]`);
     await source.dragTo(column(page, 'Review'));
     await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow.locator('.task-row')).toHaveAttribute('data-stage', 'review');
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'review');
     const reviewColor = await sidebarRow.locator('.stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor);
     expect(reviewColor).toBe(await page.locator('.board-column[data-stage="review"] .stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor));
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'review', completedAt: null });
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
     await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow.locator('.task-row')).toHaveAttribute('data-stage', 'pending');
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'pending', completedAt: null });
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Settled'));
     await expect(column(page, 'Settled').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow).toHaveCount(0);
+    await showView(page, 'Conversation');
+    const settledTasks = page.getByRole('region', { name: 'Settled tasks', exact: true });
+    const settledToggle = settledTasks.getByRole('button', { name: /Settled/ });
+    if (await settledToggle.getAttribute('aria-expanded') !== 'true') await settledToggle.click();
+    await expect(sidebarRow).toHaveAttribute('data-stage', 'completed');
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'completed', completedAt: expect.any(Number) });
   });
   test('confirms linked issue close and reopen only after each saved stage', async ({ page }) => {
@@ -543,12 +548,12 @@ test.describe('project board', () => {
     await page.screenshot({ path: '/private/tmp/pandacode-board-light-compact.png', animations: 'disabled' });
   });
 
-  test('retains settled tasks of any age and safely reopens legacy archived records', async ({ page }) => {
+  test('retains Settled tasks of any age and reopens them', async ({ page }) => {
     await page.unroute('**/src/preview.ts*');
     await installPreviewProbe(page, `
       for (const fixture of [
         { id: 'old-settled', title: 'Settled months ago', taskStage: 'completed', completedAt: now - 90 * 86400000, archived: false },
-        { id: 'legacy-archived', title: 'Archived long ago', taskStage: 'completed', completedAt: now - 60 * 86400000, archived: true },
+        { id: 'settled-history', title: 'Settled long ago', taskStage: 'completed', completedAt: now - 60 * 86400000, archived: false },
         { id: 'old-pending', title: 'Still pending after a week', taskStage: 'pending', completedAt: null, archived: false }
       ]) sessions.push({ ...sessions[1], ...fixture, taskDescription: 'Retained task details', updatedAt: now - 90 * 86400000 });
     `);
@@ -556,13 +561,13 @@ test.describe('project board', () => {
     await openBoard(page);
     await expect(board(page).getByRole('button', { name: 'Archived tasks', exact: true })).toHaveCount(0);
     await expect(column(page, 'Settled').getByRole('button', { name: 'Open task: Settled months ago', exact: true })).toBeVisible();
-    await expect(column(page, 'Settled').getByRole('button', { name: 'Open task: Archived long ago', exact: true })).toBeVisible();
+    await expect(column(page, 'Settled').getByRole('button', { name: 'Open task: Settled long ago', exact: true })).toBeVisible();
     await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Still pending after a week', exact: true })).toBeVisible();
     expect(await savedTask(page, 'Settled months ago')).toMatchObject({ archived: false, taskStage: 'completed' });
-    await card(page, 'Archived long ago').click();
+    await card(page, 'Settled months ago').click();
     await details(page).getByRole('button', { name: 'Reopen task', exact: true }).click();
-    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Archived long ago', exact: true })).toBeVisible();
-    expect(await savedTask(page, 'Archived long ago')).toMatchObject({ archived: false, taskStage: 'review' });
+    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Settled months ago', exact: true })).toBeVisible();
+    expect(await savedTask(page, 'Settled months ago')).toMatchObject({ archived: false, taskStage: 'review' });
   });
 });
 

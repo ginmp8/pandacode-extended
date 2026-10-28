@@ -453,8 +453,8 @@ test.describe('bots', () => {
     await expect(panel(page).locator('.bots-banner')).toHaveCount(0);
     await expect(tab(page, 'Profile')).toHaveAttribute('aria-selected', 'true');
     await expect(panel(page).getByRole('button', { name: 'Cancel' })).toHaveCount(0);
-    await panel(page).getByRole('textbox', { name: 'Job' }).fill('Finds answers');
-    await panel(page).getByRole('button', { name: 'Save' }).click();
+    await panel(page).getByRole('textbox', { name: 'Title' }).fill('Finds answers');
+    await expect(panel(page).locator('.bs-saved')).toHaveText('Saved');
     await expect(panel(page).locator('.bp-meta')).toContainText('Finds answers');
     await tab(page, 'Activity').click();
     await expect(panel(page).locator('.bots-activity')).toContainText('Settings changed');

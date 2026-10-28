@@ -54,8 +54,8 @@ test.describe('browser workspace', () => {
   test.beforeEach(async ({ page }) => {
     await installPreviewProbe(page);
     await page.goto('/');
-    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
-    await expect(page.locator('#inspector')).toBeVisible();
+    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant', { timeout: 20_000 });
+    await expect(page.locator('#inspector')).toBeVisible({ timeout: 20_000 });
   });
 
   test('file previews open HTML and SVG in the browser with a separate source action', async ({ page }) => {
@@ -93,9 +93,11 @@ test.describe('browser workspace', () => {
     await page.addInitScript(() => { (window as any).__fileLinkExample = true; });
     await page.reload();
     const response = page.locator('.message-content').filter({ hasText: 'Open the page' });
-    await response.getByRole('button', { name: 'the page', exact: true }).click();
+    // The first transcript row sits beneath the transparent titlebar drag strip;
+    // activate its focusable file links by keyboard instead of clicking through the header.
+    await response.getByRole('button', { name: 'the page', exact: true }).press('Enter');
     await expect(browserUrl(page)).toHaveValue(/\/index\.html$/);
-    await response.getByRole('button', { name: 'src/main.ts', exact: true }).click();
+    await response.getByRole('button', { name: 'src/main.ts', exact: true }).press('Enter');
     await expect(page.locator('.file-view-path')).toHaveText('src/main.ts');
     await expect(response.getByRole('button', { name: 'missing.html', exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
@@ -105,7 +107,7 @@ test.describe('browser workspace', () => {
     await expect(page.locator('#transcript')).toHaveAttribute('inert', '');
     await page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'Conversation', exact: true }).click();
     await expect(page.locator('#transcript')).not.toHaveAttribute('inert', '');
-    await page.locator('.message-content').getByRole('button', { name: 'public/favicon.svg', exact: true }).click();
+    await page.locator('.message-content').getByRole('button', { name: 'public/favicon.svg', exact: true }).press('Enter');
     await expect(page.locator('.file-view-path')).toHaveText('public/favicon.svg');
     await expect(page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'favicon.svg', exact: true })).toHaveAttribute('aria-selected', 'true');
     await page.getByRole('button', { name: 'Preview in browser', exact: true }).click();

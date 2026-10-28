@@ -2159,6 +2159,19 @@ async fn launch_operation_admitted(
                     }
                 }
             }
+            // Record only the final explicit outcome; storage excludes stops, restores,
+            // failures and goal tasks before setting the monotonic bit.
+            if let Err(error) = db.record_successful_ordinary_turn(
+                &session_id,
+                successful,
+                was_stopped,
+                restore_stage.as_deref(),
+            ) {
+                successful = false;
+                if let Ok(mut slot) = persistence_error.lock() {
+                    *slot = Some(error);
+                }
+            }
             if let Some(title) = &title_run {
                 if title.finish(&db, successful).unwrap_or(false) {
                     let _ = app.emit("sessions-changed", ());

@@ -166,7 +166,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 33;
+pub const SCHEMA_VERSION: i64 = 34;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -488,6 +488,17 @@ impl Store {
             if version < 33 {
                 // Preserve old archived conversations as settled tasks, without deleting history.
                 migration.execute_batch("UPDATE sessions SET task_stage='completed',completed_at=COALESCE(completed_at,updated_at),archived=0 WHERE archived=1; PRAGMA user_version=33;").map_err(|e| e.to_string())?;
+            }
+            if version < 34 {
+                // Persist mirror backfill progress and truncated message markers across restarts.
+                for (table, name, sql) in [
+                    ("sessions", "remote_backfill_base", "ALTER TABLE sessions ADD COLUMN remote_backfill_base INTEGER"),
+                    ("messages", "remote_cut", "ALTER TABLE messages ADD COLUMN remote_cut INTEGER"),
+                ] {
+                    let exists: bool = migration.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"), [name], |r| r.get(0)).map_err(|e| e.to_string())?;
+                    if !exists { migration.execute_batch(sql).map_err(|e| e.to_string())?; }
+                }
+                migration.execute_batch("PRAGMA user_version=34;").map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }
@@ -3294,7 +3305,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandacode-project-switch-{}", id()));
         std::fs::create_dir_all(dir.join("destination")).unwrap();
         let path = dir.join("store.db");
-        let expected;
+        let mut expected;
         {
             let store = Store::open(&path).unwrap();
             let source = store.add_project(&dir).unwrap();
@@ -3327,6 +3338,10 @@ mod tests {
         }
         {
             let store = Store::open(&path).unwrap();
+            // Reopening upgrades legacy archived tasks to settled tasks.
+            expected["archived"] = false.into();
+            expected["taskStage"] = "completed".into();
+            expected["completedAt"] = expected["updatedAt"].clone();
             assert_eq!(
                 serde_json::to_value(store.sessions().unwrap().remove(0)).unwrap(),
                 expected

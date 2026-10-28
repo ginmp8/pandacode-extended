@@ -14,7 +14,7 @@ export type BotSignals = { waiting?: 'approval' | 'question'; failed?: boolean; 
 export type BotStatus =
   | { kind: 'waiting'; reason: 'approval' | 'question' } | { kind: 'failed' } | { kind: 'limited'; until: number | null }
   | { kind: 'working' } | { kind: 'unread'; count: number } | { kind: 'responded' };
-export type BotsListContext = { bots: Bot[]; channels?: SharedChannelSummary[]; selectedProject: string | undefined; selectedChannel?: string; signals: (bot: Bot) => BotSignals; loaded: boolean; hiddenOpen: boolean };
+export type BotsListContext = { bots: Bot[]; channels?: SharedChannelSummary[]; selectedProject: string | undefined; selectedChannel?: string; signals: (bot: Bot) => BotSignals; loaded: boolean; loadError?: boolean; hiddenOpen: boolean };
 
 const VIEW_KEY = 'pandacode.sidebarView';
 const SEEN_KEY = 'pandacode.botsSeen';
@@ -175,7 +175,8 @@ export function ordered(bots: Bot[]): Bot[] {
 
 export function botsListHtml(context: BotsListContext, query: string): string {
   const channels = context.channels ?? [];
-  if (!context.loaded) return `<div class="bots-skeleton" role="status" aria-label="Loading bots">${'<span class="bot-row-skeleton" aria-hidden="true"><i></i><span><i></i><i></i></span></span>'.repeat(SKELETON_ROWS)}</div>`;
+  const error = context.loadError ? '<div class="bots-panel-start" role="alert"><p>Unable to load bots.</p><button type="button" class="secondary-button" data-action="retry-bots">Retry</button></div>' : '';
+  if (!context.loaded && !context.loadError) return `<div class="bots-skeleton" role="status" aria-label="Loading bots">${'<span class="bot-row-skeleton" aria-hidden="true"><i></i><span><i></i><i></i></span></span>'.repeat(SKELETON_ROWS)}</div>`;
   const needle = query.trim().toLowerCase();
   const bots = ordered(context.bots.filter(bot => !needle || `${bot.name} ${bot.role} ${bot.lastMessage?.text ?? ''}`.toLowerCase().includes(needle)));
   const matchingChannels = channels.filter(channel => !needle || channel.name.toLowerCase().includes(needle));
@@ -197,7 +198,7 @@ export function botsListHtml(context: BotsListContext, query: string): string {
   const channelRows = (items: SharedChannelSummary[]) => items.map(channel => `<button type="button" class="channel-row${context.selectedChannel === channel.id ? ' selected' : ''}"${context.selectedChannel === channel.id ? ' aria-current="page"' : ''} data-action="open-shared-channel" data-channel="${escape(channel.id)}" aria-label="#${escape(channel.name)}">${channelFaceCluster(channel.memberIds, context.bots)}<span>#${escape(channel.name)}</span></button>`).join('');
   const channelGroups = (activeChannels.length ? `<div class="bots-group bots-group-channels" role="group" aria-label="Channels"><h3 class="bots-group-label">Channels</h3><div role="list">${channelRows(activeChannels)}</div></div>` : '')
     + (deletedChannels.length ? `<div class="bots-group bots-hidden" role="group" aria-label="Deleted channels"><h3 class="bots-group-label">Deleted channels</h3><div role="list">${channelRows(deletedChannels)}</div></div>` : '');
-  const empty = !bots.length && !channels.length ? `<div class="bots-panel-start"><p>No bots yet</p><button type="button" class="secondary-button" data-action="new-bot-menu">${icon('plus')}<span>Create your first bot or channel</span></button></div>` : '';
+  const empty = !context.loadError && !bots.length && !channels.length ? `<div class="bots-panel-start"><p>No bots yet</p><button type="button" class="secondary-button" data-action="new-bot-menu">${icon('plus')}<span>Create your first bot or channel</span></button></div>` : '';
   const noMatch = Boolean((context.bots.length || channels.length) && !bots.length && !matchingChannels.length) ? '<p class="bots-panel-empty">No bots or channels match.</p>' : '';
-  return `${empty}${botGroups}${channelGroups}${noMatch}`;
+  return `${error}${empty}${botGroups}${channelGroups}${noMatch}`;
 }

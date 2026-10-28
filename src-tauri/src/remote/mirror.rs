@@ -680,13 +680,12 @@ async fn uncut(app: &tauri::AppHandle, local: &str) -> Result<()> {
     Ok(())
 }
 
-/// Replaces a cut copy with the page's whole message. The copy is forgotten either way: a
-/// message the host no longer has, or cuts again, stays as it is.
+/// Replaces a cut copy only after receiving and validating the whole message.
 pub(crate) fn replace_cut(store: &Store, local: &str, (id, host_id): (i64, i64), page: &Value) -> Result<bool> {
-    store.db.execute("UPDATE messages SET remote_cut=NULL WHERE id=?1 AND session_id=?2", params![id, local]).map_err(|e| e.to_string())?;
     let Some(message) = page["messages"].as_array().and_then(|messages| messages.first()).filter(|m| m["id"].as_i64() == Some(host_id) && m["cut"] != true) else { return Ok(false) };
     let (_, role, content, created_at) = valid_message(message)?;
-    let changed = store.db.execute("UPDATE messages SET role=?3,content=?4,created_at=?5,turn_duration_ms=?6 WHERE id=?1 AND session_id=?2", params![id, local, role, content, created_at, message["turnDurationMs"].as_i64()]).map_err(|e| e.to_string())?;
+    let content = copied_content(message, role, content)?;
+    let changed = store.db.execute("UPDATE messages SET role=?3,content=?4,created_at=?5,turn_duration_ms=?6,remote_cut=NULL WHERE id=?1 AND session_id=?2 AND remote_cut=?7", params![id, local, role, content, created_at, message["turnDurationMs"].as_i64(), host_id]).map_err(|e| e.to_string())?;
     Ok(changed > 0)
 }
 
@@ -781,9 +780,21 @@ fn valid_message(message: &Value) -> Result<(i64, &str, &str, i64)> {
 
 fn insert_copy(store: &Store, local: &str, id: Option<i64>, message: &Value) -> Result<()> {
     let (host_id, role, content, created_at) = valid_message(message)?;
+    let content = copied_content(message, role, content)?;
     let cut = (message["cut"] == true).then_some(host_id);
     store.db.execute("INSERT INTO messages(id,session_id,role,content,created_at,turn_duration_ms,remote_cut) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id, local, role, content, created_at, message["turnDurationMs"].as_i64(), cut]).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Preserve only the safe coordination label, never an internal prompt from the host.
+fn copied_content(message: &Value, role: &str, content: &str) -> Result<String> {
+    if role == "coordination" {
+        if let Ok(kind) = serde_json::from_value::<crate::architect::internal_turns::CoordinationKind>(message["coordinationKind"].clone()) {
+            return crate::architect::internal_turns::encode(kind, kind.label());
+        }
+        return Ok("Coordinating team".into());
+    }
+    Ok(content.to_owned())
 }
 
 fn store_title(store: &Store, local: &str, page: &Value) -> Result<()> {
@@ -819,18 +830,11 @@ pub(crate) fn store_page(store: &Store, local: &str, after: i64, page: &Value) -
     }
     let mut last = after;
     for message in page["messages"].as_array().map(Vec::as_slice).unwrap_or_default() {
-        let (Some(id), Some(role), Some(content), Some(created_at)) = (message["id"].as_i64(), message["role"].as_str(), message["content"].as_str(), message["createdAt"].as_i64()) else { return Err("The other computer sent an invalid message.".into()) };
-        if id <= last || role.is_empty() || role.len() > 32 || !role.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+        let (id, ..) = valid_message(message)?;
+        if id <= last {
             return Err("The other computer sent an invalid message.".into());
         }
-        // Connect carries the safe presentation, not the host's internal prompt.
-        // Keep its typed label when the local Store projects the mirrored row again.
-        let projected = if role == "coordination" {
-            serde_json::from_value::<crate::architect::internal_turns::CoordinationKind>(message["coordinationKind"].clone()).ok()
-                .map(|kind| crate::architect::internal_turns::encode(kind, kind.label())).transpose()?
-        } else { None };
-        let content = projected.as_deref().unwrap_or(content);
-        store.db.execute("INSERT INTO messages(session_id,role,content,created_at,turn_duration_ms) VALUES (?1,?2,?3,?4,?5)", params![local, role, content, created_at, message["turnDurationMs"].as_i64()]).map_err(|e| e.to_string())?;
+        insert_copy(store, local, None, message)?;
         last = id;
     }
     store_title(store, local, page)?;
@@ -1820,6 +1824,25 @@ mod tests {
     }
 
     #[test]
+    fn version_34_adds_durable_mirror_backfill_columns() {
+        let path = std::env::temp_dir().join(format!("pandacode-mirror-upgrade-{}.sqlite3", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch("ALTER TABLE sessions DROP COLUMN remote_backfill_base; ALTER TABLE messages DROP COLUMN remote_cut; PRAGMA user_version=33;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        for (table, name) in [("sessions", "remote_backfill_base"), ("messages", "remote_cut")] {
+            let exists: bool = store.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"), [name], |r| r.get(0)).unwrap();
+            assert!(exists, "{table}.{name}");
+        }
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), crate::storage::SCHEMA_VERSION);
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[test]
     fn version_26_adds_the_mirror_columns() {
         let path = std::env::temp_dir().join(format!("pandacode-mirror-{}.sqlite3", uuid::Uuid::new_v4()));
         {
@@ -1827,7 +1850,7 @@ mod tests {
             store.db.execute_batch("DROP INDEX sessions_remote; ALTER TABLE sessions DROP COLUMN remote_device; ALTER TABLE sessions DROP COLUMN remote_session; ALTER TABLE sessions DROP COLUMN remote_synced_id; PRAGMA user_version=25;").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!((crate::storage::SCHEMA_VERSION, store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap()), (32, 32));
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), crate::storage::SCHEMA_VERSION);
         let columns: i64 = store.db.query_row("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name IN ('remote_device','remote_session','remote_synced_id')", [], |r| r.get(0)).unwrap();
         assert_eq!(columns, 3);
         let project = store.add_project(&std::env::temp_dir()).unwrap();
@@ -2335,6 +2358,74 @@ mod tests {
         assert_eq!(mirrored[0].content, "Reviewing worker results");
         assert_eq!(mirrored[0].coordination_kind, Some(CoordinationKind::WorkerReview));
         assert_eq!(mirrored[1].role, "user");
+    }
+
+    #[test]
+    fn cut_copies_survive_invalid_retries_and_forward_pages_mark_cuts() {
+        let (viewer, local) = store();
+        let cut = json!({"id": 7, "role": "assistant", "content": "partial", "createdAt": 1, "cut": true});
+        assert!(!store_page(&viewer, &local, 0, &json!({"messages": [cut]})).unwrap());
+        let [(id, host_id)] = cut_copies(&viewer, &local).unwrap()[..] else { panic!("cut is durable") };
+        for page in [json!({"messages": []}), json!({"messages": [{"id": 8}]}), json!({"messages": [{"id": 7, "cut": true}]})] {
+            assert!(!replace_cut(&viewer, &local, (id, host_id), &page).unwrap());
+        }
+        assert!(replace_cut(&viewer, &local, (id, host_id), &json!({"messages": [{"id": 7, "role": "", "content": "bad", "createdAt": 1}]})).is_err());
+        viewer.db.execute_batch("CREATE TEMP TRIGGER reject_mirror_update BEFORE UPDATE ON messages WHEN NEW.content='rejected' BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        let rejected = json!({"messages": [{"id": 7, "role": "assistant", "content": "rejected", "createdAt": 1}]});
+        assert!(replace_cut(&viewer, &local, (id, host_id), &rejected).is_err());
+        assert_eq!(cut_copies(&viewer, &local).unwrap(), [(id, 7)]);
+        assert_eq!(viewer.messages(&local, None).unwrap()[0].content, "partial");
+        let whole = json!({"messages": [{"id": 7, "role": "assistant", "content": "whole", "createdAt": 1}]});
+        assert!(replace_cut(&viewer, &local, (id, host_id), &whole).unwrap());
+        assert!(cut_copies(&viewer, &local).unwrap().is_empty());
+        assert_eq!(viewer.messages(&local, None).unwrap()[0].content, "whole");
+    }
+
+    #[test]
+    fn invalid_forward_page_does_not_advance_or_keep_partial_inserts() {
+        let (viewer, local) = store();
+        let page = json!({"messages": [{"id": 1, "role": "user", "content": "one", "createdAt": 1}, {"id": 2, "role": "user"}]});
+        assert!(store_page(&viewer, &local, 0, &page).is_err());
+        assert!(viewer.messages(&local, None).unwrap().is_empty());
+        let cursor: i64 = viewer.db.query_row("SELECT remote_synced_id FROM sessions WHERE id=?1", [&local], |r| r.get(0)).unwrap();
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn tail_and_older_copies_preserve_coordination_projection() {
+        use crate::architect::internal_turns::{encode, CoordinationKind};
+        let (host, host_task) = store();
+        let (viewer, local) = store();
+        let private = encode(CoordinationKind::WorkerReview, "Private scheduler instructions").unwrap();
+        host.message(&host_task, "coordination", &private).unwrap();
+        host.message(&host_task, "coordination", &private).unwrap();
+        let tail = host::messages_page_with(&host.db, &host_task, host::MessagePaging::Tail { limit: 1 }).unwrap();
+        assert_eq!(tail["messages"][0]["coordinationKind"], "worker_review");
+        assert!(store_tail(&viewer, &local, &tail).unwrap());
+        let oldest = oldest_copied(&viewer, &local).unwrap().unwrap();
+        let older = host::messages_page_with(&host.db, &host_task, host::MessagePaging::Before { before_id: oldest.1, limit: 1 }).unwrap();
+        assert_eq!(older["messages"][0]["coordinationKind"], "worker_review");
+        assert!(!store_older(&viewer, &local, oldest, &older).unwrap());
+        let messages = viewer.messages(&local, None).unwrap();
+        assert_eq!(messages.len(), 2);
+        for message in messages {
+            assert_eq!(message.coordination_kind, Some(CoordinationKind::WorkerReview));
+            assert_eq!(message.content, "Reviewing worker results");
+        }
+    }
+
+    #[test]
+    fn replacing_cut_coordination_keeps_its_safe_kind() {
+        use crate::architect::internal_turns::CoordinationKind;
+        let (viewer, local) = store();
+        let message = json!({"id": 1, "role": "coordination", "content": "partial", "coordinationKind": "worker_review", "createdAt": 1, "cut": true});
+        store_page(&viewer, &local, 0, &json!({"messages": [message]})).unwrap();
+        let (id, host_id) = cut_copies(&viewer, &local).unwrap()[0];
+        let whole = json!({"id": 1, "role": "coordination", "content": "untrusted", "coordinationKind": "worker_review", "createdAt": 1});
+        assert!(replace_cut(&viewer, &local, (id, host_id), &json!({"messages": [whole]})).unwrap());
+        let message = viewer.messages(&local, None).unwrap().remove(0);
+        assert_eq!(message.coordination_kind, Some(CoordinationKind::WorkerReview));
+        assert_eq!(message.content, "Reviewing worker results");
     }
 
     #[test]

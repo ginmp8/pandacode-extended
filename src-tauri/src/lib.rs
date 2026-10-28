@@ -3511,6 +3511,8 @@ pub fn run() {
                 remote_workspace_image,
                 remote::remote_targets,
                 remote::mirror::remote_start_task,
+                remote::mirror::remote_team,
+                remote::mirror::remote_worker_messages,
                 remote::mirror::remote_repo_check,
                 provider_settings::provider_configuration,
                 connections::connections_list,

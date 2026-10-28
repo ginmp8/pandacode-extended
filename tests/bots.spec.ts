@@ -30,9 +30,10 @@ async function showTasksView(page: Page): Promise<void> {
   if (await botsBar(page).getAttribute('aria-pressed') === 'true') await botsBar(page).click();
   await expect(page.locator('#navigation')).toBeVisible();
 }
-async function openBots(page: Page): Promise<void> {
+async function openBots(page: Page, checkEmpty = false): Promise<void> {
   await page.goto('/');
   await showBotsView(page);
+  if (checkEmpty) await expect(sidebar(page).getByText('No bots yet', { exact: true })).toBeVisible();
   await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
   await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
   await expect(bots(page)).toBeVisible();
@@ -115,7 +116,7 @@ test.describe('bots', () => {
     // After the reply, the row previews it with its time.
     await expect(row.locator('.bot-card-preview')).toContainText('This is the browser preview');
     await expect(row.locator('time')).toBeVisible();
-    const search = sidebar(page).getByRole('searchbox', { name: 'Search bots' });
+    const search = sidebar(page).getByRole('searchbox', { name: 'Search bots and channels' });
     await search.fill('nobody');
     await expect(sidebar(page).locator('.bots-panel-empty')).toHaveText('No bots or channels match.');
     await search.fill('sco');
@@ -132,13 +133,13 @@ test.describe('bots', () => {
   });
 
   test('a new bot opens its conversation in the task view, with the bot in the header', async ({ page }) => {
-    await openBots(page);
+    await openBots(page, true);
     await expect(bots(page).getByRole('heading', { name: 'New bot' })).toBeVisible();
-    await expect(bots(page).getByText('No bots yet.')).toBeVisible();
     await bots(page).getByRole('button', { name: /Researcher/ }).click();
-    await expect(bots(page).getByRole('textbox', { name: 'Job' })).toHaveValue('Digs into questions and reports back');
+    await expect(bots(page).getByRole('textbox', { name: 'What should this bot help with?' })).toHaveValue('Research the questions I bring you using the web and files on this computer. Lead with the answer, then the evidence, and cite sources with links.');
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
+    const form = bots(page).getByRole('form', { name: 'New bot' });
     await expect(form.locator('#bc-name-error')).toHaveText('Give the bot a name.');
     await form.getByRole('textbox', { name: 'Name' }).fill('Scout');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
@@ -575,6 +576,38 @@ test.describe('bots', () => {
     await expect.poll(names).toEqual([second, first]);
     const ids = await sidebar(page).locator('[data-bot-row]').evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.botRow));
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pandacode.botsOrder') ?? '[]'))).toEqual(ids);
+  });
+
+  test('failed bot loads offer retry and preserve cached bots', async ({ page }) => {
+    await page.addInitScript(() => { (window as any).__failBotsList = true; });
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch(), source = await response.text();
+      const marker = /async function invoke\(command, args\) \{/;
+      expect(source).toMatch(marker);
+      await route.fulfill({ response, body: source.replace(marker, `async function invoke(command, args) {
+        if (command === 'bots_list' && window.__failBotsList) throw new Error('List unavailable');
+      `) });
+    });
+    await page.goto('/');
+    await showBotsView(page);
+    await expect(sidebar(page).getByRole('alert')).toHaveText(/Unable to load bots/);
+    await expect(sidebar(page).getByText('No bots yet')).toHaveCount(0);
+    await page.evaluate(() => { (window as any).__failBotsList = false; });
+    await sidebar(page).getByRole('button', { name: 'Retry' }).click();
+    await expect(sidebar(page).getByText('No bots yet')).toBeVisible();
+    await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
+    await sidebar(page).getByRole('menuitem', { name: 'New bot' }).click();
+    await bots(page).getByRole('textbox', { name: 'Name' }).fill('Scout');
+    await bots(page).getByRole('button', { name: 'Create bot' }).click();
+    await expect(crumb(page).locator('.bot-crumb-state')).toHaveText('Ready');
+    await page.evaluate(() => { (window as any).__failBotsList = true; });
+    await page.locator('#breadcrumb').getByRole('button', { name: 'Pause Scout' }).click();
+    await expect(sidebar(page).getByRole('alert')).toHaveText(/Unable to load bots/);
+    await expect(sidebar(page).getByRole('button', { name: 'Chat with Scout' })).toBeVisible();
+    await page.evaluate(() => { (window as any).__failBotsList = false; });
+    await sidebar(page).getByRole('button', { name: 'Retry' }).click();
+    await expect(sidebar(page).getByRole('alert')).toHaveCount(0);
+    await expect(crumb(page).locator('.bot-crumb-state')).toHaveText('Paused');
   });
 
   test('loading shows skeleton rows, then the empty state offers to create a bot', async ({ page }) => {

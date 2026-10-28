@@ -1020,8 +1020,7 @@ fn mcp_references_are_bounded_names_and_never_raw_skills() {
         assert!(set_capabilities(&f.store, &bot.id, &invalid).is_err());
     }
     assert_eq!(get(&f.store, &bot.id).unwrap().mcp, saved.mcp);
-    let raw_skills: bool = f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='skills')", [], |r| r.get(0)).unwrap();
-    assert!(!raw_skills, "Extended keeps Skills in its scoped hash-pinned library");
+    assert!(saved.skills.is_empty(), "MCP references do not activate Skills");
 }
 
 fn project_task(f: &Fixture) -> crate::storage::Session {

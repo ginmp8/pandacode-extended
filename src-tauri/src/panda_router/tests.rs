@@ -422,4 +422,3 @@ fn every_harness_map_entry_names_a_card() {
         assert!(resolve_card(provider, model, "").is_some(), "{provider} {model}");
     }
 }
-

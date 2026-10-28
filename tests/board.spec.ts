@@ -101,18 +101,18 @@ test.describe('project board', () => {
     await queueTask(page, 'Drag between stages');
     const task = await savedTask(page, 'Drag between stages');
     const sidebarRow = page.locator('#navigation .task-item[data-id="' + task.id + '"]');
-    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
+    await expect(sidebarRow.locator('.task-row')).toHaveAttribute('data-stage', 'pending');
     await expect(sidebarRow.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: Pending');
     const source = page.locator(`.board-card[data-task-id="${task.id}"]`);
     await source.dragTo(column(page, 'Review'));
     await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow).toHaveAttribute('data-stage', 'review');
+    await expect(sidebarRow.locator('.task-row')).toHaveAttribute('data-stage', 'review');
     const reviewColor = await sidebarRow.locator('.stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor);
     expect(reviewColor).toBe(await page.locator('.board-column[data-stage="review"] .stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor));
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'review', completedAt: null });
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
     await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
+    await expect(sidebarRow.locator('.task-row')).toHaveAttribute('data-stage', 'pending');
     expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'pending', completedAt: null });
     await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Settled'));
     await expect(column(page, 'Settled').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
@@ -134,13 +134,13 @@ test.describe('project board', () => {
     await expect(page.locator('#toast')).toContainText('GitHub issue #131 closed.');
     await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('closed');
 
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await showView(page, 'Conversation');
     await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
     const reopen = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
     await reopen.getByRole('button', { name: 'Reopen issue', exact: true }).click();
     await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('open');
 
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await showView(page, 'Board');
     await readyIssueTaskForCompletion(page, title);
     await details(page).getByRole('button', { name: 'Settle', exact: true }).click();
     const closeAgain = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
@@ -184,7 +184,7 @@ test.describe('project board', () => {
     await expect(page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true })).toHaveCount(0);
     await expect(page.locator('#toast')).toContainText('GitHub issue #131 is already closed.');
 
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await showView(page, 'Conversation');
     await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
     const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
     await expect(confirm).toBeVisible();
@@ -193,7 +193,7 @@ test.describe('project board', () => {
     await expect(confirm).toBeHidden();
     await expect.poll(async () => (await calls(page, 'github_cancel_linked_issue_action')).length).toBe(1);
     expect(await page.evaluate(() => ((window as any).__boardCalls ?? []).filter((call: any) => call.command === 'github_apply_linked_issue_action').length)).toBe(0);
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await showView(page, 'Board');
     await card(page, 'Make search feel instant').click();
     await page.evaluate(async () => {
       const { invoke } = await import((window as any).__boardPreviewUrl);
@@ -593,4 +593,3 @@ test('the sidebar view menu switches views, marks the current one and stays reac
   await page.setViewportSize({ width: 620, height: 800 });
   await expect(page.locator('.sidebar .brand #view-menu')).toBeVisible();
 });
-

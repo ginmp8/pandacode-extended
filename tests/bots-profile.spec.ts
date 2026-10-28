@@ -4,15 +4,27 @@ const settings = (page: Page) => page.getByRole('dialog', { name: 'Scout setting
 async function createBot(page: Page, mode = 'ask'): Promise<void> {
   await page.goto('/');
   await page.locator('.sidebar-bots-bar').click();
-  await page.getByRole('region', { name: 'Bots', exact: true }).getByRole('button', { name: 'Add bot', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Bots' });
+  const sidebar = page.getByRole('region', { name: 'Bots', exact: true });
+  await sidebar.getByRole('button', { name: 'Add bot or channel' }).click();
+  await sidebar.getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'New bot' });
   await dialog.getByRole('button', { name: /Researcher/ }).click();
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('Scout');
-  await dialog.getByRole('textbox', { name: 'Soul', exact: true }).fill('Precise, candid and warm.');
-  await dialog.getByRole('combobox', { name: 'Permissions' }).selectOption(mode);
   await dialog.getByRole('button', { name: 'Create bot' }).click();
   await expect(dialog).toBeHidden();
   await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
+  await openSettings(page);
+  if (mode === 'full') {
+    await settings(page).getByRole('radio', { name: 'Full access' }).click();
+    await settings(page).getByRole('alertdialog', { name: 'Give Scout full access?' }).getByRole('button', { name: 'Allow full access' }).click();
+  }
+  await settings(page).getByRole('textbox', { name: 'Soul', exact: true }).fill('Precise, candid and warm.');
+  await expect.poll(() => page.evaluate(async () => {
+    const { invoke } = await import('/src/preview.ts');
+    const [bot] = await invoke<any[]>('bots_list', {});
+    return { soul: bot.soul, mode: bot.mode };
+  })).toEqual({ soul: 'Precise, candid and warm.', mode });
+  await closeSettings(page);
 }
 async function openSettings(page: Page): Promise<void> {
   await page.locator('#breadcrumb').getByRole('button', { name: 'Scout settings', exact: true }).click();
@@ -30,13 +42,11 @@ test('personality imports, saves and removes without changing instructions', asy
   await expect(soul).toHaveValue('Precise, candid and warm.');
   await settings(page).locator('[data-soul-file]').setInputFiles({ name: 'soul.md', mimeType: 'text/markdown', buffer: Buffer.from('\uFEFF# Scout\nWarm, focused — never vague.') });
   await expect(soul).toHaveValue('# Scout\nWarm, focused — never vague.');
-  await settings(page).getByRole('button', { name: 'Save', exact: true }).click();
   await closeSettings(page); await openSettings(page);
   await expect(soul).toHaveValue('# Scout\nWarm, focused — never vague.');
   await expect(settings(page).getByRole('textbox', { name: 'Instructions', exact: true })).toHaveValue(instructions);
-  await settings(page).getByRole('button', { name: 'Remove personality' }).click();
+  await settings(page).getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(soul).toHaveValue('');
-  await settings(page).getByRole('button', { name: 'Save', exact: true }).click();
   await closeSettings(page); await openSettings(page);
   await expect(soul).toHaveValue('');
 });
@@ -92,7 +102,6 @@ test('a stale bot detail response cannot change the target of a profile save', a
   await expect(fixture.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Alpha');
   await fixture.getByRole('textbox', { name: 'Soul', exact: true }).fill('Alpha changed this personality');
   await page.evaluate(async () => { (window as any).__releaseBotDetail(); await new Promise(resolve => setTimeout(resolve, 0)); });
-  await fixture.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => page.evaluate(async id => { const { invoke } = await import('/src/preview.ts'); return (await invoke<any>('bot_detail', { botId: id })).bot.soul; }, ids.first)).toBe('Alpha changed this personality');
   const untouched = await page.evaluate(async id => { const { invoke } = await import('/src/preview.ts'); return (await invoke<any>('bot_detail', { botId: id })).bot; }, ids.second);
   expect(untouched.name).toBe('Beta');

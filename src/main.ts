@@ -1406,6 +1406,7 @@ function composerPlaceholder(): string { const bot = botForThread(); return bot 
 function botCrumb(bot: import('./bots').Bot): string {
   const s = session();
   const working = state.sessions.some(task => task.projectId === bot.projectId && isRunning(task.id));
+  const status = bot.paused ? 'Paused' : working ? 'Working' : 'Ready';
   // Channel threads and scheduled work name where they come from; the bot's own chat needs no label.
   const where = s && s.id !== bot.desktopSession ? s.title.split(' · ').slice(1).join(' · ') : '';
   return `<span class="bot-crumb">${botAvatar(bot, 'bot-crumb-avatar')}<strong>${escape(bot.name)}</strong>${where ? `<span class="bot-crumb-where">${escape(where)}</span>` : ''}<span class="bot-crumb-state" data-state="${status.toLowerCase()}">${status}</span></span><button class="icon-button bot-crumb-action" data-action="bot-pause" data-bot="${escape(bot.id)}" aria-label="${bot.paused ? 'Resume' : 'Pause'} ${escape(bot.name)}" title="${bot.paused ? 'Resume: schedules, check-ins and channels continue' : 'Pause: stop work and hold schedules and messages'}" aria-pressed="${bot.paused}">${icon(bot.paused ? 'play' : 'pause')}</button><button class="bot-crumb-settings" data-action="bot-settings" data-bot="${escape(bot.id)}" aria-label="${escape(bot.name)} settings" title="Profile, memory, schedules, channels and rules">${icon('settings')}<span>Settings</span></button>`;
@@ -5152,17 +5153,22 @@ const botThreadMetaLoaded = new Set<string>();
 const botThreadMetaRequests = new Map<string, number>();
 
 let botReloadGeneration = 0;
+let botListGeneration = 0;
 let taskBots = new Map<string, string>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
   const generation = ++botReloadGeneration;
-  const [bots, links, projects] = await Promise.all([
-    call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
+  const listGeneration = ++botListGeneration;
+  const [result, links, projects] = await Promise.all([
+    call<import('./bots').Bot[]>('bots_list').then(bots => ({ bots, ok: true })).catch(() => ({ bots: sidebarBots, ok: false })),
     call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots)),
     withProjects ? call<Project[]>('list_projects') : Promise.resolve(null),
   ]);
   if (generation !== botReloadGeneration) return;
-  sidebarBots = bots; botProjects = new Set(bots.map(bot => bot.projectId));
+  if (listGeneration === botListGeneration) {
+    sidebarBots = result.bots; botsLoadError = !result.ok; if (result.ok) botsLoaded = true;
+    botProjects = new Set(sidebarBots.map(bot => bot.projectId));
+  }
   taskBots = new Map(Object.entries(links));
   if (botProjects.has(state.projectFilter)) setProjectFilter('');
   if (projects) state.projects = projects;
@@ -5440,6 +5446,7 @@ let sidebarView: SidebarView = storedSidebarView();
 let botsQuery = '';
 /** Skeleton rows show until the first bots_list answers, so the empty state never flashes. */
 let botsLoaded = false;
+let botsLoadError = false;
 let hiddenBotsOpen = (() => { try { return localStorage.getItem('pandacode.botsHiddenOpen') === 'true'; } catch { return false; } })();
 let botsListPendingRender = false;
 /** Bot workspaces whose run finished while another thread was open; cleared when the bot opens. */
@@ -5479,7 +5486,7 @@ function renderBots(): void {
     bindBotRows(panel.querySelector<HTMLElement>('.bots-panel-list')!);
   }
   const list = panel.querySelector<HTMLElement>('.bots-panel-list')!;
-  const html = botsListHtml({ bots: sidebarBots, channels: sidebarChannels, selectedProject: state.sharedChannelId ? undefined : current?.projectId, selectedChannel: state.sharedChannelId, signals: bot => botSignals(bot, unread), loaded: botsLoaded, hiddenOpen: hiddenBotsOpen }, botsQuery);
+  const html = botsListHtml({ bots: sidebarBots, channels: sidebarChannels, selectedProject: state.sharedChannelId ? undefined : current?.projectId, selectedChannel: state.sharedChannelId, signals: bot => botSignals(bot, unread), loaded: botsLoaded, loadError: botsLoadError, hiddenOpen: hiddenBotsOpen }, botsQuery);
   if (list.innerHTML !== html) {
     const menuAnchor = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
     if (menuAnchor && list.contains(menuAnchor)) botsListPendingRender = true;
@@ -5690,7 +5697,10 @@ function setSidebarView(view: SidebarView): void {
 }
 /** A bot's latest message changed; refresh the list's previews without reloading projects. */
 async function refreshBotPreviews(): Promise<void> {
-  sidebarBots = await call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots);
+  const generation = ++botListGeneration;
+  const result = await call<import('./bots').Bot[]>('bots_list').then(bots => ({ bots, ok: true })).catch(() => ({ bots: sidebarBots, ok: false }));
+  if (generation !== botListGeneration) return;
+  sidebarBots = result.bots; botsLoadError = !result.ok; if (result.ok) botsLoaded = true;
   renderBots();
 }
 /** The bot whose workspace holds the open conversation: its own chat, a channel thread or scheduled work. */
@@ -5869,6 +5879,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;
     case 'bot-pause': if (element.dataset.bot) { const bot = sidebarBots.find(item => item.id === element.dataset.bot); if (bot) await setBotPaused(bot, !bot.paused); } break;
+    case 'retry-bots': botsLoadError = false; renderBots(); run(reloadBotProjects(false)); break;
     case 'toggle-hidden-bots': hiddenBotsOpen = !hiddenBotsOpen; try { localStorage.setItem('pandacode.botsHiddenOpen', String(hiddenBotsOpen)); } catch { /* Keep the choice for this window. */ } renderBots(); break;
     case 'mark-bots-read': markAllBotsRead(sidebarBots, bot => state.sessions.filter(task => task.projectId === bot.projectId && task.lastResponseAt).map(task => task.lastResponseAt!)); renderBots(); break;
     case 'open-bot': if (element.dataset.bot) await openBot(element.dataset.bot); break;

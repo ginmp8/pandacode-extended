@@ -2916,12 +2916,15 @@ pub(crate) fn fit_page(rows: PageRows, budget: usize) -> Value {
         .rows
         .iter()
         .map(|message| {
-            let mut message = message.clone();
-            if message.to_string().len() > MAX_MESSAGE {
-                fit_message(&mut message);
+            let mut fitted = message.clone();
+            if fitted.to_string().len() > MAX_MESSAGE {
+                fit_message(&mut fitted);
+                if fitted["content"] != message["content"] {
+                    fitted["cut"] = json!(true);
+                }
             }
-            let size = message.to_string().len();
-            (message, size)
+            let size = fitted.to_string().len();
+            (fitted, size)
         })
         .collect();
     let page = fit_page_in(&rows, &messages, budget);
@@ -4654,6 +4657,16 @@ mod tests {
         // A normal page keeps it whole (under the 120 KB cap) and unmarked.
         let full = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 30 }, PAGE_BUDGET).unwrap();
         assert!(full["messages"][0].get("cut").is_none() && full["messages"][0]["content"].as_str().unwrap().len() > 100 * 1024);
+    }
+
+    #[test]
+    fn oversized_message_at_full_budget_is_marked_for_retry() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','user',?1,1)", ["x".repeat(MAX_MESSAGE * 2)]).unwrap();
+        let page = messages_page_fit(&db, "s", MessagePaging::After { after_id: 0, limit: 1 }, PACKED_PAGE_MAX).unwrap();
+        assert_eq!(page["messages"][0]["cut"], true);
+        assert!(page["messages"][0]["content"].as_str().unwrap().len() < MAX_MESSAGE * 2);
     }
 
     #[test]

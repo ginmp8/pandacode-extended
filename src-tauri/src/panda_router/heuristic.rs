@@ -224,4 +224,3 @@ pub fn profile(text: &str, ctx: &TaskContext) -> TaskProfile {
     let p50: f64 = cp.iter().zip(OUT_P50).map(|(p, o)| p * o).sum::<f64>() + 0.08 * (d - 5.0);
     TaskProfile { category: cp, difficulty, skills, flags: flags.map(|v| py_round(v, 4)), checklist, out_p50: py_round(p50, 3) }
 }
-

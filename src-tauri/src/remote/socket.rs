@@ -180,7 +180,7 @@ async fn session(app: &tauri::AppHandle, generation: u64, token: &str) -> Outcom
     let mut socket_config = tungstenite::protocol::WebSocketConfig::default();
     socket_config.max_message_size = Some(MAX_FRAME);
     socket_config.max_frame_size = Some(MAX_FRAME);
-    let stream = match tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async_with_config(request, Some(socket_config), false)).await {
+    let stream = match tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async_tls_with_config(request, Some(socket_config), false, Some(tls()))).await {
         Ok(Ok((stream, _))) => stream,
         Ok(Err(tungstenite::Error::Http(response))) if matches!(response.status().as_u16(), 401 | 403) => return Outcome::Unauthorized,
         _ => return Outcome::Failed,

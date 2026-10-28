@@ -1863,6 +1863,13 @@ test('tool activity settings persist expanded and collapsed groups with compact 
   await page.keyboard.press('Enter');
   await expect(groups.first()).toHaveAttribute('open', '');
   await page.reload();
+  // A manual disclosure survives reload independently of the global expand-all setting.
+  await expect(turn).toHaveAttribute('open', '');
+  await expect(groups.first()).toHaveAttribute('open', '');
+  await turn.locator('.turn-activity-summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(turn).not.toHaveAttribute('open', '');
+  await page.reload();
   await expect(turn).not.toHaveAttribute('open', '');
 });
 

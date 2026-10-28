@@ -127,7 +127,7 @@ test('a new chat lists under Chats, not projects, without project affordances', 
   await expect(page.locator('#prompt')).toHaveAttribute('placeholder', 'Ask anything…');
 
   // Leaving the chat brings the project affordances back.
-  await page.locator('.folder-group .task-item').first().click();
+  await page.locator('#navigation [data-thread-group="all"] .task-item').first().click();
   await expect(page.locator('#deploy-button')).toBeVisible();
 });
 
@@ -416,7 +416,7 @@ test('the sidebar disables deletion for running, awaiting-approval and active-go
   const id = (await chats(page).locator('.task-item.selected').getAttribute('data-id'))!;
   for (const status of ['running', 'waiting'] as const) {
     await page.evaluate(({ id, status }) => (window as any).__chatTestSetProtection(id, status), { id, status });
-    await expect(row(page, id).locator('.task-status.running')).toBeVisible();
+    await expect(row(page, id).locator('.task-indicator.running')).toBeVisible();
     await row(page, id).click({ button: 'right' });
     await expect(menu(page).getByRole('menuitem', { name: 'Delete chat…', exact: true })).toBeDisabled();
     await page.keyboard.press('Escape');
@@ -451,5 +451,7 @@ test('Go to anything starts a chat, and an empty chat can move to a project', as
   await page.getByRole('button', { name: 'Move to project…' }).click();
   await page.getByRole('option', { name: /orbit/ }).click();
   await expect(chats(page)).toHaveCount(0);
-  await expect(page.locator('.folder-group[aria-label="orbit tasks"] .task-item.selected')).toHaveCount(1, { timeout: 20_000 });
+  const moved = page.locator('#navigation [data-thread-group="all"] .task-item.selected');
+  await expect(moved).toHaveCount(1, { timeout: 20_000 });
+  await expect(moved.locator('.task-project-name')).toContainText('orbit');
 });

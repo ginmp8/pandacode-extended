@@ -474,7 +474,7 @@ const projectRunner = new ProjectRunner({
 });
 let sidebarDragging = false, orderingBusy = false;
 /** The open thread stays in the section it was opened from, so its row does not jump from under the click. */
-let sectionHold: { id: string; section: HeldSection } | undefined, completedOpen = readOpen(localStorage, COMPLETED_OPEN_KEY);
+let sectionHold: { id: string; section: HeldSection; index?: number } | undefined, completedOpen = readOpen(localStorage, COMPLETED_OPEN_KEY);
 const collapsedSections = readCollapsed(localStorage, COLLAPSED_SECTIONS_KEY);
 /** Settled lists its newest rows first, then pages in more on request. */
 const COMPLETED_FIRST = 10, COMPLETED_PAGE = 25;
@@ -1225,13 +1225,14 @@ function renderNavigation(): void {
   // A held thread that starts running is held in Active from then on: after its run it stays there
   // while it is open, and goes to its folder once you open another thread, never back to (say)
   // the Settled section it was opened from.
-  if (sectionHold && sectionHold.section !== 'active' && isRunning(sectionHold.id)) sectionHold = { ...sectionHold, section: 'active' };
+  if (sectionHold && sectionHold.section !== 'active' && isRunning(sectionHold.id)) sectionHold = { ...sectionHold, section: 'active', index: undefined };
   const order = taskComparator(sidebarSort.tasks), manual = sidebarSort.tasks === 'manual';
   const sections = sidebarSections({
     tasks: [...matching].sort(order), stage: taskStage,
     // Work that needs you: running or waiting, stopped by a usage limit, or failed while you were away.
     active: s => isRunning(s.id) || limitActive(s, now) || failed(s) && seen.has(s.id),
     selectedId: state.sessionId, hold: sectionHold?.id === state.sessionId ? sectionHold.section : undefined,
+    holdIndex: sectionHold?.id === state.sessionId ? sectionHold.index : undefined,
   });
   const visible = sections.rest;
   renderBots();
@@ -2824,6 +2825,18 @@ function markTraySeen(sessionId: string): void { void call('tray_seen', { sessio
 async function selectSession(id: string, focusComposer = false, preservePreviousAttachments = false): Promise<void> {
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
+  // Keep the selected row in the visual section and position it was opened from.
+  // This only affects presentation; it never changes stored stage or task ordering.
+  const selectedRow = document.querySelector<HTMLElement>(`#navigation .task-item[data-id="${CSS.escape(id)}"]`);
+  const sourceGroup = selectedRow?.closest<HTMLElement>('[data-thread-group]');
+  const sourceSection = sectionOf(sourceGroup?.dataset.threadGroup);
+  const position = selectedRow && sourceGroup
+    ? [...sourceGroup.querySelectorAll<HTMLElement>('.task-item')].indexOf(selectedRow)
+    : -1;
+  sectionHold = sourceSection ? {
+    id, section: sourceSection,
+    index: (sourceSection === 'review' || sourceSection === 'completed') && position >= 0 ? position : undefined,
+  } : undefined;
   closeMenus();
   if (document.querySelector('#dialog')?.classList.contains('change-review-dialog')) closeModal();
   const previousTask = session(), changingTask = previousTask?.id !== id;

@@ -612,7 +612,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(metadata, (id, "cabin.png".into(), Some(8), Some(4)));
+        assert_eq!(metadata, (id.clone(), "cabin.png".into(), Some(8), Some(4)));
         assert!(root
             .join(format!("data/attachments/{session}/{id}.png"))
             .is_file());

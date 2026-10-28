@@ -3305,6 +3305,79 @@ mod tests {
     }
 
     #[test]
+    fn migration_33_rolls_back_and_preserves_archived_task_relations() {
+        let dir = std::env::temp_dir().join(format!("pandacode-legacy-archive-{}", id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("storage.db");
+        let (ids, project_id) = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&dir).unwrap();
+            let mut ids = Vec::new();
+            for (index, stage) in ["pending", "review", "completed"].iter().enumerate() {
+                let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+                store.message(&task.id, "user", &format!("Prompt {index}")).unwrap();
+                store.message(&task.id, "assistant", &format!("Reply {index}")).unwrap();
+                store.db.execute(
+                    "UPDATE sessions SET archived=1,task_stage=?2,completed_at=?3,updated_at=?4,pinned=1,sidebar_order=?5,worktree_branch='preserved' WHERE id=?1",
+                    params![&task.id, *stage, (index == 2).then_some(17_i64), 1_000 + index as i64, index as i64],
+                ).unwrap();
+                ids.push(task.id);
+            }
+            store.db.execute(
+                "INSERT INTO task_links(session_id,kind,number,url,title,state,checked_at) VALUES (?1,'issue',58,?2,'Preserved issue','open',7)",
+                params![&ids[0], "https://github.com/ginmp8/pandacode-extended/issues/58"],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO github_issue_actions(session_id,action,repository,number,url,approved_at) VALUES (?1,'close','owner/repo',58,?2,7)",
+                params![&ids[0], "https://github.com/owner/repo/issues/58"],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO queued_messages(id,session_id,position,text,attachments,created_at,updated_at) VALUES ('queued-legacy',?1,0,'Retain queued message','[]',7,7)",
+                [&ids[1]],
+            ).unwrap();
+            // A failed migration must leave both the schema version and all rows intact.
+            store.db.execute_batch(
+                "CREATE TRIGGER reject_archive_upgrade BEFORE UPDATE OF archived ON sessions
+                 WHEN OLD.archived=1 AND NEW.archived=0
+                 BEGIN SELECT RAISE(ABORT,'simulated migration failure'); END;
+                 PRAGMA user_version=32;",
+            ).unwrap();
+            (ids, project.id)
+        };
+        assert!(Store::open(&path).is_err());
+        {
+            let db = Connection::open(&path).unwrap();
+            assert_eq!(db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 32);
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM sessions WHERE archived=1", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM sessions WHERE task_stage IN ('pending','review')", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+            db.execute_batch("DROP TRIGGER reject_archive_upgrade;").unwrap();
+        }
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+            assert_eq!(store.projects().unwrap().len(), 1);
+            assert_eq!(store.sessions().unwrap().len(), 3);
+            for (index, sid) in ids.iter().enumerate() {
+                let task = store.session(sid).unwrap();
+                assert_eq!(task.project_id, project_id);
+                assert!(!task.archived);
+                assert_eq!(task.task_stage, "completed");
+                assert_eq!(task.completed_at, Some(if index == 2 { 17 } else { 1_000 + index as i64 }));
+                assert!(task.pinned);
+                assert_eq!(task.sidebar_order, Some(index as i64));
+                assert_eq!(task.worktree_branch.as_deref(), Some("preserved"));
+                assert_eq!(store.messages(sid, None).unwrap().len(), 2);
+            }
+            for table in ["task_links", "github_issue_actions", "queued_messages"] {
+                let count: i64 = store.db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+                assert_eq!(count, 1, "{table} must survive repeated upgrades");
+            }
+            assert_eq!(store.settle_archived().unwrap(), 0);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn migration_28_creates_message_attachments_index() {
         let (store, _) = empty_session();
         let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();

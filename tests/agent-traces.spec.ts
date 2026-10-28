@@ -199,3 +199,25 @@ test('header glyph states, two-tone header text, and no frozen shimmer under red
   await advanceUntil(page, async () => await header.getAttribute('data-mode') === 'folded');
   await expect(header.locator('.trace-summary-text')).toHaveCSS('white-space', 'nowrap');
 });
+
+test('explicit per-task tool and turn disclosure survives task switching and page reload', async ({ page }) => {
+  await open(page, 'Morning brief');
+  await send(page, 'Brief me');
+  await page.clock.runFor(12000);
+  await expect(page.locator('.task-item.selected')).not.toHaveClass(/running/);
+  const turn = page.locator('details.turn-activity.is-steps');
+  await expect(turn).not.toHaveAttribute('open', '');
+  await turn.locator(':scope > summary').click();
+  const first = turn.locator(STEP).first();
+  await first.locator(':scope > summary').click();
+  await expect(first).toHaveAttribute('open', '');
+  await page.locator('.task-item', { hasText: 'Tool gallery' }).click();
+  await page.locator('.task-item', { hasText: 'Morning brief' }).click();
+  await expect(turn).toHaveAttribute('open', '');
+  await expect(first).toHaveAttribute('open', '');
+  await page.clock.resume();
+  await page.reload();
+  await page.locator('.task-item', { hasText: 'Morning brief' }).click();
+  await expect(turn).toHaveAttribute('open', '');
+  await expect(first).toHaveAttribute('open', '');
+});

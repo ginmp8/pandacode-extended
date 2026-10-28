@@ -49,6 +49,7 @@ reducedMotion.addEventListener('change', settleMotion);
 document.addEventListener('visibilitychange', settleMotion);
 const seen = new Map<string, Set<string>>();
 // Tools the reader opened or closed by hand keep that state for the rest of the turn.
+import { disclosureChoice } from './disclosure-state';
 const pinned = new Map<string, Set<string>>();
 
 document.addEventListener('click', event => {
@@ -118,8 +119,11 @@ export function choreograph(host: HTMLElement, turnKey: string, options: { answe
   if (options.expandAll) return;
   const withCard = tools.filter(tool => tool.dataset.toolStatus !== 'running' && tool.querySelector(':scope > .tool-activity-body > .tool-trace-frame > .tool-trace-card'));
   const keep = new Set(options.answering ? [] : withCard.slice(-OPEN_CARDS));
+  const sessionId = host.closest<HTMLElement>('#transcript')?.dataset.sessionId ?? '';
   for (const tool of tools) {
     // Only result cards open automatically; raw records keep their own manual disclosure.
+    const manual = disclosureChoice(sessionId, 'tool', tool.dataset.toolKey!);
+    if (manual !== undefined) { delete tool.dataset.auto; tool.open = manual; continue; }
     if (pinned.get(turnKey)?.has(tool.dataset.toolKey!)) { delete tool.dataset.auto; continue; }
     tool.dataset.auto = '';
     const want = keep.has(tool);
@@ -132,7 +136,9 @@ export function choreograph(host: HTMLElement, turnKey: string, options: { answe
 /** True while the reader keeps a tool of this turn open by hand; the turn then stays open at the end. */
 export function readingTrace(activity: Element): boolean {
   const held = pinned.get(activity.closest<HTMLElement>('[data-turn-key]')?.dataset.turnKey ?? '');
-  return !!held && [...activity.querySelectorAll<HTMLDetailsElement>('details.tool-trace[open]')].some(tool => held.has(tool.dataset.toolKey!));
+  const sessionId = activity.closest<HTMLElement>('#transcript')?.dataset.sessionId ?? '';
+  return [...activity.querySelectorAll<HTMLDetailsElement>('details.tool-trace[open]')].some(tool =>
+    Boolean(held?.has(tool.dataset.toolKey!)) || disclosureChoice(sessionId, 'tool', tool.dataset.toolKey!) === true);
 }
 
 /** The end of a turn: every card closes, the step list folds under the summary header. */

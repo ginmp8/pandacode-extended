@@ -48,6 +48,7 @@ import { providerLogo } from './provider-logos';
 import { decodeToolActivity, groupToolRuns, renderToolActivity, renderToolGroup, renderToolStatus, toolStackHtml } from './tool-activity';
 import { describeTool, kindIcon, summarizeTools, traceRowHtml } from './tool-trace';
 import { choreograph, enterHeader, enterText, foldTurn, readingTrace } from './trace-motion';
+import { disclosureChoice, rememberDisclosure, type DisclosureKind } from './disclosure-state';
 import { groupTurns, formatDuration, turnLabel } from './turn-activity';
 import { initializeNativeAppearance } from './appearance';
 import { currentTheme, setTheme } from './theme';
@@ -1578,10 +1579,12 @@ function renderTranscript(preservePosition = false): void {
   renderStream();
   refreshTeamProgress();
   restoreTurns(transcript, turnViews);
+  restoreDisclosurePreferences(transcript, s.id);
   if (unfolded) foldSavedTurn(transcript, unfolded);
   restoreToolGroups(transcript, groupViews);
   restoreChangeCards(transcript, changeViews);
   restoreTools(transcript, toolViews);
+  restoreDisclosurePreferences(transcript, s.id);
   if (restoreAnchor) restoreAnchor();
   else if (readingTool) transcript.scrollTop = scrollTop;
   else followTranscript();
@@ -1765,6 +1768,35 @@ function restoreTools(root: ParentNode, views: Map<string, ToolView>): void {
     }
   });
 }
+/** Stable disclosure identities are scoped to one task; only explicit reader clicks write. */
+function disclosureTarget(details: HTMLDetailsElement): { kind: DisclosureKind; key: string } | undefined {
+  const tool = details.closest<HTMLDetailsElement>('details[data-tool-key]');
+  if (details.classList.contains('tool-trace-raw') && tool?.dataset.toolKey) return { kind: 'raw', key: tool.dataset.toolKey };
+  if (details.dataset.toolKey) return { kind: 'tool', key: details.dataset.toolKey };
+  if (details.dataset.toolGroupKey) return { kind: 'group', key: details.dataset.toolGroupKey };
+  if (details.dataset.turnKey) return { kind: 'turn', key: details.dataset.turnKey };
+}
+
+function restoreDisclosurePreferences(root: ParentNode, sessionId: string): void {
+  root.querySelectorAll<HTMLDetailsElement>('details').forEach(details => {
+    const target = disclosureTarget(details);
+    if (!target) return;
+    const preference = disclosureChoice(sessionId, target.kind, target.key);
+    if (preference !== undefined) details.open = preference;
+  });
+}
+
+document.addEventListener('click', event => {
+  const summary = (event.target as Element | null)?.closest?.('summary');
+  const details = summary?.parentElement;
+  if (!(details instanceof HTMLDetailsElement) || !details.closest('#transcript')) return;
+  const target = disclosureTarget(details);
+  if (!target) return;
+  const sessionId = details.closest<HTMLElement>('#transcript')?.dataset.sessionId ?? '';
+  // Native <details> toggling occurs as the click default action, after this handler.
+  window.setTimeout(() => rememberDisclosure(sessionId, target.kind, target.key, details.open), 0);
+}, true);
+
 function visibleMessages(): Message[] {
   if (state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId)) {
     let lastUser = -1; state.messages.forEach((m, i) => { if (m.role === 'user' || m.role === 'coordination' || m.role === 'changes') lastUser = i; });

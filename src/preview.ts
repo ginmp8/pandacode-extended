@@ -542,12 +542,6 @@ function taskSummary(s: Session): Session {
   }
   return { ...s, taskDescription };
 }
-function archiveCompletedTasks(): void {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const s of sessions) {
-    if (!s.archived && s.taskStage === 'completed' && s.completedAt != null && s.completedAt <= cutoff && s.status !== 'running' && s.status !== 'waiting') s.archived = true;
-  }
-}
 for (const [sessionId, history] of Object.entries(messages)) {
   if (history.some(message => message.role === 'user') && history.some(message => message.role === 'assistant')) {
     const marker: Message = { id: ++id, sessionId, role: 'changes', content: '', createdAt: history.at(-1)!.createdAt };
@@ -1121,7 +1115,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'browser_capture': result = { id: crypto.randomUUID(), name: 'Sample screenshot', path: '/sample/browser-capture.png', mimeType: 'image/png', url: browserState.url, title: browserState.title, width: 1280, height: 800, dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' }; break;
     // Like the native rowid: projects are pushed in the order they were added.
     case 'list_projects': result = projects.map((project, index) => ({ ...project, addedOrder: index + 1 })); break;
-    case 'list_sessions': archiveCompletedTasks(); sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
+    case 'list_sessions': sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
     case 'set_resume_at_reset': {
       const s = session(args.sessionId);
       if (args.enabled && !(s.limitedAt && s.limitedUntil)) throw new Error('This task has no usage limit with a known reset time.');
@@ -1317,7 +1311,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'update_session': {
       const s = session(args.sessionId);
-      if (args.archived === false && s.archived && s.taskStage === 'completed') s.completedAt = Date.now();
+      if (args.archived === false && s.archived && s.taskStage === 'completed') s.completedAt ??= Date.now();
       Object.assign(s, Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'sessionId')), { updatedAt: Date.now() }); break;
     }
     case 'set_reasoning_effort': {

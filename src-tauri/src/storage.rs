@@ -22,7 +22,6 @@ pub fn valid_permission_mode(mode: &str) -> bool {
 // selected mode, including restrictive modes chosen before this default changed.
 pub const DEFAULT_PERMISSION_MODE: &str = "ask";
 
-pub const COMPLETED_ARCHIVE_DELAY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,7 +166,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 33;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -486,6 +485,10 @@ impl Store {
                     .execute_batch("PRAGMA user_version=32;")
                     .map_err(|error| error.to_string())?;
             }
+            if version < 33 {
+                // Preserve old archived conversations as settled tasks, without deleting history.
+                migration.execute_batch("UPDATE sessions SET task_stage='completed',completed_at=COALESCE(completed_at,updated_at),archived=0 WHERE archived=1; PRAGMA user_version=33;").map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
@@ -531,7 +534,7 @@ impl Store {
             path: path.to_path_buf(),
         };
         crate::architect::profiles::initialize(&store)?;
-        store.archive_completed(now())?;
+        store.settle_archived()?;
         Ok(store)
     }
     /// Older team releases stored scheduler prompts as user rows. Reuse their exact
@@ -1231,19 +1234,9 @@ impl Store {
         self.session(sid)
     }
 
-    /// Archive deadlines depend on completion time, never unrelated task edits.
-    /// The partial index keeps the once-per-minute sweep bounded to completed tasks.
-    pub fn archive_completed(&self, timestamp: i64) -> Result<usize> {
-        self.db
-            .execute(
-                "UPDATE sessions SET archived=1,updated_at=?1
-             WHERE archived=0 AND task_stage='completed' AND completed_at<=?2
-               AND status NOT IN ('running','waiting')",
-                params![
-                    timestamp,
-                    timestamp.saturating_sub(COMPLETED_ARCHIVE_DELAY_MS)
-                ],
-            )
+    /// Normalize legacy writes from old clients. Archived task history is never deleted.
+    pub fn settle_archived(&self) -> Result<usize> {
+        self.db.execute("UPDATE sessions SET archived=0,task_stage='completed',completed_at=COALESCE(completed_at,updated_at) WHERE archived=1", [])
             .map_err(|e| e.to_string())
     }
     /// Resolve the selected task's checkout without silently falling back to the main folder.
@@ -2144,24 +2137,18 @@ mod tests {
     }
 
     #[test]
-    fn archive_sweep_includes_completed_tasks_outside_the_recent_list() {
+    fn settle_archived_preserves_sessions_and_metadata() {
         let (store, task) = empty_session();
-        store.set_task_stage(&task.id, "completed").unwrap();
-        store
-            .db
-            .execute(
-                "UPDATE sessions SET created_at=0,updated_at=0,completed_at=?2 WHERE id=?1",
-                params![task.id, now() - COMPLETED_ARCHIVE_DELAY_MS],
-            )
-            .unwrap();
-        store.db.execute("WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<501)
-            INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at)
-            SELECT 'filler-'||value,?1,'Recent task','codex','default','ask','idle',1,1 FROM n", [&task.project_id]).unwrap();
-        let recent = store.sessions().unwrap();
-        assert_eq!(recent.len(), 500);
-        assert!(recent.iter().all(|item| item.id != task.id));
-        assert_eq!(store.archive_completed(now()).unwrap(), 1);
-        assert!(store.session(&task.id).unwrap().archived);
+        store.message(&task.id, "user", "Retain this").unwrap();
+        store.message(&task.id, "assistant", "Done").unwrap();
+        store.db.execute("UPDATE sessions SET archived=1,task_stage='review',completed_at=NULL WHERE id=?1", [&task.id]).unwrap();
+        assert_eq!(store.settle_archived().unwrap(), 1);
+        let saved = store.session(&task.id).unwrap();
+        assert!(!saved.archived);
+        assert_eq!(saved.task_stage, "completed");
+        assert_eq!(saved.completed_at, Some(saved.updated_at));
+        assert_eq!(store.messages(&task.id, None).unwrap().len(), 2);
+        assert_eq!(store.settle_archived().unwrap(), 0);
     }
 
     #[test]
@@ -2251,53 +2238,22 @@ mod tests {
     }
 
     #[test]
-    fn completed_archive_uses_exact_deadline_and_manual_restore_grants_another_week() {
+    fn settled_tasks_never_archive_on_age_or_metadata_updates() {
         let (store, task) = empty_session();
         store.set_task_stage(&task.id, "completed").unwrap();
-        let completed_at = now() - COMPLETED_ARCHIVE_DELAY_MS;
-        store
-            .db
-            .execute(
-                "UPDATE sessions SET completed_at=?2 WHERE id=?1",
-                params![task.id, completed_at],
-            )
-            .unwrap();
-        store
-            .update_task_details(&task.id, "Edited later", "Still complete")
-            .unwrap();
-        assert_eq!(
-            store
-                .archive_completed(completed_at + COMPLETED_ARCHIVE_DELAY_MS - 1)
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .archive_completed(completed_at + COMPLETED_ARCHIVE_DELAY_MS)
-                .unwrap(),
-            1
-        );
-        assert_eq!(store.archive_completed(now()).unwrap(), 0);
-        assert!(store.session(&task.id).unwrap().archived);
-        store
-            .update(&task.id, None, Some(false), None, None)
-            .unwrap();
-        let restored = store.session(&task.id).unwrap();
-        assert!(!restored.archived);
-        assert!(restored.completed_at.unwrap() > completed_at);
-        assert_eq!(store.archive_completed(now()).unwrap(), 0);
-        store.set_task_stage(&task.id, "pending").unwrap();
-        assert_eq!(
-            store
-                .archive_completed(now() + 2 * COMPLETED_ARCHIVE_DELAY_MS)
-                .unwrap(),
-            0
-        );
-        assert!(store.session(&task.id).unwrap().completed_at.is_none());
+        let original = now() - 90 * 24 * 60 * 60 * 1000;
+        store.db.execute("UPDATE sessions SET completed_at=?2 WHERE id=?1", params![task.id, original]).unwrap();
+        store.update_task_details(&task.id, "Edited later", "Still settled").unwrap();
+        assert!(!store.session(&task.id).unwrap().archived);
+        assert_eq!(store.session(&task.id).unwrap().completed_at, Some(original));
+        assert_eq!(store.settle_archived().unwrap(), 0);
+        let reopened = store.set_task_stage(&task.id, "review").unwrap();
+        assert_eq!(reopened.task_stage, "review");
+        assert!(reopened.completed_at.is_none());
     }
 
     #[test]
-    fn board_migration_backfills_history_recovers_runs_and_archives_after_reopen() {
+    fn board_migration_backfills_history_and_preserves_settled_tasks() {
         let directory = std::env::temp_dir().join(format!("pandacode-board-{}", id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("store.sqlite");
@@ -2349,14 +2305,14 @@ mod tests {
                 .db
                 .execute(
                     "UPDATE sessions SET completed_at=?2 WHERE id=?1",
-                    params![answered, now() - COMPLETED_ARCHIVE_DELAY_MS],
+                    params![answered, now() - 90 * 24 * 60 * 60 * 1000],
                 )
                 .unwrap();
         }
         {
             let store = Store::open(&path).unwrap();
             let archived = store.session(&answered).unwrap();
-            assert!(archived.archived);
+            assert!(!archived.archived);
             assert_eq!(archived.task_stage, "completed");
             assert_eq!(archived.task_description, "Original requirements");
             assert_eq!(store.messages(&answered, None).unwrap().len(), 2);

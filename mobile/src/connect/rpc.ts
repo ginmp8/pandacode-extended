@@ -26,7 +26,8 @@ export const maybeRan = (error: unknown) => {
 export const UNKNOWN_METHOD = 'Unknown method.';
 export const outdated = (computer: string) => `Update PandaCode on ${computer} to use this.`;
 
-export interface Request { type: 'req'; id: string; method: Method; params: unknown; ts: number; nonce: string }
+/** `z: 1`: this phone opens packed (deflated) replies and events. */
+export interface Request { type: 'req'; id: string; method: Method; params: unknown; ts: number; nonce: string; z: 1 }
 
 export function request(method: Method, params: unknown, now = Date.now()): Request {
   if (!METHODS.includes(method)) throw new Error('Unknown remote method.');
@@ -34,7 +35,7 @@ export function request(method: Method, params: unknown, now = Date.now()): Requ
   if (!Number.isSafeInteger(now) || now < 0) throw new Error('The device clock is invalid.');
   // `ts` and a fresh `nonce` let the host refuse replays.
   const nonce = Array.from(randomBytes(16), b => b.toString(16).padStart(2, '0')).join('');
-  return { type: 'req', id: uuid(), method, params, ts: now, nonce };
+  return { type: 'req', id: uuid(), method, params, ts: now, nonce, z: 1 };
 }
 
 const WINDOW_MS = 60_000;

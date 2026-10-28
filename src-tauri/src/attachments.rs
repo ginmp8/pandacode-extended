@@ -536,29 +536,6 @@ pub fn chunk_reply(bytes: &[u8], mime: &str, offset: u64) -> Result<Value, Strin
     Ok(response)
 }
 
-/// Metadata rows for one Connect message, in their original attachment order.
-pub fn message_attachment_rows(
-    db: &rusqlite::Connection,
-    session_id: &str,
-    message_id: i64,
-) -> Result<Vec<Value>, String> {
-    let mut statement = db
-        .prepare(
-            "SELECT id,kind,name,mime,bytes,width,height FROM message_attachments
-         WHERE session_id=?1 AND message_id=?2 ORDER BY rowid",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![session_id, message_id], |row| {
-        Ok(json!({
-            "id": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "name": row.get::<_, String>(2)?,
-            "mime": row.get::<_, String>(3)?, "bytes": row.get::<_, i64>(4)?,
-            "width": row.get::<_, Option<u32>>(5)?, "height": row.get::<_, Option<u32>>(6)?
-        }))
-    }).map_err(|error| error.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,11 +597,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(linked, 1);
-        let item = message_attachment_rows(&store.db, &session, message).unwrap();
-        assert_eq!(item[0]["id"], id);
-        assert_eq!(item[0]["name"], "cabin.png");
-        assert_eq!(item[0]["width"].as_u64(), Some(8));
-        assert_eq!(item[0]["height"].as_u64(), Some(4));
+        let metadata = store
+            .db
+            .query_row(
+                "SELECT id,name,width,height FROM message_attachments WHERE session_id=?1 AND message_id=?2",
+                params![session, message],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<u32>>(2)?,
+                        row.get::<_, Option<u32>>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(metadata, (id, "cabin.png".into(), Some(8), Some(4)));
         assert!(root
             .join(format!("data/attachments/{session}/{id}.png"))
             .is_file());

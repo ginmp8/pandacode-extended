@@ -35,6 +35,8 @@ const probe = String.raw`
   }
 `;
 
+const openWorkers = (page: Page) => page.locator('#agents-toggle');
+
 async function setup(page: Page) {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch(), body = await response.text();
@@ -42,7 +44,9 @@ async function setup(page: Page) {
     await route.fulfill({ response, body: body.replace(/switch \(command\) \{/, `${probe}\nswitch (command) {`) });
   });
   await page.goto('/');
-  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
+  await page.locator('.task-item[data-id="session-1"]').click();
+  await expect(page.locator('#prompt')).toHaveAttribute('data-session-id','session-1');
+  await expect(page.locator('#transcript').getByText('Loading conversation…',{exact:true})).toBeHidden();
 }
 async function open(page: Page, options: Record<string, unknown> = {}) {
   await page.evaluate(async options => {
@@ -117,14 +121,23 @@ test('team entry suggests configured workers and worker review uses the worker t
     (window as any).__assistTeam={sessionId:'session-2',config:{workers:[profile],maxParallel:1,maxRounds:4,maxAssignments:8,workspace:'shared',summaryLimit:1800},status:'ready',round:1,revision:1,updatedAt:200,workers:[{...profile,id:'worker-1',profileId:'fast',sessionId:'worker-1-session',status:'completed',assignment:'Check keyboard navigation',summary:'Checked the task',dependsOn:[],files:['src/app.ts'],attempt:1,createdAt:100,updatedAt:200}]};
   });
   await page.locator('.task-item[data-id="session-2"]').click();
-  await page.getByRole('button',{name:'Open workers',exact:true}).click();
+  await expect(page.locator('#prompt')).toHaveAttribute('data-session-id','session-2');
+  // The task row becomes selected before its saved team has loaded and mounted
+  // the worker trigger. Wait for the same loaded-conversation state as other
+  // team tests before looking for that control.
+  await expect(page.locator('#transcript').getByText('Loading conversation…',{exact:true})).toBeHidden();
+  const teamReads = await page.evaluate(() => (window as any).__assistCalls.filter((entry: any) => entry.command === 'architect_get'));
+  expect(teamReads).toContainEqual({command:'architect_get',args:{sessionId:'session-2'}});
+  await expect(openWorkers(page)).toBeVisible();
+  await openWorkers(page).click();
+  await expect(page.getByRole('dialog',{name:'Workers',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Suggest worker',exact:true}).click();
   await expect(page.getByRole('tab',{name:'Choose worker',exact:true})).toHaveAttribute('aria-selected','true');
   await page.locator('#jev-assist-query').fill('Add meaningful keyboard tests');
   await page.locator('[data-assist-prepare]').click(); await prepared(page);
   expect((await calls(page,'jev_assist_prepare')).at(-1).args).toEqual({sessionId:'session-2',request:{kind:'route',query:'Add meaningful keyboard tests'}});
   await page.locator('[data-assist-close]').click();
-  await page.getByRole('button',{name:'Open workers',exact:true}).click();
+  await openWorkers(page).click();
   await page.locator('.architect-worker-row[data-worker-id="worker-1"]').click();
   await page.getByRole('button',{name:'Review with Jev',exact:true}).click(); await prepared(page);
   expect((await calls(page,'jev_assist_prepare')).at(-1).args).toEqual({sessionId:'worker-1-session',request:{kind:'review'}});

@@ -40,7 +40,7 @@ export function useNewTask(initialDevice?: string) {
   const pickModel = (id: string) => pick({ model: id, effort: options.defaultEffort(id) });
 
   const canStart = (prompt: string) => !!(deviceId && projectId && provider && prompt.trim()) && supportsPermissionMode(provider, mode) && !starting;
-  /** Starts the task and returns its session id; throws (and clears `starting`) on failure. */
+  /** Starts the task and returns its session id and any worktree note; throws (and clears `starting`) on failure. */
   const start = async (prompt: string) => {
     if (!supportsPermissionMode(provider, mode)) throw new Error('Choose a permission mode supported by this harness.');
     setStarting(true);

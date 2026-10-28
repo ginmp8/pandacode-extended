@@ -24,11 +24,12 @@ The `early_upstream_review` supplement records [issue #26](https://github.com/gi
 | Previously prepared Extended candidate, retained | `0.5.0` | `0.5.0+pc.0.3.47` |
 | Previous upstream 0.3.48 integration candidate, not published | `0.5.1` | `0.5.1+pc.0.3.48` |
 | Previous three-fix candidate, not published | `0.5.2` | `0.5.2+pc.0.3.48` |
-| Current upstream integration candidate (not shipped or fully verified) | `0.6.0` | `0.6.0+pc.0.3.50` |
+| Previous upstream integration candidate (not shipped or fully verified) | `0.6.0` | `0.6.0+pc.0.3.50` |
+| Current 0.3.51–0.3.65 integration candidate (not shipped or fully verified) | `0.7.0` | `0.7.0+pc.0.3.50` |
 
 The historical 0.5.2 candidate addresses dark-theme native select menus, manual Board stage management, and bot-owned deleted conversation cleanup (issues #32, #33, and #34). It preserves the tracked 0.3.48 upstream reference and all earlier source evidence; this candidate is unpublished and untagged.
 
-The previous candidate used `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplements in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24) and [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26). The original corrections remained part of `0.5.0`; that historical candidate stayed at `0.5.1`. The current unpublished candidate must remain at `0.6.0`; individual corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. No tag for an unpublished candidate is created without explicit publication authorization. Incremental source evidence is in [0.5.1 coverage](upstream-integration-0.5.1.md), and the prior 0.5.0 coverage is retained.
+The previous candidate used `0.5.0` for the upstream feature integration tracked in [issue #22](https://github.com/ginmp8/pandacode-extended/issues/22) and its historical coverage supplements in [issue #24](https://github.com/ginmp8/pandacode-extended/issues/24) and [issue #26](https://github.com/ginmp8/pandacode-extended/issues/26). The original corrections remained part of `0.5.0`; that historical candidate stayed at `0.5.1`. The previous `0.6.0` candidate remains unpublished. The current unpublished `0.7.0` candidate must remain at `0.7.0` through corrective commits, with the tracked upstream reference held at `0.3.50` until integration coverage is independently verified; corrective commits do not create patch releases. Keep the existing `0.4.0` release, tag, note and date unchanged. No tag for an unpublished candidate is created without explicit publication authorization. Incremental source evidence is in [0.5.1 coverage](upstream-integration-0.5.1.md), and the prior 0.5.0 coverage is retained.
 
 **After publication**, version selection for a distinct future release must be decided from its actual changes and consumer compatibility. Corrections normally use PATCH, compatible additions use MINOR, and incompatible changes require a migration assessment. This document deliberately does not preassign numbers to hypothetical releases.
 
@@ -41,7 +42,8 @@ releases/
     0.3.42-hardened.md         # Legacy Extended note, retained
     0.4.0.md                   # Published Extended history, retained
     0.5.0.md                   # Historical Extended candidate note
-    0.6.0.md                   # Current Extended candidate note
+    0.6.0.md                   # Prior Extended candidate note
+    0.7.0.md                   # Current Extended candidate note
 ```
 
 - Original PandaCode notes stay at `releases/<upstream-version>.md` and keep existing `website/src/data/release-dates.json` keys such as `0.3.42`.
@@ -68,3 +70,7 @@ The Extended desktop release builder rejects a version that does not have exactl
 ## 0.6.0 candidate source lineage
 
 Issue #38 tracks 0.3.49 Connect and issue #39 tracks 0.3.50 traces. The single review branch and PR #40 (ready for review, not merged) use source snapshots pinned to upstream commits `e71acdda9eb5d488122081c4dbc49ee1a5b4f9e2` and `15541a51f3f5d8ee32d91349f9d5035a53c4cd19`. Historical 0.3.48 coverage remains immutable; new source identities and unresolved verification risks are recorded in [the 0.6.0 assessment](upstream-integration-0.6.0.md). No tag, artifact, updater or published release is authorized. The owner authorized Ready for review as an operational review state. That authorization does not waive implementation, security, upstream-parity or physical-device gates, and does not authorize merge or release. Corrective commits for #41/#42 retain `0.6.0`.
+
+## 0.7.0 candidate source lineage
+
+The current unpublished candidate integrates implementation work for original PandaCode `0.3.51` through `0.3.65`, tracked in issues [#47–#56](https://github.com/ginmp8/pandacode-extended/issues?q=is%3Aissue+label%3A0.7.0) and integration [PR #57](https://github.com/ginmp8/pandacode-extended/pull/57). The Panda Router v4 dependency is tracked separately in [PandaOrchestrator#1](https://github.com/ginmp8/PandaOrchestrator/issues/1). The original source notes are preserved under `releases/`, and their date keys come from the original GitHub Release publication dates. `0.3.58` has an original tag and release-note commit dated 2026-10-27 but no published GitHub Release record; its date is source evidence, **not** evidence of publication. The 0.7.0 Extended note is an unpublished preparation record dated 2026-10-27. The documented upstream reference remains at `0.3.50` pending acceptance of all security, compatibility, browser and native checks. No tag, binary, updater, deployment or published release is authorized by this PR.

@@ -3,6 +3,7 @@ import { expect, test, type Page } from '@playwright/test';
 const chats = (page: Page) => page.getByRole('region', { name: 'Chats', exact: true });
 const prompt = (page: Page) => page.getByRole('textbox', { name: 'Message your coding agent', exact: true });
 const row = (page: Page, id: string) => page.locator(`.task-item[data-id="${id}"]`);
+const sectionFor = (page: Page, id: string) => row(page, id).locator('xpath=ancestor::section[@data-thread-group][1]');
 const menu = (page: Page) => page.getByRole('dialog', { name: 'Task actions', exact: true });
 
 async function probe(page: Page): Promise<void> {
@@ -222,18 +223,26 @@ test('drafts and prompt attachments make New chat create a separate conversation
 test('a chat with saved messages starts a separate conversation without stopping its agent', async ({ page }) => {
   await newChat(page);
   const firstId = await chats(page).locator('.task-item.selected').getAttribute('data-id');
+  await page.evaluate(() => { (window as any).__holdPreviewCompletion = true; });
   await prompt(page).fill('Save this conversation first');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('#transcript')).toContainText('Save this conversation first');
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__releasePreviewCompletion)).toBe('function');
   await newChat(page);
   const nextId = await chats(page).locator('.task-item.selected').getAttribute('data-id');
   expect(nextId).not.toBe(firstId);
-  // A running chat moves to Active, and to Needs review when its turn finishes.
-  // Both conversations must remain visible exactly once across those sections.
+  // While the preview run is held open, the chat moves to Active with its actual Running status.
+  await expect(sectionFor(page, firstId!)).toHaveAttribute('data-thread-group', 'active');
+  await expect(row(page, firstId!).locator('.task-indicator.running')).toHaveAttribute('aria-label', 'Running');
+  await expect(chats(page).locator(`.task-item[data-id="${firstId}"]`)).toHaveCount(0);
+  // The new idle chat remains in Chats while the original run continues.
+  await expect(sectionFor(page, nextId!)).toHaveAttribute('data-thread-group', 'chats');
   await expect(row(page, firstId!)).toHaveCount(1);
   await expect(row(page, firstId!)).toBeVisible();
   await expect(row(page, nextId!)).toHaveCount(1);
   await expect(row(page, nextId!)).toBeVisible();
+  await page.evaluate(() => (window as any).__releasePreviewCompletion());
+  await expect(sectionFor(page, firstId!)).toHaveAttribute('data-thread-group', 'review');
   expect(await calls(page, 'chat_create')).toHaveLength(2);
   expect(await calls(page, 'stop_session')).toEqual([]);
 });

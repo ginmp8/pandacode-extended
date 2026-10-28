@@ -70,7 +70,7 @@ function parseBlock(raw: string): MessageAttachment[] {
   return [{ kind: 'raw', name: head.replace(/[:(].*$/, '').trim() || 'Context', detail: 'Saved context', raw }];
 }
 export function parseAttachments(blocks: string[]): MessageAttachment[] {
-  return blocks.filter(block => !block.startsWith('Bot brief:\n') && !block.startsWith('Response style (PandaCode token saver')).flatMap(parseBlock);
+  return blocks.filter(block => !block.startsWith('Bot brief:\n') && !block.startsWith('Your ongoing role is:') && !block.startsWith('Response style (PandaCode token saver')).flatMap(parseBlock);
 }
 /** Only ordinary, non-traversing local paths may reach workspace/native reveal APIs. */
 export function attachmentTarget(item: MessageAttachment, root: string): { kind: 'workspace' | 'reveal' | 'text'; path?: string } {

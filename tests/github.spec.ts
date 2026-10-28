@@ -21,9 +21,24 @@ async function probe(page: Page, hook = ''): Promise<void> {
     `)) });
   });
   await page.goto('/');
-  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
-  await expect(prompt(page)).toBeEnabled();
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1', { timeout: 20_000 });
+  await expect(prompt(page)).toBeEnabled({ timeout: 20_000 });
 }
+
+test('a saved GitHub view falls back to Conversation persistently when integration is off', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('pandacode.view', 'github');
+    localStorage.setItem('pandacode.github', 'off');
+  });
+  await probe(page);
+  const view = page.getByRole('button', { name: 'Workspace view: Conversation', exact: true });
+  await expect(view).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('pandacode.view'))).toBe('conversation');
+  await page.reload();
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
+  await expect(view).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('pandacode.view'))).toBe('conversation');
+});
 
 test('@ mentions offer issues and pull requests, insert #numbers, and send their context', async ({ page }) => {
   await probe(page);
@@ -80,20 +95,21 @@ test('the GitHub switch hides mentions, imports, and pull requests without runni
   expect((await calls(page, 'send_message')).at(-1).args.text).toBe('Refers to #128');
   expect((await calls(page, 'github_search')).length + (await calls(page, 'github_status')).length).toBe(before);
   expect(await calls(page, 'github_resolve')).toHaveLength(0);
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Import from GitHub', exact: true })).toBeHidden();
   await expect(page.locator('.link-chip')).toHaveCount(0);
   // Turning it back on restores the chips already stored on tasks.
   await page.evaluate(() => localStorage.removeItem('pandacode.github'));
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Board view', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  const view = page.getByRole('button', { name: 'Workspace view: Board', exact: true });
+  await expect(view).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('pandacode.view'))).toBe('board');
   await expect(page.getByRole('button', { name: 'Import from GitHub', exact: true })).toBeVisible();
 });
 
 test('importing issues creates linked Pending tasks, skips ones already on the board, and can update them', async ({ page }) => {
   await probe(page);
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
   const board = page.getByRole('region', { name: 'Project board', exact: true });
   await expect(board.locator('.board-card .link-chip')).toHaveText(/#131/);
   await page.getByRole('button', { name: 'Import from GitHub', exact: true }).click();

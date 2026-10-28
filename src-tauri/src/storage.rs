@@ -22,7 +22,6 @@ pub fn valid_permission_mode(mode: &str) -> bool {
 // selected mode, including restrictive modes chosen before this default changed.
 pub const DEFAULT_PERMISSION_MODE: &str = "ask";
 
-pub const COMPLETED_ARCHIVE_DELAY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +29,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// When the project was added, as an increasing number (its rowid): the sidebar's Added sort.
+    pub added_order: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +73,9 @@ pub struct Session {
     pub context_usage: Option<ContextUsage>,
     pub mode: String,
     pub status: String,
+    /// Whether an ordinary task turn has explicitly completed successfully.
+    /// This is monotonic task history, independent of stage and message timestamps.
+    pub has_finished_turn: bool,
     pub created_at: i64,
     pub updated_at: i64,
     /// Unix milliseconds of the latest saved nonempty assistant response.
@@ -165,9 +169,23 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 35;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
+
+/// Once the sidebar has been arranged by hand, a New task published by its first prompt goes to
+/// the top: every rank moves down one and it takes rank 0. Without this the next reorder would
+/// rank it after every arranged task. Forks and imports stay unranked. A TEMP trigger lives on
+/// this connection only, so it needs no schema change; it is added once ranks exist.
+fn rank_published_drafts(db: &Connection) -> Result<()> {
+    db.execute_batch("CREATE TEMP TRIGGER IF NOT EXISTS rank_published_draft AFTER UPDATE OF draft ON main.sessions
+        WHEN OLD.draft=1 AND NEW.draft=0 AND NEW.sidebar_order IS NULL AND NEW.pinned=0
+          AND EXISTS(SELECT 1 FROM main.sessions WHERE sidebar_order IS NOT NULL)
+        BEGIN
+          UPDATE sessions SET sidebar_order=sidebar_order+1 WHERE sidebar_order IS NOT NULL;
+          UPDATE sessions SET sidebar_order=0 WHERE id=NEW.id;
+        END;").map_err(|e| e.to_string())
+}
 
 fn settle_unfinished_tools(db: &Connection, sid: Option<&str>, notice: &str) -> Result<()> {
     db.execute("UPDATE messages SET content=json_set(content,'$.status','failed','$.output',
@@ -470,6 +488,36 @@ impl Store {
                     .execute_batch("PRAGMA user_version=32;")
                     .map_err(|error| error.to_string())?;
             }
+            if version < 33 {
+                // Preserve old archived conversations as settled tasks, without deleting history.
+                migration.execute_batch("UPDATE sessions SET task_stage='completed',completed_at=COALESCE(completed_at,updated_at),archived=0 WHERE archived=1; PRAGMA user_version=33;").map_err(|e| e.to_string())?;
+            }
+            if version < 34 {
+                // Persist mirror backfill progress and truncated message markers across restarts.
+                for (table, name, sql) in [
+                    ("sessions", "remote_backfill_base", "ALTER TABLE sessions ADD COLUMN remote_backfill_base INTEGER"),
+                    ("messages", "remote_cut", "ALTER TABLE messages ADD COLUMN remote_cut INTEGER"),
+                ] {
+                    let exists: bool = migration.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"), [name], |r| r.get(0)).map_err(|e| e.to_string())?;
+                    if !exists { migration.execute_batch(sql).map_err(|e| e.to_string())?; }
+                }
+                migration.execute_batch("PRAGMA user_version=34;").map_err(|e| e.to_string())?;
+            }
+            if version < 35 {
+                let exists: bool = migration
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='has_finished_turn')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if !exists {
+                    migration
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN has_finished_turn INTEGER NOT NULL DEFAULT 0 CHECK(has_finished_turn IN (0,1));")
+                        .map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("PRAGMA user_version=35;").map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
@@ -508,12 +556,14 @@ impl Store {
             '$.workers',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.status') IN ('running','waiting') THEN json_set(value,'$.status','stopped') ELSE value END)) FROM json_each(content,'$.workers'))))
             WHERE json_extract(content,'$.status') IN ('running','waiting');").map_err(|e|e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
+        let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if ranked { rank_published_drafts(&db)?; }
         let store = Self {
             db,
             path: path.to_path_buf(),
         };
         crate::architect::profiles::initialize(&store)?;
-        store.archive_completed(now())?;
+        store.settle_archived()?;
         Ok(store)
     }
     /// Older team releases stored scheduler prompts as user rows. Reuse their exact
@@ -583,7 +633,7 @@ impl Store {
     }
     fn read_projects(db: &Connection) -> Result<Vec<Project>> {
         let mut stmt = db
-            .prepare("SELECT id,name,path FROM projects ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id,name,path,rowid FROM projects ORDER BY name COLLATE NOCASE")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -591,6 +641,7 @@ impl Store {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     path: r.get(2)?,
+                    added_order: r.get(3)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -617,13 +668,14 @@ impl Store {
             .map_err(|e| e.to_string())?;
         self.db
             .query_row(
-                "SELECT id,name,path FROM projects WHERE path=?1",
+                "SELECT id,name,path,rowid FROM projects WHERE path=?1",
                 [path_str],
                 |r| {
                     Ok(Project {
                         id: r.get(0)?,
                         name: r.get(1)?,
                         path: r.get(2)?,
+                        added_order: r.get(3)?,
                     })
                 },
             )
@@ -632,13 +684,14 @@ impl Store {
     pub fn project(&self, project_id: &str) -> Result<Project> {
         self.db
             .query_row(
-                "SELECT id,name,path FROM projects WHERE id=?1",
+                "SELECT id,name,path,rowid FROM projects WHERE id=?1",
                 [project_id],
                 |r| {
                     Ok(Project {
                         id: r.get(0)?,
                         name: r.get(1)?,
                         path: r.get(2)?,
+                        added_order: r.get(3)?,
                     })
                 },
             )
@@ -676,6 +729,7 @@ impl Store {
             model: r.get(4)?,
             mode: r.get(5)?,
             status: r.get(6)?,
+            has_finished_turn: r.get(30)?,
             created_at: r.get(7)?,
             updated_at: r.get(8)?,
             archived: r.get(9)?,
@@ -710,7 +764,7 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<Session>> {
         // Lists only need a card preview. Full details remain in SQLite and are
         // fetched for the selected task or directly for an agent's Start prompt.
-        let mut stmt=self.db.prepare(&format!("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,substr(task_description,1,512),completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER} LIMIT 500")).map_err(|e|e.to_string())?;
+        let mut stmt=self.db.prepare(&format!("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,substr(task_description,1,512),completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device,has_finished_turn FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER} LIMIT 500")).map_err(|e|e.to_string())?;
         let rows = stmt
             .query_map([], Self::session_row)
             .map_err(|e| e.to_string())?;
@@ -721,7 +775,7 @@ impl Store {
         Ok(sessions)
     }
     pub fn session(&self, sid: &str) -> Result<Session> {
-        let mut session = self.db.query_row("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,task_description,completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device FROM sessions WHERE id=?1",[sid],Self::session_row).optional().map_err(|e|e.to_string())?.ok_or_else(||String::from("Conversation not found."))?;
+        let mut session = self.db.query_row("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,task_description,completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device,has_finished_turn FROM sessions WHERE id=?1",[sid],Self::session_row).optional().map_err(|e|e.to_string())?.ok_or_else(||String::from("Conversation not found."))?;
         self.attach_links(std::slice::from_mut(&mut session))?;
         Ok(session)
     }
@@ -877,7 +931,7 @@ impl Store {
         // Work from the entire order, not the currently displayed project/search
         // result or the 500-row listing window, so hidden tasks keep their slots.
         let mut ordered = {
-            let mut query = transaction.prepare(&format!("SELECT id,pinned FROM sessions WHERE id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER}")).map_err(|e| e.to_string())?;
+            let mut query = transaction.prepare(&format!("SELECT id,pinned FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER}")).map_err(|e| e.to_string())?;
             let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))).map_err(|e| e.to_string())?;
             rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.to_string())?
         };
@@ -899,6 +953,7 @@ impl Store {
             }
         }
         transaction.commit().map_err(|e| e.to_string())?;
+        rank_published_drafts(&self.db)?;
         self.sessions()
     }
     fn attach_links(&self, sessions: &mut [Session]) -> Result<()> {
@@ -1183,13 +1238,16 @@ impl Store {
 
     pub fn set_task_stage(&self, sid: &str, stage: &str) -> Result<Session> {
         crate::architect::check_manual(self, sid)?;
-        if stage == "in_progress" {
+        let current = self.session(sid)?;
+        // Work in progress comes from starting a task. The one way back by hand is undoing the
+        // completion of a run that stopped or failed, which never left work in progress.
+        let undoing = current.task_stage == "completed" && matches!(current.status.as_str(), "error" | "interrupted");
+        if stage == "in_progress" && !undoing {
             return Err("Start the task to move it to work in progress.".into());
         }
-        if !matches!(stage, "pending" | "review" | "completed") {
+        if !matches!(stage, "pending" | "review" | "completed" | "in_progress") {
             return Err("Unknown task stage.".into());
         }
-        self.session(sid)?;
         let changed = self
             .db
             .execute(
@@ -1206,19 +1264,9 @@ impl Store {
         self.session(sid)
     }
 
-    /// Archive deadlines depend on completion time, never unrelated task edits.
-    /// The partial index keeps the once-per-minute sweep bounded to completed tasks.
-    pub fn archive_completed(&self, timestamp: i64) -> Result<usize> {
-        self.db
-            .execute(
-                "UPDATE sessions SET archived=1,updated_at=?1
-             WHERE archived=0 AND task_stage='completed' AND completed_at<=?2
-               AND status NOT IN ('running','waiting')",
-                params![
-                    timestamp,
-                    timestamp.saturating_sub(COMPLETED_ARCHIVE_DELAY_MS)
-                ],
-            )
+    /// Normalize legacy writes from old clients. Archived task history is never deleted.
+    pub fn settle_archived(&self) -> Result<usize> {
+        self.db.execute("UPDATE sessions SET archived=0,task_stage='completed',completed_at=COALESCE(completed_at,updated_at) WHERE archived=1", [])
             .map_err(|e| e.to_string())
     }
     /// Resolve the selected task's checkout without silently falling back to the main folder.
@@ -1565,6 +1613,8 @@ impl Store {
         Ok(message_id)
     }
 
+    /// Updates the task's terminal status without claiming how that outcome was reached.
+    /// Reconciliation callers use this when only a remote status snapshot is available.
     pub fn finish_task_turn(&self, sid: &str, successful: bool, stopped: bool) -> Result<()> {
         self.finish_task_operation(sid, successful, stopped, None)
     }
@@ -1601,6 +1651,34 @@ impl Store {
             .map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Records an explicit successful Connect completion or authoritative host snapshot.
+    /// The update is idempotent and never clears a previously finished turn.
+    pub fn mark_finished_turn(&self, sid: &str) -> Result<bool> {
+        let changed = self
+            .db
+            .execute(
+                "UPDATE sessions SET has_finished_turn=1 WHERE id=?1 AND has_finished_turn=0 AND goal_state IS NULL",
+                [sid],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(changed > 0)
+    }
+
+    /// Records a local completion only for an explicit, successful ordinary task turn.
+    /// Goal tasks are excluded by `mark_finished_turn`; restore operations are excluded here.
+    pub fn record_successful_ordinary_turn(
+        &self,
+        sid: &str,
+        successful: bool,
+        stopped: bool,
+        restore_stage: Option<&str>,
+    ) -> Result<bool> {
+        if !successful || stopped || restore_stage.is_some() {
+            return Ok(false);
+        }
+        self.mark_finished_turn(sid)
     }
 
     pub fn finish_turn(&self, sid: &str, message_id: i64, duration_ms: i64) -> Result<()> {
@@ -1878,6 +1956,57 @@ mod tests {
     }
 
     #[test]
+    fn a_new_task_published_after_a_manual_reorder_is_listed_first_and_stays_there() {
+        let (store, first) = empty_session();
+        let second = store.create_session(&first.project_id, "claude", "sonnet", "auto").unwrap();
+        let ids = |store: &Store| store.sessions().unwrap().into_iter().map(|task| task.id).collect::<Vec<_>>();
+        // Nothing arranged yet: a published draft stays unranked and activity orders the list.
+        let early = store.mark_draft(&store.create_session(&first.project_id, "claude", "sonnet", "auto").unwrap().id).unwrap();
+        store.message(&early.id, "user", "First").unwrap();
+        assert_eq!(store.session(&early.id).unwrap().sidebar_order, None);
+        store.reorder_sessions(&[first.id.clone(), second.id.clone(), early.id.clone()]).unwrap();
+        let draft = store.mark_draft(&store.create_session(&first.project_id, "codex", "gpt-5", "auto").unwrap().id).unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, None, "drafts are not ranked");
+        store.message(&draft.id, "user", "Build the thing").unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, Some(0));
+        assert_eq!(ids(&store), vec![draft.id.clone(), first.id.clone(), second.id.clone(), early.id.clone()]);
+        // Reordering two other tasks keeps it on top instead of ranking it last.
+        store.reorder_sessions(&[second.id.clone(), first.id.clone()]).unwrap();
+        assert_eq!(ids(&store), vec![draft.id.clone(), second.id.clone(), first.id.clone(), early.id.clone()]);
+    }
+
+    #[test]
+    fn projects_list_by_name_and_carry_the_order_they_were_added() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let root = std::env::temp_dir().join(format!("pandacode-added-{}", id()));
+        for name in ["zeta", "alpha", "mid"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
+        let added = ["zeta", "alpha", "mid"].map(|name| store.add_project(&root.join(name)).unwrap());
+        assert!(added[0].added_order < added[1].added_order && added[1].added_order < added[2].added_order);
+        let listed = store.projects().unwrap();
+        assert_eq!(listed.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["alpha", "mid", "zeta"]);
+        assert_eq!(listed.iter().find(|p| p.name == "zeta").unwrap().added_order, added[0].added_order);
+        assert_eq!(store.project(&added[2].id).unwrap().added_order, added[2].added_order);
+        let json = serde_json::to_value(&listed[0]).unwrap();
+        assert!(json.get("addedOrder").is_some_and(|value| value.is_i64()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_draft_open_during_a_reorder_stays_unranked_and_publishes_to_the_top() {
+        let (store, first) = empty_session();
+        let second = store.create_session(&first.project_id, "claude", "sonnet", "auto").unwrap();
+        let draft = store.mark_draft(&store.create_session(&first.project_id, "codex", "gpt-5", "auto").unwrap().id).unwrap();
+        // The draft is invisible, so a reorder must not rank it (it would then skip the publish rank).
+        store.reorder_sessions(&[second.id.clone(), first.id.clone()]).unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, None);
+        assert_eq!(store.session(&second.id).unwrap().sidebar_order, Some(0));
+        store.message(&draft.id, "user", "Now publish").unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, Some(0));
+        let ids = store.sessions().unwrap().into_iter().map(|task| task.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![draft.id.clone(), second.id.clone(), first.id.clone()]);
+    }
+
+    #[test]
     fn new_task_drafts_stay_hidden_until_their_first_prompt() {
         let (store, listed) = empty_session();
         let draft = store.create_session(&listed.project_id, "codex", "gpt-5", "auto").unwrap();
@@ -2068,24 +2197,18 @@ mod tests {
     }
 
     #[test]
-    fn archive_sweep_includes_completed_tasks_outside_the_recent_list() {
+    fn settle_archived_preserves_sessions_and_metadata() {
         let (store, task) = empty_session();
-        store.set_task_stage(&task.id, "completed").unwrap();
-        store
-            .db
-            .execute(
-                "UPDATE sessions SET created_at=0,updated_at=0,completed_at=?2 WHERE id=?1",
-                params![task.id, now() - COMPLETED_ARCHIVE_DELAY_MS],
-            )
-            .unwrap();
-        store.db.execute("WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<501)
-            INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at)
-            SELECT 'filler-'||value,?1,'Recent task','codex','default','ask','idle',1,1 FROM n", [&task.project_id]).unwrap();
-        let recent = store.sessions().unwrap();
-        assert_eq!(recent.len(), 500);
-        assert!(recent.iter().all(|item| item.id != task.id));
-        assert_eq!(store.archive_completed(now()).unwrap(), 1);
-        assert!(store.session(&task.id).unwrap().archived);
+        store.message(&task.id, "user", "Retain this").unwrap();
+        store.message(&task.id, "assistant", "Done").unwrap();
+        store.db.execute("UPDATE sessions SET archived=1,task_stage='review',completed_at=NULL WHERE id=?1", [&task.id]).unwrap();
+        assert_eq!(store.settle_archived().unwrap(), 1);
+        let saved = store.session(&task.id).unwrap();
+        assert!(!saved.archived);
+        assert_eq!(saved.task_stage, "completed");
+        assert_eq!(saved.completed_at, Some(saved.updated_at));
+        assert_eq!(store.messages(&task.id, None).unwrap().len(), 2);
+        assert_eq!(store.settle_archived().unwrap(), 0);
     }
 
     #[test]
@@ -2134,9 +2257,16 @@ mod tests {
         let stopped = store.session(&task.id).unwrap();
         assert_eq!(stopped.status, "interrupted");
         assert_eq!(stopped.task_stage, "in_progress");
+        // Completing a stopped run can be undone back to work in progress.
+        store.set_task_stage(&task.id, "completed").unwrap();
+        let undone = store.set_task_stage(&task.id, "in_progress").unwrap();
+        assert_eq!(undone.task_stage, "in_progress");
+        assert!(undone.completed_at.is_none());
         store.begin_task_turn(&task.id, "Finish").unwrap();
         store.finish_task_turn(&task.id, true, false).unwrap();
         let review = store.session(&task.id).unwrap();
+        // Undoing a completion puts a stopped run back in progress; nothing else may.
+        assert!(store.set_task_stage(&task.id, "in_progress").is_err());
         assert_eq!(review.status, "idle");
         assert_eq!(review.task_stage, "review");
         assert!(review.completed_at.is_none());
@@ -2168,53 +2298,74 @@ mod tests {
     }
 
     #[test]
-    fn completed_archive_uses_exact_deadline_and_manual_restore_grants_another_week() {
+    fn finished_turn_is_explicit_monotonic_and_excludes_goal_tasks() {
         let (store, task) = empty_session();
-        store.set_task_stage(&task.id, "completed").unwrap();
-        let completed_at = now() - COMPLETED_ARCHIVE_DELAY_MS;
-        store
-            .db
-            .execute(
-                "UPDATE sessions SET completed_at=?2 WHERE id=?1",
-                params![task.id, completed_at],
-            )
-            .unwrap();
-        store
-            .update_task_details(&task.id, "Edited later", "Still complete")
-            .unwrap();
-        assert_eq!(
-            store
-                .archive_completed(completed_at + COMPLETED_ARCHIVE_DELAY_MS - 1)
-                .unwrap(),
-            0
+        store.finish_task_turn(&task.id, true, false).unwrap();
+        assert!(
+            !store.session(&task.id).unwrap().has_finished_turn,
+            "status-only idle is not evidence"
+        );
+
+        store.finish_task_operation(&task.id, false, false, None).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, false, false, None).unwrap(),
+            "errors do not finish a turn"
+        );
+        store.finish_task_operation(&task.id, true, true, None).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, true, true, None).unwrap(),
+            "stops do not finish a turn"
+        );
+        store.finish_task_operation(&task.id, true, false, Some("pending")).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, true, false, Some("pending")).unwrap(),
+            "maintenance restore does not finish a turn"
+        );
+
+        store.finish_task_operation(&task.id, true, false, None).unwrap();
+        assert!(
+            store.record_successful_ordinary_turn(&task.id, true, false, None).unwrap(),
+            "the explicit ordinary success path records the signal"
+        );
+        assert!(
+            !store.record_successful_ordinary_turn(&task.id, true, false, None).unwrap(),
+            "the signal is idempotent"
         );
         assert_eq!(
-            store
-                .archive_completed(completed_at + COMPLETED_ARCHIVE_DELAY_MS)
-                .unwrap(),
-            1
+            serde_json::to_value(store.session(&task.id).unwrap()).unwrap()["hasFinishedTurn"],
+            true
         );
-        assert_eq!(store.archive_completed(now()).unwrap(), 0);
-        assert!(store.session(&task.id).unwrap().archived);
-        store
-            .update(&task.id, None, Some(false), None, None)
-            .unwrap();
-        let restored = store.session(&task.id).unwrap();
-        assert!(!restored.archived);
-        assert!(restored.completed_at.unwrap() > completed_at);
-        assert_eq!(store.archive_completed(now()).unwrap(), 0);
-        store.set_task_stage(&task.id, "pending").unwrap();
-        assert_eq!(
-            store
-                .archive_completed(now() + 2 * COMPLETED_ARCHIVE_DELAY_MS)
-                .unwrap(),
-            0
+        store.finish_task_operation(&task.id, false, false, None).unwrap();
+        assert!(
+            store.session(&task.id).unwrap().has_finished_turn,
+            "later failures never clear task history"
         );
-        assert!(store.session(&task.id).unwrap().completed_at.is_none());
+
+        let goal = store.create_session(&task.project_id, "claude", "sonnet", "full").unwrap();
+        store.db.execute(r#"UPDATE sessions SET goal_state='{"status":"paused"}' WHERE id=?1"#, [&goal.id]).unwrap();
+        assert!(
+            !store.record_successful_ordinary_turn(&goal.id, true, false, None).unwrap(),
+            "goal tasks are not ordinary completions"
+        );
     }
 
     #[test]
-    fn board_migration_backfills_history_recovers_runs_and_archives_after_reopen() {
+    fn settled_tasks_never_archive_on_age_or_metadata_updates() {
+        let (store, task) = empty_session();
+        store.set_task_stage(&task.id, "completed").unwrap();
+        let original = now() - 90 * 24 * 60 * 60 * 1000;
+        store.db.execute("UPDATE sessions SET completed_at=?2 WHERE id=?1", params![task.id, original]).unwrap();
+        store.update_task_details(&task.id, "Edited later", "Still settled").unwrap();
+        assert!(!store.session(&task.id).unwrap().archived);
+        assert_eq!(store.session(&task.id).unwrap().completed_at, Some(original));
+        assert_eq!(store.settle_archived().unwrap(), 0);
+        let reopened = store.set_task_stage(&task.id, "review").unwrap();
+        assert_eq!(reopened.task_stage, "review");
+        assert!(reopened.completed_at.is_none());
+    }
+
+    #[test]
+    fn board_migration_backfills_history_and_preserves_settled_tasks() {
         let directory = std::env::temp_dir().join(format!("pandacode-board-{}", id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("store.sqlite");
@@ -2266,14 +2417,14 @@ mod tests {
                 .db
                 .execute(
                     "UPDATE sessions SET completed_at=?2 WHERE id=?1",
-                    params![answered, now() - COMPLETED_ARCHIVE_DELAY_MS],
+                    params![answered, now() - 90 * 24 * 60 * 60 * 1000],
                 )
                 .unwrap();
         }
         {
             let store = Store::open(&path).unwrap();
             let archived = store.session(&answered).unwrap();
-            assert!(archived.archived);
+            assert!(!archived.archived);
             assert_eq!(archived.task_stage, "completed");
             assert_eq!(archived.task_description, "Original requirements");
             assert_eq!(store.messages(&answered, None).unwrap().len(), 2);
@@ -3110,6 +3261,50 @@ mod tests {
     }
 
     #[test]
+    fn migration_35_defaults_old_rows_to_false_without_backfill_and_reopens_cleanly() {
+        let directory = std::env::temp_dir().join(format!("pandacode-finished-migration-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        let session_id = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&directory).unwrap();
+            let task = store
+                .create_session(&project.id, "codex", "default", "ask")
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "UPDATE sessions SET task_stage='review',status='idle',last_response_at=123456,has_finished_turn=1 WHERE id=?1",
+                    [&task.id],
+                )
+                .unwrap();
+            store
+                .db
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN has_finished_turn; PRAGMA user_version=34;",
+                )
+                .unwrap();
+            task.id
+        };
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .db
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                35
+            );
+            let task = store.session(&session_id).unwrap();
+            assert!(!task.has_finished_turn, "legacy status/timestamp data is not backfilled");
+            assert_eq!(task.task_stage, "review");
+            assert_eq!(task.last_response_at, Some(123456));
+            assert_eq!(serde_json::to_value(task).unwrap()["hasFinishedTurn"], false);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn migration_28_creates_message_attachments_index() {
         let (store, _) = empty_session();
         let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
@@ -3255,7 +3450,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandacode-project-switch-{}", id()));
         std::fs::create_dir_all(dir.join("destination")).unwrap();
         let path = dir.join("store.db");
-        let expected;
+        let mut expected;
         {
             let store = Store::open(&path).unwrap();
             let source = store.add_project(&dir).unwrap();
@@ -3288,6 +3483,10 @@ mod tests {
         }
         {
             let store = Store::open(&path).unwrap();
+            // Reopening upgrades legacy archived tasks to settled tasks.
+            expected["archived"] = false.into();
+            expected["taskStage"] = "completed".into();
+            expected["completedAt"] = expected["updatedAt"].clone();
             assert_eq!(
                 serde_json::to_value(store.sessions().unwrap().remove(0)).unwrap(),
                 expected

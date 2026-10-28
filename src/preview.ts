@@ -6,10 +6,12 @@ import { historicalProvider } from './provider-handoff';
 import { isPreviewableFile } from './file-links';
 import type { CommandPanel, GoalState } from './command-center';
 import { createPreviewArchitect } from './preview-architect';
+import { namedTeamSetup } from './team-mode';
+import type { TeamSnapshot, TeamWorker } from './architect-types';
 import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
-import { invokeBots, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
+import { invokeBots, previewBotBusy, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
 import { invokeRemote, previewRemoteStart } from './preview-remote';
 import { createPreviewDesign } from './preview-design';
 import { BRIEF_ID, GALLERY_ID, briefAnswer, briefMessages, briefTimings, briefTools, galleryMessages } from './preview-traces';
@@ -72,25 +74,52 @@ for (const s of sessions) {
   s.taskDescription = '';
   s.completedAt = null;
 }
-loadThreadOrder();
 // One sample task already tracks a GitHub issue so chips have something to show.
 sessions[2].issue = { kind: 'issue', number: 131, url: 'https://github.com/orbit-labs/orbit/issues/131', title: 'Keyboard shortcut cheat sheet', state: 'open', checkedAt: now };
 // Sidebar sections showcase: opt in with ?sections so default session counts stay unchanged.
 if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('sections')) {
-  const sample = (id: string, projectId: string, title: string, extra: Partial<Session>): Session => ({ id, projectId, title, provider: 'claude', model: 'sonnet', mode: 'ask', status: 'idle', createdAt: now - 7200000, updatedAt: now - 60000, archived: false, worktreePath: null, resumeId: null, lastResponseAt: null, pinned: false, sidebarOrder: null, taskStage: 'review', taskDescription: '', completedAt: null, ...extra });
+  // Keep the ordinary samples in their project folders for this sections showcase.
+  for (const task of sessions) task.taskStage = task.lastResponseAt ? 'in_progress' : 'pending';
+  const sample = (id: string, projectId: string, title: string, extra: Partial<Session>): Session => ({ id, projectId, title, provider: 'claude', model: 'sonnet', mode: 'ask', status: 'idle', createdAt: now - 7200000, updatedAt: now - 60000, archived: false, worktreePath: null, resumeId: null, lastResponseAt: null, pinned: false, sidebarOrder: null, taskStage: 'in_progress', taskDescription: '', completedAt: null, ...extra });
   sessions.push(
     sample('sections-running', 'project-1', 'Speed up the search index', { status: 'running', taskStage: 'in_progress', lastPromptAt: now - 95000 }),
     sample('sections-approval', 'project-2', 'Migrate settings storage', { provider: 'codex', model: '', status: 'waiting_approval', taskStage: 'in_progress', lastPromptAt: now - 240000 }),
-    sample('sections-review-1', 'project-1', 'Fix the flaky filter test', { lastPromptAt: now - 1500000, lastResponseAt: now - 1200000 }),
-    sample('sections-review-2', 'project-2', 'Write the release notes', { provider: 'codex', model: '', lastPromptAt: now - 11000000, lastResponseAt: now - 10800000 }),
+    sample('sections-review-1', 'project-1', 'Fix the flaky filter test', { taskStage: 'review', lastPromptAt: now - 1500000, lastResponseAt: now - 1200000 }),
+    sample('sections-review-2', 'project-2', 'Write the release notes', { provider: 'codex', model: '', taskStage: 'review', lastPromptAt: now - 11000000, lastResponseAt: now - 10800000 }),
     sample('sections-done-1', 'project-1', 'Add dark mode tokens', { taskStage: 'completed', lastResponseAt: now - 90000000, completedAt: now - 86000000 }),
     sample('sections-done-2', 'project-2', 'Remove the old onboarding', { taskStage: 'completed', lastResponseAt: now - 200000000, completedAt: now - 190000000 }),
     sample('sections-done-3', 'project-1', 'Document the keyboard map', { provider: 'kimi', model: '', taskStage: 'completed', lastResponseAt: now - 300000000, completedAt: now - 290000000 }),
+    // Needs you without running: a failed run you have not seen, and a usage limit.
+    sample('sections-failed', 'project-2', 'Upgrade the build toolchain', { status: 'error', lastPromptAt: now - 900000, lastResponseAt: now - 600000 }),
+    sample('sections-limited', 'project-1', 'Profile startup time', { lastPromptAt: now - 1800000, lastResponseAt: now - 1700000, limitedAt: now - 1700000, limitedUntil: now + 3600000 }),
+    sample('sections-pinned', 'project-1', 'Release checklist for 1.0', { pinned: true, sidebarOrder: 0, lastResponseAt: now - 432000000 }),
+    // A long title on a worktree branch with a linked pull request.
+    sample('sections-long', 'project-2', 'Redesign the sidebar rows so long titles, branches and pull requests all fit on one line', { worktreePath: '/Users/you/Projects/pandacode-worktrees/sidebar', worktreeBranch: 'pandacode/sidebar-redesign-compact-rows', pullRequest: { kind: 'pull', number: 482, url: 'https://github.com/aicodeking/pandacode/pull/482', title: 'Compact sidebar rows', state: 'open', checkedAt: now }, lastPromptAt: now - 172000000, lastResponseAt: now - 170000000 }),
+    sample('sections-chat', 'sections-chat-project', 'Explain the borrow checker', { lastPromptAt: now - 7000000, lastResponseAt: now - 6900000 }),
+    ...['Compare two date libraries', 'Draft a short changelog', 'Name the new CLI flag'].map((title, index) => sample(`sections-chat-${index + 2}`, 'sections-chat-project', title, { lastPromptAt: now - 9000000 - index * 3600000, lastResponseAt: now - 8900000 - index * 3600000 })),
+    // Enough threads for "Show more" in a folder and paging in Completed.
+    ...['Tidy the logger', 'Rename the config keys', 'Split the router', 'Cache the icon lookups', 'Drop the legacy flag', 'Add a retry to uploads', 'Trim the bundle'].map((title, index) => sample(`sections-many-${index}`, 'project-1', title, { lastResponseAt: now - 200000000 - index * 9000000 })),
+    ...['Pin the Node version', 'Fix the tooltip offset', 'Translate the menus', 'Audit the CSP', 'Retire the old icons', 'Speed up cold start', 'Archive old logs', 'Bump the parser', 'Clean the fixtures'].map((title, index) => sample(`sections-old-${index}`, index % 2 ? 'project-2' : 'project-1', title, { taskStage: 'completed', lastResponseAt: now - 310000000 - index * 30000000, completedAt: now - 300000000 - index * 30000000 })),
   );
-  // These two finished while another thread was open, so they wait in Needs review.
-  localStorage.setItem('pandacode.sidebar.unreviewed', JSON.stringify(['sections-review-1', 'sections-review-2']));
+  projects.push({ id: 'sections-chat-project', name: 'Chat', path: '/Users/you/PandaCode Chats/chat-5ec7105a' });
+  // These finished while another thread was open, so they wait in Needs review (or Active, if they failed).
+  localStorage.setItem('pandacode.sidebar.unreviewed', JSON.stringify(['sections-review-1', 'sections-review-2', 'sections-failed']));
 }
+// Saved pins and ranks apply to every sample, the ?sections ones included.
+loadThreadOrder();
 let id = 10;
+const ROUTING_KEY = 'pandacode.preview.routing';
+let previewRouting = { enabled: true, mode: 'balanced', minP: 0.5, profiler: 'missing', error: null as string | null };
+try { previewRouting = { ...previewRouting, ...JSON.parse(localStorage.getItem(ROUTING_KEY) ?? '{}') }; } catch { /* Defaults. */ }
+const saveRouting = () => { try { localStorage.setItem(ROUTING_KEY, JSON.stringify(previewRouting)); } catch { /* Kept in memory only. */ } };
+/** Deterministic stand-in for Panda Router: longer text reads as harder, later pool entries as pricier and stronger. */
+function previewRoute(text: string, pool: { provider: string; model: string; name: string }[]) {
+  const difficulty = Math.min(0.95, 0.2 + text.length / 400);
+  const rated = pool.map((m, i) => ({ provider: m.provider, model: m.model, name: m.name, cardId: `${m.provider}:${m.model}`, pSuccess: Math.max(0.05, Math.min(0.99, 0.95 - difficulty * 0.6 + (i % 7) * 0.05)), estCostUsd: 0.002 * (1 + (i % 9)), estLatencyMs: 2000 + i * 100 }));
+  const score = (m: typeof rated[number]) => previewRouting.mode === 'quality' ? m.pSuccess : previewRouting.mode === 'cheapest' ? (m.pSuccess >= previewRouting.minP ? 1 - m.estCostUsd : -1) : m.pSuccess - m.estCostUsd * 5;
+  const ranking = [...rated].sort((a, b) => score(b) - score(a));
+  return { pick: ranking[0] ?? null, ranking, unrated: [], difficulty: Math.max(1, Math.round(difficulty * 10)), category: /test|bug|fix/i.test(text) ? 'debugging' : 'general coding', profiler: 'onnx', latencyMs: 12 };
+}
 let previewClaudeMode: 'inherit' | 'subscription' = 'inherit';
 const traceRoot = '/Users/you/Projects/orbit';
 const traceIndex = `${traceRoot}/src/lib/search-index.ts`;
@@ -488,12 +517,18 @@ let browserHistory: string[] = [], browserIndex = -1;
 let browserState: BrowserStatus = { url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false };
 function browserChanged(): void { browserState.canGoBack = browserIndex > 0; browserState.canGoForward = browserIndex < browserHistory.length - 1; emit('browser-state', { ...browserState }); }
 function emit(name: string, event: unknown) { listeners.get(name)?.forEach(fn => fn(event)); }
+// Tests: deliver a native event, e.g. a background refresh of the open channel.
+(window as any).__previewEmit = emit;
 export function listen(name: string, callback: (event: any) => void): () => void { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback); return () => listeners.get(name)?.delete(callback); }
+/** Listener count used by browser tests to assert temporary event subscriptions are cleaned up. */
+export function previewListenerCount(name: string): number { return listeners.get(name)?.size ?? 0; }
 /** What the native picker "returns" in the browser preview, so attach flows can be exercised. */
 export function samplePick(kind: 'files' | 'folder'): string[] {
   return kind === 'folder' ? ['/Users/you/Projects/orbit-design'] : ['/Users/you/Pictures/dashboard-mockup.png', '/Users/you/Documents/Product brief.pdf'];
 }
 function agent(event: AgentEvent) { emit('agent-event', event); }
+/** tests: a live `subagent` event for any task (`__previewSubagent('session-1', { id, name, status, … })`). */
+(window as any).__previewSubagent = (sessionId: string, data: Record<string, unknown>) => agent({ sessionId, kind: 'subagent', text: '', data: { parentId: null, prompt: '', response: '', tools: [], startedAt: now, updatedAt: Date.now(), ...data } } as unknown as AgentEvent);
 function session(value: unknown): Session { const result = sessions.find(s => s.id === value); if (!result) throw new Error('Task not found'); return result; }
 function assertIdle(s: Session): void {
   if (s.status === 'running' || s.status === 'waiting' || timers.has(s.id)) throw new Error('Stop the agent before changing this task.');
@@ -510,12 +545,6 @@ function taskSummary(s: Session): Session {
     taskDescription += character;
   }
   return { ...s, taskDescription };
-}
-function archiveCompletedTasks(): void {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const s of sessions) {
-    if (!s.archived && s.taskStage === 'completed' && s.completedAt != null && s.completedAt <= cutoff && s.status !== 'running' && s.status !== 'waiting') s.archived = true;
-  }
 }
 for (const [sessionId, history] of Object.entries(messages)) {
   if (history.some(message => message.role === 'user') && history.some(message => message.role === 'assistant')) {
@@ -537,6 +566,46 @@ function finishTiming(sessionId: string): void {
  * from the host, which happens when a run ends (just before its `done`). */
 const mirrorSynced = new Map<string, number>();
 function syncMirror(sessionId: string): void { if (mirrorSynced.has(sessionId)) mirrorSynced.set(sessionId, id); }
+/* tests: a long mirror thread copied newest page first; older pages land below it with lower
+ * ids (`remote_backfill_base + host id` natively) and announce themselves by `mirror-messages`. */
+(window as any).__previewMirrorThread = (total: number, tail: number) => {
+  const sessionId = 'mirror-long', at = (i: number): Message => ({ id: 100000 + i, sessionId, role: i % 2 ? 'assistant' : 'user', content: `Message ${String(i).padStart(3, '0')}`, createdAt: now - (total - i) * 1000 });
+  sessions.unshift({ ...sessions[0], id: sessionId, title: 'Long remote thread', resumeId: null, remoteDevice: { id: 'dev-studio', name: 'Studio iMac' }, lastResponseAt: now });
+  messages[sessionId] = Array.from({ length: tail }, (_, k) => at(total - tail + k));
+  let oldest = total - tail;
+  (window as any).__previewMirrorBackfill = (count: number) => {
+    const from = Math.max(0, oldest - count);
+    messages[sessionId] = [...Array.from({ length: oldest - from }, (_, k) => at(from + k)), ...messages[sessionId]];
+    oldest = from; emit('mirror-messages', { sessionId, older: true });
+  };
+  emit('sessions-changed', {});
+};
+/* tests: a mirror whose host runs subagents and an architect team. `list_subagents` answers
+ * with what native code would have saved from the host's events; `remote_team` and
+ * `remote_worker_messages` answer like remote/mirror.rs from the host's `task.team`. */
+const mirrorSubagents = new Map<string, Map<string, unknown>>();
+const mirrorTeams = new Map<string, TeamSnapshot>();
+const mirrorWorkerMessages = new Map<string, Message[]>();
+(window as any).__previewMirrorTeam = (sessionId = 'mirror-team') => {
+  sessions.unshift({ ...sessions[0], id: sessionId, title: 'Remote team task', resumeId: null, status: 'running', remoteDevice: { id: 'dev-studio', name: 'Studio iMac' }, lastResponseAt: now });
+  messages[sessionId] = [{ id: ++id, sessionId, role: 'user', content: 'Split the docs work', createdAt: now }];
+  const worker = (n: number, status: TeamWorker['status'], summary: string): TeamWorker => ({ id: `w${n}`, sessionId: `host-worker-${n}`, profileId: 'auto', name: `Worker ${n}`, provider: 'codex', model: 'gpt-5.5', status, assignment: `Part ${n}`, summary, error: null, dependsOn: [], files: [], readOnly: false, attempt: 1, abandoned: false, checkpoint: null, createdAt: now, updatedAt: now });
+  mirrorTeams.set(sessionId, { sessionId, config: { auto: true, workers: [], maxParallel: 0, maxRounds: 6, maxAssignments: 0, workspace: 'shared', summaryLimit: 0 }, status: 'running', round: 1, revision: 1, workers: [worker(1, 'completed', 'Wrote the intro'), worker(2, 'running', '')], error: null, summary: null, updatedAt: now });
+  // `__previewMirrorLongWorker(n)`: worker 1's transcript becomes n messages, several pages long.
+  (window as any).__previewMirrorLongWorker = (count: number) => mirrorWorkerMessages.set('w1', Array.from({ length: count }, (_, index) => ({ id: index + 1, sessionId: 'host-worker-1', role: index % 2 ? 'assistant' : 'user', content: `Worker line ${index + 1}`, createdAt: now }) as Message));
+  mirrorWorkerMessages.set('w1', [{ id: 1, sessionId: 'host-worker-1', role: 'user', content: 'Part 1', createdAt: now }, { id: 2, sessionId: 'host-worker-1', role: 'assistant', content: 'Intro written on the host.', createdAt: now }]);
+  emit('sessions-changed', {});
+  const w = window as any;
+  // The host's `subagent` events, re-emitted under the local id (and saved, as natively).
+  w.__mirrorSubagent = (data: { id: string }) => { mirrorSubagents.set(sessionId, new Map(mirrorSubagents.get(sessionId)).set(data.id, data)); agent({ sessionId, kind: 'subagent', text: '', data } as unknown as AgentEvent); };
+  // A `team` event: the host changed a worker row.
+  w.__mirrorTeamWorker = (row: Partial<TeamWorker> & { id: string }) => {
+    const team = mirrorTeams.get(sessionId)!;
+    const workers = team.workers.some(item => item.id === row.id) ? team.workers.map(item => item.id === row.id ? { ...item, ...row } : item) : [...team.workers, { ...team.workers[0], ...row }];
+    mirrorTeams.set(sessionId, { ...team, workers, revision: team.revision + 1 });
+    agent({ sessionId, kind: 'team', text: '', data: row } as unknown as AgentEvent);
+  };
+};
 function finish(sessionId: string, content: string) { const time = Date.now(); messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time }); finishTiming(sessionId); const s = session(sessionId); if (content.trim()) s.lastResponseAt = time; s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time; timers.delete(sessionId); activeTools.delete(sessionId); syncMirror(sessionId); agent({ sessionId, kind: 'done', text: '' }); }
 /** Replays the Morning brief reference: five MCP tools (running, then completed), then the answer in chunks. `?replay=N` scales the pace. */
 function replayBrief(s: Session): void {
@@ -731,6 +800,14 @@ function resolveSlash(provider: ProviderId, text: string): { action: string | nu
   return { action: command.action ?? null, arguments: match[2] ?? '' };
 }
 
+// `?teams` seeds two named agent teams for the model picker.
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('teams') && !localStorage.getItem('pandacode.preview.architect-library')) {
+  const team = (id: string, name: string, models: [ProviderId, string, string, string][]) => ({ id, name, updatedAt: now, setup: namedTeamSetup(name, { provider: models[0][0], harness: models[0][1], model: models[0][2], name: models[0][3] }, models.map(([provider, harness, model, label]) => ({ provider, harness, model, name: label }))) });
+  localStorage.setItem('pandacode.preview.architect-library', JSON.stringify({ enabled: false, lastSetup: null, activeProfileId: null, profiles: [
+    team('preview-ship-crew', 'Ship crew', [['claude', 'Claude Code', 'opus', 'Claude Opus 5'], ['codex', 'Codex', 'gpt-6-astra', 'GPT-6-Astra'], ['kimi', 'Kimi Code', 'kimi-code/k3', 'K3']]),
+    team('preview-budget-trio', 'Budget trio', [['deepseek', 'DeepSeek', 'deepseek-v4-pro', 'DeepSeek V4 Pro'], ['glm', 'GLM Coding Plan', 'default', 'GLM-5.3'], ['mimo', 'MiMo Token Plan', 'default', 'MiMo-V2.6-Pro']]),
+  ] }));
+}
 const architect = createPreviewArchitect({
   parent: session,
   assertIdle,
@@ -842,15 +919,16 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       emit('remote://start-progress', { deviceId: args.deviceId, startId: args.startId ?? null, repo: null, stage: 'starting', percent: null, detail: `Waiting for ${target.name}…` });
       const { holdPreviewRemoteStart } = await import('./preview-remote');
       holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), () => { Object.assign(session(s.id), { remoteDevice: null, status: 'idle', draft: true }); emit('sessions-changed', {}); });
-      w.__remoteStartAttach = async () => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); };
+      // `note`: the worktree note `task.startStatus` carries for the resumed start (remote/mirror.rs `resume_start`).
+      w.__remoteStartAttach = async (note?: string) => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; if (note) emit('remote://start-note', { sessionId: s.id, note }); await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); };
       emit('sessions-changed', {});
       return { sessionId: s.id } as T;
     }
     await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] });
     emit('sessions-changed', {});
-    return { sessionId: s.id } as T;
+    return (w.__remoteStartBusy ? { sessionId: s.id, note: w.__remoteStartBusy } : { sessionId: s.id }) as T;
   }
-  if (command.startsWith('remote_')) return invokeRemote<T>(command, args, emit);
+  if (command.startsWith('remote_') && command !== 'remote_team' && command !== 'remote_worker_messages') return invokeRemote<T>(command, args, emit);
   if (command === 'capabilities_inventory' || command === 'cache_alignment') return previewCapabilities(command) as T;
   if (command.startsWith('recipes_')) { const r = recipesCommand(command, args); if (r.handled) return r.result as T; }
   let result: unknown;
@@ -918,6 +996,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = structuredClone(summary); break;
     }
     case 'turn_change_diff': result = turnChanges.diff(args.sessionId, args.changeId, args.path); break;
+    case 'model_routing_status': result = { ...previewRouting }; break;
+    case 'model_routing_configure': previewRouting = { ...previewRouting, ...(args.enabled != null ? { enabled: Boolean(args.enabled) } : {}), ...(args.mode ? { mode: args.mode } : {}), ...(args.minP != null ? { minP: Math.min(0.9, Math.max(0.3, Number(args.minP))) } : {}) }; saveRouting(); result = { ...previewRouting }; break;
+    case 'model_routing_prepare': previewRouting = { ...previewRouting, profiler: 'ready', error: null }; saveRouting(); result = { ...previewRouting }; break;
+    case 'model_routing_route': result = previewRoute(String(args.text), args.pool as any[]); break;
     case 'architect_get': result = architect.get(args.sessionId); break;
     case 'review_readiness': result = { ready: false, status: 'containment_unproven', provenProviders: [], note: 'No verified filesystem, network and credential confinement for the CLI process tree.' }; break;
     case 'architect_configure': result = architect.configure(args.sessionId, args.config, args.architect, args.profileId); break;
@@ -1009,7 +1091,14 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'archive_codex_task': { const task = codexTask(args.sessionId); assertIdle(task); task.archived = true; task.updatedAt = Date.now(); break; }
     case 'export_task': { const task = session(args.sessionId); result = `# ${task.title}\n\n` + (messages[task.id] ?? []).map(message => `## ${message.role}\n\n${message.content}\n\n`).join(''); break; }
-    case 'list_subagents': return [] as T;
+    case 'list_subagents': return [...(mirrorSubagents.get(String(args.sessionId))?.values() ?? [])] as T;
+    case 'remote_team': return structuredClone(mirrorTeams.get(String(args.sessionId)) ?? null) as T;
+    case 'remote_worker_messages': {
+      // Pages of 40 back from the tail, as `worker_pages` in remote/mirror.rs joins the host's.
+      const all = mirrorWorkerMessages.get(String(args.workerId)) ?? [], before = all.filter(message => !args.beforeId || message.id < args.beforeId);
+      ((window as any).__remoteWorkerPages ??= []).push(args.beforeId ?? null);
+      return { messages: structuredClone(before.slice(-40)), hasOlder: before.length > 40 } as T;
+    }
     case 'list_local_servers': result = [{ port: 3000, process: 'node', url: 'http://localhost:3000' }, { port: 5173, process: 'vite', url: 'http://localhost:5173' }]; break;
     case 'browser_open_external': {
       const url = new URL(args.url);
@@ -1028,8 +1117,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'browser_bounds': break;
     case 'browser_close': browserHistory = []; browserIndex = -1; browserState = { url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false }; browserChanged(); break;
     case 'browser_capture': result = { id: crypto.randomUUID(), name: 'Sample screenshot', path: '/sample/browser-capture.png', mimeType: 'image/png', url: browserState.url, title: browserState.title, width: 1280, height: 800, dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' }; break;
-    case 'list_projects': result = projects; break;
-    case 'list_sessions': archiveCompletedTasks(); sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
+    // Like the native rowid: projects are pushed in the order they were added.
+    case 'list_projects': result = projects.map((project, index) => ({ ...project, addedOrder: index + 1 })); break;
+    case 'list_sessions': sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
     case 'set_resume_at_reset': {
       const s = session(args.sessionId);
       if (args.enabled && !(s.limitedAt && s.limitedUntil)) throw new Error('This task has no usage limit with a known reset time.');
@@ -1072,7 +1162,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'steer_task': {
       const s = session(args.sessionId), w = window as any;
-      if (!timers.has(s.id) && s.status !== 'running') throw new Error('The agent is not running; the message stays queued.');
+      if (!timers.has(s.id) && s.status !== 'running' && !previewBotBusy(s.id)) throw new Error('The agent is not running; the message stays queued.');
       if (w.__remoteRefuse && s.remoteDevice) throw new Error(w.__remoteRefuse);
       if (w.__remoteSteerHold && s.remoteDevice) await new Promise<void>(resolve => { w.__remoteSteerRelease = () => { w.__remoteSteerHold = false; resolve(); }; });
       // Claude-family, Codex, Pi, Muse and Devin take it live; others hold it for the next turn of the same run.
@@ -1085,6 +1175,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         if (text.includes('[steer-fails]')) return report('failed');
         (messages[s.id] ??= []).push({ id: ++id, sessionId: s.id, role: 'user', content: text, createdAt: Date.now() });
         report('delivered');
+        // A sample bot shown as working has no preview run to answer it, so it answers here.
+        if (previewBotBusy(s.id)) agent({ sessionId: s.id, kind: 'text', text: 'Got it, I will fold that in. (browser preview)' });
       }, mode === 'live' ? 900 : 1500);
       result = { steered: true, id: steerId, mode }; break;
     }
@@ -1211,7 +1303,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const s = session(args.sessionId); assertIdle(s);
       if (s.archived) throw new Error('Restore this task before changing its stage.');
       const stage = args.stage as TaskStage;
-      if (!['pending', 'review', 'completed'].includes(stage)) throw new Error('Start the task to move it to work in progress.');
+      // Like the native store: work in progress only by undoing the completion of a stopped run.
+      const undoing = s.taskStage === 'completed' && ['error', 'interrupted'].includes(s.status);
+      if (!['pending', 'review', 'completed'].includes(stage) && !(stage === 'in_progress' && undoing)) throw new Error('Start the task to move it to work in progress.');
       s.completedAt = stage === 'completed' ? s.completedAt ?? Date.now() : null;
       s.taskStage = stage; s.updatedAt = Date.now(); result = s; break;
     }
@@ -1221,7 +1315,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'update_session': {
       const s = session(args.sessionId);
-      if (args.archived === false && s.archived && s.taskStage === 'completed') s.completedAt = Date.now();
+      if (args.archived === false && s.archived && s.taskStage === 'completed') s.completedAt ??= Date.now();
       Object.assign(s, Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'sessionId')), { updatedAt: Date.now() }); break;
     }
     case 'set_reasoning_effort': {

@@ -1,6 +1,6 @@
 [package]
 name = "pandacode"
-version = "0.6.0"
+version = "0.7.0"
 description = "A lightweight native workspace for coding agents"
 authors = ["PandaCode contributors"]
 edition = "2021"
@@ -29,21 +29,29 @@ portable-pty = "0.9"
 ignore = "0.4.33"
 regex = "1"
 libc = "0.2"
+libm = "0.2"
 base64 = "0.22"
 sha2 = "0.10"
 hmac = "0.12"
 hkdf = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
+flate2 = "=1.1.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
 des = "0.8"
 shell-words = "1"
 if-addrs = "=0.15.0"
 zip = { version = "=9.0.0", default-features = false, features = ["deflate"] }
+
+# Panda Router ONNX profiler. Keep this predicate aligned with `panda_onnx` in build.rs.
+[target.'cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", target_arch = "aarch64"), target_os = "windows"))'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

@@ -2421,7 +2421,7 @@ async function showViewMenu(anchor: HTMLElement): Promise<void> {
   const width = 200, rect = anchor.getBoundingClientRect();
   const inSidebar = Boolean(anchor.closest('.sidebar'));
   const point = { x: inSidebar ? Math.max(8, rect.right - width) : rect.left, y: rect.bottom };
-  await showChoices(anchor, { title: 'Workspace view', width, point, items: WORKSPACE_VIEWS.filter(view => view.id !== 'github' || githubEnabled()).map(view => ({ id: view.id, label: view.label, icon: view.icon, selected: view.id === state.view })), onSelect: id => setWorkspaceView(id as WorkspaceView) });
+  await showChoices(anchor, { title: 'Workspace view', width, point, items: WORKSPACE_VIEWS.filter(view => view.id !== 'github' || githubEnabled()).map(view => ({ id: view.id, label: view.label, icon: view.icon, selected: view.id === state.view })), onSelect: id => setWorkspaceView(id as WorkspaceView) }, false);
 }
 function setWorkspaceView(view: WorkspaceView): void {
   if (state.view === view) return;

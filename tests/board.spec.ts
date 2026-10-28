@@ -560,6 +560,8 @@ test.describe('project board', () => {
       ]) sessions.push({ ...sessions[1], ...fixture, taskDescription: 'Retained task details', updatedAt: now - 90 * 86400000 });
     `);
     await page.reload();
+    // The shell button exists before async preview initialization binds navigation handlers.
+    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
     await openBoard(page);
     await expect(board(page).getByRole('button', { name: 'Archived tasks', exact: true })).toHaveCount(0);
     await expect(column(page, 'Settled').getByRole('button', { name: 'Open task: Settled months ago', exact: true })).toBeVisible();

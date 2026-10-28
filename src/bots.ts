@@ -6,10 +6,10 @@ import { infoMark } from './tooltip';
 import type { Provider, ProviderId, ProviderModel, ReasoningEffort } from './types';
 import { advertisedModelsOnly, modelChoices } from './model-catalog';
 import { connectInput, guideToggled } from './bots-connect';
-import { readSoulFile, MAX_SOUL_BYTES } from './bot-soul';
+import { readSoulFile } from './bot-soul';
 import { mountBotCapabilities } from './bot-capabilities';
-import { avatarPicker, botAvatarHtml, handleAvatarPicker } from './bot-avatars';
-import { renderPanel, panelClick, panelSubmit, panelChange, invalidateActivity, type PanelContext, type Tab } from './bots-panels';
+import { avatarPicker, botAvatarHtml, colorPicker, handleAvatarPicker } from './bot-avatars';
+import { age, renderPanel, panelClick, panelSubmit, panelChange, invalidateActivity, type PanelContext, type Tab } from './bots-panels';
 
 export { age };
 
@@ -17,6 +17,8 @@ export interface Bot {
   id: string; name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; projectId: string;
   provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; nextHeartbeatAt: number | null;
   mcp: string[];
+  /** Optional profile fields; older bot records remain valid. */
+  color?: string; reasoningEffort?: string; backupModels?: BackupModel[]; fallbackMode?: 'ask' | 'auto'; notify?: boolean; whileWorking?: 'queue' | 'steer'; showPlan?: boolean;
   paused: boolean; memoryVersion: number; notifyChannelId: string | null; notifyThread: string | null; createdAt: number; updatedAt: number;
   /** The bot's conversation in this app, once it exists. */
   desktopSession?: string | null;
@@ -110,8 +112,15 @@ const navFor = (section: Section): Nav => section === 'conversations' || section
 /** One labelled row, like a Settings row: title and hint on the left, the control on the right. */
 const row = (title: string, hint: string, control: string, stacked = false) => `<label class="bs-row ${stacked ? 'stacked' : ''}"><span class="bs-row-text"><strong>${title}</strong>${hint ? `<small>${escape(hint)}</small>` : ''}</span>${control}</label>`;
 const heading = (title: string, more = '') => `<h3 class="bs-heading">${escape(title)}${more}</h3>`;
-const MODES = [{ id: 'ask', label: 'Ask before acting' }, { id: 'auto', label: 'Auto-approve edits' }, { id: 'review', label: 'Approve for me' }, { id: 'plan', label: 'Plan only' }, { id: 'full', label: 'Full access' }];
-const providerModes = (provider: ProviderId) => MODES.filter(mode => mode.id === 'review' ? ['claude', 'glm', 'mimo'].includes(provider) : !(mode.id === 'auto' && ['github-copilot', 'devin'].includes(provider)));
+/** OpenBot-style permission levels over the harness modes; Plan only stays for bots that already use it. */
+const PERMISSIONS = [{ id: 'auto', label: 'Workspace only', hint: 'Edits files in its workspace without asking' }, { id: 'ask', label: 'Ask first', hint: 'Asks before edits and commands' }, { id: 'review', label: 'Approve for me', hint: 'A reviewer model approves safe steps and asks you about the rest' }, { id: 'full', label: 'Full access', hint: 'Runs anything without asking' }, { id: 'plan', label: 'Plan only', hint: 'Reads and plans, never changes anything' }];
+const permissionChoices = (provider: ProviderId, current: string) => PERMISSIONS.filter(item => (item.id !== 'plan' || current === 'plan')
+  && (item.id !== 'review' || ['claude', 'glm', 'mimo'].includes(provider))
+  && (item.id !== 'auto' || !['github-copilot', 'devin'].includes(provider)));
+const permissionOptions = (provider: ProviderId, current: string) => {
+  const choices = permissionChoices(provider, current), chosen = choices.some(item => item.id === current) ? current : 'ask';
+  return choices.map(item => `<button type="button" role="radio" data-permission="${item.id}" aria-label="${escape(item.label)}" aria-checked="${item.id === chosen}"><strong>${escape(item.label)}</strong><small>${escape(item.hint)}</small></button>`).join('');
+};
 const CHECK_INS = [{ minutes: 0, label: 'Off' }, { minutes: 30, label: 'Every 30 minutes' }, { minutes: 60, label: 'Every hour' }, { minutes: 180, label: 'Every 3 hours' }, { minutes: 360, label: 'Every 6 hours' }, { minutes: 1440, label: 'Once a day' }];
 const PURPOSE_MAX = 2000;
 const SAVE_TEXT = { '': '', saving: 'Saving…', saved: 'Saved', error: 'Not saved' } as const;
@@ -125,6 +134,20 @@ export const TEMPLATES: { id: string; avatar: string; name: string; role: string
   { id: 'watch', avatar: 'panda:5', name: 'Watcher', role: 'Keeps an eye on things and tells me when they change', instructions: 'Check the sources I give you. Only message me when something meaningfully changed, with the before and after and a link.', goals: '', heartbeatMinutes: 60 },
   { id: 'blank', avatar: 'panda:0', name: '', role: '', instructions: '', goals: '', heartbeatMinutes: 0 },
 ];
+
+/** Suggested bots: picking one fills the create form's name and purpose. */
+export const SUGGESTIONS: { id: string; avatar: string; name: string; role: string; purpose: string; heartbeatMinutes: number }[] = [
+  { id: 'research', avatar: 'panda:4', name: 'Researcher', role: 'Digs into questions and reports back', purpose: 'Research the questions I bring you using the web and files on this computer. Lead with the answer, then the evidence, and cite sources with links.', heartbeatMinutes: 0 },
+  { id: 'inbox', avatar: 'panda:2', name: 'Inbox Triage', role: 'Sorts what needs me from what can wait', purpose: 'When I forward messages or notifications, sort them into needs me today, can wait, and ignore. Draft short replies for the first group, but never send anything yourself.', heartbeatMinutes: 0 },
+  { id: 'chief', avatar: 'panda:1', name: 'Chief of Staff', role: 'Keeps my week on track', purpose: 'Track my commitments, follow-ups and deadlines. Each morning, tell me my top three priorities and anything about to slip. Ask before acting on my behalf.', heartbeatMinutes: 360 },
+  { id: 'review', avatar: 'panda:6', name: 'Code Reviewer', role: 'Reviews changes before they ship', purpose: 'Review the diffs and pull requests I point you to. Flag bugs, risky changes and missing tests first, style last. Suggest concrete fixes, and run the tests before saying something works.', heartbeatMinutes: 0 },
+  { id: 'release', avatar: 'panda:5', name: 'Release Notes', role: 'Turns merged work into release notes', purpose: 'When I ask, read the commits and merged pull requests since the last release tag and write release notes grouped into New, Improved and Fixed, in plain language for users.', heartbeatMinutes: 0 },
+  { id: 'standup', avatar: 'panda:7', name: 'Standup', role: 'Drafts my daily standup', purpose: 'Each weekday morning, look at what changed in my projects since yesterday and draft a short standup: done, next, and anything blocking. Keep it under 120 words.', heartbeatMinutes: 1440 },
+  { id: 'monitor', avatar: 'panda:8', name: 'Monitor', role: 'Watches things and tells me when they change', purpose: 'Check the pages, feeds or commands I give you. Only message me when something meaningfully changed, with the before, the after and a link.', heartbeatMinutes: 60 },
+  { id: 'writer', avatar: 'panda:3', name: 'Writer', role: 'Drafts and edits in my voice', purpose: 'Help me draft and edit posts, emails and docs. Match my tone, keep it tight, and offer one alternative for any line you change a lot.', heartbeatMinutes: 0 },
+];
+interface Draft { name: string; purpose: string; role: string; avatar: string; color: string; heartbeatMinutes: number; suggestion: string; provider: ProviderId | ''; model: string; reasoningEffort: string; }
+const newDraft = (): Draft => ({ name: '', purpose: '', role: '', avatar: 'panda:0', color: '', heartbeatMinutes: 0, suggestion: '', provider: '', model: '', reasoningEffort: '' });
 
 export function avatar(bot: Pick<Bot, 'avatar' | 'name' | 'color'>, cls = ''): string { return botAvatarHtml(bot.avatar, bot.name, cls, bot.color ?? ''); }
 
@@ -261,30 +284,84 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   function harnessControls(providerId: ProviderId | '', modelId: string, labelled = true): { provider: Provider | undefined; harness: string; model: string } {
     const providers = options.providers;
     const hasInstalledProvider = providers.some(item => item.installed);
-    const provider = providers.find(item => item.id === source.provider) ?? providers.find(item => item.installed) ?? providers[0];
-    const model = source.model || (provider ? options.defaultModel(provider.id) : '');
-    const models = provider ? modelCatalogs.get(provider.id) ?? provider.models : [];
-    const visibleModes = provider ? providerModes(provider.id) : MODES;
-    const mode = source.mode;
-    const unavailableMode = !visibleModes.some(item => item.id === mode);
-    const templates = bot ? '' : `<div class="bots-templates" role="group" aria-label="Start from">${TEMPLATES.map(item => `<button type="button" data-template="${item.id}" aria-pressed="${item.id === template.id}">${botAvatarHtml(item.avatar, item.name, 'bots-template-avatar')}${escape(item.name || 'Blank')}</button>`).join('')}</div>`;
-    const checkIns = `<select name="heartbeatMinutes" aria-label="Check-ins">${CHECK_INS.map(item => `<option value="${item.minutes}" ${item.minutes === source.heartbeatMinutes ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`;
-    return `<form class="bots-form" novalidate>
-      ${bot ? '' : '<h3>New bot</h3><p class="bots-lede">A bot is an agent that lives on this computer. It remembers, works on a schedule, and answers you here, in a browser, or in Telegram, Slack, Discord and WhatsApp.</p>'}
-      ${templates}
+    const provider = providers.find(item => item.id === providerId) ?? providers.find(item => item.installed) ?? providers[0];
+    const preferred = modelId || (provider ? options.defaultModel(provider.id) : '');
+    const models = provider ? catalogFor(provider.id) : [];
+    const shown = provider && advertisedModelsOnly(provider.id) && preferred !== 'default' && !models.some(item => item.id === preferred) ? 'default' : preferred;
+    const wrap = (title: string, control: string) => labelled ? `<label class="bc-control"><span>${title}</span>${control}</label>` : control;
+    return {
+      provider,
+      harness: wrap('Harness', `<select name="provider" aria-label="Harness">${providers.map(item => `<option value="${item.id}" ${item.id === provider?.id ? 'selected' : ''} ${!item.installed && hasInstalledProvider ? 'disabled' : ''}>${escape(item.name)}${!item.installed ? ' · Not installed' : ''}</option>`).join('')}</select>`),
+      model: wrap('Model', `<select name="model" aria-label="Model" data-preferred-model="${escape(preferred)}">${provider ? modelOptions(provider.id, models, shown) : '<option value="default">Default</option>'}</select>`),
+    };
+  }
+
+  /** A centered column: live avatar, color and face, name, purpose and brain, then suggestions to start from. */
+  function renderCreate(): string {
+    const { provider, harness, model } = harnessControls(draft.provider, draft.model);
+    const efforts = provider ? effortSelect(provider.id, draft.model || options.defaultModel(provider.id), draft.reasoningEffort) : '';
+    const cards = SUGGESTIONS.map(item => `<li><button type="button" class="bc-card" data-suggestion="${item.id}" aria-pressed="${item.id === draft.suggestion}">${botAvatarHtml(item.avatar, item.name, 'bc-card-avatar')}<b>${escape(item.name)}</b><small>${escape(item.role)}</small></button></li>`).join('');
+    return `<div class="bots-create"><form class="bots-form bc-form" novalidate aria-label="New bot">
+      <div class="bc-preview">${botAvatarHtml(draft.avatar, draft.name || 'Bot', 'bc-avatar', draft.color)}</div>
+      ${colorPicker(draft.color)}${avatarPicker(draft.avatar, draft.color)}
+      <label class="bots-field"><span>Name<i class="bc-required" aria-hidden="true">*</i></span><input name="name" maxlength="60" required aria-required="true" value="${escape(draft.name)}" placeholder="Scout" autocomplete="off" ${nameError ? 'aria-invalid="true" aria-describedby="bc-name-error"' : ''}></label>
+      ${nameError ? `<p class="bc-error" id="bc-name-error">${escape(nameError)}</p>` : ''}
+      <label class="bots-field"><span>What should this bot help with?</span><textarea name="purpose" rows="3" maxlength="${PURPOSE_MAX}" placeholder="Describe its job, what to always do, and what to never do" aria-describedby="bc-count">${escape(draft.purpose)}</textarea></label>
+      <span class="bc-count" id="bc-count">${draft.purpose.length} / ${PURPOSE_MAX}</span>
+      <div class="bc-brain" role="group" aria-label="Harness and model">${harness}${model}<label class="bc-control"><span>Reasoning</span>${efforts}</label></div>
+      <div class="bc-actions">${bots.length && !single ? '<button type="button" class="secondary-button" data-bots-action="cancel-edit">Cancel</button>' : ''}<button type="submit" class="primary-button bc-submit" ${creating ? 'disabled aria-busy="true"' : ''}>${creating ? '<span class="support-spinner" aria-hidden="true"></span>Creating bot…' : 'Create bot'}</button></div>
+    </form>
+    <section class="bc-suggestions" aria-labelledby="bc-suggestions-title"><h4 id="bc-suggestions-title">Suggestions</h4><div class="bc-rail"><ul>${cards}</ul></div></section></div>`;
+  }
+
+  function backupsRow(bot: Bot): string {
+    const backups = bot.backupModels ?? [];
+    const label = (item: BackupModel) => `${modelName(item.provider, item.model)} · ${harnessName(item.provider)}`;
+    const items = backups.map((item, index) => `<li><span>${escape(label(item))}</span>
+      <button type="button" class="icon-button" data-backup-move="${index}" data-step="-1" aria-label="Move ${escape(label(item))} up" title="Move up" ${index === 0 ? 'disabled' : ''}>${icon('down', 'flip')}</button>
+      <button type="button" class="icon-button" data-backup-move="${index}" data-step="1" aria-label="Move ${escape(label(item))} down" title="Move down" ${index === backups.length - 1 ? 'disabled' : ''}>${icon('down')}</button>
+      <button type="button" class="icon-button" data-backup-remove="${index}" aria-label="Remove ${escape(label(item))}" title="Remove">${icon('close')}</button></li>`).join('');
+    const taken = (provider: ProviderId, model: string) => (provider === bot.provider && model === bot.model) || backups.some(item => item.provider === provider && item.model === model);
+    const groups = installed().map(provider => {
+      const models = botModelChoices(provider.id, catalogFor(provider.id), '').filter(model => model.id !== 'default' && !taken(provider.id, model.id));
+      return models.length ? `<optgroup label="${escape(provider.name)}">${models.map(model => `<option value="${escape(JSON.stringify({ provider: provider.id, model: model.id }))}">${escape(model.name)}</option>`).join('')}</optgroup>` : '';
+    }).join('');
+    const full = backups.length >= 4;
+    return `<div class="bs-row stacked"><span class="bs-row-text"><strong>Backup models</strong><small>Tried in order when the main model is unavailable</small></span>
+      <input type="hidden" name="backupModels" value="${escape(JSON.stringify(backups))}">
+      ${items ? `<ol class="bp-backups">${items}</ol>` : ''}
+      <small class="bp-backup-note">Automatic failover only retries before a bot writes a reply. Usage limits wait for reset; provider errors wait ten minutes before switching back.</small>
+      <div class="bp-backup-add"><select data-backup-add aria-label="Add a backup model" ${full || !groups ? 'disabled' : ''}><option value="">${full ? 'Up to four backups' : 'Add a backup model…'}</option>${groups}</select>
+      <select name="fallbackMode" aria-label="Switching to a backup"><option value="ask" ${bot.fallbackMode !== 'auto' ? 'selected' : ''}>Ask first</option><option value="auto" ${bot.fallbackMode === 'auto' ? 'selected' : ''}>Automatic</option></select></div></div>`;
+  }
+
+  /** Settings → Profile, saved as you go: identity, the brain behind the bot, and its rules. */
+  function renderProfile(bot: Bot): string {
+    const { provider, harness, model } = harnessControls(bot.provider, bot.model, false);
+    const mode = permissionChoices(bot.provider, bot.mode).some(item => item.id === bot.mode) ? bot.mode : 'ask';
+    const checkIns = `<select name="heartbeatMinutes" aria-label="Check-ins">${CHECK_INS.map(item => `<option value="${item.minutes}" ${item.minutes === bot.heartbeatMinutes ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`;
+    const toggle = (name: string, on: boolean, label: string) => `<input type="checkbox" class="bots-switch" name="${name}" ${on ? 'checked' : ''} aria-label="${label}">`;
+    const pop = avatarOpen ? `<div class="bp-avatar-pop" role="dialog" aria-label="Icon">
+        <button type="button" class="secondary-button" data-bots-action="avatar-upload">${icon('upload')}Upload image</button>
+        <h5>Choose panda</h5>${avatarPicker(bot.avatar, bot.color ?? '')}<h5>Color</h5>${colorPicker(bot.color ?? '')}
+        <button type="button" class="bp-avatar-reset" data-bots-action="avatar-reset">${icon('reset')}Reset</button></div>`
+      : `<input type="hidden" name="avatar" value="${escape(bot.avatar)}"><input type="hidden" name="color" value="${escape(bot.color ?? '')}">`;
+    return `<form class="bots-form bots-profile" novalidate aria-label="Profile">
+      <div class="bp-identity"><span class="bp-avatar-wrap"><button type="button" class="bp-avatar-button" data-bots-action="avatar" aria-haspopup="dialog" aria-expanded="${avatarOpen}" aria-label="Change icon">${avatar(bot, 'bp-avatar')}<span class="bp-avatar-badge">${icon('edit')}</span></button>${pop}</span>
+        <div class="bp-identity-fields"><input name="name" maxlength="60" required value="${escape(bot.name)}" placeholder="Name" aria-label="Name" autocomplete="off"><input name="role" maxlength="200" value="${escape(bot.role)}" placeholder="Title, like Research assistant" aria-label="Title" autocomplete="off"><p class="bc-error" id="bp-name-error" hidden></p></div></div>
+      <div class="bs-group">${row('Instructions', 'How it should work, what to always or never do', `<textarea name="instructions" rows="4" maxlength="16000" aria-label="Instructions">${escape(bot.instructions)}</textarea>`, true)}</div>
+      ${heading('Personality', infoMark('Optional. Tone, values and conversational style, kept apart from the instructions. Importing copies the file once; later changes to the file do not change the bot. Personality never grants tools or permissions.', 'About personality'))}
       <div class="bs-group">
-        <div class="bs-row stacked"><span class="bs-row-text"><strong>Icon</strong></span>${avatarPicker(source.avatar)}</div>
-        ${row('Name', '', `<input name="name" maxlength="60" required value="${escape(source.name)}" placeholder="Scout" aria-label="Name" autocomplete="off">`)}
-        ${row('Job', '', `<input name="role" maxlength="200" value="${escape(source.role)}" placeholder="What it's for, in a few words" aria-label="Job" autocomplete="off">`)}
-        ${row('Instructions', 'How it should work, what to always or never do', `<textarea name="instructions" rows="4" maxlength="16000" aria-label="Instructions">${escape(source.instructions)}</textarea>`, true)}
+        <div class="bs-row stacked bots-soul"><span class="bs-row-text"><strong>Soul</strong><small>Markdown, up to 64 KB</small></span>
+          <textarea name="soul" rows="4" aria-label="Soul" placeholder="# Leo&#10;Dry wit, fiercely loyal, blunt under pressure.">${escape(bot.soul ?? '')}</textarea>
+          <span class="bots-soul-actions"><button type="button" class="secondary-button" data-bots-action="soul-import">Import soul.md…</button><button type="button" class="secondary-button" data-bots-action="soul-remove" ${bot.soul ? '' : 'hidden'}>Remove</button><input type="file" data-soul-file accept=".md,.markdown,.txt,text/markdown,text/plain" hidden></span>
+          <p class="bots-error bots-soul-error" role="alert" hidden></p>
+        </div>
       </div>
-      ${heading('Personality', infoMark('Optional tone, values and conversational style. Personality never grants permissions or overrides safety rules.', 'About personality'))}
-      <div class="bs-group"><div class="bs-row stacked"><span class="bs-row-text"><strong>Soul</strong></span><textarea name="soul" rows="5" aria-label="Soul" placeholder="How the bot sounds and relates to you">${escape(source.soul)}</textarea><div class="bots-soul-actions"><button type="button" class="secondary-button" data-bots-action="import-soul">Import soul.md</button><button type="button" class="secondary-button" data-bots-action="remove-soul">Remove personality</button><input type="file" data-soul-file accept=".md,.txt,text/plain,text/markdown" hidden><span class="field-help" data-live>UTF-8 text, up to 64 KB. Imported once; the file stays on your computer.</span></div></div></div>
       ${heading('Brain')}
       <div class="bs-group">
-        ${row('Harness', '', `<select name="provider" aria-label="Harness">${providers.map(item => `<option value="${item.id}" ${item.id === provider?.id ? 'selected' : ''} ${!item.installed && hasInstalledProvider ? 'disabled' : ''}>${escape(item.name)}${!item.installed ? ' · Not installed' : ''}</option>`).join('')}</select>`)}
-        ${row('Model', '', `<select name="model" aria-label="Model" data-preferred-model="${escape(model)}">${provider ? modelOptions(provider.id, models, advertisedModelsOnly(provider.id) && model !== 'default' && !models.some(item => item.id === model) ? 'default' : model) : `<option value="default">Default</option>`}</select>`)}
-        ${row('Permissions', '', `<select name="mode" aria-label="Permissions">${unavailableMode ? `<option value="${escape(mode)}" selected>${escape(mode)} · Unavailable for this harness</option>` : ''}${visibleModes.map(item => `<option value="${item.id}" ${item.id === mode ? 'selected' : ''}>${item.label}</option>`).join('')}</select>`)}
+        ${row('Harness', '', harness)}${row('Model', '', model)}${row('Reasoning', '', provider ? effortSelect(provider.id, bot.model, bot.reasoningEffort ?? '') : '')}
+        ${backupsRow(bot)}
       </div>
       ${heading('Rules')}
       <div class="bs-group">
@@ -299,7 +376,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       ${heading('Check-ins', infoMark('On each check-in the bot reviews its goals and memory using read-only steps, and messages you only when something needs attention.', 'About check-ins'))}
       <div class="bs-group">
         ${row('Check in', '', checkIns)}
-        ${row('Standing goals', 'One per line. Check-ins work toward these.', `<textarea name="goals" rows="2" maxlength="16000" aria-label="Standing goals">${escape(source.goals)}</textarea>`, true)}
+        ${row('Standing goals', 'One per line. Check-ins work toward these.', `<textarea name="goals" rows="2" maxlength="16000" aria-label="Standing goals">${escape(bot.goals)}</textarea>`, true)}
       </div>
     </form>`;
   }
@@ -433,24 +510,15 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       const nav = `<div class="bs-nav" role="tablist" aria-orientation="vertical" aria-label="Bot settings">${SECTIONS.map(item => `<button type="button" role="tab" id="bs-tab-${item.id}" data-section="${item.id}" aria-controls="bs-panel" aria-selected="${item.id === section}" tabindex="${item.id === section ? 0 : -1}">${icon(item.icon)}<span>${item.label}</span>${badge(item.id)}</button>`).join('')}</div>`;
       const current = SECTIONS.find(item => item.id === section)!;
       const body = section === 'profile' ? renderProfile(detail.bot)
+        : section === 'skills' ? '<div data-bot-capabilities></div>'
         : section === 'activity' ? `${heading('Conversations')}${renderPanel('conversations', detail, context)}${heading('Rules', infoMark('Answer the bot\'s requests for you. Deny wins over allow, and * matches anything, as in npm test*. Risky actions such as sudo, force pushes, deleting files or anything about passwords always ask, whatever the rules say.', 'About rules'))}${renderPanel('rules', detail, context)}${heading('Activity log')}${renderPanel('activity', detail, context)}`
         : renderPanel(section, detail, context);
       const saved = section === 'profile' ? `<span class="bs-saved" role="status" aria-live="polite" data-state="${saveState}"></span>` : '';
       pane.innerHTML = `${renderHeader(detail.bot)}${confirm}${alert}<div class="bs-body">${nav}<div class="bots-panel" id="bs-panel" role="tabpanel" aria-labelledby="bs-tab-${section}"><div class="bs-panel-head"><h2>${current.label}${saved}</h2><p>${escape(current.text)}</p></div>${body}</div></div>`;
       setSaved(saveState);
     }
-    // Keep a half-typed setting (a new memory, a schedule prompt) through background refreshes.
-    const typing = pane.contains(document.activeElement) ? document.activeElement as HTMLInputElement | HTMLTextAreaElement : null;
-    const kept = typing && 'value' in typing && typing.type !== 'checkbox' ? { name: typing.name || typing.getAttribute('aria-label') || '', value: typing.value } : null;
-    const nav = `<div class="bs-nav" role="tablist" aria-orientation="vertical" aria-label="Bot settings">${SECTIONS.map(item => `<button type="button" role="tab" id="bs-tab-${item.id}" data-section="${item.id}" aria-controls="bs-panel" aria-selected="${item.id === section}" tabindex="${item.id === section ? 0 : -1}">${icon(item.icon)}<span>${item.label}</span>${badge(item.id)}</button>`).join('')}</div>`;
-    const current = SECTIONS.find(item => item.id === section)!;
-    const body = section === 'profile' ? renderForm(detail.bot)
-      : section === 'skills' ? '<div data-bot-capabilities></div>'
-      : section === 'activity' ? `${heading('Conversations')}${renderPanel('conversations', detail, context)}${heading('Rules', infoMark('Answer the bot\'s requests for you. Deny wins over allow, and * matches anything, as in npm test*. Risky actions such as sudo, force pushes, deleting files or anything about passwords always ask, whatever the rules say.', 'About rules'))}${renderPanel('rules', detail, context)}${heading('Activity log')}${renderPanel('activity', detail, context)}`
-      : renderPanel(section, detail, context);
-    pane.innerHTML = `${renderHeader(detail.bot)}${confirm}${alert}<div class="bs-body">${nav}<div class="bots-panel" id="bs-panel" role="tabpanel" aria-labelledby="bs-tab-${section}"><div class="bs-panel-head"><h2>${current.label}</h2><p>${escape(current.text)}</p></div>${body}</div></div>`;
     hydrateFormModels();
-    if (section === 'skills') disposeCapabilities = mountBotCapabilities(pane.querySelector<HTMLElement>('[data-bot-capabilities]')!, detail.bot, options);
+    if (section === 'skills' && detail) disposeCapabilities = mountBotCapabilities(pane.querySelector<HTMLElement>('[data-bot-capabilities]')!, detail.bot, options);
     if (kept?.name) {
       const again = [...pane.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].find(field => (field.name || field.getAttribute('aria-label')) === kept.name);
       if (again) { again.value = kept.value; again.focus(); if (kept.start !== null && 'setSelectionRange' in again) try { again.setSelectionRange(kept.start, kept.end); } catch { /* Not a text field. */ } }
@@ -531,11 +599,14 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     if (bot && target.dataset.backupRemove) { patchBot({ backupModels: (bot.backupModels ?? []).filter((_, index) => index !== Number(target.dataset.backupRemove)) }); return; }
     const action = target.dataset.botsAction;
     if (moreOpen && action !== 'more') moreOpen = false;
-    if (action === 'new') { editing = 'new'; template = TEMPLATES[0]; confirming = null; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); }
-    else if (action === 'import-soul') pane.querySelector<HTMLInputElement>('[data-soul-file]')?.click();
-    else if (action === 'remove-soul') { soulImportGeneration++; const soul = pane.querySelector<HTMLTextAreaElement>('[name=soul]'); if (soul) { soul.value = ''; soul.focus(); } }
-    else if (action === 'cancel-edit') { editing = null; render(); }
+    if (action === 'new') { editing = 'new'; draft = newDraft(); nameError = ''; confirming = null; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); }
+    else if (action === 'cancel-edit') { editing = null; nameError = ''; render(); }
     else if (action === 'more') { moreOpen = !moreOpen; render(); if (moreOpen) pane.querySelector<HTMLElement>('.bp-menu [role=menuitem]')?.focus(); }
+    else if (action === 'avatar') { avatarOpen = !avatarOpen; render(); pane.querySelector<HTMLElement>(avatarOpen ? '.bp-avatar-pop button' : '.bp-avatar-button')?.focus(); }
+    else if (action === 'avatar-upload') pane.querySelector<HTMLInputElement>('.bp-avatar-pop [data-avatar-upload]')?.click();
+    else if (action === 'avatar-reset' && bot) patchBot({ avatar: 'panda:0', color: '' });
+    else if (action === 'soul-import') pane.querySelector<HTMLInputElement>('input[data-soul-file]')?.click();
+    else if (action === 'soul-remove') setSoul('');
     else if (action === 'open-chat' && bot) options.openChat(bot.id);
     else if (action === 'pause' && bot) void work(async () => { await options.call('bot_set_paused', { botId: bot.id, paused: !bot.paused }); options.notify(bot.paused ? `${bot.name} resumed` : `${bot.name} paused`); await load(); });
     else if (action === 'reset' && bot) context.confirm(`Reset ${bot.name}?`, 'This deletes its conversations, memories, schedules and activity. Its instructions, channels and rules stay.', 'Reset', async () => { await options.call('bot_reset', { botId: bot.id }); options.notify(`${bot.name} was reset`); await load(); });
@@ -548,20 +619,27 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const form = event.target as HTMLFormElement;
     if (!host.contains(form)) return;
     event.preventDefault();
-    if (!form.matches('.bots-form')) { if (section !== 'profile' && section !== 'skills') panelSubmit(form, section, context); return; }
-    const input = readForm(form);
-    if (new TextEncoder().encode(input.soul).length > MAX_SOUL_BYTES) { error = 'Personality must be under 64 KB.'; render(); return; }
-    if (!input.name) { error = 'Give the bot a name.'; render(); return; }
-    void work(async () => {
-      if (editing !== 'new' && detail) { await options.call('bot_update', { botId: detail.bot.id, input }); options.notify('Bot saved'); await load(); return; }
-      // A new bot opens straight into its conversation, like a new task.
-      const bot = await options.call<Bot>('bot_create', { input });
-      selected = bot.id; editing = null; section = 'profile';
-      options.notify(`${bot.name} is ready`);
-      await load();
-      options.openChat(bot.id);
-    });
+    if (form.matches('.bc-form')) createBot(form);
+    else if (form.matches('.bots-profile')) queueSave();
+    else if (section !== 'profile') panelSubmit(form, section, context);
   };
+  /** A new harness brings its own models, permissions and reasoning levels. */
+  function providerChanged(form: HTMLFormElement, providerId: ProviderId): void {
+    const provider = options.providers.find(item => item.id === providerId);
+    const select = form.querySelector<HTMLSelectElement>('select[name=model]');
+    const mode = form.querySelector<HTMLInputElement>('input[name=mode]');
+    if (provider && select) {
+      const preferred = options.defaultModel(provider.id) || 'default';
+      select.dataset.preferredModel = preferred;
+      void loadFormModels(provider.id, select, preferred);
+    }
+    if (provider && mode) {
+      if (!permissionChoices(provider.id, mode.value).some(item => item.id === mode.value)) mode.value = 'ask';
+      const group = form.querySelector<HTMLElement>('[role=radiogroup][aria-label="Rules"]');
+      if (group) group.innerHTML = permissionOptions(provider.id, mode.value);
+    }
+    syncEfforts(form);
+  }
   const change = (event: Event) => {
     if (handleAvatarPicker(event)) return;
     const target = event.target as HTMLElement;
@@ -590,11 +668,9 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         if (value) patchBot({ backupModels: [...(bot.backupModels ?? []), JSON.parse(value) as BackupModel] });
         return;
       }
-      if (provider && mode) {
-        const choices = providerModes(provider.id);
-        const current = mode.value;
-        const unavailable = !choices.some(item => item.id === current);
-        mode.innerHTML = (unavailable ? `<option value="${escape(current)}" selected>${escape(current)} · Unavailable for this harness</option>` : '') + choices.map(item => `<option value="${item.id}" ${item.id === current ? 'selected' : ''}>${item.label}</option>`).join('');
+      if (target.matches('select[name=mode]') && (target as HTMLSelectElement).value === 'full' && bot.mode !== 'full') {
+        context.confirm(`Give ${bot.name} full access?`, 'It can run any command and change any file this computer allows, without asking first.', 'Allow full access', async () => patchBot({ mode: 'full' }));
+        return;
       }
       if (target.matches('input[name=name],input[name=role],textarea')) return; // Saved by the `input` listener.
       queueSave();
@@ -604,6 +680,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   };
   const typed = (event: Event) => {
     const target = event.target as HTMLElement;
+    if (target instanceof HTMLTextAreaElement && target.name === 'soul') soulImportGeneration++;
     connectInput(target);
     const form = target.closest<HTMLFormElement>('.bc-form,.bots-profile');
     if (form?.matches('.bc-form')) {
@@ -624,7 +701,6 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   host.addEventListener('click', click);
   host.addEventListener('submit', submit);
   host.addEventListener('change', change);
-  const typed = (event: Event) => { if (event.target instanceof HTMLTextAreaElement && event.target.name === 'soul') soulImportGeneration++; connectInput(event.target as HTMLElement); };
   host.addEventListener('input', typed);
   // `toggle` and `scroll` do not bubble, so listen while capturing.
   const toggled = (event: Event) => {

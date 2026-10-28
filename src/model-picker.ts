@@ -61,6 +61,10 @@ function catalogFailureReason(reason: unknown): string {
   return 'Check provider configuration';
 }
 
+/** A rail entry: Recent, Teams, or one harness (or named connection of a harness). */
+type Group = { key: string; provider: Provider; connection: PickerConnection | null; name: string; locked: boolean; unavailable: boolean };
+type Row = { group: Group; model: ProviderModel; custom?: boolean };
+
 /** A transient picker with local state and listeners released on dismissal. */
 export function openModelPicker(options: ModelPickerOptions): () => void {
   const { anchor, current, canSwitchProvider, onSelect, onEffortSelect, loadModels, onClose } = options;
@@ -441,67 +445,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     }
   }
 
-  /** Default plus the most recent models, padded from the catalog, when the caller asks for a short list. */
-  function shortList(provider: ProviderId, models: ProviderModel[]): ProviderModel[] {
-    const recent = options.recent?.(provider);
-    if (!recent) return models;
-    const byId = new Map(models.map(model => [model.id, model]));
-    const first = [...(provider === current.provider ? [current.model] : []), ...recent, ...storedRecent(provider)].filter(id => id !== 'default' && byId.has(id));
-    const ids = [...new Set([...first, ...models.map(model => model.id).filter(id => id !== 'default')])].slice(0, RECENT_LIMIT);
-    return [byId.get('default')!, ...ids.map(id => byId.get(id)!)];
-  }
-  function renderChoices(): void {
-    if (closed) return;
-    const focused = panel.contains(document.activeElement) ? (document.activeElement as HTMLElement).closest<HTMLButtonElement>('.model-menu-option') : null;
-    const focusedKey = focused ? optionKey(focused) : '';
-    const query = search.value.trim();
-    const normalized = query.toLowerCase();
-    const visibleProviders = providers.filter(provider => provider.installed || provider.id === current.provider);
-    const namedHarness = visibleProviders.some(provider => [provider.id, provider.name].some(name => name.toLowerCase() === normalized));
-    let total = 0;
-    const teams = (options.teams ?? []).filter(team => !query || [team.name, team.detail, 'team'].some(value => value.toLowerCase().includes(normalized)));
-    const teamSelected = options.teams?.some(team => team.selected) ?? false;
-    total += teams.length;
-    const teamMarkup = teams.length ? `<section class="model-menu-group" aria-label="Agent teams"><div class="model-menu-group-heading"><h3>${icon('worktree')}Agent teams</h3></div>${teams.map(team => `<button type="button" class="model-menu-option model-menu-team${team.selected ? ' model-menu-current' : ''}" data-team="${escape(team.id)}" data-provider="team" data-model="${escape(team.id)}" data-available="true" aria-label="${escape(`Agent team · ${team.name}`)}" title="${escape(team.detail)}" ${team.selected ? 'aria-current="true"' : ''}>${providerLogo(team.provider)}<span class="model-menu-option-label"><span>${escape(team.name)}</span><span class="model-menu-description">${escape(team.detail)}</span></span>${team.selected ? icon('check') : ''}</button>`).join('')}</section>` : '';
-    const connections = options.connections ?? [];
-    const currentConnection = options.currentConnection ?? null;
-    let markup = teamMarkup + visibleProviders.flatMap(provider => [null, ...connections.filter(c => c.provider === provider.id)].map(connection => ({ provider, connection }))).map(({ provider, connection }) => {
-      const groupName = connection?.name ?? provider.name;
-      const models = modelChoices(provider.id, provider.models, provider.id === current.provider ? current.model : '');
-      const providerMatches = [provider.id, provider.name, groupName].some(name => name.toLowerCase().includes(normalized));
-      const visible = query ? models.filter(model => providerMatches || [model.id, model.name, model.description].some(value => value.toLowerCase().includes(normalized))) : shortList(provider.id, models);
-      const locked = !canSwitchProvider && provider.id !== current.provider;
-      const unavailable = !provider.installed;
-      const custom = !advertisedModelsOnly(provider.id) && Boolean(query && !namedHarness && !models.some(model => [model.id, model.name].some(value => value.toLowerCase() === normalized)) && !locked);
-      if (!visible.length && !custom) return '';
-      const disabled = locked || unavailable;
-      const row = (model: ProviderModel, isCustom: boolean): string => {
-        total++;
-        const selected = !teamSelected && provider.id === current.provider && model.id === (current.model || 'default') && (connection?.id ?? null) === currentConnection;
-        const accessible = isCustom ? `Use "${model.id}" with ${groupName}` : `${groupName} · ${model.name}`;
-        const detail = [model.contextWindow ? `${tokenCount(model.contextWindow)} context` : '', model.description || (model.name !== model.id && model.id !== 'default' ? model.id : '')].filter(Boolean).join(' · ');
-        return `<button type="button" class="model-menu-option${selected ? ' model-menu-current' : ''}" data-provider="${provider.id}" data-model="${escape(model.id)}"${connection ? ` data-connection="${escape(connection.id)}"` : ''} data-available="${!disabled}" aria-label="${escape(accessible)}" title="${escape(detail)}" ${selected ? 'aria-current="true"' : ''} ${disabled ? 'disabled' : ''}>${providerLogo(provider.id)}<span class="model-menu-option-label">${isCustom ? `<span class="model-menu-custom-label">Use custom model</span><span>${escape(model.id)}</span>` : `<span>${escape(model.name)}</span>${detail ? `<span class="model-menu-description">${escape(detail)}</span>` : ''}`}</span>${selected ? icon('check') : isCustom ? icon('plus') : ''}</button>`;
-      };
-      return `<section class="model-menu-group" aria-label="${escape(groupName)}"${connection ? ` data-connection-group="${escape(connection.id)}"` : ''}><div class="model-menu-group-heading"><h3>${providerLogo(provider.id)}${escape(groupName)}</h3>${locked ? '<span>New task required</span>' : unavailable ? '<span>Unavailable</span>' : `<span data-catalog-loading="${provider.id}" hidden>Loading…</span>`}</div>${visible.map(model => row(model, false)).join('')}${custom ? row(fallbackModel(provider.id, query), true) : ''}</section>`;
-    }).join('');
-    if (providersStatus) markup = `<button type="button" class="model-menu-option" data-available="false" disabled>${icon('monitor')}<span class="model-menu-option-label"><span>${escape(providersStatus)}</span></span></button>`;
-    else if (!total) markup = '<p class="model-menu-empty">No matching models.</p>';
-    // Loading and saving are in-place updates: retain rows, focus and scroll position.
-    if (markup !== choicesMarkup) {
-      list.innerHTML = markup;
-      choicesMarkup = markup;
-      const buttons = enabledButtons();
-      const restore = buttons.find(button => optionKey(button) === focusedKey);
-      const next = restore ?? buttons.find(button => optionKey(button) === activeKey) ?? buttons.find(button => button.getAttribute('aria-current') === 'true') ?? buttons[0];
-      setActive(next, Boolean(focused));
-      if (focused && !next) search.focus({ preventScroll: true });
-    }
-    list.querySelectorAll<HTMLElement>('[data-catalog-loading]').forEach(status => { status.hidden = !catalogLoading.has(status.dataset.catalogLoading as ProviderId); });
-    catalogError.hidden = catalogErrors.size === 0;
-    catalogError.textContent = catalogErrors.size ? `Could not load models for ${providers.filter(provider => catalogErrors.has(provider.id)).map(provider => `${provider.name} (${catalogErrors.get(provider.id)})`).join(', ')}. You can enter model IDs for agents that support custom models.` : '';
-    updateControls();
-    position();
-  }
+  // ----- Selection and events -----
 
   async function select(button: HTMLButtonElement): Promise<void> {
     if (pending || closed || button.disabled) return;

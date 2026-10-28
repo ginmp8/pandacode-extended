@@ -11,7 +11,7 @@ import type { TeamSnapshot, TeamWorker } from './architect-types';
 import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
-import { invokeBots, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
+import { invokeBots, previewBotBusy, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
 import { invokeRemote, previewRemoteStart } from './preview-remote';
 import { createPreviewDesign } from './preview-design';
 import { BRIEF_ID, GALLERY_ID, briefAnswer, briefMessages, briefTimings, briefTools, galleryMessages } from './preview-traces';

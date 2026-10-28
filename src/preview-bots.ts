@@ -170,7 +170,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const input = validate(args.input);
       const id = crypto.randomUUID(), now = Date.now();
       const project = host.addProject(input.name);
-      const bot: Bot = { ...input, mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
+      const bot: Bot = { ...input, soul: input.soul ?? '', mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
       const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [] };
       log(entry, 'created', `Created ${bot.name}`);
       bots.set(id, entry); result = structuredClone(bot); changed(); break;

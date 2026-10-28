@@ -38,7 +38,7 @@ import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubRefe
 import type { BrowserPanel } from './browser';
 import { botAvatarHtml } from './bot-avatars';
 import * as botThread from './bot-thread';
-import type { Activity as BotActivity, FailoverAsk } from './bots';
+import { avatar as botAvatar, type Activity as BotActivity, type FailoverAsk } from './bots';
 import { call, chooseFolder, preview, subscribe } from './bridge';
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, markdown, morph } from './dom';
@@ -70,7 +70,7 @@ import type { RemoteHost, RemoteRepoCheck, RemoteStatus, RemoteTarget } from './
 import type { RemoteStart } from './remote-progress';
 import type { RoutingMode, RoutingStatus } from './model-routing';
 import { LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
-import { botAvatar, botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
+import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
 import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
@@ -1240,10 +1240,6 @@ function renderNavigation(): void {
   /** `card`: two lines (where, then what) for Active, Needs review and Pinned; otherwise one line. */
   const row = (s: Session, card = false, reorderable = false, showProject = false): string => {
     const p = state.projects.find(p => p.id === s.projectId);
-    const stage = chatTask(s) ? '' : taskStage(s);
-    const stageName = stage ? stageNames[stage] : '';
-    const stageDot = stage ? '<span class="stage-dot" aria-hidden="true" title="Board stage: ' + escape(stageName) + '"></span>' : '';
-    const taskTitle = '<span class="task-title-row">' + stageDot + '<span class="task-title">' + escape(s.title) + '</span></span>';
     const activityAt = lastActivity(s);
     const live = state.streams.get(s.id);
     const startedAt = live?.startedAt ?? s.lastPromptAt;
@@ -1259,37 +1255,35 @@ function renderNavigation(): void {
     const link = s.pullRequest ?? s.issue;
     const linkMark = link ? `<span class="task-link ${link.kind === 'pull' ? 'pull' : 'issue'}" title="${escape(`${link.kind === 'pull' ? 'Pull request' : 'Issue'} #${link.number}: ${link.title}`)}">#${link.number}</span>` : '';
     // Worktree tasks show their branch; the worktree mark keeps its accessible name either way.
-    const worktreeMark = s.worktreePath ? `<span class="task-worktree" role="img" aria-label="Worktree" title="${escape(s.worktreePath)}">${icon('worktree')}</span>` : '';
-    const branch = s.worktreePath ? `<span class="task-branch">${worktreeMark}${s.worktreeBranch ? `<span>${escape(s.worktreeBranch)}</span>` : ''}</span>` : '';
-    const signalIcon = status === 'attention' ? live?.inputs.size ? 'help' : 'alert' : status === 'limited' ? 'pause' : 'activity';
-    const signals = `${status ? `<span class="task-status ${status}" role="img" aria-label="${escape(statusLabel)}" title="${escape(statusLabel)}">${icon(signalIcon)}</span>` : ''}${age ? `<span class="task-age${elapsed ? ' task-runtime' : ''}"${elapsed ? ` data-started-at="${startedAt}"` : ''} title="${elapsed ? `Working for ${elapsed}` : `Last message: ${escape(new Date(activityAt!).toLocaleString())}`}">${age}</span>` : ''}`;
-    const stageAttribute = stage ? `data-stage="${stage}"` : '';
-    const description = [shortProvider(s.provider), stage ? `Board stage: ${stageName}` : ''].filter(Boolean).join(' · ');
-    const done = taskStage(s) === 'completed';
-    // Completed rows keep their completion order, so they are not dragged.
-    const reorderable = state.archived || !done;
-    const button = `<button class="task-item${inFolder ? ' task-oneline' : ''} ${s.id === state.sessionId ? 'selected' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" ${stageAttribute} draggable="${reorderable}" data-pinned="${Boolean(s.pinned)}" ${reorderable ? 'aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''} ${s.id === state.sessionId ? 'aria-current="page"' : ''} aria-description="${escape(description)}" title="${escape(s.worktreeBranch ? `${s.title}\n${s.worktreeBranch}` : s.title)}">`;
+    const worktreeMark = (s.worktreePath ? `<span class="task-worktree" role="img" aria-label="Worktree" title="${escape(s.worktreePath)}">${icon('worktree')}</span>` : '')
+      + (s.cloud ? `<span class="task-cloud" role="img" aria-label="Runs on ${escape(s.cloud.label)}" title="Runs on a ${escape(s.cloud.label)} cloud machine">${cloudIcon()}</span>` : '');
+    const branch = s.worktreePath || s.cloud ? `<span class="task-branch">${worktreeMark}${s.worktreeBranch ? branchLabel(s.worktreeBranch) : ''}</span>` : '';
+    const signals = `${status ? `<span class="task-indicator ${status}" role="img" aria-label="${statusLabel}" title="${statusLabel}"></span>` : unread ? '<span class="task-indicator unread" role="img" aria-label="Unread" title="Unread"></span>' : ''}${word ? `<span class="task-status ${status}" aria-hidden="true">${word}</span>` : ''}${age && !word ? `<span class="task-age${elapsed ? ' task-runtime' : ''}"${elapsed ? ` data-started-at="${startedAt}"` : ''} title="${elapsed ? `Working for ${elapsed}` : `Last message: ${escape(new Date(activityAt!).toLocaleString())}`}">${age}</span>` : ''}`;
+    const stage = chatTask(s) ? '' : taskStage(s), done = taskStage(s) === 'completed';
+    const stageName = stage ? stageNames[stage] : '';
+    const stageDot = stage ? '<span class="stage-dot" aria-hidden="true" title="Board stage: ' + escape(stageName) + '"></span>' : '';
+    const selected = s.id === state.sessionId;
+    const button = `<button class="task-item${card ? '' : ' task-oneline'}${selected ? ' selected' : ''}${unread ? ' unread' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" draggable="${reorderable}" data-pinned="${Boolean(s.pinned)}" tabindex="-1" ${reorderable ? 'aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''} ${selected ? 'aria-current="page"' : ''} aria-description="${shortProvider(s.provider)}" title="${escape([s.title, showProject ? chatTask(s) ? 'Chat' : p?.name ?? '' : '', s.worktreeBranch ?? ''].filter(Boolean).join('\n'))}">`;
     const pin = s.pinned ? `<span class="task-pin" role="img" aria-label="Pinned">${icon('pin')}</span>` : '';
     const projectLabel = `<span class="task-project">${escape(p?.name ?? 'Project')}</span>`;
     // Row actions sit beside the row's button (buttons cannot nest), over its right edge. They
     // are not Tab stops: ⌘↩ completes and the menu key or ⇧F10 opens the menu.
     const title = escape(s.title), id = escape(s.id), busy = isRunning(s.id) || configuringSessions.has(s.id);
-    const tick = state.archived || busy ? '' : `<button class="task-action task-check${done ? ' checked' : ''}" data-action="${done ? 'sidebar-reopen' : 'sidebar-complete'}" data-task="${id}" aria-label="${done ? 'Reopen' : 'Mark complete'}: ${title}" title="${done ? 'Reopen task' : 'Mark complete'}">${icon('check')}</button>`;
-    const archive = `<button class="task-action task-archive" data-action="sidebar-archive" data-task="${id}" aria-label="${s.archived ? 'Restore' : 'Archive'}: ${title}" title="${s.archived ? 'Restore task' : 'Archive task'}">${icon(s.archived ? 'undo' : 'archive')}</button>`;
-    // The archive view deletes directly; elsewhere Delete sits in the row's menu, one click from hover.
-    const last = state.archived
-      ? `<button class="task-action task-delete" data-action="sidebar-delete" data-task="${id}" aria-label="Delete: ${title}" title="${busy ? 'Stop the agent before deleting this task' : 'Delete task…'}" ${busy ? 'disabled' : ''}>${icon('trash')}</button>`
-      : `<button class="task-action task-more" data-action="sidebar-more" data-task="${id}" aria-haspopup="menu" aria-label="Task actions: ${title}" title="Task actions">${icon('more')}</button>`;
-    const wrap = (content: string) => `<div class="task-row${inFolder ? ' task-row-oneline' : ''}" id="task-row-${id}" data-stage="${stage}" data-actions="${[tick, archive, last].filter(Boolean).length}">${content}<span class="task-actions">${tick}${archive}${last}</span></div>`;
-    // Inside a project's folder the heading already names the project: one line with the
-    // title, then the worktree mark, linked PR or issue, status, age and harness.
-    if (inFolder) return wrap(`${button}<span class="task-line task-top">${taskTitle}${worktreeMark}${linkMark}${pin}${projectName}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`);
-    // With one project chosen the filter names it: two lines, the title and then the rest.
-    const head = inProject
-      ? `<span class="task-line task-top">${taskTitle}${signals}</span>`
-      : `<span class="task-line task-head">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-checkout">${escape(checkout)}</span>${signals}</span>${taskTitle}`;
-    return wrap(`${button}${head}`
-      + `<span class="task-line task-meta">${branch}${linkMark}${pin}${projectName}${providerLogo(s.provider, 'task-provider')}</span></button>`);
+    const taskTitle = `<span class="task-title-row">${stageDot}${taskTitle}</span>`;
+    const tick = state.archived || busy ? '' : `<button class="task-action task-check${done ? ' checked' : ''}" data-action="${done ? 'sidebar-reopen' : 'sidebar-complete'}" data-task="${id}" tabindex="-1" aria-label="${done ? 'Reopen' : 'Mark complete'}: ${title}" title="${done ? 'Reopen task' : 'Mark complete'}">${icon('check')}</button>`;
+    // The archive view restores and deletes directly; elsewhere Archive and Delete sit in the row's menu.
+    const extra = state.archived
+      ? `<button class="task-action task-archive" data-action="sidebar-archive" data-task="${id}" tabindex="-1" aria-label="Restore: ${title}" title="Restore task">${icon('undo')}</button><button class="task-action task-delete" data-action="sidebar-delete" data-task="${id}" tabindex="-1" aria-label="Delete: ${title}" title="${busy ? 'Stop the agent before deleting this task' : 'Delete task…'}" ${busy ? 'disabled' : ''}>${icon('trash')}</button>`
+      : `<button class="task-action task-more" data-action="sidebar-more" data-task="${id}" tabindex="-1" aria-haspopup="menu" aria-label="Task actions: ${title}" title="Task actions">${icon('more')}</button>`;
+    const quickArchive = state.archived ? '' : `<button class="task-action task-archive" data-action="sidebar-archive" data-task="${id}" tabindex="-1" aria-label="Archive: ${title}" title="Archive task">${icon('archive')}</button>`;
+    const wrap = (content: string) => `<div class="task-row${card ? '' : ' task-row-oneline'}" id="task-row-${id}" data-stage="${stage}">${content}<span class="task-actions">${tick}${quickArchive}${extra}</span></div>`;
+    // One line: the title, then the worktree mark, linked PR or issue, status, age and harness.
+    // A flat list names each row's project: its icon first, its name after the title.
+    if (!card && showProject) return wrap(`${button}<span class="task-line task-top">${projectAppIcon(s.projectId, p?.name ?? '')}${taskTitle}<span class="task-project-name" aria-hidden="true">${escape(chatTask(s) ? 'Chat' : p?.name ?? 'Project')}</span>${worktreeMark}${linkMark}${pin}${projectLabel}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`);
+    if (!card) return wrap(`${button}<span class="task-line task-top">${taskTitle}${worktreeMark}${linkMark}${pin}${projectLabel}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`);
+    // Two lines: where (app icon, checkout, status, age), then what (title, branch, PR, harness).
+    return wrap(`${button}<span class="task-line task-head">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-checkout">${escape(checkout)}</span>${pin}${signals}</span>`
+      + `<span class="task-line task-top">${taskTitle}${branch}${linkMark}${projectLabel}${providerLogo(s.provider, 'task-provider')}</span></button>`);
   };
   const single = Boolean(state.projectFilter);
   const heading = (key: string, label: string, count: number) => `<div class="group-heading section-heading">${label}<span class="section-count">${count}</span></div>`;
@@ -4656,6 +4650,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
   const deleteDescription = task.goalState?.status === 'active' ? 'Pause the active goal before deleting this chat.'
     : isRunning(id) ? 'Stop the agent before deleting this chat.'
       : finishingStreams.has(id) ? 'Wait for the agent to finish before deleting this chat.' : undefined;
+  const movable = !['active', 'review', 'completed'].includes(group);
   const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id), done = taskStage(task) === 'completed';
   const unread = unreviewed?.has(id) ?? false, path = task.worktreePath ?? state.projects.find(p => p.id === task.projectId)?.path ?? '';
   const branch = task.worktreeBranch ?? '';
@@ -5172,6 +5167,13 @@ let sidebarBots: import('./bots').Bot[] = [];
 let sidebarChannels: SharedChannelSummary[] = [];
 let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
+const botSwitches = new Map<string, BotActivity[]>();
+const botMessages = new Map<string, botThread.BotMessageMarker[]>();
+const botFailovers = new Map<string, FailoverAsk>();
+const botFailoverErrors = new Map<string, string>();
+const botThreadMetaLoaded = new Set<string>();
+const botThreadMetaRequests = new Map<string, number>();
+
 let botReloadGeneration = 0;
 let taskBots = new Map<string, string>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }

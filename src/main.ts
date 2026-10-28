@@ -2075,9 +2075,12 @@ function renderComposer(): void {
     for (const { name } of [...previousSteer.attributes]) if (!nextSteer.hasAttribute(name)) previousSteer.removeAttribute(name);
     for (const { name, value } of [...nextSteer.attributes]) if (previousSteer.getAttribute(name) !== value) previousSteer.setAttribute(name, value);
     if (previousSteer.innerHTML !== nextSteer.innerHTML) previousSteer.innerHTML = nextSteer.innerHTML;
-    nextSteer.replaceWith(previousSteer);
+    // Park the live button in a connected sibling while replacing its form.
+    // A detached button can drop a pointer click during frequent remote updates.
+    composerRoot.parentElement!.append(previousSteer);
   }
   composerRoot.replaceChildren(nextMarkup.content);
+  if (previousSteer && nextSteer && previousTaskId === s.id) nextSteer.replaceWith(previousSteer);
   if (restoreSteerFocus && previousSteer?.isConnected) previousSteer.focus({ preventScroll: true });
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.

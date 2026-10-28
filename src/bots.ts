@@ -6,7 +6,7 @@ import { infoMark } from './tooltip';
 import type { Provider, ProviderId, ProviderModel, ReasoningEffort } from './types';
 import { advertisedModelsOnly, modelChoices } from './model-catalog';
 import { connectInput, guideToggled } from './bots-connect';
-import { readSoulFile } from './bot-soul';
+import { readSoulFile, MAX_SOUL_BYTES } from './bot-soul';
 import { mountBotCapabilities } from './bot-capabilities';
 import { avatarPicker, botAvatarHtml, colorPicker, handleAvatarPicker } from './bot-avatars';
 import { age, renderPanel, panelClick, panelSubmit, panelChange, invalidateActivity, type PanelContext, type Tab } from './bots-panels';
@@ -404,6 +404,10 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const form = pane.querySelector<HTMLFormElement>('.bots-profile');
     if (!form || !detail) return;
     const input = readForm(form);
+    const soulError = form.querySelector<HTMLElement>('.bots-soul-error');
+    const tooLong = new TextEncoder().encode(input.soul ?? '').length > MAX_SOUL_BYTES;
+    if (soulError) { soulError.hidden = !tooLong; soulError.textContent = tooLong ? 'Personality must be under 64 KB.' : ''; }
+    if (tooLong) { setSaved('error'); return; }
     const nameField = form.querySelector<HTMLInputElement>('input[name=name]')!;
     const nameNote = form.querySelector<HTMLElement>('#bp-name-error')!;
     nameNote.hidden = Boolean(input.name);
@@ -606,7 +610,11 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     else if (action === 'avatar-upload') pane.querySelector<HTMLInputElement>('.bp-avatar-pop [data-avatar-upload]')?.click();
     else if (action === 'avatar-reset' && bot) patchBot({ avatar: 'panda:0', color: '' });
     else if (action === 'soul-import') pane.querySelector<HTMLInputElement>('input[data-soul-file]')?.click();
-    else if (action === 'soul-remove') setSoul('');
+    else if (action === 'soul-remove') {
+      soulImportGeneration++;
+      const soul = pane.querySelector<HTMLTextAreaElement>('.bots-profile textarea[name=soul]');
+      if (soul) { soul.value = ''; soul.focus(); queueSave(); }
+    }
     else if (action === 'open-chat' && bot) options.openChat(bot.id);
     else if (action === 'pause' && bot) void work(async () => { await options.call('bot_set_paused', { botId: bot.id, paused: !bot.paused }); options.notify(bot.paused ? `${bot.name} resumed` : `${bot.name} paused`); await load(); });
     else if (action === 'reset' && bot) context.confirm(`Reset ${bot.name}?`, 'This deletes its conversations, memories, schedules and activity. Its instructions, channels and rules stay.', 'Reset', async () => { await options.call('bot_reset', { botId: bot.id }); options.notify(`${bot.name} was reset`); await load(); });
@@ -621,7 +629,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     event.preventDefault();
     if (form.matches('.bc-form')) createBot(form);
     else if (form.matches('.bots-profile')) queueSave();
-    else if (section !== 'profile') panelSubmit(form, section, context);
+    else if (section !== 'profile' && section !== 'skills') panelSubmit(form, section, context);
   };
   /** A new harness brings its own models, permissions and reasoning levels. */
   function providerChanged(form: HTMLFormElement, providerId: ProviderId): void {
@@ -651,6 +659,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       void readSoulFile(file).then(text => {
         if (disposed || generation !== soulImportGeneration || !form.isConnected || !pane.contains(form)) return;
         soul.value = text; soul.focus();
+        if (form.matches('.bots-profile')) queueSave();
       }).catch(cause => {
         if (disposed || generation !== soulImportGeneration || !form.isConnected) return;
         options.notify(message(cause));

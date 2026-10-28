@@ -69,7 +69,7 @@ button .icon{pointer-events:none}
 .task-age{margin-left:auto;flex-shrink:0;font-size:var(--text-2xs);font-variant-numeric:tabular-nums}
 .task-item:hover{background:var(--raised)}
 .task-item.selected{background:var(--accent-dim);color:var(--text);font-weight:var(--weight-medium)}
-.task-indicator{width:5px;height:5px;background:var(--faint);border-radius:50%;flex-shrink:0}
+.task-indicator{display:inline-block;width:5px;height:5px;background:var(--faint);border-radius:50%;flex-shrink:0}
 .selected .task-indicator{background:var(--accent-ink)}
 .task-indicator.running{background:var(--focus);box-shadow:none;animation:breathe 1.5s infinite}
 .task-indicator.attention{background:var(--accent-ink);box-shadow:0 0 0 3px rgb(var(--accent-rgb) / .3)}

@@ -394,7 +394,9 @@ test.describe('project board', () => {
     expect(completed.taskStage).toBe('completed');
     expect(completed.completedAt).toBeGreaterThan(Date.now() - 10_000);
     expect(completed.archived).toBe(false);
-    await expect(page.locator(`.task-item[data-id="${task.id}"]`)).toHaveCount(0);
+    // A selected task stays at its original sidebar position while its Board stage changes.
+    await expect(page.locator(`.task-item[data-id="${task.id}"]`)).toHaveCount(1);
+    await expect(page.locator(`.task-row[data-stage="completed"] .task-item[data-id="${task.id}"]`)).toHaveCount(1);
     await details(page).getByRole('button', { name: 'Reopen task', exact: true }).click();
     await expect(column(page, 'Review').getByRole('button', { name: `Open task: ${title}`, exact: true })).toBeVisible();
     expect(await savedTask(page, title)).toMatchObject({ taskStage: 'review', completedAt: null, archived: false });

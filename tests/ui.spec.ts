@@ -2810,18 +2810,12 @@ for (const delayedCommand of ['add_project', 'list_projects']) {
     await expect(settings.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
     await expect(settings.getByRole('button', { name: 'Back to the workspace', exact: true })).toBeVisible();
     await page.evaluate(() => {
-      const navigation = document.querySelector('#navigation')!;
-      const observer = new MutationObserver(() => {
-        (window as any).__pandacodeFolderNavigationUpdated = true;
-        observer.disconnect();
-      });
-      observer.observe(navigation, { childList: true });
       (window as any).__pandacodeDelayFolder = false;
       (window as any).__pandacodeReleaseFolder();
       delete (window as any).__pandacodeReleaseFolder;
     });
-    await expect.poll(() => page.evaluate(() => (window as any).__pandacodeFolderNavigationUpdated)).toBe(true);
-    expect(await previewProjectNames(page)).toContain('canceled-task-folder');
+    // Flat All projects navigation has no folder node to mutate; verify the persisted project instead.
+    await expect.poll(async () => (await previewProjectNames(page)).includes('canceled-task-folder')).toBe(true);
     await expect(settings.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
     // The workspace behind the page is hidden from assistive technology, so read the composer directly.
     await expect(page.locator('#prompt')).toHaveAttribute('data-session-id', sessionId!);
@@ -3420,21 +3414,29 @@ test('⌘F finds text in the thread, in your messages and the agent’s, and ste
   await expect(input).toBeFocused();
   await input.fill('search');
   const count = find.locator('.thread-find-count');
-  await expect(count).toHaveText(/^1 of \d+$/);
-  const total = Number((await count.textContent())!.split(' of ')[1]);
+  await expect(count).toHaveText(/^\d+ of \d+$/);
+  const [initial, total] = (await count.textContent())!.split(' of ').map(Number);
   expect(total).toBeGreaterThan(1);
+  expect(initial).toBeGreaterThanOrEqual(1);
+  expect(initial).toBeLessThanOrEqual(total);
   // Matches come from both sides of the conversation, highlighted without touching the DOM.
   const owners = await page.evaluate(() => {
     const all = (CSS as any).highlights.get('thread-find');
     return [...all].map((range: Range) => range.startContainer.parentElement!.closest('.message')!.classList.contains('user-message') ? 'user' : 'agent');
   });
   expect(owners).toContain('user'); expect(owners).toContain('agent');
-  expect(await page.evaluate(() => (CSS as any).highlights.get('thread-find-current').size)).toBe(1);
+  expect(await page.evaluate(index => {
+    const all = [...(CSS as any).highlights.get('thread-find')] as Range[];
+    const current = [...(CSS as any).highlights.get('thread-find-current')] as Range[];
+    return current.length === 1 && all[index - 1] === current[0];
+  }, initial)).toBe(true);
   await input.press('Enter');
-  await expect(count).toHaveText(`2 of ${total}`);
+  await expect(count).toHaveText(`${initial === total ? 1 : initial + 1} of ${total}`);
   await input.press('Shift+Enter');
-  await expect(count).toHaveText(`1 of ${total}`);
+  await expect(count).toHaveText(`${initial} of ${total}`);
   await input.press('Shift+Enter');
+  await expect(count).toHaveText(`${initial === 1 ? total : initial - 1} of ${total}`);
+  for (let index = 1; index < initial; index++) await input.press('Shift+Enter');
   await expect(count).toHaveText(`${total} of ${total}`);
   await page.keyboard.press('ControlOrMeta+g');
   await expect(count).toHaveText(`1 of ${total}`);

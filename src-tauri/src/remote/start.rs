@@ -7,6 +7,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -278,7 +280,7 @@ fn stop_group(child: &mut std::process::Child) {
 /// `gh repo clone` like [`github_hub::clone_to`], with git's `--progress` read as it
 /// arrives so the viewer sees a percentage. Same timeout, stops the whole group. With
 /// `lazy` the clone leaves the working tree empty (`--no-checkout`) for the caller to fill.
-fn clone_with_progress(repo: &str, destination: &Path, timeout: Duration, lazy: bool, cancel: &AtomicBool, progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
+fn clone_with_progress(repo: &str, destination: &Path, timeout: Duration, lazy: bool, cancel: &Cancel, progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
     let repo = github_hub::valid_repo(repo)?;
     let parent = destination.parent().filter(|parent| parent.is_dir()).ok_or("Choose an existing folder to clone into.")?;
     let mut command = Command::new(crate::providers::tool_path("gh").unwrap_or_else(|| "gh".into()));
@@ -297,7 +299,7 @@ fn clone_with_progress(repo: &str, destination: &Path, timeout: Duration, lazy: 
 /// Runs a clone `command` in its own process group, relaying its progress. A timeout or
 /// `cancel` kills the group within 100 ms and removes the half-made `destination` (only when
 /// it did not exist before).
-fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &AtomicBool, mut progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
+fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &Cancel, mut progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
     check(cancel)?;
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -323,7 +325,7 @@ fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeo
         }
         let stopped = if let Err(error) = authorize() {
             Some(error)
-        } else if cancel.load(Ordering::Relaxed) {
+        } else if cancel.is_set() {
             Some(CANCELLED.to_owned())
         } else if Instant::now() >= deadline {
             Some(format!("Cloning {repo} took longer than {} minutes.", timeout.as_secs() / 60))
@@ -348,7 +350,7 @@ fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeo
 }
 
 #[cfg(test)]
-fn supervise(command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &AtomicBool, progress: impl FnMut(u8)) -> Result<()> {
+fn supervise(command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &Cancel, progress: impl FnMut(u8)) -> Result<()> {
     supervise_checked(command, repo, destination, timeout, cancel, progress, || Ok(()))
 }
 
@@ -475,11 +477,11 @@ pub(crate) fn in_place_refusal(host: &str, project: &str, current: &str, branch:
 /// Readies the main checkout for a task in place: refuses unless it is clean, idle and on
 /// `branch`, then fast-forwards it to origin when it can.
 #[cfg(test)]
-fn ready_in_place(root: &Path, project: &str, branch: &str, busy: bool) -> Result<()> {
+fn ready_in_place(root: &Path, project: &str, branch: &str, busy: bool) -> Result<Option<String>> {
     ready_in_place_checked(root, project, branch, busy, || Ok(()))
 }
 
-fn ready_in_place_checked(root: &Path, project: &str, branch: &str, busy: bool, authorize: impl FnOnce() -> Result<()>) -> Result<()> {
+fn ready_in_place_checked(root: &Path, project: &str, branch: &str, busy: bool, authorize: impl FnOnce() -> Result<()>) -> Result<Option<String>> {
     let current = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], GIT).unwrap_or_default();
     let dirty = !git(root, &["status", "--porcelain"], GIT)?.is_empty();
     if let Some(refusal) = in_place_refusal(&super::config::device_name(), project, &current, branch, dirty, busy) {
@@ -532,6 +534,17 @@ fn busy_in_place(state: &AppState, project_id: &str) -> Result<bool> {
 /// Puts a fresh clone's checkout on `branch`; nobody's work is there yet. A clone starts on
 /// origin's default branch at origin's commit, so that branch needs no switch and no merge,
 /// and any other is made from origin's ref.
+#[cfg(test)]
+fn attach(store: &Mutex<crate::storage::Store>, root: &Path, branch: &str, made: Option<workspace::Worktree>, id: &str) -> Result<workspace::Worktree> {
+    let checkout = made.map_or_else(|| remote_worktree(root, branch), Ok)?;
+    let result = store.lock().map_err(|e| e.to_string()).and_then(|store| store.attach_worktree(id, &checkout.path, &checkout.branch));
+    if let Err(error) = result {
+        discard(root, &checkout);
+        return Err(error);
+    }
+    Ok(checkout)
+}
+
 #[cfg(test)]
 pub(crate) fn checkout(root: &Path, branch: &str) -> Result<()> {
     checkout_checked(root, branch, || Ok(()))
@@ -607,13 +620,13 @@ pub(crate) async fn require_installed(provider: &str) -> Result<()> {
 
 /// Starts the task, reporting each stage to the viewer, and the failure as `error`.
 pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start) -> Result<Value> {
-    run_cancellable(app, from, authenticated_key, start, Arc::new(AtomicBool::new(false))).await
+    run_cancellable(app, from, authenticated_key, start, Arc::new(Cancel::default())).await
 }
 
 /// [`run`] that stops when `cancel` is set: it is checked between stages, and a running clone
 /// is killed and its folder removed. Once the task exists it is too late to cancel. A cancelled
 /// start fails with [`CANCELLED`] and sends no `error` stage; the canceller answers the viewer.
-pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, cancel: Arc<AtomicBool>) -> Result<Value> {
+pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, cancel: Arc<Cancel>) -> Result<Value> {
     super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
     let progress = Arc::new(Progress { authenticated_key: authenticated_key.to_owned(), app: app.clone(), to: from.to_owned(), start: start.start_id.clone(), repo: match &start.target { Target::Repo(repo) => repo.clone(), Target::ProjectId(_) => String::new() }, last: Mutex::new(None) });
     let result = start_task(app, from, authenticated_key, start, &progress, &cancel).await;
@@ -622,6 +635,8 @@ pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenti
     }
     result
 }
+
+type Prepared = (String, Option<workspace::Worktree>, Option<String>, Option<Reservation>);
 
 /// The checkout a start works in once the project is found or cloned: the branch to use, the
 /// worktree made along the way (a worktree start on a fresh clone, or an in-place start whose
@@ -633,22 +648,29 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
     progress.authorize()?;
     let branch = pick_branch(&root, wanted, !cloned)?;
     check(cancel)?;
-    let made = match (worktree, cloned) {
-        (true, true) => Some(worktree_while_restoring_checked(&root, &branch, &|| progress.authorize())?),
+    let (made, note, reservation) = match (worktree, cloned) {
+        (true, true) => (Some(worktree_while_restoring_checked(&root, &branch, &|| progress.authorize())?), None, None),
         (false, true) => {
             checkout_checked(&root, &branch, || progress.authorize())?;
-            None
+            (None, None, None)
         }
         (false, false) => {
-            ready_in_place_checked(&root, &project.name, &branch, busy_in_place(state, &project.id)?, || progress.authorize())?;
-            None
+            let claim = reserve_in_place(&project.id, || busy_in_place(state, &project.id))?;
+            let refused = ready_in_place_checked(&root, &project.name, &branch, claim.is_none(), || progress.authorize())?;
+            if let Some(reason) = refused {
+                // Never switch or modify a busy, dirty, or differently checked-out project.
+                let checkout = remote_worktree(&root, &branch)?;
+                (Some(checkout), Some(worktree_note(&reason)), None)
+            } else {
+                (None, None, claim)
+            }
         }
-        (true, false) => None,
+        (true, false) => (None, None, None),
     };
-    Ok((branch, made, None, None))
+    Ok((branch, made, note, reservation))
 }
 
-async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, progress: &Arc<Progress>, cancel: &Arc<AtomicBool>) -> Result<Value> {
+async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, progress: &Arc<Progress>, cancel: &Arc<Cancel>) -> Result<Value> {
     check(cancel)?;
     super::host::require_method(app, from, authenticated_key, "task.start")?;
     progress.report("finding", None, None);
@@ -659,7 +681,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     super::host::require_method(app, from, authenticated_key, "task.start")?;
     let handle = app.clone();
     let (target, wanted, worktree, reporter, flag) = (start.target, start.branch.clone(), start.worktree, progress.clone(), cancel.clone());
-    let (project, (branch, made, mut note, reserved)) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, Prepared)> {
+    let (project, (branch, made, note, _reserved)) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, Prepared)> {
         let state = handle.state::<AppState>();
         // A worktree start never uses the clone's own checkout, so a fresh clone defers it.
         let (project, cloned) = project_for(&state, &target, &reporter, worktree, &flag)?;
@@ -676,6 +698,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         made.iter().for_each(|made| discard(&root, made));
         return Err(error);
     }
+    cancel.commit()?;
     let state = app.state::<AppState>();
     let created = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -698,7 +721,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         let _ = crate::task_deletion::delete_state(&state, &task.id);
         return Err(error);
     }
-    if worktree {
+    if worktree || made.is_some() {
         let (handle, device, key, mode) = (app.clone(), from.to_owned(), authenticated_key.to_owned(), task.mode.clone());
         let store = state.store.clone();
         let id = task.id.clone();
@@ -937,11 +960,11 @@ mod tests {
             command
         };
         let error = "Connect authority was revoked.";
-        assert_eq!(supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &AtomicBool::new(false), drop, || Err(error.into())), Err(error.into()));
+        assert_eq!(supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &Cancel::default(), drop, || Err(error.into())), Err(error.into()));
         assert!(!destination.exists(), "an already denied start cannot spawn the clone");
 
         let allowed = AtomicBool::new(true);
-        let result = supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &AtomicBool::new(false), |_| {
+        let result = supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &Cancel::default(), |_| {
             allowed.store(false, Ordering::SeqCst);
         }, || if allowed.load(Ordering::SeqCst) { Ok(()) } else { Err(error.into()) });
         assert_eq!(result, Err(error.into()), "revocation is observed after clone progress without a timing sleep");

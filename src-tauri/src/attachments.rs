@@ -560,29 +560,6 @@ pub fn message_attachment_rows(
 }
 
 #[cfg(test)]
-pub fn message_attachment_rows(
-    db: &rusqlite::Connection,
-    session_id: &str,
-    message_id: i64,
-) -> Result<Vec<Value>, String> {
-    let mut statement = db
-        .prepare(
-            "SELECT id,kind,name,mime,bytes,width,height FROM message_attachments
-         WHERE session_id=?1 AND message_id=?2 ORDER BY rowid",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![session_id, message_id], |row| {
-        Ok(json!({
-            "id": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "name": row.get::<_, String>(2)?,
-            "mime": row.get::<_, String>(3)?, "bytes": row.get::<_, i64>(4)?,
-            "width": row.get::<_, Option<u32>>(5)?, "height": row.get::<_, Option<u32>>(6)?
-        }))
-    }).map_err(|error| error.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use image::{ImageFormat, Rgba, RgbaImage};

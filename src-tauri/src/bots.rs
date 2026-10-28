@@ -46,7 +46,15 @@ CREATE TABLE IF NOT EXISTS bots(
   notify_channel_id TEXT,
   notify_thread TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL);
+  updated_at INTEGER NOT NULL,
+  color TEXT NOT NULL DEFAULT '',
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  backup_models TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(backup_models)),
+  fallback_mode TEXT NOT NULL DEFAULT 'ask',
+  notify INTEGER NOT NULL DEFAULT 1 CHECK(notify IN (0,1)),
+  while_working TEXT NOT NULL DEFAULT 'queue',
+  show_plan INTEGER NOT NULL DEFAULT 0 CHECK(show_plan IN (0,1)),
+  skills TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skills)));
 CREATE TABLE IF NOT EXISTS bot_memories(
   id TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -163,7 +171,7 @@ CREATE INDEX IF NOT EXISTS bot_messages_source ON bot_messages(source_session_id
 
 /// Profile columns added after the bots table first shipped (schema 25). Fresh databases get
 /// them from `SCHEMA`; `upgrade` adds whichever are missing, so it is safe to run every start.
-const ADDED_COLUMNS: [(&str, &str); 7] = [
+const ADDED_COLUMNS: [(&str, &str); 8] = [
     ("color", "TEXT NOT NULL DEFAULT ''"),
     ("reasoning_effort", "TEXT NOT NULL DEFAULT ''"),
     ("backup_models", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(backup_models))"),
@@ -171,6 +179,7 @@ const ADDED_COLUMNS: [(&str, &str); 7] = [
     ("notify", "INTEGER NOT NULL DEFAULT 1 CHECK(notify IN (0,1))"),
     ("while_working", "TEXT NOT NULL DEFAULT 'queue'"),
     ("show_plan", "INTEGER NOT NULL DEFAULT 0 CHECK(show_plan IN (0,1))"),
+    ("skills", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skills))"),
 ];
 
 pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
@@ -191,6 +200,11 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
 const MAX_TEXT: usize = 16 * 1024;
 const MAX_SOUL: usize = 64 * 1024;
 const MAX_MEMORIES: i64 = 500;
+const MAX_BACKUPS: usize = 4;
+
+fn known_provider(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex" | "kimi" | "opencode" | "glm" | "antigravity" | "grok" | "mimo" | "pi" | "deepseek" | "commandcode" | "cline" | "omp" | "github-copilot" | "muse" | "devin" | "kilo")
+}
 pub(crate) const DESKTOP: &str = "desktop";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +232,15 @@ pub struct Bot {
     pub notify_thread: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub color: String,
+    pub reasoning_effort: String,
+    pub backup_models: Vec<BackupModel>,
+    pub fallback_mode: String,
+    pub notify: bool,
+    pub while_working: String,
+    pub show_plan: bool,
+    /// Library skill references only, never executable definitions.
+    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -280,7 +303,7 @@ pub struct Thread {
     pub updated_at: i64,
 }
 
-const BOT_COLUMNS: &str = "id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,paused,memory_version,notify_channel_id,notify_thread,created_at,updated_at,soul,mcp";
+const BOT_COLUMNS: &str = "id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,paused,memory_version,notify_channel_id,notify_thread,created_at,updated_at,soul,mcp,color,reasoning_effort,backup_models,fallback_mode,notify,while_working,show_plan,skills";
 
 fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
     Ok(Bot {
@@ -304,6 +327,14 @@ fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         updated_at: r.get(17)?,
         soul: r.get(18)?,
         mcp: serde_json::from_str(&r.get::<_, String>(19)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, Box::new(e)))?,
+        color: r.get(20)?,
+        reasoning_effort: r.get(21)?,
+        backup_models: serde_json::from_str(&r.get::<_, String>(22)?).unwrap_or_default(),
+        fallback_mode: r.get(23)?,
+        notify: r.get(24)?,
+        while_working: r.get(25)?,
+        show_plan: r.get(26)?,
+        skills: serde_json::from_str(&r.get::<_, String>(27)?).unwrap_or_default(),
     })
 }
 
@@ -319,26 +350,7 @@ fn validate(input: &BotInput) -> Result<BotInput> {
     if !crate::storage::valid_permission_mode(&input.mode) {
         return Err("Choose a permission mode for the bot.".into());
     }
-    let known = matches!(
-        input.provider.as_str(),
-        "claude"
-            | "codex"
-            | "kimi"
-            | "opencode"
-            | "glm"
-            | "antigravity"
-            | "grok"
-            | "mimo"
-            | "pi"
-            | "deepseek"
-            | "commandcode" | "cline"
-            | "omp"
-            | "github-copilot"
-            | "muse"
-            | "devin"
-            | "kilo"
-    );
-    if input.model.len() > 200 || !known {
+    if input.model.len() > 200 || !known_provider(&input.provider) {
         return Err("Choose a harness and model for the bot.".into());
     }
     if !(0..=7 * 24 * 60).contains(&input.heartbeat_minutes) {

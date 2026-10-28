@@ -135,7 +135,12 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
         let store = state.store.lock().map_err(|e| e.to_string())?;
         crate::remote::check_current_request("ask")?;
         super::check_task_admission(&store, &store.session(session_id)?)?;
-        message_queue::add(&store, session_id, &text, &json!([]))?;
+        if !force_queue && steer_while_busy(bot, &image_ids, sender_id) {
+            drop(store);
+            message_queue::steer_task(app.clone(), state, session_id.to_owned(), text).await?;
+        } else {
+            message_queue::add(&store, session_id, &text, &image_attachments(&image_ids))?;
+        }
         return Ok(());
     }
     super::failover::remember_images(session_id, &image_ids);

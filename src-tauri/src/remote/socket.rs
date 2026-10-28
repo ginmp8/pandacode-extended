@@ -411,7 +411,7 @@ pub(super) fn sealed(app: &tauri::AppHandle, from: &str, to: &str, body: &str) {
         return;
     }
     let Ok((key, authenticated_key)) = peer_key(app, from) else { return };
-    let Ok((plain, packed)) = crypto::open_packed(&key, from, to, body) else { return };
+    let Ok((plain, _packed)) = crypto::open_packed(&key, from, to, body) else { return };
     let Ok(message) = serde_json::from_slice::<Value>(&plain) else { return };
     if matches!(message["type"].as_str(), Some("res" | "event")) {
         // Decryption proves a current presence key, not continued authorization.
@@ -884,7 +884,7 @@ fn seal_and_send(app: &tauri::AppHandle, to: &str, key: &crypto::Key, expected_k
     let me = remote(app).device_id();
     let plain = stamp_delivery(message, chrono::Utc::now().timestamp_millis()).to_string();
     let payload_bytes = plain.len();
-    let body = crypto::seal(key, &me, to, &outgoing(to, message, plain, packs))?;
+    let body = crypto::seal(key, &me, to, &outgoing(to, message, plain, None))?;
     let mut frame = json!({"to": to, "body": body});
     if let Some(id) = message["id"].as_str() { frame["ref"] = json!(id); }
     let frame = frame.to_string();

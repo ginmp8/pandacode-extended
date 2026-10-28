@@ -1487,12 +1487,16 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             }
             subscriber.until = Some(Instant::now() + SUBSCRIPTION);
             subscriber.sessions.extend(session_ids);
-            let replay = inner.journal.resume(&mut tasks, &after, epoch.as_deref());
+            let replay = inner.journal.resume(&mut tasks, &after, epoch.as_deref(), budget);
             drop(inner);
             if replay.gaps > 0 {
                 super::diagnostics::record("replay.gap", format!("{} of {} tasks for {from}", replay.gaps, after.len()));
             }
-            Ok(reply)
+            let reply = subscribe_reply(tasks, &missing, &replay);
+            Ok(add_gap_subagents(reply, |id| {
+                let store = app.state::<AppState>().store.lock().map_err(|e| e.to_string())?;
+                store.subagents(id)
+            }))
         }
         Call::TasksList { limit } => {
             let handle = app.clone();
@@ -2865,9 +2869,7 @@ pub(crate) fn read_page(db: &rusqlite::Connection, session_id: &str, page: Messa
         if let Some(kind) = kind {
             message["coordinationKind"] = json!(kind);
         }
-        let mut attachments = if has_attachment_table {
-            crate::attachments::message_attachment_rows(db, session_id, message_id)?
-        } else { Vec::new() };
+        let mut list = attachments.remove(&message_id).unwrap_or_default();
         if message["role"] == "user" {
             list.extend(context_attachments(message_id, message["content"].as_str().unwrap_or_default()));
         }
@@ -3181,7 +3183,7 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
         tokio::time::sleep(delay).await;
     }
     type SubscriberBatch = (String, Vec<Value>, Vec<Value>);
-    let (epoch, batches): (String, Vec<SubscriberBatch>) = {
+    let (epoch, batches, started, counted): (String, Vec<SubscriberBatch>, Instant, u32) = {
         let state = remote(&app);
         let mut inner = state.lock();
         inner.flushing = false;
@@ -3226,9 +3228,11 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
             super::diagnostics::record("subscriber.lagged", format!("{device}: over {MAX_BUFFER} buffered events"));
         }
         for frame in lagged_frames(frames(events), behind, &epoch) {
+            sent = sent.saturating_add(1);
             let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
         }
         for data in finished {
+            sent = sent.saturating_add(1);
             let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
         }
     }
@@ -4815,13 +4819,13 @@ mod extended_security_tests {
 
     #[test]
     fn requests_are_validated() {
-        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None }));
+        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None, replay: REPLAY_BUDGET }));
         assert!(parse(true, "subscribe", &json!({})).is_err());
         assert!(parse(true, "subscribe", &json!({"sessionIds": ["a b"]})).is_err());
         assert!(parse(true, "subscribe", &json!({"sessionIds": vec!["s"; MAX_IDS + 1]})).is_err());
         assert_eq!(parse(true, "task.send", &json!({"sessionId": "s1", "text": " hi "})), Ok(Call::Send { session_id: "s1".into(), text: "hi".into(), image_ids: Vec::new() }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": 7})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 7, limit: PAGE_ROWS } }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": -3})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 0, limit: PAGE_ROWS } }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": 7})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 7, limit: PAGE_ROWS }, budget: PAGE_BUDGET }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": -3})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 0, limit: PAGE_ROWS }, budget: PAGE_BUDGET }));
         assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "effort": null})), Ok(Call::Configure { session_id: "s1".into(), model: None, effort: Some(None), mode: None }));
         assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "mode": "ask"})), Ok(Call::Configure { session_id: "s1".into(), model: None, effort: None, mode: Some("ask".into()) }));
         assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "provider": "codex", "model": "gpt"})), Ok(Call::Configure { session_id: "s1".into(), model: Some(("codex".into(), "gpt".into())), effort: None, mode: None }));

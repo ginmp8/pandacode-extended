@@ -833,7 +833,6 @@ pub(crate) fn store_page(store: &Store, local: &str, after: i64, page: &Value) -
         store.db.execute("INSERT INTO messages(session_id,role,content,created_at,turn_duration_ms) VALUES (?1,?2,?3,?4,?5)", params![local, role, content, created_at, message["turnDurationMs"].as_i64()]).map_err(|e| e.to_string())?;
         last = id;
     }
-    let last = messages.last().and_then(|m| m["id"].as_i64()).unwrap_or(after);
     store_title(store, local, page)?;
     store.db.execute("UPDATE sessions SET remote_synced_id=?2 WHERE id=?1", params![local, last]).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;

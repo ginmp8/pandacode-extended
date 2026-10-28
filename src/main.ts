@@ -1793,8 +1793,8 @@ document.addEventListener('click', event => {
   const target = disclosureTarget(details);
   if (!target) return;
   const sessionId = details.closest<HTMLElement>('#transcript')?.dataset.sessionId ?? '';
-  // Native <details> toggling occurs as the click default action, after this handler.
-  window.setTimeout(() => rememberDisclosure(sessionId, target.kind, target.key, details.open), 0);
+  // A microtask runs after the native toggle without depending on paused clocks.
+  queueMicrotask(() => rememberDisclosure(sessionId, target.kind, target.key, details.open));
 }, true);
 
 function visibleMessages(): Message[] {

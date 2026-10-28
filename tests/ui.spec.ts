@@ -3454,9 +3454,15 @@ test('the prompt sits in the same place in every thread', async ({ page }) => {
   const measure = async () => {
     const composer = page.locator('#composer');
     await expect(composer).toBeVisible();
-    // Measure atomically in one DOM read, avoiding a race between transient composer remounts.
-    const bottom = await composer.evaluate(element => Math.round(element.getBoundingClientRect().bottom));
-    expect(bottom).toBeGreaterThan(0);
+    // Wait for a real layout box across transient remounts, then require the same bottom in every thread.
+    let bottom = 0;
+    const sample = async () => {
+      const rect = await composer.boundingBox();
+      bottom = rect ? Math.round(rect.y + rect.height) : 0;
+      return bottom;
+    };
+    if (bottoms.length) await expect.poll(sample).toBe(bottoms[0]);
+    else await expect.poll(sample).toBeGreaterThan(0);
     bottoms.push(bottom);
   };
   const ids = await page.locator('#navigation .task-item').evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.id!));

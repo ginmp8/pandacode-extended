@@ -201,6 +201,11 @@ fn take_pending_start(starts: &mut HashMap<String, PendingStart>, local: &str, e
     }
 }
 
+/// A stale response must not change the flags of a newer pending attempt.
+fn pending_start_mut<'a>(starts: &'a mut HashMap<String, PendingStart>, local: &str, expected_start_id: &str) -> Option<&'a mut PendingStart> {
+    starts.get_mut(local).filter(|start| start.start_id == expected_start_id)
+}
+
 /// The journal entry (and live frame) of a run end.
 const RUN_END: &str = "run.finished";
 
@@ -1470,19 +1475,19 @@ async fn resume_start(app: tauri::AppHandle, local: String) {
                 }
                 // Made before the cancel arrived: the user asked for it to stop.
                 Cancel::Started(session) => {
-                    remote(&app).lock().viewer.starts.remove(&local);
+                    if take_pending_start(&mut remote(&app).lock().viewer.starts, &local, &start_id).is_none() { return; }
                     if let Err(error) = linked(&app, &state, &local, &session, true) {
                         eprintln!("PandaCode Connect: could not link a remote task: {error}");
                     }
                     let _ = app.emit("sessions-changed", ());
                 }
                 outcome => {
-                    if let Err(error) = settle_cancel(&app, &state, &local, outcome) {
+                    if let Err(error) = settle_cancel(&app, &state, &local, &start_id, outcome) {
                         eprintln!("PandaCode Connect: could not cancel a start on {}: {error}", super::device_label(&device));
                     }
                 }
             }
-            if let Some(start) = remote(&app).lock().viewer.starts.get_mut(&local) {
+            if let Some(start) = pending_start_mut(&mut remote(&app).lock().viewer.starts, &local, &start_id) {
                 start.busy = false;
             }
             return;
@@ -1586,29 +1591,32 @@ fn cancel_outcome(reply: &Result<Value>) -> Cancel {
 }
 
 /// Acts on a cancel's outcome; the `remote_cancel_start` reply.
-fn settle_cancel(app: &tauri::AppHandle, state: &AppState, local: &str, outcome: Cancel) -> Result<Value> {
+fn settle_cancel(app: &tauri::AppHandle, state: &AppState, local: &str, expected_start_id: &str, outcome: Cancel) -> Result<Value> {
     match outcome {
         Cancel::Started(session) => {
-            remote(app).lock().viewer.starts.remove(local);
+            if take_pending_start(&mut remote(app).lock().viewer.starts, local, expected_start_id).is_none() {
+                return Ok(json!({"cancelled": false, "pending": true}));
+            }
             attach(state, local, &session)?;
             subscribe_soon(app);
             let _ = app.emit("sessions-changed", ());
             Ok(json!({"cancelled": false}))
         }
         Cancel::Cancelled => {
-            let start = remote(app).lock().viewer.starts.remove(local);
-            if let Some(start) = start {
-                start.cancel.notify_one();
-                abandon(state, local, start.created);
-            }
+            let Some(start) = take_pending_start(&mut remote(app).lock().viewer.starts, local, expected_start_id) else {
+                return Ok(json!({"cancelled": false, "pending": true}));
+            };
+            start.cancel.notify_one();
+            abandon(state, local, start.created);
             let _ = app.emit("sessions-changed", ());
             Ok(json!({"cancelled": true}))
         }
         Cancel::Pending | Cancel::Unsupported | Cancel::TooLate => Ok(json!({"cancelled": false, "pending": true})),
         Cancel::Refused(error) => {
-            if let Some(start) = remote(app).lock().viewer.starts.get_mut(local) {
-                start.cancelling = false;
-            }
+            let Some(start) = pending_start_mut(&mut remote(app).lock().viewer.starts, local, expected_start_id) else {
+                return Ok(json!({"cancelled": false, "pending": true}));
+            };
+            start.cancelling = false;
             Err(error)
         }
     }
@@ -1816,7 +1824,7 @@ async fn cancel_start(app: &tauri::AppHandle, state: &AppState, local: &str) -> 
             super::diagnostics::record("rpc.timeout", format!("task.cancelStart on {}: {error}", super::device_label(&device)));
         }
     }
-    settle_cancel(app, state, local, outcome)
+    settle_cancel(app, state, local, &start_id, outcome)
 }
 
 fn ensure_no_local_bot(store: &Store, id: &str) -> Result<()> {
@@ -1866,6 +1874,25 @@ mod tests {
         let task = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
         store.db.execute("UPDATE sessions SET remote_device='host',remote_session='h1' WHERE id=?1", [&task.id]).unwrap();
         (store, task.id)
+    }
+
+    #[test]
+    fn stale_cancellation_cannot_reset_the_newer_attempt() {
+        let mut starts = HashMap::new();
+        starts.insert("draft".to_owned(), PendingStart {
+            device: "host".into(),
+            start_id: "new-attempt".into(),
+            created: false,
+            cancel: Arc::new(Notify::new()),
+            busy: true,
+            cancelling: true,
+        });
+        assert!(pending_start_mut(&mut starts, "draft", "old-attempt").is_none());
+        assert!(starts.get("draft").unwrap().cancelling);
+        assert!(take_pending_start(&mut starts, "draft", "old-attempt").is_none());
+        assert_eq!(starts.get("draft").unwrap().start_id, "new-attempt");
+        pending_start_mut(&mut starts, "draft", "new-attempt").unwrap().cancelling = false;
+        assert!(!starts.get("draft").unwrap().cancelling);
     }
 
     #[test]

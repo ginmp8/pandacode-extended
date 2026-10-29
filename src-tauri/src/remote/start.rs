@@ -126,7 +126,7 @@ fn valid_branch(branch: &str) -> Result<()> {
             || component.ends_with('.')
             || component.ends_with(".lock")
     });
-    if branch.is_empty() || branch == "HEAD" || branch.starts_with('-') || branch.contains("..") || invalid_component || !branch.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c)) {
+    if branch.is_empty() || branch == "HEAD" || branch == "@" || branch.starts_with('-') || branch.contains("..") || invalid_component || !branch.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c)) {
         return Err("Invalid branch.".into());
     }
     Ok(())
@@ -1178,7 +1178,7 @@ mod tests {
         let mut with_image = ok.clone();
         with_image["imageIds"] = json!([image]);
         assert_eq!(parse(&with_image).unwrap().image_ids, vec![image]);
-        for (key, bad) in [("repo", json!("../etc")), ("branch", json!("--upload-pack=x")), ("branch", json!("a..b")), ("branch", json!("HEAD")), ("prompt", json!(" ")), ("provider", json!("a b")), ("model", Value::Null), ("imageIds", json!(["/etc/passwd"]))] {
+        for (key, bad) in [("repo", json!("../etc")), ("branch", json!("--upload-pack=x")), ("branch", json!("a..b")), ("branch", json!("HEAD")), ("branch", json!("@")), ("prompt", json!(" ")), ("provider", json!("a b")), ("model", Value::Null), ("imageIds", json!(["/etc/passwd"]))] {
             let mut params = ok.clone();
             params[key] = bad;
             assert!(parse(&params).is_err(), "{key}");
@@ -1493,6 +1493,7 @@ mod tests {
         assert_eq!(pick_branch(&clone, Some("unpushed"), false).unwrap_err(), "Requested branch 'unpushed' is not available on origin.");
         assert_eq!(pick_branch(&clone, Some("../bad"), false).unwrap_err(), "Invalid branch.");
         assert_eq!(pick_branch(&clone, Some("HEAD"), false).unwrap_err(), "Invalid branch.", "origin/HEAD is a symbolic default alias, not an explicit branch");
+        assert_eq!(pick_branch(&clone, Some("@"), false).unwrap_err(), "Invalid branch.", "Git treats @ as HEAD rather than a selectable branch");
         assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main", "explicit branch failure must not switch the checkout");
         assert_eq!(pick_branch(&clone, None, true).unwrap(), "main");
         // An existing checkout on another branch, dirty or busy is never switched.

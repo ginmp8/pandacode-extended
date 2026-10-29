@@ -604,6 +604,26 @@ fn discard(root: &Path, made: &workspace::Worktree) {
     let _ = workspace::remove_worktree(root, &made.path, Some(&made.branch), true);
 }
 
+/// A failed start can leave a newly created task and checkout. Remove only
+/// that task; if it is still running or cannot be deleted, preserve its checkout.
+fn rollback_created_start(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    owned: Option<&workspace::Worktree>,
+    error: String,
+) -> String {
+    if crate::task_deletion::delete_state(state, task_id).is_err() {
+        return format!("{error} The incomplete task could not be safely removed.");
+    }
+    if let Some(checkout) = owned {
+        if workspace::remove_worktree(root, &checkout.path, Some(&checkout.branch), true).is_err() {
+            return format!("{error} The new worktree could not be safely removed.");
+        }
+    }
+    error
+}
+
 /// The refusal for a harness `host` doesn't have, naming it as the app does when it knows it.
 fn not_installed(provider: &str, host: &str, installed: bool) -> Result<()> {
     if installed {
@@ -700,6 +720,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     .await
     .map_err(|e| e.to_string())??;
     let root = PathBuf::from(&project.path);
+    let mut owned_checkout = None;
     if let Err(error) = check(cancel).and_then(|_| super::host::require_method(app, from, authenticated_key, "task.start")) {
         made.iter().for_each(|made| discard(&root, made));
         return Err(error);
@@ -727,48 +748,50 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         }
     };
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
-        let _ = crate::task_deletion::delete_state(&state, &task.id);
-        return Err(error);
+        return Err(rollback_created_start(&state, &task.id, &root, made.as_ref(), error));
     }
     if worktree || made.is_some() {
         let (handle, device, key, mode) = (app.clone(), from.to_owned(), authenticated_key.to_owned(), task.mode.clone());
         let store = state.store.clone();
         let id = task.id.clone();
+        let attachment_root = root.clone();
         let attached = tauri::async_runtime::spawn_blocking(move || -> Result<workspace::Worktree> {
             if let Err(error) = super::host::check_start_mode(&handle, &device, &key, Some(&mode)) {
-                made.iter().for_each(|checkout| discard(&root, checkout));
+                made.iter().for_each(|checkout| discard(&attachment_root, checkout));
                 return Err(error);
             }
-            let checkout = made.map_or_else(|| remote_worktree(&root, &branch), Ok)?;
+            let checkout = made.map_or_else(|| remote_worktree(&attachment_root, &branch), Ok)?;
             let store = store.lock().map_err(|e| e.to_string())?;
             let attached = super::host::check_start_mode(&handle, &device, &key, Some(&mode))
                 .and_then(|_| store.attach_worktree(&id, &checkout.path, &checkout.branch));
             if let Err(error) = attached {
                 drop(store);
-                discard(&root, &checkout);
+                discard(&attachment_root, &checkout);
                 return Err(error);
             }
             Ok(checkout)
         })
         .await
         .map_err(|e| e.to_string())?;
-        if let Err(error) = attached {
-            let _ = crate::task_deletion::delete_state(&state, &task.id);
-            return Err(error);
+        match attached {
+            Ok(checkout) => owned_checkout = Some(checkout),
+            Err(error) => {
+                let _ = crate::task_deletion::delete_state(&state, &task.id);
+                return Err(error);
+            }
         }
     }
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
-        let _ = crate::task_deletion::delete_state(&state, &task.id);
-        return Err(error);
+        return Err(rollback_created_start(&state, &task.id, &root, owned_checkout.as_ref(), error));
     }
     progress.report("starting", None, None);
     // The caller mirrors the task from its first event.
     if let Err(error) = super::host::follow(app, from, authenticated_key, &task.id) {
-        // No agent has been launched yet; discard the newly created task on a failed subscription.
-        let _ = crate::task_deletion::delete_state(&state, &task.id);
-        return Err(error);
+        return Err(rollback_created_start(&state, &task.id, &root, owned_checkout.as_ref(), error));
     }
-    crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await?;
+    if let Err(error) = crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await {
+        return Err(rollback_created_start(&app.state::<AppState>(), &task.id, &root, owned_checkout.as_ref(), error));
+    }
     use tauri::Emitter;
     let _ = app.emit("sessions-changed", ());
     Ok(match note {
@@ -780,6 +803,62 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_remote_start_rollback_preserves_other_tasks_and_projects() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, other, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let other = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, other.id, store.project(&project_id).unwrap().path)
+        };
+        assert_eq!(rollback_created_start(&state, &target, Path::new(&root), None, "Access revoked.".into()), "Access revoked.");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err());
+        assert!(store.session(&other).is_ok(), "other tasks are never rolled back");
+        assert!(store.project(&project_id).is_ok(), "existing projects are never removed");
+    }
+
+    #[test]
+    fn failed_remote_start_keeps_task_when_deletion_is_not_safe() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let task_id = state.store.lock().unwrap().create_session(&project_id, "codex", "default", "ask").unwrap().id;
+        state.shutdown.store(1, Ordering::SeqCst);
+        let result = rollback_created_start(&state, &task_id, Path::new("."), None, "Denied.".into());
+        assert!(result.contains("could not be safely removed"));
+        assert!(state.store.lock().unwrap().session(&task_id).is_ok());
+        state.shutdown.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn failed_remote_start_removes_only_its_owned_checkout() {
+        let base = temp_base("rollback");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = std::fs::canonicalize(&clone).unwrap();
+        let (state, _) = crate::concurrent_task_tests::test_state();
+        let (project, task) = {
+            let store = state.store.lock().unwrap();
+            let project = store.add_project(&root).unwrap().id;
+            let task = store.create_session(&project, "codex", "default", "ask").unwrap().id;
+            (project, task)
+        };
+        let owned = remote_worktree(&root, "main").unwrap();
+        state.store.lock().unwrap().attach_worktree(&task, &owned.path, &owned.branch).unwrap();
+        assert!(owned.path.exists());
+        assert_eq!(rollback_created_start(&state, &task, &root, Some(&owned), "Denied.".into()), "Denied.");
+        assert!(!owned.path.exists(), "only this start's new checkout is removed");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&task).is_err());
+        assert!(store.project(&project).is_ok());
+        assert!(root.exists(), "main checkout must survive");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn project(id: &str) -> Project {
         Project { id: id.into(), name: id.into(), path: format!("/p/{id}"), added_order: 0 }

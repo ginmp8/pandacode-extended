@@ -38,6 +38,29 @@ test('a mirror shows its host subagents, live and from the saved snapshot', asyn
   await expect(panel.locator('button[data-subagent-id="run:b"]')).toContainText('Reviewer');
 });
 
+test('a remote team and its saved subagents remain visible after a task switch', async ({ page }) => {
+  await openMirror(page, () => page.evaluate(c => (window as any).__mirrorSubagent(c), child('run:reopen', 'Saved reviewer', 'completed', 'Review complete')));
+  // Another task is selected before the host's saved state is requested again.
+  await page.locator('#navigation .task-item').filter({ hasNotText: 'Remote team task' }).first().click();
+  await page.locator('#navigation .task-item').filter({ hasText: 'Remote team task' }).click();
+
+  const workerButton = page.getByRole('button', { name: 'Open workers' });
+  await expect(workerButton).toContainText('1/2');
+  await workerButton.click();
+  const workerPanel = page.getByRole('dialog', { name: 'Workers', exact: true });
+  await expect(workerPanel.locator('.architect-worker-row')).toHaveCount(2);
+  await expect(workerPanel.locator('.architect-panel-controls')).toBeHidden();
+  await expect(workerPanel.locator('.team-messages')).toHaveCount(0);
+
+  // Saved child events must remain associated with the mirrored task, not the
+  // task that was selected while the host sent the original event.
+  const childButton = page.getByRole('button', { name: 'Subagents', exact: true });
+  await expect(childButton).toBeVisible();
+  await childButton.click();
+  await expect(page.getByRole('region', { name: 'Subagents', exact: true })
+    .locator('button[data-subagent-id="run:reopen"]')).toContainText('Saved reviewer');
+});
+
 test('a mirror shows the host team read-only, with worker transcripts and live row changes', async ({ page }) => {
   await openMirror(page);
   const trigger = page.getByRole('button', { name: 'Open workers' });

@@ -6219,8 +6219,10 @@ document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
   if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
     const channelId = state.sharedChannelId, text = String(new FormData(form).get('text') ?? '').trim();
-    if (!text) return;
+    if (!text || state.sharedChannelPosting.has(channelId)) return;
     state.sharedChannelDrafts.delete(channelId);
+    const submittedPrompt = form.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+    if (submittedPrompt) submittedPrompt.value = '';
     const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;

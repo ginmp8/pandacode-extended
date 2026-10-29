@@ -140,6 +140,19 @@ test.describe('shared bot channels', () => {
     await expect(channel.locator('.bc-assigned').last()).toContainText('Stopped');
   });
 
+  test('does not deliver a channel post twice on repeated submit and clears the sent draft', async ({ page }) => {
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await prompt.fill('Send exactly once.');
+    await page.locator('#shared-channel-composer').evaluate(form => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await expect(page.locator('.bc-channel .bc-message.from-user')).toHaveCount(1);
+    await expect(prompt).toHaveValue('');
+  });
+
   test('uses the channel lead when a post has no bot mention', async ({ page }) => {
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();

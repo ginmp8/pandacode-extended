@@ -624,6 +624,18 @@ fn rollback_created_start(
     error
 }
 
+/// The host subscription is an injectable effect: a rejected follow must undo the
+/// just-created task and only its owned checkout before any agent is launched.
+fn follow_created_start(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    owned: Option<&workspace::Worktree>,
+    follow: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    follow().map_err(|error| rollback_created_start(state, task_id, root, owned, error))
+}
+
 /// The refusal for a harness `host` doesn't have, naming it as the app does when it knows it.
 fn not_installed(provider: &str, host: &str, installed: bool) -> Result<()> {
     if installed {
@@ -786,9 +798,9 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     }
     progress.report("starting", None, None);
     // The caller mirrors the task from its first event.
-    if let Err(error) = super::host::follow(app, from, authenticated_key, &task.id) {
-        return Err(rollback_created_start(&state, &task.id, &root, owned_checkout.as_ref(), error));
-    }
+    follow_created_start(&state, &task.id, &root, owned_checkout.as_ref(), || {
+        super::host::follow(app, from, authenticated_key, &task.id)
+    })?;
     if let Err(error) = crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await {
         return Err(rollback_created_start(&app.state::<AppState>(), &task.id, &root, owned_checkout.as_ref(), error));
     }
@@ -803,6 +815,28 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_host_follow_rolls_back_only_its_new_task() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, other, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let other = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, other.id, store.project(&project_id).unwrap().path)
+        };
+        let mut calls = 0;
+        let result = follow_created_start(&state, &target, Path::new(&root), None, || {
+            calls += 1;
+            Err("Subscription denied.".into())
+        });
+        assert_eq!(result, Err("Subscription denied.".into()));
+        assert_eq!(calls, 1, "the rejected host subscription is attempted only once");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err(), "no orphan task after a rejected follow");
+        assert!(store.session(&other).is_ok(), "unrelated sessions remain intact");
+        assert!(store.project(&project_id).is_ok(), "the pre-existing project remains intact");
+    }
 
     #[test]
     fn failed_remote_start_rollback_preserves_other_tasks_and_projects() {

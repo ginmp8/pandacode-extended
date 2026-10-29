@@ -625,6 +625,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_settings_rename_removes_staged_file() {
+        let dir = std::env::temp_dir().join(format!("pandacode-routing-rename-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("routing.json");
+        // A directory cannot be replaced by the staged JSON file on any supported OS.
+        std::fs::create_dir_all(&destination).unwrap();
+        assert!(write_settings(&destination, &Settings::default()).is_err());
+        let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path() != destination)
+            .collect();
+        assert!(remaining.is_empty(), "failed rename must remove the staged JSON file");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn default_entries_yield_to_concrete_models() {
         let pool = pool_from([
             ("claude", "default", "Default · Claude Opus 5.5 · Claude Code"),

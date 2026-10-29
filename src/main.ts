@@ -2092,6 +2092,29 @@ function renderComposer(): void {
     && Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index)).some(range => range.intersectsNode(transcript));
   // Otherwise keep typing focus and the caret, since people type while agents work.
   const typing = oldPrompt && document.activeElement === oldPrompt && !readingTranscript ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
+  if (state.sharedChannelId) {
+    lastSteerComposerMarkup = undefined;
+    const area = $('#composer-area'), channel = state.sharedChannelDetail;
+    const previousPrompt = area.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+    if (previousPrompt) state.sharedChannelDrafts.set(state.sharedChannelId, previousPrompt.value);
+    const reassignOpen = area.querySelector<HTMLButtonElement>('.bc-channel-actions [data-shared-action="reassign-toggle"][aria-expanded="true"]') !== null;
+    area.innerHTML = channel ? sharedChannelActionsHtml(channel, sidebarBots) + sharedChannelComposerHtml(channel) : '';
+    const prompt = area.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+    if (prompt) {
+      prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? '';
+      const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+      prompt.disabled = posting;
+      const send = area.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
+      if (send) send.disabled = posting;
+    }
+    if (reassignOpen) {
+      const toggle = area.querySelector<HTMLButtonElement>('.bc-channel-actions [data-shared-action="reassign-toggle"]');
+      const menu = area.querySelector<HTMLElement>('.bc-channel-actions .bc-reassign-menu');
+      if (toggle && menu) { toggle.setAttribute('aria-expanded', 'true'); menu.hidden = false; }
+    }
+    browserPanel?.refresh();
+    return;
+  }
   const s = session();
   if (!s) { lastSteerComposerMarkup = undefined; $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
   syncOverlayContext({ projectId: s.projectId, provider: s.provider, model: s.model || 'default', mode: s.mode, reasoningEffort: s.reasoningEffort ?? null });
@@ -6148,8 +6171,42 @@ document.addEventListener('drop', event => {
   const id = event.dataTransfer?.getData('text/plain');
   if (id && column.dataset.stage) run(moveBoardTask(id, column.dataset.stage as TaskStage));
 });
+async function handleSharedChannelAction(button: HTMLButtonElement): Promise<void> {
+  const channelId = state.sharedChannelId, channel = state.sharedChannelDetail;
+  if (!channel || channel.archived || !channelId || channel.id !== channelId) return;
+  const name = button.dataset.sharedAction;
+  if (name === 'reassign-toggle') {
+    const menu = button.parentElement?.querySelector<HTMLElement>('.bc-reassign-menu');
+    if (menu) { menu.hidden = !menu.hidden; button.setAttribute('aria-expanded', String(!menu.hidden)); }
+    return;
+  }
+  const messageId = button.dataset.message;
+  const botId = button.dataset.bot;
+  if ((name === 'continue' || name === 'reassign') && (!messageId || !channel.messages.some(item => item.id === messageId && item.kind === 'user'))) return;
+  if (name === 'reassign' && (!botId || !channel.memberIds.includes(botId))) return;
+  const command = name === 'stop' ? 'bot_shared_channel_stop'
+    : name === 'continue' ? 'bot_shared_channel_continue'
+    : name === 'reassign' ? 'bot_shared_channel_reassign' : '';
+  if (!command) return;
+  button.disabled = true;
+  try {
+    await call(command, { channelId, ...(messageId ? { messageId } : {}), ...(botId ? { botId } : {}) });
+    await refreshSharedChannel(channelId);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error));
+    if (button.isConnected) button.disabled = false;
+  }
+}
+
 document.addEventListener('click', event => {
   const target = event.target as Element;
+  const shared = target.closest<HTMLButtonElement>('#composer-area .bc-channel-actions button[data-shared-action]');
+  if (shared) {
+    if (shared.disabled) return;
+    event.preventDefault();
+    run(handleSharedChannelAction(shared));
+    return;
+  }
   // Message markup cannot grant access to arbitrary application actions. Only
   // the saved user's attachment button opts into this delegated handler.
   const element = target.closest('.markdown,.streaming-content,.message-content')

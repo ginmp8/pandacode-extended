@@ -796,7 +796,8 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         return Err(rollback_created_start(&state, &task.id, &root, owned_checkout.as_ref(), error));
     }
-    progress.report("starting", None, None);
+    // Preserve the fallback explanation if the start acknowledgement is lost.
+    progress.report("starting", None, note.as_deref());
     // The caller mirrors the task from its first event.
     follow_created_start(&state, &task.id, &root, owned_checkout.as_ref(), || {
         super::host::follow(app, from, authenticated_key, &task.id)

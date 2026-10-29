@@ -111,7 +111,7 @@ async function lastMessage(host: PreviewBotsHost, sessionId: string): Promise<Bo
 }
 
 const params = typeof location === 'undefined' ? new URLSearchParams() : new URLSearchParams(location.search);
-let sampled = false;
+let sampleSeeding: Promise<void> | null = null;
 let sampleChannelSeeded = false;
 /** Sample threads that look busy (their work is simulated by events, not a preview run), so a message waits in the queue as it would natively. */
 const sampleBusy = new Set<string>();
@@ -120,8 +120,9 @@ export const previewBotBusy = (sessionId: string): boolean => sampleBusy.has(ses
 /** `?bots=sample` starts with four bots, one in each sidebar state: waiting for approval, working,
  *  at a usage limit, and paused. `?botsDelay=ms` holds the first list, to show the loading rows. */
 async function seedSamples(host: PreviewBotsHost): Promise<void> {
-  if (sampled || params.get('bots') !== 'sample') return;
-  sampled = true;
+  if (params.get('bots') !== 'sample') return;
+  if (sampleSeeding) return sampleSeeding;
+  sampleSeeding = (async () => {
   const base = { instructions: 'Sample bot.', goals: '', provider: 'claude', model: 'sonnet', mode: 'ask', heartbeatMinutes: 0 };
   const make = (name: string, role: string, avatar: string, profile: Partial<BotInput> = {}) => invokeBots<Bot>('bot_create', { input: { ...base, name, role, avatar, ...profile } }, host);
   const [waiting, working, limited, paused] = await Promise.all([make('Scout', 'Research', 'panda:5'), make('Writer', 'Drafts posts', 'panda:4'), make('Ledger', 'Finance', 'panda:7', { color: '#14b8a6', reasoningEffort: 'high', backupModels: [{ provider: 'codex', model: 'gpt-5' }], fallbackMode: 'auto', notify: false, whileWorking: 'steer', showPlan: true }), make('Dozy', 'Night shift', 'panda:8')]);
@@ -139,6 +140,8 @@ async function seedSamples(host: PreviewBotsHost): Promise<void> {
     host.emit('agent-event', { sessionId: busy, kind: 'status', text: 'Working…' });
     host.emit('agent-event', { sessionId: capped, kind: 'limited', text: 'Usage limit reached', data: { resetsAt: Date.now() + 3 * 3_600_000 } });
   }, 600);
+  })();
+  await sampleSeeding;
 }
 
 /** Stops a sample channel's work (only `botIds`' assignments, when given), as Stop, archive and member removal do natively. */
@@ -150,6 +153,28 @@ function stopChannelWork(channel: SharedChannelDetail, botIds?: string[]): void 
   if (latest && !channel.activeBotIds.length) latest.status = 'Stopped';
 }
 
+function sharedChannel(id: string): SharedChannelDetail {
+  const channel = sharedChannels.get(id);
+  if (!channel) throw new Error('Shared channel not found.');
+  return channel;
+}
+
+function channelSummary(channel: SharedChannelDetail): SharedChannelSummary {
+  const { id, name, memberIds, leadBotId, archived, updatedAt } = channel;
+  return { id, name, memberIds: [...memberIds], leadBotId, archived, updatedAt };
+}
+
+function validateChannelMembers(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !bots.has(id))) throw new Error('Choose valid channel members.');
+  return [...new Set(value as string[])];
+}
+
+function validateChannelName(value: unknown): string {
+  const name = String(value ?? '').trim().replace(/^#+/, '');
+  if (!name || [...name].length > 48) throw new Error('Enter a channel name under 49 characters.');
+  return name;
+}
+
 export async function invokeBots<T>(command: string, args: Record<string, any>, host: PreviewBotsHost): Promise<T> {
   const changed = () => host.emit('bots-changed', null);
   let result: unknown = null;
@@ -158,6 +183,50 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const desktopSession = entry.threads.find(thread => thread.channelId === 'desktop')?.sessionId ?? null;
       return { ...structuredClone(entry.bot), desktopSession, lastMessage: desktopSession ? await lastMessage(host, desktopSession) : null };
     })); break;
+    case 'bot_shared_channels': {
+      await seedSamples(host);
+      result = [...sharedChannels.values()].sort((a, b) => b.updatedAt - a.updatedAt).map(channelSummary);
+      break;
+    }
+    case 'bot_shared_channel_detail': {
+      const channel = sharedChannel(String(args.channelId));
+      const limit = Math.max(1, Math.min(1000, Number(args.limit) || 100));
+      result = { ...channel, memberIds: [...channel.memberIds], activeBotIds: [...channel.activeBotIds],
+        messages: channel.messages.slice(-limit), hasMore: channel.messages.length > limit };
+      break;
+    }
+    case 'bot_shared_channel_create': {
+      const name = validateChannelName(args.name), memberIds = validateChannelMembers(args.memberIds);
+      const id = crypto.randomUUID(), updatedAt = Date.now();
+      const channel: SharedChannelDetail = { id, name, memberIds, leadBotId: memberIds[0] ?? null,
+        archived: false, updatedAt, activeBotIds: [], messages: [] };
+      sharedChannels.set(id, channel);
+      result = channelSummary(channel);
+      host.emit('bot-shared-channel-changed', { channelId: id });
+      break;
+    }
+    case 'bot_shared_channel_update': {
+      const channel = sharedChannel(String(args.channelId));
+      if (channel.archived) throw new Error('This channel is deleted.');
+      const name = validateChannelName(args.name), memberIds = validateChannelMembers(args.memberIds);
+      const removed = channel.memberIds.filter(id => !memberIds.includes(id));
+      if (removed.length) stopChannelWork(channel, removed);
+      channel.name = name;
+      channel.memberIds = memberIds;
+      channel.leadBotId = memberIds.includes(args.leadBotId) ? args.leadBotId : memberIds[0] ?? null;
+      channel.updatedAt = Date.now();
+      result = channelSummary(channel);
+      host.emit('bot-shared-channel-changed', { channelId: channel.id });
+      break;
+    }
+    case 'bot_shared_channel_archive': {
+      const channel = sharedChannel(String(args.channelId));
+      channel.archived = Boolean(args.archived);
+      if (channel.archived) stopChannelWork(channel);
+      channel.updatedAt = Date.now();
+      host.emit('bot-shared-channel-changed', { channelId: channel.id });
+      break;
+    }
     case 'bot_desktop_thread': { const entry = store(args.botId); const known = entry.threads.length; result = (await desktopThread(host, entry)).sessionId; if (entry.threads.length !== known) { host.emit('sessions-changed', null); changed(); } break; }
     case 'bot_project_ids': result = [...bots.values()].map(entry => entry.bot.projectId); break;
     case 'bot_detail': {

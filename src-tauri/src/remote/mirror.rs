@@ -1582,7 +1582,10 @@ fn cancel_outcome(reply: &Result<Value>) -> Cancel {
     match reply {
         Ok(reply) if reply["cancelled"] == false && reply["pending"] == true => Cancel::TooLate,
         Ok(reply) if reply["cancelled"] == false => started_session(reply).map_or_else(Cancel::Refused, Cancel::Started),
-        Ok(_) => Cancel::Cancelled,
+        // A malformed success reply is not proof that the host stopped the start.
+        // Keep the pending start, rather than dropping its mirror and orphaning a live task.
+        Ok(reply) if reply["cancelled"] == true => Cancel::Cancelled,
+        Ok(_) => Cancel::Refused("The other computer returned an invalid cancellation response.".into()),
         // Only the host's own answer cancels: one that can't be reached stays pending.
         Err(error) if client::maybe_ran(error) || error == super::socket::OFFLINE || error == super::UNKNOWN_DEVICE => Cancel::Pending,
         Err(error) if error == "Unknown method." => Cancel::Unsupported,
@@ -2506,6 +2509,14 @@ mod tests {
         assert_eq!(cancel_outcome(&Ok(json!({"cancelled": false, "sessionId": "h1"}))), Cancel::Started("h1".into()));
         assert_eq!(cancel_outcome(&Ok(json!({"cancelled": false, "pending": true}))), Cancel::TooLate, "the host is making the task: keep the start, stop it once linked");
         assert!(matches!(cancel_outcome(&Ok(json!({"cancelled": false}))), Cancel::Refused(_)));
+        // A malformed success response must not discard a start that may still be
+        // running on the other computer. Only an explicit true confirms cancellation.
+        for malformed in [json!({}), json!(null), json!({"cancelled": null}), json!({"cancelled": "true"}), json!({"cancelled": 1})] {
+            assert_eq!(
+                cancel_outcome(&Ok(malformed)),
+                Cancel::Refused("The other computer returned an invalid cancellation response.".into())
+            );
+        }
         // The cancel may not have arrived: keep the start and ask again when the host is back.
         for error in [client::TIMED_OUT, client::LOST, super::super::socket::OFFLINE] {
             assert_eq!(cancel_outcome(&Err(error.into())), Cancel::Pending, "{error}");

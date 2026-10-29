@@ -93,6 +93,7 @@ export const MAX_UNPACKED = 2 * 1024 * 1024;
 const SLICE = 2 * 1024;
 
 export function unpack(deflated: Uint8Array): Uint8Array {
+  if (!deflated.length) throw new Error('Unreadable frame.');
   const chunks: Uint8Array[] = [];
   let size = 0;
   let done = false;

@@ -59,6 +59,7 @@ test('refuses a packed bomb and broken deflate', async () => {
   assert.equal(open(key, 'a', 'b', body(deflateSync(new TextEncoder().encode('{"ok":true}')))), '{"ok":true}');
   assert.throws(() => open(key, 'a', 'b', body(deflateSync(new Uint8Array(MAX_UNPACKED + 1).fill(32)))), /too large/);
   assert.throws(() => open(key, 'a', 'b', body(new TextEncoder().encode('not deflate'))));
+  assert.throws(() => open(key, 'a', 'b', body(new Uint8Array())), /Unreadable frame/);
 });
 
 test('unpack inflates in slices and stops a bomb at the cap', async () => {
@@ -66,6 +67,7 @@ test('unpack inflates in slices and stops a bomb at the cap', async () => {
   // Incompressible-ish text spanning many input slices comes back whole.
   const text = Array.from({ length: 40_000 }, (_, i) => (i * 2654435761 >>> 0).toString(36)).join(',');
   assert.equal(new TextDecoder().decode(unpack(deflateSync(new TextEncoder().encode(text)))), text);
+  assert.equal(unpack(deflateSync(new Uint8Array(MAX_UNPACKED))).length, MAX_UNPACKED, 'the exact 2 MiB boundary is valid');
   // 64 MB of zeros packs to ~64 KB; it must fail at the 2 MB cap, not after inflating it all.
   const bomb = deflateSync(new Uint8Array(64 * 1024 * 1024));
   const started = Date.now();

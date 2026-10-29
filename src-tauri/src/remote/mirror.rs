@@ -488,7 +488,17 @@ where
     let mut pages = vec![first];
     while !backward && pages.len() < WORKER_PAGES && pages.last().is_some_and(|page| page["hasMore"] == true) {
         let Some(after) = pages.last().and_then(|page| page["messages"].as_array()?.last()?["id"].as_i64()) else { break };
-        pages.push(ask("afterId", json!(after)).await?);
+        let next = ask("afterId", json!(after)).await?;
+        // Older hosts may replay an unchanged page while still claiming hasMore.
+        // Stop instead of requesting the same cursor for the entire page budget.
+        let newest = next["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .and_then(|message| message["id"].as_i64());
+        if newest.is_none_or(|id| id <= after) {
+            break;
+        }
+        pages.push(next);
     }
     Ok(worker_page(&pages, backward))
 }
@@ -1929,6 +1939,52 @@ mod tests {
         let long: Vec<i64> = (1..=(WORKER_TAIL as i64 + 3)).collect();
         let legacy = worker_page(&[page(&long, false)], false);
         assert_eq!((ids(&legacy).len(), ids(&legacy)[0], legacy["hasOlder"].as_bool()), (WORKER_TAIL, 4, Some(false)), "an older host's read keeps the newest and offers nothing older it cannot page back to");
+    }
+
+    #[test]
+    fn a_stalled_legacy_host_worker_page_does_not_repeat_the_same_cursor() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let page = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(worker_pages(
+                |_, _| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    async { Ok(json!({"messages": [{"id": 7, "content": "newest"}], "hasMore": true})) }
+                },
+                None,
+            ))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "a repeated last ID must not cause ten requests");
+        assert_eq!(page["messages"], json!([{"id": 7, "content": "newest"}]));
+        assert_eq!(page["hasOlder"], false);
+    }
+
+    #[test]
+    fn a_legacy_host_worker_page_still_collects_newer_messages() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let page = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(worker_pages(
+                |_, _| {
+                    let n = calls.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        Ok(match n {
+                            0 => json!({"messages": [{"id": 7}], "hasMore": true}),
+                            _ => json!({"messages": [{"id": 8}], "hasMore": false}),
+                        })
+                    }
+                },
+                None,
+            ))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(page["messages"], json!([{"id": 7}, {"id": 8}]));
     }
 
     #[test]

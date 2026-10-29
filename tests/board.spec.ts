@@ -1,6 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
 // The workspace view (Conversation, Board, GitHub) is picked from the sidebar's view menu.
-const showView = async (page: Page, name: string) => { await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name, exact: true }).click(); };
+const showView = async (page: Page, name: string) => {
+  // The persisted Board can render before bootstrap has attached menu handlers.
+  await expect(page.locator('.new-task-button')).toBeEnabled({ timeout: 15_000 });
+  await page.getByRole('button', { name: /^Workspace view: / }).click();
+  await page.getByRole('menuitemradio', { name, exact: true }).click();
+};
 
 const board = (page: Page) => page.getByRole('region', { name: 'Project board', exact: true });
 const column = (page: Page, name: string) => board(page).getByRole('region', { name, exact: true });

@@ -1981,8 +1981,9 @@ function paintLiveHeader(activity: HTMLDetailsElement, current: Stream, workedMs
   const last = tools[tools.length - 1];
   const status = current.inputs.size || current.approvals.size || current.status === 'Stopping agent';
   let mode: string, html: string, step = '';
-  if (workedMs !== undefined || (answered && !narrated)) {
-    // A tool-only turn folds to its summary mid-answer; a narrated one keeps its steps until it ends.
+  if (current.status !== 'Stopping agent' && (workedMs !== undefined || (answered && !narrated))) {
+    // While a stop is pending, show the explicit status even if a prior finish snapshot exists.
+    // A tool-only turn otherwise folds to its summary mid-answer; narrated turns retain steps.
     mode = 'folded';
     html = tools.length && !narrated ? foldedLabelHtml(tools) : escape(`Worked for ${formatDuration(workedMs ?? 0)}`);
   } else if (last && !status) {

@@ -4748,6 +4748,9 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
   const group = anchor.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup ?? '';
   const movable = !['active', 'review', 'completed'].includes(group);
   const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id), done = taskStage(task) === 'completed';
+  // Reuse the native, authorized project chooser only for the selected, unstarted local task.
+  const canMoveProject = id === state.sessionId && !busy && !task.remoteDevice && !task.worktreePath
+    && !chatTask(task) && newTaskView() && userProjects().some(project => project.id !== task.projectId);
   const unread = unreviewed?.has(id) ?? false, path = task.worktreePath ?? state.projects.find(p => p.id === task.projectId)?.path ?? '';
   const branch = task.worktreeBranch ?? '';
   await showChoices(anchor, { title: 'Task actions', point, actions: true, width: 280, items: [
@@ -4757,6 +4760,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
       { id: 'down', label: 'Move down', leading: icon('arrow', 'icon-down'), disabled: fixed || orderingBusy || index === ids.length - 1 },
     ] : [],
     { id: 'rename', label: 'Rename…', icon: 'edit', separator: true },
+    ...canMoveProject ? [{ id: 'move-project', label: 'Move to project…', icon: 'folder' }] : [],
     ...task.archived || id === state.sessionId ? [] : [{ id: 'unread', label: unread ? 'Mark as read' : 'Mark as unread', icon: 'chat' }],
     ...branch && !task.archived && !task.remoteDevice ? [{ id: 'branch-task', label: `New task from ${branch}…`, icon: 'worktree' }] : [],
     ...branch ? [{ id: 'copy-branch', label: 'Copy branch name', icon: 'copy', separator: true }] : [],
@@ -4776,6 +4780,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
     if (choice === 'stage' || choice === 'delete') { sidebarTaskAction(choice === 'stage' ? done ? 'reopen' : 'complete' : choice, id); return; }
     // Renames the row's task in place; the open thread stays open.
     if (choice === 'rename') { showRename(task); return; }
+    if (choice === 'move-project') { await showProjectPicker(anchor); return; }
     if (choice === 'branch-task') { await selectSession(id); worktrees.openDialog('new'); return; }
     if (choice === 'unread') {
       const seen = unreviewed ??= readCollapsed(localStorage, UNREVIEWED_KEY);

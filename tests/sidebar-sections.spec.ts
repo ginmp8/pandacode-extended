@@ -384,4 +384,22 @@ $&`);
     await page.keyboard.press('ArrowDown');
     await expect(section(page, 'completed').locator('.task-item').first()).toBeFocused();
   });
+
+  test('the context menu moves only an unstarted local task using the authorized project picker', async ({ page }) => {
+    await open(page);
+    await row(page, 'session-2').click();
+    await expect(row(page, 'session-2')).toHaveAttribute('aria-current', 'page');
+    await row(page, 'session-2').click({ button: 'right' });
+    const move = menu(page).getByRole('menuitem', { name: 'Move to project…', exact: true });
+    await expect(move).toBeVisible();
+    await move.click();
+    const chooser = page.getByRole('dialog', { name: 'Choose project', exact: true });
+    await expect(chooser).toBeVisible();
+    await chooser.getByRole('option', { name: /pandacode/i }).click();
+    await expect(chooser).toBeHidden();
+    await expect(row(page, 'session-2')).toHaveAttribute('title', /pandacode/i);
+    await row(page, 'session-1').click({ button: 'right' });
+    await expect(menu(page).getByRole('menuitem', { name: 'Move to project…', exact: true })).toHaveCount(0);
+  });
+
 });

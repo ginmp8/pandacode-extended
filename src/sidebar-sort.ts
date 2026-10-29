@@ -32,7 +32,7 @@ export function readSort(storage: Pick<Storage, 'getItem'>): SidebarSort {
 export function readProjectOrder(storage: Pick<Storage, 'getItem'>): string[] {
   try {
     const value: unknown = JSON.parse(storage.getItem(PROJECT_ORDER_KEY) ?? '[]');
-    return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === 'string'))].slice(0, 1000) : [];
+    return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === 'string' && id.trim().length > 0))].slice(0, 1000) : [];
   } catch { return []; }
 }
 

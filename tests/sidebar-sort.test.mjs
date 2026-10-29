@@ -67,6 +67,8 @@ test('Added follows each project’s addedOrder, not the name order the list arr
 test('the saved folder order keeps unique string ids only', () => {
   const read = value => readProjectOrder({ getItem: key => key === PROJECT_ORDER_KEY ? value : null });
   assert.deepEqual(read(JSON.stringify(['b', 'a', 'b', 3, null])), ['b', 'a']);
+  // Empty or whitespace-only ids are invalid, not empty project identities.
+  assert.deepEqual(read(JSON.stringify(['b', '', '   ', '\t', 'a', 'b', 3, null])), ['b', 'a']);
   assert.deepEqual(read('{"not":"a list"}'), []);
   assert.deepEqual(read('broken'), []);
   assert.deepEqual(read(null), []);

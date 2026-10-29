@@ -418,13 +418,21 @@ fn save_subagents(store: &Store, events: &[Value]) {
     }
 }
 
-/// The last `subagent` snapshot per (task, child), in first-seen order.
+/// The newest `subagent` snapshot per (task, child), in first-seen order.
+/// Replay batches may contain older frames after newer ones; terminal states win ties.
 fn newest_subagents(events: &[Value]) -> Vec<(&str, &Value)> {
     let mut newest: Vec<(&str, &str, &Value)> = Vec::new();
     for event in events.iter().filter(|event| event["kind"] == "subagent") {
         let (Some(session), Some(id)) = (event["sessionId"].as_str(), event["data"]["id"].as_str()) else { continue };
         match newest.iter_mut().find(|(s, i, _)| *s == session && *i == id) {
-            Some(slot) => slot.2 = &event["data"],
+            Some(slot) => {
+                let previous = slot.2["updatedAt"].as_i64().unwrap_or(i64::MIN);
+                let incoming = event["data"]["updatedAt"].as_i64().unwrap_or(i64::MIN);
+                if incoming > previous || (incoming == previous
+                    && matches!(slot.2["status"].as_str(), Some("running" | "waiting"))) {
+                    slot.2 = &event["data"];
+                }
+            }
             None => newest.push((session, id, &event["data"])),
         }
     }
@@ -1828,6 +1836,22 @@ mod tests {
         ];
         let newest = newest_subagents(&events);
         assert_eq!(newest.iter().map(|(s, d)| (*s, d["id"].as_str().unwrap(), d["status"].as_str().unwrap())).collect::<Vec<_>>(), [("l", "r:a", "completed"), ("l", "r:b", "running")]);
+    }
+
+    #[test]
+    fn an_out_of_order_subagent_batch_keeps_the_latest_snapshot() {
+        let events = [
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "run:a", "status": "completed", "updatedAt": 200}}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "run:a", "status": "running", "updatedAt": 100}}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "run:b", "status": "waiting", "updatedAt": 300}}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "run:b", "status": "completed", "updatedAt": 300}}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "run:b", "status": "running", "updatedAt": 300}}),
+        ];
+        let newest = newest_subagents(&events);
+        assert_eq!(newest.len(), 2);
+        assert_eq!(newest[0].1, "run:a");
+        assert_eq!(newest[0].2["status"], "completed", "an older running frame cannot replace a newer completed one");
+        assert_eq!(newest[1].2["status"], "completed", "a terminal snapshot wins an equal-time tie");
     }
 
     #[test]

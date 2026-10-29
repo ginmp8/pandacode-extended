@@ -37,7 +37,24 @@ if (typeof location !== 'undefined' && new URLSearchParams(location.search).has(
 if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('trace')) sessions = [...sessions,
   { id: BRIEF_ID, projectId: 'project-1', title: 'Morning brief', provider: 'claude', model: 'sonnet', mode: 'ask', status: 'idle', createdAt: now - 50000, updatedAt: now + 2000, archived: false, worktreePath: null, resumeId: null, lastResponseAt: null },
   { id: GALLERY_ID, projectId: 'project-1', title: 'Tool gallery', provider: 'claude', model: 'sonnet', mode: 'ask', status: 'idle', createdAt: now - 40000, updatedAt: now + 3000, archived: false, worktreePath: null, resumeId: null, lastResponseAt: now - 100000 }];
-// The preview persists sidebar preferences only, never sample conversation data.
+// The browser preview persists sidebar preferences; only the opted-in trace demo's
+// completed Morning brief history is retained per tab to model native message hydration.
+const BRIEF_HISTORY_KEY = 'pandacode.preview.briefHistory.v1';
+function restoreBriefHistory(): Message[] {
+  try {
+    const raw = sessionStorage.getItem(BRIEF_HISTORY_KEY);
+    if (!raw || raw.length > 100_000) return briefMessages;
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value) || value.length > 128 || !value.every((message: unknown) => {
+      if (!message || typeof message !== 'object') return false;
+      const row = message as Record<string, unknown>;
+      return Number.isSafeInteger(row.id) && Number(row.id) > 0 && row.sessionId === BRIEF_ID
+        && (row.role === 'user' || row.role === 'tool' || row.role === 'assistant')
+        && typeof row.content === 'string' && typeof row.createdAt === 'number';
+    })) return briefMessages;
+    return value as Message[];
+  } catch { return briefMessages; }
+}
 const THREAD_ORDER_KEY = 'pandacode.preview.threadOrder';
 type ThreadOrder = { id: string; pinned: boolean; sidebarOrder: number | null };
 function loadThreadOrder(): void {
@@ -146,7 +163,7 @@ const traceMessages: Message[] = [
 ];
 // Trace showcase thread: opt in with ?trace so default session counts stay unchanged.
 const showTrace = typeof location !== 'undefined' && new URLSearchParams(location.search).has('trace');
-const messages: Record<string, Message[]> = { ...(showTrace ? { 'session-5': traceMessages, [BRIEF_ID]: briefMessages, [GALLERY_ID]: galleryMessages } : {}), 'session-1': [
+const messages: Record<string, Message[]> = { ...(showTrace ? { 'session-5': traceMessages, [BRIEF_ID]: restoreBriefHistory(), [GALLERY_ID]: galleryMessages } : {}), 'session-1': [
   { id: 1, sessionId: 'session-1', role: 'user', content: 'Search feels a little slow. Can you make it respond instantly as I type, and keep the keyboard navigation working?', createdAt: now - 420000 },
   { id: 2, sessionId: 'session-1', role: 'assistant', content: 'I’ll trace how the search input updates the results, then check the keyboard interactions.', createdAt: now - 410000 },
   { id: 3, sessionId: 'session-1', role: 'tool', content: encodeTool({ id: 'sample-read', name: 'Read', status: 'completed', input: 'src/components/search.ts', output: sampleSource }), createdAt: now - 400000 },
@@ -155,6 +172,8 @@ const messages: Record<string, Message[]> = { ...(showTrace ? { 'session-5': tra
   { id: 7, sessionId: 'session-1', role: 'tool', content: 'Legacy tool report\nOlder saved output remains readable.', createdAt: now - 280000 },
   { id: 8, sessionId: 'session-1', role: 'tool', content: 'Tool finished', createdAt: now - 270000 },
 ], 'session-4': [{ id: 6, sessionId: 'session-4', role: 'assistant', content: 'The project is a small native workspace for coding agents.', createdAt: now - 259200000 }] };
+// Reused demo message IDs must not collide if another message is sent after reload.
+id = Math.max(id, ...(messages[BRIEF_ID] ?? []).map(message => message.id));
 const providers: Provider[] = [
   { id: 'claude', name: 'Claude Code', installed: true, path: '/sample/bin/claude', version: 'Sample provider', models: ['sonnet', 'opus', 'haiku'].map(id => fallbackModel('claude', id)) },
   { id: 'codex', name: 'Codex', installed: true, path: '/sample/bin/codex', version: 'Sample provider', models: [] },
@@ -606,7 +625,20 @@ const mirrorWorkerMessages = new Map<string, Message[]>();
     agent({ sessionId, kind: 'team', text: '', data: row } as unknown as AgentEvent);
   };
 };
-function finish(sessionId: string, content: string) { const time = Date.now(); messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time }); finishTiming(sessionId); const s = session(sessionId); if (content.trim()) s.lastResponseAt = time; s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time; timers.delete(sessionId); activeTools.delete(sessionId); syncMirror(sessionId); agent({ sessionId, kind: 'done', text: '' }); }
+function finish(sessionId: string, content: string) {
+  const time = Date.now();
+  messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time });
+  finishTiming(sessionId);
+  const s = session(sessionId);
+  if (content.trim()) s.lastResponseAt = time;
+  s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time;
+  timers.delete(sessionId); activeTools.delete(sessionId); syncMirror(sessionId);
+  if (sessionId === BRIEF_ID) {
+    try { sessionStorage.setItem(BRIEF_HISTORY_KEY, JSON.stringify(messages[sessionId])); }
+    catch { /* The preview remains usable if tab storage is unavailable. */ }
+  }
+  agent({ sessionId, kind: 'done', text: '' });
+}
 /** Replays the Morning brief reference: five MCP tools (running, then completed), then the answer in chunks. `?replay=N` scales the pace. */
 function replayBrief(s: Session): void {
   const speed = Number(new URLSearchParams(location.search).get('replay')) || 1, at = (ms: number) => ms / speed;

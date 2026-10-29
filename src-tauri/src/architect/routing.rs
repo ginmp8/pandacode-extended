@@ -293,8 +293,15 @@ pub(super) fn route_request(config: &TeamConfig, langs: &[String], args: Value) 
     let mut jobs = Vec::new();
     for task in args.tasks {
         text(&task.text, MAX_TASK_TEXT, "Task text")?;
-        if task.failed.len() > 12 || task.failed.iter().any(|f| !HARNESSES.contains(&f.provider.as_str()) || f.model.len() > 200) {
-            return Err("List at most 12 failed models, each with a known harness.".into());
+        if task.failed.len() > 12
+            || task.failed.iter().any(|f| {
+                !HARNESSES.contains(&f.provider.as_str())
+                    || f.model.is_empty()
+                    || f.model.len() > 200
+                    || f.model.contains('\0')
+            })
+        {
+            return Err("List at most 12 failed models with known harnesses and valid model IDs.".into());
         }
         let failed = task
             .failed

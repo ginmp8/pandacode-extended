@@ -2782,7 +2782,15 @@ fn route_models_reports_compact_picks() {
     if let Some(sonnet) = sonnet {
         assert_eq!(sonnet["profileId"], "sonnet");
     }
-    for bad in [json!({"tasks":[]}), json!({"tasks":[{"text":""}]}), json!({"tasks":[{"text":"x","failed":[{"provider":"nope","model":"m"}]}]}), json!({"tasks":[{"text":"x"}],"mode":"fast"})] {
+    for bad in [
+        json!({"tasks":[]}),
+        json!({"tasks":[{"text":""}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"nope","model":"m"}]}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"claude","model":""}]}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"claude","model":format!("bad{}id", char::from(0))}]}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"claude","model":"x".repeat(201)}]}]}),
+        json!({"tasks":[{"text":"x"}],"mode":"fast"}),
+    ] {
         assert!(routing::route_request(&config, &[], bad).is_err());
     }
 }

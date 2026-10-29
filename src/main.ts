@@ -2097,7 +2097,7 @@ function renderComposer(): void {
     const area = $('#composer-area'), channel = state.sharedChannelDetail;
     const previousPrompt = area.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
     if (previousPrompt) state.sharedChannelDrafts.set(state.sharedChannelId, previousPrompt.value);
-    const reassignOpen = area.querySelector<HTMLButtonElement>('.bc-channel-actions [data-shared-action="reassign-toggle"][aria-expanded="true"]') !== null;
+    const reassignMessage = area.querySelector<HTMLButtonElement>('.bc-reassign-menu:not([hidden]) button[data-message]')?.dataset.message;
     area.innerHTML = channel ? sharedChannelActionsHtml(channel, sidebarBots) + sharedChannelComposerHtml(channel) : '';
     const prompt = area.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
     if (prompt) {
@@ -2107,10 +2107,13 @@ function renderComposer(): void {
       const send = area.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
       if (send) send.disabled = posting;
     }
-    if (reassignOpen) {
+    if (reassignMessage) {
       const toggle = area.querySelector<HTMLButtonElement>('.bc-channel-actions [data-shared-action="reassign-toggle"]');
       const menu = area.querySelector<HTMLElement>('.bc-channel-actions .bc-reassign-menu');
-      if (toggle && menu) { toggle.setAttribute('aria-expanded', 'true'); menu.hidden = false; }
+      if (toggle && menu && [...menu.querySelectorAll<HTMLButtonElement>('button[data-message]')].some(item => item.dataset.message === reassignMessage)) {
+        toggle.setAttribute('aria-expanded', 'true');
+        menu.hidden = false;
+      }
     }
     browserPanel?.refresh();
     return;
@@ -6200,6 +6203,17 @@ async function handleSharedChannelAction(button: HTMLButtonElement): Promise<voi
 
 document.addEventListener('click', event => {
   const target = event.target as Element;
+  const earlier = target.closest<HTMLButtonElement>('#transcript .bc-history > button[data-shared-action="earlier"]');
+  if (earlier && state.sharedChannelId) {
+    if (earlier.disabled) return;
+    event.preventDefault();
+    const channelId = state.sharedChannelId, history = earlier.closest<HTMLElement>('.bc-history');
+    state.sharedChannelLimits.set(channelId, (state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE) + CHANNEL_PAGE);
+    if (history) state.sharedChannelFromBottom = history.scrollHeight - history.scrollTop;
+    earlier.disabled = true;
+    run(refreshSharedChannel(channelId));
+    return;
+  }
   const shared = target.closest<HTMLButtonElement>('#composer-area .bc-channel-actions button[data-shared-action]');
   if (shared) {
     if (shared.disabled) return;

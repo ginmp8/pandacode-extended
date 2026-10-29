@@ -1613,7 +1613,9 @@ fn settle_cancel(app: &tauri::AppHandle, state: &AppState, local: &str, expected
         }
         Cancel::Pending | Cancel::Unsupported | Cancel::TooLate => Ok(json!({"cancelled": false, "pending": true})),
         Cancel::Refused(error) => {
-            let Some(start) = pending_start_mut(&mut remote(app).lock().viewer.starts, local, expected_start_id) else {
+            let state = remote(app);
+            let mut inner = state.lock();
+            let Some(start) = pending_start_mut(&mut inner.viewer.starts, local, expected_start_id) else {
                 return Ok(json!({"cancelled": false, "pending": true}));
             };
             start.cancelling = false;

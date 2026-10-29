@@ -91,3 +91,16 @@ test('the filter matches title, branch, linked PR and project, word by word', ()
   assert.equal(matchesFilter(t, 'orbit', 'Orbit'), true);
   assert.equal(matchesFilter(t, 'speed missing'), false);
 });
+
+test('filter searches a linked issue even when the task also has a pull request', () => {
+  const linked = task('both', {
+    title: 'Speed up search',
+    pullRequest: { kind: 'pull', number: 482, title: 'Compact rows' },
+    issue: { kind: 'issue', number: 73, title: 'Restore keyboard navigation' },
+  });
+  assert.equal(matchesFilter(linked, '#482'), true);
+  assert.equal(matchesFilter(linked, 'compact'), true);
+  assert.equal(matchesFilter(linked, '#73'), true);
+  assert.equal(matchesFilter(linked, 'keyboard'), true);
+  assert.equal(matchesFilter(linked, 'speed #73'), true);
+});

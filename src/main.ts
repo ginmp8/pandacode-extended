@@ -4755,7 +4755,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
   const group = anchor.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup ?? '';
   const movable = !['active', 'review', 'completed'].includes(group);
   const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id);
-  const openedStage = taskStage(task), openedPinned = task.pinned, done = openedStage === 'completed';
+  const openedStage = taskStage(task), openedPinned = Boolean(task.pinned), done = openedStage === 'completed';
   // Reuse the native, authorized project chooser only for the selected, unstarted local task.
   const canMoveProject = id === state.sessionId && !busy && !task.remoteDevice && !task.worktreePath
     && !chatTask(task) && newTaskView() && userProjects().some(project => project.id !== task.projectId);
@@ -4780,11 +4780,11 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
   ], onSelect: async choice => {
     closeChoiceMenu();
     // A background task update can make the menu's original action stale.
-    const current = state.sessions.find(item => item.id === id);
+    const menuTask = state.sessions.find(item => item.id === id);
     if ((choice === 'pin' || choice === 'stage' || choice === 'unread') &&
-        (!current || !sidebarMenuChoiceIsCurrent(choice,
+        (!menuTask || !sidebarMenuChoiceIsCurrent(choice,
           { pinned: openedPinned, stage: openedStage, unread },
-          { pinned: current.pinned, stage: taskStage(current), unread: unreviewed?.has(id) ?? false }))) {
+          { pinned: Boolean(menuTask.pinned), stage: taskStage(menuTask), unread: unreviewed?.has(id) ?? false }))) {
       notify('Task changed. Reopen its actions.');
       return;
     }

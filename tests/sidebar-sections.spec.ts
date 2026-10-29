@@ -421,4 +421,53 @@ $&`);
     await expect(menu(page).getByRole('menuitem', { name: 'Move to project…', exact: true })).toHaveCount(0);
   });
 
+
+  test('120 tasks across 20 projects keep sort order and per-section caps after reload', async ({ page }) => {
+    // Keep this scale fixture inside the browser test; it must not change real saved tasks.
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `if (!window.__sidebarScaleFixture) {
+        window.__sidebarScaleFixture = true;
+        for (let i = 0; i < 20; i++) projects.push({
+          ...projects[0], id: 'scale-project-' + i, name: 'Scale project ' + i, path: '/tmp/scale-project-' + i,
+        });
+        for (let i = 0; i < 120; i++) sessions.push({
+          ...sessions[0], id: 'scale-task-' + i, projectId: 'scale-project-' + (i % 20),
+          title: 'Scale task ' + i, createdAt: Date.now() - i * 1000,
+          updatedAt: Date.now(), lastPromptAt: Date.now() - (119 - i) * 1000,
+          lastResponseAt: null, status: 'idle', taskStage: 'pending', pinned: false,
+          sidebarOrder: null, archived: false, draft: false,
+        });
+      }
+      
+});
+`);
+      await route.fulfill({ response, body });
+    });
+    await open(page);
+    const filter = page.getByRole('searchbox', { name: 'Filter tasks', exact: true });
+    await filter.fill('Scale task');
+    await expect(page.locator('#navigation .task-item')).toHaveCount(120);
+    await filter.fill('');
+
+    for (const { sort, limit, first } of [
+      { sort: 'manual', limit: 3, first: 'scale-task-119' },
+      { sort: 'recent', limit: 6, first: 'scale-task-119' },
+      { sort: 'created', limit: 10, first: 'scale-task-0' },
+      { sort: 'created', limit: 15, first: 'scale-task-0' },
+    ]) {
+      await page.evaluate(({ sort, limit }) => {
+        localStorage.setItem('pandacode.sidebar.sort', JSON.stringify({ tasks: sort, perProject: limit }));
+      }, { sort, limit });
+      await page.reload();
+      const rows = section(page, 'all').locator('.task-item');
+      await expect(rows.first()).toHaveAttribute('data-id', first);
+      const shown = await rows.count();
+      // A selected row beyond the cap is intentionally kept visible.
+      expect(shown).toBeGreaterThanOrEqual(limit);
+      expect(shown).toBeLessThanOrEqual(limit + 1);
+      await expect(section(page, 'all').getByRole('button', { name: /^Show \d+ more$/ })).toBeVisible();
+    }
+  });
+
 });

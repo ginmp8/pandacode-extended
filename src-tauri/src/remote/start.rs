@@ -499,7 +499,10 @@ fn ready_in_place_checked(root: &Path, project: &str, branch: &str, busy: bool, 
 
 /// The note a start that fell back from the main checkout to a worktree reports.
 fn worktree_note(reason: &str) -> String {
-    format!("Started in a worktree: {reason}")
+    // Names supplied by the host may contain line separators. Keep the same
+    // single-line, bounded explanation in progress and recovery replies.
+    let first_line = reason.split(['\n', '\r', '\u{2028}', '\u{2029}']).next().unwrap_or_default();
+    format!("Started in a worktree: {first_line}").chars().take(300).collect()
 }
 
 /// Projects whose main checkout a remote start has claimed and not yet launched in.
@@ -1049,6 +1052,11 @@ mod tests {
         assert_eq!(in_place_refusal("Studio", "orbit", "", "main", false, false).unwrap(), "Studio has orbit on a detached HEAD, not main.");
         assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, true).unwrap(), "Studio has an agent working in orbit.");
         assert_eq!(worktree_note("Studio has an agent working in orbit."), "Started in a worktree: Studio has an agent working in orbit.");
+        for separator in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+            let note = worktree_note(&format!("Studio is busy.{separator}/private/host"));
+            assert_eq!(note, "Started in a worktree: Studio is busy.", "separator {separator:?}");
+        }
+        assert_eq!(worktree_note(&"x".repeat(1000)).chars().count(), 300);
         assert!(WORST_CASE <= Duration::from_secs(10 * 60));
     }
 

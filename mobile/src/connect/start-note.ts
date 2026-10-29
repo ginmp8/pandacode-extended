@@ -3,6 +3,6 @@
 export function startNote(reply: unknown): string | undefined {
   const note = (reply as { note?: unknown } | null)?.note;
   if (typeof note !== 'string') return undefined;
-  const line = note.split('\n')[0].trim().slice(0, 300);
+  const line = note.split(/[\r\n\u2028\u2029]/, 1)[0].trim().slice(0, 300);
   return line || undefined;
 }

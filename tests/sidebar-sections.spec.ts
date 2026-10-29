@@ -439,8 +439,7 @@ $&`);
           sidebarOrder: null, archived: false, draft: false,
         });
       }
-      
-});
+      $&
 `);
       await route.fulfill({ response, body });
     });

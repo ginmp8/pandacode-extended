@@ -94,6 +94,31 @@ test('reopening the selected Settled row retains its visual position until anoth
   assert.deepEqual(ids(running.completed), ['new', 'old']);
 });
 
+test('settling a selected Finished row keeps its visual slot until selection changes', () => {
+  const tasks = [
+    task('latest', { taskStage: 'review', lastResponseAt: 70 }),
+    task('selected', { taskStage: 'completed', completedAt: 80, lastResponseAt: 200 }),
+    task('old', { taskStage: 'review', lastResponseAt: 30 }),
+    task('settled', { taskStage: 'completed', completedAt: 10 }),
+  ];
+  const original = structuredClone(tasks);
+  const held = split(tasks, { selectedId: 'selected', hold: 'review', holdIndex: 1 });
+  assert.deepEqual(ids(held.review), ['latest', 'selected', 'old']);
+  assert.deepEqual(ids(held.completed), ['settled']);
+  assert.equal(new Set(Object.values(held).flat().map(t => t.id)).size, tasks.length);
+
+  const released = split(tasks, { selectedId: 'other' });
+  assert.deepEqual(ids(released.review), ['latest', 'old']);
+  assert.deepEqual(ids(released.completed), ['selected', 'settled']);
+
+  const running = split(tasks.map(t => t.id === 'selected' ? { ...t, running: true } : t), {
+    selectedId: 'selected', hold: 'review', holdIndex: 1,
+  });
+  assert.deepEqual(ids(running.active), ['selected']);
+  assert.deepEqual(ids(running.review), ['latest', 'old']);
+  assert.deepEqual(tasks, original);
+});
+
 test('sectionOf maps sidebar groups to the section a thread holds', () => {
   assert.equal(sectionOf('active'), 'active');
   assert.equal(sectionOf('review'), 'review');

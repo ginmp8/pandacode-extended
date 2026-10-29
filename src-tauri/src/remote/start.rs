@@ -921,9 +921,13 @@ mod tests {
             let unrelated = store.create_session(&project_id, "codex", "default", "ask").unwrap();
             (target.id, unrelated.id, store.project(&project_id).unwrap().path)
         };
+        // Codex accepts catalog-defined effort IDs, including hyphenated values;
+        // a space is invalid under the real provider validator and exercises rollback.
+        assert!(crate::providers::validate_reasoning_effort("codex", Some("catalog-defined-effort")).is_ok());
+        assert!(crate::providers::validate_reasoning_effort("codex", Some("invalid effort value")).is_err());
         let error = configure_created_start(&state, &target, Path::new(&root), None, || {
             state.store.lock().unwrap()
-                .set_reasoning_effort(&target, Some("invalid-effort-value"))
+                .set_reasoning_effort(&target, Some("invalid effort value"))
                 .map(|_| ())
         }).unwrap_err();
         assert!(!error.is_empty(), "the invalid effort must be rejected");

@@ -89,6 +89,7 @@ export function streamMarkdown(target: HTMLElement, value: string, scroll?: HTML
   if (state.context !== context) {
     state.context = context; state.rendered = ''; state.formatted = false;
   }
+  const previousValue = state.value;
   state.value = value; state.scroll = scroll;
   if (!value) {
     clearTimeout(state.timer); state.timer = 0; state.rendered = ''; state.formatted = false;
@@ -99,6 +100,17 @@ export function streamMarkdown(target: HTMLElement, value: string, scroll?: HTML
     const text = target.firstChild;
     if (text instanceof Text && shown.startsWith(text.data)) text.appendData(shown.slice(text.length));
     else target.textContent = shown;
+  } else {
+    // Updating a still-open link's label must not await the asynchronous Markdown
+    // renderer. The old formatted frame has the same prefix and an inert link span.
+    const previousLink = previousValue.match(OPEN_LINK);
+    const nextLink = value.match(OPEN_LINK);
+    if (previousLink && nextLink && !previousLink[1] && !nextLink[1] &&
+        previousValue.slice(0, previousLink.index) === value.slice(0, nextLink.index)) {
+      const links = target.querySelectorAll<HTMLElement>('.md-open-link');
+      const open = links.item(links.length - 1);
+      if (open) open.textContent = nextLink[2];
+    }
   }
   schedule(state);
 }

@@ -2107,11 +2107,35 @@ function renderComposer(): void {
   const restoreSteerFocus = Boolean(previousSteer && document.activeElement === previousSteer);
   const liveForm = composerRoot.querySelector<HTMLFormElement>('#composer');
   const freshForm = nextMarkup.content.querySelector<HTMLFormElement>('#composer');
-  const sameSteerComposer = Boolean(liveForm && freshForm && previousSteer && nextSteer && previousTaskId === s.id
-    && lastSteerComposerMarkup?.taskId === s.id && lastSteerComposerMarkup.html === composerMarkup);
-  if (sameSteerComposer && liveForm && freshForm) {
-    // Streaming/presence updates refresh the surrounding strips, but must not
-    // move the unchanged form: even parking/reinserting Steer destabilizes pointer clicks.
+  const reuseSteerForm = Boolean(liveForm && freshForm && previousSteer && nextSteer && previousTaskId === s.id);
+  if (reuseSteerForm && liveForm && freshForm && previousSteer && nextSteer) {
+    // Keep the live form and Steer button connected even when streaming changes
+    // another control's markup. Parking the button outside the form on every
+    // refresh makes pointer clicks unstable and can detach the Playwright target.
+    if (lastSteerComposerMarkup?.taskId !== s.id || lastSteerComposerMarkup.html !== composerMarkup) {
+      liveForm.className = freshForm.className;
+      const currentAttachments = liveForm.querySelector<HTMLElement>('#attachments');
+      const freshAttachments = freshForm.querySelector<HTMLElement>('#attachments');
+      if (currentAttachments && freshAttachments && currentAttachments.innerHTML !== freshAttachments.innerHTML) {
+        currentAttachments.replaceWith(freshAttachments);
+      }
+      // Preserve the live textarea's value, selection and focus across updates.
+      const currentPrompt = liveForm.querySelector<HTMLTextAreaElement>('#prompt');
+      const freshPrompt = freshForm.querySelector<HTMLTextAreaElement>('#prompt');
+      if (currentPrompt && freshPrompt) {
+        for (const { name } of [...currentPrompt.attributes]) if (!freshPrompt.hasAttribute(name)) currentPrompt.removeAttribute(name);
+        for (const { name, value } of [...freshPrompt.attributes]) if (currentPrompt.getAttribute(name) !== value) currentPrompt.setAttribute(name, value);
+      }
+      const currentTools = liveForm.querySelector<HTMLElement>('.composer-tools');
+      const freshTools = freshForm.querySelector<HTMLElement>('.composer-tools');
+      if (currentTools && freshTools && currentTools.innerHTML !== freshTools.innerHTML) currentTools.replaceWith(freshTools);
+      for (const { name } of [...previousSteer.attributes]) if (!nextSteer.hasAttribute(name)) previousSteer.removeAttribute(name);
+      for (const { name, value } of [...nextSteer.attributes]) if (previousSteer.getAttribute(name) !== value) previousSteer.setAttribute(name, value);
+      if (previousSteer.innerHTML !== nextSteer.innerHTML) previousSteer.innerHTML = nextSteer.innerHTML;
+      const currentSend = previousSteer.nextElementSibling, freshSend = nextSteer.nextElementSibling;
+      if (currentSend && freshSend && currentSend.outerHTML !== freshSend.outerHTML) currentSend.replaceWith(freshSend);
+    }
+    // The outer strips may change while the working form keeps its DOM identity.
     for (const child of [...composerRoot.childNodes]) if (child !== liveForm) child.remove();
     let beforeForm = true;
     for (const child of [...nextMarkup.content.childNodes]) {
@@ -2120,15 +2144,7 @@ function renderComposer(): void {
       else composerRoot.append(child);
     }
   } else {
-    if (previousSteer && nextSteer && previousTaskId === s.id) {
-      for (const { name } of [...previousSteer.attributes]) if (!nextSteer.hasAttribute(name)) previousSteer.removeAttribute(name);
-      for (const { name, value } of [...nextSteer.attributes]) if (previousSteer.getAttribute(name) !== value) previousSteer.setAttribute(name, value);
-      if (previousSteer.innerHTML !== nextSteer.innerHTML) previousSteer.innerHTML = nextSteer.innerHTML;
-      // Preserve the button identity when the form genuinely needs new markup.
-      composerRoot.parentElement!.append(previousSteer);
-    }
     composerRoot.replaceChildren(nextMarkup.content);
-    if (previousSteer && nextSteer && previousTaskId === s.id) nextSteer.replaceWith(previousSteer);
   }
   lastSteerComposerMarkup = { taskId: s.id, html: composerMarkup };
   if (restoreSteerFocus && previousSteer?.isConnected) previousSteer.focus({ preventScroll: true });

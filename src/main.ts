@@ -5298,10 +5298,11 @@ function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadB
 async function reloadBotProjects(withProjects = true): Promise<void> {
   const generation = ++botReloadGeneration;
   const listGeneration = ++botListGeneration;
-  const [result, links, projects] = await Promise.all([
+  const [result, links, projects, channels] = await Promise.all([
     call<import('./bots').Bot[]>('bots_list').then(bots => ({ bots, ok: true })).catch(() => ({ bots: sidebarBots, ok: false })),
     call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots)),
     withProjects ? call<Project[]>('list_projects') : Promise.resolve(null),
+    call<SharedChannelSummary[]>('bot_shared_channels').catch(() => sidebarChannels),
   ]);
   if (generation !== botReloadGeneration) return;
   if (listGeneration === botListGeneration) {
@@ -5309,6 +5310,7 @@ async function reloadBotProjects(withProjects = true): Promise<void> {
     botProjects = new Set(sidebarBots.map(bot => bot.projectId));
   }
   taskBots = new Map(Object.entries(links));
+  sidebarChannels = channels;
   if (botProjects.has(state.projectFilter)) setProjectFilter('');
   if (projects) state.projects = projects;
   renderNavigation(); renderHeader();

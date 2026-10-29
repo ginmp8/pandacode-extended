@@ -118,7 +118,15 @@ pub(crate) fn parse(params: &Value) -> Result<Start> {
 
 /// A branch name git accepts that can never be read as an option.
 fn valid_branch(branch: &str) -> Result<()> {
-    if branch.is_empty() || branch == "HEAD" || branch.starts_with('-') || branch.contains("..") || branch.ends_with('/') || branch.ends_with(".lock") || !branch.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c)) {
+    // Git rejects empty, dot-prefixed, dot-suffixed and .lock path components.
+    // Reject them before a remote start can clone or create a worktree.
+    let invalid_component = branch.split('/').any(|component| {
+        component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with('.')
+            || component.ends_with(".lock")
+    });
+    if branch.is_empty() || branch == "HEAD" || branch.starts_with('-') || branch.contains("..") || invalid_component || !branch.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c)) {
         return Err("Invalid branch.".into());
     }
     Ok(())
@@ -1174,6 +1182,12 @@ mod tests {
             let mut params = ok.clone();
             params[key] = bad;
             assert!(parse(&params).is_err(), "{key}");
+        }
+        // Reject malformed Git ref components before causing any clone/worktree effects.
+        for branch in ["feature//x", "feature/.hidden", "feature/topic.", "feature/topic.lock/next", ".hidden"] {
+            let mut params = ok.clone();
+            params["branch"] = json!(branch);
+            assert!(parse(&params).is_err(), "invalid Git branch accepted: {branch}");
         }
     }
 

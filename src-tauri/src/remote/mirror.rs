@@ -486,16 +486,22 @@ where
         return Ok(json!({"messages": [], "hasOlder": false}));
     }
     let mut pages = vec![first];
+    // A legacy host's overlapping/replayed page may be out of ID order. The cursor
+    // must advance to its largest valid ID, not merely the last array element.
+    let page_max_id = |page: &Value| {
+        page["messages"]
+            .as_array()?
+            .iter()
+            .filter_map(|message| message["id"].as_i64())
+            .filter(|id| *id > 0)
+            .max()
+    };
     while !backward && pages.len() < WORKER_PAGES && pages.last().is_some_and(|page| page["hasMore"] == true) {
-        let Some(after) = pages.last().and_then(|page| page["messages"].as_array()?.last()?["id"].as_i64()) else { break };
+        let Some(after) = pages.last().and_then(|page| page_max_id(page)) else { break };
         let next = ask("afterId", json!(after)).await?;
         // Older hosts may replay an unchanged page while still claiming hasMore.
         // Stop instead of requesting the same cursor for the entire page budget.
-        let newest = next["messages"]
-            .as_array()
-            .and_then(|messages| messages.last())
-            .and_then(|message| message["id"].as_i64());
-        if newest.is_none_or(|id| id <= after) {
+        if page_max_id(&next).is_none_or(|id| id <= after) {
             break;
         }
         pages.push(next);
@@ -1989,6 +1995,46 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2, "a repeated last ID must not cause ten requests");
         assert_eq!(page["messages"], json!([{"id": 7, "content": "newest"}]));
+        assert_eq!(page["hasOlder"], false);
+    }
+
+    #[test]
+    fn a_reordered_legacy_host_page_advances_by_its_highest_message_id() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let page = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(worker_pages(
+                |key, cursor| {
+                    let index = calls.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        Ok(if index == 0 {
+                            assert_eq!(key, "tail");
+                            json!({"messages": [{"id": 7}, {"id": 5}, {"id": 6}], "hasMore": true})
+                        } else {
+                            assert_eq!(key, "afterId");
+                            assert_eq!(cursor, json!(7), "a reordered page must advance past its highest ID");
+                            // Replayed overlap includes an old row after a new one.
+                            json!({"messages": [{"id": 9}, {"id": 6}], "hasMore": false})
+                        })
+                    }
+                },
+                None,
+            ))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            page["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| message["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![5, 6, 7, 9],
+            "a stale trailing row must not suppress new transcript messages"
+        );
         assert_eq!(page["hasOlder"], false);
     }
 

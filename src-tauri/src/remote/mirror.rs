@@ -451,7 +451,7 @@ pub async fn remote_team(app: tauri::AppHandle, state: tauri::State<'_, AppState
     let Ok(Some(mirror)) = of(&*lock(&state)?, &session_id) else { return Ok(None) };
     match client::call(&app, &mirror.device, "task.team", json!({"sessionId": mirror.session})).await {
         Ok(reply) => Ok(desktop_team(&reply["team"], &session_id)),
-        Err(error) if error == "Unknown method." => Ok(None),
+        Err(error) if error == "Unknown method." => Err("Team workers are not available on this host version.".into()),
         Err(error) => Err(error),
     }
 }

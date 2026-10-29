@@ -1124,7 +1124,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'archive_codex_task': { const task = codexTask(args.sessionId); assertIdle(task); task.archived = true; task.updatedAt = Date.now(); break; }
     case 'export_task': { const task = session(args.sessionId); result = `# ${task.title}\n\n` + (messages[task.id] ?? []).map(message => `## ${message.role}\n\n${message.content}\n\n`).join(''); break; }
     case 'list_subagents': return [...(mirrorSubagents.get(String(args.sessionId))?.values() ?? [])] as T;
-    case 'remote_team': return structuredClone(mirrorTeams.get(String(args.sessionId)) ?? null) as T;
+    case 'remote_team':
+      if ((window as any).__previewOldRemoteTeam) throw new Error('Team workers are not available on this host version.');
+      return structuredClone(mirrorTeams.get(String(args.sessionId)) ?? null) as T;
     case 'remote_worker_messages': {
       // Pages of 40 back from the tail, as `worker_pages` in remote/mirror.rs joins the host's.
       const all = mirrorWorkerMessages.get(String(args.workerId)) ?? [], before = all.filter(message => !args.beforeId || message.id < args.beforeId);

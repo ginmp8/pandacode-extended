@@ -18,6 +18,14 @@ async function openMirror(page: Page, before?: () => Promise<void>) {
   await page.locator('#navigation .task-item').filter({ hasText: 'Remote team task' }).click();
 }
 
+test('an older remote host keeps the task visible when team workers are unsupported', async ({ page }) => {
+  await page.addInitScript(() => { (window as any).__previewOldRemoteTeam = true; });
+  await openMirror(page);
+  await expect(page.locator('#toast')).toContainText('Team workers are not available on this host version.');
+  await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('Split the docs work');
+  await expect(page.getByRole('button', { name: 'Open workers' })).toHaveCount(0);
+});
+
 test('a mirror shows its host subagents, live and from the saved snapshot', async ({ page }) => {
   // Sent while another task was open: only the saved snapshot can show it.
   await openMirror(page, () => page.evaluate(c => (window as any).__mirrorSubagent(c), child('run:a', 'Explorer')));

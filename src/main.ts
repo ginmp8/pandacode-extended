@@ -183,6 +183,7 @@ let inspectorChosen = true;
 type ThreadPanel = { workspace: string; open: boolean; tab: typeof state.inspectorTab; folder: string; file: string; kind: typeof state.selectedKind; staged: boolean; context?: FileLinkContext; browserUrl: string };
 const threadPanels = new Map<string, ThreadPanel>();
 const teams = new Map<string, TeamSnapshot | null>();
+const legacyRemoteTeamNotices = new Set<string>();
 let architectView: ArchitectView | undefined;
 let architectLoading: Promise<ArchitectView> | undefined;
 let architectSetupCleanup: (() => void) | undefined;
@@ -235,7 +236,15 @@ function onArchitect(team: TeamEvent): void {
 async function loadTeam(id: string): Promise<TeamSnapshot | null> {
   const known = teams.has(id), before = teams.get(id);
   // A task on another computer shows the team its host runs; older hosts have none to show.
-  const loaded = state.sessions.find(task => task.id === id)?.remoteDevice ? await call<TeamSnapshot | null>('remote_team', { sessionId: id }).catch(() => null) : await call<TeamSnapshot | null>('architect_get', { sessionId: id });
+  const loaded = state.sessions.find(task => task.id === id)?.remoteDevice ? await call<TeamSnapshot | null>('remote_team', { sessionId: id }).catch(error => {
+    // An older host can run a task without supporting remote team visibility.
+    if (errorText(error).includes('Team workers are not available on this host version.') && id === state.sessionId && !legacyRemoteTeamNotices.has(id)) {
+      legacyRemoteTeamNotices.add(id);
+      if (legacyRemoteTeamNotices.size > 64) legacyRemoteTeamNotices.delete(legacyRemoteTeamNotices.values().next().value!);
+      notify('Team workers are not available on this host version. The remote task is still available.');
+    }
+    return null;
+  }) : await call<TeamSnapshot | null>('architect_get', { sessionId: id });
   if (deletedSessions.has(id)) return null;
   // An update or a removal that arrived during the fetch is newer than this snapshot.
   if (teams.has(id) !== known || teams.get(id) !== before) return teams.get(id) ?? null;

@@ -497,7 +497,7 @@ where
             .max()
     };
     while !backward && pages.len() < WORKER_PAGES && pages.last().is_some_and(|page| page["hasMore"] == true) {
-        let Some(after) = pages.last().and_then(|page| page_max_id(page)) else { break };
+        let Some(after) = pages.last().and_then(&page_max_id) else { break };
         let next = ask("afterId", json!(after)).await?;
         // Older hosts may replay an unchanged page while still claiming hasMore.
         // Stop instead of requesting the same cursor for the entire page budget.

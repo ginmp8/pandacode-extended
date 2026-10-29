@@ -763,7 +763,11 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     }
     progress.report("starting", None, None);
     // The caller mirrors the task from its first event.
-    super::host::follow(app, from, authenticated_key, &task.id)?;
+    if let Err(error) = super::host::follow(app, from, authenticated_key, &task.id) {
+        // No agent has been launched yet; discard the newly created task on a failed subscription.
+        let _ = crate::task_deletion::delete_state(&state, &task.id);
+        return Err(error);
+    }
     crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await?;
     use tauri::Emitter;
     let _ = app.emit("sessions-changed", ());

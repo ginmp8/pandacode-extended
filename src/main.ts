@@ -4849,7 +4849,8 @@ function visibleSidebarRows(): HTMLElement[] {
 /** ⌘1…⌘9 open the Nth visible task, ⌘⇧[ and ⌘⇧] the previous and next, / filters, ⌘Z undoes. */
 function sidebarShortcut(event: KeyboardEvent): boolean {
   const command = event.metaKey || event.ctrlKey, target = event.target as HTMLElement;
-  const typing = target.matches('input, textarea, select, [contenteditable="true"]');
+  const typing = target.isContentEditable || Boolean(target.closest('input, textarea, select, [role="textbox"]'));
+  if (event.isComposing) return false;
   if (event.key === 'Escape' && target.id === 'sidebar-filter') {
     event.preventDefault();
     if ((target as HTMLInputElement).value) { state.query = ''; renderNavigation(); } else target.blur();

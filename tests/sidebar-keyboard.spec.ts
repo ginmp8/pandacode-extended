@@ -140,3 +140,24 @@ test('in the sort menu ↓/↑ step over the per-section row, ←/→ move along
   await expect(focused).toHaveCSS('box-shadow', /0px 0px 0px 1px inset/);
   expect(await focused.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
 });
+
+test('global shortcuts ignore nested editable content and IME composition', async ({ page }) => {
+  await open(page);
+  const result = await page.evaluate(() => {
+    const editor = document.createElement('div');
+    editor.contentEditable = 'true';
+    const nested = document.createElement('span');
+    nested.textContent = 'Write here';
+    editor.append(nested);
+    document.body.append(editor);
+    editor.focus();
+    const slash = new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+    nested.dispatchEvent(slash);
+    const composing = new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true, isComposing: true });
+    document.body.dispatchEvent(composing);
+    const focusStolen = document.activeElement?.id === 'sidebar-filter';
+    editor.remove();
+    return { nestedPrevented: slash.defaultPrevented, composingPrevented: composing.defaultPrevented, focusStolen };
+  });
+  expect(result).toEqual({ nestedPrevented: false, composingPrevented: false, focusStolen: false });
+});

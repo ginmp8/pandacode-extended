@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sidebarMenuChoiceIsCurrent } from '../src/sidebar-menu-state.ts';
+import { sidebarMenuChoiceIsCurrent, sidebarRowCanReorder } from '../src/sidebar-menu-state.ts';
 
 const opened = { pinned: false, stage: 'review', unread: true };
 
@@ -27,4 +27,13 @@ test('unrelated field updates do not invalidate independent menu choices', () =>
   assert.equal(sidebarMenuChoiceIsCurrent('pin', opened, { ...opened, stage: 'completed' }), true);
   assert.equal(sidebarMenuChoiceIsCurrent('stage', opened, { ...opened, unread: false }), true);
   assert.equal(sidebarMenuChoiceIsCurrent('unread', opened, { ...opened, pinned: true }), true);
+});
+
+test('a stale reorder menu cannot modify automatically ordered or non-draggable rows', () => {
+  assert.equal(sidebarRowCanReorder('all', true), true);
+  assert.equal(sidebarRowCanReorder('chats', true), true);
+  assert.equal(sidebarRowCanReorder('all', false), false);
+  for (const group of ['active', 'review', 'completed', undefined]) {
+    assert.equal(sidebarRowCanReorder(group, true), false, String(group));
+  }
 });

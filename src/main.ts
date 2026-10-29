@@ -3,7 +3,7 @@ import { bindThreadReordering, syncRovingFocus, threadGroupRows } from './thread
 import { PROJECT_LIMIT, readCollapsed, shownTasks } from './sidebar-tree';
 import { COLLAPSED_SECTIONS_KEY, COMPLETED_OPEN_KEY, UNREVIEWED_KEY, readOpen, sectionOf, sidebarSections, type HeldSection } from './sidebar-sections';
 import { PER_PROJECT, PROJECT_ORDER_KEY, SORT_KEY, compareManual, matchesFilter, readProjectOrder, readSort, taskComparator, type SidebarSort } from './sidebar-sort';
-import { sidebarMenuChoiceIsCurrent } from './sidebar-menu-state';
+import { sidebarMenuChoiceIsCurrent, sidebarRowCanReorder } from './sidebar-menu-state';
 import './styles.css';
 import './model-picker.css';
 import './smooth.css';
@@ -4754,7 +4754,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
     : isRunning(id) ? 'Stop the agent before deleting this chat.'
       : finishingStreams.has(id) ? 'Wait for the agent to finish before deleting this chat.' : undefined;
   const group = anchor.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup ?? '';
-  const movable = !['active', 'review', 'completed'].includes(group);
+  const movable = sidebarRowCanReorder(group, anchor.draggable);
   const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id);
   const openedStage = taskStage(task), openedPinned = Boolean(task.pinned), done = openedStage === 'completed';
   // Reuse the native, authorized project chooser only for the selected, unstarted local task.
@@ -4809,9 +4809,10 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
       await navigator.clipboard.writeText(choice === 'copy-branch' ? branch : choice === 'copy-path' ? path : id);
       notify(choice === 'copy-branch' ? 'Branch name copied' : choice === 'copy-path' ? 'Path copied' : 'Task ID copied'); return;
     }
-    // Resolve the current list after an agent activity change or project filter.
+    // A task can enter an automatically sorted section while this menu is open.
+    if (choice !== 'up' && choice !== 'down') return;
     const row = $('#navigation').querySelector<HTMLElement>(`.task-item[data-id="${CSS.escape(id)}"]`);
-    if (!row) return;
+    if (!row || !sidebarRowCanReorder(row.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup, row.draggable)) return;
     const current = threadGroupRows(row).map(item => item.dataset.id!), from = current.indexOf(id);
     const to = from + (choice === 'up' ? -1 : 1);
     if (from >= 0 && to >= 0 && to < current.length) {

@@ -9,3 +9,8 @@ export function sidebarMenuChoiceIsCurrent(choice: SidebarMenuChoice, opened: Si
   if (choice === 'stage') return opened.stage === current.stage;
   return opened.unread === current.unread;
 }
+
+/** A task may move to an automatically ordered section while its menu is open. */
+export function sidebarRowCanReorder(group: string | undefined, draggable: boolean): boolean {
+  return draggable && group !== undefined && group !== '' && !['active', 'review', 'completed'].includes(group);
+}

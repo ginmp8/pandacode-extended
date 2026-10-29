@@ -885,7 +885,7 @@ mod tests {
         let owned = remote_worktree(&root, "main").unwrap();
         state.store.lock().unwrap().attach_worktree(&task, &owned.path, &owned.branch).unwrap();
         assert!(owned.path.exists());
-        assert_eq!(rollback_created_start(&state, &task, &root, Some(&owned), "Denied.".into()), "Denied.");
+        assert_eq!(follow_created_start(&state, &task, &root, Some(&owned), || Err("Denied.".into())), Err("Denied.".into()));
         assert!(!owned.path.exists(), "only this start's new checkout is removed");
         let store = state.store.lock().unwrap();
         assert!(store.session(&task).is_err());

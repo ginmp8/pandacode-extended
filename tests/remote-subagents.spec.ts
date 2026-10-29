@@ -51,6 +51,7 @@ test('a remote team and its saved subagents remain visible after a task switch',
   await expect(workerPanel.locator('.architect-worker-row')).toHaveCount(2);
   await expect(workerPanel.locator('.architect-panel-controls')).toBeHidden();
   await expect(workerPanel.locator('.team-messages')).toHaveCount(0);
+  await workerPanel.getByRole('button', { name: 'Close workers' }).click();
 
   // Saved child events must remain associated with the mirrored task, not the
   // task that was selected while the host sent the original event.

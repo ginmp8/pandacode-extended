@@ -191,6 +191,16 @@ pub(crate) struct PendingStart {
     cancelling: bool,
 }
 
+/// Removes an in-flight start only when the async result belongs to that attempt.
+/// An older reply cannot remove a newer retry using the same local task id.
+fn take_pending_start(starts: &mut HashMap<String, PendingStart>, local: &str, expected_start_id: &str) -> Option<PendingStart> {
+    if starts.get(local).is_some_and(|start| start.start_id == expected_start_id) {
+        starts.remove(local)
+    } else {
+        None
+    }
+}
+
 /// The journal entry (and live frame) of a run end.
 const RUN_END: &str = "run.finished";
 
@@ -1441,9 +1451,13 @@ async fn resume_start(app: tauri::AppHandle, local: String) {
     let deadline = Instant::now() + START_TIMEOUT;
     // The host can't cancel (an older one): follow the start instead, stopping it once made.
     let mut uncancellable = false;
+    let mut claimed_start_id: Option<String> = None;
     loop {
         let start = remote(&app).lock().viewer.starts.get(&local).map(|start| (start.device.clone(), start.start_id.clone(), start.created, start.cancelling));
         let Some((device, start_id, created, cancelling)) = start else { return };
+        // This recovery loop belongs to one attempt; it cannot adopt a replacement retry.
+        if claimed_start_id.as_ref().is_some_and(|id| id != &start_id) { return; }
+        claimed_start_id.get_or_insert_with(|| start_id.clone());
         let state = app.state::<AppState>();
         // Stopped while the host could not be reached: ask it again to cancel.
         if cancelling && !uncancellable {
@@ -1481,14 +1495,23 @@ async fn resume_start(app: tauri::AppHandle, local: String) {
                 continue;
             }
             StartState::Unreachable => {
-                if let Some(start) = remote(&app).lock().viewer.starts.get_mut(&local) {
-                    start.busy = false;
-                }
+                let current = {
+                    let state = remote(&app);
+                    let mut inner = state.lock();
+                    if let Some(start) = inner.viewer.starts.get_mut(&local).filter(|start| start.start_id == start_id) {
+                        start.busy = false;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !current { return; }
                 waiting_for(&app, &device, &start_id, None);
                 return;
             }
             StartState::Done(session, note) => {
-                let stop_now = remote(&app).lock().viewer.starts.remove(&local).is_some_and(|start| start.cancelling);
+                let Some(current) = take_pending_start(&mut remote(&app).lock().viewer.starts, &local, &start_id) else { return };
+                let stop_now = current.cancelling;
                 if let Err(error) = linked(&app, &state, &local, &session, stop_now) {
                     eprintln!("PandaCode Connect: could not link a remote task: {error}");
                 }
@@ -1498,7 +1521,7 @@ async fn resume_start(app: tauri::AppHandle, local: String) {
                 }
             }
             StartState::Failed(error) => {
-                remote(&app).lock().viewer.starts.remove(&local);
+                if take_pending_start(&mut remote(&app).lock().viewer.starts, &local, &start_id).is_none() { return; }
                 abandon(&state, &local, created);
                 super::diagnostics::record("start.failed", error.chars().take(200).collect::<String>());
                 let _ = app.emit("remote://start-progress", json!({"deviceId": device, "startId": start_id, "repo": null, "stage": "error", "percent": null, "detail": error}));
@@ -1843,6 +1866,26 @@ mod tests {
         let task = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
         store.db.execute("UPDATE sessions SET remote_device='host',remote_session='h1' WHERE id=?1", [&task.id]).unwrap();
         (store, task.id)
+    }
+
+    #[test]
+    fn a_late_start_status_reply_cannot_remove_a_newer_retry() {
+        let pending = |id: &str| PendingStart {
+            device: "host".into(),
+            start_id: id.into(),
+            created: false,
+            cancel: Arc::new(Notify::new()),
+            busy: true,
+            cancelling: false,
+        };
+        let mut starts = HashMap::new();
+        starts.insert("draft".to_owned(), pending("old-start"));
+        // The old task.startStatus request is still in flight when a retry replaces it.
+        starts.insert("draft".to_owned(), pending("new-start"));
+        assert!(take_pending_start(&mut starts, "draft", "old-start").is_none());
+        assert_eq!(starts.get("draft").unwrap().start_id, "new-start");
+        assert_eq!(take_pending_start(&mut starts, "draft", "new-start").unwrap().start_id, "new-start");
+        assert!(!starts.contains_key("draft"));
     }
 
     #[test]

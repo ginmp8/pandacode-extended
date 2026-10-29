@@ -91,12 +91,16 @@ pub(crate) fn route_recipients(members: &[String], lead: Option<&str>, requested
     } else {
         requested.to_vec()
     };
-    if chosen.len() > 2 { return Err("Mention up to two bots in one post.".into()); }
+    // A repeated mention is still one recipient, but bound raw input before deduplication.
+    if chosen.len() > 64 { return Err("Mention up to two bots in one post.".into()); }
     let mut seen = HashSet::new();
     let mut recipients = Vec::new();
     for id in chosen {
         if !members.contains(&id) { return Err("Choose bots that belong to this channel.".into()); }
-        if seen.insert(id.clone()) { recipients.push(id); }
+        if seen.insert(id.clone()) {
+            if recipients.len() == 2 { return Err("Mention up to two bots in one post.".into()); }
+            recipients.push(id);
+        }
     }
     if recipients.is_empty() { return Err("Choose a channel member to assign this post.".into()); }
     Ok(recipients)

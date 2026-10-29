@@ -1872,6 +1872,8 @@ fn shared_channel_routing_uses_lead_and_limits_mentions_to_two_members() {
     let members = vec!["scout".to_owned(), "writer".to_owned(), "ledger".to_owned()];
     assert_eq!(shared_channels::route_recipients(&members, Some("scout"), &[]).unwrap(), ["scout"]);
     assert_eq!(shared_channels::route_recipients(&members, Some("scout"), &["writer".into(), "ledger".into()]).unwrap(), ["writer", "ledger"]);
+    assert_eq!(shared_channels::route_recipients(&members, Some("scout"), &["scout".into(), "scout".into(), "writer".into()]).unwrap(), ["scout", "writer"]);
+    assert!(shared_channels::route_recipients(&members, Some("scout"), &vec!["scout".to_owned(); 65]).is_err());
     assert!(shared_channels::route_recipients(&members, Some("scout"), &["scout".into(), "writer".into(), "ledger".into()]).is_err());
     assert!(shared_channels::route_recipients(&members, Some("missing"), &[]).is_err());
     assert!(shared_channels::route_recipients(&members, Some("scout"), &["outsider".into()]).is_err());

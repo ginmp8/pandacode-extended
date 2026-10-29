@@ -227,6 +227,52 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       host.emit('bot-shared-channel-changed', { channelId: channel.id });
       break;
     }
+    case 'bot_shared_channel_post': {
+      const channel = sharedChannel(String(args.channelId));
+      if (channel.archived) throw new Error('This channel is deleted.');
+      const text = String(args.text ?? '').trim();
+      if (!text || [...text].length > 16384) throw new Error('Write a channel message under 16,384 characters.');
+      const mentions = args.recipients ?? [];
+      if (!Array.isArray(mentions) || mentions.length > 2 || mentions.some(id => typeof id !== 'string' || !channel.memberIds.includes(id))) throw new Error('Choose valid channel recipients.');
+      const recipients: string[] = mentions.length ? [...new Set<string>(mentions)] : channel.leadBotId ? [channel.leadBotId] : [];
+      if (!recipients.length) throw new Error('Add a channel member first.');
+      const id = crypto.randomUUID(), createdAt = Date.now();
+      const failed = text.includes('[post-fails]');
+      channel.messages.push({ id, kind: 'user', authorBotId: null, text,
+        status: failed ? 'Failed' : 'In progress', createdAt });
+      for (const botId of recipients) {
+        channel.messages.push({ id: crypto.randomUUID(), kind: 'assigned', authorBotId: botId, text: '',
+          status: failed ? 'Failed' : 'In progress', createdAt });
+      }
+      if (!failed) channel.activeBotIds = [...new Set([...channel.activeBotIds, ...recipients])];
+      channel.updatedAt = createdAt;
+      host.emit('bot-shared-channel-changed', { channelId: channel.id });
+      break;
+    }
+    case 'bot_shared_channel_stop': {
+      const channel = sharedChannel(String(args.channelId));
+      stopChannelWork(channel);
+      channel.updatedAt = Date.now();
+      host.emit('bot-shared-channel-changed', { channelId: channel.id });
+      break;
+    }
+    case 'bot_shared_channel_continue':
+    case 'bot_shared_channel_reassign': {
+      const channel = sharedChannel(String(args.channelId));
+      if (channel.archived) throw new Error('This channel is deleted.');
+      const message = channel.messages.find(item => item.id === args.messageId && item.kind === 'user');
+      if (!message || (message.status !== 'Failed' && message.status !== 'Stopped')) throw new Error('Only stopped or failed channel posts can resume.');
+      const botId = command === 'bot_shared_channel_reassign' ? String(args.botId) : channel.leadBotId;
+      if (!botId || !channel.memberIds.includes(botId)) throw new Error('Select an active channel member.');
+      const createdAt = Date.now();
+      message.status = 'In progress';
+      channel.messages.push({ id: crypto.randomUUID(), kind: 'assigned', authorBotId: botId, text: '',
+        status: 'In progress', createdAt });
+      channel.activeBotIds = [...new Set([...channel.activeBotIds, botId])];
+      channel.updatedAt = createdAt;
+      host.emit('bot-shared-channel-changed', { channelId: channel.id });
+      break;
+    }
     case 'bot_desktop_thread': { const entry = store(args.botId); const known = entry.threads.length; result = (await desktopThread(host, entry)).sessionId; if (entry.threads.length !== known) { host.emit('sessions-changed', null); changed(); } break; }
     case 'bot_project_ids': result = [...bots.values()].map(entry => entry.bot.projectId); break;
     case 'bot_detail': {

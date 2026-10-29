@@ -1080,6 +1080,44 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_dirty_or_different_branch_checkout_is_never_modified_by_fallback_checks() {
+        let base = temp_base("fallback-preservation");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "initial"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = clone.canonicalize().unwrap();
+        let initial_head = git(&root, &["rev-parse", "HEAD"], GIT).unwrap();
+
+        let untracked = root.join("local-notes.txt");
+        std::fs::write(&untracked, "preserve these local notes").unwrap();
+        let dirty = ready_in_place_checked(&root, "project", "main", false, || Err("unexpected checkout".into())).unwrap().unwrap();
+        assert!(dirty.contains("uncommitted changes"), "{dirty}");
+        let made = remote_worktree(&root, "main").unwrap();
+        assert!(made.path.exists() && made.path != root, "fallback owns a different worktree");
+        assert_eq!(std::fs::read_to_string(&untracked).unwrap(), "preserve these local notes");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"], GIT).unwrap(), initial_head);
+        discard(&root, &made);
+        std::fs::remove_file(&untracked).unwrap();
+
+        git_in(&root, &["switch", "-q", "-c", "topic"]);
+        let other_branch = ready_in_place_checked(&root, "project", "main", false, || Err("unexpected checkout".into())).unwrap().unwrap();
+        assert!(other_branch.contains("on topic, not main"), "{other_branch}");
+        assert_eq!(git(&root, &["branch", "--show-current"], GIT).unwrap(), "topic");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"], GIT).unwrap(), initial_head);
+
+        git_in(&root, &["switch", "-q", "main"]);
+        let busy = ready_in_place_checked(&root, "project", "main", true, || Err("unexpected checkout".into())).unwrap().unwrap();
+        assert!(busy.contains("agent working"), "{busy}");
+        assert_eq!(git(&root, &["branch", "--show-current"], GIT).unwrap(), "main");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"], GIT).unwrap(), initial_head);
+        assert!(git(&root, &["status", "--porcelain"], GIT).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn only_a_clean_idle_checkout_on_the_branch_runs_in_place() {
         assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", false, false), None);
         assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, false).unwrap(), "Studio has uncommitted changes in orbit.");

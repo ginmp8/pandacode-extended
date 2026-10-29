@@ -137,6 +137,7 @@ test.describe('sidebar sections', () => {
   test('the row tick settles a finished thread, Undo brings it back, and the checked tick reopens it', async ({ page }) => {
     await open(page);
     await toggle(page).click();
+    const originalOrder = await ids(page, 'review');
     await row(page, 'sections-review-1').hover();
     await action(page, 'Settle: Fix the flaky filter test').click();
     await expect(section(page, 'completed').locator('.task-item').first()).toHaveAttribute('data-id', 'sections-review-1');
@@ -148,6 +149,7 @@ test.describe('sidebar sections', () => {
     // Undo restores the stage and the unread mark, so it is back in Finished, still unread.
     await expect(section(page, 'review').locator('[data-id="sections-review-1"]')).toHaveCount(1);
     await expect(row(page, 'sections-review-1')).toHaveClass(/\bunread\b/);
+    await expect.poll(() => ids(page, 'review')).toEqual(originalOrder);
     await row(page, 'sections-review-2').hover();
     await action(page, 'Settle: Write the release notes').click();
     await expect(section(page, 'completed').locator('.task-item').first()).toHaveAttribute('data-id', 'sections-review-2');

@@ -1793,8 +1793,9 @@ document.addEventListener('click', event => {
   const target = disclosureTarget(details);
   if (!target) return;
   const sessionId = details.closest<HTMLElement>('#transcript')?.dataset.sessionId ?? '';
-  // A microtask runs after the native toggle without depending on paused clocks.
-  queueMicrotask(() => rememberDisclosure(sessionId, target.kind, target.key, details.open));
+  // Native summary toggling follows click dispatch; the microtask can observe
+  // the previous state. Record the requested post-click state immediately.
+  rememberDisclosure(sessionId, target.kind, target.key, !details.open);
 }, true);
 
 function visibleMessages(): Message[] {

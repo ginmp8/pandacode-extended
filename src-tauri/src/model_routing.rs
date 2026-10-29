@@ -639,8 +639,8 @@ mod tests {
         // Reject malformed and oversized catalog entries before constructing a router pool.
         let custom = |model: &str, name: &str| PoolEntry { provider: "claude".into(), model: model.into(), name: name.into() };
         assert!(validate_pool(&[custom("", "Model")]).is_err());
-        assert!(validate_pool(&[custom("model\\0spoof", "Model")]).is_err());
-        assert!(validate_pool(&[custom("model", "Name\\0spoof")]).is_err());
+        assert!(validate_pool(&[custom("model\0spoof", "Model")]).is_err());
+        assert!(validate_pool(&[custom("model", "Name\0spoof")]).is_err());
         assert!(validate_pool(&[custom(&"x".repeat(201), "Model")]).is_err());
         assert!(validate_pool(&[custom("model", &"x".repeat(201))]).is_err());
         assert!(validate_pool(&[custom(&"x".repeat(200), &"x".repeat(200))]).is_ok());

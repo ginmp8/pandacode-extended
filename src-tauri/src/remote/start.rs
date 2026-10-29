@@ -541,12 +541,12 @@ fn busy_in_place(state: &AppState, project_id: &str) -> Result<bool> {
 /// A local run can start after the remote reservation's first busy check.
 /// Before launching the remote agent, fall back to an owned worktree rather than
 /// sharing that local run's checkout. A failed recheck also fails closed.
-fn late_busy_worktree_note(reserved_main: bool, busy: Result<bool>, project: &str) -> Option<String> {
+fn late_busy_worktree_note(reserved_main: bool, busy: impl FnOnce() -> Result<bool>, project: &str) -> Option<String> {
     if !reserved_main {
         return None;
     }
     let host = super::config::device_name();
-    let reason = match busy {
+    let reason = match busy() {
         Ok(false) => return None,
         Ok(true) => format!("{host} has an agent working in {project}."),
         Err(_) => format!("{host} could not confirm {project} is idle."),
@@ -843,7 +843,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     }
     // The reservation excludes other remote starts, but a local run may have
     // registered an agent since prepare(). Do not launch into its main checkout.
-    if let Some(reason) = late_busy_worktree_note(reserved.is_some(), busy_in_place(&state, &project.id), &project.name) {
+    if let Some(reason) = late_busy_worktree_note(reserved.is_some(), || busy_in_place(&state, &project.id), &project.name) {
         note = Some(reason);
     }
     if worktree || made.is_some() || note.is_some() {
@@ -1412,12 +1412,12 @@ mod tests {
     /// and a local agent there turns every one away.
     #[test]
     fn a_late_local_agent_causes_safe_worktree_fallback() {
-        let busy = late_busy_worktree_note(true, Ok(true), "orbit").unwrap();
+        let busy = late_busy_worktree_note(true, || Ok(true), "orbit").unwrap();
         assert!(busy.starts_with("Started in a worktree: "));
         assert!(busy.ends_with("has an agent working in orbit."));
-        assert!(late_busy_worktree_note(true, Ok(false), "orbit").is_none());
-        assert!(late_busy_worktree_note(false, Ok(true), "orbit").is_none(), "explicit worktrees do not need a second busy decision");
-        let unknown = late_busy_worktree_note(true, Err("store unavailable".into()), "orbit").unwrap();
+        assert!(late_busy_worktree_note(true, || Ok(false), "orbit").is_none());
+        assert!(late_busy_worktree_note(false, || panic!("no idle-check lock without a main-checkout reservation"), "orbit").is_none(), "explicit worktrees do not need a second busy decision");
+        let unknown = late_busy_worktree_note(true, || Err("store unavailable".into()), "orbit").unwrap();
         assert!(unknown.contains("could not confirm orbit is idle"), "recheck errors must not select the main checkout");
         assert!(!unknown.contains("store unavailable"), "internal errors stay off the remote viewer");
     }

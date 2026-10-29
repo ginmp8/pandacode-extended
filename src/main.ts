@@ -4356,6 +4356,7 @@ function showOpenProject(forTask = false): void {
 async function changeTaskProject(projectId: string): Promise<void> {
   const selected = session();
   if (!selected || !newTaskView() || configuringSessions.has(selected.id)) throw new Error('A project can only be changed before starting the task.');
+  if (selected.remoteDevice) throw new Error('A remote task stays in its host project.');
   if (selected.worktreePath && selected.projectId !== projectId) throw new Error('A worktree task stays with its original project. Start a new task to use another project.');
   if (selected.projectId === projectId) { document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return; }
   const generation = state.generation;
@@ -4384,7 +4385,7 @@ async function changeTaskProject(projectId: string): Promise<void> {
 async function showProjectPicker(anchor: HTMLElement): Promise<void> {
   if (pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
   if (projectPickerCleanup) { closeProjectPicker(); return; }
-  const selected = session(); if (!selected || selected.worktreePath || !newTaskView() || configuringSessions.has(selected.id)) return;
+  const selected = session(); if (!selected || selected.remoteDevice || selected.worktreePath || !newTaskView() || configuringSessions.has(selected.id)) return;
   closeModelPicker();
   closeChoiceMenu();
   const { epoch, release } = beginMenuOpen(anchor);

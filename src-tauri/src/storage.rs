@@ -1354,6 +1354,11 @@ impl Store {
             self.project(project_id)?;
         }
         let current = self.session(sid)?;
+        // A mirrored task's project belongs to its host, even before its first message.
+        // Do not let a local configure request rehome its identity or change the harness.
+        if current.remote_device.is_some() && project_id.is_some_and(|id| id != current.project_id.as_str()) {
+            return Err("Remote task project is owned by its host.".into());
+        }
         // Queue the handoff and replace the native context atomically. Keep the
         // project fixed once a conversation exists, but let another harness continue it.
         let switching = current.provider != provider;
@@ -3598,6 +3603,25 @@ mod tests {
                 "Existing tasks can still change models within their project"
             );
         }
+    }
+
+    #[test]
+    fn configure_remote_task_project_change_is_rejected_without_mutation() {
+        let root = std::env::temp_dir().join(format!("pandacode-remote-project-{}", id()));
+        std::fs::create_dir_all(root.join("destination")).unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let source = store.add_project(&root).unwrap();
+        let destination = store.add_project(&root.join("destination")).unwrap();
+        let task = store.create_session(&source.id, "claude", "sonnet", "auto").unwrap();
+        store.db.execute(
+            "UPDATE sessions SET remote_device=?2,remote_session=?3 WHERE id=?1",
+            params![&task.id, "device-1", "remote-session-1"],
+        ).unwrap();
+        let before = serde_json::to_value(store.session(&task.id).unwrap()).unwrap();
+        let error = store.configure(&task.id, "codex", "default", Some(&destination.id)).unwrap_err();
+        assert!(error.contains("Remote task project"), "{error}");
+        assert_eq!(serde_json::to_value(store.session(&task.id).unwrap()).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

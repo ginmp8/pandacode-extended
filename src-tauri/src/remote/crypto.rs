@@ -110,6 +110,10 @@ fn unpack(plain: Vec<u8>) -> crate::Result<Vec<u8>> {
     if plain.first() != Some(&PACKED) {
         return Ok(plain);
     }
+    // The marker alone is not a raw DEFLATE stream; do not accept an empty decoded frame.
+    if plain.len() == 1 {
+        return Err("Unreadable frame.".into());
+    }
     let mut out = Vec::new();
     flate2::read::DeflateDecoder::new(&plain[1..]).take(MAX_UNPACKED + 1).read_to_end(&mut out).map_err(|_| "Unreadable frame.")?;
     if out.len() as u64 > MAX_UNPACKED {
@@ -184,6 +188,7 @@ mod tests {
         let key = [7u8; 32];
         assert_eq!(open(&key, "a", "b", &seal(&key, "a", "b", &bomb).unwrap()).unwrap_err(), "A frame was too large.");
         assert!(open(&key, "a", "b", &seal(&key, "a", "b", b"z not deflate").unwrap()).is_err());
+        assert_eq!(open(&key, "a", "b", &seal(&key, "a", "b", b"z").unwrap()).unwrap_err(), "Unreadable frame.");
         // The biggest page a host sends still opens.
         let page = vec![b' '; super::super::host::PACKED_PAGE_MAX + 64 * 1024];
         assert_eq!(open_packed(&key, "a", "b", &seal(&key, "a", "b", &pack(&page)).unwrap()).unwrap(), (page, true));

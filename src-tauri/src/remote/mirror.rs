@@ -1762,10 +1762,12 @@ pub async fn remote_start_task(
             let kept = {
                 let state = remote(&app);
                 let mut inner = state.lock();
-                inner.viewer.starts.get_mut(&local).map(|start| {
-                    start.busy = false;
-                    start.start_id.clone()
-                })
+                inner.viewer.starts.get_mut(&local)
+                    .filter(|start| Some(start.start_id.as_str()) == start_id.as_deref())
+                    .map(|start| {
+                        start.busy = false;
+                        start.start_id.clone()
+                    })
             };
             if let Some(start_id) = kept {
                 waiting_for(&app, &device_id, &start_id, Some(&repo));
@@ -1774,7 +1776,17 @@ pub async fn remote_start_task(
             eprintln!("PandaCode Connect: lost the reply to a start ({error}); asking the host again when it is back.");
         }
         started => {
-            let stop_now = remote(&app).lock().viewer.starts.remove(&local).is_some_and(|start| start.cancelling);
+            // A late task.start reply must not replace or remove another attempt's mirror.
+            let pending = start_id.as_deref().and_then(|expected| {
+                take_pending_start(&mut remote(&app).lock().viewer.starts, &local, expected)
+            });
+            if start_id.is_some() && pending.is_none() {
+                return match started {
+                    Err(error) => Err(error),
+                    Ok(_) => Err("That remote start was replaced or cancelled.".into()),
+                };
+            }
+            let stop_now = pending.is_some_and(|start| start.cancelling);
             match started.and_then(|session| linked(&app, &state, &local, &session, stop_now)) {
                 Ok(()) => {}
                 Err(error) => {

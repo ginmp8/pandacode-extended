@@ -167,6 +167,39 @@ test('a recovered start note is scoped to its waiting mirror and listeners are c
   expect(result.noteListeners).toBe(0);
 });
 
+
+test('a recovered host note arriving before the lost-reply result is retained', async ({ page }) => {
+  await newTask(page);
+  const result = await page.evaluate(async () => {
+    const progress = await import('/src/remote-progress.ts' as string);
+    const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
+    let started!: () => void;
+    let resolveReply!: (value: { sessionId: string }) => void;
+    let startId = '';
+    const called = new Promise<void>(resolve => { started = resolve; });
+    const reply = new Promise<{ sessionId: string }>(resolve => { resolveReply = resolve; });
+    const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, id => {
+      startId = id;
+      started();
+      return reply;
+    });
+    await called;
+    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId, stage: 'starting', detail: 'Waiting for Studio iMac…' });
+    const note = 'Started in a worktree: Studio iMac has an agent working in orbit.';
+    progress.onRemoteStartNote({ sessionId, note });
+    const early = progress.remoteStart(sessionId)?.note ?? null;
+    resolveReply({ sessionId });
+    const linked = await Promise.race([
+      completion,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Early start note did not settle the waiting mirror')), 2000)),
+    ]);
+    return { early, linked, cleared: !progress.remoteStart(sessionId) };
+  });
+  expect(result.early).toBe('Started in a worktree: Studio iMac has an agent working in orbit.');
+  expect(result.linked).toEqual({ sessionId: expect.any(String), note: result.early });
+  expect(result.cleared).toBe(true);
+});
+
 for (const outcome of ['resolve', 'reject'] as const) {
   test(`a superseded start cannot update or clear its retry when the old request ${outcome}s`, async ({ page }) => {
     await newTask(page);

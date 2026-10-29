@@ -95,8 +95,11 @@ const waitingFor = (start: RemoteStart): boolean => start.stage === 'starting' &
 export function onRemoteStartNote(event: RemoteStartNote): void {
   if (!event || typeof event.sessionId !== 'string' || !event.sessionId || typeof event.note !== 'string' || !event.note.trim()) return;
   const start = starts.get(event.sessionId) ?? [...starts.values()].find(item => item.mirrorId === event.sessionId);
-  if (!start?.waiting || !waitingFor(start)) return;
+  if (!start || !waitingFor(start)) return;
+  // The link can race the lost-reply result. Remember an early note, but settle
+  // only once the waiting continuation has installed its own promise.
   start.note = event.note;
+  if (!start.waiting) return;
   // The host has linked this mirror. The result carries the note to sendRemote's
   // existing composer-note path, which survives the task selection/redraw.
   start.settle?.();
@@ -163,6 +166,8 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
       if (typeof mirror === 'string') entry.mirrorId = mirror;
       ended = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
       ended.catch(() => undefined);
+      // A linked host can publish its note before the lost-reply result resolves.
+      if (entry.note) entry.settle?.();
       await ended;
     }
     if (starts.get(sessionId) === entry) starts.delete(sessionId);

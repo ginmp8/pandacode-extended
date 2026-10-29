@@ -157,6 +157,23 @@ test.describe('sidebar sections', () => {
     await expect(section(page, 'review').locator('[data-id="sections-review-2"]')).toHaveCount(1);
   });
 
+  test('a stale Settle Undo cannot override a newer explicit Reopen', async ({ page }) => {
+    await open(page);
+    await toggle(page).click();
+    await row(page, 'sections-review-1').hover();
+    await action(page, 'Settle: Fix the flaky filter test').click();
+    await expect(section(page, 'completed').locator('[data-id="sections-review-1"]')).toHaveCount(1);
+
+    // Reopen is a newer explicit decision; the earlier Settle toast must not undo it.
+    await row(page, 'sections-review-1').hover();
+    await action(page, 'Reopen: Fix the flaky filter test').click();
+    await expect(section(page, 'review').locator('[data-id="sections-review-1"]')).toHaveCount(1);
+    await expect(page.locator('#toast').getByRole('button', { name: 'Undo', exact: true })).toBeVisible();
+    await page.locator('#toast').getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect(section(page, 'review').locator('[data-id="sections-review-1"]')).toHaveCount(1);
+    await expect(section(page, 'completed').locator('[data-id="sections-review-1"]')).toHaveCount(0);
+  });
+
   test('the open thread stays under the pointer when its own tick moves it to another section', async ({ page }) => {
     await open(page);
     await toggle(page).click();

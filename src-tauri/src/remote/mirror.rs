@@ -507,12 +507,15 @@ where
 /// `hasOlder`. An older host can't page backward, so its forward read never offers older
 /// messages, even when only the newest are kept.
 fn worker_page(pages: &[Value], backward: bool) -> Value {
-    let mut messages: Vec<Value> = Vec::new();
-    for message in pages.iter().flat_map(|page| page["messages"].as_array().cloned().unwrap_or_default()) {
-        if messages.last().and_then(|last| last["id"].as_i64()) < message["id"].as_i64() {
-            messages.push(message);
-        }
-    }
+    // Older hosts and reconnect/replay paths may overlap or reorder pages.
+    // Sort before deduplicating so a later page cannot hide an earlier valid row.
+    let mut messages: Vec<Value> = pages
+        .iter()
+        .flat_map(|page| page["messages"].as_array().cloned().unwrap_or_default())
+        .filter(|message| message["id"].as_i64().is_some_and(|id| id > 0))
+        .collect();
+    messages.sort_by_key(|message| message["id"].as_i64().unwrap_or_default());
+    messages.dedup_by_key(|message| message["id"].as_i64().unwrap_or_default());
     let keep = messages.len().saturating_sub(WORKER_TAIL);
     let has_older = backward && (pages.first().is_some_and(|page| page["hasOlder"] == true) || keep > 0);
     json!({"messages": messages.split_off(keep), "hasOlder": has_older})
@@ -1939,6 +1942,33 @@ mod tests {
         let long: Vec<i64> = (1..=(WORKER_TAIL as i64 + 3)).collect();
         let legacy = worker_page(&[page(&long, false)], false);
         assert_eq!((ids(&legacy).len(), ids(&legacy)[0], legacy["hasOlder"].as_bool()), (WORKER_TAIL, 4, Some(false)), "an older host's read keeps the newest and offers nothing older it cannot page back to");
+    }
+
+    #[test]
+    fn replayed_worker_pages_keep_out_of_order_rows_once() {
+        // A replay can overlap a page and contain entries arriving out of order.
+        // Previously the first high ID caused lower, still-valid IDs to disappear.
+        let pages = [
+            json!({"tail": true, "hasOlder": true, "messages": [
+                {"id": 7, "content": "seven"},
+                {"id": 5, "content": "five"},
+                {"id": 6, "content": "six"}
+            ]}),
+            json!({"tail": true, "hasOlder": true, "messages": [
+                {"id": 6, "content": "stale duplicate"},
+                {"id": 8, "content": "eight"},
+                {"id": "invalid", "content": "ignore"}
+            ]}),
+        ];
+        let result = worker_page(&pages, true);
+        let rows = result["messages"].as_array().unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row["id"].as_i64().unwrap()).collect::<Vec<_>>(),
+            vec![5, 6, 7, 8],
+            "overlapping/reordered pages must preserve every valid host message once"
+        );
+        assert_eq!(rows[1]["content"], "six", "retain the first copy for a duplicate ID");
+        assert_eq!(result["hasOlder"], true, "replay cannot hide older transcript pages");
     }
 
     #[test]

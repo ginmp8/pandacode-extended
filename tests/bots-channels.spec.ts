@@ -29,6 +29,19 @@ test.describe('shared bot channels', () => {
     await expect(page.getByRole('dialog', { name: 'Channel settings' })).toBeVisible();
   });
 
+  test('prevents duplicate channel creation from rapid repeated submissions', async ({ page }) => {
+    await showBots(page);
+    await page.getByRole('button', { name: 'Add bot or channel' }).click();
+    await page.getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New channel' }).click();
+    const dialog = page.getByRole('dialog', { name: 'New channel' });
+    await dialog.getByRole('textbox', { name: 'Channel name' }).fill('double-create');
+    await dialog.locator('form').evaluate(form => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await expect(sidebar(page).getByRole('button', { name: '#double-create' })).toHaveCount(1);
+  });
+
   test('an empty channel explains how to start and an archived channel is preview only', async ({ page }) => {
     await showBots(page);
     await page.getByRole('button', { name: 'Add bot or channel' }).click();

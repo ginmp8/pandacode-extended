@@ -56,16 +56,21 @@ export function createChannelBody(bots: Bot[]): string {
 export function openCreateChannel(options: SharedChannelUiOptions): void {
   const dialog = options.modal('New channel', createChannelBody(options.bots), 'bot-shared-dialog');
   const form = dialog.querySelector<HTMLFormElement>('.bc-create-form')!;
+  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+  let creating = false;
   form.addEventListener('submit', event => {
     event.preventDefault();
     const data = new FormData(form), name = String(data.get('name') ?? '').trim().replace(/^#+/, '');
-    if (!name) return;
+    if (!name || creating) return;
+    creating = true;
+    if (submit) submit.disabled = true;
     const memberIds = [...form.querySelectorAll<HTMLInputElement>('input[name=member]:checked')].map(input => input.value);
     void options.call<SharedChannelSummary>('bot_shared_channel_create', { name, memberIds }).then(async channel => {
       await options.changed();
       options.closeModal();
       options.openChannel(channel.id);
-    }).catch(error => options.notify(error instanceof Error ? error.message : String(error)));
+    }).catch(error => options.notify(error instanceof Error ? error.message : String(error)))
+      .finally(() => { creating = false; if (submit?.isConnected) submit.disabled = false; });
   });
   dialog.querySelector('[data-shared-action="cancel"]')?.addEventListener('click', options.closeModal);
 }

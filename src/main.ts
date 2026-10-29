@@ -3,6 +3,7 @@ import { bindThreadReordering, syncRovingFocus, threadGroupRows } from './thread
 import { PROJECT_LIMIT, readCollapsed, shownTasks } from './sidebar-tree';
 import { COLLAPSED_SECTIONS_KEY, COMPLETED_OPEN_KEY, UNREVIEWED_KEY, readOpen, sectionOf, sidebarSections, type HeldSection } from './sidebar-sections';
 import { PER_PROJECT, PROJECT_ORDER_KEY, SORT_KEY, compareManual, matchesFilter, readProjectOrder, readSort, taskComparator, type SidebarSort } from './sidebar-sort';
+import { sidebarMenuChoiceIsCurrent } from './sidebar-menu-state';
 import './styles.css';
 import './model-picker.css';
 import './smooth.css';
@@ -4753,7 +4754,8 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
       : finishingStreams.has(id) ? 'Wait for the agent to finish before deleting this chat.' : undefined;
   const group = anchor.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup ?? '';
   const movable = !['active', 'review', 'completed'].includes(group);
-  const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id), done = taskStage(task) === 'completed';
+  const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id);
+  const openedStage = taskStage(task), openedPinned = task.pinned, done = openedStage === 'completed';
   // Reuse the native, authorized project chooser only for the selected, unstarted local task.
   const canMoveProject = id === state.sessionId && !busy && !task.remoteDevice && !task.worktreePath
     && !chatTask(task) && newTaskView() && userProjects().some(project => project.id !== task.projectId);
@@ -4777,6 +4779,15 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
     ...(chatTask(task) ? [{ id: 'delete-chat', label: 'Delete chat…', icon: 'trash', danger: true, disabled: deleteBlocked, description: deleteDescription }] : []),
   ], onSelect: async choice => {
     closeChoiceMenu();
+    // A background task update can make the menu's original action stale.
+    const current = state.sessions.find(item => item.id === id);
+    if ((choice === 'pin' || choice === 'stage' || choice === 'unread') &&
+        (!current || !sidebarMenuChoiceIsCurrent(choice,
+          { pinned: openedPinned, stage: openedStage, unread },
+          { pinned: current.pinned, stage: taskStage(current), unread: unreviewed?.has(id) ?? false }))) {
+      notify('Task changed. Reopen its actions.');
+      return;
+    }
     if (choice === 'pin') { run(pinTask(id)); return; }
     if (choice === 'delete-chat') {
       const current = state.sessions.find(item => item.id === id);

@@ -1579,7 +1579,7 @@ fn start_note(reply: &Value) -> Option<String> {
     reply["note"].as_str().map(|note| {
         // A peer host may return CR-only or Unicode line separators; never
         // expose a second line of a remote worktree explanation.
-        note.split(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+        note.split(['\n', '\r', '\u{2028}', '\u{2029}'])
             .next()
             .unwrap_or_default()
             .chars()

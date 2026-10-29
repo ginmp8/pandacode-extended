@@ -4880,8 +4880,8 @@ function sidebarShortcut(event: KeyboardEvent): boolean {
     if ((target as HTMLInputElement).value) { state.query = ''; renderNavigation(); } else target.blur();
     return true;
   }
-  // Never take keys meant for the prompt or any other field.
-  if (typing) return false;
+  // Never take sidebar shortcuts from an editor or an open dialog/choice menu.
+  if (typing || target.closest('[role="dialog"], dialog[open]')) return false;
   if (command && !event.shiftKey && !event.altKey && /^[1-9]$/.test(event.key)) {
     const row = visibleSidebarRows()[Number(event.key) - 1];
     if (row) { event.preventDefault(); run(selectSession(row.dataset.id!)); }

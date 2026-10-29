@@ -60,6 +60,19 @@ test('⌘1…9 open the nth task and ⌘⇧[ / ] step through tasks', async ({ p
   await expect(row(page, 'session-2')).toHaveAttribute('aria-current', 'page');
 });
 
+test('task jump shortcuts do not leave an open Sort and view dialog', async ({ page }) => {
+  await open(page);
+  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  await page.getByRole('button', { name: 'Sort and view', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Sort and view', exact: true });
+  await expect(dialog.locator('.choice-menu-option:focus')).toHaveCount(1);
+  await page.keyboard.press(`${mod}+2`);
+  await page.keyboard.press(`${mod}+Shift+BracketRight`);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.choice-menu-option:focus')).toHaveCount(1);
+  await expect(row(page, 'session-1')).toHaveAttribute('aria-current', 'page');
+});
+
 test('/ focuses the filter from the sidebar and ⌘Z undoes settling a task', async ({ page }) => {
   await open(page);
   await row(page, 'session-2').focus();

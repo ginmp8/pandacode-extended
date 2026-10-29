@@ -34,6 +34,7 @@ import { clearInbox, readInbox, saveInboxSoon } from './inbox-file.ts';
 import { decodeInbox, encodeInbox, type RestoredInbox } from '../store/inbox-cache.ts';
 import { attempt, configured, stopping, unanswered, unconfigured, unpaused, unstopping } from './optimistic.ts';
 import { newestPage, olderByAfterId, pageMessages, type Fetch } from './paging.ts';
+import { newestCutId } from './cut-recovery.ts';
 import type { Live } from '../store/reduce.ts';
 import type { AgentEvent, Bot, Changes, ConfigureParams, Device, Diff, MergeMethod, Message, MessagePage, Provider, ProviderModel, PullDetail, RunFinished, StartParams, SubscribeReply, TaskSummary, TasksList } from './types.ts';
 
@@ -908,7 +909,7 @@ function loadMessages(deviceId: string, sessionId: string, pages = MAX_PAGES, ba
   // thread is open, alone with a large budget; mergeMessages swaps it in. Still cut, or the call
   // fails: the cut copy stays and the next copy tries again (the catch-up itself succeeded).
   const uncut = async () => {
-    const id = state().messages[key]?.find(m => m.cut)?.id;
+    const id = newestCutId(state().messages[key]);
     if (!id || (background && !watched.get(deviceId)?.has(sessionId))) return;
     try {
       const reply = await fetchFor(deviceId, sessionId)({ afterId: id - 1, limit: 1, budget: WHOLE_BUDGET });

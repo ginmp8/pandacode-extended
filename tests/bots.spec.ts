@@ -473,6 +473,22 @@ test.describe('bots', () => {
     await expect(crumb(page)).toHaveCount(0);
   });
 
+  test('closing bot settings flushes a pending profile autosave without waiting for the debounce', async ({ page }) => {
+    await newBot(page, 'Quick Save');
+    await openSettings(page, undefined, 'Quick Save');
+    // Freeze the 600 ms debounce: closing the view must flush immediately,
+    // not rely on the old timer surviving dismissal or navigation.
+    await page.clock.pauseAt(new Date());
+    await panel(page, 'Quick Save').getByRole('textbox', { name: 'Title' }).fill('Saved on close');
+    await panel(page, 'Quick Save').getByRole('button', { name: 'Close dialog' }).click();
+    await expect(panel(page, 'Quick Save')).toBeHidden();
+    await expect.poll(() => page.evaluate(async () => {
+      const { invoke } = await import('/src/preview.ts');
+      const list = await invoke('bots_list', {}) as { name: string; role: string }[];
+      return list.find(bot => bot.name === 'Quick Save')?.role;
+    }), { timeout: 5000 }).toBe('Saved on close');
+  });
+
   test('Open chat in settings returns to the conversation', async ({ page }) => {
     await newBot(page);
     await showTasksView(page);

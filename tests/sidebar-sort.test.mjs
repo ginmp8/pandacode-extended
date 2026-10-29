@@ -104,3 +104,31 @@ test('filter searches a linked issue even when the task also has a pull request'
   assert.equal(matchesFilter(linked, 'keyboard'), true);
   assert.equal(matchesFilter(linked, 'speed #73'), true);
 });
+
+test('sorts 120 tasks deterministically without mutating input', () => {
+  const tasks = Array.from({ length: 120 }, (_, index) => task(`task-${String(index).padStart(3, '0')}`, {
+    projectId: `project-${index % 20}`,
+    createdAt: index % 7,
+    sidebarOrder: index % 5 === 0 ? null : index % 47,
+    lastPromptAt: index % 11,
+    lastResponseAt: index % 13,
+  }));
+  const snapshot = structuredClone(tasks);
+  for (const mode of ['manual', 'recent', 'created']) {
+    const order = rows => sorted(rows, taskComparator(mode));
+    assert.deepEqual(order(tasks), order([...tasks].reverse()), mode);
+    assert.equal(new Set(order(tasks)).size, tasks.length);
+  }
+  assert.deepEqual(tasks, snapshot);
+});
+
+test('twenty projects retain added order across listing changes and renames', () => {
+  const projects = Array.from({ length: 20 }, (_, index) => ({
+    id: `project-${index}`, name: `Project ${20 - index}`, path: `/p${index}`, addedOrder: index,
+  }));
+  const added = rows => [...rows].sort(projectComparator('added', rows, new Map())).map(project => project.id);
+  const expected = added(projects);
+  assert.deepEqual(added([...projects].reverse()), expected);
+  const renamed = projects.map((project, index) => index === 3 ? { ...project, name: 'Renamed project' } : project);
+  assert.deepEqual(added(renamed), expected);
+});

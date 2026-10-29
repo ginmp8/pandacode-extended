@@ -618,6 +618,19 @@ fn create_task_with_cleanup<T>(
     result
 }
 
+/// Once a task exists, a configuration failure must undo that task as well
+/// as its newly created worktree. Run the effect without holding the store lock
+/// across the rollback path.
+fn configure_created_start(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    owned: Option<&workspace::Worktree>,
+    configure: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    configure().map_err(|error| rollback_created_start(state, task_id, root, owned, error))
+}
+
 /// A failed start can leave a newly created task and checkout. Remove only
 /// that task; if it is still running or cannot be deleted, preserve its checkout.
 fn rollback_created_start(
@@ -761,13 +774,17 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     let task = create_task_with_cleanup(&root, made.as_ref(), || {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
-        crate::architect::profiles::create_user_task(&store, &project.id, &start.provider, &start.model, start.mode.as_deref(), None).and_then(|task| {
-            if start.effort.is_some() {
-                store.set_reasoning_effort(&task.id, start.effort.as_deref())?;
-            }
-            Ok(task)
-        })
+        crate::architect::profiles::create_user_task(&store, &project.id, &start.provider, &start.model, start.mode.as_deref(), None)
     })?;
+    if start.effort.is_some() {
+        // Creating the session succeeded; an invalid effort or storage failure
+        // must now delete that session, not just discard its prepared checkout.
+        configure_created_start(&state, &task.id, &root, made.as_ref(), || {
+            state.store.lock().map_err(|e| e.to_string())?
+                .set_reasoning_effort(&task.id, start.effort.as_deref())
+                .map(|_| ())
+        })?;
+    }
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         return Err(rollback_created_start(&state, &task.id, &root, made.as_ref(), error));
     }
@@ -851,6 +868,27 @@ mod tests {
             "a refusal without an owned checkout cannot affect the project"
         );
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn invalid_remote_reasoning_effort_rolls_back_only_its_new_task() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, unrelated, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let unrelated = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, unrelated.id, store.project(&project_id).unwrap().path)
+        };
+        let error = configure_created_start(&state, &target, Path::new(&root), None, || {
+            state.store.lock().unwrap()
+                .set_reasoning_effort(&target, Some("invalid-effort-value"))
+                .map(|_| ())
+        }).unwrap_err();
+        assert!(!error.is_empty(), "the invalid effort must be rejected");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err(), "no orphan session after invalid effort");
+        assert!(store.session(&unrelated).is_ok(), "an unrelated task is preserved");
+        assert!(store.project(&project_id).is_ok(), "the project is preserved");
     }
 
     #[test]

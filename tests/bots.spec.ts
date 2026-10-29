@@ -489,6 +489,31 @@ test.describe('bots', () => {
     }), { timeout: 5000 }).toBe('Saved on close');
   });
 
+  test('closing bot settings removes its capturing rail scroll listener across reopen', async ({ page }) => {
+    await newBot(page, 'Scroll Scout');
+    await page.evaluate(() => {
+      const active = new Set<EventListenerOrEventListenerObject>();
+      const add = EventTarget.prototype.addEventListener;
+      const remove = EventTarget.prototype.removeEventListener;
+      EventTarget.prototype.addEventListener = function (type, listener, options) {
+        if (type === 'scroll' && this instanceof HTMLElement && this.id === 'bots-host' && listener) active.add(listener);
+        return add.call(this, type, listener, options);
+      };
+      EventTarget.prototype.removeEventListener = function (type, listener, options) {
+        if (type === 'scroll' && this instanceof HTMLElement && this.id === 'bots-host' && listener) active.delete(listener);
+        return remove.call(this, type, listener, options);
+      };
+      (window as any).__activeBotRailScrollListeners = () => active.size;
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await openSettings(page, undefined, 'Scroll Scout');
+      await expect.poll(() => page.evaluate(() => (window as any).__activeBotRailScrollListeners())).toBe(1);
+      await panel(page, 'Scroll Scout').getByRole('button', { name: 'Close dialog' }).click();
+      await expect(panel(page, 'Scroll Scout')).toBeHidden();
+      await expect.poll(() => page.evaluate(() => (window as any).__activeBotRailScrollListeners())).toBe(0);
+    }
+  });
+
   test('Open chat in settings returns to the conversation', async ({ page }) => {
     await newBot(page);
     await showTasksView(page);

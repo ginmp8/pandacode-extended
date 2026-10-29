@@ -747,6 +747,6 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       if (kind === 'done') { void load(); return; }
       if (kind === 'turn_start' || kind === 'status') renderList();
     },
-    dispose: () => { disposed = true; soulImportGeneration++; disposeCapabilities?.(); void flushSave(); host.removeEventListener('click', click); host.removeEventListener('submit', submit); host.removeEventListener('change', change); host.removeEventListener('input', typed); host.removeEventListener('toggle', toggled, true); host.removeEventListener('keydown', keys); },
+    dispose: () => { disposed = true; soulImportGeneration++; disposeCapabilities?.(); void flushSave(); host.removeEventListener('click', click); host.removeEventListener('submit', submit); host.removeEventListener('change', change); host.removeEventListener('input', typed); host.removeEventListener('toggle', toggled, true); host.removeEventListener('scroll', scrolled, true); host.removeEventListener('keydown', keys); },
   };
 }

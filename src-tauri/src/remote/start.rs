@@ -672,6 +672,22 @@ fn rollback_created_start(
     error
 }
 
+/// A failed attachment worker cannot be allowed to strand its already-created task.
+/// The Made guard in the worker cleans an uncommitted checkout on unwind; this
+/// cleanup handles the separate persisted task even when join itself fails.
+fn attached_or_rollback<T>(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    joined: std::result::Result<Result<T>, tokio::task::JoinError>,
+) -> Result<T> {
+    match joined {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(rollback_created_start(state, task_id, root, None, error)),
+        Err(join_error) => Err(rollback_created_start(state, task_id, root, None, join_error.to_string())),
+    }
+}
+
 /// The host subscription is an injectable effect: a rejected follow must undo the
 /// just-created task and only its owned checkout before any agent is launched.
 fn follow_created_start(
@@ -827,15 +843,8 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
             drop(store);
             Ok(owned.keep().expect("attached remote worktree"))
         })
-        .await
-        .map_err(|e| e.to_string())?;
-        match attached {
-            Ok(checkout) => owned_checkout = Some(checkout),
-            Err(error) => {
-                let _ = crate::task_deletion::delete_state(&state, &task.id);
-                return Err(error);
-            }
-        }
+        .await;
+        owned_checkout = Some(attached_or_rollback(&state, &task.id, &root, attached)?);
     }
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         return Err(rollback_created_start(&state, &task.id, &root, owned_checkout.as_ref(), error));
@@ -938,6 +947,32 @@ mod tests {
         assert!(store.session(&target).is_err(), "no orphan session after invalid effort");
         assert!(store.session(&unrelated).is_ok(), "an unrelated task is preserved");
         assert!(store.project(&project_id).is_ok(), "the project is preserved");
+    }
+
+    #[test]
+    fn failed_attachment_join_rolls_back_just_its_new_task() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, unrelated, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let unrelated = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, unrelated.id, store.project(&project_id).unwrap().path)
+        };
+        // A join cancellation models an attachment worker that never returned a
+        // Worktree. Previously the early ? returned without deleting the task.
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let joined = runtime.block_on(async {
+            let worker = tokio::spawn(std::future::pending::<Result<()>>());
+            worker.abort();
+            worker.await
+        });
+        assert!(joined.is_err(), "this test must exercise the JoinError path");
+        let error = attached_or_rollback(&state, &target, Path::new(&root), joined).unwrap_err();
+        assert!(!error.is_empty());
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err(), "failed join cannot leave an orphan task");
+        assert!(store.session(&unrelated).is_ok(), "unrelated sessions must survive");
+        assert!(store.project(&project_id).is_ok(), "the existing project must survive");
     }
 
     #[test]

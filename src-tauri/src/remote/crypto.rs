@@ -188,6 +188,10 @@ mod tests {
         let key = [7u8; 32];
         assert_eq!(open(&key, "a", "b", &seal(&key, "a", "b", &bomb).unwrap()).unwrap_err(), "A frame was too large.");
         assert!(open(&key, "a", "b", &seal(&key, "a", "b", b"z not deflate").unwrap()).is_err());
+        // A valid packed message exactly at the hard limit must remain readable.
+        let exact = vec![b' '; MAX_UNPACKED as usize];
+        assert_eq!(open(&key, "a", "b", &seal(&key, "a", "b", &pack(&exact)).unwrap()).unwrap(), exact);
+
         assert_eq!(open(&key, "a", "b", &seal(&key, "a", "b", b"z").unwrap()).unwrap_err(), "Unreadable frame.");
         // The biggest page a host sends still opens.
         let page = vec![b' '; super::super::host::PACKED_PAGE_MAX + 64 * 1024];

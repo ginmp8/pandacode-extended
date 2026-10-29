@@ -34,6 +34,9 @@ export const FACES: { name: string; art: string }[] = [
 const escape = (value: string): string => value.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const pandaIndex = (id: string): number => PANDAS.findIndex(p => p.id === id);
 export const isUpload = (value: string): boolean => IMAGE.test(value);
+/** Only canonical hex colors can be interpolated into inline CSS. */
+export const safeBotColor = (color: string | undefined): string => color && COLOR.test(color) ? color : '';
+
 
 /** A panda face on its preset color; '' for an unknown id. Inside a picker, `--panda-bg` recolors every face at once. */
 export function pandaSvg(id: string): string {
@@ -49,7 +52,8 @@ export function botAvatarHtml(avatar: string, name: string, cls = '', color = ''
   const value = avatar.trim();
   const art = pandaSvg(value) || (value.length <= MAX_AVATAR_URL && IMAGE.test(value) ? `<img alt="" src="${value}">` : '');
   const content = art || escape(value || name.trim().slice(0, 1).toUpperCase() || '?');
-  const tint = COLOR.test(color) ? ` style="--panda-bg:${color};--bot-color:${color}"` : '';
+  const validColor = safeBotColor(color);
+  const tint = validColor ? ` style="--panda-bg:${validColor};--bot-color:${validColor}"` : '';
   return `<span class="bot-avatar${art ? ' has-art' : ''}${cls ? ` ${cls}` : ''}"${tint} aria-hidden="true">${content}</span>`;
 }
 

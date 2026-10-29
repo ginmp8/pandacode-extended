@@ -1,5 +1,5 @@
 import type { Bot } from './bots';
-import { botAvatarHtml } from './bot-avatars';
+import { botAvatarHtml, safeBotColor } from './bot-avatars';
 import { escape, icon } from './dom';
 import { WORKING_LABELS } from './bot-thread';
 
@@ -77,9 +77,10 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
   const name = bot?.name ?? (message.kind === 'user' ? 'You' : 'Bot');
+  const tint = safeBotColor(bot?.color);
   // Assignment rows and the working row already show progress; a post only flags what needs the user.
   const marker = message.status === 'Failed' || message.status === 'Stopped' ? `<small class="bc-message-status">${escape(message.status)}</small>` : '';
-  return `<article class="bc-message ${message.kind === 'user' ? 'from-user' : 'from-bot'}" data-message-id="${escape(message.id)}" ${bot?.color ? `style="--bot-color:${escape(bot.color)}"` : ''}>
+  return `<article class="bc-message ${message.kind === 'user' ? 'from-user' : 'from-bot'}" data-message-id="${escape(message.id)}" ${tint ? `style="--bot-color:${tint}"` : ''}>
     ${bot ? botAvatarHtml(bot.avatar, bot.name, 'bc-message-avatar', bot.color) : ''}<div class="bc-message-main"><header><strong>${escape(name)}</strong>${marker}</header><div class="bc-message-text" data-message-id="${escape(message.id)}"></div></div></article>`;
 }
 

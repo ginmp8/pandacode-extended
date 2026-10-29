@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { avatarPicker, botAvatarHtml, PANDAS, pandaSvg } from '../src/bot-avatars.ts';
+import { avatarPicker, botAvatarHtml, PANDAS, pandaSvg, safeBotColor } from '../src/bot-avatars.ts';
 
 test('ten pandas, each its own color, each a compact id-free SVG', () => {
   assert.deepEqual(PANDAS.map(p => p.id), Array.from({ length: 10 }, (_, i) => `panda:${i}`));
@@ -38,4 +38,14 @@ test('blocks oversized and unsupported image URL content in avatar markup', () =
   assert.ok(!avatarPicker(overlong).includes('data-avatar-choice="custom"'));
   assert.ok(!botAvatarHtml('data:image/svg+xml;base64,PHN2Zz4=', 'Ana').includes('<img'));
   assert.ok(!botAvatarHtml('data:image/jpeg;base64,AA==', 'Ana').includes('<img'));
+});
+
+test('shared-channel bot colors reject unsafe CSS declarations', () => {
+  assert.equal(safeBotColor('#aBc123'), '#aBc123');
+  assert.equal(safeBotColor(undefined), '');
+  assert.equal(safeBotColor(''), '');
+  for (const color of ['red', '#fff', 'var(--x)', '#123456;background-image:url(https://example.org/x)', '#123456\" onmouseover=\"x', 'rgb(1,2,3)']) {
+    assert.equal(safeBotColor(color), '');
+    assert.ok(!botAvatarHtml('panda:0', 'Ana', '', color).includes('style="--panda-bg:'));
+  }
 });

@@ -631,6 +631,24 @@ fn configure_created_start(
     configure().map_err(|error| rollback_created_start(state, task_id, root, owned, error))
 }
 
+/// Holds a newly prepared worktree until it is attached to the task. A
+/// refusal, poisoned store lock or unwinding task drops only this checkout.
+struct Made(PathBuf, Option<workspace::Worktree>);
+
+impl Made {
+    fn keep(mut self) -> Option<workspace::Worktree> {
+        self.1.take()
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        if let Some(checkout) = self.1.as_ref() {
+            discard(&self.0, checkout);
+        }
+    }
+}
+
 /// A failed start can leave a newly created task and checkout. Remove only
 /// that task; if it is still running or cannot be deleted, preserve its checkout.
 fn rollback_created_start(
@@ -798,16 +816,13 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
                 made.iter().for_each(|checkout| discard(&attachment_root, checkout));
                 return Err(error);
             }
-            let checkout = made.map_or_else(|| remote_worktree(&attachment_root, &branch), Ok)?;
+            let owned = Made(attachment_root.clone(), Some(made.map_or_else(|| remote_worktree(&attachment_root, &branch), Ok)?));
+            let checkout = owned.1.as_ref().expect("new remote worktree");
             let store = store.lock().map_err(|e| e.to_string())?;
-            let attached = super::host::check_start_mode(&handle, &device, &key, Some(&mode))
-                .and_then(|_| store.attach_worktree(&id, &checkout.path, &checkout.branch));
-            if let Err(error) = attached {
-                drop(store);
-                discard(&attachment_root, &checkout);
-                return Err(error);
-            }
-            Ok(checkout)
+            super::host::check_start_mode(&handle, &device, &key, Some(&mode))
+                .and_then(|_| store.attach_worktree(&id, &checkout.path, &checkout.branch))?;
+            drop(store);
+            Ok(owned.keep().expect("attached remote worktree"))
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -842,6 +857,33 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unattached_remote_worktree_is_removed_by_its_drop_guard() {
+        let base = temp_base("attach-guard");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = clone.canonicalize().unwrap();
+
+        let rejected = remote_worktree(&root, "main").unwrap();
+        let rejected_path = rejected.path.clone();
+        {
+            let _pending = Made(root.clone(), Some(rejected));
+            assert!(rejected_path.exists());
+            // Returning Err or unwinding here drops the pending attachment.
+        }
+        assert!(!rejected_path.exists(), "failed attachment must not strand a worktree");
+
+        let promoted = remote_worktree(&root, "main").unwrap();
+        let kept = Made(root.clone(), Some(promoted)).keep().unwrap();
+        assert!(kept.path.exists(), "a successfully attached checkout remains owned by its task");
+        discard(&root, &kept);
+        assert!(root.exists(), "the main checkout must not be deleted");
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn denied_task_creation_discards_only_its_prepared_worktree() {

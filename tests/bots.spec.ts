@@ -119,6 +119,8 @@ test.describe('bots', () => {
     const search = sidebar(page).getByRole('searchbox', { name: 'Search bots and channels' });
     await search.fill('nobody');
     await expect(sidebar(page).locator('.bots-panel-empty')).toHaveText('No bots or channels match.');
+    // A search with no matches must not suggest that an existing bot was deleted.
+    await expect(sidebar(page).getByText('No bots yet')).toHaveCount(0);
     await search.fill('sco');
     await expect(row).toBeVisible();
     await expect(search).toBeFocused();

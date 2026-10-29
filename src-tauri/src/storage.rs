@@ -1737,8 +1737,13 @@ impl Store {
         if activity.id.is_empty() || activity.id.len() > 1024 || content.len() > 1024 * 1024 {
             return Err("Subagent activity exceeded its storage limit.".into());
         }
+        // Replayed or reordered remote snapshots must not overwrite newer persisted state.
+        // Distinct active updates can share one millisecond; a terminal snapshot wins a tie.
         self.db.execute("INSERT INTO subagents(session_id,id,content,updated_at) VALUES (?1,?2,?3,?4)
-            ON CONFLICT(session_id,id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at",
+            ON CONFLICT(session_id,id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at
+            WHERE excluded.updated_at > subagents.updated_at
+               OR (excluded.updated_at = subagents.updated_at
+                   AND json_extract(subagents.content,'$.status') IN ('running','waiting'))",
             params![sid,activity.id,content,activity.updated_at]).map_err(|error| error.to_string())?;
         // Keep current work regardless of age; older terminal snapshots give
         // way to the newest 64 entries without growing every parent turn.

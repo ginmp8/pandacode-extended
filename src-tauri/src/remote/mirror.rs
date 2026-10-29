@@ -1831,6 +1831,32 @@ mod tests {
     }
 
     #[test]
+    fn replayed_subagent_snapshots_cannot_resurrect_an_older_state() {
+        let (store, session) = store();
+        let event = |id: &str, status: &str, time: i64| json!({
+            "sessionId": session, "kind": "subagent",
+            "data": {
+                "id": id, "parentId": null, "name": "Worker", "prompt": "",
+                "status": status, "response": "", "tools": [],
+                "startedAt": 100, "updatedAt": time
+            }
+        });
+        save_subagents(&store, &[event("run:one", "completed", 200)]);
+        save_subagents(&store, &[event("run:one", "running", 100)]);
+        save_subagents(&store, &[event("run:one", "running", 200)]);
+        let snapshots = store.subagents(&session).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!((snapshots[0].status.as_str(), snapshots[0].updated_at), ("completed", 200),
+            "late or equal-time running replay must not resurrect a completed child");
+
+        save_subagents(&store, &[event("run:two", "running", 300)]);
+        save_subagents(&store, &[event("run:two", "completed", 300)]);
+        let done = store.subagents(&session).unwrap();
+        assert_eq!(done.iter().find(|child| child.id == "run:two").unwrap().status, "completed",
+            "a same-millisecond active-to-terminal update must still be persisted");
+    }
+
+    #[test]
     fn a_mirror_never_gets_a_local_team() {
         let (store, mirror) = store();
         assert!(crate::architect::refuse_mirror(&store, &mirror).unwrap_err().starts_with("This task's team runs on "));

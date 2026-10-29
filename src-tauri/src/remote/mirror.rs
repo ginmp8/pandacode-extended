@@ -1855,6 +1855,19 @@ mod tests {
     }
 
     #[test]
+    fn subagent_snapshots_with_shared_ids_stay_in_their_own_sessions() {
+        let events = [
+            json!({"sessionId": "mirror-a", "kind": "subagent", "data": {"id": "run:shared", "status": "running", "updatedAt": 100}}),
+            json!({"sessionId": "mirror-b", "kind": "subagent", "data": {"id": "run:shared", "status": "waiting", "updatedAt": 200}}),
+            json!({"sessionId": "mirror-a", "kind": "subagent", "data": {"id": "run:shared", "status": "completed", "updatedAt": 300}}),
+        ];
+        let snapshots = newest_subagents(&events);
+        assert_eq!(snapshots.len(), 2, "a child ID may be reused on another mirrored task");
+        assert_eq!((snapshots[0].0, snapshots[0].1["status"].as_str()), ("mirror-a", Some("completed")));
+        assert_eq!((snapshots[1].0, snapshots[1].1["status"].as_str()), ("mirror-b", Some("waiting")));
+    }
+
+    #[test]
     fn replayed_subagent_snapshots_cannot_resurrect_an_older_state() {
         let (store, session) = store();
         let event = |id: &str, status: &str, time: i64| json!({

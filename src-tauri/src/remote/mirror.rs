@@ -1576,7 +1576,16 @@ fn settle_cancel(app: &tauri::AppHandle, state: &AppState, local: &str, outcome:
 /// Why the host started the task somewhere other than asked (its busy main checkout gave way
 /// to a worktree), cut to one short line. Older hosts send none.
 fn start_note(reply: &Value) -> Option<String> {
-    reply["note"].as_str().map(|note| note.lines().next().unwrap_or_default().chars().take(300).collect::<String>()).filter(|note| !note.trim().is_empty())
+    reply["note"].as_str().map(|note| {
+        // A peer host may return CR-only or Unicode line separators; never
+        // expose a second line of a remote worktree explanation.
+        note.split(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect::<String>()
+    }).filter(|note| !note.trim().is_empty())
 }
 
 fn started_session(reply: &Value) -> Result<String> {
@@ -1823,6 +1832,14 @@ mod tests {
         assert_eq!(start_note(&json!({"note": "  "})), None);
         assert_eq!(start_note(&json!({"note": "Started in a worktree: busy.\nmore"})).as_deref(), Some("Started in a worktree: busy."));
         assert_eq!(start_note(&json!({"note": "x".repeat(500)})).map(|note| note.len()), Some(300));
+        for separator in ["\r", "\r\n", "\u{2028}", "\u{2029}"] {
+            let reason = format!("Started in a worktree: busy.{separator}/private/host");
+            assert_eq!(
+                start_note(&json!({"note": reason})).as_deref(),
+                Some("Started in a worktree: busy."),
+                "remote hosts cannot inject a second line with {separator:?}"
+            );
+        }
     }
 
     #[test]

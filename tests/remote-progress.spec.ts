@@ -200,6 +200,39 @@ test('a recovered host note arriving before the lost-reply result is retained', 
   expect(result.cleared).toBe(true);
 });
 
+
+test('a remote agent attachment before the lost start reply still settles the pending task', async ({ page }) => {
+  await newTask(page);
+  const result = await page.evaluate(async () => {
+    const progress = await import('/src/remote-progress.ts' as string);
+    const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
+    let started!: () => void;
+    let resolveReply!: (value: { sessionId: string }) => void;
+    let attemptId = '';
+    const called = new Promise<void>(resolve => { started = resolve; });
+    const reply = new Promise<{ sessionId: string }>(resolve => { resolveReply = resolve; });
+    const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, id => {
+      attemptId = id; started(); return reply;
+    });
+    await called;
+    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId: attemptId, stage: 'starting', detail: 'Waiting for Studio iMac…' });
+    progress.remoteStartAttached('unrelated-task');
+    const before = progress.remoteStart(sessionId)?.attached ?? false;
+    progress.remoteStartAttached(sessionId);
+    const early = progress.remoteStart(sessionId)?.attached ?? false;
+    resolveReply({ sessionId });
+    const linked = await Promise.race([
+      completion,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Early remote agent attachment did not release the waiting mirror')), 2000)),
+    ]);
+    return { before, early, linked, cleared: !progress.remoteStart(sessionId) };
+  });
+  expect(result.before).toBe(false);
+  expect(result.early).toBe(true);
+  expect(result.linked).toEqual({ sessionId: expect.any(String) });
+  expect(result.cleared).toBe(true);
+});
+
 for (const outcome of ['resolve', 'reject'] as const) {
   test(`a superseded start cannot update or clear its retry when the old request ${outcome}s`, async ({ page }) => {
     await newTask(page);

@@ -12,7 +12,7 @@ export type RemoteStartStage = 'connecting' | 'finding' | 'downloading' | 'prepa
 export interface RemoteStartProgress { deviceId: string; startId?: string | null; repo?: string | null; stage: Exclude<RemoteStartStage, 'connecting'>; percent?: number | null; detail?: string | null }
 /** `remote://start-note`, emitted when a lost start reply is recovered and linked. */
 export interface RemoteStartNote { sessionId: string; note: string }
-export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; note?: string; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; waiting?: boolean; mirrorId?: string; settle?: (error?: Error) => void }
+export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; note?: string; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; waiting?: boolean; attached?: boolean; mirrorId?: string; settle?: (error?: Error) => void }
 
 const EVENT = 'remote://start-progress';
 const NOTE_EVENT = 'remote://start-note';
@@ -167,7 +167,7 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
       ended = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
       ended.catch(() => undefined);
       // A linked host can publish its note before the lost-reply result resolves.
-      if (entry.note) entry.settle?.();
+      if (entry.note || entry.attached) entry.settle?.();
       await ended;
     }
     if (starts.get(sessionId) === entry) starts.delete(sessionId);
@@ -186,7 +186,11 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
 /** The task of a start whose reply was lost spoke (its first agent event): it attached. */
 export function remoteStartAttached(sessionId: string): void {
   const start = starts.get(sessionId) ?? [...starts.values()].find(item => item.mirrorId === sessionId);
-  if (start?.waiting) start.settle?.();
+  if (!start || !waitingFor(start)) return;
+  // The first host agent event can precede the lost start reply. Keep it for
+  // the continuation, instead of waiting forever for an event already delivered.
+  if (!start.waiting) { start.attached = true; return; }
+  start.settle?.();
 }
 
 /** Ends a start the viewer cancelled (`remote_cancel_start` answered `cancelled: true`). */

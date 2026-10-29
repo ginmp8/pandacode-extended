@@ -4754,7 +4754,7 @@ async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: 
     : isRunning(id) ? 'Stop the agent before deleting this chat.'
       : finishingStreams.has(id) ? 'Wait for the agent to finish before deleting this chat.' : undefined;
   const group = anchor.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup ?? '';
-  const movable = sidebarRowCanReorder(group, anchor.draggable);
+  const movable = !['active', 'review', 'completed'].includes(group);
   const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id);
   const openedStage = taskStage(task), openedPinned = Boolean(task.pinned), done = openedStage === 'completed';
   // Reuse the native, authorized project chooser only for the selected, unstarted local task.

@@ -445,13 +445,17 @@ fn project_for(state: &AppState, target: &Target, progress: &Progress, lazy: boo
     }
 }
 
-/// Picks the viewer's branch when origin has it, else the default branch. An existing
-/// checkout fetches first (`fetch`); a clone made a moment ago already has origin's refs.
+/// Picks the explicit remote branch or fails closed. Only omitted branches use origin's
+/// default; an existing checkout fetches first, while a fresh clone already has refs.
 pub(crate) fn pick_branch(root: &Path, wanted: Option<&str>, fetch: bool) -> Result<String> {
     if fetch {
         git(root, &["fetch", "--quiet", "origin"], FETCH).map_err(|e| format!("Could not fetch from GitHub: {e}"))?;
     }
-    if let Some(branch) = wanted.filter(|branch| on_origin(root, branch)) {
+    if let Some(branch) = wanted {
+        valid_branch(branch)?;
+        if !on_origin(root, branch) {
+            return Err(format!("Requested branch '{branch}' is not available on origin."));
+        }
         return Ok(branch.to_owned());
     }
     let head = git(root, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], GIT).unwrap_or_default();
@@ -1107,7 +1111,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Picks a pushed branch, falls back to origin's default, and checks it out.
+    /// Picks a pushed branch, rejects missing explicit branches, and checks it out.
     #[test]
     fn the_branch_comes_from_origin() {
         let base = std::env::temp_dir().join(format!("pandacode-start-{}", uuid::Uuid::new_v4()));
@@ -1119,7 +1123,10 @@ mod tests {
         run(&origin, &["branch", "feature"]);
         run(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
         assert_eq!(pick_branch(&clone, Some("feature"), true).unwrap(), "feature");
-        assert_eq!(pick_branch(&clone, Some("unpushed"), true).unwrap(), "main");
+        assert_eq!(pick_branch(&clone, Some("unpushed"), true).unwrap_err(), "Requested branch 'unpushed' is not available on origin.");
+        assert_eq!(pick_branch(&clone, Some("unpushed"), false).unwrap_err(), "Requested branch 'unpushed' is not available on origin.");
+        assert_eq!(pick_branch(&clone, Some("../bad"), false).unwrap_err(), "Invalid branch.");
+        assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main", "explicit branch failure must not switch the checkout");
         assert_eq!(pick_branch(&clone, None, true).unwrap(), "main");
         // An existing checkout on another branch, dirty or busy is never switched.
         assert!(ready_in_place(&clone, "orbit", "feature", false).unwrap().unwrap().contains("on main, not feature"));

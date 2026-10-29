@@ -2009,12 +2009,14 @@ mod tests {
             .block_on(worker_pages(
                 |key, cursor| {
                     let index = calls.fetch_add(1, Ordering::Relaxed);
+                    // Own the request name before returning a future from an Fn callback.
+                    let request = key.to_owned();
                     async move {
                         Ok(if index == 0 {
-                            assert_eq!(key, "tail");
+                            assert_eq!(request, "tail");
                             json!({"messages": [{"id": 7}, {"id": 5}, {"id": 6}], "hasMore": true})
                         } else {
-                            assert_eq!(key, "afterId");
+                            assert_eq!(request, "afterId");
                             assert_eq!(cursor, json!(7), "a reordered page must advance past its highest ID");
                             // Replayed overlap includes an old row after a new one.
                             json!({"messages": [{"id": 9}, {"id": 6}], "hasMore": false})

@@ -82,8 +82,8 @@ pub(crate) fn write_settings(path: &Path, settings: &Settings) -> Result<(), Str
     // Separate temp files for concurrent app instances/callers; rename stays on the same volume.
     let temp = next_settings_temp(path);
     let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(&temp, json).map_err(|e| format!("Could not save model routing settings: {e}"))?;
-    let result = std::fs::rename(&temp, path);
+    // A failed or partial write must not leave a misleading staged file behind.
+    let result = std::fs::write(&temp, json).and_then(|_| std::fs::rename(&temp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }

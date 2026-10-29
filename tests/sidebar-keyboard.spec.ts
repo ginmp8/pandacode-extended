@@ -160,4 +160,19 @@ test('global shortcuts ignore nested editable content and IME composition', asyn
     return { nestedPrevented: slash.defaultPrevented, composingPrevented: composing.defaultPrevented, focusStolen };
   });
   expect(result).toEqual({ nestedPrevented: false, composingPrevented: false, focusStolen: false });
+  test('a remote unstarted task never offers local project reassignment', async ({ page }) => {
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(/const providers\\s*=/, `for (const s of sessions) if (s.id === 'session-2') s.remoteDevice = { id: 'remote-test', name: 'Another computer' };\\n$&`);
+      await route.fulfill({ response, body });
+    });
+    await page.goto('/');
+    await row(page, 'session-2').click();
+    await expect(row(page, 'session-2')).toHaveAttribute('aria-current', 'page');
+    await row(page, 'session-2').click({ button: 'right' });
+    const actions = page.getByRole('dialog', { name: 'Task actions', exact: true });
+    await expect(actions).toBeVisible();
+    await expect(actions.getByRole('menuitem', { name: 'Move to project…', exact: true })).toHaveCount(0);
+  });
+
 });

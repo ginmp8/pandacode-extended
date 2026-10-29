@@ -604,6 +604,20 @@ fn discard(root: &Path, made: &workspace::Worktree) {
     let _ = workspace::remove_worktree(root, &made.path, Some(&made.branch), true);
 }
 
+/// Refusals or storage errors before task creation must discard only the
+/// newly prepared checkout, never the user's main working directory.
+fn create_task_with_cleanup<T>(
+    root: &Path,
+    made: Option<&workspace::Worktree>,
+    create: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let result = create();
+    if result.is_err() {
+        made.iter().for_each(|checkout| discard(root, checkout));
+    }
+    result
+}
+
 /// A failed start can leave a newly created task and checkout. Remove only
 /// that task; if it is still running or cannot be deleted, preserve its checkout.
 fn rollback_created_start(
@@ -742,7 +756,9 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         return Err(error);
     }
     let state = app.state::<AppState>();
-    let created = {
+    // Guard and lock errors must be captured by cleanup rather than escaping
+    // through ? and stranding a worktree prepared before task creation.
+    let task = create_task_with_cleanup(&root, made.as_ref(), || {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
         crate::architect::profiles::create_user_task(&store, &project.id, &start.provider, &start.model, start.mode.as_deref(), None).and_then(|task| {
@@ -751,14 +767,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
             }
             Ok(task)
         })
-    };
-    let task = match created {
-        Ok(task) => task,
-        Err(error) => {
-            made.iter().for_each(|made| discard(&root, made));
-            return Err(error);
-        }
-    };
+    })?;
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         return Err(rollback_created_start(&state, &task.id, &root, made.as_ref(), error));
     }
@@ -816,6 +825,33 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denied_task_creation_discards_only_its_prepared_worktree() {
+        let base = temp_base("pre-create-denial");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = clone.canonicalize().unwrap();
+        let unrelated = root.join("keep.txt");
+        std::fs::write(&unrelated, "unrelated user content").unwrap();
+        let owned = remote_worktree(&root, "main").unwrap();
+        let error = create_task_with_cleanup(&root, Some(&owned), || -> Result<()> {
+            Err("Remote permission was revoked before task creation.".into())
+        });
+        assert_eq!(error, Err("Remote permission was revoked before task creation.".into()));
+        assert!(!owned.path.exists(), "the prepared task worktree must not be stranded");
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "unrelated user content");
+        assert!(root.exists(), "the original checkout must remain intact");
+        assert_eq!(
+            create_task_with_cleanup::<()>(&root, None, || Err("Denied.".into())),
+            Err("Denied.".into()),
+            "a refusal without an owned checkout cannot affect the project"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn failed_host_follow_rolls_back_only_its_new_task() {

@@ -228,13 +228,18 @@ test('agent questions can load a mirror workspace image through its host', async
 });
 
 test('the first mirror prompt stays visible after a steer', async ({ page }) => {
+  // Hold the preview turn through the click: a slow browser must not finish the
+  // simulated run between the visibility assertion and the Steer interaction.
+  await page.addInitScript(() => { (window as any).__holdPreviewCompletion = true; });
   await startMirror(page, 'First mirror prompt');
+  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
   await expect(page.getByRole('button', { name: 'Steer the running turn' })).toBeVisible();
   const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
   await prompt.fill('Steer the mirror');
   await page.getByRole('button', { name: 'Steer the running turn' }).click();
   await expect(userMessages(page, 'Steer the mirror')).toHaveCount(1);
   await expect(userMessages(page, 'First mirror prompt')).toHaveCount(1);
+  await page.evaluate(() => { (window as any).__releasePreviewCompletion(); });
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
   await expect(userMessages(page, 'First mirror prompt')).toHaveCount(1);
   await expect(userMessages(page, 'Steer the mirror')).toHaveCount(1);

@@ -132,22 +132,31 @@ test('an offline mirror has a compact last-seen status and Retry resubscribes wi
 });
 
 test('mirror stop feedback is immediate for the button and Escape', async ({ page }) => {
+  test.slow(); // Exercises two full preview turns with a held stop response.
+  // Do not let preview auto-complete while Playwright is resolving the Stop button.
+  await page.addInitScript(() => { (window as any).__holdPreviewCompletion = true; });
   await startMirror(page);
+  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
+  await expect(page.getByRole('button', { name: 'Stop task' })).toBeVisible();
   await page.evaluate(() => { (window as any).__stopHold = true; });
   await page.getByRole('button', { name: 'Stop task' }).click();
   await expect(page.locator('#stream-region .turn-activity-label')).toContainText('Stopping agent');
   await page.waitForFunction(() => typeof (window as any).__stopRelease === 'function');
   await page.evaluate(() => { (window as any).__stopRelease(); });
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0);
+  await page.evaluate(() => { (window as any).__releasePreviewCompletion?.(); });
   const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  await page.evaluate(() => { (window as any).__holdPreviewCompletion = true; });
   await prompt.fill('Restart the mirror');
   await prompt.press('Enter');
+  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
   await expect(page.getByRole('button', { name: 'Stop task' })).toBeVisible();
   await page.evaluate(() => { (window as any).__stopHold = true; });
   await page.keyboard.press('Escape');
   await expect(page.locator('#stream-region .turn-activity-label')).toContainText('Stopping agent');
   await page.waitForFunction(() => typeof (window as any).__stopRelease === 'function');
   await page.evaluate(() => { (window as any).__stopRelease(); });
+  await page.evaluate(() => { (window as any).__releasePreviewCompletion?.(); });
 });
 
 test('remote settings distinguish loading, empty, and retryable status/device failures', async ({ page }) => {

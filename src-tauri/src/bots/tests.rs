@@ -1894,6 +1894,28 @@ fn shared_channel_persists_members_and_archive_state() {
 }
 
 #[test]
+fn failed_channel_member_insert_rolls_back_channel_creation_and_allows_retry() {
+    let f = fixture();
+    let scout = bot(&f);
+    let writer = create(&f.store, &input("Writer"), &f.root).unwrap();
+    f.store.db.execute_batch(
+        "CREATE TRIGGER reject_second_channel_member BEFORE INSERT ON bot_shared_channel_members
+         WHEN NEW.position = 1 BEGIN SELECT RAISE(FAIL, 'injected member write failure'); END;"
+    ).unwrap();
+
+    assert!(shared_channels::create(&f.store, "atomic-create", &[scout.id.clone(), writer.id.clone()]).is_err());
+    let remaining: i64 = f.store.db.query_row(
+        "SELECT COUNT(*) FROM bot_shared_channels WHERE name='atomic-create'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(remaining, 0, "failed channel creation must not leave an orphan channel");
+
+    f.store.db.execute_batch("DROP TRIGGER reject_second_channel_member;").unwrap();
+    let channel = shared_channels::create(&f.store, "atomic-create", &[scout.id.clone(), writer.id.clone()]).unwrap();
+    assert_eq!(channel.member_ids, [scout.id, writer.id]);
+}
+
+#[test]
 fn a_bot_update_carries_its_hop_depth_into_the_next_turn_only() {
     let f = fixture();
     let scout = bot(&f);

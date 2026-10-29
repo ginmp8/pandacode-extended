@@ -131,10 +131,12 @@ pub(crate) fn create(store: &Store, raw_name: &str, requested: &[String]) -> Res
     let id = crate::storage::id();
     let now = crate::storage::now();
     let lead = members.first().cloned();
-    store.db.execute("INSERT INTO bot_shared_channels(id,name,lead_bot_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)", params![id,name,lead,now]).map_err(|e| e.to_string())?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("INSERT INTO bot_shared_channels(id,name,lead_bot_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)", params![id,name,lead,now]).map_err(|e| e.to_string())?;
     for (position, bot_id) in members.iter().enumerate() {
-        store.db.execute("INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,?3)", params![id,bot_id,position as i64]).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,?3)", params![id,bot_id,position as i64]).map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     shared_channel(store, &id)
 }
 

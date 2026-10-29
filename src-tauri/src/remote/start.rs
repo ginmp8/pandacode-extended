@@ -538,6 +538,22 @@ fn busy_in_place(state: &AppState, project_id: &str) -> Result<bool> {
     Ok(agents.keys().any(|id| store.session(id).is_ok_and(|task| task.project_id == project_id && task.worktree_path.is_none())))
 }
 
+/// A local run can start after the remote reservation's first busy check.
+/// Before launching the remote agent, fall back to an owned worktree rather than
+/// sharing that local run's checkout. A failed recheck also fails closed.
+fn late_busy_worktree_note(reserved_main: bool, busy: Result<bool>, project: &str) -> Option<String> {
+    if !reserved_main {
+        return None;
+    }
+    let host = super::config::device_name();
+    let reason = match busy {
+        Ok(false) => return None,
+        Ok(true) => format!("{host} has an agent working in {project}."),
+        Err(_) => format!("{host} could not confirm {project} is idle."),
+    };
+    Some(worktree_note(&reason))
+}
+
 /// Puts a fresh clone's checkout on `branch`; nobody's work is there yet. A clone starts on
 /// origin's default branch at origin's commit, so that branch needs no switch and no merge,
 /// and any other is made from origin's ref.
@@ -783,7 +799,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     super::host::require_method(app, from, authenticated_key, "task.start")?;
     let handle = app.clone();
     let (target, wanted, worktree, reporter, flag) = (start.target, start.branch.clone(), start.worktree, progress.clone(), cancel.clone());
-    let (project, (branch, made, note, _reserved)) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, Prepared)> {
+    let (project, (branch, made, mut note, reserved)) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, Prepared)> {
         let state = handle.state::<AppState>();
         // A worktree start never uses the clone's own checkout, so a fresh clone defers it.
         let (project, cloned) = project_for(&state, &target, &reporter, worktree, &flag)?;
@@ -825,7 +841,12 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
         return Err(rollback_created_start(&state, &task.id, &root, made.as_ref(), error));
     }
-    if worktree || made.is_some() {
+    // The reservation excludes other remote starts, but a local run may have
+    // registered an agent since prepare(). Do not launch into its main checkout.
+    if let Some(reason) = late_busy_worktree_note(reserved.is_some(), busy_in_place(&state, &project.id), &project.name) {
+        note = Some(reason);
+    }
+    if worktree || made.is_some() || note.is_some() {
         let (handle, device, key, mode) = (app.clone(), from.to_owned(), authenticated_key.to_owned(), task.mode.clone());
         let store = state.store.clone();
         let id = task.id.clone();
@@ -1389,6 +1410,18 @@ mod tests {
 
     /// Concurrent starts for one project: exactly one gets the main checkout until it lets go,
     /// and a local agent there turns every one away.
+    #[test]
+    fn a_late_local_agent_causes_safe_worktree_fallback() {
+        let busy = late_busy_worktree_note(true, Ok(true), "orbit").unwrap();
+        assert!(busy.starts_with("Started in a worktree: "));
+        assert!(busy.ends_with("has an agent working in orbit."));
+        assert!(late_busy_worktree_note(true, Ok(false), "orbit").is_none());
+        assert!(late_busy_worktree_note(false, Ok(true), "orbit").is_none(), "explicit worktrees do not need a second busy decision");
+        let unknown = late_busy_worktree_note(true, Err("store unavailable".into()), "orbit").unwrap();
+        assert!(unknown.contains("could not confirm orbit is idle"), "recheck errors must not select the main checkout");
+        assert!(!unknown.contains("store unavailable"), "internal errors stay off the remote viewer");
+    }
+
     #[test]
     fn only_one_concurrent_start_reserves_the_main_checkout() {
         let id = format!("p-{}", uuid::Uuid::new_v4());

@@ -71,11 +71,23 @@ pub(crate) fn read_settings(path: &Path) -> Settings {
         .clamped()
 }
 
+static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_settings_temp(path: &Path) -> PathBuf {
+    let sequence = SETTINGS_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence))
+}
+
 pub(crate) fn write_settings(path: &Path, settings: &Settings) -> Result<(), String> {
-    let temp = path.with_extension("json.tmp");
+    // Separate temp files for concurrent app instances/callers; rename stays on the same volume.
+    let temp = next_settings_temp(path);
     let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
     std::fs::write(&temp, json).map_err(|e| format!("Could not save model routing settings: {e}"))?;
-    std::fs::rename(&temp, path).map_err(|e| format!("Could not save model routing settings: {e}"))
+    let result = std::fs::rename(&temp, path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|e| format!("Could not save model routing settings: {e}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -599,6 +611,17 @@ mod tests {
         let json = serde_json::to_value(RoutingStatus { enabled: true, mode: Mode::Balanced, min_p: 0.8, profiler: "missing", error: None }).unwrap();
         assert_eq!(json, serde_json::json!({"enabled":true,"mode":"balanced","minP":0.8,"profiler":"missing","error":null}));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_temp_paths_do_not_collide() {
+        let settings = Path::new("app-data/model-routing.json");
+        let first = next_settings_temp(settings);
+        let second = next_settings_temp(settings);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), settings.parent());
+        assert_eq!(second.parent(), settings.parent());
+        assert!(first.file_name().unwrap().to_string_lossy().starts_with("model-routing.json."));
     }
 
     #[test]

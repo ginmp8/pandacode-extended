@@ -3508,7 +3508,10 @@ test('streaming keeps the transcript at the bottom after sending and leaves a re
   await prompt(page).fill('Second message');
   await prompt(page).press('Enter');
   await expect(page.locator('#stream-region .live-text')).not.toBeEmpty();
-  await transcript.hover();
+  // The default hover center may land on nested scrollable tool output instead of the transcript.
+  // Put the pointer in the transcript gutter so the real wheel gesture targets its scroll container.
+  await expect.poll(() => transcript.evaluate(element => element.scrollHeight - element.clientHeight)).toBeGreaterThan(300);
+  await transcript.hover({ position: { x: 8, y: 120 } });
   await page.mouse.wheel(0, -300);
   await expect.poll(() => transcript.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(100);
   const anchor = page.locator('#transcript [data-message-id="566"]');

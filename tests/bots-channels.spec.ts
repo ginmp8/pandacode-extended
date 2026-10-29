@@ -42,6 +42,22 @@ test.describe('shared bot channels', () => {
     await expect(sidebar(page).getByRole('button', { name: '#double-create' })).toHaveCount(1);
   });
 
+  test('channel settings ignore rapid duplicate submit while the first update is pending', async ({ page }) => {
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.locator('.bc-channel').getByRole('button', { name: 'Channel settings' }).click();
+    const settings = page.getByRole('dialog', { name: 'Channel settings' });
+    await settings.locator('form').evaluate(form => {
+      const name = form.querySelector<HTMLInputElement>('input[name="name"]')!;
+      name.value = 'first-update';
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      name.value = 'stale-second';
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await expect(sidebar(page).getByRole('button', { name: '#first-update' })).toBeVisible();
+    await expect(sidebar(page).getByRole('button', { name: '#stale-second' })).toHaveCount(0);
+  });
+
   test('an empty channel explains how to start and an archived channel is preview only', async ({ page }) => {
     await showBots(page);
     await page.getByRole('button', { name: 'Add bot or channel' }).click();

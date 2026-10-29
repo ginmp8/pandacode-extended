@@ -132,8 +132,11 @@ async function editChannel(options: SharedChannelUiOptions, channel: SharedChann
     <fieldset class="bc-member-list"><legend>Members</legend>${fields || '<p>No bots are available.</p>'}</fieldset><label class="field-label" for="bc-lead">Lead</label><select id="bc-lead" name="lead">${channel.memberIds.map(id => options.bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot)).map((bot, index) => `<option value="${escape(bot.id)}" ${bot.id === channel.leadBotId || (!channel.leadBotId && index === 0) ? 'selected' : ''}>${escape(bot.name)}</option>`).join('')}</select>
     <div class="dialog-footer"><button type="button" class="secondary-button" data-shared-action="settings-cancel">Cancel</button><button type="submit" class="primary-button">Save</button></div></form>`, 'bot-shared-dialog');
   const form = dialog.querySelector<HTMLFormElement>('.bc-settings-form')!;
+  let saving = false;
   form.addEventListener('submit', event => {
     event.preventDefault();
+    if (saving) return;
+    saving = true;
     const data = new FormData(form), memberIds = [...form.querySelectorAll<HTMLInputElement>('input[name=member]:checked')].map(input => input.value);
     const requestedLead = String(data.get('lead') ?? '');
     const leadBotId = memberIds.includes(requestedLead) ? requestedLead : memberIds[0] ?? null;
@@ -141,7 +144,7 @@ async function editChannel(options: SharedChannelUiOptions, channel: SharedChann
     void options.call('bot_shared_channel_update', { channelId: channel.id, name: String(data.get('name') ?? ''), memberIds, leadBotId }).then(async () => {
       options.closeModal();
       await options.changed();
-    }).catch(error => options.notify(error instanceof Error ? error.message : String(error))).finally(() => { if (save?.isConnected) save.disabled = false; });
+    }).catch(error => options.notify(error instanceof Error ? error.message : String(error))).finally(() => { saving = false; if (save?.isConnected) save.disabled = false; });
   });
   dialog.querySelector('[data-shared-action="settings-cancel"]')?.addEventListener('click', options.closeModal);
 }

@@ -200,7 +200,12 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       detail = nextDetail;
       if (!bots.length && !single) editing ??= 'new';
       // A background refresh keeps a message the user has not acted on yet; the next action clears it.
-    } catch (cause) { if (disposed || id !== request) return; error = message(cause); }
+    } catch (cause) {
+      if (disposed || id !== request) return;
+      error = message(cause);
+      // Never show another bot's cached settings after automatic selection changes.
+      if (detail && detail.bot.id !== selected) detail = null;
+    }
     loading = false;
     render();
   }

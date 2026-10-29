@@ -619,6 +619,50 @@ test.describe('bots', () => {
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pandacode.botsOrder') ?? '[]'))).toEqual(ids);
   });
 
+  test('failed detail reload after bot removal hides the stale selected bot', async ({ page }) => {
+    await page.goto('/');
+    await page.evaluate(async () => {
+      const { mountBots } = await import('/src/bots.ts');
+      const host = document.createElement('div');
+      host.id = 'bot-reload-test';
+      document.body.append(host);
+      const first = {
+        id: 'first', name: 'First bot', role: '', instructions: '', goals: '', soul: '',
+        avatar: 'panda:0', projectId: 'workspace', provider: 'codex', model: 'default',
+        mode: 'ask', heartbeatMinutes: 0, nextHeartbeatAt: null, paused: false,
+        memoryVersion: 0, notifyChannelId: null, notifyThread: null,
+        createdAt: 1, updatedAt: 1, mcp: [], skills: [],
+      };
+      const second = { ...first, id: 'second', name: 'Second bot' };
+      let available = [first, second], failDetail = false;
+      const view = mountBots(host, {
+        providers: [], defaultModel: () => 'default', loadModels: async () => [],
+        running: () => false, openTask: () => {}, openChat: () => {}, notify: () => {},
+        call: async (command: string, args?: Record<string, unknown>): Promise<any> => {
+          if (command === 'bots_list') return available;
+          if (command === 'bot_detail') {
+            if (failDetail) throw new Error('Details unavailable');
+            return { bot: available.find(bot => bot.id === args?.botId),
+              memories: [], schedules: [], channels: [], pairings: [], threads: [],
+              rules: [], serverPort: 0 };
+          }
+          throw new Error('Unexpected bot command: ' + command);
+        },
+      });
+      (window as any).__simulateBotReloadFailure = () => {
+        available = [second];
+        failDetail = true;
+        view.refresh();
+      };
+    });
+    const host = page.locator('#bot-reload-test');
+    await expect(host.locator('.bp-name')).toHaveText('First bot');
+    await page.evaluate(() => (window as any).__simulateBotReloadFailure());
+    await expect(host.locator('.bots-error')).toContainText('Details unavailable');
+    await expect(host.locator('.bots-row')).toContainText('Second bot');
+    await expect(host.locator('.bp-name')).toHaveCount(0);
+  });
+
   test('failed bot loads offer retry and preserve cached bots', async ({ page }) => {
     await page.addInitScript(() => { (window as any).__failBotsList = true; });
     await page.route('**/src/preview.ts*', async route => {

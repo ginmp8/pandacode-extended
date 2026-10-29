@@ -675,11 +675,11 @@ fn rollback_created_start(
 /// A failed attachment worker cannot be allowed to strand its already-created task.
 /// The Made guard in the worker cleans an uncommitted checkout on unwind; this
 /// cleanup handles the separate persisted task even when join itself fails.
-fn attached_or_rollback<T>(
+fn attached_or_rollback<T, E: std::fmt::Display>(
     state: &AppState,
     task_id: &str,
     root: &Path,
-    joined: std::result::Result<Result<T>, tokio::task::JoinError>,
+    joined: std::result::Result<Result<T>, E>,
 ) -> Result<T> {
     match joined {
         Ok(Ok(value)) => Ok(value),

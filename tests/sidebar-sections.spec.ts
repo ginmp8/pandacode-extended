@@ -269,6 +269,22 @@ test.describe('sidebar sections', () => {
     expect(await page.evaluate(() => localStorage.getItem('pandacode.sidebar.completedOpen'))).not.toBe('true');
   });
 
+  test('settling the open Finished task keeps its row until another task is selected', async ({ page }) => {
+    await open(page);
+    const order = await ids(page, 'review');
+    await row(page, 'sections-review-2').click();
+    await expect(row(page, 'sections-review-2')).toHaveAttribute('aria-current', 'page');
+    await row(page, 'sections-review-2').hover();
+    await action(page, 'Settle: Write the release notes').click();
+    // A selected task must not disappear or jump into Settled under the pointer.
+    await expect.poll(() => ids(page, 'review')).toEqual(order);
+    await expect(row(page, 'sections-review-2')).toHaveAttribute('aria-current', 'page');
+    await row(page, 'session-2').click();
+    await expect(section(page, 'review').locator('[data-id="sections-review-2"]')).toHaveCount(0);
+    await toggle(page).click();
+    await expect(section(page, 'completed').locator('[data-id="sections-review-2"]')).toHaveCount(1);
+  });
+
   test('a thread opened by shortcut holds its section; once it runs it leaves Settled for good', async ({ page }) => {
     await open(page);
     await page.locator('body').click({ position: { x: 900, y: 300 } }).catch(() => undefined);

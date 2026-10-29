@@ -1849,7 +1849,7 @@ mod tests {
         ];
         let newest = newest_subagents(&events);
         assert_eq!(newest.len(), 2);
-        assert_eq!(newest[0].1, "run:a");
+        assert_eq!(newest[0].1["id"].as_str(), Some("run:a"));
         assert_eq!(newest[0].1["status"], "completed", "an older running frame cannot replace a newer completed one");
         assert_eq!(newest[1].1["status"], "completed", "a terminal snapshot wins an equal-time tie");
     }

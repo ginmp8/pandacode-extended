@@ -4696,7 +4696,12 @@ async function pinTask(id: string): Promise<void> {
     const saved = await call<Session>('pin_session', { sessionId: id, pinned: !task.pinned });
     const current = state.sessions.find(item => item.id === id);
     if (current) { current.pinned = saved.pinned; current.sidebarOrder = saved.sidebarOrder; }
-    notify(saved.pinned ? 'Task pinned' : 'Task unpinned', saved.pinned ? undefined : () => run(pinTask(id)));
+    notify(saved.pinned ? 'Task pinned' : 'Task unpinned', saved.pinned ? undefined : () => {
+      // A newer pin from another window must not be undone by this stale toast.
+      const latest = state.sessions.find(item => item.id === id);
+      if (!latest || latest.pinned !== saved.pinned) return;
+      run(pinTask(id));
+    });
   } finally { orderingBusy = false; renderNavigation(); }
 }
 async function reorderThreads(ids: string[], focus: string): Promise<void> {

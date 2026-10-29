@@ -88,6 +88,22 @@ test.describe('thread order', () => {
     expect(metadata.every((entry: object) => Object.keys(entry).sort().join(',') === 'id,pinned,sidebarOrder')).toBe(true);
   });
 
+  test('stale Unpin undo cannot overwrite a newer pin from another window', async ({ page }) => {
+    await open(page);
+    await choosePin(page, 'session-2');
+    await choosePin(page, 'session-2', false);
+    await expect(page.locator('#toast')).toContainText('Task unpinned');
+    // Simulate the native notification from another window while the old Undo toast is visible.
+    await page.evaluate(async () => {
+      const preview = await import((window as any).__threadOrderUrl);
+      await preview.invoke('pin_session', { sessionId: 'session-2', pinned: true });
+    });
+    await expect(row(page, 'session-2')).toHaveAttribute('data-pinned', 'true');
+    await page.locator('#toast').getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect(row(page, 'session-2')).toHaveAttribute('data-pinned', 'true');
+    expect((await calls(page, 'pin_session')).filter(call => call.args.sessionId === 'session-2')).toHaveLength(3);
+  });
+
   test('drags rows and reorders by keyboard without changing selection, then restores their order', async ({ page }) => {
     await open(page);
     expect(await orbit(page)).toEqual(['session-1', 'session-2', 'session-3']);

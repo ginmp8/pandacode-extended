@@ -2504,7 +2504,7 @@ fn heuristic_routes(store: &Store, team: &TeamSnapshot, args: &Value, enabled: b
     let (keys, jobs) = routing::auto_jobs(args, &["rust".to_string()], &routing::chains(store, team, args).unwrap());
     let prefs = crate::panda_router::Preferences { mode, ..Default::default() };
     let routes = enabled.then(|| crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &prefs, &routing::pool(config), jobs));
-    routing::auto_from(keys, routes, mode)
+    routing::auto_from(keys, routes, prefs)
 }
 fn routed_call(state: &AppState, sid: &str, args: Value, enabled: bool) -> Result<Value> {
     routed_call_in(state, sid, args, enabled, Mode::Balanced)
@@ -2717,6 +2717,35 @@ fn a_fresh_auto_worker_opens_on_the_ladder_in_cheap_and_balanced_modes() {
         }
     }
 }
+#[test]
+fn cheap_auto_worker_uses_the_frozen_threshold_not_the_later_global_setting() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let cheap = crate::panda_router::Routed {
+        provider: "claude".into(), model: "haiku".into(), name: "Haiku".into(), card_id: "haiku".into(),
+        p_success: 0.75, p_success_lower: 0.6, est_cost_usd: 0.01, expected_cost_usd: 0.02, est_latency_ms: 10.0,
+    };
+    let strong = crate::panda_router::Routed {
+        model: "sonnet".into(), name: "Sonnet".into(), card_id: "sonnet".into(),
+        p_success: 0.95, p_success_lower: 0.85, est_cost_usd: 0.03, expected_cost_usd: 0.04, ..cheap.clone()
+    };
+    let route = crate::panda_router::Route {
+        pick: Some(strong.clone()), decided_by: "policy:cheapest".into(),
+        ranking: vec![strong.clone(), cheap.clone()], ladder: vec![cheap, strong], failed: vec![],
+        distribution: vec![1.0], unrated: vec![], difficulty: 1, category: "coding".into(),
+        profiler: "heuristic", latency_ms: 1.0,
+    };
+    // The default threshold is 0.5; this route was computed earlier with 0.8. The cheap
+    // model clears 0.5 but not 0.8, so re-reading current Settings would staff the wrong model.
+    let prefs = crate::panda_router::Preferences { mode: Mode::Cheapest, min_p: 0.8 };
+    let routes = routing::auto_from(vec!["threshold".into()], Some(Ok(vec![route])), prefs);
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    let args = json!({"assignments":[auto_assignment("threshold", json!({"profileId":"auto"}))]});
+    dispatch_state_routed(&state, &sid, team.generation, "pandacode_dispatch_workers", args, &AtomicBool::new(false), &routes).unwrap();
+    let stored = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert_eq!(stored.workers[0].model, "sonnet", "dispatch must honor the frozen minimum success bar");
+}
+
 #[test]
 fn auto_profile_uses_the_lead_when_routing_is_off() {
     let (state, sid) = auto_state();

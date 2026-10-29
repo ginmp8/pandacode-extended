@@ -11,7 +11,7 @@ use rusqlite::{params, OptionalExtension};
 
 use super::{active, load, text, Assignment, TeamConfig, TeamSnapshot, WorkerProfile, HARNESSES};
 use crate::model_routing::{self, Job};
-use crate::panda_router::{Mode, PoolModel, Route, Routed, TaskContext};
+use crate::panda_router::{Mode, PoolModel, Preferences, Route, Routed, TaskContext};
 use crate::{storage, AppState, Result};
 
 pub(super) const AUTO: &str = "auto";
@@ -24,6 +24,8 @@ pub(crate) struct AutoRoute {
     /// Try in order, escalating on failure; a fresh Cheap or Balanced assignment opens on its first rung.
     ladder: Vec<Routed>,
     mode: Mode,
+    /// The threshold used by the route, never a later Settings value.
+    min_p: f64,
     decided_by: String,
     /// Models that failed this assignment before (escalation input).
     failed: Vec<PoolModel>,
@@ -151,13 +153,13 @@ pub(super) fn auto_jobs(args: &Value, langs: &[String], chains: &Chains) -> (Vec
         .unzip()
 }
 
-pub(super) fn auto_from(keys: Vec<String>, routes: Option<std::result::Result<Vec<Route>, String>>, mode: Mode) -> AutoRoutes {
+pub(super) fn auto_from(keys: Vec<String>, routes: Option<std::result::Result<Vec<Route>, String>>, prefs: Preferences) -> AutoRoutes {
     match routes {
         Some(Ok(routes)) => keys
             .into_iter()
             .zip(routes)
             .map(|(key, r)| {
-                let route = AutoRoute { pick: r.pick, ladder: r.ladder, mode, decided_by: r.decided_by, failed: r.failed, difficulty: r.difficulty, category: r.category, profiler: r.profiler };
+                let route = AutoRoute { pick: r.pick, ladder: r.ladder, mode: prefs.mode, min_p: prefs.min_p, decided_by: r.decided_by, failed: r.failed, difficulty: r.difficulty, category: r.category, profiler: r.profiler };
                 (key, Ok(route))
             })
             .collect(),
@@ -174,9 +176,9 @@ pub(super) async fn auto_routes(config: &TeamConfig, langs: &[String], chains: &
     if keys.is_empty() {
         return AutoRoutes::default();
     }
-    // One mode for routing and staffing, even if Settings changes it meanwhile.
-    let mode = model_routing::mode();
-    auto_from(keys, model_routing::route_jobs(pool(config), jobs, Some(mode)).await, mode)
+    // Freeze mode and minimum threshold together; Settings may change while routing awaits.
+    let prefs = model_routing::preferences();
+    auto_from(keys, model_routing::route_jobs_with_preferences(pool(config), jobs, prefs).await, prefs)
 }
 
 fn effort(provider: &str, effort: Option<&String>) -> Option<String> {
@@ -198,12 +200,12 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
     let wanted = assignment.reasoning_effort.as_ref();
     let route = routes.get(&assignment.key).cloned().unwrap_or(Err("routing is off"));
     let reason = match route {
-        Ok(AutoRoute { pick: Some(policy), ladder, mode, decided_by, failed, difficulty, category, profiler }) => {
+        Ok(AutoRoute { pick: Some(policy), ladder, mode, min_p, decided_by, failed, difficulty, category, profiler }) => {
             // Cheap keeps its contract: the opener must clear the minimum lower bound, else the policy pick.
             let opener = match mode {
                 _ if !failed.is_empty() => None,
                 Mode::Quality => None,
-                Mode::Cheapest => ladder.iter().find(|m| m.p_success_lower >= model_routing::min_p()),
+                Mode::Cheapest => ladder.iter().find(|m| m.p_success_lower >= min_p),
                 _ => ladder.first(),
             };
             let pick = opener.cloned().unwrap_or_else(|| policy.clone());

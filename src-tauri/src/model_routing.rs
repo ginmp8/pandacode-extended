@@ -184,6 +184,11 @@ pub fn min_p() -> f64 {
     RUNTIME.get().map_or_else(|| Settings::default().min_p, |rt| rt.settings().min_p)
 }
 
+/// One atomic settings snapshot: mode and threshold must describe the same dispatch decision.
+pub fn preferences() -> Preferences {
+    RUNTIME.get().map_or_else(|| Settings::default().preferences(None), |rt| rt.settings().preferences(None))
+}
+
 pub fn assets_present(dir: &Path) -> bool {
     panda_router::ASSETS.iter().all(|(file, _)| dir.join(file).is_file())
 }
@@ -420,6 +425,15 @@ pub async fn route_jobs(pool: Vec<PoolModel>, jobs: Vec<Job>, mode: Option<Mode>
         return None;
     }
     Some(run(rt, settings.preferences(mode), pool, jobs, false).await)
+}
+
+/// Route with the caller's frozen policy, while honoring a later routing-off change.
+pub async fn route_jobs_with_preferences(pool: Vec<PoolModel>, jobs: Vec<Job>, prefs: Preferences) -> Option<Result<Vec<Route>, String>> {
+    let rt = RUNTIME.get()?;
+    if !rt.settings().enabled {
+        return None;
+    }
+    Some(run(rt, prefs, pool, jobs, false).await)
 }
 
 async fn run(rt: &'static Runtime, prefs: Preferences, pool: Vec<PoolModel>, jobs: Vec<Job>, wait: bool) -> Result<Vec<Route>, String> {

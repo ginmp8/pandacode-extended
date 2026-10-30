@@ -1,7 +1,7 @@
 # Model routing
 
 In an automatic team the lead can let PandaCode pick each worker's model with
-[Panda Router](https://github.com/aicodeking/PandaOrchestrator) v4 (MIT). It runs
+[Panda Router](https://github.com/ginmp8/PandaOrchestrator) v4.3 (MIT). It runs
 inside PandaCode, in Rust: no Python, no server and no extra install (ONNX
 Runtime is linked into the app). A route takes about 10–25 ms on the CPU, and
 nothing about the task leaves your machine.
@@ -98,7 +98,7 @@ and **Route** return a "routing is off" error.
 
 The profiler files — `model.int8.onnx` (31 MB) and `tokenizer.json` (3.5 MB) — are
 downloaded once from `raw.githubusercontent.com`, from a pinned commit
-(`83e408c794ef1d09b6d13b6ad8734e984f552402`) of `aicodeking/PandaOrchestrator`,
+(`83e408c794ef1d09b6d13b6ad8734e984f552402`) of the maintained `ginmp8/PandaOrchestrator` fork,
 and verified by SHA-256 before use. They go to `panda-router/v4` in app data; the
 v2 files of earlier releases are deleted once v4 loads. The request carries no
 content from your work. It happens only while routing is enabled and only when a team needs it (turning a team
@@ -114,7 +114,7 @@ network request.
 ## Limits
 
 - Model cards are estimates, not measurements. See the upstream
-  [cards README](https://github.com/aicodeking/PandaOrchestrator/blob/main/cards/README.md)
+  [cards README](https://github.com/ginmp8/PandaOrchestrator/blob/83e408c794ef1d09b6d13b6ad8734e984f552402/cards/README.md)
   for how each number was set.
 - The router picks a model; it does not know your account's access. A model must
   still be supported by its harness and your account.
@@ -123,11 +123,14 @@ network request.
 
 - `src-tauri/src/panda_router.rs` and `panda_router/`: the ONNX profiler (`ort`,
   `tokenizers`), the MIRT matcher over the model cards, the success head and the v4
-  policy with its escalation ladder. CI (macOS job) checks the
-  pinned assets: exact tokenizer ids and well-formed profiles and routes. int8 results
-  vary slightly by CPU, so numeric parity with the Python reference (1e-4) runs with
-  `PANDA_ROUTER_STRICT=1` on the machine that dumped `data/parity.json`; the matcher
-  is pinned exactly by the heuristic parity tests.
+  policy with its escalation ladder. The current GitHub CI Rust job runs on Linux
+  x86_64, where ONNX is disabled, and verifies the heuristic fallback and relevant
+  native tests. It does **not** prove that the optional ONNX profiler builds or runs
+  on Windows, macOS arm64, or Linux arm64, nor does it execute the ignored live-asset
+  test. Real ONNX asset loading and numeric parity require a separately recorded
+  test on supported hardware with the pinned profiler files; int8 output can vary
+  slightly by CPU. `PANDA_ROUTER_STRICT=1` checks numeric parity against
+  `data/parity.json` under comparable hardware conditions.
 - `src-tauri/src/model_routing.rs`: settings, the download and the IPC.
 - `src-tauri/src/architect/routing.rs`: the team side (`profileId: "auto"`,
   `replaces` and its failure chain, `route_models`, the catalog).

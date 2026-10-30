@@ -79,7 +79,7 @@ jobs:
           sudo chmod 1777 /private/tmp
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/sidebar-keyboard.spec.ts tests/remote-progress.spec.ts tests/remote-security.spec.ts tests/remote-pairing.spec.ts tests/remote-diagnostics.spec.ts tests/remote-connect-ux.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/provider-handoff.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --shard="${{ matrix.shard }}/2" --workers=4
+          npx playwright test tests/model-routing.spec.ts tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/sidebar-keyboard.spec.ts tests/remote-progress.spec.ts tests/remote-security.spec.ts tests/remote-pairing.spec.ts tests/remote-diagnostics.spec.ts tests/remote-connect-ux.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/provider-handoff.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --shard="${{ matrix.shard }}/2" --workers=4
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:

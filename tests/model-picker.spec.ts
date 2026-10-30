@@ -48,6 +48,40 @@ test('remote harness discovery errors never expose private diagnostics', async (
   await page.evaluate(() => (window as any).__closeRemoteHarnessPicker?.());
 });
 
+test('the current custom model is not advertised by another named connection', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const modulePath = '/src/model-picker.ts';
+    const { openModelPicker } = await import(modulePath);
+    const anchor = document.createElement('button');
+    anchor.id = 'named-connection-picker-trigger';
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeConnectionPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'private-model-a' },
+      currentConnection: 'account-a',
+      connections: [
+        { id: 'account-a', name: 'Account A', provider: 'codex' },
+        { id: 'account-b', name: 'Account B', provider: 'codex' },
+      ],
+      canSwitchProvider: true,
+      onSelect: async () => {},
+    });
+  });
+  const menu = picker(page);
+  await expect(menu.locator('[role="option"][data-model="private-model-a"]')).toHaveCount(1);
+  await menu.getByRole('tab', { name: 'Account B', exact: true }).click();
+  await expect(menu.locator('[role="option"][data-model="private-model-a"]')).toHaveCount(0);
+  await menu.getByRole('tab', { name: 'Codex', exact: true }).click();
+  await expect(menu.locator('[role="option"][data-model="private-model-a"]')).toHaveCount(0);
+  await menu.getByRole('tab', { name: 'Account A', exact: true }).click();
+  await expect(menu.locator('[role="option"][data-model="private-model-a"]')).toHaveCount(1);
+  await expect(menu.locator('[role="option"][data-model="private-model-a"]')).toHaveAttribute('aria-current', 'true');
+  await page.evaluate(() => (window as any).__closeConnectionPicker?.());
+});
+
 test('the harness picker hides harnesses that are not installed', async ({ page }) => {
   await page.goto('/');
   await page.locator('.new-task-button').click();

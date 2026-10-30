@@ -434,6 +434,7 @@ test('remote provider IDs cannot inject attributes into picker markup', async ({
   await expect(tab.locator('.provider-logo')).toHaveAttribute('data-provider', remoteId);
   await tab.click();
   await expect(menu.getByRole('option', { name: 'Untrusted harness · Model A', exact: true })).toHaveAttribute('data-provider', remoteId);
+  await expect(menu.locator('[data-catalog-loading]')).toHaveAttribute('data-catalog-loading', remoteId);
   await expect(menu.locator('[data-picker-injected]')).toHaveCount(0);
   await page.evaluate(() => (window as any).__closeUnsafeProviderPicker?.());
 });

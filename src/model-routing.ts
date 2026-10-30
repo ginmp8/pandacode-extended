@@ -173,11 +173,14 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     }
   });
 
-  void request('model_routing_status').catch(() => {
-    if (!disposed) {
+  // A stale status read may resolve without rendering when a Settings write supersedes it.
+  // If that write also fails, retry the initial read rather than leaving the panel uninitialized.
+  const recoverInitialStatus = () => {
+    if (!disposed && !status) {
       statusText.textContent = 'Routing status unavailable; retrying…';
       poll(true);
     }
-  });
+  };
+  void request('model_routing_status').then(recoverInitialStatus, recoverInitialStatus);
   return () => { disposed = true; clearTimeout(polling); };
 }

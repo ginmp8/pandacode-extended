@@ -405,3 +405,35 @@ test('model selection failure does not expose provider credentials or local path
   await expect(picker(page)).not.toContainText('/private/credentials');
   await page.evaluate(() => (window as any).__closeSelectionErrorPicker?.());
 });
+
+// Remote discovery data crosses an IPC boundary. TypeScript's ProviderId union does not
+// validate a provider ID returned at runtime; generated HTML must escape attributes.
+test('remote provider IDs cannot inject attributes into picker markup', async ({ page }) => {
+  await page.goto('/?teams');
+  const remoteId = 'untrusted" data-picker-injected="true';
+  await page.evaluate(async id => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeUnsafeProviderPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      loadProviders: async () => [
+        { id: 'codex', name: 'Codex', installed: true, models: [] },
+        { id: id as any, name: 'Untrusted harness', installed: true, models: [{ id: 'model-a', name: 'Model A' }] },
+      ],
+    });
+  }, remoteId);
+  const menu = picker(page);
+  const tab = menu.getByRole('tab', { name: 'Untrusted harness', exact: true });
+  await expect(tab).toBeVisible();
+  await expect(tab.locator('.provider-logo')).toHaveAttribute('data-provider', remoteId);
+  await tab.click();
+  await expect(menu.getByRole('option', { name: 'Untrusted harness · Model A', exact: true })).toHaveAttribute('data-provider', remoteId);
+  await expect(menu.locator('[data-picker-injected]')).toHaveCount(0);
+  await page.evaluate(() => (window as any).__closeUnsafeProviderPicker?.());
+});

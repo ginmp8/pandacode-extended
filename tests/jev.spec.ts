@@ -569,6 +569,8 @@ test('Jev popover uses translucent blur and respects reduced transparency prefer
     return { alpha: context.getImageData(0, 0, 1, 1).data[3] / 255, filter: style.backdropFilter || style.getPropertyValue('-webkit-backdrop-filter') };
   });
   await expect(popover).toHaveAttribute('data-popover-state', 'open');
+  // The glass condenses as the popover arrives; read its material once it has settled.
+  await expect.poll(() => popover.evaluate(element => element.getAnimations().length)).toBe(0);
   const glass = await material();
   expect(glass.alpha).toBeGreaterThan(0); expect(glass.alpha).toBeLessThan(1);
   expect(glass.filter).toContain('blur(');
@@ -647,7 +649,7 @@ test('runs are cancellable and live activity follows conversation and board deta
   await expect(chip).toContainText('Test stopped');
   await emit(page, { id: 'run-2', status: 'running', createdAt: Date.now() + 2000 });
   await expect(chip).toContainText('Testing app');
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
   await page.getByRole('button', { name: 'Open task: Make search feel instant', exact: true }).click();
   await expect(chip).toBeVisible();
   await chip.click();

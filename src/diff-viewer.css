@@ -1,4 +1,6 @@
 .diff-viewer {
+  /* Row height; also sizes the placeholders of hunk groups that have not mounted yet. */
+  --diff-line-height: 1.45rem;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -85,11 +87,13 @@
 }
 .diff-viewer-file { min-width: 0; }
 .diff-viewer-file + .diff-viewer-file { margin-top: 16px; }
+/* A long file is mounted in hunk groups; its continuations sit flush. */
+.diff-viewer-file + .diff-viewer-continued { margin-top: 0; }
 .diff-viewer-file diffs-container {
   display: block;
   --diffs-font-family: var(--mono);
   --diffs-font-size: var(--mono-size);
-  --diffs-line-height: 1.45rem;
+  --diffs-line-height: var(--diff-line-height);
 }
 .diff-viewer-raw {
   padding: 12px 16px;
@@ -112,3 +116,6 @@ diffs-container {
   --diffs-bg-addition-emphasis-override: color-mix(in srgb, var(--success) 24%, transparent);
   --diffs-bg-deletion-emphasis-override: color-mix(in srgb, var(--danger) 24%, transparent);
 }
+
+/* Micro-interactions: only without reduced motion. */
+@media(prefers-reduced-motion:no-preference){.diff-viewer-button[aria-pressed]{transition:background-color 130ms ease-out,color 130ms ease-out}}

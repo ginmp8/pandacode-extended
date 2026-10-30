@@ -19,6 +19,7 @@ The prior `development` work remains present. It includes existing 0.7.0 integra
 - `src/sidebar-tree.css`: frosted rather than opaque row-actions treatment, with a solid fallback when reduced transparency is requested, while retaining Extended's keyboard/focus and unread indicator semantics.
 - `tests/worktrees.spec.ts`: regression for settled draft after worktree removal; added to browser CI shard without disabling existing tests.
 - Original upstream feature commit: `ed6d736746202e662e186c2d0380a3a42c06a70e` (three touched files); adapted, not blindly replaced.
+- `0.3.77` Changes diff virtualization: incorporated pinned source `src/diff-viewer.ts` with Extended's keyboard-navigation fix retained; added worker-based highlight/virtualization, pure diff chunking/preload helper, `.cv-list` scroll container and per-shadow style propagation. Existing Extended `changes-view` behavior and tests are retained. This is **not** performance-parity evidence and requires independent same-SHA validation.
 
 ## Hard security invariants for subsequent integration
 
@@ -35,7 +36,7 @@ Reference: `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, `docs/VER
 | 0.3.74 | Rich trace rendering | **Pending** |
 | 0.3.75 | Durable nested subworkers and model coordination | **Pending** |
 | 0.3.76 | Long-session memory control | **Pending** |
-| 0.3.77 | Virtualized Changes diff rendering | **Pending** |
+| 0.3.77 | Virtualized Changes diff rendering | Code adapted from pinned upstream; CI/performance/security acceptance **pending** |
 | 0.3.78 | Progress snapshot/PiP | **Pending** (high-risk local filesystem and SVG boundaries) |
 | 0.3.79 | Settled draft fix and sidebar frost | Adapted in this branch; CI/behavioral acceptance **pending** |
 
@@ -44,7 +45,8 @@ This document is a candidate ledger, **not** a promise of feature equivalence. O
 ## Validation contract and review gate
 
 - Run `npm run build`, `npm test`, `npm run test:release`, `npm run test:install-security` and `npm run site:build`.
-- Run browser regressions including `tests/worktrees.spec.ts`, `tests/sidebar-sections.spec.ts`, `tests/board.spec.ts`, `tests/github-hub.spec.ts`, `tests/remote-security.spec.ts`.
+- Run browser regressions including `tests/worktrees.spec.ts`, `tests/changes-view.spec.ts`, `tests/sidebar-sections.spec.ts`, `tests/board.spec.ts`, `tests/github-hub.spec.ts`, `tests/remote-security.spec.ts`.
+- Verify diff worker is local/self-hosted under the existing Tauri CSP (no `blob:`), serialized patches are bounded, no external calls, stale UI viewers are disposed, and keyboard horizontal scrolling remains operable. Run a reproducible large-diff performance benchmark before claiming a speed improvement.
 - Run mobile + relay typecheck/tests, Rust tests/clippy with `--locked`, and native/physical Windows checks for packaging and Connect security when available.
 - Prove absence of restored updater plugin, network bootstrap, remote Full-by-default, unapproved telemetry and privilege expansion with dedicated negative tests/static diff review.
 - Do not merge to `main`, retarget `development`, publish a release, update global automation scope or change issue labels until review/acceptance.

@@ -152,6 +152,21 @@ test('Try it shows a pick and alternatives', async ({ page }) => {
   expect((await calls(page, 'model_routing_route')).at(-1).args.pool.length).toBeGreaterThan(24);
 });
 
+test('turning routing off discards an in-flight preview instead of showing a stale recommendation', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  await page.evaluate(() => { (window as any).__routingDelay = { model_routing_route: 750 }; });
+  await settings(page).getByRole('textbox', { name: 'Task to route' }).fill('Fix the failing login test');
+  await settings(page).getByRole('button', { name: 'Route', exact: true }).click();
+  await expect(settings(page).locator('.routing-result')).toHaveText('Routing…');
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
+  await settings(page).getByRole('checkbox', { name: 'Pick worker models with Panda Router', exact: true }).uncheck();
+  await expect(settings(page).getByRole('checkbox', { name: 'Pick worker models with Panda Router', exact: true })).not.toBeChecked();
+  await page.waitForTimeout(850);
+  await expect(settings(page).locator('.routing-result')).toBeHidden();
+  await expect(settings(page).getByRole('button', { name: 'Route', exact: true })).toBeDisabled();
+});
+
 test('the catalog keeps every harness and long shared prefixes', async ({ page }) => {
   await install(page);
   const result = await page.evaluate(async () => {

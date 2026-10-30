@@ -441,7 +441,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       current.reasoningEffort = effort;
     } catch (reason) {
       if (closed) return;
-      error.textContent = reason instanceof Error ? reason.message : String(reason);
+      error.textContent = catalogFailureReason(reason);
       error.hidden = false;
     } finally {
       if (!closed) {
@@ -471,7 +471,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     } catch (reason) {
       if (closed) return;
       pending = false;
-      error.textContent = reason instanceof Error ? reason.message : String(reason);
+      error.textContent = catalogFailureReason(reason);
       error.hidden = false;
       renderChoices();
       search.focus({ preventScroll: true });

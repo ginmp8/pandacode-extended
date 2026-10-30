@@ -111,6 +111,8 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     return request('model_routing_configure', patch, true).catch(fail);
   };
 
+  // The recommendation must describe the current input, not an earlier task whose route finishes later.
+  text.addEventListener('input', () => { routeTicket++; result.hidden = true; result.textContent = ''; });
   enabled.addEventListener('change', () => void configure({ enabled: enabled.checked }));
   modes.addEventListener('click', event => {
     const mode = (event.target as Element).closest<HTMLElement>('[data-mode]')?.dataset.mode;

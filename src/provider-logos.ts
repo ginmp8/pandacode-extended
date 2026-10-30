@@ -27,9 +27,9 @@ export function providerLogo(id: ProviderId, cls = ''): string {
   // Monochrome marks are inlined and drawn in the theme's text color.
   const inline = id === 'github-copilot' ? githubCopilotLogo : id === 'cline' ? clineLogo.replaceAll('#1C1C24', 'currentColor') : id === 'devin' ? devinLogo.replace('fill="black"', 'fill="currentColor"') : '';
   if (inline) {
-    return inline.replace('<svg ', `<svg class="${className}" data-provider="${id}" aria-hidden="true" focusable="false" `);
+    return inline.replace('<svg ', `<svg class="${className}" data-provider="${escape(id)}" aria-hidden="true" focusable="false" `);
   }
   const src = logos[id];
-  if (!src) return `<span class="${className} provider-logo-tile" data-provider="${id}" aria-hidden="true">${escape(id.charAt(0).toUpperCase())}</span>`;
-  return `<img class="${className}" data-provider="${id}" src="${escape(src)}" width="20" height="20" alt="" aria-hidden="true" draggable="false">`;
+  if (!src) return `<span class="${className} provider-logo-tile" data-provider="${escape(id)}" aria-hidden="true">${escape(id.charAt(0).toUpperCase())}</span>`;
+  return `<img class="${className}" data-provider="${escape(id)}" src="${escape(src)}" width="20" height="20" alt="" aria-hidden="true" draggable="false">`;
 }

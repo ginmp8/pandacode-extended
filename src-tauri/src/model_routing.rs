@@ -564,7 +564,7 @@ pub(crate) fn validate_pool(pool: &[PoolEntry]) -> Result<(), String> {
         if !crate::architect::HARNESSES.contains(&entry.provider.as_str()) {
             return Err(format!("Unknown harness {:?}.", entry.provider));
         }
-        if entry.model.is_empty() || entry.model.len() > 200 || entry.name.len() > 200 || format!("{}{}", entry.model, entry.name).contains('\0') {
+        if entry.model.is_empty() || entry.name.is_empty() || entry.model.len() > 200 || entry.name.len() > 200 || format!("{}{}", entry.model, entry.name).contains('\0') {
             return Err("Model IDs and names must be 1–200 bytes.".into());
         }
     }

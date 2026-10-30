@@ -16,6 +16,7 @@ async function openSample(page: Page, name: string): Promise<void> {
   await showBotsView(page);
   await sidebar(page).getByRole('button', { name: new RegExp(`^Chat with ${name}`) }).click();
   await expect(page.locator('#breadcrumb .bot-crumb')).toContainText(name);
+  await expect(page.getByRole('button', { name: 'View bot settings', exact: true })).toBeVisible();
   const limit = page.getByRole('region', { name: 'Usage limit' });
   if (await limit.isVisible()) {
     await limit.getByRole('button', { name: 'Dismiss usage limit' }).click();

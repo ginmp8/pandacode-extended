@@ -312,4 +312,6 @@ test('keyboard focus can move horizontally across an unwrapped read-only diff', 
   await expect(region).toBeFocused();
   for (let press = 0; press < 5; press++) await page.keyboard.press('ArrowRight');
   await expect.poll(horizontalOffset).toBeGreaterThan(0);
+  for (let press = 0; press < 5; press++) await page.keyboard.press('ArrowLeft');
+  await expect.poll(horizontalOffset).toBe(0);
 });

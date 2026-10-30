@@ -460,7 +460,7 @@ const $app = document.querySelector<HTMLDivElement>('#app')!;
 $app.innerHTML = `<div class="workspace">
   <aside id="workspace-sidebar" class="sidebar" aria-label="Projects and tasks">
     <div class="brand" data-tauri-drag-region><span class="brand-name" data-tauri-drag-region>PandaCode Extended</span>${button('view-menu', 'Workspace view: Conversation', 'thread', 'view-menu', 'id="view-menu" aria-haspopup="menu" aria-expanded="false"')}</div>
-    <div class="sidebar-actions"><button class="new-task-button" data-action="new-task">${icon('plus')}<span>New task</span><kbd>${shortcut('N')}</kbd></button><button class="new-chat-button" data-action="new-chat" title="New chat (no project)">${icon('chat')}<span>New chat</span></button><button class="search-trigger" data-action="search">${icon('search')}<span>Search</span><kbd>${shortcut('K')}</kbd></button></div>
+    <div class="sidebar-actions"><button class="new-task-button" data-action="new-task">${icon('plus')}<span>New task</span><kbd>${shortcut('N')}</kbd></button><button class="new-chat-button" data-action="new-chat" title="New chat (no project)">${icon('chat')}<span>New chat</span></button><button class="search-trigger" data-action="search" aria-label="Search">${icon('search')}<span>Search</span><kbd>${shortcut('K')}</kbd></button></div>
     <div class="sidebar-projects"><button id="project-filter" class="project-filter" data-action="filter-projects" aria-label="Filter projects" aria-haspopup="dialog" aria-expanded="false"><span data-filter-label>All projects</span>${icon('down')}</button><button id="sidebar-sort" class="icon-button sidebar-sort" data-action="sidebar-sort" aria-label="Sort and view" title="Sort and view" aria-haspopup="menu" aria-expanded="false">${SORT_ICON}</button>${button('import-conversations', 'Import conversations', 'download', 'import-trigger')}${button('add-project', 'Open project', 'plus')}</div>
     <div class="sidebar-search">${icon('search')}<input id="sidebar-filter" type="search" aria-label="Filter tasks" placeholder="Filter tasks" autocomplete="off" spellcheck="false" maxlength="200" aria-keyshortcuts="/"><button type="button" class="sidebar-search-clear" data-action="clear-sidebar-filter" tabindex="-1" aria-label="Clear filter" title="Clear filter">${icon('close')}</button></div>
     <div id="navigation" class="navigation"></div>
@@ -1427,10 +1427,10 @@ function composerPlaceholder(): string { const bot = botForThread(); return bot 
 function botCrumb(bot: import('./bots').Bot): string {
   const s = session();
   const working = state.sessions.some(task => task.projectId === bot.projectId && isRunning(task.id));
-  const status = bot.paused ? 'Paused' : working ? 'Working' : 'Ready';
   // Channel threads and scheduled work name where they come from; the bot's own chat needs no label.
   const where = s && s.id !== bot.desktopSession ? s.title.split(' · ').slice(1).join(' · ') : '';
-  return `<span class="bot-crumb">${botAvatar(bot, 'bot-crumb-avatar')}<strong>${escape(bot.name)}</strong>${where ? `<span class="bot-crumb-where">${escape(where)}</span>` : ''}<span class="bot-crumb-state" data-state="${status.toLowerCase()}">${status}</span></span><button class="icon-button bot-crumb-action" data-action="bot-pause" data-bot="${escape(bot.id)}" aria-label="${bot.paused ? 'Resume' : 'Pause'} ${escape(bot.name)}" title="${bot.paused ? 'Resume: schedules, check-ins and channels continue' : 'Pause: stop work and hold schedules and messages'}" aria-pressed="${bot.paused}">${icon(bot.paused ? 'play' : 'pause')}</button><button class="bot-crumb-settings" data-action="bot-settings" data-bot="${escape(bot.id)}" aria-label="${escape(bot.name)} settings" title="Profile, memory, schedules, channels and rules">${icon('settings')}<span>Settings</span></button>`;
+  const next = s && isRunning(s.id) ? botThread.nextModel(s.id) : undefined;
+  return botThread.crumbHtml(bot, { where, status: bot.paused ? 'Paused' : working ? 'Working' : 'Ready', nextModel: s && next ? { running: modelLabel(s), next: next.label } : undefined });
 }
 /** Where a turn's spawned workers appear: right after what the architect said in that turn. */
 function workerSlot(turn: { user?: Message; coordination?: Message }): string {

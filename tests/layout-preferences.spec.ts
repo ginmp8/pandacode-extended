@@ -14,7 +14,16 @@ const storedInspectorWidth = (page: Page) => page.evaluate(() => localStorage.ge
 async function open(page: Page): Promise<void> {
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(prompt(page)).toBeEnabled();
-  await expect(page.locator('.task-item.selected')).toBeVisible();
+  const selected = page.locator('#navigation .task-item.selected');
+  await expect(selected).toHaveCount(1);
+  if ((page.viewportSize()?.width ?? 1440) <= 650) {
+    // At the 650px breakpoint the sidebar becomes an icon rail, hiding the task list.
+    // Selection persists in the DOM; Search is the visible route to other tasks.
+    await expect(page.locator('#navigation')).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeVisible();
+  } else {
+    await expect(selected).toBeVisible();
+  }
 }
 
 for (const [platform, modifier, key] of [['MacIntel', '⌘', 'Meta'], ['Win32', 'Ctrl', 'Control'], ['Linux x86_64', 'Ctrl', 'Control']]) {

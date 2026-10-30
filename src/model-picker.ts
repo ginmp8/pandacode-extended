@@ -58,9 +58,10 @@ function catalogFailureReason(reason: unknown): string {
   if (/(catalog|output|response).*(limit|large|exceed)/.test(message)) return 'Model catalog too large';
   // OS-level launch failures win over sensitive path words such as /credentials/.
   if (/(could not start|enoent|exited)/.test(message)) return 'Provider unavailable';
-  if (/(auth|log[ -]?in|sign[ -]?in|unauthori[sz]ed|credential|401)/.test(message)) return 'Login required';
-  if (/(forbidden|permission denied|access denied|403)/.test(message)) return 'Access denied';
+  // Concrete permission/rate-limit responses outrank sensitive credential hints in diagnostics.
   if (/(rate[ -]?limit|too many requests|429)/.test(message)) return 'Rate limited';
+  if (/(forbidden|permission denied|access denied|403)/.test(message)) return 'Access denied';
+  if (/(auth|log[ -]?in|sign[ -]?in|unauthori[sz]ed|credential|401)/.test(message)) return 'Login required';
   if (/(timed out|timeout|deadline)/.test(message)) return 'Timed out';
   if (/(invalid|malformed).*(json|catalog|response)/.test(message)) return 'Invalid provider response';
   if (/(not found|unavailable)/.test(message)) return 'Provider unavailable';

@@ -89,6 +89,23 @@ test('rapid Settings changes persist in user order even when the first native wr
   await expect(settings(page).getByRole('radio', { name: 'Best' })).toHaveAttribute('aria-checked', 'true');
 });
 
+test('a later Team mode change wins over an in-flight Settings write after closing Settings', async ({ page }) => {
+  await install(page);
+  await pickTeam(page, 'Balanced team');
+  await openAgents(page);
+  const before = (await calls(page, 'model_routing_configure')).length;
+  await page.evaluate(() => { (window as any).__routingWriteDelays = [1200, 0]; });
+  await settings(page).getByRole('radio', { name: 'Cheap' }).click();
+  await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(before + 1);
+  await closeSettings(page);
+  await pickTeam(page, 'Best team');
+  await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(before + 2);
+  await page.reload();
+  await page.locator('.task-item[data-id="session-2"]').click();
+  await openAgents(page);
+  await expect(settings(page).getByRole('radio', { name: 'Best' })).toHaveAttribute('aria-checked', 'true');
+});
+
 test('Try it shows a pick and alternatives', async ({ page }) => {
   await install(page);
   await openAgents(page);

@@ -57,6 +57,8 @@ function catalogFailureReason(reason: unknown): string {
   if (/(rpc|transport|frame).*(limit|large|exceed)|(limit|exceed).*(rpc|transport|frame)/.test(message)) return 'RPC transport limit';
   if (/(catalog|output|response).*(limit|large|exceed)/.test(message)) return 'Model catalog too large';
   if (/(auth|log[ -]?in|sign[ -]?in|unauthori[sz]ed|credential|401)/.test(message)) return 'Login required';
+  if (/(forbidden|permission denied|access denied|403)/.test(message)) return 'Access denied';
+  if (/(rate[ -]?limit|too many requests|429)/.test(message)) return 'Rate limited';
   if (/(timed out|timeout|deadline)/.test(message)) return 'Timed out';
   if (/(invalid|malformed).*(json|catalog|response)/.test(message)) return 'Invalid provider response';
   if (/(could not start|enoent|not found|unavailable|exited)/.test(message)) return 'Provider unavailable';

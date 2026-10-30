@@ -73,6 +73,48 @@ test.describe('thread header overlay', () => {
     expect(panel.bottom).toBeLessThanOrEqual(520);
   });
 
+  test('find navigation releases bottom-follow before streaming content grows', async ({ page }) => {
+    await openThread(page);
+    // Stabilize the preview before adding a unique match above the streaming region.
+    await page.waitForTimeout(400);
+    const transcript = page.locator('#transcript');
+    const stream = page.locator('#stream-region');
+    await stream.evaluate(node => { node.style.minHeight = '1200px'; });
+    await page.locator('#transcript article.user-message .message-content').first()
+      .evaluate(node => node.append(document.createTextNode(' unique-stream-reader-anchor ')));
+    await transcript.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+
+    await page.keyboard.press('ControlOrMeta+f');
+    const find = page.getByRole('search');
+    await find.getByRole('searchbox', { name: 'Find in thread', exact: true }).fill('unique-stream-reader-anchor');
+    await expect(find.locator('.thread-find-count')).toHaveText('1 of 1');
+    const position = () => page.evaluate(() => {
+      const highlights = (CSS as any).highlights.get('thread-find-current');
+      const range = [...highlights][0] as Range;
+      const pane = document.querySelector<HTMLElement>('#transcript')!;
+      const rect = range.getBoundingClientRect();
+      return {
+        matchTop: rect.top,
+        paneTop: pane.getBoundingClientRect().top,
+        paneBottom: pane.getBoundingClientRect().bottom,
+        gap: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+      };
+    });
+    const before = await position();
+    expect(before.matchTop).toBeGreaterThanOrEqual(before.paneTop);
+    expect(before.matchTop).toBeLessThan(before.paneBottom);
+    expect(before.gap).toBeGreaterThan(200);
+
+    // Streaming growth triggers the real transcript ResizeObserver. It must not snap the
+    // reader back to the bottom after find moved the viewport to an earlier match.
+    await stream.evaluate(node => { node.style.minHeight = '1800px'; });
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const after = await position();
+    expect(Math.abs(after.matchTop - before.matchTop)).toBeLessThan(16);
+    expect(after.gap).toBeGreaterThan(400);
+  });
+
   test('find in thread lands every match below the fade and the find bar', async ({ page }) => {
     await openThread(page);
     // Let the thread's refresh redraw land first; it restores the scroll position it remembered.

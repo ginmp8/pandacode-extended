@@ -63,12 +63,19 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     ).finally(() => { if (write) writing--; });
   };
   // A download started elsewhere (a team turning on) finishes on its own; follow it.
-  const poll = () => {
+  // A transient read failure must retry even if the initial Settings status never loaded.
+  // Back off to eight seconds on repeated failures; ordinary download polling stays at one second.
+  let pollFailures = 0;
+  const poll = (failed = false) => {
     if (polling || disposed) return;
+    const delay = failed ? Math.min(8000, 1000 * 2 ** pollFailures) : 1000;
+    if (failed) pollFailures = Math.min(3, pollFailures + 1);
     polling = window.setTimeout(() => {
       polling = 0;
-      request('model_routing_status').catch(() => { if (!disposed) poll(); });
-    }, 1000);
+      request('model_routing_status')
+        .then(() => { pollFailures = 0; })
+        .catch(() => { if (!disposed) poll(true); });
+    }, delay);
   };
 
   const render = (next: RoutingStatus) => {
@@ -131,6 +138,11 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     finally { routeButton.disabled = !status?.enabled; }
   });
 
-  void request('model_routing_status').catch(fail);
+  void request('model_routing_status').catch(() => {
+    if (!disposed) {
+      statusText.textContent = 'Routing status unavailable; retrying…';
+      poll(true);
+    }
+  });
   return () => { disposed = true; clearTimeout(polling); };
 }

@@ -64,7 +64,7 @@ export const SECTIONS: { id: SettingsSection; label: string; icon: string; descr
   { id: 'teams', label: 'Agent teams', icon: 'grid', description: 'Named teams of models, and the classic team setup.' },
   { id: 'tools', label: 'Tools & add-ons', icon: 'terminal', description: 'App tools, MCP servers, skills and Jev.' },
   { id: 'skills', label: 'Skills & rules', icon: 'widget', description: 'Import skills and rules once, turn them on per harness, and check for drift.' },
-  { id: 'cloud', label: 'Cloud sandboxes', icon: 'server', description: 'Daytona, Cloudflare and AWS machines for your agents.' },
+  { id: 'cloud', label: 'Cloud sandboxes', icon: 'monitor', description: 'Daytona, Cloudflare and AWS machines for your agents.' },
   { id: 'remote', label: 'Remote access', icon: 'globe', description: 'Reach your other computers with PandaCode Connect, end-to-end encrypted.' },
   { id: 'github', label: 'GitHub', icon: 'github', description: 'Issues, pull requests and repositories through the GitHub CLI.' },
   { id: 'about', label: 'About & updates', icon: 'info', description: 'Version, updates, resource usage, license and support.' },

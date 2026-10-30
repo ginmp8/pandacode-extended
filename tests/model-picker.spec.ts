@@ -48,6 +48,32 @@ test('remote harness discovery errors never expose private diagnostics', async (
   await page.evaluate(() => (window as any).__closeRemoteHarnessPicker?.());
 });
 
+test('HTTP 403 and 429 discovery errors give actionable, non-sensitive labels', async ({ page }) => {
+  await page.goto('/?teams');
+  for (const { detail, label } of [
+    { detail: 'HTTP 403 Forbidden; bearer DO_NOT_DISPLAY', label: 'Access denied' },
+    { detail: 'HTTP 429 Too Many Requests; token DO_NOT_DISPLAY', label: 'Rate limited' },
+  ]) {
+    await page.evaluate(async reason => {
+      const { openModelPicker } = await import('/src/model-picker.ts');
+      const anchor = document.createElement('button');
+      anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+      document.body.append(anchor);
+      (window as any).__closeDiscoveryPicker = openModelPicker({
+        anchor,
+        providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+        current: { provider: 'codex', model: 'default' },
+        canSwitchProvider: true,
+        onSelect: async () => {},
+        loadProviders: async () => { throw new Error(reason); },
+      });
+    }, detail);
+    await expect(picker(page)).toContainText(`Could not load harnesses: ${label}`);
+    await expect(picker(page)).not.toContainText('DO_NOT_DISPLAY');
+    await page.evaluate(() => (window as any).__closeDiscoveryPicker?.());
+  }
+});
+
 test('the current custom model is not advertised by another named connection', async ({ page }) => {
   await page.goto('/?teams');
   await page.evaluate(async () => {

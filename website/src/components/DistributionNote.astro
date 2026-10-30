@@ -3,7 +3,7 @@ import { distribution } from '../lib/distribution';
 interface Props { id: string }
 const { id } = Astro.props;
 ---
-{distribution.isUnsignedPreview && (
+{distribution.hasNote && (
   <p id={id} class="distribution-note">
     <strong>{distribution.platforms}</strong> · Alpha preview<br>
     <span>Downloads here are original PandaCode builds, not PandaCode Extended installers.</span><br>

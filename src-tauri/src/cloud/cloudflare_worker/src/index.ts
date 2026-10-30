@@ -5,7 +5,9 @@ import { DurableObject } from "cloudflare:workers";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const IDLE_MS = 10 * 60 * 1000;
-const MAX_OUTPUT = 256 * 1024;
+// Longest a client may ask a container to stay up unattended (24 h).
+const MAX_KEEPALIVE_MINUTES = 24 * 60;
+const MAX_OUTPUT = 4 * 1024 * 1024;
 const WORKSPACE = "/workspace";
 
 interface Env {
@@ -68,7 +70,17 @@ export class Sandbox extends DurableObject<Env> {
     }
   }
 
+  // Keep the container up for `minutes` with no requests (a detached agent is running).
+  // Exec'd processes do not count as activity, so this stretches the inactivity timeout.
+  async keepAlive(minutes: number): Promise<{ keepAliveMs: number }> {
+    const keepAliveMs = Math.min(Math.max(Math.round(minutes), 1), MAX_KEEPALIVE_MINUTES) * 60_000;
+    await this.ctx.storage.put("keepUntil", Date.now() + keepAliveMs);
+    await this.ensureRunning();
+    return { keepAliveMs };
+  }
+
   async stop(): Promise<void> {
+    await this.ctx.storage.delete("keepUntil");
     const container = this.container();
     if (container.running) await container.destroy();
   }
@@ -84,7 +96,8 @@ export class Sandbox extends DurableObject<Env> {
     if (!container.running) {
       container.start({ image: container.images.sandbox, instance: "basic", enableInternet: true });
     }
-    await container.setInactivityTimeout(IDLE_MS);
+    const keepUntil = (await this.ctx.storage.get<number>("keepUntil")) ?? 0;
+    await container.setInactivityTimeout(Math.max(IDLE_MS, keepUntil - Date.now()));
     return container;
   }
 }
@@ -101,7 +114,7 @@ export default {
     if (!(await authorized(request, env))) return new Response("Unauthorized", { status: 401 });
     const url = new URL(request.url);
     if (url.pathname === "/health") return Response.json({ ok: true, version: 1 });
-    const match = /^\/sandboxes\/([^/]+)(\/exec|\/start|\/stop)?$/.exec(url.pathname);
+    const match = /^\/sandboxes\/([^/]+)(\/exec|\/start|\/stop|\/keepalive)?$/.exec(url.pathname);
     if (match === null || !NAME.test(match[1])) return Response.json({ message: "Not found" }, { status: 404 });
     const sandbox = env.SANDBOX.getByName(match[1]);
     try {
@@ -109,6 +122,13 @@ export default {
       if (match[2] === "/start" && request.method === "POST") return Response.json(await sandbox.start());
       if (match[2] === "/stop" && request.method === "POST") { await sandbox.stop(); return Response.json({ running: false }); }
       if (match[2] === undefined && request.method === "DELETE") { await sandbox.stop(); return Response.json({ deleted: true }); }
+      if (match[2] === "/keepalive" && request.method === "POST") {
+        const body = (await request.json()) as { minutes?: unknown };
+        if (typeof body.minutes !== "number" || !Number.isFinite(body.minutes) || body.minutes <= 0) {
+          return Response.json({ message: "minutes must be a positive number" }, { status: 400 });
+        }
+        return Response.json(await sandbox.keepAlive(body.minutes));
+      }
       if (match[2] === "/exec" && request.method === "POST") {
         const maxBytes = 256 * 1024;
         const reader = request.body?.getReader();

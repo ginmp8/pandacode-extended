@@ -169,10 +169,7 @@ pub fn warm_key(session_id: &str, provider: &str) -> String {
 }
 
 fn valid_env_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !name.starts_with(|c: char| c.is_ascii_digit())
+    crate::provider_settings::valid_env_name(name)
 }
 
 /// One variable from the settings form. A secret without a value keeps its saved one.
@@ -536,6 +533,22 @@ mod tests {
         assert!(missing.contains("API_KEY") && !missing.contains("fixture"));
         let codex = launch_with(&Connection { provider: "codex".into(), secret_env: vec![], ..connection }, |_| None).unwrap();
         assert!(codex.env.contains(&("CODEX_HOME".into(), "/Users/me/.claude-work".into())));
+    }
+
+    #[test]
+    fn changing_connection_starts_a_fresh_harness_session_that_carries_the_conversation() {
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "auto").unwrap();
+        store.message(&task.id, "user", "Earlier request").unwrap();
+        store.message(&task.id, "assistant", "Earlier answer").unwrap();
+        store.resume(&task.id, "session-in-work-config").unwrap();
+        fresh_context(&store, &task.id).unwrap();
+        let task = store.session(&task.id).unwrap();
+        assert_eq!(task.resume_id, None);
+        let (prompt, through) = crate::context_recovery::prepare(&store, &task, "Continue where you left off.").unwrap();
+        assert!(through.is_some());
+        assert!(prompt.contains("Earlier answer") && prompt.contains("Continue where you left off."));
     }
 
     #[test]

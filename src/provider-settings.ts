@@ -10,9 +10,14 @@ type ClaudeMode = 'inherit' | 'subscription';
 interface ClaudeStatus { mode: ClaudeMode; source: string; environmentVariables: string[]; endpoint: string | null; savedLogin: 'signedIn' | 'notSignedIn' | 'otherCredentials' | 'unknown'; conflict: boolean; }
 const howProvidersWork = 'Nothing here is applied to every agent. GLM Coding Plan and MiMo Token Plan run through your installed Claude Code, and you pick them in the model selector. Named connections are extra setups of one agent. PandaCode needs no provider of its own: titles come from the agent running the task, project checks run your own test command, and Jev uses its own keys.';
 const claudeHelp = 'Use current environment preserves your existing Claude setup. Prefer saved Claude login removes inherited API credentials, endpoints, and model routing overrides from new Claude processes in PandaCode. Claude settings, credential helpers, profiles, and organization policies can still affect authentication. Check /status in Claude to confirm.';
+const globalEnvHelp = 'These variables are added to every agent harness PandaCode starts — for example HTTP_PROXY, HTTPS_PROXY and NO_PROXY behind a proxy. Each provider can leave the global set out in its own card, and provider sign-in and endpoint settings always win. Values are saved on this computer and never shown again.';
+const envHelp = 'These variables are added whenever PandaCode starts this harness — for example HTTP_PROXY, HTTPS_PROXY and NO_PROXY behind a proxy. Provider sign-in and endpoint settings always win, and a named connection adds its own environment on top. Values are saved on this computer and never shown again.';
 
 interface Configuration {
   executablePaths: Record<string, string>;
+  globalEnvironment?: string[];
+  environment?: Record<string, string[]>;
+  useGlobalEnvironment?: Record<string, boolean>;
   glmKeySaved: boolean;
   glmKeyFromEnvironment: boolean;
   deepseekKeySaved: boolean;
@@ -37,6 +42,21 @@ const keyed = {
 } as const;
 type KeyedProvider = keyof typeof keyed;
 
+/** The saved-variable list and add form for one provider, or `*` for the global set. */
+function envEditor(key: string): string {
+  return `<div class="connection-env-list" data-env-list="${key}"></div>
+    <form data-env-provider="${key}"><div class="connection-input-row"><input class="connection-env-name" aria-label="Variable name" placeholder="NAME" maxlength="128" autocomplete="off" spellcheck="false"><input class="connection-env-value" aria-label="Variable value" placeholder="value" maxlength="4096" autocomplete="off" spellcheck="false"><button class="secondary-button" type="submit">Add</button></div></form>`;
+}
+
+/** Per-provider collapsed environment section with the global-set toggle. */
+function envDetails(provider: string): string {
+  return `<details class="connection-env"><summary>Environment variables ${icon('down')}</summary>
+    <label class="connection-env-global"><input type="checkbox" data-use-global="${provider}"> Use global environment variables</label>
+    ${envEditor(provider)}
+    <small>${escape(envHelp)}</small>
+  </details>`;
+}
+
 function keyForm(provider: KeyedProvider, label: string): string {
   return `<form id="${provider}-key-form" data-key-provider="${provider}"><label for="${provider}-key">${escape(label)}</label><div class="connection-input-row"><input id="${provider}-key" type="password" autocomplete="off" spellcheck="false" placeholder="Enter API key" maxlength="4096"><button class="primary-button" type="submit">Save key</button></div></form>
       <div class="connection-key-status"><span id="${provider}-key-status" role="status">Checking connection…</span><button type="button" class="secondary-button" id="remove-${provider}-key" data-remove-key="${provider}" hidden>Remove saved key</button></div>`;
@@ -54,11 +74,13 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
       <div class="connection-key-status"><span class="claude-auth-source" role="status">Checking Claude login…</span><span class="claude-auth-details"></span><button type="button" class="secondary-button" data-check-claude>Check login</button></div>
       <p class="claude-auth-endpoint" hidden></p><p class="claude-auth-conflict" hidden>Environment credentials can override your saved Claude login.</p><p class="claude-auth-login" hidden></p>
       <a href="https://code.claude.com/docs/en/authentication" target="_blank" rel="noopener noreferrer">Claude sign-in help ${icon('forward')}</a>
+      ${envDetails('claude')}
     </section>
     <section class="connection-card"><h3>${providerLogo('glm')}GLM Coding Plan<small>via Claude Code</small></h3>
       <p>Use a Z.ai Coding Plan key with your installed Claude Code. Your regular Claude account stays separate.</p>
       ${keyForm('glm', 'Z.ai API key')}
       <a href="https://docs.z.ai/devpack/tool/claude" target="_blank" rel="noopener noreferrer">Coding Plan setup ${icon('forward')}</a>
+      ${envDetails('glm')}
     </section>
     <section class="connection-card"><h3>${providerLogo('mimo')}MiMo Token Plan<small>Xiaomi, via Claude Code</small></h3>
       <p>Use your Token Plan (or pay-as-you-go) key with your installed Claude Code. Pick the cluster shown on your Token Plan page; keys look like <code>tp-…</code>, <code>ttp-…</code> or <code>sk-…</code>.</p>
@@ -66,6 +88,7 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
       <small id="mimo-endpoint-hint" class="connection-endpoint-hint" data-live></small>
       ${keyForm('mimo', 'MiMo API key')}
       <a href="https://platform.xiaomimimo.com/token-plan" target="_blank" rel="noopener noreferrer">Token Plan ${icon('forward')}</a>
+      ${envDetails('mimo')}
     </section>
     <section class="connection-card"><h3>${providerLogo('opencode')}OpenCode</h3><p>Uses the accounts and models configured in OpenCode. Sign in once with <code>opencode auth login</code>.</p><p>Choose which OpenCode models appear in the model selector in Settings → Agents.</p><a href="https://opencode.ai/docs/" target="_blank" rel="noopener noreferrer">Install & sign in ${icon('forward')}</a>${pathForm('opencode', 'OpenCode executable', '/path/to/opencode')}</section>
     <section class="connection-card"><h3>${providerLogo('antigravity')}Antigravity</h3><p>Connect the official Google Antigravity ACP server. The standalone <code>agy</code> terminal CLI is a different executable.</p><a href="https://antigravity.google/docs/ide/extensions" target="_blank" rel="noopener noreferrer">Get the official ACP server ${icon('forward')}</a>${pathForm('antigravity', 'Antigravity ACP executable', '/path/to/agy_acp_server.par')}</section>
@@ -74,7 +97,7 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
     <section class="connection-card"><h3>Oh My Pi<small>omp</small></h3><p>A Pi fork with its own accounts and models. Install it with <code>bun install -g @oh-my-pi/pi-coding-agent</code>, then sign in from the <code>omp</code> CLI before starting a task.</p><a href="https://github.com/can1357/oh-my-pi" target="_blank" rel="noopener noreferrer">Install omp ${icon('forward')}</a>${pathForm('omp', 'omp executable', '/path/to/omp')}</section>
     <section class="connection-card"><h3>${providerLogo('deepseek')}DeepSeek<small>DeepSeek Harness, via ACP</small></h3><p>Install with <code>npm i -g @deepseek-ai/dsh</code>. A key is optional: DeepSeek can use its own stored credentials.</p>
       ${keyForm('deepseek', 'DeepSeek API key')}
-      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer">Get an API key ${icon('forward')}</a>${pathForm('deepseek', 'DeepSeek executable', '/path/to/dsh')}</section>
+      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer">Get an API key ${icon('forward')}</a>${pathForm('deepseek', 'DeepSeek executable', '/path/to/dsh')}${envDetails('deepseek')}</section>
     <section class="connection-card"><h3>${providerLogo('commandcode')}Command Code<small>via ACP</small></h3><p>Install with <code>npm i -g command-code</code>, then sign in once with <code>command-code login</code>. A key is optional: either one authenticates the same account.</p>
       ${keyForm('commandcode', 'Command Code API key')}
       <a href="https://commandcode.ai/docs/acp" target="_blank" rel="noopener noreferrer">Command Code docs ${icon('forward')}</a>${pathForm('commandcode', 'Command Code executable', '/path/to/command-code')}</section>
@@ -122,6 +145,19 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
     for (const input of host.querySelectorAll<HTMLInputElement>('[data-executable]')) {
       if (!editedPaths.has(input)) input.value = config.executablePaths[input.dataset.executable!] ?? '';
     }
+    const envNames = (key: string) => key === '*' ? config.globalEnvironment ?? [] : config.environment?.[key] ?? [];
+    for (const list of host.querySelectorAll<HTMLElement>('[data-env-list]')) {
+      const key = list.dataset.envList!;
+      list.replaceChildren(...envNames(key).map(name => {
+        const row = document.createElement('span');
+        row.className = 'connection-env-var';
+        row.innerHTML = `<code>${escape(name)}</code><button type="button" class="secondary-button" data-remove-env="${key}" data-env-name="${escape(name)}" aria-label="Remove ${escape(name)}">Remove</button>`;
+        return row;
+      }));
+    }
+    for (const toggle of host.querySelectorAll<HTMLInputElement>('[data-use-global]')) {
+      toggle.checked = config.useGlobalEnvironment?.[toggle.dataset.useGlobal!] ?? true;
+    }
     for (const provider of Object.keys(keyed) as KeyedProvider[]) {
       const spec = keyed[provider];
       const status = host.querySelector(`#${provider}-key-status`)!;
@@ -141,15 +177,16 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
     endpointHint.textContent = chosen ? chosen.url : 'Required before MiMo tasks can start. The Token Plan page shows your cluster.';
     endpointHint.classList.toggle('error', !chosen);
   }
-  async function perform(operation: () => Promise<Configuration>, success: string, submittedInput?: HTMLInputElement): Promise<void> {
-    if (pending || disposed) return;
+  async function perform(operation: () => Promise<Configuration>, success: string, submittedInput?: HTMLInputElement, onFailure?: () => void): Promise<boolean> {
+    if (pending || disposed) return false;
     const submittedValue = submittedInput?.value;
     pending = true; host.setAttribute('aria-busy', 'true');
     claudeMode.disabled = true;
     host.querySelectorAll<HTMLButtonElement>('button').forEach(button => button.disabled = true);
+    host.querySelectorAll<HTMLInputElement>('[data-use-global]').forEach(toggle => toggle.disabled = true);
     try {
       const configuration = await operation();
-      if (disposed) return;
+      if (disposed) return false;
       configurationRevision++;
       if (submittedInput && submittedInput.value === submittedValue) {
         editedPaths.delete(submittedInput);
@@ -157,15 +194,30 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
       }
       render(configuration); message(success);
       await saved();
-    } catch (error) { if (!disposed) message(String(error), true); }
+      return true;
+    } catch (error) { if (!disposed) { message(String(error), true); onFailure?.(); } return false; }
     finally {
       pending = false;
-      if (!disposed) { claudeMode.disabled = false; host.removeAttribute('aria-busy'); host.querySelectorAll<HTMLButtonElement>('button').forEach(button => button.disabled = false); for (const input of keyInputs) host.querySelector<HTMLButtonElement>(`#${input.id}-form button`)!.disabled = input.disabled; }
+      if (!disposed) { claudeMode.disabled = false; host.removeAttribute('aria-busy'); host.querySelectorAll<HTMLButtonElement>('button').forEach(button => button.disabled = false); host.querySelectorAll<HTMLInputElement>('[data-use-global]').forEach(toggle => toggle.disabled = false); for (const input of keyInputs) host.querySelector<HTMLButtonElement>(`#${input.id}-form button`)!.disabled = input.disabled; }
     }
   }
   const submit = (event: Event) => {
     const form = (event.target as HTMLElement).closest<HTMLFormElement>('form'); if (!form || !host.contains(form)) return;
     event.preventDefault(); event.stopPropagation();
+    const envKey = form.dataset.envProvider;
+    if (envKey !== undefined) {
+      const name = form.querySelector<HTMLInputElement>('.connection-env-name')!;
+      const value = form.querySelector<HTMLInputElement>('.connection-env-value')!;
+      const variable = name.value.trim();
+      if (!variable) { name.focus(); return; }
+      const saved = () => { name.value = ''; value.value = ''; name.focus(); };
+      const operation = envKey === '*'
+        ? () => call<Configuration>('provider_set_global_environment_variable', { name: variable, value: value.value })
+        : () => call<Configuration>('provider_set_environment_variable', { provider: envKey, name: variable, value: value.value });
+      // The entered variable survives a refused save (validation, storage budget).
+      void perform(operation, envKey === '*' ? 'Global environment variable saved.' : 'Environment variable saved.').then(ok => { if (ok) saved(); });
+      return;
+    }
     const keyedProvider = form.dataset.keyProvider as KeyedProvider | undefined;
     if (keyedProvider) {
       const key = keyInput(keyedProvider);
@@ -182,6 +234,17 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
   const click = async (event: MouseEvent) => {
     const target = (event.target as HTMLElement).closest<HTMLElement>('button'); if (!target) return;
     if (target.hasAttribute('data-check-claude')) { void checkClaude(); return; }
+    const removingEnv = target.dataset.removeEnv;
+    // Only the provider env lists use valued data-remove-env buttons; the named
+    // connection editor's row Remove carries no value and must not match.
+    if (removingEnv !== undefined && target.dataset.envName && target.closest('[data-env-list]')) {
+      const name = target.dataset.envName!;
+      const operation = removingEnv === '*'
+        ? () => call<Configuration>('provider_remove_global_environment_variable', { name })
+        : () => call<Configuration>('provider_remove_environment_variable', { provider: removingEnv, name });
+      void perform(operation, 'Environment variable removed.');
+      return;
+    }
     const removing = target.dataset.removeKey as KeyedProvider | undefined;
     if (removing) { void perform(() => call(keyed[removing].remove), 'Saved key removed.'); return; }
     if (target.dataset.chooseExecutable) {
@@ -201,6 +264,20 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
     if (target instanceof HTMLInputElement && target.dataset.executable) editedPaths.add(target);
   };
   const change = (event: Event) => {
+    const target = event.target as HTMLElement;
+    if (target instanceof HTMLInputElement && target.matches('[data-use-global]')) {
+      if (pending) { target.checked = !target.checked; return; }
+      const provider = target.dataset.useGlobal!;
+      const useGlobal = target.checked;
+      void perform(
+        () => call<Configuration>('provider_set_use_global_environment', { provider, useGlobal }),
+        useGlobal ? 'Global environment variables are used again.' : 'Global environment variables are off for this provider.',
+        undefined,
+        // perform only reports the failure; the checkbox returns to the saved state.
+        () => { target.checked = !useGlobal; },
+      );
+      return;
+    }
     if (event.target === claudeMode) {
       if (pending) return;
       claudeEdited = true; claudeRevision++;

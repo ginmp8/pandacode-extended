@@ -46,31 +46,31 @@ export function mountAboutSettings(host: HTMLElement): () => void {
   return () => { disposed = true; cleanupUpdates(); };
 }
 
-/** The Updates rows follow the updater: status, Check now / Restart now, and the automatic switch. */
+/** The Updates rows follow the updater: status, Check now / Install / Restart now, and the mode. */
 function mountUpdates(host: HTMLElement): () => void {
   const updates = appUpdates();
   const status = host.querySelector<HTMLElement>('.settings-update-status')!;
   const action = host.querySelector<HTMLButtonElement>('.settings-update-action')!;
-  const auto = host.querySelector<HTMLInputElement>('[data-update-automatic]')!;
+  const modeSelect = host.querySelector<HTMLSelectElement>('[data-update-mode]')!;
   if (!updates?.supported) {
-    status.textContent = describeUpdate({ kind: 'off' }, false);
+    status.textContent = describeUpdate({ kind: 'off' }, 'off');
     host.querySelector<HTMLElement>('.settings-updates-auto')?.remove();
     return () => {};
   }
   const paint = () => {
     const state = updates.state;
-    status.textContent = describeUpdate(state, updates.automatic);
-    auto.checked = updates.automatic;
-    const restartable = state.kind === 'ready' || state.kind === 'available';
+    status.textContent = describeUpdate(state, updates.mode, Date.now(), updates.installable);
+    modeSelect.value = updates.mode;
+    const restartable = updates.installable && (state.kind === 'ready' || state.kind === 'available');
     action.hidden = state.kind === 'downloading' || state.kind === 'installing';
     action.disabled = state.kind === 'checking';
     action.textContent = restartable ? (state.kind === 'ready' ? 'Restart now' : 'Install') : 'Check now';
   };
-  const click = () => { void (updates.state.kind === 'ready' || updates.state.kind === 'available' ? updates.restart() : updates.check()); };
-  const change = () => updates.setAutomatic(auto.checked);
+  const click = () => { void (updates.installable && (updates.state.kind === 'ready' || updates.state.kind === 'available') ? updates.restart() : updates.check()); };
+  const change = () => updates.setMode(modeSelect.value as UpdateMode);
   action.addEventListener('click', click);
-  auto.addEventListener('change', change);
+  modeSelect.addEventListener('change', change);
   const unsubscribe = updates.subscribe(paint);
   paint();
-  return () => { unsubscribe(); action.removeEventListener('click', click); auto.removeEventListener('change', change); };
+  return () => { unsubscribe(); action.removeEventListener('click', click); modeSelect.removeEventListener('change', change); };
 }

@@ -15,8 +15,19 @@ pub struct Connection {
     /// Cloudflare: the sandbox Worker is deployed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandboxes: Option<bool>,
+    /// Providers that can run cloud agents: whether their tasks include the
+    /// harness's saved environment variables (Settings → Providers). Absent on
+    /// deploy-only providers: nothing is ever sent without this being on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherit_environment: Option<bool>,
     /// Non-secret details shown in Settings, such as an API URL or account.
     pub detail: Option<String>,
+}
+
+/// Providers whose cloud agents can inherit the harness's saved environment. Deploy-only
+/// providers (Railway, Netlify) cannot host agents, so the setting does not apply to them.
+fn inherits_environment(providers: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>, provider: &str) -> Option<bool> {
+    (!matches!(provider, "railway" | "netlify")).then(|| providers.get(provider).and_then(|options| options.get("inheritEnvironment").map(String::as_str)) == Some("true"))
 }
 
 pub fn connections() -> Vec<Connection> {
@@ -88,6 +99,14 @@ pub async fn cloud_connect(app: AppHandle, provider: String, key: String, option
                 super::set_secret("railway_token", key.trim())?;
                 let mut settings = super::settings();
                 settings.railway_workspace = workspace;
+                super::save_settings(&settings)?;
+            }
+            "netlify" => {
+                let site = netlify_site_id(text("siteId"))?;
+                block(verify_netlify(NETLIFY_API, key.trim(), site.as_deref()))?;
+                super::set_secret("netlify_token", key.trim())?;
+                let mut settings = super::settings();
+                set_option(&mut settings, "netlify", "siteId", site);
                 super::save_settings(&settings)?;
             }
             // Google Cloud uses gcloud's own login; PandaCode stores only the project and region.
@@ -162,6 +181,23 @@ async fn verify_vercel(token: &str, team: Option<&str>) -> Result<()> {
 }
 
 const RAILWAY_API: &str = "https://backboard.railway.com/graphql/v2";
+const NETLIFY_API: &str = "https://api.netlify.com/api/v1";
+
+fn netlify_site_id(site: Option<String>) -> Result<Option<String>> {
+    site.map(|id| uuid::Uuid::parse_str(&id).map(|id| id.to_string())
+        .map_err(|_| "A Netlify project ID is a UUID (Project configuration / General / Project details).".into())).transpose()
+}
+
+/// Check the selected project, or the account when no project was selected.
+async fn verify_netlify(api: &str, token: &str, site: Option<&str>) -> Result<()> {
+    let client = super::http::client(Duration::from_secs(30))?;
+    let path = site.map_or_else(|| "user".to_string(), |id| format!("sites/{id}"));
+    let reply = super::http::send("Netlify", client.get(format!("{api}/{path}")).bearer_auth(token)).await?;
+    if reply["id"].as_str().is_none_or(str::is_empty) {
+        return Err("Netlify did not return an account or project ID.".into());
+    }
+    Ok(())
+}
 
 /// An account token can read `me`; a workspace token only its own workspace.
 async fn verify_railway(api: &str, token: &str, workspace: Option<&str>) -> Result<()> {
@@ -247,6 +283,12 @@ pub async fn cloud_disconnect(app: AppHandle, provider: String) -> Result<Vec<Co
                 settings.railway_workspace = None;
                 super::save_settings(&settings)?;
             }
+            "netlify" => {
+                super::remove_secret("netlify_token");
+                let mut settings = super::settings();
+                settings.providers.remove("netlify");
+                super::save_settings(&settings)?;
+            }
             "gcloud" => {
                 let mut settings = super::settings();
                 settings.gcloud_project = None;
@@ -254,6 +296,7 @@ pub async fn cloud_disconnect(app: AppHandle, provider: String) -> Result<Vec<Co
                 settings.providers.remove("gcloud");
                 super::save_settings(&settings)?;
             }
+            "docker" => super::docker::disconnect()?,
             "aws" => {
                 aws_screen::close(None);
                 let mut settings = super::settings();

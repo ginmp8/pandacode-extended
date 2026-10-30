@@ -77,6 +77,15 @@ test.describe('browser workspace', () => {
     await expect(browserUrl(page)).toHaveValue(/\/public\/favicon\.svg$/);
     await expect.poll(async () => (await commandCalls(page, 'prepare_file_preview')).at(-1)?.args).toMatchObject({ projectId: 'project-1', sessionId: 'session-1', path: 'public/favicon.svg' });
     expect((await commandCalls(page, 'read_file')).some(call => call.args.path === 'public/favicon.svg')).toBe(false);
+    await page.getByRole('button', { name: 'Preview in browser', exact: true }).click();
+    await expect(browserUrl(page)).toHaveValue(/\/public\/favicon\.svg$/);
+    // View source shows the SVG's text, not the image.
+    await page.getByRole('button', { name: 'Files', exact: true }).click();
+    await page.getByRole('button', { name: 'View source of favicon.svg', exact: true }).click();
+    await expect(page.locator('.file-view-path')).toHaveText('public/favicon.svg');
+    await expect(page.locator('.office-viewer[data-kind="image"]')).toHaveCount(0);
+    await expect.poll(async () => (await commandCalls(page, 'read_file')).some(call => call.args.path === 'public/favicon.svg')).toBe(true);
+    await expect(page.locator('.file-view-body')).toContainText('<svg');
   });
 
   test('file preview errors keep the file list usable', async ({ page }) => {
@@ -98,7 +107,7 @@ test.describe('browser workspace', () => {
     await response.getByRole('button', { name: 'src/main.ts', exact: true }).click();
     await expect(page.locator('.file-view-path')).toHaveText('src/main.ts');
     await expect(response.getByRole('button', { name: 'missing.html', exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     await page.locator('.board-card').filter({ hasText: 'Make search feel instant' }).click();
     await expect(page.locator('#prompt')).toHaveAttribute('data-session-id', 'session-1');
     await expect(page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'main.ts', exact: true })).toHaveAttribute('aria-selected', 'true');

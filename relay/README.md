@@ -28,7 +28,21 @@ Development, installation, tests and CI do not publish a relay.
    The deploy creates the `Account` Durable Object (SQLite migration `v1`), `AUTH_LIMITER` (10/min per IP), `GLOBAL_AUTH_LIMITER` (300 sign-ins/min), and `ACCOUNT_LIMITER` (30/min per account) rate-limit bindings. A signing secret shorter than 32 characters, or missing OAuth configuration for sign-in, receives a generic server error before requests are processed.
 3. Build the desktop app with `PANDACODE_RELAY_URL` set to the Worker URL (or set it as an environment variable at run time).
 
-Rotating `SESSION_SECRET` signs everyone out.
+Rotating `SESSION_SECRET` signs everyone out. `SESSION_SECRET` must be at least 32 characters; with it missing or shorter (or the GitHub ID/secret missing, for sign-in) every request gets a generic `500 server error`.
+
+Hardening notes:
+- Sign-in bodies are read through a streaming cap of 256 KiB (`src/body.ts`), so chunked uploads get 413 too.
+- Tokens carry `gen`, a random value stored on the device row when it is first registered. The Durable Object rejects a token whose `gen` differs from the row's, so a revoke followed by a re-register in the same second kills old tokens. A plain re-sign-in of a still-registered device keeps its `gen` (its other tokens stay valid; same device, same key). Tokens without `gen` (issued before schema 2) fall back to the `iat >= registered_at` check; `/v1/token` upgrades them. Schema 2 adds `devices.gen` (existing rows get 0).
+- A rate-limited WebSocket frame over 4 KiB is answered `rate limit exceeded` without parsing it.
+- **Push** (`src/push.ts`): a signed-in phone can register a device push token with
+  `POST /v1/push/devices` (`{ platform: "ios" | "android", token }`; one device keeps up to
+  3 per platform). A host with remote control on can send a `{ kind: "notify", body: { kind:
+  "waiting" | "finished", count } }` frame on its socket; the object coalesces bursts (30 s
+  window, halved when the waiting count grows) and forwards the notice to every registered
+  token via APNs/FCM. Payloads carry counts and a deep link, never task text. The bridge is
+  env-gated: with none of `APNS_KEY`/`APNS_KEY_ID`/`APNS_TEAM_ID`/`APNS_TOPIC` (iOS, the .p8
+  provider key) or `FCM_SERVICE_ACCOUNT`/`FCM_PROJECT_ID` (Android) set, registrations are
+  stored and notify frames answered, but nothing is sent.
 
 ## Behaviour
 
@@ -52,7 +66,7 @@ npm run dev    # local; put SESSION_SECRET=... in .dev.vars; requires reviewed W
 
 | File | Job |
 |---|---|
-| `src/index.ts` | Routes, auth rate limit, GitHub sign-in, token check |
+| `src/index.ts` | Routes, auth rate limits, GitHub sign-in, token check |
 | `src/account.ts` | Durable Object: device rows, hibernating WebSockets, forwarding, presence |
 | `src/account-delete.ts`, `routes.ts` | Confirmed durable account deletion and exact authenticated routes |
 | `src/token.ts`, `validate.ts`, `bucket.ts`, `frames.ts`, `github.ts`, `limits.ts` | Pure logic, unit tested |

@@ -8,6 +8,8 @@ export { cancelledRemoteStart, clearRemoteStart, remoteStart, remoteStartAttache
  * signed-in computer; a task that runs there shows that computer, locked. */
 
 export const LOCAL = 'local';
+/** Opens Settings → Remote access when no other computer can take a task. */
+export const CONNECT_SETUP = 'connect-setup';
 
 export function lastSeenText(target: Pick<RemoteTarget, 'lastSeen'>): string {
   const raw = target.lastSeen;
@@ -37,7 +39,7 @@ export function computerControl(session: Session, fresh: boolean, targets: Remot
   return `<button type="button" id="composer-computer" class="composer-computer" data-action="computer-menu" aria-label="Computer: ${escape(name + status)}" aria-haspopup="dialog" aria-expanded="false" title="Where this task runs">${icon('monitor')}<span>${escape(name)}${target && !target.online ? ' · Offline' : !target && chosen !== LOCAL ? ' · Not paired' : ''}</span>${icon('down')}</button>`;
 }
 
-export function computerItems(targets: RemoteTarget[], chosen: string) {
+export function computerItems(targets: RemoteTarget[], chosen: string, clouds: CloudTarget[] = []) {
   return [
     { id: LOCAL, label: 'This computer', icon: 'monitor', selected: chosen === LOCAL },
     ...targets.map(target => ({ id: target.deviceId, label: target.name, description: target.online ? target.platform : offlineText(target), icon: 'monitor', selected: target.deviceId === chosen, disabled: !target.online })),

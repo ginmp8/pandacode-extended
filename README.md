@@ -45,15 +45,26 @@ embedded editor engine.
 - **Agent teams.** An [architect and up to three workers](docs/architect-workers.md),
   mixing harnesses and models, or named team profiles. Each spawned worker is one
   line in the turn that started it; click it to open the worker.
+- **Model routing.** In automatic teams (Cheap, Balanced or Best, from the Team
+  button) the lead can let a local router pick each worker's model, in about 10–25 ms
+  and without sending the task anywhere; a failed worker's replacement escalates to a
+  stronger model. See
+  [model routing](docs/model-routing.md).
 - **Bots.** Put an agent behind Telegram, Slack, Discord, WhatsApp or a local web
   chat; each conversation is an ordinary task. The sidebar's **Bots** view lists
   every bot with its latest message. This fork adds ten built-in panda icons, local image uploads cropped to 128px PNG, and reorganized bot settings. See [bots](docs/bots.md).
 - **Native system tray.** Optional OS tray menu lists running, waiting and recently finished tasks; plan usage is refreshed only when the menu is opened or its refresh action is used.
 - **Local VMs and cloud sandboxes.** Headless macOS/Linux VMs on Apple silicon
   (Tart), and Daytona, Cloudflare and AWS sandboxes that agents can drive.
+- **Cloud agents.** Pick a cloud provider in a New task's **Run on** menu and the
+  agent runs on a machine in your own account (Daytona, Cloudflare, AWS, Google Cloud,
+  E2B, Modal, Vercel Sandbox, CodeSandbox, Runloop, Blaxel, Tensorlake, Freestyle,
+  boat). PandaCode installs the harness there, copies your login, and keeps the run
+  going while your laptop sleeps; changes come back to a local worktree. See
+  [cloud agents](docs/cloud-agents.md).
 - **Simulators.** iOS Simulator and Android emulator tools for agents.
-- **Deploys.** Start a deploy task for Vercel, Cloudflare, Railway, AWS or Google
-  Cloud from the header, with approval-gated CLI runs (AWS and Google Cloud use
+- **Deploys.** Start a deploy task for Vercel, Cloudflare, Railway, Netlify, AWS or Google
+  Cloud from the header ([Netlify setup](docs/netlify.md)), with approval-gated CLI runs (AWS and Google Cloud use
   your installed CLI and its login).
 - **GitHub view.** Your repositories with their threads, pull requests and issues;
   review, fix checks, merge or solve an issue in one click. Each opens as a linked
@@ -174,14 +185,22 @@ PandaCode does not include provider plans or usage.
 
 [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi), a Pi fork that runs on Bun, installs with `bun install -g @oh-my-pi/pi-coding-agent`; sign in through `omp` itself. PandaCode drives it with the same RPC bridge as Pi and passes `--approval-mode yolo` so the bridge stays the only approval gate.
 
-[DeepSeek](https://platform.deepseek.com/api_keys) installs with `npm i -g @deepseek-ai/dsh`; PandaCode launches `dsh --profile acp`. An API key is optional (Settings → Providers, or `DEEPSEEK_API_KEY`); dsh can use its own stored credentials. Usage limits are not shown in PandaCode; check platform.deepseek.com.
+[DeepSeek](https://platform.deepseek.com/api_keys) installs with `npm i -g @deepseek-ai/dsh`; PandaCode launches `dsh --profile acp`. An API key is optional (Settings → Providers, or `DEEPSEEK_API_KEY`); dsh can use its own stored credentials. With a saved key (or `DEEPSEEK_API_KEY`), the Usage dialog shows the account balance from `api.deepseek.com`.
 
 [Command Code](https://commandcode.ai/docs/acp) installs with `npm i -g command-code` (Node 22 or newer); PandaCode launches `command-code acp`. Sign in once with `command-code login`, or save an API key in Settings → Providers (or set `COMMAND_CODE_API_KEY`); either one authenticates the same account. Usage limits are not shown in PandaCode; check Command Code Studio.
-[Cline](https://docs.cline.bot/cline-cli/overview) installs with `npm i -g cline`; PandaCode launches `cline --acp`. Sign in once with `cline auth` (or set `CLINE_API_KEY`); the provider and models chosen in Cline apply. See [provider details](docs/providers.md#cline).
+[Cline](https://docs.cline.bot/usage/cli-overview) installs with `npm i -g cline`; PandaCode launches `cline --acp`. Sign in once with `cline auth` (or set `CLINE_API_KEY`); the provider and models chosen in Cline apply. See [provider details](docs/providers.md#cline).
+
+[Kilo Code](https://kilo.ai/docs/code-with-ai/platforms/cli) installs with `npm i -g @kilocode/cli`; sign in with `kilo auth login`, then select **Kilo Code** in PandaCode. PandaCode launches `kilo acp` and uses Kilo's configured providers and models. See [provider details](docs/providers.md#kilo-code).
 
 Muse Code installs with Meta's launcher into `~/.local/bin/muse`; run `muse login` once in a terminal. PandaCode launches `muse serve` and speaks MSP, Muse's JSON-RPC session protocol, with its sandbox and approval modes; see [docs/providers.md](docs/providers.md#muse-code) for what each mode does and what Muse cannot express.
 
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli) installs with `npm install -g @github/copilot`; run `copilot login` in a terminal, then select **GitHub Copilot CLI** in PandaCode. PandaCode launches the local `copilot` executable over ACP. The CLI manages its own sign-in. See [provider details](docs/providers.md#github-copilot-cli).
+
+[Devin CLI](https://docs.devin.ai/cli) installs with `curl -fsSL https://cli.devin.ai/install.sh | bash` (or `brew install --cask devin-cli`, or the copy bundled with Devin Desktop); run `devin auth login` once in a terminal, then select **Devin CLI** in PandaCode. PandaCode launches `devin acp` with the CLI's own sign-in and lists every Devin model with its own thinking levels. See [provider details](docs/providers.md#devin-cli).
+
+[ZCode](https://github.com/zai-org/ZCode) installs with its install script (`~/.local/bin/zcode`, Node 24); run `zcode` once in a terminal and sign in, then select **ZCode** in PandaCode. PandaCode talks to `zcode app-server` directly — the CLI's own protocol, since it exposes no ACP mode — listing every model the account can reach with its own reasoning levels. See [provider details](docs/providers.md#zcode).
+
+[Hermes Agent](https://hermes-agent.org) installs with `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`; run `hermes acp --setup` or configure `~/.hermes/config.yaml`, then select **Hermes Agent** in PandaCode. PandaCode launches `hermes acp` and uses Hermes' configured provider and models. See [provider details](docs/providers.md#hermes-agent).
 
 ## Build from source
 
@@ -225,7 +244,7 @@ JavaScript and outbound connections do not run inside the preview.
 
 The bar above the prompt shows the project, checkout and branch. Its branch chip
 is the one place for [worktrees](docs/worktrees.md): an unstarted task moves into
-a new worktree in place, a started one spawns a sibling task, and archiving a
+a new worktree in place, a started one spawns a sibling task, and settling a
 clean worktree task offers to remove its checkout and merged branch.
 
 Choose **Board** in the header to manage tasks by status. Choose **Team** in the

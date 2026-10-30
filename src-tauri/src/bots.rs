@@ -6,9 +6,11 @@
 mod brief;
 pub(crate) mod tasks;
 pub(crate) mod channels;
+pub(crate) mod failover;
 pub(crate) mod gateway;
 pub(crate) mod guard;
 pub(crate) mod schedule;
+pub(crate) mod shared_channels;
 mod secrets;
 #[cfg(test)]
 mod tests;
@@ -44,7 +46,16 @@ CREATE TABLE IF NOT EXISTS bots(
   notify_channel_id TEXT,
   notify_thread TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL);
+  updated_at INTEGER NOT NULL,
+  color TEXT NOT NULL DEFAULT '',
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  backup_models TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(backup_models)),
+  fallback_mode TEXT NOT NULL DEFAULT 'ask',
+  notify INTEGER NOT NULL DEFAULT 1 CHECK(notify IN (0,1)),
+  while_working TEXT NOT NULL DEFAULT 'queue',
+  show_plan INTEGER NOT NULL DEFAULT 0 CHECK(show_plan IN (0,1)),
+  skills TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skills)),
+  mcp TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(mcp)));
 CREATE TABLE IF NOT EXISTS bot_memories(
   id TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -101,13 +112,94 @@ CREATE TABLE IF NOT EXISTS bot_pairings(
   code TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   PRIMARY KEY(channel_id,sender_id));
+CREATE TABLE IF NOT EXISTS bot_tasks(
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  brief_version INTEGER NOT NULL DEFAULT -1);
 CREATE TABLE IF NOT EXISTS bot_rules(
   id TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
   pattern TEXT NOT NULL,
   decision TEXT NOT NULL CHECK(decision IN ('allow','ask','deny')),
   created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS bot_shared_channels(
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  lead_bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
+  archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS bot_shared_channel_members(
+  channel_id TEXT NOT NULL REFERENCES bot_shared_channels(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  PRIMARY KEY(channel_id,bot_id),
+  UNIQUE(channel_id,position));
+CREATE TABLE IF NOT EXISTS bot_shared_channel_messages(
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES bot_shared_channels(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('user','reply')),
+  author_bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
+  text TEXT NOT NULL,
+  status TEXT CHECK(status IN ('queued','in_progress','completed','failed','stopped')),
+  created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS bot_shared_channel_messages_channel ON bot_shared_channel_messages(channel_id,created_at,id);
+CREATE TABLE IF NOT EXISTS bot_shared_channel_deliveries(
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES bot_shared_channels(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES bot_shared_channel_messages(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN ('queued','in_progress','completed','failed','stopped')),
+  depth INTEGER NOT NULL DEFAULT 0 CHECK(depth BETWEEN 0 AND 3),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS bot_shared_channel_deliveries_session ON bot_shared_channel_deliveries(session_id,status,created_at,id);
+CREATE TABLE IF NOT EXISTS bot_messages(
+  id TEXT PRIMARY KEY,
+  source_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  target_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  source_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  target_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  source_channel_id TEXT NOT NULL,
+  source_external_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('queued','in_progress','completed','failed','stopped')),
+  result TEXT,
+  depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK(source_bot_id<>target_bot_id));
+CREATE INDEX IF NOT EXISTS bot_messages_target ON bot_messages(target_session_id,status,created_at,id);
+CREATE INDEX IF NOT EXISTS bot_messages_source ON bot_messages(source_session_id,created_at,id);
 ";
+
+/// Profile columns added after the bots table first shipped (schema 25). Fresh databases get
+/// them from `SCHEMA`; `upgrade` adds whichever are missing, so it is safe to run every start.
+const ADDED_COLUMNS: [(&str, &str); 7] = [
+    ("color", "TEXT NOT NULL DEFAULT ''"),
+    ("reasoning_effort", "TEXT NOT NULL DEFAULT ''"),
+    ("backup_models", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(backup_models))"),
+    ("fallback_mode", "TEXT NOT NULL DEFAULT 'ask'"),
+    ("notify", "INTEGER NOT NULL DEFAULT 1 CHECK(notify IN (0,1))"),
+    ("while_working", "TEXT NOT NULL DEFAULT 'queue'"),
+    ("show_plan", "INTEGER NOT NULL DEFAULT 0 CHECK(show_plan IN (0,1))"),
+];
+
+pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
+    // Bot databases at schema 27 already exist in the wild. Keep these tables idempotent
+    // here instead of bumping the app-wide schema version for this bot-only feature.
+    db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    for (name, definition) in ADDED_COLUMNS {
+        let exists: bool = db
+            .query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name=?1)", [name], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            db.execute_batch(&format!("ALTER TABLE bots ADD COLUMN {name} {definition};")).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
 
 const MAX_TEXT: usize = 16 * 1024;
 const MAX_SOUL: usize = 64 * 1024;
@@ -139,6 +231,28 @@ pub struct Bot {
     pub notify_thread: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Badge color behind a panda avatar (`#rrggbb`); empty uses the panda's own.
+    pub color: String,
+    pub reasoning_effort: String,
+    /// Models to try, in order, when the main one is unavailable.
+    pub backup_models: Vec<BackupModel>,
+    /// `ask` before switching to a backup model, or switch `auto`matically.
+    pub fallback_mode: String,
+    pub notify: bool,
+    /// What a message sent while the bot works does: `queue` or `steer`.
+    pub while_working: String,
+    pub show_plan: bool,
+    /// Library skill ids, by reference (schema 29).
+    pub skills: Vec<String>,
+    /// MCP server names from the harness's own config, by reference; never their definitions.
+    pub mcp: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupModel {
+    pub provider: String,
+    pub model: String,
 }
 
 /// Editable fields; workspace and timestamps are owned by native code.
@@ -156,6 +270,14 @@ pub struct BotInput {
     pub model: String,
     pub mode: String,
     pub heartbeat_minutes: i64,
+    pub color: String,
+    pub reasoning_effort: String,
+    pub backup_models: Vec<BackupModel>,
+    pub fallback_mode: String,
+    /// Absent (an older caller) means on.
+    pub notify: Option<bool>,
+    pub while_working: String,
+    pub show_plan: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -213,7 +335,8 @@ fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
     })
 }
 
-fn clean(text: &str, limit: usize) -> String {
+/// The canonical stored form of a free-text field: control characters stripped, capped.
+pub(crate) fn clean(text: &str, limit: usize) -> String {
     text.chars().filter(|c| *c == '\n' || !c.is_control()).take(limit).collect::<String>().trim().to_owned()
 }
 
@@ -225,8 +348,52 @@ fn validate(input: &BotInput) -> Result<BotInput> {
     if !crate::storage::valid_permission_mode(&input.mode) {
         return Err("Choose a permission mode for the bot.".into());
     }
-    let known = matches!(
-        input.provider.as_str(),
+    if input.model.len() > 200 || !known_provider(&input.provider) {
+        return Err("Choose a harness and model for the bot.".into());
+    }
+    if !(0..=7 * 24 * 60).contains(&input.heartbeat_minutes) {
+        return Err("Check-ins run at most once a week and at least every minute.".into());
+    }
+    if input.soul.len() > MAX_SOUL {
+        return Err("The personality is larger than 64 KB. Shorten it and try again.".into());
+    }
+    let color = input.color.trim();
+    if !(color.is_empty() || color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|c| c.is_ascii_hexdigit())) {
+        return Err("Choose a color from the list.".into());
+    }
+    if input.reasoning_effort.len() > 40 || input.reasoning_effort.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+        return Err("Choose a reasoning level from the list.".into());
+    }
+    if input.backup_models.len() > MAX_BACKUPS || input.backup_models.iter().any(|backup| !known_provider(&backup.provider) || backup.model.is_empty() || backup.model.len() > 200) {
+        return Err(format!("Choose up to {MAX_BACKUPS} backup models from installed harnesses."));
+    }
+    let pick = |value: &str, allowed: &[&str]| if value.is_empty() { Ok(allowed[0].to_owned()) } else if allowed.contains(&value) { Ok(value.to_owned()) } else { Err(String::from("Choose a setting from the list.")) };
+    Ok(BotInput {
+        name,
+        role: clean(&input.role, 200),
+        instructions: clean(&input.instructions, MAX_TEXT),
+        goals: clean(&input.goals, MAX_TEXT),
+        soul: clean(&input.soul, MAX_SOUL),
+        avatar: avatar(&input.avatar),
+        provider: input.provider.clone(),
+        model: input.model.clone(),
+        mode: input.mode.clone(),
+        heartbeat_minutes: input.heartbeat_minutes,
+        color: color.to_ascii_lowercase(),
+        reasoning_effort: input.reasoning_effort.clone(),
+        backup_models: input.backup_models.clone(),
+        fallback_mode: pick(&input.fallback_mode, &["ask", "auto"])?,
+        notify: Some(input.notify.unwrap_or(true)),
+        while_working: pick(&input.while_working, &["queue", "steer"])?,
+        show_plan: input.show_plan,
+    })
+}
+
+const MAX_BACKUPS: usize = 4;
+
+fn known_provider(provider: &str) -> bool {
+    matches!(
+        provider,
         "claude"
             | "codex"
             | "kimi"
@@ -237,7 +404,7 @@ fn validate(input: &BotInput) -> Result<BotInput> {
             | "mimo"
             | "pi"
             | "deepseek"
-            | "commandcode" | "cline"
+            | "commandcode" | "cline" | "kilo"
             | "omp"
             | "github-copilot"
             | "muse"
@@ -247,8 +414,13 @@ fn validate(input: &BotInput) -> Result<BotInput> {
     if input.model.len() > 200 || !known {
         return Err("Choose a harness and model for the bot.".into());
     }
-    if !(0..=7 * 24 * 60).contains(&input.heartbeat_minutes) {
-        return Err("Check-ins run at most once a week and at least every minute.".into());
+}
+
+/// Adds the `soul` column to a bots table created before it existed (schema 28). Idempotent.
+pub(crate) fn migrate_soul(db: &rusqlite::Connection) -> Result<()> {
+    let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='soul')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if !exists {
+        db.execute_batch("ALTER TABLE bots ADD COLUMN soul TEXT NOT NULL DEFAULT '';").map_err(|e| e.to_string())?;
     }
     if input.soul.len() > MAX_SOUL {
         return Err("Personality must be under 64 KB. Shorten the text or import a smaller soul.md.".into());
@@ -417,7 +589,24 @@ pub(crate) fn update(store: &Store, id: &str, input: &BotInput) -> Result<Bot> {
         store.db.execute("UPDATE projects SET name=?2 WHERE id=?1", params![before.project_id, input.name]).map_err(|e| e.to_string())?;
     }
     log(store, id, "updated", "Settings changed", json!({}))?;
-    get(store, id)
+    let bot = get(store, id)?;
+    let session_ids = {
+        let mut statement = store.db.prepare("SELECT session_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
+        let rows = statement.query_map([id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    for session_id in session_ids { sync_thread_profile(store, &bot, &session_id)?; }
+    Ok(bot)
+}
+
+fn sync_thread_profile(store: &Store, bot: &Bot, session_id: &str) -> Result<()> {
+    let session = store.session(session_id)?;
+    if matches!(session.status.as_str(), "running" | "waiting") { return Ok(()); }
+    if session.provider != bot.provider || session.model != bot.model {
+        store.configure(session_id, &bot.provider, &bot.model, None)?;
+    }
+    store.db.execute("UPDATE sessions SET mode=?2,reasoning_effort=?3 WHERE id=?1", params![session_id,bot.mode,(!bot.reasoning_effort.is_empty()).then_some(bot.reasoning_effort.as_str())]).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
@@ -510,7 +699,9 @@ fn owned_thread_session_ids(store: &Store, bot_id: &str) -> Result<Vec<String>> 
 pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
     let bot = get(store, id)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
+    shared_channels::settle_posts(store, &open)?;
     for table in ["bot_memories", "bot_schedules", "bot_activity"] {
         store.db.execute(&format!("DELETE FROM {table} WHERE bot_id=?1"), [id]).map_err(|e| e.to_string())?;
     }
@@ -522,6 +713,7 @@ pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
 
 /// Deletes the bot and its records. Its workspace folder stays on disk.
 pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
+    let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     let channels: Vec<String> = {
         let mut statement = store.db.prepare("SELECT id FROM bot_channels WHERE bot_id=?1").map_err(|e| e.to_string())?;
@@ -532,6 +724,7 @@ pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
         secrets::remove_all(&channel);
     }
     store.db.execute("DELETE FROM bots WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+    shared_channels::settle_posts(store, &open)?;
     Ok(())
 }
 
@@ -666,6 +859,7 @@ pub(crate) fn thread_session(store: &Store, bot: &Bot, channel_id: &str, externa
         .map_err(|e| e.to_string())?;
     if let Some(session) = existing {
         if store.session(&session).is_ok() {
+            sync_thread_profile(store, bot, &session)?;
             store.db.execute("UPDATE bot_threads SET updated_at=?2 WHERE session_id=?1", params![session, crate::storage::now()]).map_err(|e| e.to_string())?;
             return Ok((session, false));
         }
@@ -673,6 +867,9 @@ pub(crate) fn thread_session(store: &Store, bot: &Bot, channel_id: &str, externa
     }
     let task = store.create_session(&bot.project_id, &bot.provider, &bot.model, &bot.mode)?;
     store.update(&task.id, Some(clean(title, 120)), None, None, None)?;
+    if !bot.reasoning_effort.is_empty() {
+        store.db.execute("UPDATE sessions SET reasoning_effort=?2 WHERE id=?1", params![task.id, bot.reasoning_effort]).map_err(|e| e.to_string())?;
+    }
     store
         .db
         .execute("INSERT INTO bot_threads(bot_id,channel_id,external_id,session_id,updated_at) VALUES(?1,?2,?3,?4,?5)", params![bot.id, channel_id, external_id, task.id, crate::storage::now()])
@@ -749,8 +946,9 @@ pub struct LastMessage {
 const PREVIEW_CHARS: usize = 160;
 
 /// Markdown and whitespace flattened to one line, cut to a sidebar-sized preview.
+/// One line of the message as the user saw it: folded context such as the bot brief is left out.
 fn preview(content: &str) -> String {
-    let plain: String = content.chars().filter(|c| !matches!(c, '*' | '_' | '`' | '#' | '>')).collect();
+    let plain: String = channels::web::visible(content).chars().filter(|c| !matches!(c, '*' | '_' | '`' | '#' | '>')).collect();
     let line = plain.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() <= PREVIEW_CHARS {
         return line;
@@ -932,12 +1130,65 @@ pub async fn bot_project_ids(state: State<'_, AppState>) -> Result<Vec<String>> 
 
 /// Sends a message to the bot from the desktop app, in its desktop conversation.
 #[tauri::command]
-pub async fn bot_message(app: tauri::AppHandle, bot_id: String, text: String) -> Result<String> {
-    gateway::deliver(&app, gateway::Inbound { bot_id, channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: DESKTOP.into(), sender_name: "You".into(), text, trusted: true }).await
+pub async fn bot_message(app: tauri::AppHandle, bot_id: String, text: String, image_ids: Option<Vec<String>>, moodboard_ids: Option<Vec<String>>, force_queue: Option<bool>) -> Result<String> {
+    gateway::deliver_with_queue(&app, gateway::Inbound { bot_id, channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: DESKTOP.into(), sender_name: "You".into(), text, trusted: true, image_ids, moodboard_ids }, force_queue.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn bot_set_capabilities(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String, skills: Vec<String>, mcp: Vec<String>) -> Result<Bot> {
+    guard_main(&window)?;
+    let bot = set_capabilities(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &skills, &mcp)?;
+    let _ = app.emit("bots-changed", ());
+    Ok(bot)
+}
+
+/// Starts an ordinary task with a bot (or none). The window then applies the bot's harness and model.
+#[tauri::command]
+pub async fn bot_assign_task(window: tauri::WebviewWindow, state: State<'_, AppState>, session_id: String, bot_id: Option<String>) -> Result<Option<Bot>> {
+    guard_main(&window)?;
+    assign_task(&*state.store.lock().map_err(|e| e.to_string())?, &session_id, bot_id.as_deref())
+}
+
+#[tauri::command]
+pub async fn bot_task_links(state: State<'_, AppState>) -> Result<std::collections::HashMap<String, String>> {
+    task_links(&*state.store.lock().map_err(|e| e.to_string())?)
+}
+
+/// The brief a bot task's next message carries, or nothing when the task has no bot or has
+/// seen this version. Skills are the bot's plus the project's, deduplicated by id; the bot's
+/// ride in the prompt, so nothing is written into a checkout other tasks may share.
+pub(crate) fn task_brief(store: &Store, library: Option<&crate::skills::Library>, session_id: &str) -> Result<Option<String>> {
+    let Some((bot, seen)) = task_bot(store, session_id)? else { return Ok(None) };
+    if seen == bot.memory_version {
+        return Ok(None);
+    }
+    let task = store.session(session_id)?;
+    let root = store.workspace_root(&task.project_id, Some(session_id))?;
+    let project = library.map(|l| l.project_active(&task.provider, &root)).unwrap_or_default();
+    let resolved = crate::skills::scoped::resolve(&bot.skills, &project);
+    let files = crate::skills::scoped::has_skill_folder(&task.provider);
+    // Harnesses with skill folders already read the project's; the rest get every skill as text.
+    let inline: Vec<String> = resolved.iter().filter(|r| !files || r.provenance == "bot").map(|r| r.id.clone()).collect();
+    let installed: Vec<String> = resolved.iter().filter(|r| files && r.provenance != "bot").map(|r| format!("{} ({})", r.id, if r.provenance == "both" { "bot and project" } else { "project" })).collect();
+    let (text, skipped) = library.map(|l| l.prompt_text(&inline)).unwrap_or_default();
+    let memories = memories(store, &bot.id)?;
+    store.db.execute("UPDATE bot_tasks SET brief_version=?2 WHERE session_id=?1", params![session_id, bot.memory_version]).map_err(|e| e.to_string())?;
+    Ok(Some(format!("{}{}", brief::compose(&bot, &memories, brief::TASK, ""), brief::skills(&text, &installed, &skipped))))
+}
+
+#[tauri::command]
+pub async fn bot_task_brief(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String) -> Result<Option<String>> {
+    let library = crate::skills::library(&app).ok();
+    task_brief(&*state.store.lock().map_err(|e| e.to_string())?, library.as_ref(), &session_id)
 }
 
 /// Starts the scheduler and channel connections once the app is ready.
 pub(crate) fn start(app: &tauri::AppHandle) {
+    // Before the scheduler or any window reads a bot, so older databases have the profile columns.
+    let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| { upgrade(&store.db)?; shared_channels::reconcile_in_progress(&store) });
+    if let Err(error) = upgraded {
+        eprintln!("Could not upgrade the bots table: {error}");
+    }
     schedule::start(app.clone());
     channels::start_all(app.clone());
 }
@@ -946,7 +1197,14 @@ pub(crate) fn start(app: &tauri::AppHandle) {
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) {
     let app = app.clone();
     let session_id = session_id.to_owned();
-    tauri::async_runtime::spawn(async move { gateway::run_finished(&app, &session_id, successful).await });
+    tauri::async_runtime::spawn(async move {
+        let reply = app.state::<AppState>().store.lock().ok()
+            .and_then(|store| shared_channels::latest_reply(&store, &session_id).ok())
+            .unwrap_or_default();
+        if gateway::run_finished(&app, &session_id, successful).await {
+            shared_channels::run_finished(&app, &session_id, successful, &reply).await;
+        }
+    });
 }
 
 /// Called when a run asks for approval; bot conversations forward it to their channel.

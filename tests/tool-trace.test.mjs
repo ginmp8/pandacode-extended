@@ -9,7 +9,7 @@ test('describes each kind as a verb, chip and object', () => {
   const cases = [
     [tool('Bash', { command: 'npm test -- --runInBand' }), 'shell', 'Ran', 'npm', 'test -- --runInBand'],
     [tool('Command', '/bin/zsh -lc "git status --short"\nWorking directory: /repo'), 'shell', 'Ran', 'git', 'status --short'],
-    [tool('pandacode_vm_exec', { name: 'vm', command: 'uname -a' }), 'shell', 'Ran', 'uname', '-a'],
+    [tool('pandacode_vm_exec', { name: 'vm', command: 'uname -a' }), 'shell', 'Ran', 'uname', '-a · on vm'],
     [tool('Read', { file_path: '/repo/src/main.ts' }), 'read', 'Read', 'main.ts', ''],
     [tool('read', { path: 'src/dom.ts' }), 'read', 'Read', 'dom.ts', ''],
     [tool('Write', { file_path: 'a/b.md', content: 'one\ntwo' }), 'write', 'Wrote', 'b.md', '2 lines'],
@@ -149,4 +149,106 @@ test('chips, objects and cards escape tool data', () => {
   assert.match(html, /&lt;img/);
   const card = mcpCard(tool('mcp__slack__search_messages', {}, { output: JSON.stringify({ messages: [{ user: unsafe, channel: unsafe, ts: unsafe, text: unsafe, state: unsafe }] }) }));
   assert.ok(card.includes('&lt;img') && !card.includes('<img'));
+});
+
+import { failedVerb } from '../src/tool-trace.ts';
+
+test('failed rows lead with the failure', () => {
+  const cases = { 'Creating task': "Couldn't create task", Running: "Couldn't run", 'Taking screenshot of': "Couldn't take screenshot of", 'Double-clicking': "Couldn't double-click",
+    Cancelling: "Couldn't cancel", Controlling: "Couldn't control", Dragging: "Couldn't drag", Installing: "Couldn't install", 'Shutting down': "Couldn't shut down",
+    'Queuing message for': "Couldn't queue message for", 'Going back': "Couldn't go back", Using: "Couldn't use", 'Messaging the user': "Couldn't message the user", Pressing: "Couldn't press" };
+  for (const [running, failed] of Object.entries(cases)) assert.equal(failedVerb(running), failed);
+  for (const name of PANDACODE_TOOLS) assert.match(describeTool(tool('pandacode_' + name, {}, { status: 'failed' })).verb, /^Couldn't [a-z]/, name);
+  const html = renderToolActivity({ id: '1', name: 'pandacode_vm_manage', status: 'failed', input: '{"action":"create","name":"x"}', output: 'No disk' }, 'k');
+  assert.ok(!html.includes('tool-activity-status'));
+  assert.match(html, /is-error">No disk</);
+});
+
+test('badges separate success, running, neutral and failure', () => {
+  const html = toolPreview(tool('pandacode_list_tasks', {}, { output: JSON.stringify({ tasks: ['completed', 'running', 'queued', 'failed', 'stopped'].map((status, i) => ({ id: String(i), title: 't', status })) }) }));
+  assert.match(html, /tool-trace-badge">completed</);
+  assert.match(html, /is-live">running</);
+  assert.match(html, /is-quiet">queued</);
+  assert.match(html, /is-failed">failed</);
+  assert.match(html, /is-quiet">stopped</);
+});
+
+test('cards do not repeat the row, and full data appears only when the card is partial', () => {
+  const card = (name, input, output = '') => toolPreview(tool(name, input, { output }));
+  assert.equal(card('pandacode_vm_control', { name: 'vm', action: 'click', x: 1, y: 2 }), '');
+  assert.match(card('pandacode_vm_control', { name: 'vm', action: 'scroll', direction: 'down', amount: 5 }), /<dt>amount<\/dt><dd>5<\/dd>/);
+  assert.ok(!card('pandacode_vm_control', { name: 'vm', action: 'scroll', direction: 'down', amount: 5 }).includes('<dt>direction'));
+  assert.equal(card('pandacode_bot_remember', { content: 'short' }), '');
+  assert.equal(card('pandacode_bot_notify', { text: 'short' }), '');
+  assert.ok(!card('pandacode_bot_schedule', { title: 'Digest', prompt: 'Summarize', kind: 'daily', timeOfDay: '08:00' }).includes('<dt>kind'));
+  assert.equal(card('pandacode_vm_screenshot', { name: 'vm' }), '');
+  assert.ok(!card('pandacode_track_files', { paths: ['a'] }, '{"captureId":"cap-1"}').includes('Capture cap-1'));
+  const mcp = card('mcp__github__list_issues', { repo: 'a/b' }, '{"total":1}');
+  assert.ok(!mcp.includes('tool-trace-chip'));
+  assert.match(mcp, /<h5 class="tool-trace-label">Arguments<\/h5>/);
+  assert.ok(!card('Task', { subagent_type: 'Explore', prompt: 'p' }, 'r').includes('tool-trace-chip'));
+  const activity = (name, input, output) => renderToolActivity({ id: '1', name, status: 'completed', input: JSON.stringify(input), output }, 'k');
+  assert.ok(!activity('pandacode_vm_list', {}, '{"vms":[]}').includes('tool-trace-raw'));
+  assert.match(activity('mcp__x__y', {}, 'line\n'.repeat(20)), /tool-trace-raw/);
+  // Rich cards for built-in tools are excerpts and always keep the raw record.
+  assert.match(activity('Bash', { command: 'ls' }, 'a'), /tool-trace-raw/);
+  assert.match(activity('Bash', { command: 'ls' }, Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')), /tool-trace-raw/);
+  assert.match(activity('Read', { file_path: 'a' }, Array.from({ length: 400 }, (_, i) => `x ${i}`).join('\n')), /tool-trace-raw/);
+  assert.match(activity('Read', { file_path: 'a' }, 'one\ntwo'), /tool-trace-raw/);
+  assert.match(activity('pandacode_open_terminal', {}, ''), /data-static><div class="tool-trace-summary"/);
+  assert.ok(!activity('pandacode_open_terminal', {}, '').includes('<details'));
+  assert.ok(!renderToolActivity({ id: '1', name: 'Bash', status: 'running', input: '{"command":"ls"}', output: '' }, 'k').includes('Waiting for output'));
+  assert.match(toolPreview(tool('pandacode_vm_screenshot', { name: 'vm' }, { output: 'Screenshot 1280×800' })), /^<p data-trace-kind="mcp" class="tool-trace-inline tool-trace-note">Screenshot 1280×800<\/p>$/);
+  assert.equal(card('pandacode_set_task_stage', { taskId: 't', stage: 'review' }, '{"id":"t","title":"T","stage":"review"}'), '<!--trace-complete-->');
+  assert.match(activity('pandacode_set_task_stage', { taskId: 't', stage: 'review' }, '{"id":"t","title":"T","stage":"review"}'), /data-static/);
+  const one = card('pandacode_create_task', { title: 'T', description: 'Do it' }, '{"id":"t","title":"T","description":"Do it"}');
+  assert.equal(one.match(/Do it/g)?.length, 1);
+  assert.ok(!activity('pandacode_open_terminal', {}, '').includes('No output was returned'));
+  assert.ok(!activity('Bash', { command: 'true' }, '').includes('No output was returned'));
+});
+
+test('summaries keep finished work in past tense, name PandaCode families and count nonzero exits', () => {
+  const bash = tool('Bash', { command: 'ls' });
+  assert.equal(summarizeTools([bash, { ...bash, status: 'running' }], { live: true }), 'Ran 1 command · 1 running');
+  assert.equal(summarizeTools([tool('pandacode_send_team_message', {}), tool('pandacode_read_team_mailbox', {}), tool('pandacode_vm_list', {})]), 'Coordinated 2 team steps and operated 1 VM action');
+  assert.equal(summarizeTools([tool('pandacode_cloud_cli', {}), bash]), 'Ran 1 cloud command and 1 command');
+  const failing = tool('Bash', { command: 'npm test' }, { output: 'Exit code: 1\nOutput:\nfail' });
+  assert.equal(summarizeTools([failing, bash]), 'Ran 1 command · 1 failed');
+  const trace = describeTool(failing);
+  assert.equal(trace.exit, 1);
+  assert.match(traceRowHtml(trace), /is-failed">exit 1</);
+  assert.match(renderToolActivity({ id: '1', ...failing }, 'k'), /data-tool-failed/);
+  assert.ok(!renderToolActivity({ id: '1', ...bash, output: 'Exit code: 0\nOutput:\nok' }, 'k').includes('data-tool-failed'));
+});
+
+test('search keeps line numbers; generic arrays of objects become item lists; directory marks you', () => {
+  assert.match(toolPreview(tool('Grep', { pattern: 'x' }, { output: 'src/a.ts:12:const x = 1' })), /tc-gutter">12</);
+  // A recognizable collection becomes brand rows; other JSON keeps the argument/result tables.
+  const mcp = toolPreview(tool('mcp__github__list_issues', {}, { output: JSON.stringify({ total: 2, items: [{ number: 812, title: 'Rows wrap' }, { number: 815, title: 'Dark chips' }] }) }));
+  assert.match(mcp, /trace-row-head"><b>Rows wrap<\/b>/);
+  assert.ok(!mcp.includes('2 items'));
+  const generic = toolPreview(tool('mcp__x__get_config', {}, { output: JSON.stringify({ name: 'app', regions: ['us', 'eu'] }) }));
+  assert.match(generic, /<dt>regions<\/dt><dd>us, eu<\/dd>/);
+  const dir = toolPreview(tool('pandacode_team_directory', {}, { output: JSON.stringify({ you: 'w1', workers: [{ id: 'w1', name: 'Traces' }, { id: 'w2', name: 'Audit' }] }) }));
+  assert.ok(!dir.includes('You are'));
+  assert.match(dir, /Traces<\/b><span class="tool-trace-badge is-quiet">you</);
+});
+
+test('subagent cards: compact while running, result first with the prompt behind a disclosure', () => {
+  const running = toolPreview(tool('Task', { subagent_type: 'Explore', prompt: 'Find callers' }, { status: 'running' }));
+  assert.equal(running, '');
+  const withModel = toolPreview(tool('Task', { subagent_type: 'Explore', prompt: 'Find callers', model: 'haiku' }, { status: 'running' }));
+  assert.match(withModel, /haiku<\/span><span class="tool-trace-badge is-live">running</);
+  assert.ok(!withModel.includes('Find callers'));
+  const done = toolPreview(tool('Task', { subagent_type: 'Explore', prompt: 'Find callers' }, { output: 'Found 3' }));
+  assert.ok(done.indexOf('Found 3') < done.indexOf('tool-trace-aside'));
+  assert.match(done, /<details class="tool-trace-aside"><summary>.*Prompt<\/summary><p class="tool-trace-prompt">Find callers<\/p><\/details>/);
+});
+
+test('vm_exec rows name their machine; created tasks keep the input description', async () => {
+  const { toolPreview } = await import('../src/tool-trace.ts');
+  const vm = describeTool(tool('pandacode_vm_exec', { name: 'ubuntu-dev', command: 'uname -a' }));
+  assert.equal(vm.object, '-a · on ubuntu-dev');
+  const created = toolPreview(tool('pandacode_create_task', { title: 'Polish', description: 'Tighten the onboarding copy' }, { output: JSON.stringify({ task: { id: 't1', title: 'Polish' } }) }));
+  assert.match(created, /Tighten the onboarding copy/);
 });

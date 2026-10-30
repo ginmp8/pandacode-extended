@@ -106,7 +106,7 @@ mod tests {
         );
         let codex = load("codex", &paths).await.unwrap();
         assert_eq!(codex, vec![json!({"type":"localImage","path":file.0})]);
-        for provider in ["glm", "mimo", "opencode", "antigravity", "grok"] {
+        for provider in ["glm", "mimo", "opencode", "kilo", "antigravity", "grok"] {
             let blocks = load(provider, &paths).await.unwrap();
             assert_eq!(blocks[0]["type"], "image");
             if matches!(provider, "glm" | "mimo") {

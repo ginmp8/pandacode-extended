@@ -25,7 +25,11 @@ test('decodes only supported, bounded tool records', () => {
 });
 
 test('renders the command and recorded output with a stable disclosure key', () => {
-  const html = renderToolActivity(stored(activity), 'message-5');
+  // A rich card is an excerpt, so the raw record stays one click away; a PandaCode card that shows everything drops it.
+  assert.match(renderToolActivity(stored(activity), 'short'), /tool-trace-raw/);
+  assert.ok(!renderToolActivity({ ...activity, name: 'pandacode_vm_list', input: '{}', output: '{"vms":[]}' }, 'own').includes('tool-trace-raw'));
+  const long = { ...activity, output: activity.output + '\n' + Array.from({ length: 12 }, (_, i) => `line ${i}`).join('\n') };
+  const html = renderToolActivity(stored(long), 'message-5');
   assert.match(html, /data-tool-key="message-5"/);
   assert.match(html, /data-tool-status="completed"/);
   assert.match(html, /tool-trace-verb">Ran<\/span><span class="tool-trace-chip" title="npm run test">/);

@@ -1,6 +1,7 @@
 import type { ToolActivity } from './types';
 import { escape, icon } from './dom.ts';
-import { describeTool, kindIcon, summarizeTools, summaryIcons, toolPreview, traceRowHtml } from './tool-trace.ts';
+import { pandacodeTool } from './tool-trace-pandacode.ts';
+import { PARTIAL, describeTool, toolFailed, summarizeGroup, summaryIcons, toolPreview, traceIcon, traceRowHtml } from './tool-trace.ts';
 
 const MAX_CONTENT = 100_000;
 const MAX_DETAIL = 20_000;
@@ -106,7 +107,7 @@ export function toolStackHtml(tools: (ToolActivity | undefined)[]): string {
 export function renderToolGroup(entries: { key: string; content: string | ToolActivity }[], expanded = false, live = false): string {
   if (!entries.length) return '';
   const tools = entries.map(entry => typeof entry.content === 'string' ? decodeToolActivity(entry.content) : entry.content);
-  const failed = tools.some(tool => tool?.status === 'failed');
+  const failed = tools.some(tool => tool && toolFailed(tool));
   const running = tools.some(tool => tool?.status === 'running');
   const [sentence, failures] = summarizeTools(tools, { live }).split(' · ');
   const stack = toolStackHtml(tools);

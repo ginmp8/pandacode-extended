@@ -72,7 +72,7 @@ test('hero, supported harnesses, and complete page have valid resources and resp
   }
   await expect(page.locator('#preview-notes')).toContainText('free, open-source software');
   await expect(page.locator('#preview-notes')).toContainText('provider subscriptions and model usage are separate');
-  await expect(page.locator('#preview-notes')).toContainText('Apple silicon Macs, Windows x64, and Linux x64 are published on GitHub Releases');
+  await expect(page.locator('#preview-notes')).toContainText('Apple silicon and Intel Macs, Windows x64 and arm64, and Linux x86_64 and aarch64 are published on GitHub Releases');
   await expect(page.locator('#preview-notes').getByRole('link', { name: 'PandaCode License' })).toHaveAttribute('href', '/license/');
   await expect(page.locator('#preview-notes').getByRole('link', { name: /Report an issue/ })).toHaveAttribute('href', issues);
   await expect.poll(() => page.locator('img:visible').evaluateAll(images => images.filter(image => !(image as HTMLImageElement).complete || !(image as HTMLImageElement).naturalWidth).map(image => (image as HTMLImageElement).src))).toEqual([]);
@@ -135,7 +135,8 @@ async function expectPrivacyDetails(page: Page) {
   await expect(footer.getByRole('link', {name: 'License', exact: true})).toHaveAttribute('href', '/license/');
   await expect(footer.getByRole('link', {name: 'Changelog', exact: true})).toHaveAttribute('href', '/changelog/');
   await expect(footer.getByRole('link', {name: 'GitHub', exact: true})).toHaveAttribute('href', repo);
-  await expect(footer.getByRole('link', {name: 'Support', exact: true})).toHaveAttribute('href', issues);
+  await expect(footer.getByRole('link', {name: 'Support', exact: true})).toHaveAttribute('href', '/support/');
+  await expect(footer.getByRole('link', {name: 'Issues', exact: true})).toHaveAttribute('href', issues);
   await expect(footer.getByRole('link', {name: 'Terms'})).toHaveCount(0);
 }
 
@@ -411,7 +412,7 @@ test('server-rendered hero and feature copy remain visible without JavaScript', 
   await expect(page.locator('.download-content .button')).toHaveAttribute('href', releases);
   await expect(page.locator('#open-source pre')).toContainText('npm run desktop');
   await expect(page.locator('#download-distribution')).toBeVisible();
-  await expect(page.locator('#download-distribution')).toContainText('Not notarized by Apple');
+  await expect(page.locator('#download-distribution')).toContainText('Signed and notarized by Apple');
   await expectPreviewDisclosures(page);
   await expectPrivacyDetails(page);
   await expectComparison(page);

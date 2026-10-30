@@ -41,6 +41,8 @@ pub(super) const RATE_LIMITED: &str = "Too many requests to that computer. Try a
 const MAX_STARTS: usize = 8;
 const PEER_QUEUE: usize = 64;
 const MAX_PEERS: usize = 64;
+const MAX_STARTS: usize = 4;
+static STARTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
 /// Relay close codes: another socket replaced this one, or the device was revoked.
 const REPLACED: u16 = 4000;
 const REVOKED: u16 = 4001;
@@ -261,6 +263,20 @@ async fn session(app: &tauri::AppHandle, generation: u64, token: &str) -> Outcom
     }
 }
 
+/// One TLS config for every relay connect: rustls keeps session tickets in it, so a reconnect
+/// resumes instead of receiving and checking the certificate chain again. That saves bytes and
+/// CPU, not a round trip (TLS 1.3 takes one either way). 0-RTT early data is not used: a
+/// replayed upgrade would replace this device's socket at the relay (close 4000, a minute's
+/// backoff), and the relay can't tell a replay apart.
+fn tls() -> tokio_tungstenite::Connector {
+    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    let config = CONFIG.get_or_init(|| {
+        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+        std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth())
+    });
+    tokio_tungstenite::Connector::Rustls(config.clone())
+}
+
 /// Trades a token in its last week for a fresh 30-day one (`POST /v1/token`). Failures are
 /// left for the next check; a refused token signs out as any 401 does.
 async fn refresh_token(app: tauri::AppHandle, old: String) {
@@ -284,7 +300,7 @@ async fn refresh_token(app: tauri::AppHandle, old: String) {
         }
         inner.token = Some(fresh.to_owned());
     }
-    if let Err(error) = crate::secret_store::set(config::SERVICE, &state.accounts.token, fresh) {
+    if let Err(error) = super::secrets::set_token(&state.dir, fresh) {
         eprintln!("Could not save the refreshed PandaCode Connect token: {error}");
     }
 }
@@ -722,11 +738,14 @@ async fn answer(app: &tauri::AppHandle, from: &str, request: Request) {
 /// Applies a presence list, which carries the full device rows. A host that comes online (or restarted, forgetting subscriptions) is subscribed again.
 fn presence(app: &tauri::AppHandle, list: &Value) {
     let Some(list) = list.as_array() else { return };
-    let renamed = {
+    // The socket's first presence: subscribe at once, with the catch-up alongside.
+    let (renamed, first) = {
         let state = remote(app);
         let mut inner = state.lock();
+        let first = !inner.presence;
         apply_presence(&mut inner, list);
-        super::remember_names(&inner.devices)
+        prune_packing(&mut packing(), &inner.devices);
+        (super::remember_names(&inner.devices), first)
     };
     emit_presence(app);
     if renamed {
@@ -756,6 +775,11 @@ fn apply_presence(inner: &mut Inner, list: &[Value]) {
     let Inner { devices, subscribers, keys, .. } = inner;
     subscribers.retain(|id, _| devices.iter().any(|d| &d.id == id));
     keys.retain(|id, _| devices.iter().any(|d| &d.id == id));
+}
+
+/// A device gone from presence is forgotten as a packing peer too.
+fn prune_packing(packing: &mut std::collections::HashSet<String>, devices: &[Device]) {
+    packing.retain(|id| devices.iter().any(|d| &d.id == id));
 }
 
 fn parse_devices(list: &[Value]) -> Vec<Device> {
@@ -879,8 +903,8 @@ fn stamp_delivery(message: &Value, now_ms: i64) -> Value {
     message
 }
 
-/// Requests and task content, sealed only to a device trusted here with its current key.
-pub(crate) fn send_trusted(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
+/// Seals a request or event to the device's current key from presence.
+pub(crate) fn send_to_device(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
     remote(app).lock().callable(to)?;
     let (key, public_key) = peer_key(app, to)?;
     send_sealed(app, to, &key, Some(&public_key), false, false, message).map(|_| ())
@@ -1032,6 +1056,15 @@ mod tests {
     }
 
     #[test]
+    fn a_device_gone_from_presence_is_no_longer_packed_for() {
+        let mut inner = Inner::default();
+        apply_presence(&mut inner, &[json!({"id": "kept", "online": true, "host": false})]);
+        let mut set: std::collections::HashSet<String> = ["kept".into(), "gone".into()].into();
+        prune_packing(&mut set, &inner.devices);
+        assert_eq!(set, ["kept".to_string()].into());
+    }
+
+    #[test]
     fn going_offline_or_coming_back_forgets_cached_lists() {
         let mut inner = Inner::default();
         let row = |id: &str, online: bool| json!({"id": id, "online": online, "host": true});
@@ -1048,20 +1081,14 @@ mod tests {
     }
 
     #[test]
-    fn trust_follows_the_pinned_key() {
+    fn device_views_omit_trust_while_encryption_still_uses_the_current_key() {
         let (host, old, new) = (crypto::generate(), crypto::generate(), crypto::generate());
-        let mut settings = config::Settings::default();
-        settings.trusted.insert("viewer".into(), crypto::public_key(&old));
-        assert!(settings.is_trusted("viewer", &crypto::public_key(&old)));
-        // The relay (or the device) reports a new key: untrusted until trusted again.
-        assert!(!settings.is_trusted("viewer", &crypto::public_key(&new)));
-        assert!(!settings.is_trusted("other", &crypto::public_key(&old)));
-        // A frame sealed by the new key never opens with the pinned pair key.
-        let pinned = crypto::pair_key(&host, "host", &crypto::public_key(&old), "viewer").unwrap();
+        // A frame sealed for an old key still cannot open after the peer key changes.
+        let previous = crypto::pair_key(&host, "host", &crypto::public_key(&old), "viewer").unwrap();
         let swapped = crypto::pair_key(&new, "viewer", &crypto::public_key(&host), "host").unwrap();
         let body = crypto::seal(&swapped, "viewer", "host", b"{}").unwrap();
-        assert!(crypto::open(&pinned, "viewer", "host", &body).is_err());
-        let view = Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: crypto::public_key(&new), host: false, online: true, last_seen: Value::Null }.view("host", &settings);
-        assert_eq!(view["trusted"], false);
+        assert!(crypto::open(&previous, "viewer", "host", &body).is_err());
+        let view = Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: crypto::public_key(&new), host: false, online: true, last_seen: Value::Null }.view("host");
+        assert!(view.get("trusted").is_none());
     }
 }

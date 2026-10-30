@@ -6,6 +6,8 @@ import { historicalProvider } from './provider-handoff';
 import { isPreviewableFile } from './file-links';
 import type { CommandPanel, GoalState } from './command-center';
 import { createPreviewArchitect } from './preview-architect';
+import { namedTeamSetup } from './team-mode';
+import type { TeamSnapshot, TeamWorker } from './architect-types';
 import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
@@ -19,7 +21,7 @@ import { recipesCommand } from './preview-recipes';
 import { openCodePreviewKey, openCodePreviewModels, previewOpenCodeChoices, previewOpenCodeSelection } from './preview-opencode';
 const turnChanges = createPreviewTurnChanges();
 const now = Date.now();
-const sampleReadme = '# Orbit\n\nA tiny search index for the browser preview.\n\n## Usage\n\n- Build the index with `createSearchIndex`.\n- Call `search(query)`.\n\n> Results are case-insensitive.\n';
+const sampleReadme = '<div align="center">\n\n<img src="docs/banner.png" alt="Orbit banner" width="100%" onerror="alert(1)"/>\n\n[![Build](https://img.shields.io/badge/build-passing-green)](https://example.com/ci)\n\n<script>alert(1)</script>\n\n<a href="https://example.com/x" download class="toast">Get</a>\n\n</div>\n\n# Orbit\n\nA tiny search index for the browser preview.\n\n## Usage\n\n- Build the index with `createSearchIndex`.\n- Call `search(query)`.\n\n> Results are case-insensitive.\n';
 const sampleSource = '// Browser preview — sample source\nexport function createSearchIndex(items) {\n  return {\n    search(query) {\n      return items.filter(item =>\n        item.title.toLowerCase().includes(query.toLowerCase())\n      );\n    }\n  };\n}\n';
 const previewWorkspaceFiles = ['index.html', '.gitignore', 'README.md', 'package.json', 'tsconfig.json', 'src/main.ts', 'src/style.css', 'src/components/search.ts', 'src/components/search.test.ts', 'src/lib/search-index.ts', 'public/favicon.svg', 'docs/design notes.md'];
 const sampleTestOutput = 'PASS src/components/search.test.ts\n  ✓ filters results as the query changes\n  ✓ preserves keyboard selection\n\nTests: 12 passed, 12 total\nTime: 0.8s\nSample output — no command was executed.';
@@ -72,7 +74,6 @@ for (const s of sessions) {
   s.taskDescription = '';
   s.completedAt = null;
 }
-loadThreadOrder();
 // One sample task already tracks a GitHub issue so chips have something to show.
 sessions[2].issue = { kind: 'issue', number: 131, url: 'https://github.com/orbit-labs/orbit/issues/131', title: 'Keyboard shortcut cheat sheet', state: 'open', checkedAt: now };
 // Sidebar sections showcase: opt in with ?sections so default session counts stay unchanged.
@@ -91,7 +92,47 @@ if (typeof location !== 'undefined' && new URLSearchParams(location.search).has(
   localStorage.setItem('pandacode.sidebar.unreviewed', JSON.stringify(['sections-review-1', 'sections-review-2']));
 }
 let id = 10;
+const ROUTING_KEY = 'pandacode.preview.routing';
+let previewRouting = { enabled: true, mode: 'balanced', minP: 0.5, profiler: 'missing', error: null as string | null };
+try { previewRouting = { ...previewRouting, ...JSON.parse(localStorage.getItem(ROUTING_KEY) ?? '{}') }; } catch { /* Defaults. */ }
+let previewExclusions = { providers: [] as string[], models: [] as { provider: string; model: string }[] };
+// Two seeded tiers; keys are the mock's normalized model names.
+let previewTiers: Record<string, string> = { 'claude-sonnet-5-5': 'S', 'deepseek-v4-pro': 'B' };
+/** Stand-in for native grouping: one row per model name across harnesses; experimental or default entries are unrated. */
+function previewTierModels(pool: { provider: string; model: string; name: string }[]) {
+  const rows = new Map<string, { key: string; name: string; cardId: string | null; providers: string[]; rated: boolean }>();
+  for (const m of pool) {
+    const key = m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const rated = !/exp|default|adaptive/i.test(m.name);
+    const row = rows.get(key) ?? { key, name: m.name, cardId: rated ? key : null, providers: [], rated };
+    if (!row.providers.includes(m.provider)) row.providers.push(m.provider);
+    rows.set(key, row);
+  }
+  return [...rows.values()];
+}
+let previewHealth = [{ provider: 'commandcode', model: 'gpt-6.1-sol', reason: 'Two runs in a row ended with a provider error (sample).', until: Date.now() + 8 * 60_000, failures: 2, providerDown: false }];
+const saveRouting = () => { try { localStorage.setItem(ROUTING_KEY, JSON.stringify(previewRouting)); } catch { /* Kept in memory only. */ } };
+/** Deterministic stand-in for Panda Router: longer text reads as harder, later pool entries as pricier and stronger. */
+function previewRoute(text: string, pool: { provider: string; model: string; name: string }[]) {
+  const difficulty = Math.min(0.95, 0.2 + text.length / 400);
+  const rated = pool.map((m, i) => ({ provider: m.provider, model: m.model, name: m.name, cardId: `${m.provider}:${m.model}`, pSuccess: Math.max(0.05, Math.min(0.99, 0.95 - difficulty * 0.6 + (i % 7) * 0.05)), estCostUsd: 0.002 * (1 + (i % 9)), estLatencyMs: 2000 + i * 100 }));
+  const score = (m: typeof rated[number]) => previewRouting.mode === 'quality' ? m.pSuccess : previewRouting.mode === 'cheapest' ? (m.pSuccess >= previewRouting.minP ? 1 - m.estCostUsd : -1) : m.pSuccess - m.estCostUsd * 5;
+  const ranking = [...rated].sort((a, b) => score(b) - score(a));
+  return { pick: ranking[0] ?? null, ranking, unrated: [], difficulty: Math.max(1, Math.round(difficulty * 10)), category: /test|bug|fix/i.test(text) ? 'debugging' : 'general coding', profiler: 'onnx', latencyMs: 12 };
+}
 let previewClaudeMode: 'inherit' | 'subscription' = 'inherit';
+// Provider environment in the preview lives in memory so the Settings UI can be tested in a browser.
+const previewEnvState = { global: [] as [string, string][], providers: {} as Record<string, [string, string][]>, useGlobal: {} as Record<string, boolean> };
+const previewEnvNames = (vars: [string, string][]) => vars.map(([name]) => name);
+function previewProviderConfiguration(): Record<string, unknown> {
+  return {
+    executablePaths: {}, claudeConnectionMode: previewClaudeMode,
+    globalEnvironment: previewEnvNames(previewEnvState.global),
+    environment: Object.fromEntries(Object.entries(previewEnvState.providers).map(([provider, vars]) => [provider, previewEnvNames(vars)])),
+    useGlobalEnvironment: previewEnvState.useGlobal,
+    glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false,
+  };
+}
 const traceRoot = '/Users/you/Projects/orbit';
 const traceIndex = `${traceRoot}/src/lib/search-index.ts`;
 const traceJson = (value: unknown) => JSON.stringify(value, null, 2);
@@ -140,6 +181,7 @@ const providers: Provider[] = [
   { id: 'commandcode', name: 'Command Code', installed: true, path: '/sample/bin/command-code', version: '1.87.1 (sample)', models: [] },
   { id: 'kilo', name: 'Kilo Code', installed: true, path: '/sample/bin/kilo', version: '7.3.41 (sample)', models: [] },
   { id: 'cline', name: 'Cline', installed: true, path: '/sample/bin/cline', version: '3.0.73 (sample)', models: [] },
+  { id: 'kilo', name: 'Kilo Code', installed: true, path: '/sample/bin/kilo', version: '7.3.41 (sample)', models: [] },
   { id: 'omp', name: 'Oh My Pi', installed: false, path: null, version: '', models: [] },
   { id: 'github-copilot', name: 'GitHub Copilot CLI', installed: true, path: '/sample/bin/copilot', version: 'GitHub Copilot CLI 1.0.82 (sample)', models: [] },
   { id: 'muse', name: 'Muse Code', installed: true, path: '/sample/bin/muse', version: 'Muse Code 1.4.7 (sample)', models: [] },
@@ -153,6 +195,14 @@ const previewMimoEndpoints = [
   { id: 'api', url: 'https://api.xiaomimimo.com/anthropic', label: 'Pay-as-you-go API' },
 ];
 let previewMimoEndpoint: string | null = null;
+let previewAgentsDockPreferences = { enabled: true, keepOnScreen: true, pinned: false };
+const previewAgentsDockSnapshot = {
+  agents: [
+    { id: 'preview-active', title: 'Polish the new onboarding', projectName: 'PandaCode', provider: 'codex', model: 'gpt-5.6-sol', status: 'running', elapsedSeconds: 94 },
+    { id: 'preview-approval', title: 'Build a responsive gallery', projectName: 'Gallery', provider: 'claude', model: 'sonnet', status: 'waiting-for-approval', elapsedSeconds: 327 },
+    { id: 'preview-input', title: 'Prepare the release notes', projectName: 'Website', provider: 'pi', model: 'anthropic/sonnet', status: 'waiting-for-input', elapsedSeconds: 41 },
+  ],
+};
 /** Named connections; secret values are dropped, only their names are kept, as on the native side. */
 let previewConnections: import('./connections').ConnectionSnapshot = { connections: [], tasks: {} };
 function previewSaveConnection(input: { id?: string | null; provider: ProviderId; name: string; executable?: string | null; args?: string[]; env?: { name: string; value: string | null; secret: boolean }[]; configDir?: string | null }): import('./connections').ConnectionSnapshot {
@@ -175,6 +225,11 @@ function remoteCatalog(id: ProviderId): ProviderModel[] {
   return id === 'codex' ? ['gpt-5-codex', 'gpt-5'].map(model => fallbackModel('codex', model)) : [];
 }
 const catalogs: Record<ProviderId, ProviderModel[]> = {
+  // Recorded from `kilo acp` 7.3.41; efforts belong to its current model only.
+  kilo: [
+    { id: 'kilo/stealth/claude-sonnet-4.6', name: 'Kilo Gateway/Stealth: Claude Sonnet 4.6 (20% off)', description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'].map(id => ({ id, name: id, description: '' })), defaultReasoningEffort: 'none' },
+    { id: 'kilo/anthropic/claude-sonnet-4.6', name: 'Kilo Gateway/Anthropic: Claude Sonnet 4.6', description: '' },
+  ],
   pi: [{ id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Sample Pi model.', reasoningEfforts: [{ id: 'low', name: 'Low', description: '' }, { id: 'high', name: 'High', description: '' }], contextWindow: 200000 }],
   omp: [{ id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Sample omp model.', reasoningEfforts: [{ id: 'low', name: 'Low', description: '' }, { id: 'high', name: 'High', description: '' }], contextWindow: 200000 }],
   deepseek: [
@@ -235,8 +290,59 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
     { id: 'grok-4.7', name: 'Grok 4.7', description: 'Frontier model for agentic coding.', reasoningEfforts: [{ id: 'low', name: 'Low', description: 'Fastest responses. Best for simple tasks.' }, { id: 'medium', name: 'Medium', description: 'Strong quality with a faster turnaround.' }, { id: 'high', name: 'High', description: 'Thorough reasoning and quality. Recommended.' }, { id: 'xhigh', name: 'Extra High', description: 'Maximum reasoning for the hardest tasks.' }], defaultReasoningEffort: 'high', contextWindow: 500000 },
     { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Fast', description: 'Fast variant. 2x the price.', reasoningEfforts: [{ id: 'low', name: 'Low', description: 'Fastest responses.' }, { id: 'high', name: 'High', description: 'Thorough reasoning and quality.' }], defaultReasoningEffort: 'high', contextWindow: 500000 },
   ],
+  // Mirrors the session/create settings snapshot recorded from zcode app-server 3.16.3.
+  zcode: [
+    { id: 'zcproxy/GLM-5.3', name: 'zcproxy/GLM-5.3', description: 'OmniRouter', reasoningEfforts: ['low', 'high', 'max'].map(effort => ({ id: effort, name: effort[0].toUpperCase() + effort.slice(1), description: '' })), defaultReasoningEffort: 'max', contextWindow: 200000 },
+  ],
 };
-let git: GitStatus = { branch: 'feat/instant-search', isRepo: true, files: [{ path: 'src/components/search.ts', index: ' ', working: 'M' }, { path: 'src/lib/search-index.ts', index: '?', working: '?' }, { path: 'src/components/search.test.ts', index: ' ', working: 'M' }] };
+// `?bench=diff` (or localStorage `pandacode.bench` = `diff`) adds synthetic, deterministic
+// patches of known size for tests/diff-perf.spec.ts; other runs never see them.
+const benchDiffs = typeof location !== 'undefined' && (new URLSearchParams(location.search).get('bench') === 'diff' || localStorage.getItem('pandacode.bench') === 'diff');
+const BENCH_LINES: Record<string, (n: number, word: string) => string> = {
+  ts: (n, w) => [`export function ${w}${n}(input: ${w[0].toUpperCase()}${w.slice(1)}Options): number {`, `  const ${w} = input.items.filter(item => item.weight > ${n % 17});`, `  if (!${w}.length) return ${n};`, `  return ${w}.reduce((total, item) => total + item.weight * ${n % 9 + 1}, 0);`, `}`, `// ${w} keeps the index warm between keystrokes (${n})`, `const ${w}Cache = new Map<string, ${w[0].toUpperCase()}${w.slice(1)}Entry>();`][n % 7],
+  rs: (n, w) => [`pub fn ${w}_${n}(input: &[u32]) -> u64 {`, `    let ${w}: u64 = input.iter().map(|v| *v as u64 * ${n % 9 + 1}).sum();`, `    if ${w} > ${n} { return ${w}; }`, `    ${w}.saturating_sub(${n % 13})`, `}`, `// ${w} runs on the background pool (${n})`][n % 6],
+  css: (n, w) => [`.${w}-${n} {`, `  padding: ${n % 12}px ${n % 7}px;`, `  color: rgb(var(--accent-rgb) / 0.${n % 9 + 1});`, `  border-radius: ${n % 5}px;`, `}`][n % 5],
+  json: (n, w) => `  "${w}${n}": { "weight": ${n % 97}, "enabled": ${n % 2 === 0}, "label": "${w} ${n}" },`,
+  md: (n, w) => [`## ${w[0].toUpperCase()}${w.slice(1)} ${n}`, ``, `The ${w} step runs after indexing and takes about ${n % 40} ms on a warm cache.`, `- Keep ${w} under ${n % 9 + 1} passes`, `- See \`${w}${n}()\` for details`][n % 5],
+};
+const BENCH_WORDS = ['search', 'index', 'render', 'token', 'cache', 'query', 'layout', 'stream', 'parse', 'merge'];
+/** One file of `changed` added+removed lines in hunks of ~40, from a fixed seed so every run gets the same bytes. */
+function benchPatch(path: string, lang: string, changed: number, seed: number): string {
+  let state = seed >>> 0;
+  const random = () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 2 ** 32; };
+  const line = () => BENCH_LINES[lang](Math.floor(random() * 10_000), BENCH_WORDS[Math.floor(random() * BENCH_WORDS.length)]);
+  const out = [`diff --git a/${path} b/${path}`, 'index 64d221a..0e6c9ef 100644', `--- a/${path}`, `+++ b/${path}`];
+  let oldLine = 1, newLine = 1, left = changed;
+  while (left > 0) {
+    const size = Math.min(left, 40), body: string[] = [];
+    let oldCount = 0, newCount = 0;
+    for (let i = 0; i < 3; i++, oldCount++, newCount++) body.push(' ' + line());
+    for (let done = 0; done < size;) {
+      const run = Math.min(size - done, 1 + Math.floor(random() * 6)), kind = random();
+      for (let i = 0; i < run; i++) {
+        if (kind < 0.4) { body.push('-' + line()); oldCount++; } else if (kind < 0.8) { body.push('+' + line()); newCount++; } else { body.push(' ' + line()); oldCount++; newCount++; }
+      }
+      if (kind < 0.8) done += run;
+    }
+    for (let i = 0; i < 3; i++, oldCount++, newCount++) body.push(' ' + line());
+    out.push(`@@ -${oldLine},${oldCount} +${newLine},${newCount} @@`, ...body);
+    oldLine += oldCount + 20; newLine += newCount + 20; left -= size;
+  }
+  return out.join('\n') + '\n';
+}
+// Sizes are changed lines; with context the patches are ~47, ~1.1k, ~4k, ~30k and ~3k lines.
+const BENCH_DIFFS: Record<string, () => string> = {
+  'bench/small.ts': () => benchPatch('bench/small.ts', 'ts', 30, 1),
+  'bench/medium.ts': () => benchPatch('bench/medium.ts', 'ts', 800, 2),
+  'bench/large.ts': () => benchPatch('bench/large.ts', 'ts', 2800, 3),
+  'bench/huge.ts': () => benchPatch('bench/huge.ts', 'ts', 21_200, 4),
+  'bench/multi': () => Array.from({ length: 10 }, (_, i) => { const lang = ['ts', 'rs', 'css', 'json', 'md'][i % 5]; return benchPatch(`bench/multi/file-${i}.${lang}`, lang, 200, 10 + i); }).join(''),
+};
+// Production builds have no /src/preview.ts to import, so the benchmark reads patches here.
+if (benchDiffs) (window as any).__benchDiffs = BENCH_DIFFS;
+// `&benchFiles=bench/large.ts,bench/small.ts` lists only those bench files in git status.
+const benchListed = new URLSearchParams(typeof location !== 'undefined' ? location.search : '').get('benchFiles')?.split(',') ?? Object.keys(BENCH_DIFFS);
+let git: GitStatus = { branch: 'feat/instant-search', isRepo: true, files: [{ path: 'src/components/search.ts', index: ' ', working: 'M' }, { path: 'src/lib/search-index.ts', index: '?', working: '?' }, { path: 'src/components/search.test.ts', index: ' ', working: 'M' }, ...(benchDiffs ? benchListed.filter(path => BENCH_DIFFS[path]).map(path => ({ path, index: ' ', working: 'M' })) : [])] };
 const worktreeGit = new Map<string, GitStatus>();
 const previewBranches = new Set<string>(), pushedBranches = new Set<string>(['feat/instant-search']), mergedBranches = new Set<string>();
 function checkoutGit(sessionId: unknown): GitStatus {
@@ -385,6 +491,14 @@ const previewVm = createPreviewVm();
 const previewDesign = createPreviewDesign();
 const previewSkills = createPreviewSkills();
 const previewCloud = createPreviewCloud();
+/** Each preview cloud preparation step takes this long; tests can watch the stages go by. */
+const CLOUD_STEP_MS = 400;
+function cloudStage(s: Session, stage: NonNullable<Session['cloud']>['stage'], detail: string | null = null): void {
+  if (!s.cloud) return;
+  s.cloud = { ...s.cloud, stage, detail };
+  emit('cloud-agent://progress', { sessionId: s.id, stage, detail });
+  emit('sessions-changed', {});
+}
 const previewSimulator = (() => {
   const devices: { udid: string; name: string; runtime: string; state: string; family: string; deviceType: string; platform?: string; duo?: boolean }[] = [
     { udid: '3720D4A0-B8C5-4DAC-9425-6A4685BC533E', name: 'iPhone 17 Pro', runtime: 'iOS 26.2', state: 'Booted', family: 'phone', deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro' },
@@ -488,12 +602,17 @@ let browserHistory: string[] = [], browserIndex = -1;
 let browserState: BrowserStatus = { url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false };
 function browserChanged(): void { browserState.canGoBack = browserIndex > 0; browserState.canGoForward = browserIndex < browserHistory.length - 1; emit('browser-state', { ...browserState }); }
 function emit(name: string, event: unknown) { listeners.get(name)?.forEach(fn => fn(event)); }
+previewProgress.onChange = sessionId => emit('progress-changed', { sessionId });
+// Tests: deliver a native event, e.g. a background refresh of the open channel.
+(window as any).__previewEmit = emit;
 export function listen(name: string, callback: (event: any) => void): () => void { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback); return () => listeners.get(name)?.delete(callback); }
 /** What the native picker "returns" in the browser preview, so attach flows can be exercised. */
 export function samplePick(kind: 'files' | 'folder'): string[] {
   return kind === 'folder' ? ['/Users/you/Projects/orbit-design'] : ['/Users/you/Pictures/dashboard-mockup.png', '/Users/you/Documents/Product brief.pdf'];
 }
 function agent(event: AgentEvent) { emit('agent-event', event); }
+/** tests: a live `subagent` event for any task (`__previewSubagent('session-1', { id, name, status, … })`). */
+(window as any).__previewSubagent = (sessionId: string, data: Record<string, unknown>) => agent({ sessionId, kind: 'subagent', text: '', data: { parentId: null, prompt: '', response: '', tools: [], startedAt: now, updatedAt: Date.now(), ...data } } as unknown as AgentEvent);
 function session(value: unknown): Session { const result = sessions.find(s => s.id === value); if (!result) throw new Error('Task not found'); return result; }
 function assertIdle(s: Session): void {
   if (s.status === 'running' || s.status === 'waiting' || timers.has(s.id)) throw new Error('Stop the agent before changing this task.');
@@ -510,12 +629,6 @@ function taskSummary(s: Session): Session {
     taskDescription += character;
   }
   return { ...s, taskDescription };
-}
-function archiveCompletedTasks(): void {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const s of sessions) {
-    if (!s.archived && s.taskStage === 'completed' && s.completedAt != null && s.completedAt <= cutoff && s.status !== 'running' && s.status !== 'waiting') s.archived = true;
-  }
 }
 for (const [sessionId, history] of Object.entries(messages)) {
   if (history.some(message => message.role === 'user') && history.some(message => message.role === 'assistant')) {
@@ -731,6 +844,14 @@ function resolveSlash(provider: ProviderId, text: string): { action: string | nu
   return { action: command.action ?? null, arguments: match[2] ?? '' };
 }
 
+// `?teams` seeds two named agent teams for the model picker.
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('teams') && !localStorage.getItem('pandacode.preview.architect-library')) {
+  const team = (id: string, name: string, models: [ProviderId, string, string, string][]) => ({ id, name, updatedAt: now, setup: namedTeamSetup(name, { provider: models[0][0], harness: models[0][1], model: models[0][2], name: models[0][3] }, models.map(([provider, harness, model, label]) => ({ provider, harness, model, name: label }))) });
+  localStorage.setItem('pandacode.preview.architect-library', JSON.stringify({ enabled: false, lastSetup: null, activeProfileId: null, profiles: [
+    team('preview-ship-crew', 'Ship crew', [['claude', 'Claude Code', 'opus', 'Claude Opus 5'], ['codex', 'Codex', 'gpt-6-astra', 'GPT-6-Astra'], ['kimi', 'Kimi Code', 'kimi-code/k3', 'K3']]),
+    team('preview-budget-trio', 'Budget trio', [['deepseek', 'DeepSeek', 'deepseek-v4-pro', 'DeepSeek V4 Pro'], ['glm', 'GLM Coding Plan', 'default', 'GLM-5.3'], ['mimo', 'MiMo Token Plan', 'default', 'MiMo-V2.6-Pro']]),
+  ] }));
+}
 const architect = createPreviewArchitect({
   parent: session,
   assertIdle,
@@ -848,9 +969,39 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] });
     emit('sessions-changed', {});
-    return { sessionId: s.id } as T;
+    return (w.__remoteStartBusy ? { sessionId: s.id, note: w.__remoteStartBusy } : { sessionId: s.id }) as T;
   }
-  if (command.startsWith('remote_')) return invokeRemote<T>(command, args, emit);
+  if (command.startsWith('remote_') && command !== 'remote_team' && command !== 'remote_worker_messages') return invokeRemote<T>(command, args, emit);
+  if (command === 'cloud_agent_targets') return previewCloud.agentTargets() as T;
+  if (command === 'cloud_agent_set_claude_token') { if (!String(args.token ?? '').trim()) throw new Error('Paste the token from claude setup-token.'); return null as T; }
+  if (command === 'cloud_agent_start') {
+    // The agent runs on a cloud machine; here the machine is prepared on a timer, then the prompt is sent.
+    const target = previewCloud.agentTargets().find(item => item.provider === args.provider && item.ready);
+    if (!target) throw new Error('Connect this provider in Settings → Cloud first.');
+    ((window as any).__cloudStarts ??= []).push(args);
+    const s = args.sessionId ? session(args.sessionId) : await invoke<Session>('create_session', { projectId: args.projectId, provider: args.harness, model: args.model, mode: args.mode });
+    Object.assign(s, { provider: args.harness, model: args.model, mode: args.mode, reasoningEffort: args.effort, draft: false, worktreeBranch: `pandacode/cloud-${s.id.slice(0, 8)}`, cloud: { provider: target.provider, label: target.label, machine: `${target.provider}:pc-${s.id.slice(0, 8)}`, stage: 'creating', detail: null } });
+    const stages = ['installing', 'credentials', 'uploading', 'running'] as const;
+    stages.forEach((stage, index) => setTimeout(async () => {
+      cloudStage(s, stage);
+      if (stage === 'running') { await invoke('send_message', { sessionId: s.id, text: args.prompt }); cloudStage(s, 'ready'); }
+    }, (index + 1) * CLOUD_STEP_MS));
+    emit('sessions-changed', {});
+    return structuredClone(s) as T;
+  }
+  if (command === 'cloud_agent_action') {
+    const s = session(args.sessionId);
+    if (!s.cloud) throw new Error('This task does not run on a cloud machine.');
+    ((window as any).__cloudActions ??= []).push(args.action);
+    // `window.__cloudActionFail` lets tests make one action fail like the provider would.
+    if ((window as any).__cloudActionFail === args.action) throw new Error(`${s.cloud.label} could not ${args.action} the machine (HTTP 503).`);
+    if (args.action === 'sync') { cloudStage(s, 'syncing'); setTimeout(() => cloudStage(s, 'ready'), CLOUD_STEP_MS); }
+    else if (args.action === 'retry') cloudStage(s, 'ready');
+    else if (args.action === 'stop') cloudStage(s, 'stopped');
+    else if (args.action === 'delete') { s.cloud = { ...s.cloud, machine: null }; cloudStage(s, 'stopped', 'Machine deleted'); }
+    else if (args.action !== 'open') throw new Error('Unknown cloud action.');
+    return null as T;
+  }
   if (command === 'capabilities_inventory' || command === 'cache_alignment') return previewCapabilities(command) as T;
   if (command.startsWith('recipes_')) { const r = recipesCommand(command, args); if (r.handled) return r.result as T; }
   let result: unknown;
@@ -863,6 +1014,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'jev_configuration': result = { enabled: false, decisionsEnabled: false, decisionProvider: 'typesafe', decisionModel: '', openrouterKeySaved: false, pythonPath: '', chromePath: '', textModel: 'inception/mercury-2.5', textBaseUrl: 'https://openrouter.ai/api/v1', typesafeKeySaved: false, textKeySaved: false }; break;
     case 'jev_decision_models': result = args?.provider === 'openrouter' ? [{ id: 'openai/gpt-4o-mini', name: 'OpenAI: GPT-4o mini' }, { id: 'anthropic/claude-haiku-4.5', name: 'Anthropic: Claude Haiku 4.5' }] : [{ id: 'jev-1.13.0', name: 'jev-1.13.0' }]; break;
     case 'jev_doctor': result = { ready: false, pythonVersion: '', jevVersion: '', chromePath: '', issues: ['Jev runs in the desktop app. This browser preview does not launch browsers or contact model APIs.'] }; break;
+    case 'jev_decision_models': result = args?.provider === 'openrouter' ? [{ id: 'openai/gpt-4o-mini', name: 'OpenAI: GPT-4o mini' }, { id: 'anthropic/claude-haiku-4.5', name: 'Anthropic: Claude Haiku 4.5' }] : [{ id: 'jev-1.13.0', name: 'jev-1.13.0' }]; break;
     case 'jev_list_runs': case 'jev_assist_list': result = []; break;
     case 'jev_watch_run': break; // Preview never starts Chrome or contacts model providers.
     case 'jev_assist_prepare': {
@@ -899,17 +1051,37 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = { provider, ...(connection ? { connectionId: connection.id } : {}), status: supported ? 'ready' : 'unsupported', checkedAt: Date.now(), stale: false,
         plan: provider === 'codex' ? 'Pro' : provider === 'opencode' ? 'Go' : null,
         windows: supported ? [
-          { label: provider === 'opencode' ? 'Go rolling window' : '5-hour window', usedPercent: provider === 'codex' ? 38 : 22, resetsAt: new Date(Date.now() + 7200000).toISOString() },
+          { label: provider === 'opencode' ? 'Go rolling window' : '5-hour window', usedPercent: args.connection ? 91 : provider === 'codex' ? 38 : 22, resetsAt: new Date(Date.now() + 7200000).toISOString() },
           { label: provider === 'opencode' ? 'Go weekly' : 'Weekly', usedPercent: 64, resetsAt: new Date(Date.now() + 3 * 86400000).toISOString() },
         ] : [], source: 'Sample limits for the browser preview. No provider request was made.',
         message: supported ? null : 'This harness does not expose account limits. Check its account dashboard.' };
       break;
     }
-    case 'provider_configuration': result = { executablePaths: {}, claudeConnectionMode: previewClaudeMode, glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false }; break;
+    case 'provider_configuration': result = previewProviderConfiguration(); break;
+    case 'provider_set_environment_variable': case 'provider_set_global_environment_variable': {
+      const name = String(args.name ?? ''), value = String(args.value ?? '');
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.length > 128) throw new Error('Environment variable names use letters, digits and underscores, and do not start with a digit.');
+      if (value.includes('\0') || value.length > 4096) throw new Error(`The value of ${name} is too long or contains NUL.`);
+      const vars = args.provider ? previewEnvState.providers[String(args.provider)] ??= [] : previewEnvState.global;
+      const existing = vars.find(entry => entry[0] === name);
+      if (existing) existing[1] = value; else vars.push([name, value]);
+      return invoke<T>('provider_configuration', {});
+    }
+    case 'provider_remove_environment_variable': case 'provider_remove_global_environment_variable': {
+      const name = String(args.name ?? '');
+      const vars = args.provider ? previewEnvState.providers[String(args.provider)] : previewEnvState.global;
+      const index = vars?.findIndex(entry => entry[0] === name) ?? -1;
+      if (index >= 0) vars!.splice(index, 1);
+      return invoke<T>('provider_configuration', {});
+    }
+    case 'provider_set_use_global_environment':
+      if (args.useGlobal) delete previewEnvState.useGlobal[String(args.provider)];
+      else previewEnvState.useGlobal[String(args.provider)] = false;
+      return invoke<T>('provider_configuration', {});
     case 'provider_set_mimo_endpoint':
       if (!previewMimoEndpoints.some(entry => entry.id === args.endpoint)) throw new Error('Choose one of the MiMo endpoints listed in Settings.');
       previewMimoEndpoint = args.endpoint;
-      result = { executablePaths: {}, claudeConnectionMode: previewClaudeMode, glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false }; break;
+      result = previewProviderConfiguration(); break;
     case 'provider_save_glm_key': case 'provider_remove_glm_key': case 'provider_save_deepseek_key': case 'provider_remove_deepseek_key': case 'provider_save_commandcode_key': case 'provider_remove_commandcode_key': case 'provider_save_mimo_key': case 'provider_remove_mimo_key': case 'provider_set_executable': throw new Error('Provider connections can only be changed in the desktop app.');
     case 'turn_change_summary': {
       session(args.sessionId);
@@ -918,6 +1090,17 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = structuredClone(summary); break;
     }
     case 'turn_change_diff': result = turnChanges.diff(args.sessionId, args.changeId, args.path); break;
+    case 'model_routing_status': result = { ...previewRouting }; break;
+    case 'model_routing_configure': previewRouting = { ...previewRouting, ...(args.enabled != null ? { enabled: Boolean(args.enabled) } : {}), ...(args.mode ? { mode: args.mode } : {}), ...(args.minP != null ? { minP: Math.min(0.9, Math.max(0.3, Number(args.minP))) } : {}) }; saveRouting(); result = { ...previewRouting }; break;
+    case 'model_routing_prepare': previewRouting = { ...previewRouting, profiler: 'ready', error: null }; saveRouting(); result = { ...previewRouting }; break;
+    case 'model_routing_exclusions': result = structuredClone(previewExclusions); break;
+    case 'model_routing_set_exclusions': previewExclusions = { providers: [...(args.providers as string[] ?? [])], models: [...(args.models as any[] ?? [])] }; result = structuredClone(previewExclusions); break;
+    case 'model_routing_tier_models': result = previewTierModels(args.pool as any[] ?? []); break;
+    case 'model_routing_tiers': result = { ...previewTiers }; break;
+    case 'model_routing_set_tiers': previewTiers = Object.fromEntries(Object.entries(args.tiers as Record<string, string> ?? {}).filter(([, tier]) => /^[SABCD]$/.test(tier))); result = { ...previewTiers }; break;
+    case 'model_health_list': result = previewHealth.map(entry => ({ ...entry })); break;
+    case 'model_health_clear': previewHealth = previewHealth.filter(entry => (args.provider != null && entry.provider !== args.provider) || (args.model != null && entry.model !== args.model)); result = previewHealth.map(entry => ({ ...entry })); break;
+    case 'model_routing_route': result = previewRoute(String(args.text), args.pool as any[]); break;
     case 'architect_get': result = architect.get(args.sessionId); break;
     case 'review_readiness': result = { ready: false, status: 'containment_unproven', provenProviders: [], note: 'No verified filesystem, network and credential confinement for the CLI process tree.' }; break;
     case 'architect_configure': result = architect.configure(args.sessionId, args.config, args.architect, args.profileId); break;
@@ -1009,7 +1192,14 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'archive_codex_task': { const task = codexTask(args.sessionId); assertIdle(task); task.archived = true; task.updatedAt = Date.now(); break; }
     case 'export_task': { const task = session(args.sessionId); result = `# ${task.title}\n\n` + (messages[task.id] ?? []).map(message => `## ${message.role}\n\n${message.content}\n\n`).join(''); break; }
-    case 'list_subagents': return [] as T;
+    case 'list_subagents': return [...(mirrorSubagents.get(String(args.sessionId))?.values() ?? [])] as T;
+    case 'remote_team': return structuredClone(mirrorTeams.get(String(args.sessionId)) ?? null) as T;
+    case 'remote_worker_messages': {
+      // Pages of 40 back from the tail, as `worker_pages` in remote/mirror.rs joins the host's.
+      const all = mirrorWorkerMessages.get(String(args.workerId)) ?? [], before = all.filter(message => !args.beforeId || message.id < args.beforeId);
+      ((window as any).__remoteWorkerPages ??= []).push(args.beforeId ?? null);
+      return { messages: structuredClone(before.slice(-40)), hasOlder: before.length > 40 } as T;
+    }
     case 'list_local_servers': result = [{ port: 3000, process: 'node', url: 'http://localhost:3000' }, { port: 5173, process: 'vite', url: 'http://localhost:5173' }]; break;
     case 'browser_open_external': {
       const url = new URL(args.url);
@@ -1028,13 +1218,15 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'browser_bounds': break;
     case 'browser_close': browserHistory = []; browserIndex = -1; browserState = { url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false }; browserChanged(); break;
     case 'browser_capture': result = { id: crypto.randomUUID(), name: 'Sample screenshot', path: '/sample/browser-capture.png', mimeType: 'image/png', url: browserState.url, title: browserState.title, width: 1280, height: 800, dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' }; break;
-    case 'list_projects': result = projects; break;
-    case 'list_sessions': archiveCompletedTasks(); sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
+    // Like the native rowid: projects are pushed in the order they were added.
+    case 'list_projects': result = projects.map((project, index) => ({ ...project, addedOrder: index + 1 })); break;
+    case 'list_sessions': sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
     case 'set_resume_at_reset': {
       const s = session(args.sessionId);
       if (args.enabled && !(s.limitedAt && s.limitedUntil)) throw new Error('This task has no usage limit with a known reset time.');
       s.resumeAtReset = Boolean(args.enabled) && Boolean(s.limitedAt); result = s; break;
     }
+    case 'tray_seen': result = null; break;
     case 'clear_usage_limit': { const s = session(args.sessionId); s.limitedAt = null; s.limitedUntil = null; s.resumeAtReset = false; result = null; break; }
     case 'queue_list': result = previewQueue().filter(entry => !args.sessionId || entry.sessionId === args.sessionId); break;
     case 'queue_add': {
@@ -1085,6 +1277,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         if (text.includes('[steer-fails]')) return report('failed');
         (messages[s.id] ??= []).push({ id: ++id, sessionId: s.id, role: 'user', content: text, createdAt: Date.now() });
         report('delivered');
+        // A sample bot shown as working has no preview run to answer it, so it answers here.
+        if (previewBotBusy(s.id)) agent({ sessionId: s.id, kind: 'text', text: 'Got it, I will fold that in. (browser preview)' });
       }, mode === 'live' ? 900 : 1500);
       result = { steered: true, id: steerId, mode }; break;
     }
@@ -1155,6 +1349,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'open_external_url': { const url = new URL(args.url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Use an HTTP or HTTPS URL.'); window.open(url.href, '_blank', 'noopener,noreferrer'); break; }
     case 'open_support': window.open('https://github.com/aicodeking/pandacode/issues', '_blank', 'noopener,noreferrer'); break;
     case 'local_sign_app': break;
+    case 'app_update_install_supported': result = true; break;
     case 'support_details': result = { version: 'Preview', platform: 'Browser preview', architecture: 'Not reported' }; break;
     case 'browser_inspect': result = args.action === 'read' ? { url: browserState.url, title: browserState.title, text: 'Browser preview sample page', elements: [] } : { dispatched: true }; break;
     case 'list_provider_models': result = args.deviceId ? remoteCatalog(args.provider as ProviderId) : args.provider === 'opencode' ? previewOpenCodeChoices() : catalogs[args.provider as ProviderId] ?? []; break;
@@ -1211,7 +1406,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const s = session(args.sessionId); assertIdle(s);
       if (s.archived) throw new Error('Restore this task before changing its stage.');
       const stage = args.stage as TaskStage;
-      if (!['pending', 'review', 'completed'].includes(stage)) throw new Error('Start the task to move it to work in progress.');
+      // Like the native store: work in progress only by undoing the completion of a stopped run.
+      const undoing = s.taskStage === 'completed' && ['error', 'interrupted'].includes(s.status);
+      if (!['pending', 'review', 'completed'].includes(stage) && !(stage === 'in_progress' && undoing)) throw new Error('Start the task to move it to work in progress.');
       s.completedAt = stage === 'completed' ? s.completedAt ?? Date.now() : null;
       s.taskStage = stage; s.updatedAt = Date.now(); result = s; break;
     }
@@ -1336,7 +1533,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'respond_approval': case 'respond_user_input': break;
     case 'git_status': result = checkoutGit(args.sessionId); break;
-    case 'git_diff': result = `diff --git a/${args.path ?? 'src/components/search.ts'} b/${args.path ?? 'src/components/search.ts'}\nindex 64d221a..0e6c9ef 100644\n--- a/${args.path ?? 'src/components/search.ts'}\n+++ b/${args.path ?? 'src/components/search.ts'}\n@@ -12,5 +12,6 @@ export function mountSearch(items) {\n+  const index = createSearchIndex(items);\n+\n   input.addEventListener("input", () => {\n-    const index = createSearchIndex(items);\n-    renderAll(index.search(input.value));\n+    renderResults(index.search(input.value));\n   });\n }`; break;
+    case 'git_diff': if (benchDiffs && BENCH_DIFFS[args.path]) { result = BENCH_DIFFS[args.path](); break; } result = `diff --git a/${args.path ?? 'src/components/search.ts'} b/${args.path ?? 'src/components/search.ts'}\nindex 64d221a..0e6c9ef 100644\n--- a/${args.path ?? 'src/components/search.ts'}\n+++ b/${args.path ?? 'src/components/search.ts'}\n@@ -12,5 +12,6 @@ export function mountSearch(items) {\n+  const index = createSearchIndex(items);\n+\n   input.addEventListener("input", () => {\n-    const index = createSearchIndex(items);\n-    renderAll(index.search(input.value));\n+    renderResults(index.search(input.value));\n   });\n }`; break;
     case 'git_stage': checkoutGit(args.sessionId).files.forEach(file => { if (args.paths.includes(file.path)) { file.index = args.staged ? 'M' : ' '; file.working = args.staged ? ' ' : 'M'; } }); break;
     case 'git_commit': {
       const checkout = checkoutGit(args.sessionId);
@@ -1475,6 +1672,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       s.pullRequest = { kind: 'pull', number, url: `${repo.url}/pull/${number}`, title: pull.title, state: 'open', checkedAt: Date.now() };
       result = s; break;
     }
+    case 'task_token_usage': result = { input: 91234, cacheRead: 1000000, cacheWrite: 45000, output: 152340, firstUsed: Date.now() - 86400000, lastUsed: Date.now() - 300000 }; break;
     case 'token_saver_tools': result = { rtk: previewRtk, rtkVersion: previewRtk ? '1.0.1' : '', rtkInstall: 'brew install rtk' }; break;
     case 'token_saver_install': {
       if (args.tool !== 'rtk') throw new Error('Unknown tool.');
@@ -1497,7 +1695,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'cloud_connections': result = previewCloud.connections(); break;
     case 'cloud_connect': result = previewCloud.connect(args.provider, args.key, args.options ?? {}); emit('vm-changed', {}); break;
     case 'cloud_disconnect': result = previewCloud.disconnect(args.provider); emit('vm-changed', {}); break;
+    case 'cloud_set_inherit_environment': result = previewCloud.setInheritEnvironment(args.provider, args.inherit); break;
     case 'cloud_setup_sandboxes': result = previewCloud.setupSandboxes(); emit('vm-changed', {}); break;
+    case 'cloud_instabox_images': result = previewCloud.instaboxImages(); break;
+    case 'cloud_instabox_set_image': result = previewCloud.setInstaboxImage(args.image); break;
     case 'cloud_machines': result = previewCloud.list(); break;
     case 'cloud_create': result = previewCloud.create(args.provider, args.name); break;
     case 'cloud_power': result = previewCloud.power(args.id, args.action); break;
@@ -1514,6 +1715,10 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'vm_frame': result = await previewVm.frame(args.name); break;
     case 'vm_input': result = previewVm.input(args.name, args.input); break;
     case 'vm_desktop': result = previewVm.desktop(args.name); break;
+    case 'progress_list': result = previewProgress.list(args.sessionId); break;
+    case 'progress_media': result = previewProgress.media(args.sessionId, args.id); break;
+    case 'progress_thumb': result = previewProgress.thumb(args.sessionId, args.id); break;
+    case 'progress_clear': result = previewProgress.clear(args.sessionId); break;
     case 'design_list': result = previewDesign.list(); break;
     case 'design_read': result = previewDesign.read(args.name); break;
     case 'design_comments': result = previewDesign.comments(); break;
@@ -1584,6 +1789,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = { id: crypto.randomUUID(), name, width: 1280, height: 800, thumbnail: String(args.dataUrl ?? '').startsWith('data:image/png') ? args.dataUrl : 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' };
       break;
     }
+    // Any registry ID shows the yellow swatch; native reads browser-captures/<id>.png.
+    case 'prompt_image': result = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(args.id)) ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' : null; break;
+    case 'reveal_path': if (!String(args.path ?? '').startsWith('/')) throw new Error('This attachment is no longer on this computer.'); break;
     case 'read_document': {
       const path = String(args.path ?? ''), name = path.split('/').pop() || 'Document';
       if (!path.startsWith('/')) throw new Error('Choose the document with the picker or drop it onto the message.');

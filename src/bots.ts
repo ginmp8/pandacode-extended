@@ -16,6 +16,10 @@ export interface Bot {
   provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; nextHeartbeatAt: number | null;
   mcp: string[];
   paused: boolean; memoryVersion: number; notifyChannelId: string | null; notifyThread: string | null; createdAt: number; updatedAt: number;
+  /** Profile settings added later; older data (and preview mocks) may leave them out. */
+  color?: string; reasoningEffort?: string; backupModels?: BackupModel[]; fallbackMode?: 'ask' | 'auto'; notify?: boolean; whileWorking?: 'queue' | 'steer'; showPlan?: boolean;
+  /** Library skill ids and configured MCP server names, by reference. */
+  skills: string[]; mcp: string[];
   /** The bot's conversation in this app, once it exists. */
   desktopSession?: string | null;
   /** The latest thing said in that conversation, flattened to one line. */
@@ -31,6 +35,39 @@ export interface Thread { channelId: string; externalId: string; sessionId: stri
 export interface Rule { id: string; pattern: string; decision: 'allow' | 'ask' | 'deny'; createdAt: number; }
 export interface Activity { id: number; kind: string; summary: string; detail: Record<string, unknown>; at: number; }
 export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; independentTasks?: { id: string; title: string; updatedAt: number }[]; rules: Rule[]; serverPort: number; }
+
+/** A message held by `ask` failover (`bot-failover` event, `bot_failover_pending`); answer with `bot_failover_decide`. */
+export interface FailoverAsk { botId: string; sessionId: string; cause: 'limit' | 'provider-error'; provider: ProviderId; model: string; target: BackupModel; resetsAt: number | null; }
+/** Display names for harnesses and models; ids show when left out. */
+export interface ModelNames { harness?(provider: ProviderId): string; model?(provider: ProviderId, model: string): string; }
+
+/** The hold card: Send to {model} / Wait for the reset (Dismiss when no reset time is known), with "Next time, switch without asking" (`data-failover-always`). */
+export function failoverCardHtml(ask: FailoverAsk, names: ModelNames = {}): string {
+  const harness = names.harness?.(ask.provider) ?? ask.provider;
+  const target = names.model?.(ask.target.provider, ask.target.model) ?? ask.target.model;
+  const limit = ask.cause === 'limit';
+  // Only a known reset time resumes the message; otherwise waiting would never end.
+  const waits = limit && Boolean(ask.resetsAt);
+  const reset = ask.resetsAt ? new Date(ask.resetsAt).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+  const title = limit ? `${harness} usage limit reached` : `${harness} provider error`;
+  const body = waits ? `Your message has not started. Send it to another model now, or wait until ${reset}.` : 'Your message has not started. Send it to another model now, or dismiss this hold and retry manually.';
+  return `<section class="bot-failover" role="group" aria-label="${escape(title)}" data-failover-session="${escape(ask.sessionId)}">
+    <header><span class="bot-failover-icon">${icon('alert')}</span><strong>${escape(title)}</strong><small>Message on hold</small></header>
+    <p>${escape(body)}</p>
+    <div class="bot-failover-actions"><button type="button" class="primary-button" data-failover="send">Send to ${escape(target)}</button>
+      <button type="button" class="secondary-button" data-failover="wait">${waits ? 'Wait for the reset' : 'Dismiss'}</button></div>
+    <label class="bot-failover-always"><input type="checkbox" data-failover-always> Next time, switch without asking</label></section>`;
+}
+
+/** A `model-switch` activity (`bot_model_switches`, `bot-model-switch` event) as a centered compact system row. */
+export function modelSwitchMarkerHtml(activity: Pick<Activity, 'summary' | 'detail' | 'at'>, names: ModelNames = {}): string {
+  const detail = activity.detail as { cause?: string; back?: boolean; provider?: ProviderId; model?: string };
+  const model = detail.provider && detail.model ? names.model?.(detail.provider, detail.model) ?? detail.model : '';
+  const text = !model ? activity.summary
+    : detail.cause === 'limit' ? (detail.back ? `Usage limit ended. Switched back to ${model}.` : `Usage limit reached. Switched to ${model}.`)
+    : detail.back ? `Switched back to ${model} after the provider error.` : `Provider error. Switched to ${model}.`;
+  return `<div class="model-switch-marker" role="note"><span>${escape(text)}</span><time>${new Date(activity.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div>`;
+}
 
 export interface BotsOptions {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -73,6 +110,8 @@ const heading = (title: string, more = '') => `<h3 class="bs-heading">${escape(t
 const MODES = [{ id: 'ask', label: 'Ask before acting' }, { id: 'auto', label: 'Auto-approve edits' }, { id: 'review', label: 'Approve for me' }, { id: 'plan', label: 'Plan only' }, { id: 'full', label: 'Full access' }];
 const providerModes = (provider: ProviderId) => MODES.filter(mode => mode.id === 'review' ? ['claude', 'glm', 'mimo'].includes(provider) : !(mode.id === 'auto' && ['github-copilot', 'devin'].includes(provider)));
 const CHECK_INS = [{ minutes: 0, label: 'Off' }, { minutes: 30, label: 'Every 30 minutes' }, { minutes: 60, label: 'Every hour' }, { minutes: 180, label: 'Every 3 hours' }, { minutes: 360, label: 'Every 6 hours' }, { minutes: 1440, label: 'Once a day' }];
+const PURPOSE_MAX = 2000;
+const SAVE_TEXT = { '': '', saving: 'Saving…', saved: 'Saved', error: 'Not saved' } as const;
 
 /** Starting points, in the spirit of the named bots this feature follows. */
 export const TEMPLATES: { id: string; avatar: string; name: string; role: string; instructions: string; goals: string; heartbeatMinutes: number }[] = [
@@ -83,6 +122,16 @@ export const TEMPLATES: { id: string; avatar: string; name: string; role: string
   { id: 'watch', avatar: 'panda:5', name: 'Watcher', role: 'Keeps an eye on things and tells me when they change', instructions: 'Check the sources I give you. Only message me when something meaningfully changed, with the before and after and a link.', goals: '', heartbeatMinutes: 60 },
   { id: 'blank', avatar: 'panda:0', name: '', role: '', instructions: '', goals: '', heartbeatMinutes: 0 },
 ];
+interface Draft { name: string; purpose: string; role: string; avatar: string; color: string; heartbeatMinutes: number; suggestion: string; provider: ProviderId | ''; model: string; reasoningEffort: string; }
+const newDraft = (): Draft => ({ name: '', purpose: '', role: '', avatar: 'panda:0', color: '', heartbeatMinutes: 0, suggestion: '', provider: '', model: '', reasoningEffort: '' });
+/** A soul.md is copied into the bot once; the file is never read again. */
+const MAX_SOUL = 64 * 1024;
+/** Reads a soul.md as UTF-8 text, or explains why it cannot be used. */
+export async function readSoulFile(file: File): Promise<string> {
+  if (file.size > MAX_SOUL) throw new Error(`${file.name} is larger than 64 KB. Shorten it and try again.`);
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()).replace(/^\uFEFF/, ''); }
+  catch { throw new Error(`${file.name} is not UTF-8 text. Save it as UTF-8 Markdown and try again.`); }
+}
 
 export function age(at: number | null, now = Date.now()): string {
   if (!at) return '';
@@ -101,7 +150,11 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   let selected = options.initialBot ?? '';
   let section: Nav = navFor(options.initialTab ?? 'profile');
   let editing: 'new' | null = options.startNew ? 'new' : null;
-  let template = TEMPLATES[0];
+  let draft = newDraft();
+  let nameError = '', creating = false, avatarOpen = false, advancedOpen = false;
+  let saveTimer = 0, saving = false;
+  let pendingSave: { botId: string; input: BotInput } | null = null;
+  let saveState: keyof typeof SAVE_TEXT = '';
   let confirming: { title: string; text: string; button: string; action: () => Promise<void> } | null = null;
   let loading = true, busy = false, disposed = false, request = 0, moreOpen = false;
   let formModelGeneration = 0, soulImportGeneration = 0;
@@ -112,6 +165,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
   let error = '';
   const single = options.layout === 'settings';
   const installed = () => options.providers.filter(provider => provider.installed);
+  invalidateCapabilities();
   host.classList.add('bots');
   host.classList.toggle('bots-single', single);
   host.innerHTML = single
@@ -174,6 +228,8 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         && !catalog.some(model => model.id === preferred) ? 'default' : preferred;
       select.innerHTML = modelOptions(providerId, catalog, desired);
       select.value = botModelChoices(providerId, catalog, desired).some(model => model.id === desired) ? desired : 'default';
+      const form = select.closest('form');
+      if (form) syncEfforts(form);
     };
     apply(modelCatalogs.get(providerId) ?? provider.models);
     if (modelCatalogs.has(providerId)) return;
@@ -280,12 +336,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const confirm = confirming ? `<div class="bots-confirm" role="alertdialog" aria-label="${escape(confirming.title)}"><b>${escape(confirming.title)}</b><p>${escape(confirming.text)}</p><div class="dialog-footer"><button type="button" class="secondary-button" data-bots-action="confirm-cancel">Cancel</button><button type="button" class="primary-button danger" data-bots-action="confirm-run">${escape(confirming.button)}</button></div></div>` : '';
     const alert = error ? `<p class="bots-error" role="alert">${escape(error)}</p>` : '';
     if (loading) { pane.innerHTML = '<p class="dialog-loading" role="status">Loading bots…</p>'; return; }
-    if (editing === 'new' || !detail) {
-      pane.innerHTML = alert + (single && !detail ? '<p class="bots-empty-note">This bot no longer exists.</p>' : renderForm(null));
-      hydrateFormModels();
-      return;
-    }
-    // Keep a half-typed setting (a new memory, a schedule prompt) through background refreshes.
+    // Keep a half-typed setting (a new memory, a schedule prompt) and its caret through background refreshes.
     const typing = pane.contains(document.activeElement) ? document.activeElement as HTMLInputElement | HTMLTextAreaElement : null;
     const kept = typing && 'value' in typing && typing.type !== 'checkbox' ? { name: typing.name || typing.getAttribute('aria-label') || '', value: typing.value } : null;
     const nav = `<div class="bs-nav" role="tablist" aria-orientation="vertical" aria-label="Bot settings">${SECTIONS.map(item => `<button type="button" role="tab" id="bs-tab-${item.id}" data-section="${item.id}" aria-controls="bs-panel" aria-selected="${item.id === section}" tabindex="${item.id === section ? 0 : -1}">${icon(item.icon)}<span>${item.label}</span>${badge(item.id)}</button>`).join('')}</div>`;
@@ -299,8 +350,46 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     if (section === 'skills') disposeCapabilities = mountBotCapabilities(pane.querySelector<HTMLElement>('[data-bot-capabilities]')!, detail.bot, options);
     if (kept?.name) {
       const again = [...pane.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].find(field => (field.name || field.getAttribute('aria-label')) === kept.name);
-      if (again) { again.value = kept.value; again.focus(); }
+      if (again) { again.value = kept.value; again.focus(); if (kept.start !== null && 'setSelectionRange' in again) try { again.setSelectionRange(kept.start, kept.end); } catch { /* Not a text field. */ } }
+    } else if (focusAt >= 0) {
+      const again = pane.querySelectorAll<HTMLElement>(FOCUSABLE)[focusAt];
+      if (again?.tagName === focusTag) again.focus();
     }
+  }
+  /** Edge fades show only where the carousel has more to scroll to. */
+  function railFades(list: HTMLElement): void {
+    list.classList.toggle('fade-start', list.scrollLeft > 1);
+    list.classList.toggle('fade-end', list.scrollLeft < list.scrollWidth - list.clientWidth - 1);
+  }
+
+  /** Reads the create form into the draft; a suggestion stays picked only while its text is unchanged. */
+  function readDraft(form: HTMLFormElement): void {
+    const data = new FormData(form);
+    const text = (name: string) => String(data.get(name) ?? '');
+    const next = { ...draft, name: text('name'), purpose: text('purpose'), avatar: text('avatar') || draft.avatar, color: text('color'), provider: text('provider') as ProviderId, model: text('model'), reasoningEffort: text('reasoningEffort') };
+    const picked = SUGGESTIONS.find(item => item.id === next.suggestion);
+    draft = picked && picked.name === next.name.trim() && picked.purpose === next.purpose.trim() ? next : { ...next, suggestion: '', role: '', heartbeatMinutes: 0 };
+  }
+  function previewDraft(form: HTMLFormElement): void {
+    form.querySelector('.bc-preview')!.innerHTML = botAvatarHtml(draft.avatar, draft.name || 'Bot', 'bc-avatar', draft.color);
+    form.querySelector('.bc-count')!.textContent = `${draft.purpose.length} / ${PURPOSE_MAX}`;
+    for (const card of pane.querySelectorAll('[data-suggestion]')) card.setAttribute('aria-pressed', String((card as HTMLElement).dataset.suggestion === draft.suggestion));
+  }
+  function createBot(form: HTMLFormElement): void {
+    readDraft(form);
+    const name = draft.name.trim(), purpose = draft.purpose.trim();
+    if (!name) { nameError = 'Give the bot a name.'; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); return; }
+    nameError = '';
+    const input: BotInput = { name, role: draft.role, instructions: purpose, goals: '', avatar: draft.avatar, color: draft.color, provider: draft.provider as ProviderId, model: draft.model, mode: 'ask', heartbeatMinutes: draft.heartbeatMinutes, reasoningEffort: draft.reasoningEffort, backupModels: [], fallbackMode: 'ask', notify: true, whileWorking: 'queue', showPlan: false };
+    creating = true; render();
+    void work(async () => {
+      try {
+        const bot = await options.call<Bot>('bot_create', { input });
+        selected = bot.id; editing = null; section = 'profile'; draft = newDraft();
+        await load();
+        options.openChat(bot.id);
+      } finally { creating = false; if (!disposed && pane.querySelector('.bc-form')) render(); }
+    });
   }
 
   const click = (event: MouseEvent) => {
@@ -315,14 +404,35 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       template = TEMPLATES.find(item => item.id === target.dataset.template) ?? TEMPLATES[0];
       render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); return;
     }
-    const action = target.dataset.botsAction;
     const bot = detail?.bot;
+    if (bot && target.dataset.permission) {
+      const mode = target.dataset.permission;
+      if (!permissionChoices(bot.provider, bot.mode).some(item => item.id === mode)) return;
+      if (mode === 'full' && bot.mode !== 'full') {
+        context.confirm(`Give ${bot.name} full access?`, 'It can run any command and change any file this computer allows, without asking first.', 'Allow full access', async () => patchBot({ mode }));
+        return;
+      }
+      patchBot({ mode }); return;
+    }
+    if (bot && target.dataset.backupMove) {
+      const from = Number(target.dataset.backupMove), to = from + Number(target.dataset.step);
+      const list = [...(bot.backupModels ?? [])];
+      [list[from], list[to]] = [list[to], list[from]];
+      patchBot({ backupModels: list }); pane.querySelector<HTMLElement>(`[data-backup-move="${to}"][data-step="${target.dataset.step}"]:not(:disabled)`)?.focus(); return;
+    }
+    if (bot && target.dataset.backupRemove) { patchBot({ backupModels: (bot.backupModels ?? []).filter((_, index) => index !== Number(target.dataset.backupRemove)) }); return; }
+    const action = target.dataset.botsAction;
     if (moreOpen && action !== 'more') moreOpen = false;
     if (action === 'new') { editing = 'new'; template = TEMPLATES[0]; confirming = null; render(); pane.querySelector<HTMLInputElement>('input[name=name]')?.focus(); }
     else if (action === 'import-soul') pane.querySelector<HTMLInputElement>('[data-soul-file]')?.click();
     else if (action === 'remove-soul') { soulImportGeneration++; const soul = pane.querySelector<HTMLTextAreaElement>('[name=soul]'); if (soul) { soul.value = ''; soul.focus(); } }
     else if (action === 'cancel-edit') { editing = null; render(); }
     else if (action === 'more') { moreOpen = !moreOpen; render(); if (moreOpen) pane.querySelector<HTMLElement>('.bp-menu [role=menuitem]')?.focus(); }
+    else if (action === 'avatar') { avatarOpen = !avatarOpen; render(); pane.querySelector<HTMLElement>(avatarOpen ? '.bp-avatar-pop button' : '.bp-avatar-button')?.focus(); }
+    else if (action === 'avatar-upload') pane.querySelector<HTMLInputElement>('.bp-avatar-pop [data-avatar-upload]')?.click();
+    else if (action === 'avatar-reset' && bot) patchBot({ avatar: 'panda:0', color: '' });
+    else if (action === 'soul-import') pane.querySelector<HTMLInputElement>('input[data-soul-file]')?.click();
+    else if (action === 'soul-remove') setSoul('');
     else if (action === 'open-chat' && bot) options.openChat(bot.id);
     else if (action === 'pause' && bot) void work(async () => { await options.call('bot_set_paused', { botId: bot.id, paused: !bot.paused }); options.notify(bot.paused ? `${bot.name} resumed` : `${bot.name} paused`); await load(); });
     else if (action === 'reset' && bot) context.confirm(`Reset ${bot.name}?`, 'This deletes its conversations, memories, schedules and activity. Its instructions, channels and rules stay.', 'Reset', async () => { await options.call('bot_reset', { botId: bot.id }); options.notify(`${bot.name} was reset`); await load(); });
@@ -349,6 +459,34 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       options.openChat(bot.id);
     });
   };
+  /** A new harness brings its own models, permissions and reasoning levels. */
+  function providerChanged(form: HTMLFormElement, providerId: ProviderId): void {
+    const provider = options.providers.find(item => item.id === providerId);
+    const select = form.querySelector<HTMLSelectElement>('select[name=model]');
+    const mode = form.querySelector<HTMLInputElement>('input[name=mode]');
+    if (provider && select) {
+      const preferred = options.defaultModel(provider.id) || 'default';
+      select.dataset.preferredModel = preferred;
+      void loadFormModels(provider.id, select, preferred);
+    }
+    if (provider && mode) {
+      if (!permissionChoices(provider.id, mode.value).some(item => item.id === mode.value)) mode.value = 'ask';
+      const group = form.querySelector<HTMLElement>('[role=radiogroup][aria-label="Rules"]');
+      if (group) group.innerHTML = permissionOptions(provider.id, mode.value);
+    }
+    syncEfforts(form);
+  }
+  /** Edits the form in place (a render would drop unsaved fields); saving stores it. */
+  function setSoul(text: string, problem = ''): void {
+    const field = pane.querySelector<HTMLTextAreaElement>('.bots-form textarea[name=soul]');
+    const alert = pane.querySelector<HTMLElement>('.bots-soul-error');
+    if (!field || !alert) return;
+    if (!problem) field.value = text;
+    alert.textContent = problem; alert.hidden = !problem;
+    pane.querySelector<HTMLElement>('[data-bots-action=soul-remove]')!.hidden = !field.value;
+    field.focus();
+    if (!problem) queueSave();
+  }
   const change = (event: Event) => {
     if (handleAvatarPicker(event)) return;
     const target = event.target as HTMLElement;
@@ -381,17 +519,41 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         const unavailable = !choices.some(item => item.id === current);
         mode.innerHTML = (unavailable ? `<option value="${escape(current)}" selected>${escape(current)} · Unavailable for this harness</option>` : '') + choices.map(item => `<option value="${item.id}" ${item.id === current ? 'selected' : ''}>${item.label}</option>`).join('');
       }
+      if (target.matches('input[name=name],input[name=role],textarea')) return; // Saved by the `input` listener.
+      queueSave();
       return;
     }
     if (section !== 'profile' && section !== 'skills') panelChange(target, section, context);
+  };
+  const typed = (event: Event) => {
+    const target = event.target as HTMLElement;
+    connectInput(target);
+    const form = target.closest<HTMLFormElement>('.bc-form,.bots-profile');
+    if (form?.matches('.bc-form')) {
+      readDraft(form); previewDraft(form);
+      if (nameError && draft.name.trim()) { nameError = ''; form.querySelector('#bc-name-error')?.remove(); form.querySelector('input[name=name]')?.removeAttribute('aria-invalid'); }
+    } else if (form && detail) {
+      // The icon pickers report through their hidden inputs: show the choice at once, then save.
+      // The popover stays as it is (and keeps focus), so only the icon itself is redrawn.
+      if (target.matches('input[name=avatar],input[name=color]')) {
+        patchBot({ [(target as HTMLInputElement).name]: (target as HTMLInputElement).value }, false);
+        const icon = pane.querySelector('.bp-avatar-button .bot-avatar');
+        if (icon && detail) icon.outerHTML = avatar(detail.bot, 'bp-avatar');
+        return;
+      }
+      if (target.matches('input[name=name],input[name=role],textarea')) queueSave(600);
+    }
   };
   host.addEventListener('click', click);
   host.addEventListener('submit', submit);
   host.addEventListener('change', change);
   const typed = (event: Event) => { if (event.target instanceof HTMLTextAreaElement && event.target.name === 'soul') soulImportGeneration++; connectInput(event.target as HTMLElement); };
   host.addEventListener('input', typed);
-  // `toggle` does not bubble, so listen while capturing.
-  const toggled = (event: Event) => { if (event.target instanceof HTMLDetailsElement) guideToggled(event.target); };
+  // `toggle` and `scroll` do not bubble, so listen while capturing.
+  const toggled = (event: Event) => {
+    if (!(event.target instanceof HTMLDetailsElement)) return;
+    if (event.target.matches('.bs-advanced')) advancedOpen = event.target.open; else guideToggled(event.target);
+  };
   host.addEventListener('toggle', toggled, true);
   /** The section list moves like the app's Settings sidebar: arrow keys, Home and End. */
   const navKeys = (event: KeyboardEvent): boolean => {

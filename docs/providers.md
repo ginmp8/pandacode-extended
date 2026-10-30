@@ -3,10 +3,13 @@
 PandaCode launches each installed CLI directly. Claude, Codex, Kimi, OpenCode,
 Antigravity, Grok Build, and Devin CLI own their authentication; sign in using their official
 CLI or extension.
-The optional Z.AI Coding Plan and MiMo Token Plan API keys are stored in the macOS
-Keychain (separate entries) and injected only into their isolated Claude subprocesses. The app discovers executable paths
+The optional Z.AI Coding Plan and MiMo Token Plan API keys are stored as separate
+entries in PandaCode's secrets store (see [secret storage](#secret-storage)) and injected only into their isolated Claude subprocesses. The app discovers executable paths
 from PATH and common per-user installation folders; provider settings report the
 actual path and version. The `default` model delegates model selection to the CLI.
+
+Pi's managed Windows installation is supported without a separate global npm
+installation, including launchers that leave the `node` command unquoted.
 
 Model menus load metadata on demand from the installed CLI. Each choice keeps its
 invocation ID separate from its display name and description, so choosing a named
@@ -33,6 +36,40 @@ is limited to 8 seconds and 1 MiB of output. Provider-supplied `displayName` val
 take precedence; entries without display metadata show the exact wire model name.
 See [Kimi model configuration](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files#models).
 
+## How providers relate to agents
+
+Settings → Agents lists the agent harnesses installed on this computer (Claude
+Code, Codex, OpenCode, Pi and the rest). Settings → Providers holds what those
+harnesses sign in with: Claude's connection mode, executable locations, optional
+API keys (DeepSeek, Command Code), and the key-based plans **GLM Coding Plan** and
+**MiMo Token Plan**. The plans are not separate harnesses: each runs your
+installed Claude Code with its own key and endpoint, and appears as its own group
+in the model selector. They are set up only under Providers.
+
+Nothing on the Providers page is applied to every agent, with one exception:
+the **global environment variables** at the top of the page (below) travel with
+every harness. A key or plan is used only by the harness it belongs to, and only
+for tasks where you pick it in the model selector. Named connections (below) are
+extra setups of one harness that a task opts into. Each harness's own models
+stay in that harness; OpenCode's model list is chosen once, in Settings → Agents
+→ OpenCode models.
+
+### What PandaCode uses itself
+
+PandaCode needs no provider or model of its own:
+
+- **Thread titles** come from the agent already running the task, through the
+  `pandacode_title` tool, or from the first line of your prompt
+  (`session_titles.rs`). No extra model session is started.
+- **Project checks after turns** run the checkout's own `npm test` or
+  `cargo check` (`checks.rs`); no model is called.
+- **Jev** (optional) uses the keys entered in its own settings for its decision
+  and text-model services (`jev.rs`, `jev_decisions/`), not your agents' logins.
+- **Codex**, when installed, is also started as `codex app-server` to list its
+  integrations and skills, read Codex usage, import Codex
+  conversations and run Codex task commands (`integrations.rs`). None of this is
+  needed to use other agents.
+
 ## Named connections
 
 Settings → Providers → Connections adds named setups of one harness, such as
@@ -44,8 +81,8 @@ that read one, a config folder: `CLAUDE_CONFIG_DIR` (Claude Code, GLM, MiMo),
 (OpenCode). Other harnesses take their folder variable under Environment.
 
 Connections live in `connections.json` beside the provider settings
-(`src-tauri/src/connections.rs`). Variables marked Secret are stored in the OS
-secure store (service `app.pandacode.connections`, one account per connection
+(`src-tauri/src/connections.rs`). Variables marked Secret are stored in PandaCode's
+secrets store (service `app.pandacode.connections`, one account per connection
 and variable); the file and the webview only see their names, and an edit that
 leaves a secret empty keeps the saved value. Deleting a connection removes its
 secrets and returns its tasks to the harness's own setup.
@@ -63,9 +100,73 @@ its arguments are appended and its environment, including the config folder
 variable, is set after the harness's own configuration. Secret values are
 removed from any error the run returns. The warm-agent key includes the
 connection id and its revision, so another connection, or a saved change to the
-same one, never adopts an idle process. Model catalogs, usage checks and slash
-command discovery still use the global setup. Tasks running on another
-computer use that computer's setup.
+same one, never adopts an idle process. Agent usage reads each Claude Code and
+Codex connection through its own config folder and environment (see
+[agent-usage.md](agent-usage.md)); model catalogs and slash command discovery
+still use the global setup. Tasks running on another computer use that
+computer's setup.
+
+Changing a task's connection starts a fresh harness session, because a session
+lives in its connection's config folder: `connection_assign` clears the resume
+ID and queues context recovery, so the next message carries the conversation
+forward, as a harness switch does. When a run stops at its plan limit and the
+harness has other connections, the usage-limit banner offers **Continue on
+<connection>** for each. It assigns that connection and sends “Continue where
+you left off.” with a note naming the new connection and the one that reached
+its limit, so the transcript shows the move. PandaCode never switches on its own.
+
+## Environment variables
+
+Some networks and some providers need environment variables on the harness — a
+proxy behind `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` is the common case.
+Settings → Providers has two places for them, both in `provider-settings.json`
+(`provider_settings.rs`):
+
+- **Global environment variables** are added to every harness PandaCode starts.
+- Each provider's card has its own **Environment variables** list, plus a
+  **Use global environment variables** switch (on by default) that leaves the
+  global set out for just that harness.
+
+Variable names use letters, digits and underscores and cannot start with a
+digit (the same rule named connections use), values stay under 4096 characters
+with no NUL, and there are at most 64 variables per provider and in the global
+set. Values are plain settings: they live in the settings file on this computer
+and are never sent back to the interface — the page lists only their names, and
+a saved value is replaced by typing it again. A variable that carries a
+credential belongs to a [named connection](#named-connections), whose Secret
+values go to the secure store.
+
+At launch the layers are applied in order, each winning over the last: the
+environment PandaCode inherited, then the global set (unless the provider opted
+out), then the provider's own variables, then the harness's sign-in and
+endpoint configuration (a GLM or MiMo key always configures its Claude Code
+process, and "Prefer saved Claude login" scrubs inherited credential variables
+at this point), then a named connection's environment, whose variables land
+after the scrub.
+
+The effective set is applied to everything that spawns the harness: tasks
+(`run_inner` in `providers.rs`), warm Claude agents (`providers/warm.rs`, whose
+adoption key carries a fingerprint of the saved variables, so an edit always
+starts the next turn cold), the harness console in the terminal panel
+(`terminal.rs`), model catalogs and slash command discovery, Claude login and
+usage probes, and Codex integration discovery. Tasks running on another
+computer use that computer's environment instead. Saving a variable refreshes
+the affected provider's cached catalogs and usage, so the next query runs with
+the new setting.
+
+On cloud machines nothing is inherited by default. Settings → Agents → Cloud
+sandboxes has a per-provider **Include provider environment variables** switch
+(off), and when it is on, a task on that cloud carries the harness's saved
+variables with it — a proxy the cloud machine can reach, for example, such as a
+corporate proxy reachable from an AWS VPC. A proxy pointing at this computer
+(`127.0.0.1`, `localhost`) refuses to start the task: the machine cannot reach
+it, and the harness would lose all its API traffic. The harness's own
+credentials and endpoints still win over inherited variables, and mirroring a
+task to another computer stays untouched — that computer uses its own settings.
+
+The per-provider list and the opt-out switch live on each provider's card here,
+so harnesses without a card (Codex and Kimi Code) currently take only the
+global set.
 
 ## GitHub Copilot CLI
 
@@ -393,7 +494,7 @@ non-secret command-line settings to prevent user/project Claude credentials or
 endpoints replacing the Coding Plan connection. It does not inherit those settings
 files' hooks/plugins/permissions; PandaCode's explicitly supplied MCP tools remain
 available. Claude-managed enterprise policies still apply. The key is never
-written into argv or a settings file; it is resolved from the native Keychain or
+written into argv or a settings file; it is resolved from PandaCode's secrets store or
 `ZAI_API_KEY`. Competing Anthropic/cloud auth variables are removed, and Claude's
 subprocess credential scrubbing is enabled.
 
@@ -447,7 +548,7 @@ The Token Plan is a fixed subscription with a dedicated cluster per account —
 `ttp-…` (team); the pay-as-you-go API is `https://api.xiaomimimo.com/anthropic` with
 `sk-…` keys. Settings → Agents → Provider connections has one MiMo card: a cluster
 picker (the four endpoints above, nothing free-form — the URL is shown for the chosen
-one) and the key. The key goes into the platform secure store under its own account
+one) and the key. The key goes into PandaCode's secrets store under its own account
 (`mimo-token-plan`) or comes from `MIMO_API_KEY`; the cluster choice is a plain
 setting (`mimoEndpoint`). Unknown cluster IDs are dropped on load and refused on save.
 
@@ -468,6 +569,14 @@ variant, `mimo-v2.6-flash`, and the V2.5 pair that retires on October 21, 2026) 
 descriptions only; MiMo publishes no per-plan entitlements, so no context or effort
 metadata is claimed and custom IDs stay usable. Endpoints and models verified against
 the MiMo docs on 2026-09-22.
+
+## DeepSeek Harness
+
+DeepSeek Harness reports one `reasoning_effort` option in ACP's `thought_level`
+category. PandaCode offers those reported choices for every named DeepSeek model,
+including API-key and DeepSeek Account models. The picker preserves each model's
+full invocation ID. Before prompting, PandaCode selects the model, then applies
+the effort from the session's updated `configOptions`.
 
 ## Grok Build
 
@@ -575,7 +684,7 @@ without spending tokens.
 Cline (`cline`, installed with `npm i -g cline`) exposes ACP v1 with
 `cline --acp`, so PandaCode drives it with the shared ACP adapter. The npm package's
 `bin/cline` is a Node launcher for a bundled native binary. On Windows the npm
-`cline.cmd` shim resolves to that declared entry.
+`cline.cmd` shim resolves to that declared entry. Official docs: [CLI overview](https://docs.cline.bot/usage/cli-overview), [TUI](https://docs.cline.bot/usage/tui), and [ACP](https://docs.cline.bot/usage/acp).
 
 **Sign-in.** Cline keeps its own sign-in (`cline auth`: Cline, ClinePass or a ChatGPT
 subscription), or reads `CLINE_API_KEY` from the environment. Without either,
@@ -592,6 +701,12 @@ options by ID first. There is no ACP effort option. The effort is the launch fla
 
 **Approvals.** See [approvals](approvals.md): Plan → `plan`, everything else → `act`.
 Full access adds `--auto-approve true`.
+
+**Terminal console.** Opening the terminal console launches Cline's interactive TUI (`cline -i`), preserving the task's model, mode (`--plan`, `--auto-approve true` for Full access, or `--auto-approve false` for approval modes), and reasoning effort (`--thinking <level>`). Resuming an existing task in the console passes `--id <session-id>`.
+
+**Capabilities and MCP.** Settings → Tools & add-ons inspects Cline's MCP configurations from `~/.cline/data/settings/cline_mcp_settings.json`, `~/.cline/cline_mcp_settings.json`, `~/.cline/mcp_settings.json`, and project-level `.cline/cline_mcp_settings.json` and `.cline/mcp_settings.json`. Custom skills are detected from `~/.cline/skills`, `.cline/skills`, and compatibility roots (`.clinerules/skills`, `.claude/skills`).
+
+**Updates.** Checked through the official npm registry (`npm:cline`).
 
 **Turn data.** Streaming text, thoughts, tool calls with `rawInput`/`rawOutput`,
 cancel and `session/load` (resume) use the common ACP paths. Cline can load a
@@ -788,6 +903,80 @@ differences, read from omp 18.12's `modes/rpc/rpc-types.ts` and CLI flag table:
   omp does not hide them behind tool discovery.
 - Model discovery skips Pi-only flags (`--offline`, `--no-mcp`, …); slash
   commands come from `get_available_commands`.
+- A mid-turn message steers the running turn, exactly as it does for Pi, so a
+  recipe step that requires a steer is supported on omp too.
 
 Accounts, models and thinking levels are omp's own. Live check:
 `cargo test installed_omp -- --ignored`.
+
+## Custom OpenAI-compatible endpoints (Ollama, FreeLLMAPI, local models)
+
+PandaCode has no "custom provider" box; it launches harnesses, and a harness
+brings its own model list. For any server that speaks the OpenAI chat API
+(Ollama, LM Studio, [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi),
+a self-hosted gateway), add it to OpenCode's own config and pick its models in
+PandaCode.
+
+1. Add the provider to `~/.config/opencode/opencode.json` (or a project
+   `opencode.json`). Ollama:
+
+   ```json
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "provider": {
+       "ollama": {
+         "npm": "@ai-sdk/openai-compatible",
+         "name": "Ollama (local)",
+         "options": { "baseURL": "http://localhost:11434/v1" },
+         "models": { "qwen3-coder": { "name": "Qwen3 Coder" } }
+       }
+     }
+   }
+   ```
+
+   For FreeLLMAPI or another hosted gateway, use the same shape with its URL
+   and key; `{env:NAME}` reads the key from the environment:
+
+   ```json
+   "freellmapi": {
+     "npm": "@ai-sdk/openai-compatible",
+     "name": "FreeLLMAPI",
+     "options": { "baseURL": "https://YOUR-HOST/v1", "apiKey": "{env:FREELLMAPI_KEY}" },
+     "models": { "YOUR-MODEL-ID": { "name": "My model" } }
+   }
+   ```
+
+2. Open Settings → Agents → OpenCode → **Choose models** (the OpenCode card's
+   button), refresh, tick the new models and save.
+3. Pick the model from the composer's OpenCode group.
+
+PandaCode only lists what `opencode models --verbose` reports, so a model that
+is missing there is a config problem; check it with `opencode models` in a
+terminal. At launch PandaCode sets only the permission policy through
+`OPENCODE_CONFIG_CONTENT` (`providers/acp.rs`); your `opencode.json` is read by
+OpenCode as usual and never rewritten. To keep a separate config per setup, add
+a [named connection](#named-connections) for OpenCode with its config folder
+(`OPENCODE_CONFIG_DIR`) pointing at a folder holding that `opencode.json`.
+
+For gateways that speak the Anthropic protocol instead, add a connection for
+Claude Code and set `ANTHROPIC_BASE_URL` (and a Secret `ANTHROPIC_AUTH_TOKEN`)
+under Environment; the model name comes from that gateway.
+
+## Secret storage
+
+`src-tauri/src/secret_store.rs` holds every app secret: provider keys
+(`app.pandacode.providers`), connection secrets (`app.pandacode.connections`), cloud keys
+and settings (`app.pandacode.cloud`) and bot channel tokens (`app.pandacode.bots`).
+
+- **macOS:** one JSON file, `secrets.json` in the app data folder, keyed
+  `"<service>/<account>"`, mode 0600, written atomically (0600 temp file in the same folder,
+  fsync, rename) under a process lock and a `secrets.lock` advisory lock. Never the Keychain:
+  without an Apple Team ID each item is pinned to the build that made it, so every update
+  asked for the login password. A corrupt or unreadable file reads as none and is never
+  overwritten. An item saved in the Keychain by an older version is found with an
+  attributes-only query (no data, no prompt), read once, written to the file and deleted,
+  so each item can prompt at most once, ever; a denied read is not retried until the next
+  launch. Cloud agent bridge processes get the folder in their run spec. The usage check's
+  GLM read uses the file, else the noninteractive helper (`usage_keychain.rs`).
+- **Linux:** the Secret Service. **Windows:** Credential Manager. Neither prompts after an
+  update.

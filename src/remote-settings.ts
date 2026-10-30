@@ -7,7 +7,7 @@ import { infoMark } from './tooltip';
 import { APPROVE_SCOPES, SCOPE_HELP, SCOPE_LABELS, groupFingerprint, type DeviceGrant, type GrantScope, type PairCode } from './remote-pairing-prompt';
 import type { RemoteDevice, RemoteHost, RemoteSignIn, RemoteStatus } from './remote-types';
 
-const TRUST_TIP = 'Both computers must trust each other before one can drive the other. Compare the fingerprint shown on the other computer with the one here before trusting it. If its key changes, you need to trust it again.';
+const FULL_TIP = 'When off, your other computers cannot start or switch a task here to Full access (no approvals); a remote task without a mode starts in Ask.';
 const ALLOW_TIP = 'Remote prompts follow this computer’s approval settings; they get no more power than prompts typed here.';
 const FULL_ACCESS_TIP = 'Off by default. Enable here only if trusted computers may start, continue or configure Full access or Claude Code Approve for me tasks on this computer. Turning this off blocks new remote actions; already running work can still be stopped.';
 

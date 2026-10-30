@@ -7,6 +7,7 @@ mod catalog;
 pub(crate) mod scoped;
 mod github;
 mod safety;
+pub(crate) mod scoped;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -612,6 +613,9 @@ pub(crate) fn library(app: &AppHandle) -> Result<Library, String> {
     let home = crate::agent_usage_providers::home().ok_or("Could not find your home folder.")?;
     Ok(Library::new(dir, home))
 }
+fn repo_name(repo: &str) -> String {
+    repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').trim_end_matches(".git").to_string()
+}
 fn root(state: &AppState, project_id: Option<String>, session_id: Option<String>) -> Result<Option<PathBuf>, String> {
     project_id.map(|id| state.root(&id, session_id.as_deref())).transpose()
 }
@@ -637,7 +641,7 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
 #[tauri::command]
 pub async fn skills_import_github(app: AppHandle, repo: String, path: String, git_ref: Option<String>, kind: Kind) -> crate::Result<Item> {
     crate::blocking(move || {
-        let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches(".git").to_string();
+        let repo = repo_name(&repo);
         let (files, commit) = github::fetch(&repo, &path, git_ref.as_deref())?;
         let path = path.trim_matches('/').to_string();
         let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(repo.rsplit('/').next().unwrap_or_default()).to_string();
@@ -737,6 +741,32 @@ pub async fn skills_task_resolve(app: AppHandle, state: State<'_, AppState>, ses
     let session = store.session(&session_id)?;
     let root = store.workspace_root(&session.project_id, Some(&session_id))?;
     scoped::task(&library, &store, &session, &root)
+}
+
+#[tauri::command]
+pub async fn skills_catalogs(app: AppHandle) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.catalogs()).await
+}
+#[tauri::command]
+pub async fn skills_catalog_add(app: AppHandle, repo: String, git_ref: Option<String>) -> crate::Result<catalog::Catalogs> {
+    let git_ref = git_ref.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    crate::blocking(move || library(&app)?.add_catalog(&github::api, &repo_name(&repo), git_ref)).await
+}
+#[tauri::command]
+pub async fn skills_catalog_refresh(app: AppHandle, repo: String) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.refresh_catalog(&github::api, &repo)).await
+}
+#[tauri::command]
+pub async fn skills_catalog_state(app: AppHandle, repo: String, state: catalog::State) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.set_catalog_state(&repo, state)).await
+}
+#[tauri::command]
+pub async fn skills_catalog_import(app: AppHandle, repo: String, paths: Option<Vec<String>>) -> crate::Result<catalog::Imported> {
+    crate::blocking(move || library(&app)?.import_catalog(&github::api, &repo, paths.as_deref())).await
+}
+#[tauri::command]
+pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.discover(&github::api)).await
 }
 
 #[cfg(test)]

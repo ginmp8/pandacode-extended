@@ -389,7 +389,8 @@ test('launcher retains its old model after a failed selection and allows retry',
   await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
   await page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
   // The shared picker must classify provider errors without exposing native paths or tokens.
-  await expect(page.getByRole('alert')).toHaveText('Check provider configuration');
+  // The provider diagnostic contains a credential hint; classify it without exposing the raw text.
+  await expect(page.getByRole('alert')).toHaveText('Login required');
   await expect(page.getByRole('dialog', { name: 'Harness and model' })).not.toContainText('DO_NOT_DISPLAY');
   await expect(page.getByRole('dialog', { name: 'Harness and model' })).not.toContainText('/private/credentials');
   await expect(trigger).toHaveText(original!);

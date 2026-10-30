@@ -52,7 +52,9 @@ test('HTTP 403 and 429 discovery errors give actionable, non-sensitive labels', 
   await page.goto('/?teams');
   for (const { detail, label } of [
     { detail: 'HTTP 403 Forbidden; bearer DO_NOT_DISPLAY', label: 'Access denied' },
+    { detail: 'HTTP 403 Forbidden; please verify credentials DO_NOT_DISPLAY', label: 'Access denied' },
     { detail: 'HTTP 429 Too Many Requests; token DO_NOT_DISPLAY', label: 'Rate limited' },
+    { detail: 'HTTP 429 Too Many Requests; credential rotation DO_NOT_DISPLAY', label: 'Rate limited' },
   ]) {
     await page.evaluate(async reason => {
       const { openModelPicker } = await import('/src/model-picker.ts');

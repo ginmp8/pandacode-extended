@@ -48,6 +48,29 @@ test('remote harness discovery errors never expose private diagnostics', async (
   await page.evaluate(() => (window as any).__closeRemoteHarnessPicker?.());
 });
 
+test('synchronous harness discovery errors stay in the picker without leaking diagnostics', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeSyncDiscoveryPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      loadProviders: () => { throw new Error('ENOENT /private/credentials?token=DO_NOT_DISPLAY'); },
+    });
+  });
+  await expect(picker(page)).toContainText('Could not load harnesses: Provider unavailable');
+  await expect(picker(page)).not.toContainText('DO_NOT_DISPLAY');
+  await expect(picker(page)).not.toContainText('/private/credentials');
+  await page.keyboard.press('Escape');
+  await expect(picker(page)).toHaveCount(0);
+});
+
 test('HTTP 403 and 429 discovery errors give actionable, non-sensitive labels', async ({ page }) => {
   await page.goto('/?teams');
   for (const { detail, label } of [

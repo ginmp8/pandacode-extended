@@ -270,8 +270,17 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       return railItem(group.key, providerLogo(group.provider.id), group.name, count ? String(count) : '', classes, !query && view === group.key);
     }).join('');
     if (railHtml !== railMarkup) {
+      // Async catalog updates can change rail hit counts while a keyboard user
+      // is focused on a harness tab. Replacing its DOM would otherwise drop
+      // focus to the page body in the middle of picker navigation.
+      const focusedTab = rail.contains(document.activeElement)
+        ? (document.activeElement as HTMLElement).closest<HTMLElement>('[role="tab"]')?.dataset.view
+        : undefined;
       rail.innerHTML = railHtml;
       railMarkup = railHtml;
+      if (focusedTab !== undefined) {
+        rail.querySelector<HTMLElement>(`[data-view="${CSS.escape(focusedTab)}"]`)?.focus({ preventScroll: true });
+      }
       if (query) rail.querySelector('.model-menu-count:not(:empty)')?.parentElement?.scrollIntoView({ block: 'nearest' });
     }
 

@@ -19,6 +19,15 @@ export interface ModelRoutingOptions {
 
 const MODES: [RoutingMode, string][] = [['cheapest', 'Cheap'], ['balanced', 'Balanced'], ['quality', 'Best']];
 const MIN_P = 30, MAX_P = 90, DEFAULT_P = 50;
+// One write queue for Settings and the composer Team menu, including reopened Settings panels.
+// Ignoring stale UI replies alone does not prevent an older native write from winning persistence.
+let routingWriteTail: Promise<void> = Promise.resolve();
+export function queueRoutingPreferencesWrite<T>(save: () => Promise<T>): Promise<T> {
+  const pending = routingWriteTail.then(save);
+  routingWriteTail = pending.then(() => undefined, () => undefined);
+  return pending;
+}
+
 const HELP = 'Panda Router runs locally. For each worker it predicts which of your installed models is likely to succeed and picks one by your mode. Balanced weighs success against cost; Cheap takes the lowest cost above the minimum chance of success and moves up only if review fails; Best takes the likeliest to succeed. The Team button in the prompt box sets the same mode. The first use downloads a 35 MB profiler from GitHub.';
 const money = (usd: number) => usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 const percent = (p: number) => `${Math.round(p * 100)}%`;
@@ -40,16 +49,14 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const text = $<HTMLTextAreaElement>('.routing-text'), routeButton = $<HTMLButtonElement>('.routing-route'), result = $('.routing-result');
   const modes = $('.routing-modes'), off = $('.routing-off');
   let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0;
-  // Serialize native writes in user order; ignoring stale UI replies alone cannot protect persistence.
-  let writeTail: Promise<void> = Promise.resolve();
+  // Writes are shared with the composer Team menu and survive Settings remounts.
   // Only the reply to the newest request renders, so an older one never undoes a later change; a read
   // (status poll) also yields to a change still in flight, and a replaced request's failure stays quiet.
   const request = (command: string, args?: Record<string, unknown>, write = false) => {
     const ticket = write ? ++latest : latest;
     if (write) writing++;
     const call = () => options.call<RoutingStatus>(command, args);
-    const pending = write ? writeTail.then(call) : call();
-    if (write) writeTail = pending.then(() => undefined, () => undefined);
+    const pending = write ? queueRoutingPreferencesWrite(call) : call();
     return pending.then(
       next => { if (!disposed && ticket === latest && (write || !writing)) render(next); },
       cause => { if (ticket === latest) throw cause; },

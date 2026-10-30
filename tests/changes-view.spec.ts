@@ -287,3 +287,29 @@ test('passes truncation to the viewer and strips the marker', async ({ page }) =
   await expect(page.locator('.diff-viewer-status')).toContainText('shortened', { timeout: 15_000 });
   await expect(page.locator('.cv-file .cv-stat')).toHaveText('+2');
 });
+
+test('keyboard focus can move horizontally across an unwrapped read-only diff', async ({ page }) => {
+  const path = 'src/long-diff.ts';
+  const long = 'anUnbrokenIdentifierThatExceedsTheNarrowPanelWidth'.repeat(15);
+  const diff = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,1 +1,1 @@\n-old\n+${long}\n`;
+  await page.setViewportSize({ width: 440, height: 620 });
+  await mount(page, [{ path, index: ' ', working: 'M' }], { [path]: diff });
+  await page.addStyleTag({ content: '#host { width: 400px !important; }' });
+  const region = page.getByRole('region', { name: 'Read-only diff' });
+  await expect(page.locator('.diff-viewer[data-diff-state="ready"]')).toHaveCount(1, { timeout: 15_000 });
+  const horizontalOffset = () => page.evaluate(() => {
+    const viewer = document.querySelector<HTMLElement>('diffs-container')!;
+    const candidates = [viewer, ...viewer.shadowRoot!.querySelectorAll<HTMLElement>('*')];
+    const scrollable = candidates.find(node => {
+      const style = getComputedStyle(node);
+      return (style.overflowX === 'auto' || style.overflowX === 'scroll') &&
+        node.clientWidth > 0 && node.scrollWidth > node.clientWidth + 20;
+    });
+    return scrollable?.scrollLeft ?? -1;
+  });
+  expect(await horizontalOffset()).toBeGreaterThanOrEqual(0);
+  await region.focus();
+  await expect(region).toBeFocused();
+  for (let press = 0; press < 5; press++) await page.keyboard.press('ArrowRight');
+  await expect.poll(horizontalOffset).toBeGreaterThan(0);
+});

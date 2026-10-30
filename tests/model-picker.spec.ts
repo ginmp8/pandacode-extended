@@ -143,6 +143,39 @@ test('Recent remembers the named connection when choosing its model again', asyn
   await expect.poll(() => page.evaluate(() => (window as any).__lastNamedRecent)).toEqual(['codex', 'model-a', 'account-a']);
 });
 
+test('named-account short lists do not import another account or harness recent models', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeIsolatedRecentPicker = openModelPicker({
+      anchor,
+      providers: [{
+        id: 'codex', name: 'Codex', installed: true,
+        models: Array.from({ length: 8 }, (_, index) => ({ id: `model-${index + 1}`, name: `Model ${index + 1}` })),
+      }],
+      current: { provider: 'codex', model: 'model-8' },
+      currentConnection: 'account-a',
+      connections: [
+        { id: 'account-a', name: 'Account A', provider: 'codex' },
+        { id: 'account-b', name: 'Account B', provider: 'codex' },
+      ],
+      recent: () => ['model-7'],
+      canSwitchProvider: true,
+      onSelect: async () => {},
+    });
+  });
+  await picker(page).getByRole('tab', { name: 'Account B', exact: true }).click();
+  const list = picker(page).getByRole('listbox', { name: 'Models' });
+  await expect(list.getByRole('option', { name: 'Account B · Model 7', exact: true })).toHaveCount(0);
+  await expect(list.getByRole('option', { name: 'Account B · Model 8', exact: true })).toHaveCount(0);
+  await search(page).fill('model-8');
+  await expect(list.getByRole('option', { name: 'Account B · Model 8', exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__closeIsolatedRecentPicker?.());
+});
+
 test('the harness picker hides harnesses that are not installed', async ({ page }) => {
   await page.goto('/');
   await page.locator('.new-task-button').click();

@@ -1,0 +1,77 @@
+name: Experimental main-to-main merge assessment
+on:
+  push:
+    branches: ['integration/0.7.0-main-to-main']
+    paths: ['.github/workflows/experimental-upstream-merge-assessment.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  three-way-assessment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Analyze both main branches against pinned original 0.3.28 source
+        shell: bash
+        env:
+          EXT_MAIN: f0105e7db85a0d7bc2e70726716fcfa939fac182
+          FORK_MAIN: 0336a2fb5e3abaea35c095fcc63805652f49ea98
+          SOURCE_BASE: 70bdc708303c8681d8eb0b46f2cdb0ff087aa6eb
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pandacode-integration-assessment
+          git remote add fork https://github.com/ginmp8/pandacode.git
+          git -c protocol.version=2 fetch --no-tags --depth=1 fork "$FORK_MAIN" "$SOURCE_BASE"
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "$EXT_MAIN"
+          git cat-file -e "$SOURCE_BASE^{commit}"
+          git cat-file -e "$FORK_MAIN^{commit}"
+          git cat-file -e "$EXT_MAIN^{commit}"
+          out=/tmp/pandacode-integration-assessment
+          git diff --name-only "$SOURCE_BASE" "$EXT_MAIN" > "$out/extended-changed.txt"
+          git diff --name-only "$SOURCE_BASE" "$FORK_MAIN" > "$out/upstream-changed.txt"
+          git diff --name-only "$EXT_MAIN" "$FORK_MAIN" > "$out/main-to-main-difference.txt"
+          set +e
+          git merge-tree --write-tree --merge-base="$SOURCE_BASE" "$EXT_MAIN" "$FORK_MAIN" > "$out/three-way-merge.txt" 2>&1
+          normal_rc=$?
+          git merge-tree --write-tree --merge-base="$SOURCE_BASE" -X ours "$EXT_MAIN" "$FORK_MAIN" > "$out/extended-favored-merge.txt" 2>&1
+          ours_rc=$?
+          set -e
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os, re
+          root=Path('/tmp/pandacode-integration-assessment')
+          text=(root/'three-way-merge.txt').read_text()
+          conflict_lines=[line for line in text.splitlines() if line.startswith('CONFLICT')]
+          paths=[]
+          for line in conflict_lines:
+              match=re.search(r' in (.+)$',line)
+              if match: paths.append(match.group(1))
+          summary={
+              'status':'assessed-only; no source changes pushed',
+              'extended_main':os.environ['EXT_MAIN'],
+              'upstream_fork_main':os.environ['FORK_MAIN'],
+              'synthetic_ancestor_original_release_0_3_28':os.environ['SOURCE_BASE'],
+              'extended_paths_changed_since_ancestor':len((root/'extended-changed.txt').read_text().splitlines()),
+              'upstream_paths_changed_since_ancestor':len((root/'upstream-changed.txt').read_text().splitlines()),
+              'source_file_differences_between_mains':len((root/'main-to-main-difference.txt').read_text().splitlines()),
+              'three_way_conflict_count':len(conflict_lines),
+              'three_way_conflict_paths':list(dict.fromkeys(paths)),
+              'three_way_merge_first_line':text.splitlines()[0] if text else '',
+              'ours_preference_first_line':(root/'extended-favored-merge.txt').read_text().splitlines()[0] if (root/'extended-favored-merge.txt').stat().st_size else '',
+          }
+          (root/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(json.dumps(summary,indent=2)[:30000])
+          PY
+          echo "Conflict-free source integration is not asserted; this job is read-only."
+      - name: Archive evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: upstream-main-to-main-three-way-assessment
+          path: /tmp/pandacode-integration-assessment/
+          retention-days: 14
+          if-no-files-found: warn

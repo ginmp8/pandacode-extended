@@ -23,9 +23,12 @@ export interface CatalogHarness { id: ProviderId; name: string; models: readonly
  * the first few models of each harness, with the same ids as the catalog. */
 export function buildTeamCatalog(harnesses: readonly CatalogHarness[]): { roster: WorkerProfile[]; catalog: WorkerProfile[] } {
   const seen = new Set<string>(), taken = new Set<string>();
+  const encoder = new TextEncoder();
   const lists = harnesses.map(harness => harness.models.filter(model => {
     const key = `${harness.id}\u0000${model.id}`;
-    if (!model.id || seen.has(key)) return false;
+    // A single malformed installed entry must not invalidate the entire native routing pool.
+    if (!model.id || model.id.includes('\0') || model.name.includes('\0') || harness.name.includes('\0')
+      || encoder.encode(model.id).length > 200 || seen.has(key)) return false;
     seen.add(key); return true;
   }));
   const profiles = new Map<string, WorkerProfile>();

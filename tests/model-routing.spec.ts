@@ -15,7 +15,8 @@ async function install(page: Page, init?: () => void): Promise<void> {
       const failure = window.__routingFail?.[command];
       if (failure) throw new Error(failure);
       // Test hook: \`__routingDelay[command] = ms\` holds that command back before it runs.
-      const delay = window.__routingDelay?.[command];
+      const delay = command === 'model_routing_configure' && window.__routingWriteDelays?.length
+        ? window.__routingWriteDelays.shift() : window.__routingDelay?.[command];
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
       return invokePreview(command, args);
     }
@@ -69,6 +70,23 @@ test('the section renders, settings persist and the profiler downloads', async (
   await expect(settings(page).getByRole('spinbutton', { name: /Minimum chance/ })).toHaveValue('30');
   await expect(settings(page).getByRole('textbox', { name: 'Task to route' })).toBeDisabled();
   await expect(settings(page).getByText('Ready', { exact: true })).toBeVisible();
+});
+
+test('rapid Settings changes persist in user order even when the first native write is slow', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  await page.evaluate(() => { (window as any).__routingWriteDelays = [450, 0]; });
+  const modes = settings(page);
+  await modes.getByRole('radio', { name: 'Cheap' }).click();
+  await modes.getByRole('radio', { name: 'Best' }).click();
+  await expect(modes.getByRole('radio', { name: 'Best' })).toHaveAttribute('aria-checked', 'true');
+  await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(2);
+  // Check after the delayed write has had enough time to finish; a stale write must not win.
+  await page.waitForTimeout(550);
+  await page.reload();
+  await page.locator('.task-item[data-id="session-2"]').click();
+  await openAgents(page);
+  await expect(settings(page).getByRole('radio', { name: 'Best' })).toHaveAttribute('aria-checked', 'true');
 });
 
 test('Try it shows a pick and alternatives', async ({ page }) => {

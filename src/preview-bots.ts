@@ -275,6 +275,14 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     }
     case 'bot_desktop_thread': { const entry = store(args.botId); const known = entry.threads.length; result = (await desktopThread(host, entry)).sessionId; if (entry.threads.length !== known) { host.emit('sessions-changed', null); changed(); } break; }
     case 'bot_project_ids': result = [...bots.values()].map(entry => entry.bot.projectId); break;
+    case 'bot_message_markers': result = []; break;
+    case 'bot_failover_pending': result = failoverAsks.get(String(args.sessionId)) ?? null; break;
+    case 'bot_model_switches': result = [...bots.values()].flatMap(entry => entry.activity).filter(item => item.kind === 'model-switch' && item.detail.sessionId === args.sessionId).sort((a, b) => a.at - b.at).slice(-200); break;
+    case 'bot_failover_decide': {
+      const sessionId = String(args.sessionId ?? ''), ask = failoverAsks.get(sessionId);
+      if (!ask || !['send', 'wait'].includes(String(args.action))) throw new Error('This message is no longer on hold.');
+      failoverAsks.delete(sessionId); result = null; changed(); break;
+    }
     case 'bot_detail': {
       const entry = store(args.botId), tasks = await host.invoke<Session[]>('list_sessions', {});
       const owned = new Set(entry.threads.map(thread => thread.sessionId));

@@ -40,4 +40,4 @@ export default defineConfig({ plugins: [materialIconThemeAssets()], clearScreen:
       './src/usage-heatmap.ts',
     ],
   },
-}, build: { target: 'es2022', assetsInlineLimit: 0 } });
+}, build: { target: 'es2022', assetsInlineLimit: 0 }, worker: { format: 'es' } });

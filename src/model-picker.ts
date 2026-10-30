@@ -588,7 +588,9 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       loadCatalogs();
     }).catch(failure => {
       if (closed) return;
-      providersStatus = failure instanceof Error ? failure.message : String(failure);
+      // A remote harness discovery failure can contain tokens, paths or subprocess stderr.
+      // Display only the bounded, classified reason already used for model catalog failures.
+      providersStatus = `Could not load harnesses: ${catalogFailureReason(failure)}`;
       renderChoices();
     });
   } else loadCatalogs();

@@ -184,7 +184,10 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     const recent = options.recent?.(provider);
     if (!recent) return all;
     const byId = new Map(all.map(model => [model.id, model]));
-    const first = [...(provider === current.provider ? [current.model] : []), ...recent, ...storedRecent(provider, connection)].filter(id => id !== 'default' && byId.has(id));
+    // Harness-wide recents and another named account's current model cannot seed this account's list.
+    const scopedRecent = connection === null ? recent : [];
+    const currentPick = provider === current.provider && connection === currentConnection ? [current.model] : [];
+    const first = [...currentPick, ...scopedRecent, ...storedRecent(provider, connection)].filter(id => id !== 'default' && byId.has(id));
     const ids = [...new Set([...first, ...all.map(model => model.id).filter(id => id !== 'default')])].slice(0, RECENT_LIMIT);
     return [byId.get('default')!, ...ids.map(id => byId.get(id)!)];
   }

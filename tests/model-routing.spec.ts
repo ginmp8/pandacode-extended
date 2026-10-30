@@ -271,6 +271,40 @@ test('preview limits obsolete concurrent native routing requests', async ({ page
   await expect(button).toBeEnabled();
 });
 
+test('a failed obsolete preview cannot overwrite a newer recommendation', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  const task = settings(page).getByRole('textbox', { name: 'Task to route' });
+  const button = settings(page).getByRole('button', { name: 'Route', exact: true });
+  const result = settings(page).locator('.routing-result');
+  await page.evaluate(() => {
+    (window as any).__routingHold = { model_routing_route: true };
+    (window as any).__routingFail = { model_routing_route: 'Stale preview failed' };
+  });
+  await task.fill('Fix the obsolete login task');
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
+
+  // The first response remains held and will fail, but the latest task succeeds.
+  await task.fill('Review the current release task');
+  await page.evaluate(() => {
+    (window as any).__routingHold.model_routing_route = false;
+    delete (window as any).__routingFail.model_routing_route;
+  });
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(2);
+  await expect(result).toContainText('Difficulty');
+
+  // A rejected obsolete request must not replace the newer valid recommendation.
+  await page.evaluate(async () => {
+    (window as any).__routingReleases.shift()();
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  await expect(result).toContainText('Difficulty');
+  await expect(result).not.toContainText('Stale preview failed');
+  await expect(button).toBeEnabled();
+});
+
 test('changing mode hides the older preview before the delayed native save completes', async ({ page }) => {
   await install(page);
   await openAgents(page);

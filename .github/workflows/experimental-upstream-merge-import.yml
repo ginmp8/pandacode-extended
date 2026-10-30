@@ -1,5 +1,5 @@
 name: One-shot experimental upstream main source import
-# Candidate retries preserve Extended main and never execute untrusted imports with this write token.
+# Retry 2: fail-closed native updater quarantine and full conflicts ledger; never run imported source with write token.
 on:
   push:
     branches: ['integration/0.7.0-main-to-main']

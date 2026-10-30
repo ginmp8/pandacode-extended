@@ -148,6 +148,37 @@ test.describe('thread header overlay', () => {
     expect(result).toEqual({ releases: 1, visible: true });
   });
 
+  test('history prepend preserves the reading anchor without native scroll anchoring', async ({ page }) => {
+    await page.goto('/');
+    const outcome = await page.evaluate(async () => {
+      const { captureTranscriptAnchor } = await import('/src/transcript-scroll.ts');
+      const transcript = document.createElement('section');
+      transcript.style.cssText = 'position:fixed;top:0;left:0;width:400px;height:180px;overflow:auto;overflow-anchor:none;scroll-padding-top:26px;z-index:9999';
+      const message = (id: string, height = 90) => {
+        const row = document.createElement('article');
+        row.dataset.messageId = id;
+        row.style.height = height + 'px';
+        row.style.boxSizing = 'border-box';
+        row.textContent = 'Message ' + id;
+        return row;
+      };
+      transcript.append(...Array.from({length: 7}, (_, index) => message(String(index))));
+      document.body.append(transcript);
+      transcript.scrollTop = 142;
+      const anchor = transcript.querySelector<HTMLElement>('[data-message-id="2"]')!;
+      const topBefore = anchor.getBoundingClientRect().top;
+      const restore = captureTranscriptAnchor(transcript);
+      transcript.prepend(message('older', 124));
+      restore();
+      const topAfter = anchor.getBoundingClientRect().top;
+      const result = { offset: Math.abs(topAfter - topBefore), scrollTop: transcript.scrollTop };
+      transcript.remove();
+      return result;
+    });
+    expect(outcome.offset).toBeLessThan(1);
+    expect(outcome.scrollTop).toBeGreaterThan(142);
+  });
+
   test('find in thread lands every match below the fade and the find bar', async ({ page }) => {
     await openThread(page);
     // Let the thread's refresh redraw land first; it restores the scroll position it remembered.

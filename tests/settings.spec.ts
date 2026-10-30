@@ -466,3 +466,14 @@ test('resource usage lives in Settings → About, not in a bottom status bar', a
   await usage.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(usage.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
 });
+
+test('settings navigation uses a distinct icon for every section', async ({ page }) => {
+  await open(page);
+  await settings(page);
+  const tabs = dialog(page).getByRole('tablist', { name: 'Settings' }).getByRole('tab');
+  await expect(tabs).toHaveCount(GROUPS.length);
+  const glyphs = await tabs.evaluateAll(elements => elements.map(element =>
+    element.querySelector('svg.icon')?.innerHTML ?? ''));
+  expect(glyphs.every(glyph => glyph.length > 0)).toBe(true);
+  expect(new Set(glyphs).size).toBe(GROUPS.length);
+});

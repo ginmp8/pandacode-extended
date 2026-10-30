@@ -3,7 +3,6 @@ export interface Env {
   AUTH_LIMITER: RateLimit;
   GLOBAL_AUTH_LIMITER: RateLimit;
   ACCOUNT_LIMITER: RateLimit;
-  GLOBAL_AUTH_LIMITER: RateLimit;
   SESSION_SECRET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;

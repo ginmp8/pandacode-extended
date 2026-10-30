@@ -3,8 +3,9 @@ import { deleteAccountState } from "./account-delete.ts";
 import { type Bucket, fullBucket, take } from "./bucket.ts";
 import { type Env, fail, json } from "./env.ts";
 import { type DeviceView, errorFrame, forwardFrame, parseClientFrame, presenceFrame, undeliverableFrame } from "./frames.ts";
-import { MAX_DEVICES, RATE_LIMITED_PARSE_CHARS } from "./limits.ts";
+import { MAX_DEVICES, MAX_PUSH_TOKENS_PER_DEVICE, RATE_LIMITED_PARSE_CHARS, readJsonLimited } from "./limits.ts";
 import { hostChanged, isStale, keyChanged, tokenCurrent } from "./policy.ts";
+import { deliverPush, parsePushRegistration, shouldNotify, type NotifyBody } from "./push.ts";
 import { isUuid, parseDevice } from "./validate.ts";
 
 interface Attachment extends Bucket {
@@ -13,7 +14,7 @@ interface Attachment extends Bucket {
   joinedAt: number;
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 interface Row {
   id: string;
@@ -27,6 +28,14 @@ interface Row {
   [column: string]: SqlStorageValue;
 }
 
+interface PushRow {
+  device_id: string;
+  platform: string;
+  token: string;
+  created_at: number;
+  [column: string]: SqlStorageValue;
+}
+
 /** One per account (`idFromName("gh:<id>")`). Only the Worker reaches it, after checking the token. */
 export class Account extends DurableObject<Env> {
   // Frame buckets per device id, so a reconnect does not refill the burst. After hibernation the socket attachment seeds it.
@@ -36,6 +45,8 @@ export class Account extends DurableObject<Env> {
   /** deleteAll removes the schema too. Only an explicit new sign-in recreates it. */
   private deleted = false;
   private deleting = false;
+  /** Last push coalescing decision for this active Durable Object instance. */
+  private lastNotify?: { kind: NotifyBody["kind"] | ""; at: number };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -66,6 +77,11 @@ export class Account extends DurableObject<Env> {
     if (!sql.exec<{ name: string }>("PRAGMA table_info(devices)").toArray().some((c) => c.name === "gen")) {
       sql.exec("ALTER TABLE devices ADD COLUMN gen TEXT NOT NULL DEFAULT ''");
     }
+    // Push registrations arrive from an authenticated phone. Preserve the UUID generation
+    // column from Extended schema 2 while upgrading its storage for upstream push.
+    sql.exec(`CREATE TABLE IF NOT EXISTS push_tokens (
+      device_id TEXT NOT NULL, platform TEXT NOT NULL, token TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (device_id, token))`);
     if (version >= 0) sql.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -91,6 +107,7 @@ export class Account extends DurableObject<Env> {
     if (pathname === "/v1/connect") return this.join(request, device);
     // The Worker signs the fresh token after this 200; reaching here means the device is still registered.
     if (pathname === "/v1/token") return request.method === "POST" ? json({ ok: true, gen: row.gen }) : fail(405, "method not allowed");
+    if (pathname === "/v1/push/devices") return request.method === "POST" ? this.pushRegister(request, device) : fail(405, "method not allowed");
     if (pathname === "/v1/devices" && request.method === "GET") {
       if (this.reap()) this.broadcastPresence();
       return json({ devices: this.devices() });
@@ -131,9 +148,10 @@ export class Account extends DurableObject<Env> {
    * account data, never shared with other devices; a reinstall makes a new row, old ones fall
    * off the per-device cap. */
   private async pushRegister(request: Request, device: string): Promise<Response> {
-    const read = await this.body(request);
-    if (typeof read === "string") return fail(400, read);
-    const registration = parsePushRegistration(read);
+    // Do not copy the upstream unbounded request.json() reader into the hardened relay.
+    const read = await readJsonLimited(request, 2048);
+    if (read.tooLarge) return fail(413, "request too large");
+    const registration = parsePushRegistration(read.value);
     if (typeof registration === "string") return fail(400, registration);
     const sql = this.ctx.storage.sql;
     if (sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM push_tokens WHERE device_id = ? AND platform = ? AND token != ?",
@@ -167,17 +185,6 @@ export class Account extends DurableObject<Env> {
         if (failed > 0) console.log(`push: ${failed}/${tokens.length} deliveries failed`);
       })());
     }
-  }
-
-  private async body(request: Request): Promise<Record<string, unknown> | string> {
-    const raw = await request.json().catch(() => null);
-    if (typeof raw !== "object" || raw === null) return "body must be an object";
-    return raw as Record<string, unknown>;
-  }
-
-  private async deleteAccount(): Promise<Response> {
-    await deleteAccountState(this.ctx, (ws, code, reason) => this.close(ws, code, reason));
-    return json({ ok: true });
   }
 
   private join(request: Request, device: string): Response {

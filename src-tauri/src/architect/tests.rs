@@ -2747,6 +2747,37 @@ fn cheap_auto_worker_uses_the_frozen_threshold_not_the_later_global_setting() {
 }
 
 #[test]
+fn routing_turned_off_after_planning_uses_lead_model_at_dispatch() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let args = json!({"assignments":[auto_assignment("off-after-plan", json!({
+        "profileId":"auto", "prompt":"Fix a typo in the README heading."
+    }))]});
+    // The plan was made while routing was on; the user switches it off before dispatch.
+    let (generation, planned) = {
+        let store = state.store.lock().unwrap();
+        let team = load(&store, &sid).unwrap().unwrap();
+        let planned = heuristic_routes(&store, &team, &args, true, Mode::Balanced);
+        (team.generation, planned)
+    };
+    assert!(planned.values().any(|route| route.is_ok()), "test must start with a routed plan");
+    let disabled = routing::AutoRoutes::default();
+    assert_eq!(routes_at_dispatch(&planned, &disabled, true).len(), planned.len());
+    let current = routes_at_dispatch(&planned, &disabled, false);
+    assert!(current.is_empty(), "stale routed picks must not survive routing-off");
+    let (result, _) = dispatch_state_routed(
+        &state, &sid, generation, "pandacode_dispatch_workers",
+        args, &AtomicBool::new(false), current,
+    ).unwrap();
+    assert!(result["routing"][0].as_str().unwrap().contains("not routed (routing is off)"));
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    let lead = store.session(&sid).unwrap();
+    assert_eq!((team.workers[0].provider.as_str(), team.workers[0].model.as_str()),
+               (lead.provider.as_str(), lead.model.as_str()));
+}
+
+#[test]
 fn auto_profile_uses_the_lead_when_routing_is_off() {
     let (state, sid) = auto_state();
     with_catalog(&state, &sid);

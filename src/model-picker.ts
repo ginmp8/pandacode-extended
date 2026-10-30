@@ -230,7 +230,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     const title = [model.contextWindow ? `${context} context` : '', model.description || (model.name !== model.id && model.id !== 'default' ? model.id : '')].filter(Boolean).join(' · ');
     const meta = mixed ? group.name : context;
     const name = custom ? `Use “${escape(query)}”` : escape(model.name);
-    return `<button type="button" role="option" tabindex="-1" class="model-menu-option${selected ? ' model-menu-current' : ''}${custom ? ' model-menu-custom' : ''}" data-provider="${group.provider.id}" data-model="${escape(model.id)}"${group.connection ? ` data-connection="${escape(group.connection.id)}"` : ''} data-available="${!disabled}" aria-label="${escape(accessible)}" title="${escape(custom ? accessible : title)}" ${selected ? 'aria-current="true"' : ''} ${disabled ? 'aria-disabled="true" disabled' : ''}>${mixed ? providerLogo(group.provider.id) : ''}<span class="model-menu-name" title="${custom ? escape(query) : escape(model.name)}">${name}</span>${meta ? `<span class="model-menu-meta">${escape(meta)}</span>` : ''}${selected ? icon('check', 'model-menu-check') : custom ? icon('plus', 'model-menu-check') : ''}</button>`;
+    return `<button type="button" role="option" tabindex="-1" class="model-menu-option${selected ? ' model-menu-current' : ''}${custom ? ' model-menu-custom' : ''}" data-provider="${escape(group.provider.id)}" data-model="${escape(model.id)}"${group.connection ? ` data-connection="${escape(group.connection.id)}"` : ''} data-available="${!disabled}" aria-label="${escape(accessible)}" title="${escape(custom ? accessible : title)}" ${selected ? 'aria-current="true"' : ''} ${disabled ? 'aria-disabled="true" disabled' : ''}>${mixed ? providerLogo(group.provider.id) : ''}<span class="model-menu-name" title="${custom ? escape(query) : escape(model.name)}">${name}</span>${meta ? `<span class="model-menu-meta">${escape(meta)}</span>` : ''}${selected ? icon('check', 'model-menu-check') : custom ? icon('plus', 'model-menu-check') : ''}</button>`;
   }
 
   function heading(logo: string, name: string, status = ''): string {
@@ -314,7 +314,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       if (group) {
         const visible = shortList(group.provider.id, models(group), group.connection?.id ?? null);
         total = visible.length;
-        const status = group.locked ? '<span>New task required</span>' : group.unavailable ? '<span>Unavailable</span>' : `<span data-catalog-loading="${group.provider.id}" hidden>Loading…</span>`;
+        const status = group.locked ? '<span>New task required</span>' : group.unavailable ? '<span>Unavailable</span>' : `<span data-catalog-loading="${escape(group.provider.id)}" hidden>Loading…</span>`;
         markup = heading(providerLogo(group.provider.id), group.name, status) + visible.map(model => modelRow({ group, model }, false, '')).join('');
       }
     }

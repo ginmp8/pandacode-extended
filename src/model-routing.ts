@@ -48,14 +48,16 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const statusText = $('.routing-status'), prepare = $<HTMLButtonElement>('.routing-prepare');
   const text = $<HTMLTextAreaElement>('.routing-text'), routeButton = $<HTMLButtonElement>('.routing-route'), result = $('.routing-result');
   const modes = $('.routing-modes'), off = $('.routing-off');
-  let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0, routeTicket = 0, routeBusy = false;
+  let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0, routeTicket = 0, routeBusy = false, activeRoutes = 0;
+  // Never let repeated input edits create unbounded simultaneous native profiler calls.
+  const previewDisabled = () => !status?.enabled || routeBusy || writing > 0 || activeRoutes >= 2;
   // Invalidated previews must not block a new task while an obsolete request is still running.
   const discardPreview = () => {
     routeTicket++;
     routeBusy = false;
     result.hidden = true;
     result.textContent = '';
-    routeButton.disabled = !status?.enabled || writing > 0;
+    routeButton.disabled = previewDisabled();
   };
   // Routing cannot preview an unsaved policy, or start before initial status arrives.
   routeButton.disabled = true;
@@ -74,7 +76,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     ).finally(() => {
       if (write) {
         writing--;
-        if (!disposed) routeButton.disabled = !status?.enabled || routeBusy || writing > 0;
+        if (!disposed) routeButton.disabled = previewDisabled();
       }
     });
   };
@@ -110,7 +112,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     trackSegment(modes, modes.querySelector<HTMLElement>('.selected'));
     minRow.hidden = next.mode !== 'cheapest';
     if (document.activeElement !== minP) minP.value = String(Math.round(next.minP * 100));
-    off.hidden = next.enabled; text.disabled = !next.enabled; routeButton.disabled = !next.enabled || routeBusy || writing > 0;
+    off.hidden = next.enabled; text.disabled = !next.enabled; routeButton.disabled = previewDisabled();
     if (next.profiler === 'downloading') poll();
     statusText.textContent = { ready: 'Ready', downloading: 'Downloading…', missing: 'Not downloaded', failed: `Failed: ${next.error ?? 'unknown error'}`, unavailable: `Keyword heuristic: ${next.error ?? 'the profiler cannot run here'}` }[next.profiler];
     prepare.hidden = next.profiler === 'ready' || next.profiler === 'downloading' || next.profiler === 'unavailable';
@@ -150,9 +152,10 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   });
   routeButton.addEventListener('click', async () => {
     const task = text.value.trim();
-    if (!task || routeButton.disabled || routeBusy) return;
+    if (!task || routeButton.disabled || routeBusy || activeRoutes >= 2) return;
     const ticket = ++routeTicket;
     routeBusy = true;
+    activeRoutes++;
     routeButton.disabled = true; result.hidden = false; result.textContent = 'Routing…';
     try {
       const { catalog: pool } = await installedCatalog(options.providers, options.loadModels);
@@ -166,10 +169,9 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
       if (!disposed && ticket === routeTicket && status?.enabled) fail(cause);
     }
     finally {
-      if (ticket === routeTicket) {
-        routeBusy = false;
-        if (!disposed) routeButton.disabled = !status?.enabled || writing > 0;
-      }
+      activeRoutes--;
+      if (ticket === routeTicket) routeBusy = false;
+      if (!disposed) routeButton.disabled = previewDisabled();
     }
   });
 

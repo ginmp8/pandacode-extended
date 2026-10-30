@@ -33,16 +33,18 @@ type ModelPickerOptions = {
 const RECENT_LIMIT = 5;
 const WIDTH = 460;
 const HEIGHT = 440;
-const recentKey = (provider: ProviderId) => `pandacode.recent-models.${provider}`;
-function storedRecent(provider: ProviderId): string[] {
+// Preserve legacy harness-level recents while isolating selections made through named accounts.
+const recentKey = (provider: ProviderId, connection: string | null = null) =>
+  `pandacode.recent-models.${provider}` + (connection === null ? '' : `.connection.${encodeURIComponent(connection)}`);
+function storedRecent(provider: ProviderId, connection: string | null = null): string[] {
   try {
-    const stored = JSON.parse(localStorage.getItem(recentKey(provider)) || '[]');
+    const stored = JSON.parse(localStorage.getItem(recentKey(provider, connection)) || '[]');
     return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : [];
   } catch { return []; }
 }
-function rememberRecent(provider: ProviderId, model: string): void {
+function rememberRecent(provider: ProviderId, model: string, connection: string | null = null): void {
   if (model === 'default') return;
-  try { localStorage.setItem(recentKey(provider), JSON.stringify([model, ...storedRecent(provider).filter(id => id !== model)].slice(0, RECENT_LIMIT))); } catch { /* Ordering only. */ }
+  try { localStorage.setItem(recentKey(provider, connection), JSON.stringify([model, ...storedRecent(provider, connection).filter(id => id !== model)].slice(0, RECENT_LIMIT))); } catch { /* Ordering only. */ }
 }
 
 const optionKey = (button: HTMLElement) => `${button.dataset.connection ?? ''}|${button.dataset.provider}:${button.dataset.model}`;
@@ -173,19 +175,19 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   const isCurrent = (row: Row) => !teamSelected && !row.custom && row.group.provider.id === current.provider && row.model.id === (current.model || 'default') && (row.group.connection?.id ?? null) === currentConnection;
 
   /** Default plus the most recent models, padded from the catalog, when the caller asks for a short list. */
-  function shortList(provider: ProviderId, all: ProviderModel[]): ProviderModel[] {
+  function shortList(provider: ProviderId, all: ProviderModel[], connection: string | null): ProviderModel[] {
     const recent = options.recent?.(provider);
     if (!recent) return all;
     const byId = new Map(all.map(model => [model.id, model]));
-    const first = [...(provider === current.provider ? [current.model] : []), ...recent, ...storedRecent(provider)].filter(id => id !== 'default' && byId.has(id));
+    const first = [...(provider === current.provider ? [current.model] : []), ...recent, ...storedRecent(provider, connection)].filter(id => id !== 'default' && byId.has(id));
     const ids = [...new Set([...first, ...all.map(model => model.id).filter(id => id !== 'default')])].slice(0, RECENT_LIMIT);
     return [byId.get('default')!, ...ids.map(id => byId.get(id)!)];
   }
 
   /** The current pick, then each harness's latest stored picks, newest harness first. */
   function recentRows(all: Group[]): Row[] {
-    const plain = all.filter(group => !group.connection && !group.locked && !group.unavailable);
-    const stored = plain.map(group => ({ group, ids: storedRecent(group.provider.id) }));
+    const available = all.filter(group => !group.locked && !group.unavailable);
+    const stored = available.map(group => ({ group, ids: storedRecent(group.provider.id, group.connection?.id ?? null) }));
     const picks: [Group | undefined, string][] = [[all.find(group => group.key === (currentConnection ? `c:${currentConnection}` : `h:${current.provider}`)), current.model],
       ...stored.flatMap(({ group, ids }) => ids.slice(0, 1).map(id => [group, id] as [Group, string])), ...stored.flatMap(({ group, ids }) => ids.slice(1).map(id => [group, id] as [Group, string]))];
     const seen = new Set<string>();
@@ -289,7 +291,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     } else {
       const group = all.find(group => group.key === view);
       if (group) {
-        const visible = shortList(group.provider.id, models(group));
+        const visible = shortList(group.provider.id, models(group), group.connection?.id ?? null);
         total = visible.length;
         const status = group.locked ? '<span>New task required</span>' : group.unavailable ? '<span>Unavailable</span>' : `<span data-catalog-loading="${group.provider.id}" hidden>Loading…</span>`;
         markup = heading(providerLogo(group.provider.id), group.name, status) + visible.map(model => modelRow({ group, model }, false, '')).join('');
@@ -458,7 +460,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       if (button.dataset.team) await options.onTeamSelect?.(button.dataset.team);
       else {
         await onSelect(button.dataset.provider as ProviderId, button.dataset.model!, button.dataset.connection ?? null);
-        rememberRecent(button.dataset.provider as ProviderId, button.dataset.model!);
+        rememberRecent(button.dataset.provider as ProviderId, button.dataset.model!, button.dataset.connection ?? null);
       }
       close();
     } catch (reason) {

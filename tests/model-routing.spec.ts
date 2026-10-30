@@ -88,6 +88,18 @@ test('Settings retries an initial transient routing status read without user act
   await expect(settings(page).getByText('Not downloaded', { exact: true })).toBeVisible();
 });
 
+test('routing preview is disabled until the initial native status has loaded', async ({ page }) => {
+  await install(page);
+  await page.evaluate(() => { (window as any).__routingDelay = { model_routing_status: 1300 }; });
+  await openAgents(page);
+  const routeButton = settings(page).getByRole('button', { name: 'Route', exact: true });
+  const task = settings(page).getByRole('textbox', { name: 'Task to route' });
+  await expect(routeButton).toBeDisabled();
+  await expect(task).toBeDisabled();
+  await expect(task).toBeEnabled();
+  await expect(routeButton).toBeEnabled();
+});
+
 test('rapid Settings changes persist in user order even when the first native write is slow', async ({ page }) => {
   await install(page);
   await openAgents(page);

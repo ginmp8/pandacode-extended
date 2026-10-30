@@ -167,7 +167,9 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       locked: !canSwitchProvider && provider.id !== current.provider, unavailable: !provider.installed,
     })));
   }
-  const models = (group: Group) => modelChoices(group.provider.id, group.provider.models, group.provider.id === current.provider ? current.model : '');
+  // A saved custom model belongs to its selected connection, not every account on that harness.
+  const models = (group: Group) => modelChoices(group.provider.id, group.provider.models,
+    group.provider.id === current.provider && (group.connection?.id ?? null) === currentConnection ? current.model : '');
   const isCurrent = (row: Row) => !teamSelected && !row.custom && row.group.provider.id === current.provider && row.model.id === (current.model || 'default') && (row.group.connection?.id ?? null) === currentConnection;
 
   /** Default plus the most recent models, padded from the catalog, when the caller asks for a short list. */

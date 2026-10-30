@@ -12,12 +12,13 @@ async function install(page: Page, init?: () => void): Promise<void> {
     await route.fulfill({ response, body: source.replace(marker, `async function invoke(command, args) {
       (window.__routing ??= { calls: [] }).calls.push({ command, args: structuredClone(args) });
       // Test hook: \`__routingFail[command] = message\` rejects that command until cleared.
-      const failure = window.__routingFail?.[command];
-      if (failure) throw new Error(failure);
+      const failure = command === 'model_routing_configure' && window.__routingWriteFailures?.length
+        ? window.__routingWriteFailures.shift() : window.__routingFail?.[command];
       // Test hook: \`__routingDelay[command] = ms\` holds that command back before it runs.
       const delay = command === 'model_routing_configure' && window.__routingWriteDelays?.length
         ? window.__routingWriteDelays.shift() : window.__routingDelay?.[command];
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      if (failure) throw new Error(failure);
       return invokePreview(command, args);
     }
     async function invokePreview(command, args) {`) });
@@ -95,6 +96,26 @@ test('a later Team mode change wins over an in-flight Settings write after closi
   await openAgents(page);
   const before = (await calls(page, 'model_routing_configure')).length;
   await page.evaluate(() => { (window as any).__routingWriteDelays = [1200, 0]; });
+  await settings(page).getByRole('radio', { name: 'Cheap' }).click();
+  await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(before + 1);
+  await closeSettings(page);
+  await pickTeam(page, 'Best team');
+  await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(before + 2);
+  await page.reload();
+  await page.locator('.task-item[data-id="session-2"]').click();
+  await openAgents(page);
+  await expect(settings(page).getByRole('radio', { name: 'Best' })).toHaveAttribute('aria-checked', 'true');
+});
+
+test('a failed Settings write never blocks a later Team preference save', async ({ page }) => {
+  await install(page);
+  await pickTeam(page, 'Balanced team');
+  await openAgents(page);
+  const before = (await calls(page, 'model_routing_configure')).length;
+  await page.evaluate(() => {
+    (window as any).__routingWriteDelays = [550, 0];
+    (window as any).__routingWriteFailures = ['Simulated settings save failure', null];
+  });
   await settings(page).getByRole('radio', { name: 'Cheap' }).click();
   await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(before + 1);
   await closeSettings(page);

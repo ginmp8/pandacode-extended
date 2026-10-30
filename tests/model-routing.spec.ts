@@ -22,6 +22,8 @@ async function install(page: Page, init?: () => void): Promise<void> {
         : command === 'model_routing_route' && window.__routingPreviewDelays?.length
           ? window.__routingPreviewDelays.shift() : window.__routingDelay?.[command];
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      // Deterministic test hold: release native calls in a chosen order, without timer races.
+      if (window.__routingHold?.[command]) await new Promise(resolve => (window.__routingReleases ??= []).push(resolve));
       if (failure) throw new Error(failure);
       return invokePreview(command, args);
     }
@@ -203,48 +205,23 @@ test('editing a task allows an immediate new preview without an old request unlo
   const task = settings(page).getByRole('textbox', { name: 'Task to route' });
   const routeButton = settings(page).getByRole('button', { name: 'Route', exact: true });
   const result = settings(page).locator('.routing-result');
-  await page.evaluate(() => { (window as any).__routingDelay = { model_routing_route: 700 }; });
+  await page.evaluate(() => { (window as any).__routingHold = { model_routing_route: true }; });
   await task.fill('Fix the failing login test');
   await routeButton.click();
   await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
   await task.fill('Write release notes for the next version');
-  // The old request is obsolete; the new task can run without waiting for it.
+  // First native call remains held: a new task must be routable immediately.
   await expect(result).toBeHidden();
   await expect(routeButton).toBeEnabled();
-  await page.evaluate(() => { (window as any).__routingDelay = { model_routing_route: 2200 }; });
   await routeButton.click();
   await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(2);
-  // First request settles while the second remains pending; it must not unlock Route.
-  await page.waitForTimeout(900);
+  // Release the stale call while the newer one remains in flight.
+  await page.evaluate(() => (window as any).__routingReleases.shift()());
   await expect(routeButton).toBeDisabled();
   await expect(result).toHaveText('Routing…');
-  await expect(result).toContainText('Difficulty', { timeout: 7000 });
-  await expect(routeButton).toBeEnabled();
-});
-
-test('an edited task can reroute while an older preview finishes out of order', async ({ page }) => {
-  await install(page);
-  await openAgents(page);
-  await page.evaluate(() => { (window as any).__routingPreviewDelays = [800, 1700]; });
-  const task = settings(page).getByRole('textbox', { name: 'Task to route' });
-  const button = settings(page).getByRole('button', { name: 'Route', exact: true });
-  const result = settings(page).locator('.routing-result');
-
-  await task.fill('Fix the failing login test');
-  await button.click();
-  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
-  await task.fill('Write release notes for the next version');
-  await expect(result).toBeHidden();
-  // The older native route is still pending, but it must not hold the button.
-  await expect(button).toBeEnabled({ timeout: 250 });
-  await button.click();
-  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(2);
-  await page.waitForTimeout(950);
-  // The first request finished; the second must remain locked until it finishes.
-  await expect(button).toBeDisabled();
-  await expect(result).toHaveText('Routing…');
-  await expect(button).toBeEnabled({ timeout: 5000 });
+  await page.evaluate(() => (window as any).__routingReleases.shift()());
   await expect(result).toContainText('Difficulty');
+  await expect(routeButton).toBeEnabled();
 });
 
 test('changing mode hides the older preview before the delayed native save completes', async ({ page }) => {

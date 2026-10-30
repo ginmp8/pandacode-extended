@@ -185,6 +185,11 @@ fn effort(provider: &str, effort: Option<&String>) -> Option<String> {
     effort.filter(|e| crate::providers::validate_reasoning_effort(provider, Some(e)).is_ok()).cloned()
 }
 
+/// Validate saved fallback efforts against the provider selected by this dispatch.
+fn compatible_effort(provider: &str, requested: Option<&String>, saved: Option<&String>) -> Option<String> {
+    effort(provider, requested).or_else(|| effort(provider, saved))
+}
+
 fn money(usd: f64) -> String {
     if usd < 0.01 { format!("${usd:.4}") } else { format!("${usd:.2}") }
 }
@@ -213,7 +218,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
             if config.roster_only && roster.is_none() {
                 return Err("Panda Router picked a model outside this team.".into());
             }
-            let reasoning_effort = effort(&pick.provider, wanted).or_else(|| roster.and_then(|p| p.reasoning_effort.clone()));
+            let reasoning_effort = compatible_effort(&pick.provider, wanted, roster.and_then(|p| p.reasoning_effort.as_ref()));
             let label = if pick.name.contains('·') { pick.name.clone() } else { format!("{} · {}", pick.name, pick.provider) };
             // The keyword heuristic stands in while the profiler downloads; say so.
             let rough = if profiler == "heuristic" { ", heuristic" } else { "" };
@@ -247,7 +252,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
             name: lead.model.clone(),
             provider: lead.provider.clone(),
             model: lead.model.clone(),
-            reasoning_effort: effort(&lead.provider, wanted).or_else(|| lead.reasoning_effort.clone()),
+            reasoning_effort: compatible_effort(&lead.provider, wanted, lead.reasoning_effort.as_ref()),
         }
     } else {
         let entry = config
@@ -256,7 +261,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
             .find(|p| p.provider == lead.provider && p.model == lead.model)
             .or(config.workers.first())
             .ok_or("This team has no models.")?;
-        WorkerProfile { reasoning_effort: effort(&entry.provider, wanted).or_else(|| entry.reasoning_effort.clone()), ..entry.clone() }
+        WorkerProfile { reasoning_effort: compatible_effort(&entry.provider, wanted, entry.reasoning_effort.as_ref()), ..entry.clone() }
     };
     let note = format!("not routed ({reason}), using {} · {}", profile.name, profile.provider);
     Ok((profile, note))
@@ -347,4 +352,19 @@ pub(super) async fn route_models(config: &TeamConfig, langs: &[String], args: Va
         .await
         .ok_or_else(|| format!("{} Choose models yourself.", model_routing::OFF))??;
     Ok(route_summary(config, &routes))
+}
+
+#[cfg(test)]
+mod routing_effort_tests {
+    use super::compatible_effort;
+
+    #[test]
+    fn saved_effort_is_validated_for_the_actual_selected_provider() {
+        let unsupported = "turbo".to_string();
+        let supported = "on".to_string();
+        assert_eq!(compatible_effort("kimi", None, Some(&unsupported)), None);
+        assert_eq!(compatible_effort("kimi", Some(&unsupported), Some(&supported)), Some("on".to_string()));
+        assert_eq!(compatible_effort("kimi", Some(&supported), Some(&unsupported)), Some("on".to_string()));
+        assert_eq!(compatible_effort("kimi", None, Some(&supported)), Some("on".to_string()));
+    }
 }

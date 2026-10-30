@@ -1946,6 +1946,8 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
   if (workers?.parentElement === host && !retained.has(workers)) region.after(workers);
   for (const child of [...host.children]) if (!retained.has(child as HTMLElement)) child.remove();
   next.forEach((node, index) => { if (host.children[index] !== node) host.insertBefore(node, host.children[index] ?? null); });
+  const turn = region.querySelector<HTMLDetailsElement>('.turn-activity');
+  if (turn) turn.hidden = ![...host.children].some(node => node !== liveMessage);
   // Steps the agent narrated past fold once to their one-line summary, so later work never reopens them.
   const newestGroup = next.map(node => node.classList.contains('tool-group')).lastIndexOf(true);
   const narratedPast = next.slice(0, Math.max(newestGroup, 0)).map(node => node.classList.contains('agent-message')).lastIndexOf(true);
@@ -2194,6 +2196,7 @@ function renderComposer(): void {
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="bot-failover-bar"></div>');
+  renderBotFailover();
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="approval-bar"></div>');
   $('#composer').insertAdjacentHTML('beforebegin', remoteMissingNote(s) + remoteStartStrip(s.id) + (running ? '' : limitBanner(s, Date.now(), limitConnections(s, namedConnections))) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team, sendable: !botProjects.has(s.projectId) && !s.archived, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued }));
   renderApprovalBar(); resizePrompt();

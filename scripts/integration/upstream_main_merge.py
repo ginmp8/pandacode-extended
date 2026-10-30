@@ -34,7 +34,6 @@ PRESERVE = [
 ]
 ADDITIONAL_PRESERVE_FROM_LAUNCHER = [
     "docs/integration/main-to-main/README.md",
-    ".github/workflows/experimental-upstream-merge-assessment.yml",
     "scripts/integration/upstream_main_merge.py",
 ]
 # Keep release workflows from the Extended source; never import upstream distribution triggers.
@@ -80,6 +79,8 @@ if git("status", "--porcelain").stdout.strip():
 if rev(f"{EXT}^{{commit}}") != EXT:
     raise RuntimeError("Extended main source is not present.")
 
+git("config", "user.name", "github-actions[bot]")
+git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
 git("remote", "add", "fork", "https://github.com/ginmp8/pandacode.git")
 git("-c", "protocol.version=2", "fetch", "--no-tags", "--depth=1", "fork", UPSTREAM, BASE)
 for ref in [EXT, UPSTREAM, BASE]:
@@ -172,11 +173,11 @@ summary = {
 
 report = f"""# Initial synthetic main-to-main integration candidate — not approved
 
-Extended main: \`{EXT}\`  
-Fork main: \`{UPSTREAM}\`  
-Original content ancestor: \`{BASE}\`
+Extended main: `{EXT}`  
+Fork main: `{UPSTREAM}`  
+Original content ancestor: `{BASE}`
 
-Source merge tree \`{merged_tree}\`. For the first automated code import, conflicting content favors Extended. **This does not prove the new upstream behavior is present in conflicting functions.**
+Source merge tree `{merged_tree}`. For the first automated code import, conflicting content favors Extended. **This does not prove the new upstream behavior is present in conflicting functions.**
 
 - Paths modified from Extended main: **{len(extended_changed)}**
 - Paths still different from fork main: **{len(upstream_remaining)}** (includes legitimate hardening, branding and exclusive features)
@@ -184,13 +185,13 @@ Source merge tree \`{merged_tree}\`. For the first automated code import, confli
 - Protected paths were restored byte-for-byte from Extended main. Upstream-only workflow files were not imported.
 - Full acceptance, functional parity and security validation: **NOT EXECUTED**.
 
-The list of unresolved paths is in \`docs/integration/main-to-main/unresolved-paths.txt\`. A full assessment artifact is attached to the GitHub Actions importer run. The report is **a worklist**, not a resolution certificate.
+The list of unresolved paths is in `docs/integration/main-to-main/unresolved-paths.txt`. A full assessment artifact is attached to the GitHub Actions importer run. The report is **a worklist**, not a resolution certificate.
 
 ## Next gates
 
 1. Audit each auto-merged source path touching network access, credentials, remote execution, providers, agent tool grants, Tauri IPC, storage, cloud connections and mobile push.
 2. Reconcile all retained Extended conflict paths against upstream source and tests. Keep both sets of user-facing features or document an explicit verified incompatibility.
-3. Reconcile and lock new dependency requirements with no updater, unattended installer, untrusted \`npx\` bootstrap or non-consensual downloads.
+3. Reconcile and lock new dependency requirements with no updater, unattended installer, untrusted `npx` bootstrap or non-consensual downloads.
 4. Verify tests/builds under a **separate read-only CI token**, then execute native/physical remote safety checks.
 5. Never merge to main or publish this candidate solely based on Git's merge result.
 """

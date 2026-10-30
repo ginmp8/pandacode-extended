@@ -15,10 +15,11 @@
 - First import stages all **163 upstream-only updated files**; preserves **all Extended-only files and all concurrent Extended changes**.
 
 ## Remaining
-1. Import fork-only runtime/features, with packaging and external egress review.
-2. Reconcile all 169 common files modified on both sides: retain Extended security and exclusive Board/GitHub/product behavior while incorporating fork main changes.
-3. Verify full frontend, Rust, mobile and relay tests/builds, static and runtime security regressions, Windows installer and up-to-date provider behavior.
-4. Inspect same-SHA GitHub CI and issue acceptance; no issue closure/renumbering/release/merge to main without review.
+1. **Imported 195 fork-only files** including new application, Rust, mobile, relay, website and test sources. Of 267 fork-only paths, 72 are intentionally withheld: upstream release workflow, benchmark/telemetry fixtures and app-store images, plus a Cloudflare publishing config.
+2. Review whether any withheld source is required by release, docs or user-visible behavior; do not restore automatic publishing or network exposure.
+3. Reconcile all 169 common files modified on both sides: retain Extended security and exclusive Board/GitHub/product behavior while incorporating fork main changes.
+4. Verify full frontend, Rust, mobile and relay tests/builds, static and runtime security regressions, Windows installer and up-to-date provider behavior.
+5. Inspect same-SHA GitHub CI and issue acceptance; no issue closure/renumbering/release/merge to main without review.
 
 ## Non-negotiable Extended controls
 Updater and automatic agent installation remain disabled; npx installer and publishing workflows cannot download/publish; Windows installs current-user without fetching WebView2; Cargo/npm dependencies are locked. Tauri capabilities remain main-only, preview CSP is constrained, credentials use OS keychain, Connect requires device trust/replay/revocation checks and remote Full remains default-off, bots require approval before outbound content, and cloud/network requests cannot bypass existing controls.

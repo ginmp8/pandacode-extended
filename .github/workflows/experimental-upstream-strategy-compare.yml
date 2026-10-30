@@ -1,0 +1,98 @@
+name: Experimental theirs-preferred semantic merge check
+on:
+  push:
+    branches: ['integration/0.7.0-main-to-main']
+    paths: ['.github/workflows/experimental-upstream-strategy-compare.yml']
+permissions:
+  contents: read
+jobs:
+  upstream-first:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Compare upstream-preferred three-way source with protected Extended manifests
+        env:
+          GIT_LFS_SKIP_SMUDGE: '1'
+          GIT_TERMINAL_PROMPT: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add fork https://github.com/ginmp8/pandacode.git
+          git fetch --no-tags --depth=1 fork 70bdc708303c8681d8eb0b46f2cdb0ff087aa6eb 0336a2fb5e3abaea35c095fcc63805652f49ea98
+          git fetch --no-tags --depth=1 origin f0105e7db85a0d7bc2e70726716fcfa939fac182
+          git config user.name "diagnostic"
+          git config user.email "diagnostic@example.invalid"
+          mkdir -p /tmp/strategy-compare
+          python3 - <<'PY'
+          import re, subprocess, pathlib
+          EXT="f0105e7db85a0d7bc2e70726716fcfa939fac182"
+          UP="0336a2fb5e3abaea35c095fcc63805652f49ea98"
+          BASE="70bdc708303c8681d8eb0b46f2cdb0ff087aa6eb"
+          root=pathlib.Path("/tmp/strategy-compare")
+          def git(*a,check=True):
+              p=subprocess.run(["git",*a],text=True,capture_output=True)
+              if check and p.returncode: raise RuntimeError(str(a)+":"+p.stdout+p.stderr)
+              return p
+          merge=git("merge-tree","--write-tree","--merge-base="+BASE,"-X","theirs",EXT,UP,check=False)
+          (root/"upstream-favored-merge.log").write_text(merge.stdout+merge.stderr)
+          tree=merge.stdout.splitlines()[0]
+          assert re.fullmatch("[a-f0-9]{40,64}",tree)
+          stages={m.group(1) for line in merge.stdout.splitlines() if (m:=re.match(r"^[0-7]{6} [0-9a-f]{40,64} [123]\t(.+)$",line))}
+          candidate=git("commit-tree",tree,"-p",EXT,"-m","Diagnostic upstream-favored snapshot").stdout.strip()
+          dest=pathlib.Path("/tmp/strategy-compare/tree")
+          git("worktree","add","--detach",str(dest),candidate)
+          protected=[
+            ".github/workflows",".npmrc","AGENTS.md","LICENSE","SECURITY-HARDENING.md",
+            "SECURITY-INSTALLATION-REVIEW.md","HARDENED-REVISION.json","EXTENDED-RELEASE.json",
+            "package.json","package-lock.json","mobile/app.json","mobile/app.config.ts",
+            "mobile/package.json","mobile/package-lock.json","relay/package.json","relay/package-lock.json",
+            "src-tauri/Cargo.toml","src-tauri/Cargo.lock","src-tauri/tauri.conf.json","src-tauri/capabilities",
+            "src/app-updates.ts","src/app-updates-policy.ts","src-tauri/src/agent_updates.rs",
+            "src-tauri/src/agent_updates_install.rs","src-tauri/src/local_signing.rs",
+            "src-tauri/src/secret_store.rs","docs/VERSIONING.md","docs/releasing.md","scripts/release",
+          ]
+          for path in sorted(stages):
+              git("-C",str(dest),"restore","--source="+UP,"--staged","--worktree","--",path,check=False)
+          for path in protected:
+              git("-C",str(dest),"restore","--source="+EXT,"--staged","--worktree","--",path,check=False)
+          lib=dest/"src-tauri/src/lib.rs"
+          code=lib.read_text()
+          for unwanted in ["mod app_updates;\n","        .plugin(tauri_plugin_updater::Builder::new().build())\n",
+                           "        .plugin(tauri_plugin_process::init())\n",
+                           "                app_updates::app_update_install_supported,\n"]:
+              code=code.replace(unwanted,"")
+          lib.write_text(code)
+          git("-C",str(dest),"restore","--source="+EXT,"--staged","--worktree","--","src-tauri/src/app_updates.rs",check=False)
+          (root/"summary.txt").write_text(
+            f"mode=upstream-favored\nmerge_exit={merge.returncode}\nunresolved_after_merge={len(stages)}\n"
+            f"tree={tree}\nsource_extended_main={EXT}\nsource_upstream_main={UP}\n"
+          )
+          print((root/"summary.txt").read_text())
+          PY
+          cd /tmp/strategy-compare/tree
+          npm ci --ignore-scripts --no-audit --no-fund > /tmp/strategy-compare/npm-ci.log 2>&1
+          set +e
+          ./node_modules/.bin/tsc --noEmit > /tmp/strategy-compare/tsc.log 2>&1
+          rc=$?
+          set -e
+          echo "tsc_exit=$rc" | tee -a /tmp/strategy-compare/summary.txt
+          echo "tsc_error_count=$(grep -c 'error TS' /tmp/strategy-compare/tsc.log || true)" | tee -a /tmp/strategy-compare/summary.txt
+          sed -n '1,35p' /tmp/strategy-compare/tsc.log
+      - name: Archive diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: main-to-main-upstream-favored-typecheck
+          path: |
+            /tmp/strategy-compare/summary.txt
+            /tmp/strategy-compare/tsc.log
+            /tmp/strategy-compare/npm-ci.log
+          retention-days: 7
+          if-no-files-found: warn

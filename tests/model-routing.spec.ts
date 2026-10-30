@@ -92,13 +92,15 @@ test('Settings retries an initial transient routing status read without user act
 
 test('a failed save cannot swallow the only initial status retry', async ({ page }) => {
   await install(page);
+  // Startup may have read status already; hold and count only this Settings mount.
+  const before = (await calls(page, 'model_routing_status')).length;
   await page.evaluate(() => {
     (window as any).__routingHold = { model_routing_status: true };
     (window as any).__routingStatusFailures = ['Initial status read failed', null];
     (window as any).__routingWriteFailures = ['Mode save failed'];
   });
   await openAgents(page);
-  await expect.poll(async () => (await calls(page, 'model_routing_status')).length).toBe(1);
+  await expect.poll(async () => (await calls(page, 'model_routing_status')).length).toBe(before + 1);
   // The write supersedes the held read's generation, but its own save also fails.
   await settings(page).getByRole('radio', { name: 'Cheap' }).click();
   await expect.poll(async () => (await calls(page, 'model_routing_configure')).length).toBe(1);
@@ -107,7 +109,7 @@ test('a failed save cannot swallow the only initial status retry', async ({ page
     (window as any).__routingReleases.shift()();
   });
   await expect(settings(page).getByText('Routing status unavailable; retrying…')).toBeVisible();
-  await expect.poll(async () => (await calls(page, 'model_routing_status')).length).toBe(2);
+  await expect.poll(async () => (await calls(page, 'model_routing_status')).length).toBe(before + 2);
   await expect(settings(page).getByRole('radio', { name: 'Balanced' })).toHaveAttribute('aria-checked', 'true');
   await expect(settings(page).getByRole('button', { name: 'Route', exact: true })).toBeEnabled();
 });

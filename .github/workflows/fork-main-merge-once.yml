@@ -1,0 +1,49 @@
+name: One-time direct fork main merge (experimental)
+on:
+  push:
+    branches:
+      - integration/0.7.0-fork-main-into-extended-main
+    paths:
+      - .github/workflows/fork-main-merge-once.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-time-fork-main-integration
+  cancel-in-progress: false
+
+jobs:
+  source-only-three-way:
+    if: github.repository == 'ginmp8/pandacode-extended' && github.ref == 'refs/heads/integration/0.7.0-fork-main-into-extended-main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout isolated Extended integration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Fetch pinned fork commits (no execution of fetched code)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c http.https://github.com/.extraheader= fetch --no-tags --depth=1 https://github.com/ginmp8/pandacode.git 0336a2fb5e3abaea35c095fcc63805652f49ea98 15541a51f3f5d8ee32d91349f9d5035a53c4cd19
+          git cat-file -t 0336a2fb5e3abaea35c095fcc63805652f49ea98
+          git cat-file -t 15541a51f3f5d8ee32d91349f9d5035a53c4cd19
+      - name: Three-way source-only merge with security protection
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/integrate_fork_main.py
+      - name: Commit only to the isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A -- src mobile/src mobile/tests relay/src relay/test tests docs website/src
+          if ! git diff --cached --quiet; then
+            git -c user.name='PandaCode Integration Bot' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'chore(integration): auto-merge nonconflicting fork main changes'
+            git push origin HEAD:refs/heads/integration/0.7.0-fork-main-into-extended-main
+          else
+            echo 'No conflict-free source changes to commit.'
+          fi

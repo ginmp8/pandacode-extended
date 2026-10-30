@@ -405,9 +405,18 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       : canSetEffort ? `<div class="model-menu-effort-row"><span class="model-menu-effort-label" id="${uid}-effort">Effort</span><div class="model-menu-effort" role="radiogroup" aria-labelledby="${uid}-effort">${choices.map(effort => `<button type="button" role="radio" data-effort="${escape(effort.id)}" title="${escape(effort.description || effort.name)}"${effort.id && effort.id === model.defaultReasoningEffort ? ' data-model-default=""' : ''}>${escape(effort.name)}</button>`).join('')}</div></div><p class="model-menu-effort-hint"></p>` : '';
     if (markup !== settingsKey) {
       const focused = settings.contains(document.activeElement);
+      const focusedEffort = focused
+        ? (document.activeElement as HTMLElement).closest<HTMLElement>('[role="radio"]')?.dataset.effort
+        : undefined;
       settings.innerHTML = markup;
       settingsKey = markup;
-      if (focused) (settings.querySelector<HTMLElement>('.selected') ?? search).focus({ preventScroll: true });
+      if (focused) {
+        // Catalog refresh replaces the radio buttons before the new selected class
+        // is applied. Restore the actual keyboard choice, not the search field.
+        const target = [...settings.querySelectorAll<HTMLElement>('[role="radio"]')]
+          .find(button => button.dataset.effort === focusedEffort);
+        (target ?? settings.querySelector<HTMLElement>('.selected') ?? search).focus({ preventScroll: true });
+      }
     }
     const group = settings.querySelector<HTMLElement>('.model-menu-effort');
     if (!group) return;

@@ -40,11 +40,8 @@ const MAX_INLINE_TEXT = 32768;
 
 function id(): string { return crypto.randomUUID(); }
 function baseName(path: string): string { return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path; }
-/** A path the agent can open itself, quoted when it holds spaces. */
-export function quotePath(path: string): string { return /\s/.test(path) ? `"${path.replace(/"/g, '\\"')}"` : path; }
-const alreadyAttached = (error: unknown) => String(error instanceof Error ? error.message : error).includes('is already attached');
 function formatSize(bytes: number): string { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
-function quotePath(path: string): string { return /[\s"\\]/.test(path) ? JSON.stringify(path) : path; }
+export function quotePath(path: string): string { return /[\s"\\]/.test(path) ? JSON.stringify(path) : path; }
 function alreadyAttached(error: unknown): boolean { return String(error instanceof Error ? error.message : error).includes('already attached'); }
 function documentLabel(document: PromptDocument): string {
   if (document.method === 'history') return 'Saved attachment snapshot';
@@ -108,14 +105,6 @@ export function mountPromptAttachments(host: AttachmentsHost) {
   async function addFolder(taskId: string, path: string): Promise<void> {
     const folder = await call<Omit<PromptFolder, 'kind' | 'id'>>('describe_folder', { path });
     add(taskId, { kind: 'folder', id: id(), ...folder });
-  }
-
-  /** Dropped items that cannot be attached go into the prompt as text, one per line, so the
-   * agent can still open them. Returns false when there was no prompt to take them. */
-  function insertInstead(lines: string[], what: string): boolean {
-    if (!lines.length || !host.insertText(lines.join('\n'))) return false;
-    host.notify(lines.length === 1 ? `Inserted ${what} for ${what === 'path' ? baseName(lines[0].replace(/^"|"$/g, '')) : lines[0].split(' (')[0]}` : `Inserted ${what}s for ${lines.length} files`);
-    return true;
   }
 
   /** Paths from a picker or a drop. Folders are tried first when the kind is unknown. */

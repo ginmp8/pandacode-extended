@@ -48,7 +48,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const statusText = $('.routing-status'), prepare = $<HTMLButtonElement>('.routing-prepare');
   const text = $<HTMLTextAreaElement>('.routing-text'), routeButton = $<HTMLButtonElement>('.routing-route'), result = $('.routing-result');
   const modes = $('.routing-modes'), off = $('.routing-off');
-  let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0;
+  let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0, routeTicket = 0;
   // Writes are shared with the composer Team menu and survive Settings remounts.
   // Only the reply to the newest request renders, so an older one never undoes a later change; a read
   // (status poll) also yields to a change still in flight, and a replaced request's failure stays quiet.
@@ -79,6 +79,12 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   };
 
   const render = (next: RoutingStatus) => {
+    // A response based on an earlier routing policy must not appear after it changes.
+    if (status && (status.enabled !== next.enabled || status.mode !== next.mode || status.minP !== next.minP)) {
+      routeTicket++;
+      result.hidden = true;
+      result.textContent = '';
+    }
     status = next;
     // The composer's Team button follows every status shown here.
     window.dispatchEvent(new CustomEvent('pandacode:routing', { detail: next }));
@@ -125,17 +131,20 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   routeButton.addEventListener('click', async () => {
     const task = text.value.trim();
     if (!task || routeButton.disabled) return;
+    const ticket = ++routeTicket;
     routeButton.disabled = true; result.hidden = false; result.textContent = 'Routing…';
     try {
       const { catalog: pool } = await installedCatalog(options.providers, options.loadModels);
       const route = await options.call<RouteResult>('model_routing_route', { text: task, pool });
-      if (disposed) return;
+      if (disposed || ticket !== routeTicket || !status?.enabled) return;
       const row = (m: RoutedModel, label: string) => `<li><span class="routing-label">${label}</span><span class="routing-name">${escape(m.name)}</span><span>${percent(m.pSuccess)}</span><span>${money(m.estCostUsd)}</span></li>`;
       const alternatives = route.ranking.filter(m => !route.pick || m.cardId !== route.pick.cardId).slice(0, 4);
       result.innerHTML = `<p class="routing-summary">Difficulty ${route.difficulty}/10 · ${escape(route.category)} · ${route.profiler === 'onnx' ? 'ONNX profiler' : 'keyword heuristic'} · ${Math.round(route.latencyMs)} ms</p>`
         + (route.pick ? `<ul class="routing-ranking" aria-label="Routed models">${row(route.pick, 'Pick')}${alternatives.map(m => row(m, 'Also')).join('')}</ul>` : '<p>No rated model fits. The lead will choose.</p>');
-    } catch (cause) { fail(cause); }
-    finally { routeButton.disabled = !status?.enabled; }
+    } catch (cause) {
+      if (!disposed && ticket === routeTicket && status?.enabled) fail(cause);
+    }
+    finally { if (!disposed) routeButton.disabled = !status?.enabled; }
   });
 
   void request('model_routing_status').catch(() => {

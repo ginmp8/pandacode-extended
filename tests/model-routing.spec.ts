@@ -184,6 +184,21 @@ test('changing mode hides the older preview before the delayed native save compl
   await expect(settings(page).getByRole('radio', { name: 'Cheap' })).toHaveAttribute('aria-checked', 'true');
 });
 
+test('a routing status update cannot re-enable Route during a pending preview', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  const routeButton = settings(page).getByRole('button', { name: 'Route', exact: true });
+  await page.evaluate(() => { (window as any).__routingDelay = { model_routing_route: 1200 }; });
+  await settings(page).getByRole('textbox', { name: 'Task to route' }).fill('Fix the failing login test');
+  await routeButton.click();
+  await expect(routeButton).toBeDisabled();
+  await settings(page).getByRole('radio', { name: 'Cheap' }).click();
+  await expect(settings(page).getByRole('radio', { name: 'Cheap' })).toHaveAttribute('aria-checked', 'true');
+  await expect(routeButton).toBeDisabled();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
+  await expect(routeButton).toBeEnabled();
+});
+
 test('the catalog keeps every harness and long shared prefixes', async ({ page }) => {
   await install(page);
   const result = await page.evaluate(async () => {

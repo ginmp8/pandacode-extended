@@ -40,7 +40,7 @@ flate2 = "=1.1.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["async-await-macro", "sink", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
 des = "0.8"

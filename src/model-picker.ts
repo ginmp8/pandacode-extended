@@ -288,7 +288,12 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       const takesCustom = (group?: Group): group is Group => Boolean(group) && !advertisedModelsOnly(group!.provider.id) && !group!.locked && !group!.unavailable && !models(group!).some(model => [model.id, model.name].some(value => value.toLowerCase() === normalized));
       const viewed = all.find(group => group.key === view);
       const custom = namedHarness ? undefined : [viewed, all.find(group => group.key === `h:${current.provider}`)].find(takesCustom);
-      if (custom) { total++; markup += modelRow({ group: custom, model: fallbackModel(custom.provider.id, query), custom: true }, true, query); }
+      if (custom) {
+        // Explain an empty catalog while still offering a custom model ID for supported harnesses.
+        if (!total) markup += '<p class="model-menu-empty">No matching models.</p>';
+        total++;
+        markup += modelRow({ group: custom, model: fallbackModel(custom.provider.id, query), custom: true }, true, query);
+      }
     } else if (view === 'recent') {
       total = recent.length;
       markup = heading(icon('undo'), 'Recent') + recent.map(row => modelRow(row, true, '')).join('');

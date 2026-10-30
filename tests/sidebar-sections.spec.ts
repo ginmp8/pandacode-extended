@@ -383,16 +383,16 @@ test.describe('sidebar sections', () => {
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pandacode.sidebar.sort')!).perProject)).toBe(10);
   });
 
-  test('Settled docks at the bottom of the list while 30 running threads scroll above it', async ({ page }) => {
+  test('Settled docks at the bottom of the list while 120 running threads scroll above it', async ({ page }) => {
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
-      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `if (!window.__manyRunning) { window.__manyRunning = true; for (let i = 0; i < 30; i++) sessions.push({ ...sessions[0], id: 'many-running-' + i, title: 'Running task ' + i, status: 'running', taskStage: 'in_progress', lastPromptAt: Date.now() - i * 60000, pinned: false, sidebarOrder: null }); }
+      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `if (!window.__manyRunning) { window.__manyRunning = true; for (let i = 0; i < 120; i++) sessions.push({ ...sessions[0], id: 'many-running-' + i, title: 'Running task ' + i, status: 'running', taskStage: 'in_progress', lastPromptAt: Date.now() - i * 60000, pinned: false, sidebarOrder: null }); }
 $&`);
       await route.fulfill({ response, body });
     });
     await page.setViewportSize({ width: 1280, height: 800 });
     await open(page);
-    await expect(section(page, 'active').locator('.task-item')).toHaveCount(34);
+    await expect(section(page, 'active').locator('.task-item')).toHaveCount(124);
     const nav = page.locator('#navigation');
     const heading = toggle(page);
     const inView = async () => {

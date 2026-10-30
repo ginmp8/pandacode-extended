@@ -464,3 +464,31 @@ test('remote discovery renders new harnesses without a separate catalog loader',
   await expect(menu.getByRole('option', { name: 'Claude Code · Remote model', exact: true })).toBeVisible();
   await page.evaluate(() => (window as any).__closeDiscoveryOnlyPicker?.());
 });
+
+test('async catalog updates keep focus on the selected harness tab', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeAsyncFocusPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      loadModels: () => new Promise(resolve => { (window as any).__resolveAsyncFocusCatalog = resolve; }),
+    });
+  });
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__resolveAsyncFocusCatalog)).toBe('function');
+  await search(page).fill('late');
+  const tab = picker(page).getByRole('tab', { name: 'Codex', exact: true });
+  await tab.focus();
+  await expect(tab).toBeFocused();
+  await page.evaluate(() => (window as any).__resolveAsyncFocusCatalog([{ id: 'late-model', name: 'Late Model' }]));
+  await expect(picker(page).getByRole('option', { name: 'Codex · Late Model', exact: true })).toBeVisible();
+  // Async catalog refresh must not silently move keyboard focus to the document body.
+  await expect(tab).toBeFocused();
+  await page.evaluate(() => (window as any).__closeAsyncFocusPicker?.());
+});

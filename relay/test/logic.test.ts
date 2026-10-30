@@ -165,14 +165,19 @@ test("secret config check", () => {
   assert.equal(configured({ SESSION_SECRET: ok.SESSION_SECRET }, true), false);
 });
 
-test("gen claim: round trip, mismatch refused, legacy tokens use iat", async () => {
-  const c = await verifyToken("s3cret", await signToken("s3cret", "gh:1", ID, 1000, 42), 1001);
-  assert.equal(c?.gen, 42);
-  assert.equal(tokenCurrent({ gen: 42, iat: 1000 }, { gen: 42, registered_at: 1000 }), true);
-  // Same-second revoke + re-register: iat == registered_at would pass, gen does not.
-  assert.equal(tokenCurrent({ gen: 42, iat: 1000 }, { gen: 7, registered_at: 1000 }), false);
-  assert.equal(tokenCurrent({ iat: 1000 }, { gen: 0, registered_at: 1000 }), true);
-  assert.equal(tokenCurrent({ iat: 999 }, { gen: 0, registered_at: 1000 }), false);
+test("registration generations bind tokens to UUIDs; legacy claims apply only to legacy rows", async () => {
+  const gen = "16ac34d5-8ab0-4d25-932b-0d7f0b3a5e42";
+  const revokedGen = "badf7e3a-c2fd-4e41-8717-785eae3b5206";
+  const c = await verifyToken("s3cret", await signToken("s3cret", "gh:1", ID, 1000, gen), 1001);
+  assert.equal(c?.gen, gen);
+  assert.equal(tokenCurrent({ gen, iat: 1000 }, { gen, registered_at: 1000 }), true);
+  // Re-registration in the same second must reject all old generation claims.
+  assert.equal(tokenCurrent({ gen, iat: 1000 }, { gen: revokedGen, registered_at: 1000 }), false);
+  assert.equal(tokenCurrent({ iat: 1000 }, { gen: "", registered_at: 1000 }), true);
+  assert.equal(tokenCurrent({ iat: 999 }, { gen: "", registered_at: 1000 }), false);
+  // Legacy tokens cannot authenticate a newly registered device with a fresh UUID.
+  assert.equal(tokenCurrent({ iat: 1000 }, { gen, registered_at: 1000 }), false);
+  await assert.rejects(signToken("s3cret", "gh:1", ID, 1000, "x"), /invalid registration generation/);
   const bad = btoa(JSON.stringify({ acct: "a", dev: ID, iat: 1, exp: 9e9, gen: "x" })).replace(/=+$/, "");
   assert.equal(await verifyToken("s3cret", `${bad}.x`, 2), null);
 });

@@ -87,6 +87,9 @@ for ref in [EXT, UPSTREAM, BASE]:
     if rev(f"{ref}^{{commit}}") != ref:
         raise RuntimeError(f"Pinned commit missing {ref}")
 
+normal = git("merge-tree", "--write-tree", f"--merge-base={BASE}", EXT, UPSTREAM, check=False)
+(ARTIFACT / "normal-three-way-merge.txt").write_text(normal.stdout)
+all_conflict_lines = [line for line in normal.stdout.splitlines() if line.startswith("CONFLICT")]
 raw = git("merge-tree", "--write-tree", f"--merge-base={BASE}", "-X", "ours", EXT, UPSTREAM, check=False)
 (ARTIFACT / "merge-tree.txt").write_text(raw.stdout)
 head = raw.stdout.splitlines()
@@ -97,7 +100,9 @@ if git("cat-file", "-t", merged_tree).stdout.strip() != "tree":
     raise RuntimeError("Merge output is not a tree.")
 
 stage_re = re.compile(r"^[0-7]{6} [0-9a-f]{40,64} [123]\t(.+)$")
+all_conflicts = sorted({m.group(1) for line in normal.stdout.splitlines() if (m := stage_re.match(line))})
 conflicts = sorted({m.group(1) for line in head if (m := stage_re.match(line))})
+(ARTIFACT / "all-content-conflicts.txt").write_text("\n".join(all_conflicts) + "\n")
 (ARTIFACT / "ours-unresolved-conflicts.txt").write_text("\n".join(conflicts) + "\n")
 # A scratch commit with only this integration branch as parent: no fabricated upstream Git ancestry.
 scratch = git(
@@ -118,6 +123,21 @@ for path in ADDITIONAL_PRESERVE_FROM_LAUNCHER:
 # The privileged one-shot workflow does not persist in the imported candidate.
 write_workflow = ".github/workflows/experimental-upstream-merge-import.yml"
 git("rm", "-f", "--ignore-unmatch", "--", write_workflow)
+
+# Drop upstream auto-update IPC and plugins; no other native registration is removed here.
+native_lib = Path("src-tauri/src/lib.rs")
+native_text = native_lib.read_text()
+for obsolete in [
+    "mod app_updates;\n",
+    "        .plugin(tauri_plugin_updater::Builder::new().build())\n",
+    "        .plugin(tauri_plugin_process::init())\n",
+    "                app_updates::app_update_install_supported,\n",
+]:
+    if native_text.count(obsolete) > 1:
+        raise RuntimeError("Repeated updater registration; refuse ambiguous security patch.")
+    native_text = native_text.replace(obsolete, "")
+native_lib.write_text(native_text)
+restore(EXT, "src-tauri/src/app_updates.rs")
 
 # Guards intentionally fail closed. Do not execute fetched application code with write token.
 for path in PRESERVE:
@@ -156,6 +176,8 @@ summary = {
     "new_branch": BRANCH,
     "source_merge_tree": merged_tree,
     "merge_tree_exit_status": raw.returncode,
+    "all_conflict_events": len(all_conflict_lines),
+    "all_conflicting_paths": all_conflicts,
     "unresolved_merge_paths_favored_extended": len(conflicts),
     "unresolved_merge_paths": conflicts,
     "protected_paths": PRESERVE,
@@ -200,6 +222,9 @@ Path("docs/integration/main-to-main/CANDIDATE.md").write_text(report)
 Path("docs/integration/main-to-main/unresolved-paths.txt").write_text(
     "\n".join(conflicts) + "\n"
 )
+Path("docs/integration/main-to-main/conflicts-awaiting-reconciliation.txt").write_text(
+    "\n".join(all_conflicts) + "\n"
+)
 
 git("add", "-A")
 if not git("diff", "--cached", "--quiet", check=False).returncode:
@@ -219,4 +244,4 @@ if pushed.returncode:
 summary["candidate_commit"] = candidate
 summary["status"] = "PUSHED_AS_WIP_NOT_VERIFIED"
 (ARTIFACT / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-print(json.dumps({key: value for key, value in summary.items() if key != "unresolved_merge_paths"}, indent=2))
+print(json.dumps({key: value for key, value in summary.items() if key not in ("unresolved_merge_paths", "all_conflicting_paths")}, indent=2))

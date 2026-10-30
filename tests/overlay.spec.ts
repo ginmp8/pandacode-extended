@@ -1,5 +1,33 @@
 import { expect, test, type Page } from '@playwright/test';
 
+test('launcher visibly distinguishes launch errors and permits a safe retry', async ({page}) => {
+  await instrumentLauncher(page, `if (command === 'overlay_launch' && !window.__allowLaunch) throw new Error('Workspace unavailable');`);
+  await page.goto('/?view=launcher');
+  const prompt = page.getByRole('textbox', {name:'New task'});
+  const submit = page.getByRole('button', {name:'Start task', exact:true});
+  await prompt.fill('Keep my task draft');
+  await submit.click();
+  const feedback = page.locator('.launcher-feedback.is-error');
+  await expect(feedback).toHaveText('Workspace unavailable');
+  await expect(prompt).toHaveValue('Keep my task draft');
+  const colors = await page.evaluate(() => {
+    const failure = document.querySelector<HTMLElement>('.launcher-feedback.is-error')!;
+    const expected = document.createElement('span');
+    expected.style.color = 'var(--danger)';
+    document.body.append(expected);
+    const result = [getComputedStyle(failure).color, getComputedStyle(expected).color];
+    expected.remove();
+    return result;
+  });
+  expect(colors[0]).toBe(colors[1]);
+  await expect(submit).toBeEnabled();
+  await page.evaluate(() => { (window as any).__allowLaunch = true; });
+  await submit.click();
+  await expect(page.locator('.launcher-feedback')).toHaveText('Task started. You can keep working.');
+  await expect(feedback).toHaveCount(0);
+  await expect(prompt).toHaveValue('');
+});
+
 test('launcher applies cross-window light/dark palette changes without reopening', async ({page}) => {
   await page.goto('/?view=launcher');
   const start = page.getByRole('button', {name:'Start task', exact:true});

@@ -9,10 +9,10 @@ test('diff prefetch uses bounded basename-only language hints', () => {
 });
 
 test('patch cache key is stable and sensitive to path, length and content', () => {
-  const one = patchKey('a.ts', 'a\\nb');
-  assert.equal(one, patchKey('a.ts', 'a\\nb'));
-  assert.notEqual(one, patchKey('b.ts', 'a\\nb'));
-  assert.notEqual(one, patchKey('a.ts', 'a\\nc'));
+  const one = patchKey('a.ts', 'a\nb');
+  assert.equal(one, patchKey('a.ts', 'a\nb'));
+  assert.notEqual(one, patchKey('b.ts', 'a\nb'));
+  assert.notEqual(one, patchKey('a.ts', 'a\nc'));
 });
 
 test('splitPatch retains separate file sections and does not concatenate unrelated files', () => {
@@ -22,7 +22,7 @@ test('splitPatch retains separate file sections and does not concatenate unrelat
     'diff --git a/second.ts b/second.ts',
     '--- a/second.ts', '+++ b/second.ts', '@@ -1 +1 @@', '-before', '+after',
     '',
-  ].join('\\n');
+  ].join('\n');
   const chunks = splitPatch(patch);
   assert.equal(chunks.length, 2);
   assert.equal(chunks[0].continued, false);

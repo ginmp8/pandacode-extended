@@ -159,6 +159,28 @@ test('narrow panels keep trailing folders, keep code unbroken (scrolls) and slim
     return { wordBreak: getComputedStyle(line).wordBreak, firstRow: line.getClientRects()[0] && line.querySelector('span')!.getClientRects()[0].top - line.getBoundingClientRect().top, separator: separator.getBoundingClientRect().height };
   });
   await expect.poll(async () => (await metrics()).wordBreak).not.toBe('break-all');
+  // The highlighted diff must keep long text reachable horizontally, not just avoid break-all.
+  // Inspect the component's real scroll container rather than relying on line CSS alone.
+  const horizontal = () => page.evaluate(() => {
+    const viewer = document.querySelector<HTMLElement>('diffs-container')!;
+    const root = viewer.shadowRoot!;
+    const line = root.querySelector<HTMLElement>('[data-content] [data-line-type="change-addition"]')!;
+    const candidates = [viewer, ...root.querySelectorAll<HTMLElement>('*')];
+    const scrollable = candidates.find(node => {
+      const overflow = getComputedStyle(node).overflowX;
+      return (overflow === 'auto' || overflow === 'scroll') &&
+        node.clientWidth > 0 && node.scrollWidth > node.clientWidth + 20;
+    });
+    if (!scrollable) return { reachable: false, unbroken: false };
+    scrollable.scrollLeft = 0;
+    scrollable.scrollLeft = scrollable.scrollWidth;
+    return {
+      reachable: scrollable.scrollLeft > 0,
+      unbroken: (line.textContent ?? '').includes('averyveryverylongunbrokenstringliteralthatmustwrapsomewhereinsideitselfok'),
+    };
+  });
+  await expect.poll(async () => (await horizontal()).reachable).toBe(true);
+  expect((await horizontal()).unbroken).toBe(true);
   const { separator } = await metrics();
   expect(separator).toBeLessThanOrEqual(21);
   await page.screenshot({ path: 'test-results/changes-view-narrow.png', clip: { x: 0, y: 0, width: 410, height: 260 } });

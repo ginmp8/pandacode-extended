@@ -448,7 +448,10 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       current.reasoningEffort = effort;
     } catch (reason) {
       if (closed) return;
-      error.textContent = catalogFailureReason(reason);
+      const safeReason = catalogFailureReason(reason);
+      // Preserve the save-specific hint for unclassified failures without exposing provider details.
+      error.textContent = safeReason === 'Check provider configuration'
+        ? 'could not save reasoning effort. Check provider configuration' : safeReason;
       error.hidden = false;
     } finally {
       if (!closed) {

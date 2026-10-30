@@ -6305,6 +6305,7 @@ const threadFind = createThreadFind({
   pane: () => document.querySelector<HTMLElement>('.conversation-pane'),
   transcript: () => document.querySelector<HTMLElement>('#transcript'),
   restoreFocus: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(),
+  beforeReveal: releaseTranscript,
 });
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;

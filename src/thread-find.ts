@@ -14,6 +14,8 @@ type Host = {
   transcript(): HTMLElement | null;
   /** Where focus returns when the bar closes. */
   restoreFocus(): void;
+  /** Release automatic bottom-follow before navigating to a search match. */
+  beforeReveal?(): void;
 };
 
 /** Every case-insensitive occurrence of `query` in `root`'s text, as ranges that may span
@@ -97,7 +99,10 @@ export function createThreadFind(host: Host) {
     }
     const rect = range.getBoundingClientRect(), bottom = transcript.getBoundingClientRect().bottom, top = clearTop(transcript);
     // A third of the way down the clear area, never under anything floating over the transcript.
-    if (rect.top < top || rect.bottom > bottom - 24) transcript.scrollTop += rect.top - top - (bottom - top) / 3;
+    if (rect.top < top || rect.bottom > bottom - 24) {
+      host.beforeReveal?.();
+      transcript.scrollTop += rect.top - top - (bottom - top) / 3;
+    }
   }
 
   /** Re-run the query. A fresh query starts at the match nearest the reader; a refresh after

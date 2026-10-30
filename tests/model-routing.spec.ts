@@ -246,6 +246,31 @@ test('editing a task allows an immediate new preview without an old request unlo
   await expect(routeButton).toBeEnabled();
 });
 
+test('preview limits obsolete concurrent native routing requests', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  const task = settings(page).getByRole('textbox', { name: 'Task to route' });
+  const button = settings(page).getByRole('button', { name: 'Route', exact: true });
+  await page.evaluate(() => { (window as any).__routingHold = { model_routing_route: true }; });
+  await task.fill('First independent request');
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
+  await task.fill('Second independent request');
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(2);
+  await task.fill('Third independent request');
+  await expect(button).toBeDisabled();
+  // An old request finishing frees capacity for the current input; the other request remains in flight.
+  await page.evaluate(() => (window as any).__routingReleases.shift()());
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(3);
+  await page.evaluate(() => (window as any).__routingReleases.shift()());
+  await expect(button).toBeDisabled();
+  await page.evaluate(() => (window as any).__routingReleases.shift()());
+  await expect(button).toBeEnabled();
+});
+
 test('changing mode hides the older preview before the delayed native save completes', async ({ page }) => {
   await install(page);
   await openAgents(page);

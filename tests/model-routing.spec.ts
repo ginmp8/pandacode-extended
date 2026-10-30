@@ -13,7 +13,9 @@ async function install(page: Page, init?: () => void): Promise<void> {
       (window.__routing ??= { calls: [] }).calls.push({ command, args: structuredClone(args) });
       // Test hook: \`__routingFail[command] = message\` rejects that command until cleared.
       const failure = command === 'model_routing_configure' && window.__routingWriteFailures?.length
-        ? window.__routingWriteFailures.shift() : window.__routingFail?.[command];
+        ? window.__routingWriteFailures.shift()
+        : command === 'model_routing_status' && window.__routingStatusFailures?.length
+          ? window.__routingStatusFailures.shift() : window.__routingFail?.[command];
       // Test hook: \`__routingDelay[command] = ms\` holds that command back before it runs.
       const delay = command === 'model_routing_configure' && window.__routingWriteDelays?.length
         ? window.__routingWriteDelays.shift() : window.__routingDelay?.[command];
@@ -71,6 +73,17 @@ test('the section renders, settings persist and the profiler downloads', async (
   await expect(settings(page).getByRole('spinbutton', { name: /Minimum chance/ })).toHaveValue('30');
   await expect(settings(page).getByRole('textbox', { name: 'Task to route' })).toBeDisabled();
   await expect(settings(page).getByText('Ready', { exact: true })).toBeVisible();
+});
+
+test('Settings retries an initial transient routing status read without user action', async ({ page }) => {
+  await install(page);
+  const before = (await calls(page, 'model_routing_status')).length;
+  await page.evaluate(() => { (window as any).__routingStatusFailures = ['Temporary status read failure', null]; });
+  await openAgents(page);
+  await expect(settings(page).getByText('Routing status unavailable; retrying…')).toBeVisible();
+  await expect.poll(async () => (await calls(page, 'model_routing_status')).length).toBeGreaterThan(before + 1);
+  await expect(settings(page).getByRole('radio', { name: 'Balanced' })).toHaveAttribute('aria-checked', 'true');
+  await expect(settings(page).getByText('Not downloaded', { exact: true })).toBeVisible();
 });
 
 test('rapid Settings changes persist in user order even when the first native write is slow', async ({ page }) => {

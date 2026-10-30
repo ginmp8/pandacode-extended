@@ -25,7 +25,7 @@ The prior `development` work remains present. It includes existing 0.7.0 integra
 
 Preserve Extended-specific boundaries, including: disabled app/agent auto-update and updater capabilities; no silent install or `npx` bootstrap; safe Windows packaging; per-device Connect trust, revocation/replay checks and remote Full default-off; explicit bot outbound approvals; secrets in OS vault; safe preview/CSP; no implicit credential/provisioning flows; no unsolicited telemetry or privileged network calls; Board/GitHub/worktree integration, and independent Extended release identity. Preserve `HARDENED-REVISION.json` as historical evidence.
 
-Reference: `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, `docs/VERSIONING.md` and `tests/install-policy.test.mjs`.
+Reference: `SECURITY-HARDENING.md`, `SECURITY-INSTALLATION-REVIEW.md`, `docs/VERSIONING.md` and `tests/install-policy.test.mjs`. The new 0.3.77 Shiki worker must be bundled as an ES module (`vite.config.ts: worker.format = 'es'`), not Vite's default IIFE, because worker code splits into local chunks. This was detected by the draft PR build failure and fixed in the candidate; no external worker CDN is allowed.
 
 ## Outstanding upstream coverage (must be implemented and independently verified)
 

@@ -33,6 +33,20 @@ export function findRanges(root: ParentNode, query: string): Range[] {
       nodes.push(node); starts.push(text.length); text += node.data;
     }
     const haystack = text.toLocaleLowerCase();
+    // Unicode lowercasing can expand one original character into multiple code units
+    // (e.g. U+0130 -> i + combining dot). Map folded positions back to DOM offsets.
+    const foldedOffsets: Array<{ start: number; end: number }> = [];
+    if (haystack.length !== text.length) {
+      let offset = 0;
+      for (const character of text) {
+        const end = offset + character.length;
+        for (let index = 0; index < character.toLocaleLowerCase().length; index++) {
+          foldedOffsets.push({ start: offset, end });
+        }
+        offset = end;
+      }
+    }
+    const remap = foldedOffsets.length === haystack.length ? foldedOffsets : null;
     // Find the node holding a character offset (nodes are in order, so search from `from`).
     const locate = (offset: number, from: number): number => {
       let index = from;
@@ -41,10 +55,13 @@ export function findRanges(root: ParentNode, query: string): Range[] {
     };
     let at = haystack.indexOf(needle), cursor = 0;
     while (at !== -1) {
-      const first = locate(at, cursor), last = locate(at + needle.length - 1, first);
+      if (haystack.length !== text.length && !remap) break;
+      const from = remap ? remap[at].start : at;
+      const through = remap ? remap[at + needle.length - 1].end : at + needle.length;
+      const first = locate(from, cursor), last = locate(through - 1, first);
       const range = document.createRange();
-      range.setStart(nodes[first], at - starts[first]);
-      range.setEnd(nodes[last], at + needle.length - starts[last]);
+      range.setStart(nodes[first], from - starts[first]);
+      range.setEnd(nodes[last], through - starts[last]);
       ranges.push(range);
       cursor = first;
       at = haystack.indexOf(needle, at + needle.length);

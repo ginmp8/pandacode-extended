@@ -880,6 +880,7 @@ fn catalog_refresh_rolls_back_context_handoff_when_team_persistence_fails() {
 
 fn config() -> TeamConfig {
     TeamConfig {
+        catalog: Vec::new(),
         auto: false,
         roster_only: false,
         name: None,
@@ -2482,4 +2483,359 @@ fn lead_guidance_is_bounded_to_two_kilobytes() {
     assert!(team.config.validate().is_ok());
     team.config.lead_guidance = None;
     assert!(team.config.validate().is_ok());
+}
+
+// Panda Router: `profileId: "auto"` and route_models, routed by the keyword heuristic.
+fn profile(id: &str, provider: &str, model: &str, name: &str) -> WorkerProfile {
+    WorkerProfile { id: id.into(), name: name.into(), provider: provider.into(), model: model.into(), reasoning_effort: None }
+}
+fn routing_catalog() -> Vec<WorkerProfile> {
+    vec![
+        profile("claude-default", "claude", "default", "Default · Claude Opus 5.5 · Claude Code"),
+        profile("claude-opus", "claude", "opus", "Opus · Claude Code"),
+        profile("claude-sonnet", "claude", "sonnet", "Sonnet · Claude Code"),
+        profile("claude-haiku", "claude", "haiku", "Haiku · Claude Code"),
+        profile("codex-luna", "codex", "gpt-6-luna", "GPT-6 Luna · Codex"),
+        profile("kimi-k3", "kimi", "kimi-code/k3", "K3 · Kimi"),
+    ]
+}
+fn heuristic_routes(store: &Store, team: &TeamSnapshot, args: &Value, enabled: bool, mode: Mode) -> routing::AutoRoutes {
+    let config = &team.config;
+    let (keys, jobs) = routing::auto_jobs(args, &["rust".to_string()], &routing::chains(store, team, args).unwrap());
+    let prefs = crate::panda_router::Preferences { mode, ..Default::default() };
+    let routes = enabled.then(|| crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &prefs, &routing::pool(config), jobs));
+    routing::auto_from(keys, routes, prefs)
+}
+fn routed_call(state: &AppState, sid: &str, args: Value, enabled: bool) -> Result<Value> {
+    routed_call_in(state, sid, args, enabled, Mode::Balanced)
+}
+fn routed_call_in(state: &AppState, sid: &str, args: Value, enabled: bool, mode: Mode) -> Result<Value> {
+    let (team, routes) = {
+        let store = state.store.lock().unwrap();
+        let team = load(&store, sid)?.unwrap();
+        let routes = heuristic_routes(&store, &team, &args, enabled, mode);
+        (team, routes)
+    };
+    dispatch_state_routed(state, sid, team.generation, "pandacode_dispatch_workers", args, &AtomicBool::new(false), &routes).map(|x| x.0)
+}
+use crate::panda_router::Mode;
+fn with_catalog(state: &AppState, sid: &str) {
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, sid).unwrap().unwrap();
+    team.config.catalog = routing_catalog();
+    save(&store, &mut team).unwrap();
+}
+#[test]
+fn catalog_is_validated_like_workers_but_larger() {
+    let mut config = config();
+    config.catalog = routing_catalog();
+    assert!(config.validate().unwrap_err().contains("automatic"));
+    config.auto = true;
+    assert!(config.validate().is_ok());
+    config.catalog = (0..crate::model_routing::MAX_POOL).map(|i| profile(&format!("m{i}"), "codex", &format!("m{i}"), &"·".repeat(60))).collect();
+    assert!(config.validate().is_ok(), "names up to 200 bytes");
+    config.catalog.push(profile("extra", "codex", "x", "X"));
+    assert!(config.validate().is_err());
+    config.catalog = vec![profile("a", "nope", "x", "X")];
+    assert!(config.validate().is_err());
+    config.catalog = vec![profile("a", "codex", "x", "X"), profile("a", "codex", "y", "Y")];
+    assert!(config.validate().is_err());
+    let json = json!({"auto":true,"workers":[],"catalog":[{"id":"a","name":"A","provider":"claude","model":"opus","reasoningEffort":null}],"maxParallel":0,"maxRounds":8,"maxAssignments":24,"workspace":"shared","summaryLimit":3072});
+    let parsed: TeamConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.catalog.len(), 1);
+    assert!(serde_json::to_value(super::tests::config()).unwrap().get("catalog").is_none());
+}
+#[test]
+fn auto_profile_staffs_the_routed_pick_and_says_so() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let args = json!({"assignments":[
+        auto_assignment("typo", json!({"profileId":"auto","prompt":"Fix a typo in the README heading."})),
+        auto_assignment("proof", json!({"profileId":"auto","reasoningEffort":"high","prompt":"Prove the scheduler never starves a queued worker and refactor the dispatcher across modules accordingly."})),
+    ]});
+    let result = routed_call(&state, &sid, args, true).unwrap();
+    let notes = result["routing"].as_array().unwrap();
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().all(|n| n.as_str().unwrap().contains(": routed: ")), "{notes:?}");
+    assert!(notes.iter().all(|n| n.as_str().unwrap().ends_with(", heuristic)")), "{notes:?}");
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    for worker in &team.workers {
+        assert!(routing_catalog().iter().any(|p| p.provider == worker.provider && p.model == worker.model && p.model != "default"), "{}", worker.model);
+        let session = store.session(&worker.session_id).unwrap();
+        assert_eq!((session.provider.as_str(), session.model.as_str()), (worker.provider.as_str(), worker.model.as_str()));
+    }
+    if team.workers[1].provider == "claude" {
+        assert_eq!(team.workers[1].reasoning_effort.as_deref(), Some("high"));
+    }
+    drop(store);
+    let error = routed_call(&state, &sid, json!({"assignments":[auto_assignment("both", json!({"profileId":"auto","provider":"claude","model":"opus"}))]}), true).unwrap_err();
+    assert!(error.contains("not both"));
+}
+#[test]
+fn replacing_a_failed_auto_worker_escalates_past_its_models() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let task = json!({"profileId":"auto","prompt":"Fix a typo in the README heading."});
+    let first = routed_call(&state, &sid, json!({"assignments":[auto_assignment("try1", task.clone())]}), true).unwrap();
+    let first_id = first["workerIds"][0].as_str().unwrap().to_string();
+    let fail = |id: &str| {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let worker = team.workers.iter_mut().find(|w| w.id == id).unwrap();
+        worker.status = "failed".into();
+        worker.error = Some("tests failed".into());
+        save(&store, &mut team).unwrap();
+    };
+    // Only a failed worker can be replaced.
+    let mut retry = task.clone();
+    retry["replaces"] = json!(first_id);
+    let error = routed_call(&state, &sid, json!({"assignments":[auto_assignment("early", retry.clone())]}), true).unwrap_err();
+    assert!(error.contains("worker that failed"), "{error}");
+    fail(&first_id);
+    let second = routed_call(&state, &sid, json!({"assignments":[auto_assignment("try2", retry)]}), true).unwrap();
+    let note = second["routing"][0].as_str().unwrap();
+    assert!(note.contains(", escalation") && note.contains(" past "), "{note}");
+    let second_id = second["workerIds"][0].as_str().unwrap().to_string();
+    fail(&second_id);
+    let mut again = task.clone();
+    again["replaces"] = json!(second_id);
+    routed_call(&state, &sid, json!({"assignments":[auto_assignment("try3", again)]}), true).unwrap();
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    let (a, b, c) = (&team.workers[0], &team.workers[1], &team.workers[2]);
+    assert!(a.abandoned && b.abandoned && !c.abandoned);
+    assert!(a.error.as_deref().unwrap().starts_with(&format!("Replaced by worker {second_id}. tests failed")));
+    let chain = |w: &Worker| routing::failed_chain(&store, &team, &w.id).unwrap().map(|c| c.into_iter().map(|m| (m.provider, m.model)).collect::<Vec<_>>());
+    let model = |w: &Worker| (w.provider.clone(), w.model.clone());
+    assert_eq!(chain(a), Some(vec![model(a)]));
+    assert_eq!(chain(b), Some(vec![model(a), model(b)]));
+    assert_eq!(chain(c), None, "not failed");
+    assert!(model(c) != model(a) && model(c) != model(b) && model(b) != model(a));
+    let c_id = c.id.clone();
+    drop(store);
+    let error = routed_call(&state, &sid, json!({"assignments":[auto_assignment("ghost", json!({"profileId":"auto","replaces":"nope"}))]}), true).unwrap_err();
+    assert!(error.contains("previously returned"), "{error}");
+    // b was already replaced: no second branch around the cap.
+    let mut twice = task.clone();
+    twice["replaces"] = json!(second_id);
+    assert!(routed_call(&state, &sid, json!({"assignments":[auto_assignment("twice", twice)]}), true).unwrap_err().contains("already replaced"));
+    // The third failure (first try + 2 retries) stops auto escalation.
+    fail(&c_id);
+    let mut fourth = task.clone();
+    fourth["replaces"] = json!(c_id);
+    let error = routed_call(&state, &sid, json!({"assignments":[auto_assignment("try4", fourth)]}), true).unwrap_err();
+    assert!(error.contains("failed 3 times") && error.contains("report the failure to the user"), "{error}");
+    // The cap holds for a hand-picked model too, not only for auto.
+    let manual = json!({"provider":"claude","model":"opus","replaces":c_id});
+    let error = routed_call(&state, &sid, json!({"assignments":[auto_assignment("try4-manual", manual)]}), true).unwrap_err();
+    assert!(error.contains("failed 3 times"), "{error}");
+}
+#[test]
+fn a_completed_worker_that_failed_review_can_be_replaced() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let task = json!({"profileId":"auto","prompt":"Fix a typo in the README heading."});
+    let first = routed_call(&state, &sid, json!({"assignments":[auto_assignment("v1", task.clone())]}), true).unwrap();
+    let first_id = first["workerIds"][0].as_str().unwrap().to_string();
+    let set = |status: &str| {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].status = status.into();
+        save(&store, &mut team).unwrap();
+    };
+    let mut retry = task.clone();
+    retry["replaces"] = json!(first_id);
+    retry["replaceReason"] = json!("cargo test fails in queue::tests");
+    for status in ["stopped", "running"] {
+        set(status);
+        assert!(routed_call(&state, &sid, json!({"assignments":[auto_assignment("v2", retry.clone())]}), true).is_err(), "{status}");
+    }
+    set("completed");
+    let second = routed_call(&state, &sid, json!({"assignments":[auto_assignment("v2", retry)]}), true).unwrap();
+    assert!(second["routing"][0].as_str().unwrap().contains(" past "), "{second}");
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    let (a, b) = (&team.workers[0], &team.workers[1]);
+    assert!(a.abandoned && a.status == "completed");
+    assert_eq!(a.error.as_deref(), Some(format!("Replaced by worker {}: cargo test fails in queue::tests.", b.id).as_str()));
+    assert!((a.provider.as_str(), a.model.as_str()) != (b.provider.as_str(), b.model.as_str()));
+    drop(store);
+    let error = routed_call(&state, &sid, json!({"assignments":[auto_assignment("v3", json!({"profileId":"auto","replaceReason":"x"}))]}), true).unwrap_err();
+    assert!(error.contains("needs replaces"), "{error}");
+}
+#[test]
+fn a_fresh_auto_worker_opens_on_the_ladder_in_cheap_and_balanced_modes() {
+    // Over the parity fixture's pool, the heuristic's Balanced pick for this task is Opus while its
+    // ladder opens on a cheaper rung.
+    let text = "Refactor the monorepo: split the `core` package into `core-domain` and `core-infra`, migrate every module across all services, keep backward compat shims, and update the build pipeline, CI/CD and docs.";
+    // The parity fixture's pool, by card id under its harness.
+    let parity = ["claude-opus-5.5", "claude-sonnet-5.5", "claude-haiku-5.5", "codex-gpt-6-luna", "codex-gpt-5.6-luna", "glm-5.1", "glm-4.7", "grok-4.6", "kimi-k3", "openrouter-deepseek-v4-flash", "openrouter-gemini-3.8-flash", "claude-fable-5", "muse-wonder-1.0"];
+    let catalog: Vec<_> = parity
+        .iter()
+        .map(|id| {
+            let harness = id.split('-').next().unwrap();
+            profile(id, if harness == "openrouter" { "opencode" } else { harness }, id, id)
+        })
+        .collect();
+    for (mode, opens) in [(Mode::Balanced, true), (Mode::Cheapest, true), (Mode::Quality, false)] {
+        let (state, sid) = auto_state();
+        {
+            let store = state.store.lock().unwrap();
+            let mut team = load(&store, &sid).unwrap().unwrap();
+            team.config.catalog = catalog.clone();
+            save(&store, &mut team).unwrap();
+        }
+        let config = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap().config;
+        assert_eq!(crate::model_routing::rated_count(&routing::pool(&config)), parity.len());
+        // `files: []` (the whole checkout) leaves the files in scope unknown, as in the dispatch below.
+        let ctx = crate::panda_router::TaskContext { repo_languages: vec!["rust".into()], files_in_scope: None, requires_tools: true };
+        let job = crate::model_routing::Job { text: text.into(), ctx, failed: vec![] };
+        let prefs = crate::panda_router::Preferences { mode, ..Default::default() };
+        let route = crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &prefs, &routing::pool(&config), vec![job]).unwrap().remove(0);
+        let (pick, first) = (route.pick.clone().unwrap(), route.ladder[0].clone());
+        if mode == Mode::Balanced {
+            assert_ne!(pick.card_id, first.card_id, "the regression needs pick != ladder[0]");
+        }
+        let result = routed_call_in(&state, &sid, json!({"assignments":[auto_assignment("mono", json!({"profileId":"auto","prompt":text,"files":[]}))]}), true, mode).unwrap();
+        let note = result["routing"][0].as_str().unwrap();
+        let worker = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap().workers[0].clone();
+        // Cheap opens only on a rung that clears the minimum lower bound (the default 0.5 here).
+        let opener = match mode {
+            Mode::Cheapest => route.ladder.iter().find(|m| m.p_success_lower >= crate::model_routing::min_p()).cloned(),
+            _ if opens => Some(first.clone()),
+            _ => None,
+        };
+        let staffed = opener.as_ref().unwrap_or(&pick);
+        assert_eq!((worker.provider.as_str(), worker.model.as_str()), (staffed.provider.as_str(), staffed.model.as_str()), "{mode:?}: {note}");
+        assert_eq!(note.contains("opener"), opener.is_some(), "{note}");
+        if let Some(staffed) = opener.as_ref() {
+            assert!(mode != Mode::Cheapest || staffed.p_success_lower >= crate::model_routing::min_p(), "{note}");
+        }
+        if mode == Mode::Balanced && pick.card_id != first.card_id {
+            assert!(note.contains(&format!("(ladder 1/{}, opener; policy pick {}; ", route.ladder.len(), pick.name)), "{note}");
+        }
+    }
+}
+#[test]
+fn cheap_auto_worker_uses_the_frozen_threshold_not_the_later_global_setting() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let cheap = crate::panda_router::Routed {
+        provider: "claude".into(), model: "haiku".into(), name: "Haiku".into(), card_id: "haiku".into(),
+        p_success: 0.75, p_success_lower: 0.6, est_cost_usd: 0.01, expected_cost_usd: 0.02, est_latency_ms: 10.0,
+    };
+    let strong = crate::panda_router::Routed {
+        model: "sonnet".into(), name: "Sonnet".into(), card_id: "sonnet".into(),
+        p_success: 0.95, p_success_lower: 0.85, est_cost_usd: 0.03, expected_cost_usd: 0.04, ..cheap.clone()
+    };
+    let route = crate::panda_router::Route {
+        pick: Some(strong.clone()), decided_by: "policy:cheapest".into(),
+        ranking: vec![strong.clone(), cheap.clone()], ladder: vec![cheap, strong], failed: vec![],
+        distribution: vec![1.0], unrated: vec![], difficulty: 1, category: "coding".into(),
+        profiler: "heuristic", latency_ms: 1.0,
+    };
+    // The default threshold is 0.5; this route was computed earlier with 0.8. The cheap
+    // model clears 0.5 but not 0.8, so re-reading current Settings would staff the wrong model.
+    let prefs = crate::panda_router::Preferences { mode: Mode::Cheapest, min_p: 0.8 };
+    let routes = routing::auto_from(vec!["threshold".into()], Some(Ok(vec![route])), prefs);
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    let args = json!({"assignments":[auto_assignment("threshold", json!({"profileId":"auto"}))]});
+    dispatch_state_routed(&state, &sid, team.generation, "pandacode_dispatch_workers", args, &AtomicBool::new(false), &routes).unwrap();
+    let stored = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert_eq!(stored.workers[0].model, "sonnet", "dispatch must honor the frozen minimum success bar");
+}
+
+#[test]
+fn auto_profile_uses_the_lead_when_routing_is_off() {
+    let (state, sid) = auto_state();
+    with_catalog(&state, &sid);
+    let result = routed_call(&state, &sid, json!({"assignments":[auto_assignment("off", json!({"profileId":"auto"}))]}), false).unwrap();
+    assert!(result["routing"][0].as_str().unwrap().starts_with("off: not routed (routing is off)"));
+    let store = state.store.lock().unwrap();
+    let (worker, lead) = (&load(&store, &sid).unwrap().unwrap().workers[0], store.session(&sid).unwrap());
+    assert_eq!((worker.provider.as_str(), worker.model.as_str(), worker.profile_id.as_str()), (lead.provider.as_str(), lead.model.as_str(), "auto"));
+}
+#[test]
+fn auto_profile_in_a_named_team_routes_only_within_its_roster() {
+    let (state, sid) = roster_only_state(false);
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.workers = vec![profile("haiku", "claude", "haiku", "Haiku"), profile("luna", "codex", "gpt-6-luna", "Luna")];
+        team.config.catalog = routing_catalog();
+        save(&store, &mut team).unwrap();
+    }
+    let hard = "Prove the scheduler never starves a queued worker and refactor the dispatcher across modules.";
+    let result = routed_call(&state, &sid, json!({"assignments":[auto_assignment("hard", json!({"profileId":"auto","prompt":hard}))]}), true).unwrap();
+    assert!(result["routing"][0].as_str().unwrap().contains("routed: "));
+    let store = state.store.lock().unwrap();
+    let worker = &load(&store, &sid).unwrap().unwrap().workers[0];
+    assert!(["haiku", "luna"].contains(&worker.profile_id.as_str()), "{}", worker.profile_id);
+    drop(store);
+    // Off: the lead is not listed, so the team's first model works instead.
+    routed_call(&state, &sid, json!({"assignments":[auto_assignment("off", json!({"profileId":"auto"}))]}), false).unwrap();
+    let store = state.store.lock().unwrap();
+    assert_eq!(load(&store, &sid).unwrap().unwrap().workers[1].profile_id, "haiku");
+}
+#[test]
+fn route_models_reports_compact_picks() {
+    let mut config = config();
+    config.auto = true;
+    config.workers = vec![profile("sonnet", "claude", "sonnet", "Sonnet")];
+    config.catalog = routing_catalog();
+    let args = json!({"tasks":[
+        {"text":"Fix a typo in the README."},
+        {"text":"Investigate the failing scheduler test.","files":3,"failed":[{"provider":"claude","model":"haiku"}]},
+    ],"mode":"quality"});
+    let (pool, jobs, mode) = routing::route_request(&config, &[], args).unwrap();
+    assert_eq!(mode, Some(crate::panda_router::Mode::Quality));
+    assert!(pool.iter().all(|m| m.model != "default"), "default yields to opus");
+    let routes = crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &Default::default(), &pool, jobs).unwrap();
+    let out = routing::route_summary(&config, &routes);
+    let tasks = out["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(out["profiler"], "heuristic");
+    for task in tasks {
+        let keys: HashSet<_> = task.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["pick", "decidedBy", "alternatives", "ladder", "difficulty", "category", "unrated"].map(String::from).into_iter().collect());
+        assert!(task["alternatives"].as_array().unwrap().len() <= 3);
+        assert!((1..=4).contains(&task["ladder"].as_array().unwrap().len()), "{task}");
+        let p = task["pick"]["pSuccess"].as_f64().unwrap();
+        assert_eq!((p * 100.0).round() / 100.0, p);
+    }
+    let second = &tasks[1];
+    assert!(second["decidedBy"].as_str().unwrap().starts_with("escalation"), "{second}");
+    assert!(std::iter::once(&second["pick"]).chain(second["alternatives"].as_array().unwrap()).all(|m| m["model"] != "haiku"));
+    let sonnet = std::iter::once(&tasks[0]["pick"]).chain(tasks[0]["alternatives"].as_array().unwrap()).find(|m| m["model"] == "sonnet");
+    if let Some(sonnet) = sonnet {
+        assert_eq!(sonnet["profileId"], "sonnet");
+    }
+    for bad in [
+        json!({"tasks":[]}),
+        json!({"tasks":[{"text":""}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"nope","model":"m"}]}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"claude","model":""}]}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"claude","model":format!("bad{}id", char::from(0))}]}]}),
+        json!({"tasks":[{"text":"x","failed":[{"provider":"claude","model":"x".repeat(201)}]}]}),
+        json!({"tasks":[{"text":"x"}],"mode":"fast"}),
+    ] {
+        assert!(routing::route_request(&config, &[], bad).is_err());
+    }
+}
+#[test]
+fn routing_note_joins_the_lead_prompt_only_when_enabled() {
+    let mut config = config();
+    config.auto = true;
+    config.catalog = routing_catalog();
+    let note = routing::prompt_note(&config, true);
+    assert!(note.contains("5 rated models") && note.contains("route_models"), "{note}");
+    assert!(routing::prompt_note(&config, false).is_empty());
+    config.roster_only = true;
+    config.workers = vec![profile("haiku", "claude", "haiku", "Haiku"), profile("luna", "codex", "gpt-6-luna", "Luna")];
+    assert!(routing::prompt_note(&config, true).contains("this team's 2 rated models"));
+    let (state, sid) = auto_state();
+    let store = state.store.lock().unwrap();
+    let text = prompt(&store, &sid, "Go.", Some(&Admission { parent: sid.clone(), generation: 1 })).unwrap();
+    assert!(!text.contains("Panda Router"), "routing is off without setup");
 }

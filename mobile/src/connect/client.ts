@@ -2,6 +2,7 @@
 // Owns the relay socket, the pending calls and the store; screens call `connect.*` and read
 // state with the hooks in src/store. See README.md beside this file.
 import './polyfill.ts';
+import { startNote } from './start-note.ts';
 import { initialState, taskKey, useConnect, type ConnectState } from '../store/index.ts';
 import { chunks, dueIcons, mergeIcons } from '../store/icon-cache.ts';
 import { clearIcons, loadIcons, resetIcons, saveIcons, useIcons } from '../store/icons.ts';
@@ -33,6 +34,7 @@ import { clearInbox, readInbox, saveInboxSoon } from './inbox-file.ts';
 import { decodeInbox, encodeInbox, type RestoredInbox } from '../store/inbox-cache.ts';
 import { attempt, configured, stopping, unanswered, unconfigured, unpaused, unstopping } from './optimistic.ts';
 import { newestPage, olderByAfterId, pageMessages, type Fetch } from './paging.ts';
+import { newestCutId } from './cut-recovery.ts';
 import type { Live } from '../store/reduce.ts';
 import type { AgentEvent, Bot, Changes, ConfigureParams, Device, Diff, MergeMethod, Message, MessagePage, Provider, ProviderModel, PullDetail, RunFinished, StartParams, SubscribeReply, TaskSummary, TasksList } from './types.ts';
 
@@ -43,6 +45,18 @@ const MAX_PAGES = 50;
 /** Messages asked for when a thread opens with nothing held, and per older page on scroll. */
 const TAIL = 60;
 const OLDER = 60;
+/** The first page's JSON budget: packed, about 12 KB, one round trip on 3G; older pages load on
+ * scroll. afterId catch-up pages may be bigger: the host cuts them until they pack into one frame.
+ * Older hosts ignore `budget` (docs/connect-benchmark.md). */
+const TAIL_BUDGET = 32 * 1024;
+/** afterId catch-up pages, open or background, stay small so inflating and parsing one on the
+ * JS thread does not stutter the screen. */
+const CATCH_UP_BUDGET = 256 * 1024;
+/** One message the host cut, fetched whole (`limit: 1`). */
+const WHOLE_BUDGET = 1024 * 1024;
+/** A refused open asks the API whether the token still works at most this often. */
+const PROBE_MS = 60_000;
+let probedAt = 0;
 /** afterId pages a background prefetch may copy. */
 const PREFETCH_PAGES = 2;
 /** Task lists refresh this often while the app is open (faster while a task runs). */
@@ -128,6 +142,8 @@ const socket = new RelaySocket({
   onRefused: (used, revoked) => {
     if (revoked || auth.expired(used)) return signOutIf(used);
     // A WebSocket upgrade hides its HTTP status; ask the API whether the token still works.
+    if (Date.now() - probedAt < PROBE_MS) return;
+    probedAt = Date.now();
     auth.listDevices(used).catch(error => { if (error instanceof auth.SignedOut) signOutIf(error.token); });
   },
 });
@@ -567,6 +583,8 @@ async function frame(text: string): Promise<void> {
   switch (value?.kind) {
     case 'presence':
       if (!Array.isArray(value.devices)) return;
+      // The first presence of a socket: open threads catch up alongside the subscribe.
+      if (!presence) for (const host of watched.keys()) catchUp.add(host);
       presence = true;
       markStartup('presence');
       applyDevices(value.devices);
@@ -728,6 +746,9 @@ async function subscribeAll() {
   await Promise.all([...new Set([...watched.keys(), ...glanced.keys()])].map(subscribeHost));
 }
 
+/** Hosts whose next subscribe also copies its open threads' new messages (after a reconnect). */
+const catchUp = new Set<string>();
+
 /** Per host: the subscribe in flight, and whether the set changed since it was sent. */
 const subscribing = new Map<string, Promise<void>>();
 const resubscribe = new Set<string>();
@@ -761,6 +782,9 @@ async function subscribeOnce(deviceId: string): Promise<void> {
   // Replay pages are ordered before any live events received while subscribe is in flight.
   // Keep Extended's session-generation checks across every asynchronous boundary.
   const background = !watched.get(deviceId)?.size;
+  // After a reconnect the afterId copies of open threads go out with the subscribe instead of
+  // after its reply: one round trip less. The reply's lastId check below runs once they land.
+  const early = catchUp.delete(deviceId) ? earlyCopies(deviceId, ids) : [];
   const { reply, tasks, held } = await followReplay(
     cursors, deviceId, ids,
     params => call<SubscribeReply>(deviceId, 'subscribe', params, TIMEOUT_MS, background),
@@ -783,8 +807,16 @@ async function subscribeOnce(deviceId: string): Promise<void> {
   });
   // What arrived live meanwhile is newer than the snapshot.
   showHeld();
+  await Promise.all(early);
   // A gap means events were lost: the messages copy catches up.
   for (const t of tasks) if (watched.get(deviceId)?.has(t.sessionId) && (t.gap === true || t.lastId > lastId(state().messages[taskKey(deviceId, t.sessionId)]))) void loadMessages(deviceId, t.sessionId).catch(() => undefined);
+}
+
+/** Starts the copy of every open thread of a host that already holds messages (a thread with
+ * none is copied by its screen). Failures are left to the lastId check after the subscribe. */
+function earlyCopies(deviceId: string, ids: string[]): Promise<void>[] {
+  const open = ids.filter(id => watched.get(deviceId)?.has(id) && state().messages[taskKey(deviceId, id)]?.length);
+  return open.map(id => loadMessages(deviceId, id).catch(() => undefined));
 }
 
 /** One task's task.messages call with these params; a background copy (prefetch) turns foreground once the thread is open. */
@@ -844,7 +876,7 @@ function loadMessages(deviceId: string, sessionId: string, pages = MAX_PAGES, ba
     await peek(deviceId, sessionId);
     requireSession(version);
     const fetch = fetchFor(deviceId, sessionId, background);
-    const tail = () => newestPage(fetch, deviceId, legacy, { tail: true, limit: TAIL });
+    const tail = () => newestPage(fetch, deviceId, legacy, { tail: true, limit: TAIL, budget: TAIL_BUDGET });
     const held = !!state().messages[key]?.length;
     if (!held) {
       // An older host answers as for afterId 0 (the first page) or refuses (then the loop starts at 0).
@@ -856,7 +888,7 @@ function loadMessages(deviceId: string, sessionId: string, pages = MAX_PAGES, ba
       if (page && !page.hasMore) return old ? 'afterId' : 'tail';
     }
     for (let n = 0; n < pages; n++) {
-      const reply = await fetch({ afterId: lastId(state().messages[key]) });
+      const reply = await fetch({ afterId: lastId(state().messages[key]), budget: CATCH_UP_BUDGET });
       requireSession(version);
       if (n === 0 && held && reply?.hasMore) {
         const { page, legacy: old } = await tail();
@@ -873,7 +905,20 @@ function loadMessages(deviceId: string, sessionId: string, pages = MAX_PAGES, ba
     }
     return 'afterId';
   };
-  const copy = serial(key, run);
+  // A message the host cut to fit a small page (`cut`, newer hosts) is fetched whole once the
+  // thread is open, alone with a large budget; mergeMessages swaps it in. Still cut, or the call
+  // fails: the cut copy stays and the next copy tries again (the catch-up itself succeeded).
+  const uncut = async () => {
+    const id = newestCutId(state().messages[key]);
+    if (!id || (background && !watched.get(deviceId)?.has(sessionId))) return;
+    try {
+      const reply = await fetchFor(deviceId, sessionId)({ afterId: id - 1, limit: 1, budget: WHOLE_BUDGET });
+      store(deviceId, sessionId, pageMessages(reply), 'append');
+    } catch (error) {
+      console.warn('[connect] cut message refetch failed', error);
+    }
+  };
+  const copy = serial(key, async () => { const how = await run(); await uncut(); return how; });
   copies.set(key, copy);
   const settle = (error: string | null) => {
     if (!ownsSession(version) || copies.get(key) !== copy) return; // a later copy/session owns the state now
@@ -913,7 +958,7 @@ function loadOlder(deviceId: string, sessionId: string): Promise<void> {
     const first = state().messages[key]?.[0]?.id;
     if (!first) return setOlder();
     const fetch = fetchFor(deviceId, sessionId);
-    const { page, legacy: old } = await newestPage(fetch, deviceId, legacy, { beforeId: first, limit: OLDER });
+    const { page, legacy: old } = await newestPage(fetch, deviceId, legacy, { beforeId: first, limit: OLDER, budget: CATCH_UP_BUDGET });
     requireSession(version);
     if (!old && page) return store(deviceId, sessionId, pageMessages(page), 'prepend', page);
     const older = await olderByAfterId(fetch, first, page, MAX_PAGES);
@@ -1079,15 +1124,17 @@ async function listModels(deviceId: string, provider: string, force = false): Pr
   return models;
 }
 
-/** Starts a task on the host (repo OR projectId) and watches it. */
-async function startTask(deviceId: string, params: StartParams): Promise<string> {
+/** Starts a task on the host (repo OR projectId) and watches it; `note` says when a busy
+ * checkout made the host use a worktree instead. */
+async function startTask(deviceId: string, params: StartParams): Promise<{ sessionId: string; note?: string }> {
   const version = securityWrites.version;
   if (!params.repo === !params.projectId) throw new Error('Choose a repository or a project.');
-  const { sessionId } = await call<{ sessionId: string }>(deviceId, 'task.start', params, START_TIMEOUT_MS);
+  const reply = await call<{ sessionId: string }>(deviceId, 'task.start', params, START_TIMEOUT_MS);
+  const { sessionId } = reply;
   requireSession(version);
   watch(deviceId, [sessionId]);
   patch(s => ({ live: { ...s.live, [taskKey(deviceId, sessionId)]: { ...idleLive(), status: 'running', activity: 'Starting' } } }));
-  return sessionId;
+  return { sessionId, note: startNote(reply) };
 }
 
 /** Applies `edit` to one task's sent list; unchanged → same object, an empty list is dropped. */

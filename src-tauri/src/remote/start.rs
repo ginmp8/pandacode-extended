@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -30,8 +32,36 @@ const PROGRESS_EVENT: &str = "task.progress";
 /// The error of a start the viewer cancelled (`task.cancelStart`); no `error` stage is sent for it.
 pub(crate) const CANCELLED: &str = "Start cancelled.";
 
-fn check(cancel: &AtomicBool) -> Result<()> {
-    if cancel.load(Ordering::Relaxed) {
+/// A start's cancel switch: `task.cancelStart` flips it only until the start commits to
+/// making its task; after that it is too late, and the caller links and stops the task instead.
+#[derive(Default)]
+pub(crate) struct Cancel(AtomicU8);
+
+const OPEN: u8 = 0;
+const STOPPED: u8 = 1;
+const COMMITTED: u8 = 2;
+
+impl Cancel {
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == STOPPED
+    }
+
+    /// Cancels the start unless it already committed; whether it is cancelled now.
+    pub(crate) fn cancel(&self) -> bool {
+        matches!(self.0.compare_exchange(OPEN, STOPPED, Ordering::SeqCst, Ordering::SeqCst), Ok(_) | Err(STOPPED))
+    }
+
+    /// Past this, a cancel is refused; fails if one came first.
+    pub(crate) fn commit(&self) -> Result<()> {
+        match self.0.compare_exchange(OPEN, COMMITTED, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) | Err(COMMITTED) => Ok(()),
+            Err(_) => Err(CANCELLED.into()),
+        }
+    }
+}
+
+fn check(cancel: &Cancel) -> Result<()> {
+    if cancel.is_set() {
         return Err(CANCELLED.into());
     }
     Ok(())
@@ -88,7 +118,15 @@ pub(crate) fn parse(params: &Value) -> Result<Start> {
 
 /// A branch name git accepts that can never be read as an option.
 fn valid_branch(branch: &str) -> Result<()> {
-    if branch.starts_with('-') || branch.contains("..") || branch.ends_with('/') || branch.ends_with(".lock") || !branch.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c)) {
+    // Git rejects empty, dot-prefixed, dot-suffixed and .lock path components.
+    // Reject them before a remote start can clone or create a worktree.
+    let invalid_component = branch.split('/').any(|component| {
+        component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with('.')
+            || component.ends_with(".lock")
+    });
+    if branch.is_empty() || branch == "HEAD" || branch == "@" || branch.starts_with('-') || branch.contains("..") || invalid_component || !branch.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c)) {
         return Err("Invalid branch.".into());
     }
     Ok(())
@@ -250,7 +288,7 @@ fn stop_group(child: &mut std::process::Child) {
 /// `gh repo clone` like [`github_hub::clone_to`], with git's `--progress` read as it
 /// arrives so the viewer sees a percentage. Same timeout, stops the whole group. With
 /// `lazy` the clone leaves the working tree empty (`--no-checkout`) for the caller to fill.
-fn clone_with_progress(repo: &str, destination: &Path, timeout: Duration, lazy: bool, cancel: &AtomicBool, progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
+fn clone_with_progress(repo: &str, destination: &Path, timeout: Duration, lazy: bool, cancel: &Cancel, progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
     let repo = github_hub::valid_repo(repo)?;
     let parent = destination.parent().filter(|parent| parent.is_dir()).ok_or("Choose an existing folder to clone into.")?;
     let mut command = Command::new(crate::providers::tool_path("gh").unwrap_or_else(|| "gh".into()));
@@ -269,7 +307,7 @@ fn clone_with_progress(repo: &str, destination: &Path, timeout: Duration, lazy: 
 /// Runs a clone `command` in its own process group, relaying its progress. A timeout or
 /// `cancel` kills the group within 100 ms and removes the half-made `destination` (only when
 /// it did not exist before).
-fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &AtomicBool, mut progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
+fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &Cancel, mut progress: impl FnMut(u8), authorize: impl Fn() -> Result<()>) -> Result<()> {
     check(cancel)?;
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -295,7 +333,7 @@ fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeo
         }
         let stopped = if let Err(error) = authorize() {
             Some(error)
-        } else if cancel.load(Ordering::Relaxed) {
+        } else if cancel.is_set() {
             Some(CANCELLED.to_owned())
         } else if Instant::now() >= deadline {
             Some(format!("Cloning {repo} took longer than {} minutes.", timeout.as_secs() / 60))
@@ -320,7 +358,7 @@ fn supervise_checked(mut command: Command, repo: &str, destination: &Path, timeo
 }
 
 #[cfg(test)]
-fn supervise(command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &AtomicBool, progress: impl FnMut(u8)) -> Result<()> {
+fn supervise(command: Command, repo: &str, destination: &Path, timeout: Duration, cancel: &Cancel, progress: impl FnMut(u8)) -> Result<()> {
     supervise_checked(command, repo, destination, timeout, cancel, progress, || Ok(()))
 }
 
@@ -372,7 +410,7 @@ pub(crate) fn progress_payload(from: &str, data: &Value) -> Option<Value> {
     let percent = data["percent"].as_u64().filter(|percent| *percent <= 100);
     let start = data["startId"].as_str().filter(|id| super::host::valid_id(id).is_ok());
     let repo = data["repo"].as_str().and_then(|repo| github_hub::valid_repo(repo).ok());
-    let detail = data["detail"].as_str().filter(|_| stage == "error").map(|detail| detail.chars().take(300).collect::<String>());
+    let detail = data["detail"].as_str().filter(|_| stage == "error" || stage == "starting").map(|detail| detail.chars().take(300).collect::<String>());
     Some(json!({"deviceId": from, "startId": start, "repo": repo, "stage": stage, "percent": percent, "detail": detail}))
 }
 
@@ -386,7 +424,7 @@ pub(crate) fn progress(app: &tauri::AppHandle, from: &str, data: &Value) {
 
 /// The project checking out `repo`, cloned into `~/PandaCode` when there is none (with an
 /// empty working tree when `lazy`), and whether it was cloned just now.
-fn project_for(state: &AppState, target: &Target, progress: &Progress, lazy: bool, cancel: &AtomicBool) -> Result<(Project, bool)> {
+fn project_for(state: &AppState, target: &Target, progress: &Progress, lazy: bool, cancel: &Cancel) -> Result<(Project, bool)> {
     let (projects, bot_projects) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         (store.projects()?, crate::bots::project_ids(&store)?)
@@ -415,13 +453,17 @@ fn project_for(state: &AppState, target: &Target, progress: &Progress, lazy: boo
     }
 }
 
-/// Picks the viewer's branch when origin has it, else the default branch. An existing
-/// checkout fetches first (`fetch`); a clone made a moment ago already has origin's refs.
+/// Picks the explicit remote branch or fails closed. Only omitted branches use origin's
+/// default; an existing checkout fetches first, while a fresh clone already has refs.
 pub(crate) fn pick_branch(root: &Path, wanted: Option<&str>, fetch: bool) -> Result<String> {
     if fetch {
         git(root, &["fetch", "--quiet", "origin"], FETCH).map_err(|e| format!("Could not fetch from GitHub: {e}"))?;
     }
-    if let Some(branch) = wanted.filter(|branch| on_origin(root, branch)) {
+    if let Some(branch) = wanted {
+        valid_branch(branch)?;
+        if !on_origin(root, branch) {
+            return Err(format!("Requested branch '{branch}' is not available on origin."));
+        }
         return Ok(branch.to_owned());
     }
     let head = git(root, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], GIT).unwrap_or_default();
@@ -429,7 +471,7 @@ pub(crate) fn pick_branch(root: &Path, wanted: Option<&str>, fetch: bool) -> Res
 }
 
 /// Why the main checkout can't take a remote task in place, if it can't. Only a clean,
-/// idle checkout already on the requested branch runs one.
+/// idle checkout already on the requested branch runs one; any other gets a worktree.
 pub(crate) fn in_place_refusal(host: &str, project: &str, current: &str, branch: &str, dirty: bool, busy: bool) -> Option<String> {
     let problem = if busy {
         format!("{host} has an agent working in {project}.")
@@ -441,26 +483,60 @@ pub(crate) fn in_place_refusal(host: &str, project: &str, current: &str, branch:
     } else {
         return None;
     };
-    Some(format!("{problem} Start it in a Worktree instead."))
+    Some(problem)
 }
 
 /// Readies the main checkout for a task in place: refuses unless it is clean, idle and on
 /// `branch`, then fast-forwards it to origin when it can.
 #[cfg(test)]
-fn ready_in_place(root: &Path, project: &str, branch: &str, busy: bool) -> Result<()> {
+fn ready_in_place(root: &Path, project: &str, branch: &str, busy: bool) -> Result<Option<String>> {
     ready_in_place_checked(root, project, branch, busy, || Ok(()))
 }
 
-fn ready_in_place_checked(root: &Path, project: &str, branch: &str, busy: bool, authorize: impl FnOnce() -> Result<()>) -> Result<()> {
+fn ready_in_place_checked(root: &Path, project: &str, branch: &str, busy: bool, authorize: impl FnOnce() -> Result<()>) -> Result<Option<String>> {
     let current = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], GIT).unwrap_or_default();
     let dirty = !git(root, &["status", "--porcelain"], GIT)?.is_empty();
     if let Some(refusal) = in_place_refusal(&super::config::device_name(), project, &current, branch, dirty, busy) {
-        return Err(refusal);
+        return Ok(Some(refusal));
     }
     authorize()?;
     // A local branch that diverged keeps its own commits; the agent starts from them.
     let _ = git(root, &["merge", "--ff-only", "--quiet", &format!("origin/{branch}")], GIT);
-    Ok(())
+    Ok(None)
+}
+
+/// The note a start that fell back from the main checkout to a worktree reports.
+fn worktree_note(reason: &str) -> String {
+    // Names supplied by the host may contain line separators. Keep the same
+    // single-line, bounded explanation in progress and recovery replies.
+    let first_line = reason.split(['\n', '\r', '\u{2028}', '\u{2029}']).next().unwrap_or_default();
+    format!("Started in a worktree: {first_line}").chars().take(300).collect()
+}
+
+/// Projects whose main checkout a remote start has claimed and not yet launched in.
+static IN_PLACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A remote start's claim on a project's main checkout, from the busy check until its agent
+/// is registered (then [`busy_in_place`] sees the agent itself); dropping it releases it.
+pub(crate) struct Reservation(String);
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Ok(mut held) = IN_PLACE.lock() {
+            held.retain(|id| *id != self.0);
+        }
+    }
+}
+
+/// Claims the project's main checkout unless `busy` (a local agent there) or another remote
+/// start holds it, so two starts never both decide it is free.
+fn reserve_in_place(project_id: &str, busy: impl FnOnce() -> Result<bool>) -> Result<Option<Reservation>> {
+    let mut held = IN_PLACE.lock().map_err(|e| e.to_string())?;
+    if held.iter().any(|id| id == project_id) || busy()? {
+        return Ok(None);
+    }
+    held.push(project_id.to_owned());
+    Ok(Some(Reservation(project_id.to_owned())))
 }
 
 /// Whether a local agent is running in the project's main checkout.
@@ -470,9 +546,36 @@ fn busy_in_place(state: &AppState, project_id: &str) -> Result<bool> {
     Ok(agents.keys().any(|id| store.session(id).is_ok_and(|task| task.project_id == project_id && task.worktree_path.is_none())))
 }
 
+/// A local run can start after the remote reservation's first busy check.
+/// Before launching the remote agent, fall back to an owned worktree rather than
+/// sharing that local run's checkout. A failed recheck also fails closed.
+fn late_busy_worktree_note(reserved_main: bool, busy: impl FnOnce() -> Result<bool>, project: &str) -> Option<String> {
+    if !reserved_main {
+        return None;
+    }
+    let host = super::config::device_name();
+    let reason = match busy() {
+        Ok(false) => return None,
+        Ok(true) => format!("{host} has an agent working in {project}."),
+        Err(_) => format!("{host} could not confirm {project} is idle."),
+    };
+    Some(worktree_note(&reason))
+}
+
 /// Puts a fresh clone's checkout on `branch`; nobody's work is there yet. A clone starts on
 /// origin's default branch at origin's commit, so that branch needs no switch and no merge,
 /// and any other is made from origin's ref.
+#[cfg(test)]
+fn attach(store: &Mutex<crate::storage::Store>, root: &Path, branch: &str, made: Option<workspace::Worktree>, id: &str) -> Result<workspace::Worktree> {
+    let checkout = made.map_or_else(|| remote_worktree(root, branch), Ok)?;
+    let result = store.lock().map_err(|e| e.to_string()).and_then(|store| store.attach_worktree(id, &checkout.path, &checkout.branch));
+    if let Err(error) = result {
+        discard(root, &checkout);
+        return Err(error);
+    }
+    Ok(checkout)
+}
+
 #[cfg(test)]
 pub(crate) fn checkout(root: &Path, branch: &str) -> Result<()> {
     checkout_checked(root, branch, || Ok(()))
@@ -528,6 +631,99 @@ fn discard(root: &Path, made: &workspace::Worktree) {
     let _ = workspace::remove_worktree(root, &made.path, Some(&made.branch), true);
 }
 
+/// Refusals or storage errors before task creation must discard only the
+/// newly prepared checkout, never the user's main working directory.
+fn create_task_with_cleanup<T>(
+    root: &Path,
+    made: Option<&workspace::Worktree>,
+    create: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let result = create();
+    if result.is_err() {
+        made.iter().for_each(|checkout| discard(root, checkout));
+    }
+    result
+}
+
+/// Once a task exists, a configuration failure must undo that task as well
+/// as its newly created worktree. Run the effect without holding the store lock
+/// across the rollback path.
+fn configure_created_start(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    owned: Option<&workspace::Worktree>,
+    configure: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    configure().map_err(|error| rollback_created_start(state, task_id, root, owned, error))
+}
+
+/// Holds a newly prepared worktree until it is attached to the task. A
+/// refusal, poisoned store lock or unwinding task drops only this checkout.
+struct Made(PathBuf, Option<workspace::Worktree>);
+
+impl Made {
+    fn keep(mut self) -> Option<workspace::Worktree> {
+        self.1.take()
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        if let Some(checkout) = self.1.as_ref() {
+            discard(&self.0, checkout);
+        }
+    }
+}
+
+/// A failed start can leave a newly created task and checkout. Remove only
+/// that task; if it is still running or cannot be deleted, preserve its checkout.
+fn rollback_created_start(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    owned: Option<&workspace::Worktree>,
+    error: String,
+) -> String {
+    if crate::task_deletion::delete_state(state, task_id).is_err() {
+        return format!("{error} The incomplete task could not be safely removed.");
+    }
+    if let Some(checkout) = owned {
+        if workspace::remove_worktree(root, &checkout.path, Some(&checkout.branch), true).is_err() {
+            return format!("{error} The new worktree could not be safely removed.");
+        }
+    }
+    error
+}
+
+/// A failed attachment worker cannot be allowed to strand its already-created task.
+/// The Made guard in the worker cleans an uncommitted checkout on unwind; this
+/// cleanup handles the separate persisted task even when join itself fails.
+fn attached_or_rollback<T, E: std::fmt::Display>(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    joined: std::result::Result<Result<T>, E>,
+) -> Result<T> {
+    match joined {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(rollback_created_start(state, task_id, root, None, error)),
+        Err(join_error) => Err(rollback_created_start(state, task_id, root, None, join_error.to_string())),
+    }
+}
+
+/// The host subscription is an injectable effect: a rejected follow must undo the
+/// just-created task and only its owned checkout before any agent is launched.
+fn follow_created_start(
+    state: &AppState,
+    task_id: &str,
+    root: &Path,
+    owned: Option<&workspace::Worktree>,
+    follow: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    follow().map_err(|error| rollback_created_start(state, task_id, root, owned, error))
+}
+
 /// The refusal for a harness `host` doesn't have, naming it as the app does when it knows it.
 fn not_installed(provider: &str, host: &str, installed: bool) -> Result<()> {
     if installed {
@@ -548,13 +744,13 @@ pub(crate) async fn require_installed(provider: &str) -> Result<()> {
 
 /// Starts the task, reporting each stage to the viewer, and the failure as `error`.
 pub(crate) async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start) -> Result<Value> {
-    run_cancellable(app, from, authenticated_key, start, Arc::new(AtomicBool::new(false))).await
+    run_cancellable(app, from, authenticated_key, start, Arc::new(Cancel::default())).await
 }
 
 /// [`run`] that stops when `cancel` is set: it is checked between stages, and a running clone
 /// is killed and its folder removed. Once the task exists it is too late to cancel. A cancelled
 /// start fails with [`CANCELLED`] and sends no `error` stage; the canceller answers the viewer.
-pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, cancel: Arc<AtomicBool>) -> Result<Value> {
+pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, cancel: Arc<Cancel>) -> Result<Value> {
     super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
     let progress = Arc::new(Progress { authenticated_key: authenticated_key.to_owned(), app: app.clone(), to: from.to_owned(), start: start.start_id.clone(), repo: match &start.target { Target::Repo(repo) => repo.clone(), Target::ProjectId(_) => String::new() }, last: Mutex::new(None) });
     let result = start_task(app, from, authenticated_key, start, &progress, &cancel).await;
@@ -564,31 +760,43 @@ pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, authenti
     result
 }
 
-/// The checkout a start works in once the project is found or cloned: the branch to use, and
-/// for a worktree start on a fresh clone the worktree made along the way.
-fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wanted: Option<&str>, progress: &Progress, cancel: &AtomicBool) -> Result<(String, Option<workspace::Worktree>)> {
+type Prepared = (String, Option<workspace::Worktree>, Option<String>, Option<Reservation>);
+
+/// The checkout a start works in once the project is found or cloned: the branch to use, the
+/// worktree made along the way (a worktree start on a fresh clone, or an in-place start whose
+/// main checkout is busy, dirty or elsewhere), and the note saying why it fell back.
+fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wanted: Option<&str>, progress: &Progress, cancel: &Cancel) -> Result<Prepared> {
     check(cancel)?;
     progress.report("preparing", None, None);
     let root = PathBuf::from(&project.path);
     progress.authorize()?;
     let branch = pick_branch(&root, wanted, !cloned)?;
     check(cancel)?;
-    let made = match (worktree, cloned) {
-        (true, true) => Some(worktree_while_restoring_checked(&root, &branch, &|| progress.authorize())?),
+    let (made, note, reservation) = match (worktree, cloned) {
+        (true, true) => (Some(worktree_while_restoring_checked(&root, &branch, &|| progress.authorize())?), None, None),
         (false, true) => {
             checkout_checked(&root, &branch, || progress.authorize())?;
-            None
+            (None, None, None)
         }
         (false, false) => {
-            ready_in_place_checked(&root, &project.name, &branch, busy_in_place(state, &project.id)?, || progress.authorize())?;
-            None
+            let claim = reserve_in_place(&project.id, || busy_in_place(state, &project.id))?;
+            let refused = ready_in_place_checked(&root, &project.name, &branch, claim.is_none(), || progress.authorize())?;
+            if let Some(reason) = refused {
+                // Never switch or modify a busy, dirty, or differently checked-out project.
+                progress.authorize()?;
+                check(cancel)?;
+                let checkout = remote_worktree(&root, &branch)?;
+                (Some(checkout), Some(worktree_note(&reason)), None)
+            } else {
+                (None, None, claim)
+            }
         }
-        (true, false) => None,
+        (true, false) => (None, None, None),
     };
-    Ok((branch, made))
+    Ok((branch, made, note, reservation))
 }
 
-async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, progress: &Arc<Progress>, cancel: &Arc<AtomicBool>) -> Result<Value> {
+async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str, start: Start, progress: &Arc<Progress>, cancel: &Arc<Cancel>) -> Result<Value> {
     check(cancel)?;
     super::host::require_method(app, from, authenticated_key, "task.start")?;
     progress.report("finding", None, None);
@@ -599,7 +807,7 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     super::host::require_method(app, from, authenticated_key, "task.start")?;
     let handle = app.clone();
     let (target, wanted, worktree, reporter, flag) = (start.target, start.branch.clone(), start.worktree, progress.clone(), cancel.clone());
-    let (project, branch, made) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, String, Option<workspace::Worktree>)> {
+    let (project, (branch, made, mut note, reserved)) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, Prepared)> {
         let state = handle.state::<AppState>();
         // A worktree start never uses the clone's own checkout, so a fresh clone defers it.
         let (project, cloned) = project_for(&state, &target, &reporter, worktree, &flag)?;
@@ -607,83 +815,275 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
         if cloned && worktree && prepared.is_err() {
             let _ = restore_checkout(Path::new(&project.path));
         }
-        prepared.map(|(branch, made)| (project, branch, made))
+        prepared.map(|prepared| (project, prepared))
     })
     .await
     .map_err(|e| e.to_string())??;
     let root = PathBuf::from(&project.path);
+    let mut owned_checkout = None;
     if let Err(error) = check(cancel).and_then(|_| super::host::require_method(app, from, authenticated_key, "task.start")) {
         made.iter().for_each(|made| discard(&root, made));
         return Err(error);
     }
-    let state = app.state::<AppState>();
-    let created = {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
-        super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
-        crate::architect::profiles::create_user_task(&store, &project.id, &start.provider, &start.model, start.mode.as_deref(), None).and_then(|task| {
-            if start.effort.is_some() {
-                store.set_reasoning_effort(&task.id, start.effort.as_deref())?;
-            }
-            Ok(task)
-        })
-    };
-    let task = match created {
-        Ok(task) => task,
-        Err(error) => {
-            made.iter().for_each(|made| discard(&root, made));
-            return Err(error);
-        }
-    };
-    if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
-        let _ = crate::task_deletion::delete_state(&state, &task.id);
+    if let Err(error) = cancel.commit() {
+        made.iter().for_each(|checkout| discard(&root, checkout));
         return Err(error);
     }
-    if worktree {
+    let state = app.state::<AppState>();
+    // Guard and lock errors must be captured by cleanup rather than escaping
+    // through ? and stranding a worktree prepared before task creation.
+    let task = create_task_with_cleanup(&root, made.as_ref(), || {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        super::host::check_start_mode(app, from, authenticated_key, start.mode.as_deref())?;
+        crate::architect::profiles::create_user_task(&store, &project.id, &start.provider, &start.model, start.mode.as_deref(), None)
+    })?;
+    if start.effort.is_some() {
+        // Creating the session succeeded; an invalid effort or storage failure
+        // must now delete that session, not just discard its prepared checkout.
+        configure_created_start(&state, &task.id, &root, made.as_ref(), || {
+            state.store.lock().map_err(|e| e.to_string())?
+                .set_reasoning_effort(&task.id, start.effort.as_deref())
+                .map(|_| ())
+        })?;
+    }
+    if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
+        return Err(rollback_created_start(&state, &task.id, &root, made.as_ref(), error));
+    }
+    // The reservation excludes other remote starts, but a local run may have
+    // registered an agent since prepare(). Do not launch into its main checkout.
+    if let Some(reason) = late_busy_worktree_note(reserved.is_some(), || busy_in_place(&state, &project.id), &project.name) {
+        note = Some(reason);
+    }
+    if worktree || made.is_some() || note.is_some() {
         let (handle, device, key, mode) = (app.clone(), from.to_owned(), authenticated_key.to_owned(), task.mode.clone());
         let store = state.store.clone();
         let id = task.id.clone();
+        let attachment_root = root.clone();
         let attached = tauri::async_runtime::spawn_blocking(move || -> Result<workspace::Worktree> {
             if let Err(error) = super::host::check_start_mode(&handle, &device, &key, Some(&mode)) {
-                made.iter().for_each(|checkout| discard(&root, checkout));
+                made.iter().for_each(|checkout| discard(&attachment_root, checkout));
                 return Err(error);
             }
-            let checkout = made.map_or_else(|| remote_worktree(&root, &branch), Ok)?;
+            let owned = Made(attachment_root.clone(), Some(made.map_or_else(|| remote_worktree(&attachment_root, &branch), Ok)?));
+            let checkout = owned.1.as_ref().expect("new remote worktree");
             let store = store.lock().map_err(|e| e.to_string())?;
-            let attached = super::host::check_start_mode(&handle, &device, &key, Some(&mode))
-                .and_then(|_| store.attach_worktree(&id, &checkout.path, &checkout.branch));
-            if let Err(error) = attached {
-                drop(store);
-                discard(&root, &checkout);
-                return Err(error);
-            }
-            Ok(checkout)
+            super::host::check_start_mode(&handle, &device, &key, Some(&mode))
+                .and_then(|_| store.attach_worktree(&id, &checkout.path, &checkout.branch))?;
+            drop(store);
+            Ok(owned.keep().expect("attached remote worktree"))
         })
-        .await
-        .map_err(|e| e.to_string())?;
-        if let Err(error) = attached {
-            let _ = crate::task_deletion::delete_state(&state, &task.id);
-            return Err(error);
-        }
+        .await;
+        owned_checkout = Some(attached_or_rollback(&state, &task.id, &root, attached)?);
     }
     if let Err(error) = super::host::check_start_mode(app, from, authenticated_key, Some(&task.mode)) {
-        let _ = crate::task_deletion::delete_state(&state, &task.id);
-        return Err(error);
+        return Err(rollback_created_start(&state, &task.id, &root, owned_checkout.as_ref(), error));
     }
-    progress.report("starting", None, None);
+    // Preserve the fallback explanation if the start acknowledgement is lost.
+    progress.report("starting", None, note.as_deref());
     // The caller mirrors the task from its first event.
-    super::host::follow(app, from, authenticated_key, &task.id)?;
-    crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await?;
+    follow_created_start(&state, &task.id, &root, owned_checkout.as_ref(), || {
+        super::host::follow(app, from, authenticated_key, &task.id)
+    })?;
+    if let Err(error) = crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await {
+        return Err(rollback_created_start(&app.state::<AppState>(), &task.id, &root, owned_checkout.as_ref(), error));
+    }
     use tauri::Emitter;
     let _ = app.emit("sessions-changed", ());
-    Ok(json!({"sessionId": task.id}))
+    Ok(match note {
+        Some(note) => json!({"sessionId": task.id, "worktree": true, "note": note}),
+        None => json!({"sessionId": task.id}),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_unattached_remote_worktree_is_removed_by_its_drop_guard() {
+        let base = temp_base("attach-guard");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = clone.canonicalize().unwrap();
+
+        let rejected = remote_worktree(&root, "main").unwrap();
+        let rejected_path = rejected.path.clone();
+        {
+            let _pending = Made(root.clone(), Some(rejected));
+            assert!(rejected_path.exists());
+            // Returning Err or unwinding here drops the pending attachment.
+        }
+        assert!(!rejected_path.exists(), "failed attachment must not strand a worktree");
+
+        let promoted = remote_worktree(&root, "main").unwrap();
+        let kept = Made(root.clone(), Some(promoted)).keep().unwrap();
+        assert!(kept.path.exists(), "a successfully attached checkout remains owned by its task");
+        discard(&root, &kept);
+        assert!(root.exists(), "the main checkout must not be deleted");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn denied_task_creation_discards_only_its_prepared_worktree() {
+        let base = temp_base("pre-create-denial");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = clone.canonicalize().unwrap();
+        let unrelated = root.join("keep.txt");
+        std::fs::write(&unrelated, "unrelated user content").unwrap();
+        let owned = remote_worktree(&root, "main").unwrap();
+        let error = create_task_with_cleanup(&root, Some(&owned), || -> Result<()> {
+            Err("Remote permission was revoked before task creation.".into())
+        });
+        assert_eq!(error, Err("Remote permission was revoked before task creation.".into()));
+        assert!(!owned.path.exists(), "the prepared task worktree must not be stranded");
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "unrelated user content");
+        assert!(root.exists(), "the original checkout must remain intact");
+        assert_eq!(
+            create_task_with_cleanup::<()>(&root, None, || Err("Denied.".into())),
+            Err("Denied.".into()),
+            "a refusal without an owned checkout cannot affect the project"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn invalid_remote_reasoning_effort_rolls_back_only_its_new_task() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, unrelated, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let unrelated = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, unrelated.id, store.project(&project_id).unwrap().path)
+        };
+        // Codex accepts catalog-defined effort IDs, including hyphenated values;
+        // a space is invalid under the real provider validator and exercises rollback.
+        assert!(crate::providers::validate_reasoning_effort("codex", Some("catalog-defined-effort")).is_ok());
+        assert!(crate::providers::validate_reasoning_effort("codex", Some("invalid effort value")).is_err());
+        let error = configure_created_start(&state, &target, Path::new(&root), None, || {
+            state.store.lock().unwrap()
+                .set_reasoning_effort(&target, Some("invalid effort value"))
+                .map(|_| ())
+        }).unwrap_err();
+        assert!(!error.is_empty(), "the invalid effort must be rejected");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err(), "no orphan session after invalid effort");
+        assert!(store.session(&unrelated).is_ok(), "an unrelated task is preserved");
+        assert!(store.project(&project_id).is_ok(), "the project is preserved");
+    }
+
+    #[test]
+    fn failed_attachment_join_rolls_back_just_its_new_task() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, unrelated, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let unrelated = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, unrelated.id, store.project(&project_id).unwrap().path)
+        };
+        // A join cancellation models an attachment worker that never returned a
+        // Worktree. Previously the early ? returned without deleting the task.
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let joined = runtime.block_on(async {
+            let worker = tokio::spawn(std::future::pending::<Result<()>>());
+            worker.abort();
+            worker.await
+        });
+        assert!(joined.is_err(), "this test must exercise the JoinError path");
+        let error = attached_or_rollback(&state, &target, Path::new(&root), joined).unwrap_err();
+        assert!(!error.is_empty());
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err(), "failed join cannot leave an orphan task");
+        assert!(store.session(&unrelated).is_ok(), "unrelated sessions must survive");
+        assert!(store.project(&project_id).is_ok(), "the existing project must survive");
+    }
+
+    #[test]
+    fn failed_host_follow_rolls_back_only_its_new_task() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, other, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let other = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, other.id, store.project(&project_id).unwrap().path)
+        };
+        let mut calls = 0;
+        let result = follow_created_start(&state, &target, Path::new(&root), None, || {
+            calls += 1;
+            Err("Subscription denied.".into())
+        });
+        assert_eq!(result, Err("Subscription denied.".into()));
+        assert_eq!(calls, 1, "the rejected host subscription is attempted only once");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err(), "no orphan task after a rejected follow");
+        assert!(store.session(&other).is_ok(), "unrelated sessions remain intact");
+        assert!(store.project(&project_id).is_ok(), "the pre-existing project remains intact");
+    }
+
+    #[test]
+    fn failed_remote_start_rollback_preserves_other_tasks_and_projects() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let (target, other, root) = {
+            let store = state.store.lock().unwrap();
+            let target = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            let other = store.create_session(&project_id, "codex", "default", "ask").unwrap();
+            (target.id, other.id, store.project(&project_id).unwrap().path)
+        };
+        assert_eq!(rollback_created_start(&state, &target, Path::new(&root), None, "Access revoked.".into()), "Access revoked.");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&target).is_err());
+        assert!(store.session(&other).is_ok(), "other tasks are never rolled back");
+        assert!(store.project(&project_id).is_ok(), "existing projects are never removed");
+    }
+
+    #[test]
+    fn failed_remote_start_keeps_task_when_deletion_is_not_safe() {
+        let (state, project_id) = crate::concurrent_task_tests::test_state();
+        let task_id = state.store.lock().unwrap().create_session(&project_id, "codex", "default", "ask").unwrap().id;
+        state.shutdown.store(1, Ordering::SeqCst);
+        let result = rollback_created_start(&state, &task_id, Path::new("."), None, "Denied.".into());
+        assert!(result.contains("could not be safely removed"));
+        assert!(state.store.lock().unwrap().session(&task_id).is_ok());
+        state.shutdown.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn failed_remote_start_removes_only_its_owned_checkout() {
+        let base = temp_base("rollback");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = std::fs::canonicalize(&clone).unwrap();
+        let (state, _) = crate::concurrent_task_tests::test_state();
+        let (project, task) = {
+            let store = state.store.lock().unwrap();
+            let project = store.add_project(&root).unwrap().id;
+            let task = store.create_session(&project, "codex", "default", "ask").unwrap().id;
+            (project, task)
+        };
+        let owned = remote_worktree(&root, "main").unwrap();
+        state.store.lock().unwrap().attach_worktree(&task, &owned.path, &owned.branch).unwrap();
+        assert!(owned.path.exists());
+        assert_eq!(follow_created_start(&state, &task, &root, Some(&owned), || Err("Denied.".into())), Err("Denied.".into()));
+        assert!(!owned.path.exists(), "only this start's new checkout is removed");
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&task).is_err());
+        assert!(store.project(&project).is_ok());
+        assert!(root.exists(), "main checkout must survive");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     fn project(id: &str) -> Project {
-        Project { id: id.into(), name: id.into(), path: format!("/p/{id}") }
+        Project { id: id.into(), name: id.into(), path: format!("/p/{id}"), added_order: 0 }
     }
 
     #[test]
@@ -709,12 +1109,56 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_dirty_or_different_branch_checkout_is_never_modified_by_fallback_checks() {
+        let base = temp_base("fallback-preservation");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "initial"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = clone.canonicalize().unwrap();
+        let initial_head = git(&root, &["rev-parse", "HEAD"], GIT).unwrap();
+
+        let untracked = root.join("local-notes.txt");
+        std::fs::write(&untracked, "preserve these local notes").unwrap();
+        let dirty = ready_in_place_checked(&root, "project", "main", false, || Err("unexpected checkout".into())).unwrap().unwrap();
+        assert!(dirty.contains("uncommitted changes"), "{dirty}");
+        let made = remote_worktree(&root, "main").unwrap();
+        assert!(made.path.exists() && made.path != root, "fallback owns a different worktree");
+        assert_eq!(std::fs::read_to_string(&untracked).unwrap(), "preserve these local notes");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"], GIT).unwrap(), initial_head);
+        discard(&root, &made);
+        std::fs::remove_file(&untracked).unwrap();
+
+        git_in(&root, &["switch", "-q", "-c", "topic"]);
+        let other_branch = ready_in_place_checked(&root, "project", "main", false, || Err("unexpected checkout".into())).unwrap().unwrap();
+        assert!(other_branch.contains("on topic, not main"), "{other_branch}");
+        assert_eq!(git(&root, &["branch", "--show-current"], GIT).unwrap(), "topic");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"], GIT).unwrap(), initial_head);
+
+        git_in(&root, &["switch", "-q", "main"]);
+        let busy = ready_in_place_checked(&root, "project", "main", true, || Err("unexpected checkout".into())).unwrap().unwrap();
+        assert!(busy.contains("agent working"), "{busy}");
+        assert_eq!(git(&root, &["branch", "--show-current"], GIT).unwrap(), "main");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"], GIT).unwrap(), initial_head);
+        assert!(git(&root, &["status", "--porcelain"], GIT).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn only_a_clean_idle_checkout_on_the_branch_runs_in_place() {
         assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", false, false), None);
-        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, false).unwrap(), "Studio has uncommitted changes in orbit. Start it in a Worktree instead.");
-        assert_eq!(in_place_refusal("Studio", "orbit", "dev", "main", false, false).unwrap(), "Studio has orbit on dev, not main. Start it in a Worktree instead.");
-        assert_eq!(in_place_refusal("Studio", "orbit", "", "main", false, false).unwrap(), "Studio has orbit on a detached HEAD, not main. Start it in a Worktree instead.");
-        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, true).unwrap(), "Studio has an agent working in orbit. Start it in a Worktree instead.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, false).unwrap(), "Studio has uncommitted changes in orbit.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "dev", "main", false, false).unwrap(), "Studio has orbit on dev, not main.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "", "main", false, false).unwrap(), "Studio has orbit on a detached HEAD, not main.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, true).unwrap(), "Studio has an agent working in orbit.");
+        assert_eq!(worktree_note("Studio has an agent working in orbit."), "Started in a worktree: Studio has an agent working in orbit.");
+        for separator in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+            let note = worktree_note(&format!("Studio is busy.{separator}/private/host"));
+            assert_eq!(note, "Started in a worktree: Studio is busy.", "separator {separator:?}");
+        }
+        assert_eq!(worktree_note(&"x".repeat(1000)).chars().count(), 300);
         assert!(WORST_CASE <= Duration::from_secs(10 * 60));
     }
 
@@ -734,10 +1178,16 @@ mod tests {
         let mut with_image = ok.clone();
         with_image["imageIds"] = json!([image]);
         assert_eq!(parse(&with_image).unwrap().image_ids, vec![image]);
-        for (key, bad) in [("repo", json!("../etc")), ("branch", json!("--upload-pack=x")), ("branch", json!("a..b")), ("prompt", json!(" ")), ("provider", json!("a b")), ("model", Value::Null), ("imageIds", json!(["/etc/passwd"]))] {
+        for (key, bad) in [("repo", json!("../etc")), ("branch", json!("--upload-pack=x")), ("branch", json!("a..b")), ("branch", json!("HEAD")), ("branch", json!("@")), ("prompt", json!(" ")), ("provider", json!("a b")), ("model", Value::Null), ("imageIds", json!(["/etc/passwd"]))] {
             let mut params = ok.clone();
             params[key] = bad;
             assert!(parse(&params).is_err(), "{key}");
+        }
+        // Reject malformed Git ref components before causing any clone/worktree effects.
+        for branch in ["feature//x", "feature/.hidden", "feature/topic.", "feature/topic.lock/next", ".hidden"] {
+            let mut params = ok.clone();
+            params["branch"] = json!(branch);
+            assert!(parse(&params).is_err(), "invalid Git branch accepted: {branch}");
         }
     }
 
@@ -773,6 +1223,8 @@ mod tests {
         assert_eq!(payload, json!({"deviceId": "dev-studio", "startId": "s1", "repo": "orbit-labs/orbit", "stage": "downloading", "percent": 42, "detail": null}));
         let failed = progress_payload("dev-studio", &json!({"stage": "error", "percent": 500, "repo": "../x", "detail": "x".repeat(400)})).unwrap();
         assert_eq!((failed["percent"].is_null(), failed["repo"].is_null(), failed["detail"].as_str().map(str::len)), (true, true, Some(300)));
+        let note = progress_payload("dev-studio", &json!({"stage": "starting", "detail": "Started in a worktree: Studio has uncommitted changes in orbit."})).unwrap();
+        assert_eq!(note["detail"], "Started in a worktree: Studio has uncommitted changes in orbit.");
         assert!(progress_payload("dev-studio", &json!({"stage": "hacking"})).is_none());
         assert!(progress_payload("dev-studio", &json!({})).is_none());
     }
@@ -839,7 +1291,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         let missing = base.join("missing");
         let folders = [&main, &linked, &included, &bare, &sub, &missing];
-        let projects: Vec<Project> = folders.iter().enumerate().map(|(n, path)| Project { id: n.to_string(), name: n.to_string(), path: path.to_string_lossy().into_owned() }).collect();
+        let projects: Vec<Project> = folders.iter().enumerate().map(|(n, path)| Project { id: n.to_string(), name: n.to_string(), path: path.to_string_lossy().into_owned(), added_order: n as i64 }).collect();
         assert_eq!(config_path(&main).as_deref(), Some(main.join(".git/config")).as_deref());
         assert!(config_path(&linked).is_some_and(|path| path == main.join(".git").join("config") || path.canonicalize().ok() == main.join(".git/config").canonicalize().ok()));
         assert_eq!(config_path(&sub), None);
@@ -871,11 +1323,11 @@ mod tests {
             command
         };
         let error = "Connect authority was revoked.";
-        assert_eq!(supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &AtomicBool::new(false), drop, || Err(error.into())), Err(error.into()));
+        assert_eq!(supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &Cancel::default(), drop, || Err(error.into())), Err(error.into()));
         assert!(!destination.exists(), "an already denied start cannot spawn the clone");
 
         let allowed = AtomicBool::new(true);
-        let result = supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &AtomicBool::new(false), |_| {
+        let result = supervise_checked(command(), "a/b", &destination, Duration::from_secs(5), &Cancel::default(), |_| {
             allowed.store(false, Ordering::SeqCst);
         }, || if allowed.load(Ordering::SeqCst) { Ok(()) } else { Err(error.into()) });
         assert_eq!(result, Err(error.into()), "revocation is observed after clone progress without a timing sleep");
@@ -895,15 +1347,16 @@ mod tests {
             command
         };
         // Already cancelled: nothing runs.
-        let cancel = AtomicBool::new(true);
+        let cancel = Cancel::default();
+        assert!(cancel.cancel());
         assert_eq!(supervise(command(), "a/b", &destination, Duration::from_secs(60), &cancel, drop), Err(CANCELLED.into()));
         assert!(!destination.exists());
         // Cancelled while it runs.
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(Cancel::default());
         let setter = cancel.clone();
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
-            setter.store(true, Ordering::Relaxed);
+            setter.cancel();
         });
         let started = Instant::now();
         assert_eq!(supervise(command(), "a/b", &destination, Duration::from_secs(60), &cancel, drop), Err(CANCELLED.into()));
@@ -912,7 +1365,7 @@ mod tests {
         assert!(!destination.exists(), "the partial clone is removed");
         // A timeout stops it the same way, and a folder that was already there stays.
         std::fs::create_dir_all(&destination).unwrap();
-        let error = supervise(command(), "a/b", &destination, Duration::from_millis(300), &AtomicBool::new(false), drop).unwrap_err();
+        let error = supervise(command(), "a/b", &destination, Duration::from_millis(300), &Cancel::default(), drop).unwrap_err();
         assert!(error.starts_with("Cloning a/b took longer than"), "{error}");
         assert!(destination.exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -955,7 +1408,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Picks a pushed branch, falls back to origin's default, and checks it out.
+    /// A cancel before the start commits stops it; one after is refused, so the task it makes
+    /// is never reported cancelled.
+    #[test]
+    fn a_cancel_after_the_task_is_being_made_is_too_late() {
+        let early = Cancel::default();
+        assert!(early.cancel() && early.cancel() && early.is_set());
+        assert_eq!(early.commit(), Err(CANCELLED.into()));
+        let late = Cancel::default();
+        late.commit().unwrap();
+        assert!(!late.cancel() && !late.is_set());
+        assert_eq!(check(&late), Ok(()));
+        late.commit().unwrap();
+    }
+
+    /// Concurrent starts for one project: exactly one gets the main checkout until it lets go,
+    /// and a local agent there turns every one away.
+    #[test]
+    fn a_late_local_agent_causes_safe_worktree_fallback() {
+        let busy = late_busy_worktree_note(true, || Ok(true), "orbit").unwrap();
+        assert!(busy.starts_with("Started in a worktree: "));
+        assert!(busy.ends_with("has an agent working in orbit."));
+        assert!(late_busy_worktree_note(true, || Ok(false), "orbit").is_none());
+        assert!(late_busy_worktree_note(false, || panic!("no idle-check lock without a main-checkout reservation"), "orbit").is_none(), "explicit worktrees do not need a second busy decision");
+        let unknown = late_busy_worktree_note(true, || Err("store unavailable".into()), "orbit").unwrap();
+        assert!(unknown.contains("could not confirm orbit is idle"), "recheck errors must not select the main checkout");
+        assert!(!unknown.contains("store unavailable"), "internal errors stay off the remote viewer");
+    }
+
+    #[test]
+    fn only_one_concurrent_start_reserves_the_main_checkout() {
+        let id = format!("p-{}", uuid::Uuid::new_v4());
+        let barrier = std::sync::Barrier::new(8);
+        let won: Vec<Option<Reservation>> = std::thread::scope(|scope| {
+            let tries: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+                barrier.wait();
+                reserve_in_place(&id, || Ok(false)).unwrap()
+            })).collect();
+            tries.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        assert_eq!(won.iter().filter(|r| r.is_some()).count(), 1);
+        assert!(reserve_in_place(&id, || Ok(false)).unwrap().is_none(), "held until dropped");
+        drop(won);
+        assert!(reserve_in_place(&id, || Ok(true)).unwrap().is_none(), "a local agent is there");
+        assert!(reserve_in_place(&id, || Ok(false)).unwrap().is_some(), "released");
+        assert!(reserve_in_place(&format!("{id}-other"), || Ok(false)).unwrap().is_some());
+    }
+
+    /// A worktree the task can't take (here: no such task) is removed, branch and all.
+    #[test]
+    fn a_worktree_the_task_cannot_take_is_removed() {
+        let base = temp_base("attach");
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git_in(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
+        let root = std::fs::canonicalize(&clone).unwrap();
+        let store = Mutex::new(crate::storage::Store::open(Path::new(":memory:")).unwrap());
+        let handed = remote_worktree(&root, "main").unwrap();
+        let (path, branch) = (handed.path.clone(), handed.branch.clone());
+        assert!(attach(&store, &root, "main", Some(handed), "missing").is_err());
+        assert!(!path.exists());
+        assert!(git(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], GIT).is_err(), "branch deleted");
+        assert!(attach(&store, &root, "main", None, "missing").is_err());
+        assert_eq!(git(&root, &["worktree", "list", "--porcelain"], GIT).unwrap().matches("worktree ").count(), 1, "only the main checkout");
+        assert_eq!(git(&root, &["branch", "--list", "pandacode/*"], GIT).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Picks a pushed branch, rejects missing explicit branches, and checks it out.
     #[test]
     fn the_branch_comes_from_origin() {
         let base = std::env::temp_dir().join(format!("pandacode-start-{}", uuid::Uuid::new_v4()));
@@ -967,19 +1489,33 @@ mod tests {
         run(&origin, &["branch", "feature"]);
         run(&base, &["clone", "-q", origin.to_str().unwrap(), "clone"]);
         assert_eq!(pick_branch(&clone, Some("feature"), true).unwrap(), "feature");
-        assert_eq!(pick_branch(&clone, Some("unpushed"), true).unwrap(), "main");
+        assert_eq!(pick_branch(&clone, Some("unpushed"), true).unwrap_err(), "Requested branch 'unpushed' is not available on origin.");
+        assert_eq!(pick_branch(&clone, Some("unpushed"), false).unwrap_err(), "Requested branch 'unpushed' is not available on origin.");
+        assert_eq!(pick_branch(&clone, Some("../bad"), false).unwrap_err(), "Invalid branch.");
+        assert_eq!(pick_branch(&clone, Some("HEAD"), false).unwrap_err(), "Invalid branch.", "origin/HEAD is a symbolic default alias, not an explicit branch");
+        assert_eq!(pick_branch(&clone, Some("@"), false).unwrap_err(), "Invalid branch.", "Git treats @ as HEAD rather than a selectable branch");
+        assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main", "explicit branch failure must not switch the checkout");
         assert_eq!(pick_branch(&clone, None, true).unwrap(), "main");
         // An existing checkout on another branch, dirty or busy is never switched.
-        assert!(ready_in_place(&clone, "orbit", "feature", false).unwrap_err().contains("on main, not feature"));
-        assert!(ready_in_place(&clone, "orbit", "main", true).unwrap_err().contains("an agent working"));
+        assert!(ready_in_place(&clone, "orbit", "feature", false).unwrap().unwrap().contains("on main, not feature"));
+        assert!(ready_in_place(&clone, "orbit", "main", true).unwrap().unwrap().contains("an agent working"));
         std::fs::write(clone.join("notes.txt"), "work").unwrap();
-        assert!(ready_in_place(&clone, "orbit", "main", false).unwrap_err().contains("uncommitted changes"));
+        assert!(ready_in_place(&clone, "orbit", "main", false).unwrap().unwrap().contains("uncommitted changes"));
         assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main");
+        // The fallback worktree leaves the busy checkout's branch and files alone.
+        let root = std::fs::canonicalize(&clone).unwrap();
+        let made = remote_worktree(&root, "feature").unwrap();
+        assert!(made.branch.starts_with("pandacode/remote-"));
+        assert_eq!(std::fs::read_to_string(clone.join("notes.txt")).unwrap(), "work");
+        assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main");
+        assert_eq!(git(&made.path, &["rev-parse", "HEAD"], GIT).unwrap(), git(&clone, &["rev-parse", "origin/feature"], GIT).unwrap());
+        assert!(!made.path.join("notes.txt").exists());
+        discard(&root, &made);
         std::fs::remove_file(clone.join("notes.txt")).unwrap();
         // Clean, idle and on the branch: fast-forwarded and used in place.
         run(&origin, &["commit", "-q", "--allow-empty", "-m", "two"]);
         pick_branch(&clone, Some("main"), true).unwrap();
-        ready_in_place(&clone, "orbit", "main", false).unwrap();
+        assert_eq!(ready_in_place(&clone, "orbit", "main", false).unwrap(), None);
         assert_eq!(git(&clone, &["rev-parse", "HEAD"], GIT).unwrap(), git(&origin, &["rev-parse", "HEAD"], GIT).unwrap());
         checkout(&clone, "feature").unwrap();
         assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "feature");

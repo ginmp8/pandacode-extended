@@ -1,5 +1,70 @@
 import { expect, test, type Page } from '@playwright/test';
 
+test('launcher visibly distinguishes launch errors and permits a safe retry', async ({page}) => {
+  await instrumentLauncher(page, `if (command === 'overlay_launch' && !window.__allowLaunch) throw new Error('Workspace unavailable');`);
+  await page.goto('/?view=launcher');
+  const prompt = page.getByRole('textbox', {name:'New task'});
+  const submit = page.getByRole('button', {name:'Start task', exact:true});
+  await prompt.fill('Keep my task draft');
+  await submit.click();
+  const feedback = page.locator('.launcher-feedback.is-error');
+  await expect(feedback).toHaveText('Workspace unavailable');
+  await expect(prompt).toHaveValue('Keep my task draft');
+  const colors = await page.evaluate(() => {
+    const failure = document.querySelector<HTMLElement>('.launcher-feedback.is-error')!;
+    const expected = document.createElement('span');
+    expected.style.color = 'var(--danger)';
+    document.body.append(expected);
+    const result = [getComputedStyle(failure).color, getComputedStyle(expected).color];
+    expected.remove();
+    return result;
+  });
+  expect(colors[0]).toBe(colors[1]);
+  await expect(submit).toBeEnabled();
+  await page.evaluate(() => { (window as any).__allowLaunch = true; });
+  await submit.click();
+  await expect(page.locator('.launcher-feedback')).toHaveText('Task started. You can keep working.');
+  await expect(feedback).toHaveCount(0);
+  await expect(prompt).toHaveValue('');
+});
+
+test('launcher applies cross-window light/dark palette changes without reopening', async ({page}) => {
+  await page.goto('/?view=launcher');
+  const start = page.getByRole('button', {name:'Start task', exact:true});
+  const initial = await start.evaluate(el => getComputedStyle(el).backgroundColor);
+  const palette = await page.evaluate(async () => {
+    const {accentTokens} = await import('/src/palette-core.ts');
+    const {parseHex} = await import('/src/color.ts');
+    const rgb = parseHex('#2fb8c4')!.rgb;
+    return {
+      light: accentTokens(rgb, 'light'),
+      dark: accentTokens(rgb, 'dark'),
+    };
+  });
+  const apply = async (theme: 'light' | 'dark', tokens: Record<string, string>) => {
+    await page.evaluate(({theme, tokens}) => {
+      localStorage.setItem('pandacode.theme', theme);
+      localStorage.setItem('pandacode.palette', JSON.stringify({
+        accent: {mode:'custom', color:'#2fb8c4'},
+        vsix:null, cache:{key:'#2fb8c4:' + theme, tokens, terminal:{}},
+      }));
+      // Storage events are dispatched in the other window, not the writing window.
+      window.dispatchEvent(new StorageEvent('storage', {key:'pandacode.palette'}));
+      window.dispatchEvent(new StorageEvent('storage', {key:'pandacode.theme'}));
+    }, {theme, tokens});
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    await expect.poll(() => page.evaluate(() =>
+      document.documentElement.style.getPropertyValue('--accent').trim()
+    )).toBe(tokens['--accent']);
+    await expect(start).toBeVisible();
+  };
+  await apply('light', palette.light);
+  await expect.poll(() => start.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe(initial);
+  await apply('dark', palette.dark);
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+});
+
+
 test('launcher preserves saved harness authors and renders handoffs beside the current live provider', async ({page}) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({width:650,height:610});
@@ -57,7 +122,7 @@ test('launcher offers harness and model selection without opening the workspace'
   await page.goto('/?view=launcher');
   await page.getByRole('button', {name:'Choose harness and model'}).click();
   await expect(page.getByRole('dialog', {name:'Harness and model'})).toBeVisible();
-  await expect(page.getByRole('searchbox', {name:'Search harnesses and models'})).toBeFocused();
+  await expect(page.getByRole('combobox', { name: 'Search harnesses and models'})).toBeFocused();
   await expect(page.locator('html')).not.toHaveAttribute('data-overlay-hidden', 'true');
   expect(page.url()).toContain('view=launcher');
 });
@@ -76,7 +141,7 @@ test('launcher model trigger toggles the picker without reopening it', async ({p
   await trigger.click();
   await expect(picker).toBeVisible();
   await expect(picker).toHaveCount(1);
-  await page.getByRole('searchbox',{name:'Search harnesses and models'}).press('Shift+Tab');
+  await page.keyboard.press('Escape');
   await expect(picker).toHaveCount(0);
   await expect(page.locator('html')).not.toHaveAttribute('data-overlay-hidden','true');
 });
@@ -99,9 +164,10 @@ test('launcher shows saved team models beside its architect and preserves the co
   const triggerRect = (await trigger.boundingBox())!, suffixRect = (await suffix.boundingBox())!;
   expect(suffixRect.x + suffixRect.width).toBeLessThanOrEqual(triggerRect.x + triggerRect.width);
   await trigger.click();
-  const selected = page.getByRole('button',{name:'Claude Code · Claude Opus 5',exact:true});
+  const selected = page.getByRole('option',{name:'Claude Code · Claude Opus 5',exact:true});
   await expect(selected).toHaveAttribute('aria-current','true');
-  await page.getByRole('button',{name:'Codex · GPT-5.6-Sol',exact:true}).click();
+  await page.getByRole('tab',{name:'Codex',exact:true}).click();
+  await page.getByRole('option',{name:'Codex · GPT-5.6-Sol',exact:true}).click();
   await expect(trigger.locator('.launcher-model-name')).toHaveText('GPT-5.6-Sol');
   await expect(suffix).toHaveText('+2 models');
   await page.clock.runFor(1600);
@@ -232,12 +298,16 @@ test('launcher discovers full model names on demand and launches the chosen harn
   await expect(page.locator('.launcher-task')).toHaveCount(4);
   expect(await page.evaluate(() => (window as any).__overlayCalls.filter((call:any) => call.command === 'list_provider_models'))).toHaveLength(0);
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  const claude = page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true});
+  const picker = page.getByRole('dialog',{name:'Harness and model'});
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  const claude = picker.getByRole('listbox',{name:'Models',exact:true}).getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true});
   await expect(claude).toBeVisible();
-  await expect(claude.locator('.provider-logo')).toHaveCount(1);
+  await expect(picker.getByRole('tab',{name:'Claude Code',exact:true}).locator('.provider-logo')).toHaveCount(1);
+  await expect(claude.locator('.provider-logo')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Antigravity · Default',exact:true})).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'list_provider_models' && call.args.provider === 'antigravity'))).toBe(false);
-  await page.getByRole('searchbox',{name:'Search harnesses and models'}).fill('Claude Sonnet 5');
+  await page.getByRole('combobox',{name:'Search harnesses and models'}).fill('Claude Sonnet 5');
+  await expect(claude.locator('.provider-logo')).toHaveCount(1);
   await claude.click();
   await expect(page.getByRole('dialog',{name:'Harness and model'})).toHaveCount(0);
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
@@ -259,14 +329,15 @@ test('launcher keeps an unavailable saved harness visible but disabled without d
   await page.goto('/?view=launcher');
   await expect(page.locator('.launcher-task')).toHaveCount(4);
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  const unavailable = page.getByRole('button',{name:'Antigravity · Default',exact:true});
+  const unavailable = page.getByRole('option',{name:'Antigravity · Default',exact:true});
   await expect(unavailable).toBeVisible();
   await expect(unavailable).toHaveAttribute('aria-current','true');
   await expect(unavailable).toBeDisabled();
   expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'list_provider_models' && call.args.provider === 'antigravity'))).toBe(false);
   await unavailable.dispatchEvent('click');
   expect(await page.evaluate(() => (window as any).__overlayCalls.some((call:any) => call.command === 'overlay_select_model'))).toBe(false);
-  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await page.getByRole('listbox',{name:'Models',exact:true}).getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
 });
 
@@ -274,7 +345,8 @@ test('launcher keeps its chosen harness and model through main-window context sy
   await instrumentLauncher(page);
   await page.goto('/?view=launcher');
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  await page.getByRole('button',{name:'Claude Code · Claude Opus 5',exact:true}).click();
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await page.getByRole('option',{name:'Claude Code · Claude Opus 5',exact:true}).click();
   await expect(page.locator('.launcher-agent')).toContainText('Claude Opus 5');
   await page.evaluate(async () => {
     const {overlayCall} = await import('/src/overlay-client.ts');
@@ -282,7 +354,7 @@ test('launcher keeps its chosen harness and model through main-window context sy
   });
   await page.reload();
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  await expect(page.getByRole('button',{name:'Claude Code · Claude Opus 5',exact:true})).toHaveAttribute('aria-current','true');
+  await expect(page.getByRole('option',{name:'Claude Code · Claude Opus 5',exact:true})).toHaveAttribute('aria-current','true');
   await page.keyboard.press('Escape');
   await page.getByRole('textbox',{name:'New task'}).fill('Continue with the saved model');
   await page.getByRole('button',{name:'Start task',exact:true}).click();
@@ -294,7 +366,8 @@ test('launcher blocks starting a task while a model change is saving', async ({p
   await page.goto('/?view=launcher');
   await page.getByRole('textbox',{name:'New task'}).fill('Launch with the new harness');
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseModelSave)).toBe('function');
   await expect(page.getByRole('button',{name:'Start task',exact:true})).toBeDisabled();
   await expect(page.getByRole('dialog',{name:'Harness and model'})).toHaveAttribute('aria-busy','true');
@@ -308,17 +381,22 @@ test('launcher blocks starting a task while a model change is saving', async ({p
 });
 
 test('launcher retains its old model after a failed selection and allows retry', async ({page}) => {
-  await instrumentLauncher(page, `if (command === 'overlay_select_model' && !window.__allowModelSave) throw new Error('Could not save the selected model.');`);
+  await instrumentLauncher(page, `if (command === 'overlay_select_model' && !window.__allowModelSave) throw new Error('Could not save the selected model. /private/credentials?token=DO_NOT_DISPLAY');`);
   await page.goto('/?view=launcher');
   const trigger = page.getByRole('button',{name:'Choose harness and model'});
   const original = await trigger.textContent();
   await trigger.click();
-  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
-  await expect(page.getByRole('alert')).toHaveText('Could not save the selected model.');
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  // The shared picker must classify provider errors without exposing native paths or tokens.
+  // The provider diagnostic contains a credential hint; classify it without exposing the raw text.
+  await expect(page.getByRole('alert')).toHaveText('Login required');
+  await expect(page.getByRole('dialog', { name: 'Harness and model' })).not.toContainText('DO_NOT_DISPLAY');
+  await expect(page.getByRole('dialog', { name: 'Harness and model' })).not.toContainText('/private/credentials');
   await expect(trigger).toHaveText(original!);
-  await expect(page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true})).toBeEnabled();
+  await expect(page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true})).toBeEnabled();
   await page.evaluate(() => { (window as any).__allowModelSave = true; });
-  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  await page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
   await expect(trigger).toContainText('Claude Sonnet 5');
   await expect(page.getByRole('dialog',{name:'Harness and model'})).toHaveCount(0);
 });
@@ -328,7 +406,8 @@ test('launcher ignores late model discovery after a newer selection', async ({pa
   await page.goto('/?view=launcher');
   await page.getByRole('button',{name:'Choose harness and model'}).click();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseCatalog)).toBe('function');
-  await page.getByRole('button',{name:'Codex · GPT-5.6-Sol',exact:true}).click();
+  await page.getByRole('tab',{name:'Codex',exact:true}).click();
+  await page.getByRole('option',{name:'Codex · GPT-5.6-Sol',exact:true}).click();
   await expect(page.locator('.launcher-agent')).toContainText('GPT-5.6-Sol');
   await page.evaluate(() => (window as any).__releaseCatalog());
   await expect(page.getByRole('dialog',{name:'Harness and model'})).toHaveCount(0);
@@ -356,7 +435,8 @@ test('launcher keeps a saved model when an older status snapshot arrives late', 
   await page.clock.runFor(1600);
   await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseSnapshot)).toBe('function');
   await page.getByRole('button',{name:'Choose harness and model'}).click();
-  await page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
   await expect(page.locator('.launcher-agent')).toContainText('Claude Sonnet 5');
   await page.evaluate(() => (window as any).__releaseSnapshot());
   await page.clock.runFor(100);
@@ -372,20 +452,25 @@ test('launcher model picker fits the minimum window and Escape only closes the p
   const trigger = page.getByRole('button',{name:'Choose harness and model'});
   await trigger.click();
   const picker = page.getByRole('dialog',{name:'Harness and model'});
-  await expect(page.getByRole('button',{name:'Claude Code · Claude Sonnet 5',exact:true})).toBeAttached();
+  await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
+  await expect(page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true})).toBeAttached();
   const rect = await picker.boundingBox();
   expect(rect).not.toBeNull();
   expect(rect!.x).toBeGreaterThanOrEqual(0);
   expect(rect!.y).toBeGreaterThanOrEqual(0);
   expect(rect!.x + rect!.width).toBeLessThanOrEqual(490);
   expect(rect!.y + rect!.height).toBeLessThanOrEqual(410);
-  await page.getByRole('searchbox',{name:'Search harnesses and models'}).fill('GLM Coding Plan');
+  await page.getByRole('combobox', { name: 'Search harnesses and models'}).fill('GLM Coding Plan');
   const glm = page.locator('.model-menu-option[data-provider="glm"][data-model="glm-5.3"]');
   await expect(glm).toBeInViewport();
   await expect(glm.locator('.provider-logo')).toHaveCount(1);
   await expect(picker).toHaveAttribute('data-popover-state','open');
   await expect(picker).toHaveCSS('opacity','1');
   await page.screenshot({path:'/private/tmp/pandacode-overlay-check/model-picker.png'});
+  // The first Escape clears the search, the second closes the picker.
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('combobox', { name: 'Search harnesses and models'})).toHaveValue('');
+  await expect(picker).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(picker).toHaveCount(0);
   await expect(trigger).toBeFocused();
@@ -530,7 +615,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   await expect(narratives.nth(1)).toBeVisible();
   const groups = activity.locator('details.tool-group');
   await expect(groups).toHaveCount(2);
-  await expect(groups.nth(0).locator(':scope > summary')).toContainText('Reading 2 files');
+  await expect(groups.nth(0).locator(':scope > summary')).toContainText('Reading 2 files…');
   await expect(groups.nth(1).locator(':scope > summary')).toContainText('Running 1 command');
   await expect(groups.nth(0)).toHaveJSProperty('open',false);
   await expect(groups.nth(1)).toHaveJSProperty('open',false);
@@ -538,7 +623,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   const originalSequence = await sequence();
   expect(originalSequence).toEqual([
     expect.stringContaining('I will inspect the current launcher.'),
-    expect.stringContaining('Reading 2 files'),
+    expect.stringContaining('Reading 2 files…'),
     expect.stringContaining('The client is ready; I will verify the behavior.'),
     expect.stringContaining('Running 1 command'),
   ]);
@@ -568,6 +653,7 @@ test('launcher keeps live narratives between compact tool groups and preserves l
   });
   await page.clock.runFor(1600);
   await expect(page.locator('.launcher-thread-response:visible')).toContainText('The launch flow is verified.');
+  await expect(groups.nth(0).locator(':scope > summary')).toContainText('Read 2 files');
   await expect(activity).toHaveJSProperty('open',true);
   await page.getByRole('button',{name:'Back to active agents'}).click();
   await page.locator('.launcher-task[data-task="preview-active"]').click();

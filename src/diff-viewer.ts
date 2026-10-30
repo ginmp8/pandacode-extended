@@ -68,7 +68,7 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
   let resizeFrame = 0;
   let requestedLayout = input.layout ?? 'unified';
   let layout: 'unified' | 'split' = 'unified';
-  let wrap = true;
+  let wrap = false;
   let files: FileDiffMetadata[] = [];
   const listeners = new AbortController();
 
@@ -190,6 +190,26 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
     const button = event.key === 'ArrowLeft' || event.key === 'Home' ? unified : split;
     button.focus();
     button.click();
+  }, { signal: listeners.signal });
+
+  // Pierre's horizontal scroller lives inside a shadow root, so focusing this
+  // accessible region does not automatically forward the arrow keys to it.
+  content.addEventListener('keydown', event => {
+    if (event.target !== content || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+    const delta = event.key === 'ArrowRight' ? 80 : -80;
+    for (const host of content.querySelectorAll<HTMLElement>('diffs-container')) {
+      const nodes = host.shadowRoot ? [host, ...host.shadowRoot.querySelectorAll<HTMLElement>('*')] : [host];
+      const scrollable = nodes.find(node => {
+        const overflowX = getComputedStyle(node).overflowX;
+        return (overflowX === 'auto' || overflowX === 'scroll') &&
+          node.clientWidth > 0 && node.scrollWidth > node.clientWidth + 20;
+      });
+      if (!scrollable) continue;
+      const before = scrollable.scrollLeft;
+      scrollable.scrollLeft += delta;
+      if (scrollable.scrollLeft !== before) { event.preventDefault(); break; }
+    }
   }, { signal: listeners.signal });
 
   async function initialize(): Promise<void> {

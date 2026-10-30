@@ -14,6 +14,8 @@ type Host = {
   transcript(): HTMLElement | null;
   /** Where focus returns when the bar closes. */
   restoreFocus(): void;
+  /** Release automatic bottom-follow before navigating to a search match. */
+  beforeReveal?(): void;
 };
 
 /** Every case-insensitive occurrence of `query` in `root`'s text, as ranges that may span
@@ -31,6 +33,20 @@ export function findRanges(root: ParentNode, query: string): Range[] {
       nodes.push(node); starts.push(text.length); text += node.data;
     }
     const haystack = text.toLocaleLowerCase();
+    // Unicode lowercasing can expand one original character into multiple code units
+    // (e.g. U+0130 -> i + combining dot). Map folded positions back to DOM offsets.
+    const foldedOffsets: Array<{ start: number; end: number }> = [];
+    if (haystack.length !== text.length) {
+      let offset = 0;
+      for (const character of text) {
+        const end = offset + character.length;
+        for (let index = 0; index < character.toLocaleLowerCase().length; index++) {
+          foldedOffsets.push({ start: offset, end });
+        }
+        offset = end;
+      }
+    }
+    const remap = foldedOffsets.length === haystack.length ? foldedOffsets : null;
     // Find the node holding a character offset (nodes are in order, so search from `from`).
     const locate = (offset: number, from: number): number => {
       let index = from;
@@ -39,10 +55,13 @@ export function findRanges(root: ParentNode, query: string): Range[] {
     };
     let at = haystack.indexOf(needle), cursor = 0;
     while (at !== -1) {
-      const first = locate(at, cursor), last = locate(at + needle.length - 1, first);
+      if (haystack.length !== text.length && !remap) break;
+      const from = remap ? remap[at].start : at;
+      const through = remap ? remap[at + needle.length - 1].end : at + needle.length;
+      const first = locate(from, cursor), last = locate(through - 1, first);
       const range = document.createRange();
-      range.setStart(nodes[first], at - starts[first]);
-      range.setEnd(nodes[last], at + needle.length - starts[last]);
+      range.setStart(nodes[first], from - starts[first]);
+      range.setEnd(nodes[last], through - starts[last]);
       ranges.push(range);
       cursor = first;
       at = haystack.indexOf(needle, at + needle.length);
@@ -81,15 +100,28 @@ export function createThreadFind(host: Host) {
     bar?.querySelectorAll<HTMLButtonElement>('[data-find-step]').forEach(button => { button.disabled = ranges.length < 2; });
   }
 
+  /** The top of the transcript's clear area: below its scroll padding (the header it scrolls under,
+   *  that header's fade and the floating team bars) and below this find bar. */
+  function clearTop(transcript: HTMLElement): number {
+    const padded = transcript.getBoundingClientRect().top + (parseFloat(getComputedStyle(transcript).scrollPaddingTop) || 0);
+    return bar && !bar.hidden ? Math.max(padded, bar.getBoundingClientRect().bottom + 8) : padded;
+  }
+
   /** Bring the current match into view, opening any folded turn that hides it. */
   function reveal(): void {
     const range = ranges[current], transcript = host.transcript();
     if (!range || !transcript) return;
+    // Choosing a match is reading intent even if it is already on screen.
+    // Release streaming auto-follow before expanding a fold or measuring the range.
+    host.beforeReveal?.();
     for (let node = range.startContainer.parentElement; node && node !== transcript; node = node.parentElement) {
       if (node instanceof HTMLDetailsElement && !node.open) node.open = true;
     }
-    const rect = range.getBoundingClientRect(), box = transcript.getBoundingClientRect();
-    if (rect.top < box.top + 48 || rect.bottom > box.bottom - 24) transcript.scrollTop += rect.top - box.top - box.height / 3;
+    const rect = range.getBoundingClientRect(), bottom = transcript.getBoundingClientRect().bottom, top = clearTop(transcript);
+    // A third of the way down the clear area, never under anything floating over the transcript.
+    if (rect.top < top || rect.bottom > bottom - 24) {
+      transcript.scrollTop += rect.top - top - (bottom - top) / 3;
+    }
   }
 
   /** Re-run the query. A fresh query starts at the match nearest the reader; a refresh after
@@ -101,7 +133,7 @@ export function createThreadFind(host: Host) {
     ranges = findRanges(transcript, input.value);
     if (!ranges.length) current = -1;
     else if (fresh || !previous) {
-      const top = transcript.getBoundingClientRect().top;
+      const top = clearTop(transcript);
       const visible = ranges.findIndex(range => range.getBoundingClientRect().bottom >= top);
       current = visible === -1 ? ranges.length - 1 : visible;
     } else current = Math.min(Math.max(ranges.findIndex(range => range.compareBoundaryPoints(Range.START_TO_START, previous) >= 0), 0), ranges.length - 1);

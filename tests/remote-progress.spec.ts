@@ -127,6 +127,112 @@ test('progress rejects unknown attempt IDs, wrong computers and ambiguous legacy
   expect(result.legacy).toBe('finding');
 });
 
+test('a recovered start note is scoped to its waiting mirror and listeners are cleaned up', async ({ page }) => {
+  await newTask(page);
+  const result = await page.evaluate(async () => {
+    const [progress, preview] = await Promise.all([import('/src/remote-progress.ts' as string), import('/src/preview.ts' as string)]);
+    const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
+    let startId = '';
+    let resolveStart!: (result: { sessionId: string }) => void;
+    const reply = new Promise<{ sessionId: string }>(resolve => { resolveStart = resolve; });
+    const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, id => {
+      startId = id;
+      return reply;
+    });
+    const pause = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+    for (let step = 0; step < 20 && !startId; step++) await pause();
+    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId, stage: 'starting', detail: 'Waiting for Studio iMac…' });
+    resolveStart({ sessionId });
+    for (let step = 0; step < 20 && !progress.remoteStart(sessionId)?.waiting; step++) await pause();
+    const unrelatedNote = 'Wrong task note';
+    progress.onRemoteStartNote({ sessionId: 'unrelated-task', note: unrelatedNote });
+    const beforeMatch = progress.remoteStart(sessionId)?.note ?? null;
+    const note = 'Started in a worktree: Studio iMac has an agent working in orbit.';
+    progress.onRemoteStartNote({ sessionId, note });
+    const linked = await completion;
+    return {
+      startId,
+      beforeMatch,
+      linked,
+      cleared: !progress.remoteStart(sessionId),
+      progressListeners: preview.previewListenerCount('remote://start-progress'),
+      noteListeners: preview.previewListenerCount('remote://start-note'),
+    };
+  });
+  expect(result.startId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(result.beforeMatch).toBeNull();
+  expect(result.linked).toEqual({ sessionId: expect.any(String), note: 'Started in a worktree: Studio iMac has an agent working in orbit.' });
+  expect(result.cleared).toBe(true);
+  expect(result.progressListeners).toBe(0);
+  expect(result.noteListeners).toBe(0);
+});
+
+
+test('a recovered host note arriving before the lost-reply result is retained', async ({ page }) => {
+  await newTask(page);
+  const result = await page.evaluate(async () => {
+    const progress = await import('/src/remote-progress.ts' as string);
+    const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
+    let started!: () => void;
+    let resolveReply!: (value: { sessionId: string }) => void;
+    let startId = '';
+    const called = new Promise<void>(resolve => { started = resolve; });
+    const reply = new Promise<{ sessionId: string }>(resolve => { resolveReply = resolve; });
+    const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, id => {
+      startId = id;
+      started();
+      return reply;
+    });
+    await called;
+    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId, stage: 'starting', detail: 'Waiting for Studio iMac…' });
+    const note = 'Started in a worktree: Studio iMac has an agent working in orbit.';
+    progress.onRemoteStartNote({ sessionId, note });
+    const early = progress.remoteStart(sessionId)?.note ?? null;
+    resolveReply({ sessionId });
+    const linked = await Promise.race([
+      completion,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Early start note did not settle the waiting mirror')), 2000)),
+    ]);
+    return { early, linked, cleared: !progress.remoteStart(sessionId) };
+  });
+  expect(result.early).toBe('Started in a worktree: Studio iMac has an agent working in orbit.');
+  expect(result.linked).toEqual({ sessionId: expect.any(String), note: result.early });
+  expect(result.cleared).toBe(true);
+});
+
+
+test('a remote agent attachment before the lost start reply still settles the pending task', async ({ page }) => {
+  await newTask(page);
+  const result = await page.evaluate(async () => {
+    const progress = await import('/src/remote-progress.ts' as string);
+    const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
+    let started!: () => void;
+    let resolveReply!: (value: { sessionId: string }) => void;
+    let attemptId = '';
+    const called = new Promise<void>(resolve => { started = resolve; });
+    const reply = new Promise<{ sessionId: string }>(resolve => { resolveReply = resolve; });
+    const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, id => {
+      attemptId = id; started(); return reply;
+    });
+    await called;
+    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId: attemptId, stage: 'starting', detail: 'Waiting for Studio iMac…' });
+    progress.remoteStartAttached('unrelated-task');
+    const before = progress.remoteStart(sessionId)?.attached ?? false;
+    progress.remoteStartAttached(sessionId);
+    const early = progress.remoteStart(sessionId)?.attached ?? false;
+    resolveReply({ sessionId });
+    const linked = await Promise.race([
+      completion,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Early remote agent attachment did not release the waiting mirror')), 2000)),
+    ]);
+    return { before, early, linked, cleared: !progress.remoteStart(sessionId) };
+  });
+  expect(result.before).toBe(false);
+  expect(result.early).toBe(true);
+  expect(result.linked).toEqual({ sessionId: expect.any(String) });
+  expect(result.cleared).toBe(true);
+});
+
 for (const outcome of ['resolve', 'reject'] as const) {
   test(`a superseded start cannot update or clear its retry when the old request ${outcome}s`, async ({ page }) => {
     await newTask(page);
@@ -221,4 +327,35 @@ test('a failed start shows in the strip, not as a toast, and Retry sends it agai
   const started = await page.evaluate(() => (window as any).__remoteStarts);
   expect(started).toHaveLength(2);
   expect(started[1].startId).not.toBe(started[0].startId);
+});
+
+test('a busy host checkout starts in a worktree and says so; a steer while starting is queued', async ({ page }) => {
+  const note = 'Started in a worktree: Studio iMac has uncommitted changes in orbit.';
+  await page.addInitScript(text => { (window as any).__remoteStartBusy = text; }, note);
+  await sendToStudio(page, 'Fix the login bug');
+  for (let step = 0; step < 3; step++) await next(page);
+  // Nothing to steer yet: the message waits in the queue instead of failing.
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  await prompt.fill('Also add a test');
+  await prompt.press('ControlOrMeta+Enter');
+  await expect(page.locator('#toast')).toContainText('Studio iMac is still starting this task; your message is queued for after it.');
+  await expect(page.locator('[data-queue-id]')).toHaveCount(1);
+  await expect(page.locator('[data-queue-id]')).toContainText('Also add a test');
+  for (let step = 0; step < 4; step++) await next(page);
+  await expect(page.locator('#stream-region .live-status')).toHaveText(note);
+  await next(page);
+  await expect(page.locator('#composer-area .composer-computer-fixed')).toHaveText('on Studio iMac');
+  await expect(page.locator('#composer-area .composer-inline-note')).toHaveText(note);
+});
+
+test('a start whose reply was lost still shows the host worktree note once it links', async ({ page }) => {
+  test.slow();
+  const note = 'Started in a worktree: Studio iMac has an agent working in orbit.';
+  await page.addInitScript(() => { (window as any).__remoteStartAmbiguous = true; });
+  await sendToStudio(page, 'Lost reply, busy host');
+  for (let step = 0; step < 8; step++) await next(page);
+  await page.waitForFunction(() => typeof (window as any).__remoteStartAttach === 'function');
+  await expect(page.locator('#stream-region .turn-activity-label')).toContainText('Waiting for Studio iMac');
+  await page.evaluate(text => (window as any).__remoteStartAttach(text), note);
+  await expect(page.locator('#composer-area .composer-inline-note')).toHaveText(note);
 });

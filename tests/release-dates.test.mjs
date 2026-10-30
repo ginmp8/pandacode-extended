@@ -22,7 +22,8 @@ test('original releases remain at their original paths and every Extended histor
   assert.ok(local.includes('0.5.1.md'));
   assert.ok(local.includes('0.5.2.md'));
   assert.ok(local.includes('0.6.0.md'));
-  assert.deepEqual([...local].sort(), [...legacy.map(version => version + '.md'), '0.4.0.md', '0.5.0.md', '0.5.1.md', '0.5.2.md', '0.6.0.md'].sort(), 'Extended history must retain reviewed source notes and the current candidate');
+  assert.ok(local.includes('0.7.0.md'));
+  assert.deepEqual([...local].sort(), [...legacy.map(version => version + '.md'), '0.4.0.md', '0.5.0.md', '0.5.1.md', '0.5.2.md', '0.6.0.md', '0.7.0.md'].sort(), 'Extended history must retain reviewed source notes and the current candidate');
   for (const v of legacy) {
     assert.ok(local.includes(v + '.md'), 'missing migrated local history ' + v);
     assert.ok(!root.includes(v + '.md'), 'legacy local release still in original namespace ' + v);
@@ -47,6 +48,9 @@ test('every dated source note has a uniquely namespaced ISO date, without invent
   assert.equal(dates['0.3.49'], '2026-10-26');
   assert.equal(dates['0.3.50'], '2026-10-26');
   assert.equal(dates['extended/0.6.0'], '2026-10-26');
+  assert.equal(dates['extended/0.7.0'], '2026-10-27');
+  for (let patch = 51; patch <= 56; patch++) assert.equal(dates['0.3.' + patch], '2026-10-26');
+  for (let patch = 57; patch <= 65; patch++) assert.equal(dates['0.3.' + patch], '2026-10-27');
   for (let patch = 43; patch <= 47; patch++) assert.equal(dates['0.3.' + patch], '2026-10-25');
   assert.equal(dates['0.4.0'], undefined, 'Extended and original releases must not share an unqualified date key');
 });

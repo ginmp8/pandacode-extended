@@ -153,7 +153,7 @@ fn run_git(root: &Path, args: &[&str], limit: usize, commit: bool) -> Result<Git
         Duration::from_secs(if commit { 120 } else { 30 }),
     )
 }
-fn run_git_bounded(
+pub(crate) fn run_git_bounded(
     root: &Path,
     args: &[&str],
     limit: usize,
@@ -2075,7 +2075,9 @@ mod tests {
             assert_eq!(migrated.project_id, main.id);
             assert_eq!(migrated.worktree_path.as_deref(), first_path.to_str());
             assert_eq!(migrated.title, "Keep this title");
-            assert!(migrated.archived);
+            assert!(!migrated.archived);
+            assert_eq!(migrated.task_stage, "completed");
+            assert!(migrated.completed_at.is_some());
             assert_eq!(migrated.mode, "plan");
             assert_eq!(migrated.resume_id.as_deref(), Some("keep-provider-resume"));
             assert_eq!(

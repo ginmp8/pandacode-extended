@@ -79,7 +79,7 @@ jobs:
           sudo chmod 1777 /private/tmp
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-security.spec.ts tests/remote-pairing.spec.ts tests/remote-diagnostics.spec.ts tests/remote-connect-ux.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/provider-handoff.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --shard="${{ matrix.shard }}/2" --workers=4
+          npx playwright test tests/model-routing.spec.ts tests/model-picker.spec.ts tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/sidebar-keyboard.spec.ts tests/remote-progress.spec.ts tests/remote-security.spec.ts tests/remote-pairing.spec.ts tests/remote-diagnostics.spec.ts tests/remote-connect-ux.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/provider-handoff.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --shard="${{ matrix.shard }}/2" --workers=4
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -109,7 +109,7 @@ jobs:
           sudo chmod 1777 /private/tmp
           export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
           test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test 'historical-.*.spec.ts' tests/office-viewer.spec.ts tests/document-viewer.spec.ts tests/bots.spec.ts tests/bots-web.spec.ts tests/bots-profile.spec.ts tests/approval-modes.spec.ts tests/tray-popover.spec.ts tests/inspector-new-task.spec.ts tests/jev.spec.ts tests/jev-assist.spec.ts tests/jev-live.spec.ts tests/agent-usage.spec.ts tests/browser.spec.ts tests/history-upgrade.spec.ts tests/overlay.spec.ts tests/vm.spec.ts tests/deploy.spec.ts tests/streaming.spec.ts tests/agent-traces.spec.ts tests/markdown.spec.ts tests/ui.spec.ts tests/support.spec.ts --shard="${{ matrix.shard }}/3" --workers=2
+          npx playwright test 'historical-.*.spec.ts' tests/thread-header-overlay.spec.ts tests/thread-panels.spec.ts tests/layout-preferences.spec.ts tests/office-viewer.spec.ts tests/document-viewer.spec.ts tests/bots.spec.ts tests/bots-web.spec.ts tests/bots-profile.spec.ts tests/bots-thread.spec.ts tests/bots-channels.spec.ts tests/approval-modes.spec.ts tests/tray-popover.spec.ts tests/inspector-new-task.spec.ts tests/jev.spec.ts tests/jev-assist.spec.ts tests/jev-live.spec.ts tests/agent-usage.spec.ts tests/browser.spec.ts tests/history-upgrade.spec.ts tests/overlay.spec.ts tests/vm.spec.ts tests/deploy.spec.ts tests/streaming.spec.ts tests/agent-traces.spec.ts tests/message-actions.spec.ts tests/markdown.spec.ts tests/ui.spec.ts tests/support.spec.ts --shard="${{ matrix.shard }}/3" --workers=2
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:

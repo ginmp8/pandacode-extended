@@ -1,42 +1,42 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { REVIEW_WINDOW, readOpen, sidebarSections } from '../src/sidebar-sections.ts';
+import { readOpen, sectionOf, sidebarSections } from '../src/sidebar-sections.ts';
 
-const now = 10 * REVIEW_WINDOW;
+const now = 10 * 24 * 60 * 60 * 1000;
 const task = (id, extra = {}) => ({ id, projectId: 'p', createdAt: 1, updatedAt: 1, lastResponseAt: null, taskStage: 'pending', ...extra });
 const ids = list => list.map(t => t.id);
 const split = (tasks, options = {}) => sidebarSections({
-  tasks, now, active: t => Boolean(t.running), stage: t => t.taskStage, ...options,
+  tasks, active: t => Boolean(t.running), stage: t => t.taskStage, ...options,
 });
 
 test('puts every task in exactly one section', () => {
   const tasks = [
     task('run', { running: true, taskStage: 'in_progress' }),
     task('fresh', { taskStage: 'review', lastResponseAt: now - 60_000 }),
-    task('stale', { taskStage: 'review', lastResponseAt: now - REVIEW_WINDOW - 1 }),
+    task('old', { taskStage: 'review', lastResponseAt: 1 }),
     task('idea'),
     task('done', { taskStage: 'completed', completedAt: now - 5 }),
   ];
   const sections = split(tasks);
   assert.deepEqual(ids(sections.active), ['run']);
-  assert.deepEqual(ids(sections.review), ['fresh']);
-  assert.deepEqual(ids(sections.rest), ['stale', 'idea']);
+  assert.deepEqual(ids(sections.review), ['fresh', 'old']);
+  assert.deepEqual(ids(sections.rest), ['idea']);
   assert.deepEqual(ids(sections.completed), ['done']);
   assert.equal(Object.values(sections).flat().length, tasks.length);
 });
 
-test('keeps sidebar order within Active and Needs review', () => {
-  const tasks = [task('b', { running: true }), task('a', { running: true }), task('d', { taskStage: 'review', lastResponseAt: now - 2 }), task('c', { taskStage: 'review', lastResponseAt: now - 1 })];
+test('Active lists the latest start first and Finished the latest response, whatever the manual order', () => {
+  const tasks = [task('b', { running: true, lastPromptAt: 5 }), task('a', { running: true, lastPromptAt: 9 }), task('d', { taskStage: 'review', lastResponseAt: now - 2 }), task('c', { taskStage: 'review', lastResponseAt: now - 1 })];
   const sections = split(tasks);
-  assert.deepEqual(ids(sections.active), ['b', 'a']);
-  assert.deepEqual(ids(sections.review), ['d', 'c']);
+  assert.deepEqual(ids(sections.active), ['a', 'b']);
+  assert.deepEqual(ids(sections.review), ['c', 'd']);
 });
 
 test('lists completed tasks newest first, and a running completed task stays active', () => {
   const tasks = [
     task('old', { taskStage: 'completed', completedAt: 10 }),
     task('new', { taskStage: 'completed', completedAt: 30 }),
-    task('mid', { taskStage: 'completed', completedAt: null, updatedAt: 20 }),
+    task('mid', { taskStage: 'completed', completedAt: null, lastResponseAt: 20, updatedAt: 99 }),
     task('again', { taskStage: 'completed', running: true }),
   ];
   const sections = split(tasks);
@@ -46,7 +46,7 @@ test('lists completed tasks newest first, and a running completed task stays act
 
 test('running threads are Active even when pinned or open; pinned review work stays pinned', () => {
   const tasks = [
-    task('pin', { pinned: true, running: true }), task('open', { running: true }),
+    task('pin', { pinned: true, running: true, lastPromptAt: 2 }), task('open', { running: true, lastPromptAt: 1 }),
     task('pinDone', { pinned: true, taskStage: 'completed' }), task('pinReview', { pinned: true, taskStage: 'review', lastResponseAt: now - 1 }),
   ];
   const placed = split(tasks, { selectedId: 'open' });
@@ -55,12 +55,76 @@ test('running threads are Active even when pinned or open; pinned review work st
   assert.deepEqual(ids(placed.completed), ['pinDone']);
 });
 
-test('Needs review lists only unseen turns, and a held open thread stays there', () => {
-  const tasks = [task('seen', { taskStage: 'review', lastResponseAt: now - 1 }), task('new', { taskStage: 'review', lastResponseAt: now - 1 })];
-  const unseen = t => t.id === 'new';
-  assert.deepEqual(ids(split(tasks, { unseen }).review), ['new']);
-  assert.deepEqual(ids(split(tasks, { unseen, selectedId: 'seen', held: true }).review), ['seen', 'new']);
-  assert.deepEqual(ids(split(tasks, { unseen, selectedId: 'new' }).review), []);
+test('Finished keeps every finished task, open or not, until it is settled', () => {
+  const tasks = [task('a', { taskStage: 'review', lastResponseAt: now - 2 }), task('b', { taskStage: 'review', lastResponseAt: now - 1 })];
+  assert.deepEqual(ids(split(tasks).review), ['b', 'a']);
+  assert.deepEqual(ids(split(tasks, { selectedId: 'a' }).review), ['b', 'a']);
+  assert.deepEqual(ids(split(tasks, { selectedId: 'a', hold: 'review' }).review), ['b', 'a']);
+  assert.deepEqual(ids(split([{ ...tasks[0], taskStage: 'completed' }], { selectedId: 'other' }).completed), ['a']);
+});
+
+test('the open thread holds its section, so a click on its row never moves it; running still wins', () => {
+  const done = task('done', { taskStage: 'completed', completedAt: 5 }), idea = task('idea');
+  assert.deepEqual(ids(split([{ ...done, taskStage: 'review' }], { selectedId: 'done', hold: 'completed' }).completed), ['done']);
+  assert.deepEqual(ids(split([done], { selectedId: 'done', hold: 'rest' }).rest), ['done']);
+  assert.deepEqual(ids(split([done], { selectedId: 'other', hold: 'rest' }).completed), ['done']);
+  assert.deepEqual(ids(split([{ ...idea, running: true }], { selectedId: 'idea', hold: 'rest' }).active), ['idea']);
+  // Opened from Active, a finished run stays there while the thread is open.
+  assert.deepEqual(ids(split([idea], { selectedId: 'idea', hold: 'active' }).active), ['idea']);
+  assert.deepEqual(ids(split([idea], { selectedId: 'other', hold: 'active' }).rest), ['idea']);
+});
+
+test('reopening the selected Settled row retains its visual position until another task opens', () => {
+  const tasks = [
+    task('new', { taskStage: 'completed', completedAt: 30 }),
+    task('opened', { taskStage: 'review', completedAt: null, lastResponseAt: 40 }),
+    task('old', { taskStage: 'completed', completedAt: 10 }),
+  ];
+  const held = split(tasks, { selectedId: 'opened', hold: 'completed', holdIndex: 1 });
+  assert.deepEqual(ids(held.completed), ['new', 'opened', 'old']);
+  assert.deepEqual(ids(held.review), []);
+  // The underlying reopened stage becomes visible after a different selection.
+  const released = split(tasks, { selectedId: 'other' });
+  assert.deepEqual(ids(released.completed), ['new', 'old']);
+  assert.deepEqual(ids(released.review), ['opened']);
+  const running = split(tasks.map(task => task.id === 'opened' ? { ...task, running: true } : task), {
+    selectedId: 'opened', hold: 'completed', holdIndex: 1,
+  });
+  assert.deepEqual(ids(running.active), ['opened']);
+  assert.deepEqual(ids(running.completed), ['new', 'old']);
+});
+
+test('settling a selected Finished row keeps its visual slot until selection changes', () => {
+  const tasks = [
+    task('latest', { taskStage: 'review', lastResponseAt: 70 }),
+    task('selected', { taskStage: 'completed', completedAt: 80, lastResponseAt: 200 }),
+    task('old', { taskStage: 'review', lastResponseAt: 30 }),
+    task('settled', { taskStage: 'completed', completedAt: 10 }),
+  ];
+  const original = structuredClone(tasks);
+  const held = split(tasks, { selectedId: 'selected', hold: 'review', holdIndex: 1 });
+  assert.deepEqual(ids(held.review), ['latest', 'selected', 'old']);
+  assert.deepEqual(ids(held.completed), ['settled']);
+  assert.equal(new Set(Object.values(held).flat().map(t => t.id)).size, tasks.length);
+
+  const released = split(tasks, { selectedId: 'other' });
+  assert.deepEqual(ids(released.review), ['latest', 'old']);
+  assert.deepEqual(ids(released.completed), ['selected', 'settled']);
+
+  const running = split(tasks.map(t => t.id === 'selected' ? { ...t, running: true } : t), {
+    selectedId: 'selected', hold: 'review', holdIndex: 1,
+  });
+  assert.deepEqual(ids(running.active), ['selected']);
+  assert.deepEqual(ids(running.review), ['latest', 'old']);
+  assert.deepEqual(tasks, original);
+});
+
+test('sectionOf maps sidebar groups to the section a thread holds', () => {
+  assert.equal(sectionOf('active'), 'active');
+  assert.equal(sectionOf('review'), 'review');
+  assert.equal(sectionOf('completed'), 'completed');
+  for (const group of ['pinned', 'chats', 'project:p', 'all', 'archived']) assert.equal(sectionOf(group), 'rest');
+  assert.equal(sectionOf(undefined), undefined);
 });
 
 test('the Completed section reads its open state safely', () => {

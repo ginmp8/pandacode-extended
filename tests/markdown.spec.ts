@@ -100,6 +100,25 @@ test.describe('enriched markdown', () => {
     expect(shown.settled).toEqual([`a [x]${open}`, `a [x]${open}`, '- [ ] task', '- [x', '[x](y) done', 'run `npm`', '```\nlist[0', 'see ']);
   });
 
+  test('updates a streaming link label synchronously after the first formatted frame', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { streamMarkdown } = await import('/src/streaming-markdown.ts');
+      const host = document.createElement('div');
+      document.body.append(host);
+      streamMarkdown(host, 'Kickoff [no');
+      // Wait for a formatted open-link span: this is the path that previously
+      // left the old label visible while the next asynchronous paint was pending.
+      for (let attempt = 0; attempt < 100 && !host.querySelector('.md-open-link'); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const initial = host.querySelector('.md-open-link')?.textContent;
+      streamMarkdown(host, 'Kickoff [notes](https://gran');
+      return { initial, immediate: host.textContent?.trim() };
+    });
+    expect(result.initial).toBe('no');
+    expect(result.immediate).toBe('Kickoff notes');
+  });
+
   test('keeps local file links as workspace paths', async ({ page }) => {
     await render(page, 'See [main](file:///Users/you/Projects/orbit/src/main.ts) and [a](src/a.ts).');
     await expect(probe(page).locator('a').first()).toHaveAttribute('href', '/Users/you/Projects/orbit/src/main.ts');

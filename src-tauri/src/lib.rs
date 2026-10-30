@@ -40,10 +40,12 @@ mod local_servers;
 mod local_signing;
 mod message_queue;
 mod message_attachments;
+mod model_routing;
 mod moodboards;
 mod attachments;
 mod prompt_attachments;
 mod overlay;
+mod panda_router;
 mod provider_settings;
 mod remote;
 mod providers;
@@ -892,10 +894,11 @@ fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<providers::S
         .transpose()
         .map_err(|error| error.to_string())?;
     let store = state.store.lock().map_err(|error| error.to_string())?;
-    if live.is_none() {
+    // A mirror's children run on its host: they settle there while its turn is open.
+    let task = live.is_none().then(|| store.session(session_id)).transpose()?;
+    if let Some(task) = task.filter(|task| task.remote_device.is_none() || !matches!(task.status.as_str(), "running" | "waiting")) {
         // Retry a completion write that may have failed without reviving old
         // children just because their final snapshot could not reach disk.
-        let task = store.session(session_id)?;
         store.finish_subagents(
             session_id,
             if task.status == "error" {
@@ -2156,6 +2159,19 @@ async fn launch_operation_admitted(
                     }
                 }
             }
+            // Record only the final explicit outcome; storage excludes stops, restores,
+            // failures and goal tasks before setting the monotonic bit.
+            if let Err(error) = db.record_successful_ordinary_turn(
+                &session_id,
+                successful,
+                was_stopped,
+                restore_stage.as_deref(),
+            ) {
+                successful = false;
+                if let Ok(mut slot) = persistence_error.lock() {
+                    *slot = Some(error);
+                }
+            }
             if let Some(title) = &title_run {
                 if title.finish(&db, successful).unwrap_or(false) {
                     let _ = app.emit("sessions-changed", ());
@@ -3378,6 +3394,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             provider_settings::setup(&dir).map_err(std::io::Error::other)?;
             connections::setup(&dir).map_err(std::io::Error::other)?;
+            model_routing::setup(&dir);
             // Optional integration storage must never prevent the workspace from opening.
             if jev::setup(&dir).is_err() {
                 eprintln!("Jev settings are unavailable; browser testing remains disabled.");
@@ -3408,28 +3425,6 @@ pub fn run() {
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("Native tray is unavailable: {error}");
             }
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    let state = handle.state::<AppState>();
-                    if state.shutdown.load(Ordering::SeqCst) != 0 {
-                        break;
-                    }
-                    let archived = state
-                        .store
-                        .lock()
-                        .map_err(|e| e.to_string())
-                        .and_then(|store| store.archive_completed(storage::now()));
-                    match archived {
-                        Ok(count) if count > 0 => {
-                            let _ = handle.emit("sessions-changed", ());
-                        }
-                        Err(error) => eprintln!("Completed task archive failed: {error}"),
-                        _ => {}
-                    }
-                }
-            });
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = appearance::setup(&window) {
                     eprintln!("Native appearance setup failed: {error}");
@@ -3477,6 +3472,10 @@ pub fn run() {
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 support::open_support,
                 support::support_details,
+                model_routing::model_routing_status,
+                model_routing::model_routing_configure,
+                model_routing::model_routing_prepare,
+                model_routing::model_routing_route,
                 local_sign_app,
                 agent_updates::check_agent_updates,
                 agent_updates::update_agent,
@@ -3525,6 +3524,8 @@ pub fn run() {
                 remote_workspace_image,
                 remote::remote_targets,
                 remote::mirror::remote_start_task,
+                remote::mirror::remote_team,
+                remote::mirror::remote_worker_messages,
                 remote::mirror::remote_repo_check,
                 provider_settings::provider_configuration,
                 connections::connections_list,
@@ -3564,6 +3565,19 @@ pub fn run() {
                 bots::bot_activity,
                 bots::bot_project_ids,
                 bots::bot_message,
+                bots::shared_channels::bot_shared_channels,
+                bots::shared_channels::bot_shared_channel_detail,
+                bots::shared_channels::bot_shared_channel_create,
+                bots::shared_channels::bot_shared_channel_update,
+                bots::shared_channels::bot_shared_channel_archive,
+                bots::shared_channels::bot_shared_channel_post,
+                bots::shared_channels::bot_shared_channel_stop,
+                bots::shared_channels::bot_shared_channel_continue,
+                bots::shared_channels::bot_shared_channel_reassign,
+                bots::shared_channels::bot_message_markers,
+                bots::failover::bot_failover_decide,
+                bots::failover::bot_failover_pending,
+                bots::failover::bot_model_switches,
                 bots::schedule::bot_schedule_create,
                 bots::schedule::bot_schedule_set_enabled,
                 bots::schedule::bot_schedule_delete,

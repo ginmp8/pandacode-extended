@@ -63,6 +63,18 @@ impl SubagentState {
                 return Err("This run already has 64 active subagents.".into());
             }
         }
+        // A local provider can append text to an already-completed child within the
+        // same timestamp tick. Persisted terminal snapshots only accept newer
+        // timestamps, so advance the local logical timestamp for changed text.
+        if let Some(previous) = self.entries.get(&activity.id) {
+            if !running(&activity.status)
+                && activity.status == previous.activity.status
+                && activity.response != previous.activity.response
+                && activity.updated_at <= previous.activity.updated_at
+            {
+                activity.updated_at = previous.activity.updated_at.saturating_add(1);
+            }
+        }
         event.data = Some(serde_json::to_value(&activity).map_err(|error| error.to_string())?);
         if !self.entries.contains_key(&activity.id) {
             self.next_number += 1;
@@ -330,7 +342,12 @@ mod tests {
             "Final answer"
         );
         activity.response = "Final answer with last suffix".into();
+        let terminal_timestamp = activity.updated_at;
         record(&mut state, &store, &sid, "run", activity);
+        assert!(
+            state.get("run:worker").unwrap().updated_at > terminal_timestamp,
+            "late terminal text must advance a tied provider timestamp"
+        );
         let db = store.lock().unwrap();
         let (changed, saved) = state.finish(&db, &sid, "stopped");
         saved.unwrap();

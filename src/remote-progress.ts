@@ -10,12 +10,17 @@ import { escape, icon } from './dom';
 export type RemoteStartStage = 'connecting' | 'finding' | 'downloading' | 'preparing' | 'starting' | 'error';
 /** `remote://start-progress`, validated natively (`remote/start.rs` `progress_payload`). */
 export interface RemoteStartProgress { deviceId: string; startId?: string | null; repo?: string | null; stage: Exclude<RemoteStartStage, 'connecting'>; percent?: number | null; detail?: string | null }
-export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; waiting?: boolean; mirrorId?: string; settle?: (error?: Error) => void }
+/** `remote://start-note`, emitted when a lost start reply is recovered and linked. */
+export interface RemoteStartNote { sessionId: string; note: string }
+export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; note?: string; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; waiting?: boolean; attached?: boolean; mirrorId?: string; settle?: (error?: Error) => void }
 
 const EVENT = 'remote://start-progress';
+const NOTE_EVENT = 'remote://start-note';
 const STAGES: readonly RemoteStartStage[] = ['connecting', 'finding', 'downloading', 'preparing', 'starting', 'error'];
 const starts = new Map<string, RemoteStart>();
-let listening: Promise<unknown> | undefined;
+let listening: Promise<void> | undefined;
+let unlisten: (() => void)[] = [];
+let listenerGeneration = 0;
 let observer: MutationObserver | undefined;
 
 export function startStageText(start: Pick<RemoteStart, 'stage' | 'repo' | 'percent' | 'detail'>): string {
@@ -86,9 +91,52 @@ export function onRemoteStartProgress(event: RemoteStartProgress): void {
 }
 const waitingFor = (start: RemoteStart): boolean => start.stage === 'starting' && Boolean(start.detail?.startsWith('Waiting for'));
 
-function listen(): Promise<unknown> {
-  // bridge.ts has no typed overload for this event.
-  return listening ??= (subscribe as unknown as (name: string, callback: typeof onRemoteStartProgress) => Promise<() => void>)(EVENT, onRemoteStartProgress).catch(() => { listening = undefined; });
+/** A recovered note belongs only to the remote attempt that is currently awaiting its link. */
+export function onRemoteStartNote(event: RemoteStartNote): void {
+  if (!event || typeof event.sessionId !== 'string' || !event.sessionId || typeof event.note !== 'string' || !event.note.trim()) return;
+  const start = starts.get(event.sessionId) ?? [...starts.values()].find(item => item.mirrorId === event.sessionId);
+  if (!start || !waitingFor(start)) return;
+  // The link can race the lost-reply result. Remember an early note, but settle
+  // only once the waiting continuation has installed its own promise.
+  start.note = event.note;
+  if (!start.waiting) return;
+  // The host has linked this mirror. The result carries the note to sendRemote's
+  // existing composer-note path, which survives the task selection/redraw.
+  start.settle?.();
+}
+
+function hasActiveStart(): boolean { return [...starts.values()].some(start => start.stage !== 'error'); }
+
+/** Subscribe only while a start is in flight and dispose both event listeners at idle. */
+async function listen(): Promise<void> {
+  if (unlisten.length) return;
+  if (listening) return listening;
+  const generation = ++listenerGeneration;
+  const pending = (async () => {
+    const stops: (() => void)[] = [];
+    try {
+      // bridge.ts has no typed overloads for these remote start events.
+      const sub = subscribe as unknown as (name: string, callback: (event: any) => void) => Promise<() => void>;
+      stops.push(await sub(EVENT, onRemoteStartProgress));
+      stops.push(await sub(NOTE_EVENT, onRemoteStartNote));
+    } catch {
+      stops.forEach(stop => stop());
+      if (generation === listenerGeneration) listening = undefined;
+      return;
+    }
+    if (generation !== listenerGeneration || !hasActiveStart()) stops.forEach(stop => stop());
+    else unlisten = stops;
+  })();
+  listening = pending;
+  await pending;
+}
+
+function stopListeningIfIdle(): void {
+  if (hasActiveStart()) return;
+  // Invalidate a still-pending subscribe too; it will dispose its handlers on arrival.
+  listenerGeneration++;
+  unlisten.splice(0).forEach(stop => stop());
+  listening = undefined;
 }
 
 const message = (error: unknown): string => error instanceof Error ? error.message : typeof error === 'string' ? error : 'the other computer did not answer';
@@ -98,15 +146,16 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
  * as the strip's error, whose Retry calls `retry` (default: send the composer again).
  * With `onStage`, each stage goes to it instead of the strip, which then shows only a failure. */
 export async function trackRemoteStart<T>(sessionId: string, target: { deviceId: string; name: string }, start: (startId: string) => Promise<T>, retry?: () => void, onStage?: (start: RemoteStart) => void): Promise<T> {
-  await listen();
   const entry: RemoteStart = { sessionId, startId: crypto.randomUUID(), deviceId: target.deviceId, device: target.name, repo: null, stage: 'connecting', percent: null, detail: null, retry, onStage };
-  starts.set(sessionId, entry);
-  syncRemoteStartStrip();
   // Settled early by a cancellation, by the error frame of a start being cancelled, and,
   // once the reply was lost, by the task attaching or failing.
   let ended: Promise<void> = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
   ended.catch(() => undefined);
+  starts.set(sessionId, entry);
+  syncRemoteStartStrip();
   try {
+    await listen();
+    if (starts.get(sessionId) !== entry) throw new Error('Start cancelled.');
     // Reuse the unique start ID for cancellation and a reply lost after host admission.
     const call = start(entry.startId);
     call.catch(() => undefined);
@@ -117,23 +166,31 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
       if (typeof mirror === 'string') entry.mirrorId = mirror;
       ended = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
       ended.catch(() => undefined);
+      // A linked host can publish its note before the lost-reply result resolves.
+      if (entry.note || entry.attached) entry.settle?.();
       await ended;
     }
     if (starts.get(sessionId) === entry) starts.delete(sessionId);
-    return result;
+    return entry.note && result && typeof result === 'object' && !Array.isArray(result)
+      ? Object.assign({}, result, { note: entry.note }) as T
+      : result;
   } catch (error) {
     if (starts.get(sessionId) === entry) {
       if (entry.cancelling) starts.delete(sessionId);
       else Object.assign(entry, { stage: 'error', percent: null, waiting: false, detail: entry.stage === 'error' && entry.detail ? entry.detail : message(error) });
     }
     throw error;
-  } finally { entry.settle = undefined; syncRemoteStartStrip(); }
+  } finally { entry.settle = undefined; stopListeningIfIdle(); syncRemoteStartStrip(); }
 }
 
 /** The task of a start whose reply was lost spoke (its first agent event): it attached. */
 export function remoteStartAttached(sessionId: string): void {
   const start = starts.get(sessionId) ?? [...starts.values()].find(item => item.mirrorId === sessionId);
-  if (start?.waiting) start.settle?.();
+  if (!start || !waitingFor(start)) return;
+  // The first host agent event can precede the lost start reply. Keep it for
+  // the continuation, instead of waiting forever for an event already delivered.
+  if (!start.waiting) { start.attached = true; return; }
+  start.settle?.();
 }
 
 /** Ends a start the viewer cancelled (`remote_cancel_start` answered `cancelled: true`). */
@@ -144,7 +201,7 @@ export function cancelledRemoteStart(sessionId: string): void {
 
 export function clearRemoteStart(sessionId: string): void {
   const start = starts.get(sessionId);
-  if (start && starts.delete(sessionId)) { start.settle?.(new Error('Start cancelled.')); syncRemoteStartStrip(); }
+  if (start && starts.delete(sessionId)) { start.settle?.(new Error('Start cancelled.')); stopListeningIfIdle(); syncRemoteStartStrip(); }
 }
 
 document.addEventListener('click', event => {

@@ -148,9 +148,6 @@ function pandacodeTrace(tool: string, fields: Fields): Partial<Trace> | undefine
   if (tool === 'title') return { verb: 'Named', object: field(fields, 'title') ? `the task “${clip(field(fields, 'title'), 60)}”` : 'the task' };
   return;
 }
-function mcpNoun(tool: string): string {
-  return tool.replace(new RegExp(`^.*?${MCP_VERB}_`, 'i'), '').replace(/_/g, ' ');
-}
 
 function describeFields(kind: TraceKind, name: string, input: string, fields: Fields): Omit<Trace, 'kind' | 'verb'> & { verb?: string } {
   switch (kind) {
@@ -523,98 +520,6 @@ function agentCard(tool: Tool, fields: Fields, output: string): string {
 // --- MCP result rows (Slack, Granola, Gmail, GitHub, Linear…) ---------------
 
 const LIST_KEYS = ['results', 'messages', 'items', 'issues', 'pull_requests', 'pullRequests', 'pulls', 'threads', 'notes', 'meetings', 'events', 'documents', 'pages', 'files', 'records', 'data'];
-
-/** JSON from the output, unwrapping MCP's `[{ type: 'text', text }]` content blocks. */
-function outputJson(output: string): unknown {
-  const value = output.trim();
-  if (!/^[[{]/.test(value)) return;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    const blocks = Array.isArray(parsed) ? parsed : isRecord(parsed) && Array.isArray(parsed.content) ? parsed.content : undefined;
-    if (blocks?.length && blocks.every(block => isRecord(block) && block.type === 'text' && typeof block.text === 'string')) {
-      return outputJson(blocks.map(block => (block as Fields).text).join('\n')) ?? parsed;
-    }
-    return parsed;
-  } catch { return; }
-}
-
-function records(value: unknown): { items: Fields[]; collection: string } {
-  if (Array.isArray(value)) return { items: value.filter(isRecord), collection: '' };
-  if (!isRecord(value)) return { items: [], collection: '' };
-  const key = LIST_KEYS.find(name => Array.isArray(value[name])) ?? Object.keys(value).find(name => Array.isArray(value[name]) && (value[name] as unknown[]).some(isRecord));
-  return key ? { items: (value[key] as unknown[]).filter(isRecord), collection: key } : { items: [], collection: '' };
-}
-
-/** A string, or the readable name of a `{ name | display_name | login | email }` object. */
-function label(item: Fields, ...keys: string[]): string {
-  for (const key of keys) {
-    const value = item[key];
-    const named = isRecord(value) ? field(value, 'name', 'display_name', 'real_name', 'login', 'email', 'title') : text(value);
-    if (named) return named;
-  }
-  return '';
-}
-
-function shortTime(value: string): string {
-  const date = /^\d{9,10}(\.\d+)?$/.test(value) ? new Date(Number(value) * 1000) : /^\d{4}-\d\d-\d\d/.test(value) ? new Date(value) : undefined;
-  if (!date || Number.isNaN(date.getTime())) return clip(value, 16);
-  return date.toDateString() === new Date().toDateString()
-    ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-}
-
-// 16px status marks: GitHub pull requests and Linear-style issue circles.
-const ISSUE_MARKS: Record<string, string> = {
-  done: '<circle cx="8" cy="8" r="6" fill="currentColor"/><path d="m5.4 8.1 1.8 1.8 3.4-3.6" fill="none" stroke="var(--bg)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
-  canceled: '<circle cx="8" cy="8" r="6" fill="currentColor"/><path d="m6 6 4 4m0-4-4 4" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/>',
-  progress: '<circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.6a3.4 3.4 0 0 1 0 6.8Z" fill="currentColor"/>',
-  todo: '<circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.2 1.6"/>',
-};
-function statusMark(state: string, pull: boolean): string {
-  const value = state.toLowerCase();
-  if (pull) {
-    const tone = /merged/.test(value) ? 'merged' : /draft/.test(value) ? 'draft' : /closed/.test(value) ? 'closed' : 'open';
-    return `<span class="trace-mark is-pull" data-state="${tone}">${icon(tone === 'merged' ? 'merge' : 'pull')}</span>`;
-  }
-  const tone = /done|complete|closed|resolved|shipped/.test(value) ? 'done' : /cancel|duplicate|wont/.test(value) ? 'canceled' : /progress|started|doing|review|active/.test(value) ? 'progress' : 'todo';
-  return `<span class="trace-mark is-issue" data-state="${tone}"><svg viewBox="0 0 16 16" aria-hidden="true">${ISSUE_MARKS[tone]}</svg></span>`;
-}
-
-function mcpRow(item: Fields, collection: string, brandSvg: string | undefined): string {
-  const person = label(item, 'from', 'user', 'author', 'sender', 'username', 'user_name', 'owner', 'assignee', 'creator');
-  const where = label(item, 'identifier', 'channel', 'channel_name', 'repo', 'repository', 'key', 'project', 'team');
-  const titled = label(item, 'title', 'name', 'subject');
-  const title = titled || person || where;
-  const meta = titled ? person || where : person ? where : '';
-  const time = shortTime(label(item, 'ts', 'time', 'date', 'updated_at', 'updatedAt', 'created_at', 'createdAt', 'timestamp', 'start'));
-  const body = label(item, 'text', 'snippet', 'body', 'summary', 'description', 'preview', 'content');
-  const state = label(item, 'state', 'status');
-  const pull = /pull|merge/i.test(collection) || typeof item.merged === 'boolean' || typeof item.draft === 'boolean' || /\/pull\//.test(text(item.url) || text(item.html_url));
-  const unread = typeof item.unread === 'boolean' ? item.unread : typeof item.is_unread === 'boolean' ? item.is_unread : undefined;
-  const mark = state ? statusMark(state, pull)
-    : unread !== undefined ? `<span class="trace-mark is-unread"${unread ? ' data-unread' : ''}></span>`
-    : !titled && person ? `<span class="trace-mark is-avatar">${escape(person.trim().charAt(0).toUpperCase())}</span>`
-    : `<span class="trace-mark">${brandSvg ?? icon('file')}</span>`;
-  if (!title) return '';
-  return `<li class="trace-row"${unread ? ' data-unread' : ''}>${mark}<span class="trace-row-head"><b>${escape(clip(title, 120))}</b>${meta ? `<span class="trace-row-meta">${escape(clip(meta, 60))}</span>` : ''}</span>${time ? `<span class="trace-row-time">${escape(time)}</span>` : ''}${body ? `<span class="trace-row-body">${escape(clip(body, 200))}</span>` : ''}</li>`;
-}
-
-/** Brand-style result rows for an MCP call's JSON output; empty when the output has no list of records. */
-export function mcpCard(tool: Tool): string {
-  if (toolKind(tool.name) !== 'mcp') return '';
-  const { server } = mcpParts(tool.name);
-  const { items, collection } = records(outputJson(cleanOutput(tool.output)));
-  const brand = brandFor(server);
-  const rows = items.map(item => mcpRow(item, collection, brand?.svg)).filter(Boolean);
-  if (!rows.length) return '';
-  const more = rows.length - MCP_ROWS;
-  return `<div class="tool-trace-card is-rows" data-trace-kind="mcp"${brand ? ` data-brand="${escape(brand.id)}"` : ''}><ul class="trace-rows">${rows.slice(0, MCP_ROWS).join('')}${more > 0 ? `<li class="tool-trace-more">+${more} more</li>` : ''}</ul></div>`;
-}
-
-// --- MCP result rows (Slack, Granola, Gmail, GitHub, Linear…) ---------------
-
-const LIST_KEYS = ['results', 'messages', 'items', 'issues', 'pull_requests', 'pullRequests', 'pulls', 'threads', 'notes', 'meetings', 'events', 'documents', 'pages', 'files', 'records', 'data'];
-const isRecord = (value: unknown): value is Fields => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
 /** JSON from the output, unwrapping MCP's `[{ type: 'text', text }]` content blocks. */
 function outputJson(output: string): unknown {

@@ -49,18 +49,34 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const text = $<HTMLTextAreaElement>('.routing-text'), routeButton = $<HTMLButtonElement>('.routing-route'), result = $('.routing-result');
   const modes = $('.routing-modes'), off = $('.routing-off');
   let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0, routeTicket = 0, routeBusy = false;
+  // Invalidated previews must not block a new task while an obsolete request is still running.
+  const discardPreview = () => {
+    routeTicket++;
+    routeBusy = false;
+    result.hidden = true;
+    result.textContent = '';
+    routeButton.disabled = !status?.enabled || writing > 0;
+  };
+  // Routing cannot preview an unsaved policy, or start before initial status arrives.
+  routeButton.disabled = true;
+  text.disabled = true;
   // Writes are shared with the composer Team menu and survive Settings remounts.
   // Only the reply to the newest request renders, so an older one never undoes a later change; a read
   // (status poll) also yields to a change still in flight, and a replaced request's failure stays quiet.
   const request = (command: string, args?: Record<string, unknown>, write = false) => {
     const ticket = write ? ++latest : latest;
-    if (write) writing++;
+    if (write) { writing++; routeButton.disabled = true; }
     const call = () => options.call<RoutingStatus>(command, args);
     const pending = write ? queueRoutingPreferencesWrite(call) : call();
     return pending.then(
       next => { if (!disposed && ticket === latest && (write || !writing)) render(next); },
       cause => { if (ticket === latest) throw cause; },
-    ).finally(() => { if (write) writing--; });
+    ).finally(() => {
+      if (write) {
+        writing--;
+        if (!disposed) routeButton.disabled = !status?.enabled || routeBusy || writing > 0;
+      }
+    });
   };
   // A download started elsewhere (a team turning on) finishes on its own; follow it.
   // A transient read failure must retry even if the initial Settings status never loaded.
@@ -81,9 +97,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const render = (next: RoutingStatus) => {
     // A response based on an earlier routing policy must not appear after it changes.
     if (status && (status.enabled !== next.enabled || status.mode !== next.mode || status.minP !== next.minP)) {
-      routeTicket++;
-      result.hidden = true;
-      result.textContent = '';
+      discardPreview();
     }
     status = next;
     // The composer's Team button follows every status shown here.
@@ -96,7 +110,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     trackSegment(modes, modes.querySelector<HTMLElement>('.selected'));
     minRow.hidden = next.mode !== 'cheapest';
     if (document.activeElement !== minP) minP.value = String(Math.round(next.minP * 100));
-    off.hidden = next.enabled; text.disabled = !next.enabled; routeButton.disabled = !next.enabled || routeBusy;
+    off.hidden = next.enabled; text.disabled = !next.enabled; routeButton.disabled = !next.enabled || routeBusy || writing > 0;
     if (next.profiler === 'downloading') poll();
     statusText.textContent = { ready: 'Ready', downloading: 'Downloading…', missing: 'Not downloaded', failed: `Failed: ${next.error ?? 'unknown error'}`, unavailable: `Keyword heuristic: ${next.error ?? 'the profiler cannot run here'}` }[next.profiler];
     prepare.hidden = next.profiler === 'ready' || next.profiler === 'downloading' || next.profiler === 'unavailable';
@@ -105,14 +119,12 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const fail = (cause: unknown) => { if (!disposed) { result.hidden = false; result.textContent = cause instanceof Error ? cause.message : String(cause); } };
   const configure = (patch: Record<string, unknown>) => {
     // A later user selection supersedes an in-flight preview immediately, before the native save.
-    routeTicket++;
-    result.hidden = true;
-    result.textContent = '';
+    discardPreview();
     return request('model_routing_configure', patch, true).catch(fail);
   };
 
   // The recommendation must describe the current input, not an earlier task whose route finishes later.
-  text.addEventListener('input', () => { routeTicket++; result.hidden = true; result.textContent = ''; });
+  text.addEventListener('input', discardPreview);
   enabled.addEventListener('change', () => void configure({ enabled: enabled.checked }));
   modes.addEventListener('click', event => {
     const mode = (event.target as Element).closest<HTMLElement>('[data-mode]')?.dataset.mode;
@@ -154,8 +166,10 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
       if (!disposed && ticket === routeTicket && status?.enabled) fail(cause);
     }
     finally {
-      routeBusy = false;
-      if (!disposed) routeButton.disabled = !status?.enabled;
+      if (ticket === routeTicket) {
+        routeBusy = false;
+        if (!disposed) routeButton.disabled = !status?.enabled || writing > 0;
+      }
     }
   });
 

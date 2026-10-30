@@ -381,14 +381,17 @@ test('launcher blocks starting a task while a model change is saving', async ({p
 });
 
 test('launcher retains its old model after a failed selection and allows retry', async ({page}) => {
-  await instrumentLauncher(page, `if (command === 'overlay_select_model' && !window.__allowModelSave) throw new Error('Could not save the selected model.');`);
+  await instrumentLauncher(page, `if (command === 'overlay_select_model' && !window.__allowModelSave) throw new Error('Could not save the selected model. /private/credentials?token=DO_NOT_DISPLAY');`);
   await page.goto('/?view=launcher');
   const trigger = page.getByRole('button',{name:'Choose harness and model'});
   const original = await trigger.textContent();
   await trigger.click();
   await page.getByRole('tab',{name:'Claude Code',exact:true}).click();
   await page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true}).click();
-  await expect(page.getByRole('alert')).toHaveText('Could not save the selected model.');
+  // The shared picker must classify provider errors without exposing native paths or tokens.
+  await expect(page.getByRole('alert')).toHaveText('Check provider configuration');
+  await expect(page.getByRole('dialog', { name: 'Harness and model' })).not.toContainText('DO_NOT_DISPLAY');
+  await expect(page.getByRole('dialog', { name: 'Harness and model' })).not.toContainText('/private/credentials');
   await expect(trigger).toHaveText(original!);
   await expect(page.getByRole('option',{name:'Claude Code · Claude Sonnet 5',exact:true})).toBeEnabled();
   await page.evaluate(() => { (window as any).__allowModelSave = true; });

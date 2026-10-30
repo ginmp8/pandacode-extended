@@ -23,6 +23,31 @@ async function open(page: Page, url = '/?teams'): Promise<void> {
 
 // Issue #123: the picker lists only installed harnesses. The preview marks
 // Antigravity and Oh My Pi as not installed.
+test('remote harness discovery errors never expose private diagnostics', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    // Use the real picker with a rejected remote discovery request, not mocked markup.
+    const modulePath = '/src/model-picker.ts';
+    const { openModelPicker } = await import(modulePath);
+    const anchor = document.createElement('button');
+    anchor.id = 'remote-harness-error-trigger';
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeRemoteHarnessPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      loadProviders: async () => { throw new Error('ENOENT /private/credentials?api_key=DO_NOT_DISPLAY'); },
+    });
+  });
+  await expect(picker(page)).toContainText('Could not load harnesses: Provider unavailable');
+  await expect(picker(page)).not.toContainText('DO_NOT_DISPLAY');
+  await expect(picker(page)).not.toContainText('/private/credentials');
+  await page.evaluate(() => (window as any).__closeRemoteHarnessPicker?.());
+});
+
 test('the harness picker hides harnesses that are not installed', async ({ page }) => {
   await page.goto('/');
   await page.locator('.new-task-button').click();

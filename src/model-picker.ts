@@ -584,7 +584,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   window.visualViewport?.addEventListener('resize', schedulePosition);
   window.visualViewport?.addEventListener('scroll', schedulePosition);
   function loadCatalogs(): void {
-    if (!loadModels) return;
+    if (!loadModels) { renderChoices(); return; }
     for (const provider of providers) {
       if (!provider.installed || !canSwitchProvider && provider.id !== current.provider) continue;
       catalogLoading.add(provider.id);

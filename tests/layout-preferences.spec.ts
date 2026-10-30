@@ -768,3 +768,25 @@ test('the title bar row keeps its on-screen height under interface zoom so it st
   await page.evaluate(() => document.documentElement.style.setProperty('--page-zoom', '1.25'));
   expect(await heights()).toEqual([44, 44]);
 });
+
+test('empty send button stays accessible and changes tone with draft text at narrow width', async ({ page }) => {
+  await page.setViewportSize({ width: 600, height: 740 });
+  await open(page);
+  const send = page.locator('#composer .send-button:not(.stop-button)');
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => localStorage.setItem('pandacode.theme', value), theme);
+    await page.reload();
+    await expect(prompt(page)).toBeEnabled();
+    await expect(send).toBeVisible();
+    await expect(send).toBeEnabled();
+    await expect(send).toHaveAttribute('aria-label', 'Send message');
+    const idle = await send.evaluate(element => getComputedStyle(element).backgroundColor);
+    await prompt(page).fill('Visible draft to send');
+    await expect.poll(() => send.evaluate(element => getComputedStyle(element).backgroundColor)).not.toBe(idle);
+    await prompt(page).fill('');
+    await expect.poll(() => send.evaluate(element => getComputedStyle(element).backgroundColor)).toBe(idle);
+    // The action remains reachable even though nothing is ready to submit.
+    await send.focus();
+    await expect(send).toBeFocused();
+  }
+});

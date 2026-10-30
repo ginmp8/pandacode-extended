@@ -301,8 +301,17 @@ test('the model picker stays inside a 320px viewport with search and keyboard se
   const rail = menu.getByRole('tablist', { name: 'Harnesses' });
   await expect(rail.getByRole('tab', { name: 'Claude Code', exact: true })).toBeVisible();
   await search(page).fill('opus');
+  // A team whose description mentions Opus can legitimately appear before the model.
+  // Exercise actual keyboard navigation to the requested model instead of assuming row zero.
+  const target = menu.getByRole('option', { name: 'Claude Code · Claude Opus 5', exact: true });
+  await expect(target).toBeVisible();
+  const targetIndex = await menu.locator('.model-menu-option:not(:disabled)').evaluateAll(rows =>
+    rows.findIndex(row => row.getAttribute('aria-label') === 'Claude Code · Claude Opus 5'));
+  expect(targetIndex).toBeGreaterThanOrEqual(0);
+  await search(page).press('Home');
+  for (let index = 0; index < targetIndex; index++) await search(page).press('ArrowDown');
   await expect(activeOption(page)).toHaveAccessibleName('Claude Code · Claude Opus 5');
-  await page.keyboard.press('Enter');
+  await search(page).press('Enter');
   await expect(menu).toHaveCount(0);
   await expect(trigger(page)).toContainText('Claude Opus 5');
 });

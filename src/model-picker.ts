@@ -280,7 +280,6 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       markup += matchedTeams.map(teamRow).join('');
       const rows = all.flatMap(group => hits.get(group.key)!);
       total += rows.length;
-      if (!total) markup += '<p class="model-menu-empty">No matching models.</p>';
       markup += rows.map(row => modelRow(row, true, query)).join('');
       // One custom ID row: the viewed harness, else the current one, unless the query names a harness or an existing model.
       const takesCustom = (group?: Group): group is Group => Boolean(group) && !advertisedModelsOnly(group!.provider.id) && !group!.locked && !group!.unavailable && !models(group!).some(model => [model.id, model.name].some(value => value.toLowerCase() === normalized));

@@ -94,13 +94,15 @@ export function createThreadFind(host: Host) {
   function reveal(): void {
     const range = ranges[current], transcript = host.transcript();
     if (!range || !transcript) return;
+    // Choosing a match is reading intent even if it is already on screen.
+    // Release streaming auto-follow before expanding a fold or measuring the range.
+    host.beforeReveal?.();
     for (let node = range.startContainer.parentElement; node && node !== transcript; node = node.parentElement) {
       if (node instanceof HTMLDetailsElement && !node.open) node.open = true;
     }
     const rect = range.getBoundingClientRect(), bottom = transcript.getBoundingClientRect().bottom, top = clearTop(transcript);
     // A third of the way down the clear area, never under anything floating over the transcript.
     if (rect.top < top || rect.bottom > bottom - 24) {
-      host.beforeReveal?.();
       transcript.scrollTop += rect.top - top - (bottom - top) / 3;
     }
   }

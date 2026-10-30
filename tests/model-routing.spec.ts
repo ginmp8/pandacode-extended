@@ -167,6 +167,23 @@ test('turning routing off discards an in-flight preview instead of showing a sta
   await expect(settings(page).getByRole('button', { name: 'Route', exact: true })).toBeDisabled();
 });
 
+test('changing mode hides the older preview before the delayed native save completes', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  await page.evaluate(() => {
+    (window as any).__routingDelay = { model_routing_route: 350 };
+    (window as any).__routingWriteDelays = [900];
+  });
+  await settings(page).getByRole('textbox', { name: 'Task to route' }).fill('Fix the failing login test');
+  await settings(page).getByRole('button', { name: 'Route', exact: true }).click();
+  await expect(settings(page).locator('.routing-result')).toHaveText('Routing…');
+  await settings(page).getByRole('radio', { name: 'Cheap' }).click();
+  // The old route finishes before the mode save. It must not show under the new selection.
+  await page.waitForTimeout(500);
+  await expect(settings(page).locator('.routing-result')).toBeHidden();
+  await expect(settings(page).getByRole('radio', { name: 'Cheap' })).toHaveAttribute('aria-checked', 'true');
+});
+
 test('the catalog keeps every harness and long shared prefixes', async ({ page }) => {
   await install(page);
   const result = await page.evaluate(async () => {

@@ -233,6 +233,33 @@ test('keyboard: arrows move rows, left/right change harness, Enter picks, Tab cy
   expect(await task(page)).toMatchObject({ provider: 'codex', model: 'gpt-6-astra' });
 });
 
+test('reasoning effort save errors redact provider details and preserve the selected effort', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeEffortErrorPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [{
+        id: 'sample-model', name: 'Sample Model',
+        reasoningEfforts: [{ id: 'high', name: 'High', description: 'High effort' }],
+      }] }],
+      current: { provider: 'codex', model: 'sample-model', reasoningEffort: null },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      onEffortSelect: async () => { throw new Error('HTTP 429 Too Many Requests; INTERNAL_MARKER_SHOULD_NOT_RENDER'); },
+    });
+  });
+  const group = picker(page).getByRole('radiogroup', { name: 'Effort' });
+  await group.getByRole('radio', { name: 'High', exact: true }).click();
+  await expect(picker(page).getByRole('alert')).toHaveText('Rate limited');
+  await expect(picker(page)).not.toContainText('INTERNAL_MARKER_SHOULD_NOT_RENDER');
+  await expect(group.getByRole('radio', { name: 'Default', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await page.evaluate(() => (window as any).__closeEffortErrorPicker?.());
+});
+
 test('effort is a segmented radiogroup that saves on choice', async ({ page }) => {
   await open(page);
   const group = picker(page).getByRole('radiogroup', { name: 'Effort' });

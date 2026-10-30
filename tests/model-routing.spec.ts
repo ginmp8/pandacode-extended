@@ -312,9 +312,9 @@ test('invalid catalog entries cannot disable routing for the valid installed mod
     const { buildTeamCatalog } = await import('/src/team-catalog.ts');
     const harnesses = [{ id: 'codex', name: 'Codex', models: [
       { id: 'valid-model', name: 'Valid' },
-      { id: 'bad\\u0000model', name: 'NUL' },
+      { id: 'bad\u0000model', name: 'NUL' },
       { id: 'x'.repeat(201), name: 'Oversized' },
-      { id: 'malformed-name', name: 'Invalid\\u0000name' },
+      { id: 'malformed-name', name: 'Invalid\u0000name' },
       { id: 'also-valid', name: 'Valid 2' },
     ] }];
     const { catalog } = buildTeamCatalog(harnesses as any);

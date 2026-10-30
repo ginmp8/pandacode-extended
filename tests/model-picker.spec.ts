@@ -82,6 +82,39 @@ test('the current custom model is not advertised by another named connection', a
   await page.evaluate(() => (window as any).__closeConnectionPicker?.());
 });
 
+test('Recent remembers the named connection when choosing its model again', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const modulePath = '/src/model-picker.ts';
+    const { openModelPicker } = await import(modulePath);
+    const anchor = document.createElement('button');
+    anchor.id = 'recent-connection-trigger';
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__openNamedRecent = (connection: string) => openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [{ id: 'model-a', name: 'Model A' }, { id: 'model-b', name: 'Model B' }] }],
+      connections: [
+        { id: 'account-a', name: 'Account A', provider: 'codex' },
+        { id: 'account-b', name: 'Account B', provider: 'codex' },
+      ],
+      current: { provider: 'codex', model: 'default' },
+      currentConnection: connection,
+      canSwitchProvider: true,
+      onSelect: async (provider: string, model: string, selectedConnection: string | null) => {
+        (window as any).__lastNamedRecent = [provider, model, selectedConnection];
+      },
+    });
+    (window as any).__openNamedRecent('account-a');
+  });
+  await picker(page).getByRole('option', { name: 'Account A · Model A', exact: true }).click();
+  await expect(picker(page)).toHaveCount(0);
+  await page.evaluate(() => (window as any).__openNamedRecent('account-b'));
+  await picker(page).getByRole('tab', { name: 'Recent', exact: true }).click();
+  await picker(page).getByRole('option', { name: 'Account A · Model A', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__lastNamedRecent)).toEqual(['codex', 'model-a', 'account-a']);
+});
+
 test('the harness picker hides harnesses that are not installed', async ({ page }) => {
   await page.goto('/');
   await page.locator('.new-task-button').click();

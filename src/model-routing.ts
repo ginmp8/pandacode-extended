@@ -40,12 +40,17 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const text = $<HTMLTextAreaElement>('.routing-text'), routeButton = $<HTMLButtonElement>('.routing-route'), result = $('.routing-result');
   const modes = $('.routing-modes'), off = $('.routing-off');
   let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0;
+  // Serialize native writes in user order; ignoring stale UI replies alone cannot protect persistence.
+  let writeTail: Promise<void> = Promise.resolve();
   // Only the reply to the newest request renders, so an older one never undoes a later change; a read
   // (status poll) also yields to a change still in flight, and a replaced request's failure stays quiet.
   const request = (command: string, args?: Record<string, unknown>, write = false) => {
     const ticket = write ? ++latest : latest;
     if (write) writing++;
-    return options.call<RoutingStatus>(command, args).then(
+    const call = () => options.call<RoutingStatus>(command, args);
+    const pending = write ? writeTail.then(call) : call();
+    if (write) writeTail = pending.then(() => undefined, () => undefined);
+    return pending.then(
       next => { if (!disposed && ticket === latest && (write || !writing)) render(next); },
       cause => { if (ticket === latest) throw cause; },
     ).finally(() => { if (write) writing--; });

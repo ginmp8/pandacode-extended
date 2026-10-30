@@ -323,3 +323,25 @@ test('narrow windows collapse the rail to logos', async ({ page }) => {
   expect((await tab.boundingBox())!.width).toBeLessThan(50);
   await expect(tab.locator('.model-menu-tab-label')).toBeHidden();
 });
+
+test('model selection failure does not expose provider credentials or local paths', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeSelectionErrorPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [{ id: 'model-a', name: 'Model A' }] }],
+      current: { provider: 'codex', model: 'default' },
+      canSwitchProvider: true,
+      onSelect: async () => { throw new Error('HTTP 401 /private/credentials?token=DO_NOT_DISPLAY'); },
+    });
+  });
+  await picker(page).getByRole('option', { name: 'Codex · Model A', exact: true }).click();
+  await expect(picker(page).locator('.model-menu-error')).toHaveText('Login required');
+  await expect(picker(page)).not.toContainText('DO_NOT_DISPLAY');
+  await expect(picker(page)).not.toContainText('/private/credentials');
+  await page.evaluate(() => (window as any).__closeSelectionErrorPicker?.());
+});

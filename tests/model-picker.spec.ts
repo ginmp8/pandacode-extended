@@ -492,3 +492,35 @@ test('async catalog updates keep focus on the selected harness tab', async ({ pa
   await expect(tab).toBeFocused();
   await page.evaluate(() => (window as any).__closeAsyncFocusPicker?.());
 });
+
+test('async reasoning catalog refresh preserves focused effort choice', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeAsyncEffortPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [{
+        id: 'model-a', name: 'Model A', reasoningEfforts: [{ id: 'low', name: 'Low' }],
+      }] }],
+      current: { provider: 'codex', model: 'model-a', reasoningEffort: 'low' },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      onEffortSelect: async () => {},
+      loadModels: () => new Promise(resolve => { (window as any).__resolveAsyncEffortCatalog = resolve; }),
+    });
+  });
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__resolveAsyncEffortCatalog)).toBe('function');
+  const low = picker(page).getByRole('radio', { name: 'Low', exact: true });
+  await low.focus();
+  await expect(low).toBeFocused();
+  await page.evaluate(() => (window as any).__resolveAsyncEffortCatalog([{
+    id: 'model-a', name: 'Model A', reasoningEfforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+  }]));
+  await expect(picker(page).getByRole('radio', { name: 'High', exact: true })).toBeVisible();
+  // The available-effort row expanded while Low was focused. Keep keyboard focus on Low.
+  await expect(low).toBeFocused();
+  await page.evaluate(() => (window as any).__closeAsyncEffortPicker?.());
+});

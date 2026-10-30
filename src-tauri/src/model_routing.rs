@@ -179,7 +179,8 @@ pub fn mode() -> Mode {
     RUNTIME.get().map_or_else(|| Settings::default().mode, |rt| rt.settings().mode)
 }
 
-/// The saved minimum P(success) lower bound for Cheap; the default before setup.
+/// Test-only compatibility getter; production dispatch uses the atomic preferences snapshot.
+#[cfg(test)]
 pub fn min_p() -> f64 {
     RUNTIME.get().map_or_else(|| Settings::default().min_p, |rt| rt.settings().min_p)
 }

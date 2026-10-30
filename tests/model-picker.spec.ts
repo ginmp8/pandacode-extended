@@ -437,3 +437,30 @@ test('remote provider IDs cannot inject attributes into picker markup', async ({
   await expect(menu.locator('[data-picker-injected]')).toHaveCount(0);
   await page.evaluate(() => (window as any).__closeUnsafeProviderPicker?.());
 });
+
+test('remote discovery renders new harnesses without a separate catalog loader', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+    document.body.append(anchor);
+    (window as any).__closeDiscoveryOnlyPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      canSwitchProvider: true,
+      onSelect: async () => {},
+      loadProviders: async () => [
+        { id: 'codex', name: 'Codex', installed: true, models: [] },
+        { id: 'claude', name: 'Claude Code', installed: true, models: [{ id: 'remote-model', name: 'Remote model' }] },
+      ],
+    });
+  });
+  const menu = picker(page);
+  const remote = menu.getByRole('tab', { name: 'Claude Code', exact: true });
+  await expect(remote).toBeVisible();
+  await remote.click();
+  await expect(menu.getByRole('option', { name: 'Claude Code · Remote model', exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__closeDiscoveryOnlyPicker?.());
+});

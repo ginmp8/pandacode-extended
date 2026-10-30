@@ -609,3 +609,20 @@ test('the sidebar view menu switches views, marks the current one and stays reac
   await page.setViewportSize({ width: 620, height: 800 });
   await expect(page.locator('.sidebar .brand #view-menu')).toBeVisible();
 });
+
+test('view switching remains usable when persistence is denied', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  await page.evaluate(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key: string, value: string): void {
+      if (key === 'pandacode.view') throw new DOMException('Storage access denied', 'SecurityError');
+      return originalSetItem.call(this, key, value);
+    };
+  });
+  await showView(page, 'Board');
+  await expect(board(page)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Workspace view: Board', exact: true })).toBeVisible();
+  await showView(page, 'Conversation');
+  await expect(prompt(page)).toBeVisible();
+});

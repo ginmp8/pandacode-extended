@@ -271,8 +271,12 @@ test('a routing status update cannot re-enable Route during a pending preview', 
   await settings(page).getByRole('textbox', { name: 'Task to route' }).fill('Fix the failing login test');
   await routeButton.click();
   await expect(routeButton).toBeDisabled();
-  await settings(page).getByRole('radio', { name: 'Cheap' }).click();
-  await expect(settings(page).getByRole('radio', { name: 'Cheap' })).toHaveAttribute('aria-checked', 'true');
+  // Profiler status changes while the same task and routing policy remain selected.
+  // A status-only render must not unlock a pending preview.
+  const download = settings(page).getByRole('button', { name: 'Download', exact: true });
+  await expect(download).toBeVisible();
+  await download.click();
+  await expect(settings(page).getByText('Ready', { exact: true })).toBeVisible();
   await expect(routeButton).toBeDisabled();
   await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
   await expect(routeButton).toBeEnabled();

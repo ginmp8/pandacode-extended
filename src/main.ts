@@ -2536,7 +2536,9 @@ async function showViewMenu(anchor: HTMLElement): Promise<void> {
 function setWorkspaceView(view: WorkspaceView): void {
   if (state.view === view) return;
   closeMenus();
-  state.view = view; localStorage.setItem('pandacode.view', view);
+  state.view = view;
+  // Storage can be unavailable (privacy mode / sandbox). Keep this session's view usable.
+  try { localStorage.setItem('pandacode.view', view); } catch { /* In-memory choice only. */ }
   state.boardPanel = false;
   inspectorSuppressed = view !== 'conversation';
   renderInspector();

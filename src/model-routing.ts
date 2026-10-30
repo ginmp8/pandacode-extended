@@ -48,7 +48,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   const statusText = $('.routing-status'), prepare = $<HTMLButtonElement>('.routing-prepare');
   const text = $<HTMLTextAreaElement>('.routing-text'), routeButton = $<HTMLButtonElement>('.routing-route'), result = $('.routing-result');
   const modes = $('.routing-modes'), off = $('.routing-off');
-  let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0, routeTicket = 0;
+  let disposed = false, status: RoutingStatus | null = null, polling = 0, latest = 0, writing = 0, routeTicket = 0, routeBusy = false;
   // Writes are shared with the composer Team menu and survive Settings remounts.
   // Only the reply to the newest request renders, so an older one never undoes a later change; a read
   // (status poll) also yields to a change still in flight, and a replaced request's failure stays quiet.
@@ -96,7 +96,7 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     trackSegment(modes, modes.querySelector<HTMLElement>('.selected'));
     minRow.hidden = next.mode !== 'cheapest';
     if (document.activeElement !== minP) minP.value = String(Math.round(next.minP * 100));
-    off.hidden = next.enabled; text.disabled = routeButton.disabled = !next.enabled;
+    off.hidden = next.enabled; text.disabled = !next.enabled; routeButton.disabled = !next.enabled || routeBusy;
     if (next.profiler === 'downloading') poll();
     statusText.textContent = { ready: 'Ready', downloading: 'Downloading…', missing: 'Not downloaded', failed: `Failed: ${next.error ?? 'unknown error'}`, unavailable: `Keyword heuristic: ${next.error ?? 'the profiler cannot run here'}` }[next.profiler];
     prepare.hidden = next.profiler === 'ready' || next.profiler === 'downloading' || next.profiler === 'unavailable';
@@ -136,8 +136,9 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
   });
   routeButton.addEventListener('click', async () => {
     const task = text.value.trim();
-    if (!task || routeButton.disabled) return;
+    if (!task || routeButton.disabled || routeBusy) return;
     const ticket = ++routeTicket;
+    routeBusy = true;
     routeButton.disabled = true; result.hidden = false; result.textContent = 'Routing…';
     try {
       const { catalog: pool } = await installedCatalog(options.providers, options.loadModels);
@@ -150,7 +151,10 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     } catch (cause) {
       if (!disposed && ticket === routeTicket && status?.enabled) fail(cause);
     }
-    finally { if (!disposed) routeButton.disabled = !status?.enabled; }
+    finally {
+      routeBusy = false;
+      if (!disposed) routeButton.disabled = !status?.enabled;
+    }
   });
 
   void request('model_routing_status').catch(() => {

@@ -296,7 +296,10 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       // One custom ID row: the viewed harness, else the current one, unless the query names a harness or an existing model.
       const takesCustom = (group?: Group): group is Group => Boolean(group) && !advertisedModelsOnly(group!.provider.id) && !group!.locked && !group!.unavailable && !models(group!).some(model => [model.id, model.name].some(value => value.toLowerCase() === normalized));
       const viewed = all.find(group => group.key === view);
-      const custom = namedHarness ? undefined : [viewed, all.find(group => group.key === `h:${current.provider}`)].find(takesCustom);
+      // Recent and Teams have no harness of their own: retain the task's named account.
+      // If that account disappeared, require an explicit harness/account choice instead of detaching it.
+      const currentGroup = all.find(group => group.key === (currentConnection ? `c:${currentConnection}` : `h:${current.provider}`));
+      const custom = namedHarness ? undefined : [viewed, currentGroup].find(takesCustom);
       if (custom) {
         // Explain an empty catalog while still offering a custom model ID for supported harnesses.
         if (!total) markup += '<p class="model-menu-empty">No matching models.</p>';

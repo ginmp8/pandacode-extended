@@ -10,6 +10,103 @@ const task = (page: Page) => page.evaluate(async () => {
 });
 const activeOption = (page: Page) => picker(page).locator('[role="option"][aria-selected="true"]');
 
+for (const view of ['Recent', 'Teams']) {
+  for (const connection of ['account-a', null]) {
+    test(`custom model search from ${view} retains ${connection ?? 'the harness setup'}`, async ({ page }) => {
+      await page.goto('/?teams');
+      await page.evaluate(async connection => {
+        const { openModelPicker } = await import('/src/model-picker.ts');
+        const anchor = document.createElement('button');
+        anchor.style.cssText = 'position:fixed;top:16px;left:16px';
+        document.body.append(anchor);
+        (window as any).__customModelSelection = null;
+        openModelPicker({
+          anchor,
+          providers: [{ id: 'codex', name: 'Codex', installed: true, models: [{ id: 'model-a', name: 'Model A' }] }],
+          current: { provider: 'codex', model: 'model-a' },
+          currentConnection: connection,
+          connections: [
+            { id: 'account-a', name: 'Account A', provider: 'codex' },
+            { id: 'account-b', name: 'Account B', provider: 'codex' },
+          ],
+          teams: [{ id: 'team-a', name: 'Team A', detail: 'Lead and worker', provider: 'codex', selected: false }],
+          canSwitchProvider: true,
+          onSelect: async (provider, model, selectedConnection) => {
+            (window as any).__customModelSelection = [provider, model, selectedConnection];
+          },
+        });
+      }, connection);
+      await picker(page).getByRole('tab', { name: view === 'Teams' ? 'Teams, 1' : view, exact: true }).click();
+      await search(page).fill('custom-model-next');
+      const custom = picker(page).getByRole('option', { name: `Use "custom-model-next" with ${connection ? 'Account A' : 'Codex'}`, exact: true });
+      await expect(custom).toBeVisible();
+      if (connection) await expect(custom).toHaveAttribute('data-connection', connection);
+      else await expect(custom).not.toHaveAttribute('data-connection');
+      await custom.click();
+      await expect(picker(page)).toHaveCount(0);
+      await expect.poll(() => page.evaluate(() => (window as any).__customModelSelection))
+        .toEqual(['codex', 'custom-model-next', connection]);
+    });
+  }
+}
+
+test('an explicit named-account tab owns custom model search over the current account', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    document.body.append(anchor);
+    (window as any).__explicitAccountSelection = null;
+    openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      currentConnection: 'account-a',
+      connections: [
+        { id: 'account-a', name: 'Account A', provider: 'codex' },
+        { id: 'account-b', name: 'Account B', provider: 'codex' },
+      ],
+      canSwitchProvider: true,
+      onSelect: async (provider, model, connection) => {
+        (window as any).__explicitAccountSelection = [provider, model, connection];
+      },
+    });
+  });
+  await picker(page).getByRole('tab', { name: 'Account B', exact: true }).click();
+  await search(page).fill('custom-model-b');
+  await picker(page).getByRole('option', { name: 'Use "custom-model-b" with Account B', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__explicitAccountSelection))
+    .toEqual(['codex', 'custom-model-b', 'account-b']);
+});
+
+test('a missing named account never silently falls back to the harness setup from Teams', async ({ page }) => {
+  await page.goto('/?teams');
+  await page.evaluate(async () => {
+    const { openModelPicker } = await import('/src/model-picker.ts');
+    const anchor = document.createElement('button');
+    document.body.append(anchor);
+    (window as any).__missingAccountSelections = 0;
+    (window as any).__closeMissingAccountPicker = openModelPicker({
+      anchor,
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [] }],
+      current: { provider: 'codex', model: 'default' },
+      currentConnection: 'deleted-account',
+      connections: [],
+      teams: [{ id: 'team-a', name: 'Team A', detail: 'Lead and worker', provider: 'codex', selected: false }],
+      canSwitchProvider: true,
+      onSelect: async () => { (window as any).__missingAccountSelections++; },
+    });
+  });
+  await picker(page).getByRole('tab', { name: 'Teams, 1', exact: true }).click();
+  await search(page).fill('custom-model-next');
+  await expect(picker(page).getByRole('option')).toHaveCount(0);
+  await expect(picker(page)).toContainText('No matching models.');
+  await search(page).press('Enter');
+  expect(await page.evaluate(() => (window as any).__missingAccountSelections)).toBe(0);
+  await expect(picker(page)).toBeVisible();
+  await page.evaluate(() => (window as any).__closeMissingAccountPicker?.());
+});
+
 async function open(page: Page, url = '/?teams'): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();

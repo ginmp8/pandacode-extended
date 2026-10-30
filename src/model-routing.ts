@@ -103,7 +103,13 @@ export function mountModelRouting(host: HTMLElement, options: ModelRoutingOption
     prepare.textContent = next.profiler === 'failed' ? 'Retry' : 'Download';
   };
   const fail = (cause: unknown) => { if (!disposed) { result.hidden = false; result.textContent = cause instanceof Error ? cause.message : String(cause); } };
-  const configure = (patch: Record<string, unknown>) => request('model_routing_configure', patch, true).catch(fail);
+  const configure = (patch: Record<string, unknown>) => {
+    // A later user selection supersedes an in-flight preview immediately, before the native save.
+    routeTicket++;
+    result.hidden = true;
+    result.textContent = '';
+    return request('model_routing_configure', patch, true).catch(fail);
+  };
 
   enabled.addEventListener('change', () => void configure({ enabled: enabled.checked }));
   modes.addEventListener('click', event => {

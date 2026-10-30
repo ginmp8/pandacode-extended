@@ -167,6 +167,22 @@ test('turning routing off discards an in-flight preview instead of showing a sta
   await expect(settings(page).getByRole('button', { name: 'Route', exact: true })).toBeDisabled();
 });
 
+test('editing the task immediately invalidates an in-flight preview for the previous text', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  await page.evaluate(() => { (window as any).__routingDelay = { model_routing_route: 750 }; });
+  const task = settings(page).getByRole('textbox', { name: 'Task to route' });
+  const result = settings(page).locator('.routing-result');
+  await task.fill('Fix the failing login test');
+  await settings(page).getByRole('button', { name: 'Route', exact: true }).click();
+  await expect(result).toHaveText('Routing…');
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
+  await task.fill('Write release notes for the next version');
+  await expect(result).toBeHidden();
+  await page.waitForTimeout(850);
+  await expect(result).toBeHidden();
+});
+
 test('changing mode hides the older preview before the delayed native save completes', async ({ page }) => {
   await install(page);
   await openAgents(page);

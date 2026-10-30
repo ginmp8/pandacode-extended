@@ -115,6 +115,39 @@ test.describe('thread header overlay', () => {
     expect(after.gap).toBeGreaterThan(400);
   });
 
+  test('finding a visible match releases bottom-follow intent', async ({ page }) => {
+    await page.goto('/');
+    // Real find widget with a self-contained, visible match and no scrolling required.
+    const result = await page.evaluate(async () => {
+      const { createThreadFind } = await import('/src/thread-find.ts');
+      const pane = document.createElement('div');
+      pane.style.cssText = 'position:fixed;top:0;left:0;width:360px;height:200px;z-index:9999';
+      const transcript = document.createElement('section');
+      transcript.style.cssText = 'height:200px;overflow:auto';
+      transcript.innerHTML = '<div style="height:100px"></div><article class="message"><div class="message-content">visible-target</div></article>';
+      pane.append(transcript);
+      document.body.append(pane);
+      let releases = 0;
+      const find = createThreadFind({
+        pane: () => pane,
+        transcript: () => transcript,
+        restoreFocus: () => {},
+        beforeReveal: () => { releases++; },
+      });
+      find.open();
+      const input = pane.querySelector<HTMLInputElement>('input')!;
+      input.value = 'visible-target';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const range = [...(CSS as any).highlights.get('thread-find-current')][0] as Range;
+      const rect = range.getBoundingClientRect();
+      const visible = rect.top > 50 && rect.bottom < 200;
+      find.close();
+      pane.remove();
+      return { releases, visible };
+    });
+    expect(result).toEqual({ releases: 1, visible: true });
+  });
+
   test('find in thread lands every match below the fade and the find bar', async ({ page }) => {
     await openThread(page);
     // Let the thread's refresh redraw land first; it restores the scroll position it remembered.

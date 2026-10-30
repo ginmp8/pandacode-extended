@@ -169,6 +169,24 @@ test('Esc clears the query first, then closes and returns focus to the trigger',
   await expect(trigger(page)).toBeFocused();
 });
 
+test('the model picker stays inside a 320px viewport with search and keyboard selection', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await open(page);
+  const menu = picker(page);
+  await expect.poll(async () => {
+    const box = await menu.boundingBox();
+    return box !== null && box.x >= 0 && box.x + box.width <= 320;
+  }).toBe(true);
+  await expect(search(page)).toBeFocused();
+  const rail = menu.getByRole('tablist', { name: 'Harnesses' });
+  await expect(rail.getByRole('tab', { name: 'Claude Code', exact: true })).toBeVisible();
+  await search(page).fill('opus');
+  await expect(activeOption(page)).toHaveAccessibleName('Claude Code · Claude Opus 5');
+  await page.keyboard.press('Enter');
+  await expect(menu).toHaveCount(0);
+  await expect(trigger(page)).toContainText('Claude Opus 5');
+});
+
 test('narrow windows collapse the rail to logos', async ({ page }) => {
   await page.setViewportSize({ width: 480, height: 800 });
   await open(page);

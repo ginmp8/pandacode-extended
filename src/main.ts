@@ -70,7 +70,7 @@ import { approvalBarHtml } from './approval-bar';
 import { createThreadFind } from './thread-find';
 import type { RemoteHost, RemoteRepoCheck, RemoteStatus, RemoteTarget } from './remote-types';
 import type { RemoteStart } from './remote-progress';
-import type { RoutingMode, RoutingStatus } from './model-routing';
+import { queueRoutingPreferencesWrite, type RoutingMode, type RoutingStatus } from './model-routing';
 import { LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
 import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
@@ -373,7 +373,11 @@ async function configureRouting(mode: RoutingMode): Promise<void> {
   const ticket = ++routingTicket;
   routingConfiguring++;
   let saved = false;
-  try { applyRouting(ticket, await call<RoutingStatus>('model_routing_configure', { enabled: true, mode })); saved = true; }
+  try {
+    const next = await queueRoutingPreferencesWrite(() => call<RoutingStatus>('model_routing_configure', { enabled: true, mode }));
+    applyRouting(ticket, next);
+    saved = true;
+  }
   finally {
     routingConfiguring--;
     // A Settings status that arrived meanwhile: re-read after a save (it may be newer), apply it after a failure.

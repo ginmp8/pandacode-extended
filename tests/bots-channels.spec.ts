@@ -10,6 +10,19 @@ async function showBots(page: Page): Promise<void> {
 }
 
 test.describe('shared bot channels', () => {
+  test('entering a channel clears stale bot-thread presentation and keeps channel controls', async ({ page }) => {
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: /^Chat with Writer/ }).click();
+    await expect(page.locator('.conversation-pane')).toHaveClass(/bot-thread/);
+
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await expect(page.locator('.conversation-pane')).toHaveClass(/channel-thread/);
+    await expect(page.locator('.conversation-pane')).not.toHaveClass(/bot-thread/);
+    await expect(page.locator('body')).not.toHaveClass(/chat-thread/);
+    await expect(page.getByRole('button', { name: 'Back to conversation' })).toBeVisible();
+    await expect(page.locator('.bc-channel').getByRole('button', { name: 'Channel settings' })).toBeVisible();
+  });
+
   test('creates a channel from the sidebar and opens its settings', async ({ page }) => {
     await showBots(page);
     await page.getByRole('button', { name: 'Add bot or channel' }).click();

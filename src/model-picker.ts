@@ -56,6 +56,8 @@ function catalogFailureReason(reason: unknown): string {
   const message = (reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '').slice(0, 512).toLowerCase();
   if (/(rpc|transport|frame).*(limit|large|exceed)|(limit|exceed).*(rpc|transport|frame)/.test(message)) return 'RPC transport limit';
   if (/(catalog|output|response).*(limit|large|exceed)/.test(message)) return 'Model catalog too large';
+  // This exact UI-owned precondition is safe to display; never echo arbitrary provider text.
+  if (message === 'stop the bot before changing its connection.') return 'Stop the bot before changing its connection.';
   // OS-level launch failures win over sensitive path words such as /credentials/.
   if (/(could not start|enoent|exited)/.test(message)) return 'Provider unavailable';
   // Concrete permission/rate-limit responses outrank sensitive credential hints in diagnostics.

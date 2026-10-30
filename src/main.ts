@@ -1401,16 +1401,18 @@ function renderHeader(): void {
   projectRunner.paint();
   const fresh = newTaskView(), bot = botForThread(), chat = chatTask(session());
   $('.conversation-pane').classList.toggle('new-task-page', fresh);
-  $('.conversation-pane').classList.toggle('channel-thread', Boolean(state.sharedChannelId));
-  document.body.classList.toggle('shared-channel-thread', Boolean(state.sharedChannelId));
-  if (state.sharedChannelId) {
+  const channelThread = Boolean(state.sharedChannelId);
+  $('.conversation-pane').classList.toggle('channel-thread', channelThread);
+  document.body.classList.toggle('shared-channel-thread', channelThread);
+  // Channel rendering returns early below: clear state inherited from the previous chat or bot.
+  document.body.classList.toggle('chat-thread', !channelThread && chat);
+  $('.conversation-pane').classList.toggle('bot-thread', !channelThread && Boolean(bot));
+  if (channelThread) {
     const channel = state.sharedChannelDetail;
     $('#breadcrumb').innerHTML = `<button class="channel-back" data-action="close-shared-channel" aria-label="Back to conversation">${icon('chevron')}</button><span>${escape(channel ? `#${channel.name}` : 'Shared channel')}</span>`;
     return;
   }
   // A chat has no project: no project bar, deploy or run script.
-  document.body.classList.toggle('chat-thread', chat);
-  $('.conversation-pane').classList.toggle('bot-thread', Boolean(bot));
   $('#breadcrumb').innerHTML = bot ? botCrumb(bot) : chat ? `${icon('chat')}<span>Chat</span>` : p && !fresh ? `${icon('folder')}<button data-action="select-project" data-id="${escape(p.id)}">${escape(p.name)}</button>` : '';
   const s = session(), bar = document.querySelector<HTMLElement>('#composer-area .composer-context');
   if (s && bar) {
@@ -4501,6 +4503,11 @@ async function showModel(anchor: HTMLElement): Promise<void> {
     },
     onSelect: async (providerId, model, connection) => {
       if (botNext && isRunning(selected.id) && selected.id === state.sessionId) {
+        // Native connection_assign requires an idle task. Do not silently queue a model
+        // while discarding a different account selected in the same picker row.
+        if (!device && (connection ?? null) !== (namedConnections.tasks[selected.id] ?? null)) {
+          throw new Error('Stop the bot before changing its connection.');
+        }
         const changed = providerId !== selected.provider || (model || 'default') !== (selected.model || 'default');
         botThread.setNextModel(selected.id, changed ? { provider: providerId, model, label: model && model !== 'default' ? model : provider(providerId)?.name ?? providerId } : undefined);
         renderHeader(); return;

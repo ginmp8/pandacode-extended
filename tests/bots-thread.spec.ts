@@ -266,6 +266,30 @@ test.describe('bot conversation', () => {
     await expect(badge).toHaveAttribute('title', /finishes this turn\. next-model starts with the next one\.$/);
   });
 
+  test('running bots reject a named-connection switch instead of silently losing account identity', async ({ page }) => {
+    await page.goto('/?bots=sample');
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('region', { name: 'Settings', exact: true }).getByRole('tab', { name: 'Providers', exact: true }).click();
+    const connections = page.locator('#named-connections');
+    await connections.getByRole('button', { name: 'Add connection', exact: true }).click();
+    await connections.getByLabel('Harness', { exact: true }).selectOption('claude');
+    await connections.getByLabel('Name', { exact: true }).fill('Claude Work');
+    await connections.getByRole('button', { name: 'Save connection', exact: true }).click();
+    await expect(connections.getByRole('status')).toHaveText('Connection saved. Choose it in the model picker.');
+    await page.keyboard.press('Escape');
+
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: /^Chat with Writer/ }).click();
+    await expect(page.locator('#stream-region .bot-working')).toBeVisible();
+    await page.getByRole('button', { name: 'Choose harness and model', exact: true }).click();
+    const picker = page.getByRole('dialog', { name: 'Harness and model', exact: true });
+    await picker.getByRole('tab', { name: 'Claude Work', exact: true }).click();
+    await picker.getByRole('option', { name: /^Claude Work · / }).first().click();
+    await expect(picker.getByRole('alert')).toHaveText('Stop the bot before changing its connection.');
+    await expect(picker).toBeVisible();
+    await expect(page.locator('#breadcrumb .bot-next-model')).toHaveCount(0);
+  });
+
   test('an empty conversation says the bot is ready and suggests asks from its role', async ({ page }) => {
     await openSample(page, 'Ledger');
     const welcome = transcript(page).locator('.bot-welcome');

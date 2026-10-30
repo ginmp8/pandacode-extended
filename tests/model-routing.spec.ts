@@ -18,7 +18,9 @@ async function install(page: Page, init?: () => void): Promise<void> {
           ? window.__routingStatusFailures.shift() : window.__routingFail?.[command];
       // Test hook: \`__routingDelay[command] = ms\` holds that command back before it runs.
       const delay = command === 'model_routing_configure' && window.__routingWriteDelays?.length
-        ? window.__routingWriteDelays.shift() : window.__routingDelay?.[command];
+        ? window.__routingWriteDelays.shift()
+        : command === 'model_routing_route' && window.__routingPreviewDelays?.length
+          ? window.__routingPreviewDelays.shift() : window.__routingDelay?.[command];
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
       if (failure) throw new Error(failure);
       return invokePreview(command, args);
@@ -206,6 +208,31 @@ test('editing a task allows an immediate new preview without an old request unlo
   await expect(result).toHaveText('Routing…');
   await expect(result).toContainText('Difficulty', { timeout: 7000 });
   await expect(routeButton).toBeEnabled();
+});
+
+test('an edited task can reroute while an older preview finishes out of order', async ({ page }) => {
+  await install(page);
+  await openAgents(page);
+  await page.evaluate(() => { (window as any).__routingPreviewDelays = [800, 1700]; });
+  const task = settings(page).getByRole('textbox', { name: 'Task to route' });
+  const button = settings(page).getByRole('button', { name: 'Route', exact: true });
+  const result = settings(page).locator('.routing-result');
+
+  await task.fill('Fix the failing login test');
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(1);
+  await task.fill('Write release notes for the next version');
+  await expect(result).toBeHidden();
+  // The older native route is still pending, but it must not hold the button.
+  await expect(button).toBeEnabled({ timeout: 250 });
+  await button.click();
+  await expect.poll(async () => (await calls(page, 'model_routing_route')).length).toBe(2);
+  await page.waitForTimeout(950);
+  // The first request finished; the second must remain locked until it finishes.
+  await expect(button).toBeDisabled();
+  await expect(result).toHaveText('Routing…');
+  await expect(button).toBeEnabled({ timeout: 5000 });
+  await expect(result).toContainText('Difficulty');
 });
 
 test('changing mode hides the older preview before the delayed native save completes', async ({ page }) => {

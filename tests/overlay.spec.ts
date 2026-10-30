@@ -1,5 +1,42 @@
 import { expect, test, type Page } from '@playwright/test';
 
+test('launcher applies cross-window light/dark palette changes without reopening', async ({page}) => {
+  await page.goto('/?view=launcher');
+  const start = page.getByRole('button', {name:'Start task', exact:true});
+  const initial = await start.evaluate(el => getComputedStyle(el).backgroundColor);
+  const palette = await page.evaluate(async () => {
+    const {accentTokens} = await import('/src/palette-core.ts');
+    const {parseHex} = await import('/src/color.ts');
+    const rgb = parseHex('#2fb8c4')!.rgb;
+    return {
+      light: accentTokens(rgb, 'light'),
+      dark: accentTokens(rgb, 'dark'),
+    };
+  });
+  const apply = async (theme: 'light' | 'dark', tokens: Record<string, string>) => {
+    await page.evaluate(({theme, tokens}) => {
+      localStorage.setItem('pandacode.theme', theme);
+      localStorage.setItem('pandacode.palette', JSON.stringify({
+        accent: {mode:'custom', color:'#2fb8c4'},
+        vsix:null, cache:{key:'#2fb8c4:' + theme, tokens, terminal:{}},
+      }));
+      // Storage events are dispatched in the other window, not the writing window.
+      window.dispatchEvent(new StorageEvent('storage', {key:'pandacode.palette'}));
+      window.dispatchEvent(new StorageEvent('storage', {key:'pandacode.theme'}));
+    }, {theme, tokens});
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    await expect.poll(() => page.evaluate(() =>
+      document.documentElement.style.getPropertyValue('--accent').trim()
+    )).toBe(tokens['--accent']);
+    await expect(start).toBeVisible();
+  };
+  await apply('light', palette.light);
+  await expect.poll(() => start.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe(initial);
+  await apply('dark', palette.dark);
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+});
+
+
 test('launcher preserves saved harness authors and renders handoffs beside the current live provider', async ({page}) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({width:650,height:610});

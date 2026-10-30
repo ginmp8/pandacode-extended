@@ -306,6 +306,23 @@ test('the catalog keeps every harness and long shared prefixes', async ({ page }
   expect(result.rosterInCatalog).toBe(true);
 });
 
+test('invalid catalog entries cannot disable routing for the valid installed models', async ({ page }) => {
+  await install(page);
+  const result = await page.evaluate(async () => {
+    const { buildTeamCatalog } = await import('/src/team-catalog.ts');
+    const harnesses = [{ id: 'codex', name: 'Codex', models: [
+      { id: 'valid-model', name: 'Valid' },
+      { id: 'bad\\u0000model', name: 'NUL' },
+      { id: 'x'.repeat(201), name: 'Oversized' },
+      { id: 'malformed-name', name: 'Invalid\\u0000name' },
+      { id: 'also-valid', name: 'Valid 2' },
+    ] }];
+    const { catalog } = buildTeamCatalog(harnesses as any);
+    return catalog.map(p => p.model);
+  });
+  expect(result).toEqual(['valid-model', 'also-valid']);
+});
+
 test('the cap keeps every harness represented', async ({ page }) => {
   await install(page);
   const providers = await page.evaluate(async () => {

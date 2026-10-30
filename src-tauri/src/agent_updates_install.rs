@@ -41,19 +41,15 @@ impl Plan {
     }
 }
 
-pub(super) fn docs(provider: &str) -> Option<&'static str> {
-    Some(match provider {
+pub(super) fn docs(provider: &str) -> &'static str {
+    match provider {
         "claude" => "https://code.claude.com/docs/en/setup",
         "codex" => "https://developers.openai.com/codex/cli/",
         "kimi" => "https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html",
         "opencode" => "https://opencode.ai/docs/",
         "grok" => "https://docs.x.ai/build",
-        "cline" => "https://docs.cline.bot/usage/cli-overview",
-        "antigravity" => "https://antigravity.google/docs/ide/extensions",
-        "devin" => "https://docs.devin.ai/cli",
-        "hermes" => "https://hermes-agent.org",
-        _ => return None,
-    })
+        _ => "https://antigravity.google/docs/ide/extensions",
+    }
 }
 
 fn command(path: &Path) -> Result<Command> {
@@ -205,7 +201,6 @@ fn package(provider: &str) -> Option<&'static str> {
         "claude" => Some("@anthropic-ai/claude-code"),
         "codex" => Some("@openai/codex"),
         "opencode" => Some("opencode-ai"),
-        "cline" => Some("cline"),
         _ => None,
     }
 }

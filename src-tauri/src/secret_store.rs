@@ -1,42 +1,5 @@
-//! App secrets. On macOS they live in `secrets.json`, a 0600 JSON file in the app data dir
-//! keyed `"<service>/<account>"`: PandaCode has no Apple Team ID, so a Keychain item is pinned
-//! to the build that made it and every update asked for the login password on each read.
-//! Items saved in the Keychain by earlier versions move to the file on first use, at most one
-//! prompt per item, ever. Linux and Windows keep the OS store (Secret Service, Credential
-//! Manager). Values never enter prompts, logs, the database or the webview.
-use serde::{de::DeserializeOwned, Serialize};
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-
-const FILE: &str = "secrets.json";
-const LABEL: &str = "PandaCode secrets";
-
-static DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// Sets the app data dir once, at startup before anything reads a secret (and in the cloud
-/// bridge process, which reads provider keys).
-pub(crate) fn setup(dir: &Path) {
-    let _ = DIR.set(dir.to_owned());
-}
-
-/// The dir given to `setup`, for child processes that read secrets.
-pub(crate) fn dir() -> Option<&'static Path> {
-    DIR.get().map(PathBuf::as_path)
-}
-
-fn key(service: &str, account: &str) -> String {
-    format!("{service}/{account}")
-}
-
-/// Linux/Windows: `PANDACODE_SECRETS_FILE=1` keeps secrets in the same 0600 file macOS
-/// uses. A server has no Secret Service agent to unlock, and Secret Service cannot answer
-/// noninteractive reads; `pandacode serve` sets the variable itself. Off by default.
-#[cfg(all(not(test), any(target_os = "linux", target_os = "windows")))]
-fn file_mode() -> bool {
-    std::env::var_os("PANDACODE_SECRETS_FILE").is_some_and(|value| value == "1")
-}
+//! The OS secure store (Keychain, Secret Service, Credential Manager) for app secrets.
+//! Values never enter prompts, logs, the database or the webview.
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::Write;
@@ -44,8 +7,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 #[cfg(test)]
-fn memory() -> &'static Mutex<std::collections::HashMap<String, String>> {
-    static STORE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+fn memory() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static STORE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
     STORE.get_or_init(Default::default)
 }
 
@@ -56,20 +19,16 @@ pub(crate) fn set(service: &str, account: &str, value: &str) -> crate::Result<()
     }
     #[cfg(test)]
     {
-        memory().lock().unwrap().insert(key(service, account), value.to_owned());
+        memory().lock().unwrap().insert(format!("{service}/{account}"), value.to_owned());
         Ok(())
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
-        file_set(app_dir()?, service, account, Some(value))
+        security_framework::passwords::set_generic_password(service, account, value.as_bytes()).map_err(|_| "Could not save the secret in Keychain.".into())
     }
     #[cfg(all(not(test), any(target_os = "linux", target_os = "windows")))]
     {
-        if file_mode() {
-            file_set(app_dir()?, service, account, Some(value))
-        } else {
-            keyring::Entry::new(service, account).and_then(|entry| entry.set_password(value)).map_err(|_| "Could not save the secret in secure storage.".into())
-        }
+        keyring::Entry::new(service, account).and_then(|entry| entry.set_password(value)).map_err(|_| "Could not save the secret in secure storage.".into())
     }
     #[cfg(all(not(test), not(any(target_os = "macos", target_os = "linux", target_os = "windows"))))]
     {
@@ -81,21 +40,23 @@ pub(crate) fn set(service: &str, account: &str, value: &str) -> crate::Result<()
 pub(crate) fn get(service: &str, account: &str) -> Option<String> {
     #[cfg(test)]
     {
-        memory().lock().unwrap().get(&key(service, account)).cloned()
+        memory().lock().unwrap().get(&format!("{service}/{account}")).cloned()
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
-        let dir = app_dir().map_err(|error| eprintln!("{error}")).ok()?;
-        file_get(dir, service, account, &legacy::Keychain)
+        match security_framework::passwords::get_generic_password(service, account) {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            // -25300 is "not found"; anything else (a denied or dismissed access prompt) is worth logging.
+            Err(error) if error.code() == -25300 => None,
+            Err(error) => {
+                eprintln!("Keychain read for {service} failed ({}): {error}", error.code());
+                None
+            }
+        }
     }
     #[cfg(all(not(test), any(target_os = "linux", target_os = "windows")))]
     {
-        if file_mode() {
-            let dir = app_dir().map_err(|error| eprintln!("{error}")).ok()?;
-            file_get(dir, service, account, &legacy::NoStore)
-        } else {
-            keyring::Entry::new(service, account).and_then(|entry| entry.get_password()).ok()
-        }
+        keyring::Entry::new(service, account).and_then(|entry| entry.get_password()).ok()
     }
     #[cfg(all(not(test), not(any(target_os = "macos", target_os = "linux", target_os = "windows"))))]
     {
@@ -104,39 +65,18 @@ pub(crate) fn get(service: &str, account: &str) -> Option<String> {
     }
 }
 
-/// The file's value only: no Keychain access of any kind (background usage checks).
-#[cfg(target_os = "macos")]
-pub(crate) fn peek(service: &str, account: &str) -> Option<String> {
-    #[cfg(test)]
-    {
-        get(service, account)
-    }
-    #[cfg(not(test))]
-    {
-        load::<Map>(&app_dir().ok()?.join(FILE), LABEL).ok()?.get(&key(service, account)).cloned()
-    }
-}
-
 pub(crate) fn remove(service: &str, account: &str) {
     #[cfg(test)]
     {
-        memory().lock().unwrap().remove(&key(service, account));
+        memory().lock().unwrap().remove(&format!("{service}/{account}"));
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
-        match app_dir().and_then(|dir| file_set(dir, service, account, None)) {
-            Ok(()) => legacy::forget(&legacy::Keychain, service, account),
-            Err(error) => eprintln!("{error}"),
-        }
+        let _ = security_framework::passwords::delete_generic_password(service, account);
     }
     #[cfg(all(not(test), any(target_os = "linux", target_os = "windows")))]
     {
-        if file_mode() {
-            match app_dir().and_then(|dir| file_set(dir, service, account, None)) {
-                Ok(()) => legacy::forget(&legacy::NoStore, service, account),
-                Err(error) => eprintln!("{error}"),
-            }
-        } else if let Ok(entry) = keyring::Entry::new(service, account) {
+        if let Ok(entry) = keyring::Entry::new(service, account) {
             let _ = entry.delete_credential();
         }
     }

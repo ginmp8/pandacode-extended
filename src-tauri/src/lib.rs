@@ -4,7 +4,6 @@ mod agent_usage;
 mod agent_updates;
 mod agent_usage_providers;
 mod memory;
-mod app_updates;
 mod appearance;
 mod architect;
 mod bots;
@@ -3869,7 +3868,6 @@ pub fn run() {
                 model_health::model_health_list,
                 model_health::model_health_clear,
                 local_sign_app,
-                app_updates::app_update_install_supported,
                 agent_updates::check_agent_updates,
                 agent_updates::update_agent,
                 moodboards::list_moodboards,

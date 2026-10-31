@@ -4096,6 +4096,8 @@ mod tests {
         let request = |nonce: &str| json!({"ts": now, "nonce": nonce});
         assert_eq!(admit(&inner, "viewer"), Err(OFF.to_string()));
         inner.settings.host_enabled = true;
+        assert_eq!(admit(&inner, "viewer"), Err("PandaCode Connect is disabled. Enable it in Settings.".into()));
+        inner.settings.connection_enabled = true;
         assert_eq!(admit(&inner, "viewer"), Ok(false));
         inner.settings.remote_full_access = true;
         assert_eq!(admit(&inner, "viewer"), Ok(true));

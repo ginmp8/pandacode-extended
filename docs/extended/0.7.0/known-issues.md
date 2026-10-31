@@ -1,6 +1,6 @@
 # PandaCode Extended 0.7.0 — Known issues and remediation status
 
-**Status:** Five non-dependency issues remain open; dependency **KI-06** and SQLite compatibility **KI-07** have source fixes pending release acceptance in the **unreleased** [Extended 0.7.0 source candidate](../../../release/extended/0.7.0.md).  
+**Status:** Five non-dependency issues remain open; dependency **KI-06** and SQLite compatibility **KI-07** have source fixes pending release acceptance in the **unreleased** [Extended 0.7.0 source candidate](../../../releases/extended/0.7.0.md).  
 **Source reviewed:** [`2f21bb67`](https://github.com/ginmp8/pandacode-extended/commit/2f21bb67e3d59b5b01f794a8cc6d8b686f5a95eb), PR [#86](https://github.com/ginmp8/pandacode-extended/pull/86), reviewed 2026-10-31.  
 **Scope:** Findings observed in the candidate code and risks that require runtime reproduction. **Documented does not mean fixed, accepted, or verified at runtime.**
 

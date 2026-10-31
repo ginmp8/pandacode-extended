@@ -1,12 +1,12 @@
 # Agent updates
 
 Open **Settings → Agents → Agent updates → Check updates** to see the agents
-PandaCode finds on this computer. Automatic agent-update checks are **Off by default** in
-**Settings → Feature controls → Check agent updates automatically**. When
-explicitly enabled, PandaCode checks public release metadata every six hours
-and shows a popup if a newer version is available. When Off, only explicit
-**Check updates** actions fetch versions. **Later** dismisses the current
-version notification; a newer version can appear after the next enabled check.
+PandaCode finds on this computer. The update check reads provider release metadata;
+checking alone never installs an update. **Later** dismisses the current version notification.
+
+**PandaCode Extended only:** background agent-update checks are disabled by default and
+are controlled from Settings → Feature controls. See the independent [Extended 0.7.0
+Feature controls](extended/0.7.0/feature-controls.md) for the specific opt-in behavior.
 
 Checking does not install anything. An installation starts only after choosing
 **Update**. Finish running agents and Jev work, pause goals and teams, and close

@@ -71,13 +71,12 @@ const MAX_BUFFER: usize = 4096;
 const LAGGED: &str = "lagged";
 const CUT: &str = "\n…[cut on the host to fit a remote page]";
 /// Harness ids `providers.models` accepts (the same list `storage` allows).
-pub(crate) const PROVIDERS: [&str; 17] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin"];
+pub(crate) const PROVIDERS: [&str; 19] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "zcode", "hermes"];
 
-/// Hosting must be on. The socket already limits frames to devices in presence.
-pub(crate) fn gate(host_enabled: bool) -> Result<()> {
-    if !host_enabled {
-        return Err(OFF.into());
-    }
+/// Presence is not authorization: every ordinary request requires a pinned current key.
+pub(crate) fn gate(host_enabled: bool, trusted: bool, host_name: &str) -> Result<()> {
+    if !host_enabled { return Err(OFF.into()); }
+    if !trusted { return Err(format!("This computer isn't trusted on {host_name}. Trust it in Settings → Remote access on that computer.")); }
     Ok(())
 }
 
@@ -1195,6 +1194,13 @@ fn team_event_cache() -> &'static StdMutex<HashMap<String, HashMap<String, Value
     CACHE.get_or_init(Default::default)
 }
 
+fn forget_unfollowed_teams(inner: &super::Inner) {
+    team_event_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|session, _| inner.subscribers.values().any(|s| s.sessions.contains(session)));
+}
+
 fn queue_team_event(app: &tauri::AppHandle, session_id: &str, data: Value) {
     journaled(app, session_id, team_event_value(session_id, data), Queue::Event);
 }
@@ -1700,7 +1706,8 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotMessage { bot_id, text } => {
-            let session_id = crate::bots::bot_message(app.clone(), bot_id, text).await?;
+            require_method(app, from, authenticated_key, "bot.message")?;
+            let session_id = crate::bots::bot_message(app.clone(), bot_id, text, None, None, None).await?;
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotPause { bot_id, paused } => {
@@ -3097,7 +3104,6 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
             let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
         }
         for data in finished {
-            sent += 1;
             let _ = socket::send_to_device(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
         }
     }
@@ -4807,8 +4813,9 @@ mod extended_security_tests {
 
     #[test]
     fn host_gate_only_checks_remote_control() {
-        assert_eq!(gate(false), Err(OFF.to_string()));
-        assert_eq!(gate(true), Ok(()));
+        assert_eq!(gate(false, true, "Test"), Err(OFF.to_string()));
+        assert!(gate(true, false, "Test").unwrap_err().contains("isn't trusted"));
+        assert_eq!(gate(true, true, "Test"), Ok(()));
     }
 
     #[test]

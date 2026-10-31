@@ -908,6 +908,12 @@ pub(crate) fn send_to_device(app: &tauri::AppHandle, to: &str, message: &Value) 
     send_sealed(app, to, &key, Some(&public_key), false, false, message).map(|_| ())
 }
 
+/// The shared outbound gate: the current presence key must still match its
+/// locally pinned fingerprint. The relay is not a source of authority.
+pub(crate) fn send_trusted(app: &tauri::AppHandle, to: &str, message: &Value) -> Result<()> {
+    send_to_device(app, to, message)
+}
+
 /// Events produced by a request remain bound to its original authenticating key.
 pub(crate) fn send_authenticated(app: &tauri::AppHandle, to: &str, authenticated_key: &str, message: &Value) -> Result<()> {
     let (key, current_key) = peer_key(app, to)?;

@@ -17,6 +17,8 @@ use crate::agent_tools::{spec, validate_spec};
 use crate::providers::ToolHost;
 use crate::workspace::{run_process, run_process_cancelable};
 
+// Version-pinned CLI invocation only after the caller's explicit approval.
+const NETLIFY: &str = "netlify-cli@27.14.2";
 const OUTPUT: usize = 128 * 1024;
 
 /// Approval tools that ask on every call, even in full-access mode.

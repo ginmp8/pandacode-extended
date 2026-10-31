@@ -57,7 +57,7 @@ const AGENTS_STOPPING: &str = "Wait for the current agents to stop before resumi
 const CONTINUE_BODY: &str = "Background commands, monitors and scheduled wakeups do not report back after your turn ends, so nothing is waiting on them. Continue now: dispatch the remaining work to workers, run any check you need in the foreground and wait for it in this turn, or call finish_team with a summary if the objective is done. Do not end this turn waiting on anything.";
 const FAILED_PREFIX: &str = "A worker failed while other workers are still running, for this objective: ";
 const FAILED_BODY: &str = "\n\nRead the failed worker's error and result. Retry it with followup_worker, dispatch a replacement, or leave it for the final review. Other workers are still active: do not edit their files, repeat completed assignments, or poll. You may end this turn after you act; settled work will trigger review.\n\n";
-const HARNESSES: [&str; 17] = [
+pub(crate) const HARNESSES: [&str; 18] = [
     "claude",
     "codex",
     "kimi",
@@ -75,6 +75,7 @@ const HARNESSES: [&str; 17] = [
     "github-copilot",
     "muse",
     "devin",
+    "hermes",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +526,7 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
             profiles
         };
         let lead = store.session(sid)?;
+        let note = routing::prompt_note(&team.config, crate::model_routing::enabled());
         let mut staffing = if team.config.roster_only {
             format!("You lead {} with your own model ({} via {}). Use only these models for workers, never any other: set profileId to one of these entries in each assignment{}. Team: {}.", team.config.name.as_deref().map_or_else(|| "this agent team".to_string(), |name| format!("the {name} team")), lead.model, lead.provider, if team.config.workers.iter().any(|p| p.provider == lead.provider && p.model == lead.model) { ", or omit it to use your own model" } else { "" }, profiles)
         } else if team.config.auto {

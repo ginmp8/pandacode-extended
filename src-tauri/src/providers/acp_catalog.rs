@@ -107,11 +107,6 @@ pub(crate) fn begin(provider: &str, path: &Path) -> Option<Discovery> {
 }
 
 pub(crate) fn store(discovery: Option<Discovery>, metadata: &Value) {
-    store_models(discovery, acp::parse_models(metadata));
-}
-
-/// For harnesses whose catalog takes more than one `session/new` result (Devin).
-pub(crate) fn store_models(discovery: Option<Discovery>, models: Vec<ModelInfo>) {
     let Some(discovery) = discovery else {
         return;
     };

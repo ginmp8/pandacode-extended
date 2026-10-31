@@ -38,11 +38,9 @@ const STABLE: Duration = Duration::from_secs(30);
 pub(super) const MAX_FRAME: usize = 256 * 1024;
 /// The error a call gets when the relay (or a direct link) refused it for the frame rate.
 pub(super) const RATE_LIMITED: &str = "Too many requests to that computer. Try again in a moment.";
-const MAX_STARTS: usize = 8;
 const PEER_QUEUE: usize = 64;
 const MAX_PEERS: usize = 64;
 const MAX_STARTS: usize = 4;
-static STARTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
 /// Relay close codes: another socket replaced this one, or the device was revoked.
 const REPLACED: u16 = 4000;
 const REVOKED: u16 = 4001;

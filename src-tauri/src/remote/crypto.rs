@@ -131,19 +131,6 @@ pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// 32 random bytes, base64 (44 characters): route keys and handshake nonces.
-pub(crate) fn random_token() -> String {
-    use chacha20poly1305::aead::rand_core::RngCore;
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    STANDARD.encode(bytes)
-}
-
-/// Compares secrets without stopping at the first differing byte.
-pub(crate) fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

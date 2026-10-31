@@ -7,7 +7,6 @@ mod catalog;
 pub(crate) mod scoped;
 mod github;
 mod safety;
-pub(crate) mod scoped;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

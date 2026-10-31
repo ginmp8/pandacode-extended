@@ -3,7 +3,16 @@
 // predates the endpoint: classifyRegister sorts 404/405
 // into 'unsupported' and this module stops trying until the next launch. No task content ever
 // leaves the phone: the register body is platform + token, nothing else.
-import * as Notifications from 'expo-notifications';
+import {
+  AndroidImportance,
+  IosAuthorizationStatus,
+  addNotificationResponseReceivedListener,
+  getDevicePushTokenAsync,
+  getPermissionsAsync,
+  requestPermissionsAsync,
+  setNotificationChannelAsync,
+  setNotificationHandler,
+} from 'expo-notifications';
 import { Linking, Platform } from 'react-native';
 import { useEffect } from 'react';
 import { build } from '../connect/config.ts';
@@ -12,7 +21,7 @@ import * as secrets from '../connect/secrets.ts';
 
 // Foreground: show the banner (approvals want to be seen) but stay silent; the Live Activity and
 // inbox carry the detail. Set once at module load, per the library's contract.
-Notifications.setNotificationHandler({
+setNotificationHandler({
   handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false }),
 });
 
@@ -23,7 +32,7 @@ let unsupportedThisLaunch = false;
 /** True when the phone can hold a push token at all (Expo Go cannot; Android needs a build). */
 export async function pushAvailable(): Promise<boolean> {
   try {
-    await Notifications.getPermissionsAsync();
+    await getPermissionsAsync();
     return true;
   } catch {
     return false;
@@ -31,16 +40,16 @@ export async function pushAvailable(): Promise<boolean> {
 }
 
 export async function notificationsGranted(): Promise<boolean> {
-  const status = await Notifications.getPermissionsAsync();
-  return status.granted || status.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
+  const status = await getPermissionsAsync();
+  return status.granted || status.ios?.status === IosAuthorizationStatus.PROVISIONAL;
 }
 
 /** Asks (once, from the Settings toggle only) and registers if granted. Returns whether push is on. */
 export async function enableNotifications(): Promise<boolean> {
   if (Platform.OS === 'android' && Platform.Version >= 33) {
-    await Notifications.setNotificationChannelAsync('tasks', { name: 'Tasks', importance: Notifications.AndroidImportance.HIGH });
+    await setNotificationChannelAsync('tasks', { name: 'Tasks', importance: AndroidImportance.HIGH });
   }
-  const status = await Notifications.requestPermissionsAsync();
+  const status = await requestPermissionsAsync();
   if (!status.granted) return false;
   await registerToken();
   return true;
@@ -53,7 +62,7 @@ export async function registerToken(): Promise<void> {
   const token = await secrets.getToken();
   if (!token) return;
   try {
-    const device = await Notifications.getDevicePushTokenAsync();
+    const device = await getDevicePushTokenAsync();
     const response = await fetch(`${build.relay}${REGISTER_PATH}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -75,7 +84,7 @@ export async function enrollIfGranted(): Promise<void> {
 export function usePushNotifications(signedIn: boolean) {
   useEffect(() => {
     if (signedIn) void enrollIfGranted();
-    const sub = Notifications.addNotificationResponseReceivedListener(response => {
+    const sub = addNotificationResponseReceivedListener(response => {
       const url = (response.notification.request.content.data as { url?: string } | null)?.url;
       if (typeof url === 'string' && url.startsWith('pandacode:')) void Linking.openURL(url);
     });

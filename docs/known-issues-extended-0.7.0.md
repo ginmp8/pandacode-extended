@@ -14,6 +14,8 @@
 | [EXT-070-KI-04](#ext-070-ki-04--failed-settings-reads-can-reactivate-bots-or-lan-routes) | Major | Confirmed fallback behavior | Inaccessible or corrupted settings | Open, deferred |
 | [EXT-070-KI-05](#ext-070-ki-05--running-agents-retain-launch-time-mcp-configuration) | Minor / policy-dependent | Confirmed launch-time behavior | Existing agent sessions | Open, deferred |
 
+| [EXT-070-KI-06](#ext-070-ki-06--mobile-expo-dependency-audit-remains-open) | Major / release gate | GitHub Actions audit reproduced | Mobile/Expo transitive dependency vulnerabilities | Open, requires migration |
+
 Severities are provisional engineering priorities, not evidence of an exploited vulnerability. The owner may schedule remediation in a later revision, but merge/release risk acceptance requires a separate, explicit decision.
 
 ## EXT-070-KI-01 — Codex MCP isolation may not be enforced
@@ -86,7 +88,24 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Acceptance:** The UI clearly communicates timing, running work is not killed without approval, and new runs obey the saved preference.
 
-## Release-readiness notes (separate from the five deferred findings)
+## EXT-070-KI-06 — Mobile / Expo dependency audit remains open
+
+**Severity:** Major; affects release readiness for a distribution that includes the mobile client.  
+**Confidence:** Confirmed npm audit findings on the committed mobile lockfile in [CI run 41241914440](https://github.com/ginmp8/pandacode-extended/actions/runs/41241914440). Exploit reachability must be reviewed separately.
+
+**Evidence:** `npm audit --prefix mobile --audit-level=low` reports **27 affected packages: 3 high, 23 moderate, 1 low**. Representative findings include `node-forge`, `zod`, `glob`, nested `minimatch`, and `deepmerge`. These are **mobile-specific** findings and are distinct from the already-patched root/website packages.
+
+**Impact:** Risks include unsafe cryptographic parsing, resource exhaustion, and prototype poisoning in paths selected by Expo/Metro and tooling. Some paths are build/dev-only; runtime reachability is not established by the audit.
+
+**Compatibility constraint:** The reported `npm audit fix --force` remediation would install Expo 51 against the current Expo 58 project. Do **not** downgrade or override dependencies blindly just to produce a green audit.
+
+**Remediation:** Profile mobile dependency reachability and tree ownership, apply available compatible patches, and coordinate incompatible Expo/Metro/ESLint updates as an explicit migration with mobile build and runtime tests. Use supported manager commands and avoid hand-editing generated native outputs.
+
+**Acceptance:** A clean frozen mobile installation, successful native/Expo regression tests and a documented zero-unmitigated-critical/high audit (preferably all severities), with any remaining vulnerabilities explicitly reviewed. No bypass, skipped check or unsupported Expo downgrade.
+
+**Status:** **Open; not remediated by the desktop/website dependency patches.** See [security tracking](dependency-security-extended-0.7.0.md).
+
+## Release-readiness notes (separate from the six deferred findings)
 
 - The planned Extended release number is `0.7.0`, but the imported app's package/Cargo version remains `0.3.85`. Version metadata, release assets and updater identity must be reconciled before tagging.
 - The upstream source replacement omitted some Extended-only release/documentation files present on the prior `main`, including `releases/extended/0.6.0.md`. Preserve the required history and revalidate Extended-exclusive behavior before merging.

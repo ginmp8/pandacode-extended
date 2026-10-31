@@ -26,6 +26,7 @@ jobs:
       - name: Audit mobile npm dependencies
         run: npm audit --prefix mobile --audit-level=low
       - name: Audit relay npm dependencies
+        if: ${{ always() }}
         run: npm audit --prefix relay --audit-level=low
 
   web:

@@ -47,9 +47,9 @@ export function colorPicker(current: string): string {
   return `<div class="color-picker" role="group" aria-label="Color"><input type="hidden" name="color" value="${escape(safe)}">` + swatch('', 'Automatic') + PANDAS.map(p => swatch(p.color, p.name)).join('') + '</div>';
 }
 
-export function avatarPicker(current: string): string {
+export function avatarPicker(current: string, color = ''): string {
   const swatches = PANDAS.map(p => `<button type="button" class="avatar-swatch" data-avatar-choice="${p.id}" aria-pressed="${p.id === current}" aria-label="${p.name} panda">${pandaSvg(p.id)}</button>`).join('');
-  return `<div class="avatar-picker" role="radiogroup" aria-label="Icon"><input type="hidden" name="avatar" value="${escape(current)}">${swatches}`
+  return `<div class="avatar-picker" role="radiogroup" aria-label="Icon"${COLOR.test(color) ? ` style="--panda-bg:${color}"` : ''}><input type="hidden" name="avatar" value="${escape(current)}">${swatches}`
     + `${current.length <= MAX_AVATAR_URL && IMAGE.test(current) ? customSwatch(current, true) : ''}<button type="button" class="avatar-upload" data-avatar-upload-button>Upload…</button>`
     + `<input type="file" hidden accept="${UPLOAD_TYPES.join(',')}" data-avatar-upload><span class="avatar-error" role="alert" hidden></span></div>`;
 }

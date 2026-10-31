@@ -539,7 +539,7 @@ bindThreadReordering($('#navigation'), {
   dragging: active => { sidebarDragging = active; if (!active) renderNavigation(); },
   reorder: (ids, focus) => run(reorderThreads(ids, focus)),
   reorderFolders: (ids, focus) => reorderFolders(ids, focus),
-  menu: (row, point) => run(showSidebarTaskMenu(row, point)),
+  menu: row => run(showSidebarTaskMenu(row)),
   folderMenu: (heading, point) => run(showFolderMenu(heading, point)),
 });
 /* Branch and worktree control, plus optional GitHub through the user's gh CLI. */
@@ -650,7 +650,7 @@ const worktrees = createWorktrees({
     closeModal();
     if (current) { state.query = ''; await selectSession(created.id, true); }
   },
-  settle: async task => { await changeTaskStage(task, 'completed', false); },
+  settle: async task => { await changeTaskStage(task, 'completed'); },
   extraItems: task => github.menuItems(task),
   onExtra: (id, task) => github.onMenu(id, task),
 });
@@ -3800,6 +3800,30 @@ function onAgent(event: AgentEvent): void {
   if (!renderFrame && event.sessionId === state.sessionId && transcriptVisible()) renderFrame = requestAnimationFrame(() => { renderFrame = 0; renderStream(); });
 }
 
+/** Expands a project folder only when the native scoped listing succeeds.
+ * Close removes descendant caches; a stale read cannot reopen a folder. */
+async function toggleFolder(path: string): Promise<void> {
+  if (!path || path.startsWith('/') || path.split('/').some(part => !part || part === '.' || part === '..')) return;
+  if (state.openFolders.has(path)) {
+    for (const opened of [...state.openFolders]) if (opened === path || opened.startsWith(path + '/')) {
+      state.openFolders.delete(opened); state.folderFiles.delete(opened);
+    }
+    renderInspector(); return;
+  }
+  const key = workspaceKey(), generation = state.generation;
+  state.openFolders.add(path); renderInspector();
+  try {
+    const files = await call<FileEntry[]>('list_files', { ...workspaceContext(), path });
+    if (state.generation !== generation || workspaceKey() !== key || !state.openFolders.has(path)) return;
+    state.folderFiles.set(path, files);
+  } catch (error) {
+    if (state.generation !== generation || workspaceKey() !== key) return;
+    state.openFolders.delete(path);
+    notify(errorText(error) || 'The folder could not be read.');
+  }
+  renderInspector();
+}
+
 async function refreshInspector(): Promise<void> {
   fileTabs.show(state.sessionId, workspaceKey());
   void projectRunner.refresh();
@@ -4047,7 +4071,7 @@ function renderInspector(): void {
   if (pullTask) { pullTab.title = `Pull request #${pullTask.pullRequest!.number}`; pullTab.setAttribute('aria-label', `Pull request #${pullTask.pullRequest!.number}`); }
   const changeCount = state.git?.files.length ?? 0;
   $('.inspector-tabs [data-action="tab-changes"]').setAttribute('aria-label', changeCount ? `Changes, ${changeCount} changed ${changeCount === 1 ? 'file' : 'files'}` : 'Changes');
-  $('#inspector-title').textContent = state.inspectorTab === 'file' ? 'Open files' : INSPECTOR_TITLES[state.inspectorTab];
+  $('#inspector-title').textContent = INSPECTOR_TITLES[state.inspectorTab];
   $('#changes-count').textContent = state.git?.files.length ? String(state.git.files.length) : '';
   const changesKey = `${state.projectId}\0${state.sessionId}\0${workspacePath()}`;
   const keepChanges = state.inspectorTab === 'changes' && !state.selectedKind && Boolean(project()) && !session()?.remoteDevice && !(state.jj?.isRepo && !state.jj.colocated) && changesViewKey === changesKey && (state.inspectorLoading || (!state.gitError && Boolean(state.git?.isRepo)));
@@ -4056,10 +4080,10 @@ function renderInspector(): void {
   syncSimulatorPanel();
   syncVmPanel();
   syncDesignPanel();
-  const showFiles = state.inspectorTab === 'file';
-  $('#file-panel').hidden = !showFiles;
-  if (showFiles) { $('#inspector-content').hidden = true; $('#inspector-refresh').hidden = true; }
-  if (showFiles || state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
+  // File tabs are mounted independently above the inspector; 'files' keeps
+  // its normal project-file tree instead of the retired single-file view.
+  $('#file-panel').hidden = true;
+  if (state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
   const target = $('#inspector-content');
   if (state.inspectorTab === 'pull' && pullTask && visible) { pullView.show(target, pullTask); return; }
   pullView.dispose();

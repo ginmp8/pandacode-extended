@@ -73,3 +73,12 @@ The `webpki-roots` 0.26.11 compatibility wrapper is retained and now references 
 **Validation required before claiming resolution:** `cargo metadata --locked`, `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`, `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, `cargo audit --file src-tauri/Cargo.lock`, npm audits, VSIX theme import regressions, TLS connectivity, and platform-specific updater behavior. The Cargo.lock was reconciled against the official crates.io index for version/checksum metadata and checked for missing graph references; **Cargo tooling was unavailable in the local authoring environment**, and this does not replace Cargo resolution/build verification. If CI reports other advisories, do not ignore or classify them as resolved.
 
 Existing Extended security controls and the locally patched `mobile/vendor/extended/deepmerge` fork must remain unchanged.
+
+### Cloudflare Worker npm advisories found by the new CI gate
+
+The first execution of the separate Cloudflare Worker audit in [CI run 41252501026](https://github.com/ginmp8/pandacode-extended/actions/runs/41252501026) reported **5 npm findings (3 high, 2 moderate)** in the previously uncovered nested package installation. These findings were not visible in the four existing workspace npm audits. The native npm audit recommended versions outside the pinned ranges; do not use `npm audit fix --force`.
+
+- `@cloudflare/sandbox` **1.0.1 → 1.0.3** for the affected transitively resolved `zod` advisory [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5).
+- `wrangler` **4.151.0 → 4.156.0** to leave the vulnerable Wrangler/Miniflare/`undici` dependency range, including [GHSA-2m5v-pch6-74hx](https://github.com/advisories/GHSA-2m5v-pch6-74hx) and [GHSA-4qv8-2p9j-2685](https://github.com/advisories/GHSA-4qv8-2p9j-2685).
+
+The npm audit CI check remains fail-closed. **CI must confirm these new pins actually resolve without advisories.** A committed lockfile for this nested package is still required for fully reproducible installs; the current CI generates an ephemeral lockfile only for scanning.

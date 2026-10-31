@@ -1866,7 +1866,7 @@ mod tests {
             &project.id,
             &LaunchContext {
                 provider: "kimi".into(),
-                reasoning_effort: Some("high".into()),
+                reasoning_effort: Some("high level".into()),
                 ..LaunchContext::default()
             },
             true,
@@ -1907,6 +1907,7 @@ mod tests {
             &state,
             &original.id,
             Some(TeamConfig {
+                catalog: Vec::new(),
                 auto: false,
                 roster_only: false,
                 name: None,

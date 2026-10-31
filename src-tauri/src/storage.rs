@@ -22,7 +22,6 @@ pub fn valid_permission_mode(mode: &str) -> bool {
 // selected mode, including restrictive modes chosen before this default changed.
 pub const DEFAULT_PERMISSION_MODE: &str = "ask";
 
-pub const COMPLETED_ARCHIVE_DELAY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +29,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// When the project was added, as an increasing number (its rowid): the sidebar's Added sort.
+    pub added_order: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +109,10 @@ pub struct Session {
     /// A mirror of a task that runs on another computer (docs/remote-access.md).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_device: Option<RemoteDevice>,
+    /// A task whose agent runs on a cloud machine (docs/cloud-agents.md):
+    /// `{provider, label, machine, stage, detail}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct RemoteDevice {
@@ -168,6 +173,20 @@ type Result<T> = std::result::Result<T, String>;
 pub const SCHEMA_VERSION: i64 = 32;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
+
+/// Once the sidebar has been arranged by hand, a New task published by its first prompt goes to
+/// the top: every rank moves down one and it takes rank 0. Without this the next reorder would
+/// rank it after every arranged task. Forks and imports stay unranked. A TEMP trigger lives on
+/// this connection only, so it needs no schema change; it is added once ranks exist.
+fn rank_published_drafts(db: &Connection) -> Result<()> {
+    db.execute_batch("CREATE TEMP TRIGGER IF NOT EXISTS rank_published_draft AFTER UPDATE OF draft ON main.sessions
+        WHEN OLD.draft=1 AND NEW.draft=0 AND NEW.sidebar_order IS NULL AND NEW.pinned=0
+          AND EXISTS(SELECT 1 FROM main.sessions WHERE sidebar_order IS NOT NULL)
+        BEGIN
+          UPDATE sessions SET sidebar_order=sidebar_order+1 WHERE sidebar_order IS NOT NULL;
+          UPDATE sessions SET sidebar_order=0 WHERE id=NEW.id;
+        END;").map_err(|e| e.to_string())
+}
 
 fn settle_unfinished_tools(db: &Connection, sid: Option<&str>, notice: &str) -> Result<()> {
     db.execute("UPDATE messages SET content=json_set(content,'$.status','failed','$.output',
@@ -508,12 +527,14 @@ impl Store {
             '$.workers',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.status') IN ('running','waiting') THEN json_set(value,'$.status','stopped') ELSE value END)) FROM json_each(content,'$.workers'))))
             WHERE json_extract(content,'$.status') IN ('running','waiting');").map_err(|e|e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
+        let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if ranked { rank_published_drafts(&db)?; }
         let store = Self {
             db,
             path: path.to_path_buf(),
         };
         crate::architect::profiles::initialize(&store)?;
-        store.archive_completed(now())?;
+        store.settle_archived()?;
         Ok(store)
     }
     /// Older team releases stored scheduler prompts as user rows. Reuse their exact
@@ -583,7 +604,7 @@ impl Store {
     }
     fn read_projects(db: &Connection) -> Result<Vec<Project>> {
         let mut stmt = db
-            .prepare("SELECT id,name,path FROM projects ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id,name,path,rowid FROM projects ORDER BY name COLLATE NOCASE")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -591,6 +612,7 @@ impl Store {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     path: r.get(2)?,
+                    added_order: r.get(3)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -617,13 +639,14 @@ impl Store {
             .map_err(|e| e.to_string())?;
         self.db
             .query_row(
-                "SELECT id,name,path FROM projects WHERE path=?1",
+                "SELECT id,name,path,rowid FROM projects WHERE path=?1",
                 [path_str],
                 |r| {
                     Ok(Project {
                         id: r.get(0)?,
                         name: r.get(1)?,
                         path: r.get(2)?,
+                        added_order: r.get(3)?,
                     })
                 },
             )
@@ -632,13 +655,14 @@ impl Store {
     pub fn project(&self, project_id: &str) -> Result<Project> {
         self.db
             .query_row(
-                "SELECT id,name,path FROM projects WHERE id=?1",
+                "SELECT id,name,path,rowid FROM projects WHERE id=?1",
                 [project_id],
                 |r| {
                     Ok(Project {
                         id: r.get(0)?,
                         name: r.get(1)?,
                         path: r.get(2)?,
+                        added_order: r.get(3)?,
                     })
                 },
             )
@@ -703,6 +727,7 @@ impl Store {
                 .and_then(|s| serde_json::from_str(&s).ok()),
             worktree_branch: r.get(21)?,
             remote_device: r.get::<_, Option<String>>(29)?.map(|id| RemoteDevice { name: crate::remote::device_label(&id), id }),
+            cloud: r.get::<_, Option<String>>(30)?.as_deref().and_then(crate::cloud_agents::view),
             issue: None,
             pull_request: None,
         })
@@ -710,7 +735,7 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<Session>> {
         // Lists only need a card preview. Full details remain in SQLite and are
         // fetched for the selected task or directly for an agent's Start prompt.
-        let mut stmt=self.db.prepare(&format!("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,substr(task_description,1,512),completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER} LIMIT 500")).map_err(|e|e.to_string())?;
+        let mut stmt=self.db.prepare(&format!("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,substr(task_description,1,512),completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device,cloud FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER} LIMIT 500")).map_err(|e|e.to_string())?;
         let rows = stmt
             .query_map([], Self::session_row)
             .map_err(|e| e.to_string())?;
@@ -721,7 +746,7 @@ impl Store {
         Ok(sessions)
     }
     pub fn session(&self, sid: &str) -> Result<Session> {
-        let mut session = self.db.query_row("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,task_description,completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device FROM sessions WHERE id=?1",[sid],Self::session_row).optional().map_err(|e|e.to_string())?.ok_or_else(||String::from("Conversation not found."))?;
+        let mut session = self.db.query_row("SELECT id,project_id,title,provider,model,mode,status,created_at,updated_at,archived,resume_id,last_response_at,worktree_path,reasoning_effort,context_used_tokens,context_window,task_stage,task_description,completed_at,goal_state,codex_settings,worktree_branch,last_prompt_at,pinned,sidebar_order,draft,limited_at,limited_until,resume_at_reset,remote_device,cloud FROM sessions WHERE id=?1",[sid],Self::session_row).optional().map_err(|e|e.to_string())?.ok_or_else(||String::from("Conversation not found."))?;
         self.attach_links(std::slice::from_mut(&mut session))?;
         Ok(session)
     }
@@ -807,6 +832,19 @@ impl Store {
         Ok(())
     }
 
+    /// Tasks set to resume at reset whose limit has lifted (`pandacode serve` resumes them;
+    /// the desktop window schedules the same sends from the frontend).
+    pub fn due_limit_resumes(&self, now: i64) -> Result<Vec<String>> {
+        let mut statement = self
+            .db
+            .prepare(
+                "SELECT id FROM sessions WHERE resume_at_reset=1 AND limited_until IS NOT NULL AND limited_until<=?1 AND archived=0 AND draft=0 ORDER BY limited_until LIMIT 50",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement.query_map([now], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    }
+
     /// The PandaCode task already continuing an agent conversation, if any.
     pub fn imported_task(&self, provider: &str, resume_id: &str) -> Result<Option<String>> {
         self.db
@@ -877,7 +915,7 @@ impl Store {
         // Work from the entire order, not the currently displayed project/search
         // result or the 500-row listing window, so hidden tasks keep their slots.
         let mut ordered = {
-            let mut query = transaction.prepare(&format!("SELECT id,pinned FROM sessions WHERE id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER}")).map_err(|e| e.to_string())?;
+            let mut query = transaction.prepare(&format!("SELECT id,pinned FROM sessions WHERE draft=0 AND id NOT IN (SELECT session_id FROM architect_workers) ORDER BY {SIDEBAR_ORDER}")).map_err(|e| e.to_string())?;
             let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))).map_err(|e| e.to_string())?;
             rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.to_string())?
         };
@@ -899,6 +937,7 @@ impl Store {
             }
         }
         transaction.commit().map_err(|e| e.to_string())?;
+        rank_published_drafts(&self.db)?;
         self.sessions()
     }
     fn attach_links(&self, sessions: &mut [Session]) -> Result<()> {
@@ -1183,13 +1222,16 @@ impl Store {
 
     pub fn set_task_stage(&self, sid: &str, stage: &str) -> Result<Session> {
         crate::architect::check_manual(self, sid)?;
-        if stage == "in_progress" {
+        let current = self.session(sid)?;
+        // Work in progress comes from starting a task. The one way back by hand is undoing the
+        // completion of a run that stopped or failed, which never left work in progress.
+        let undoing = current.task_stage == "completed" && matches!(current.status.as_str(), "error" | "interrupted");
+        if stage == "in_progress" && !undoing {
             return Err("Start the task to move it to work in progress.".into());
         }
-        if !matches!(stage, "pending" | "review" | "completed") {
+        if !matches!(stage, "pending" | "review" | "completed" | "in_progress") {
             return Err("Unknown task stage.".into());
         }
-        self.session(sid)?;
         let changed = self
             .db
             .execute(
@@ -1206,18 +1248,13 @@ impl Store {
         self.session(sid)
     }
 
-    /// Archive deadlines depend on completion time, never unrelated task edits.
-    /// The partial index keeps the once-per-minute sweep bounded to completed tasks.
-    pub fn archive_completed(&self, timestamp: i64) -> Result<usize> {
+    /// Archiving is retired: archived tasks become ordinary completed ones.
+    pub fn settle_archived(&self) -> Result<usize> {
         self.db
             .execute(
-                "UPDATE sessions SET archived=1,updated_at=?1
-             WHERE archived=0 AND task_stage='completed' AND completed_at<=?2
-               AND status NOT IN ('running','waiting')",
-                params![
-                    timestamp,
-                    timestamp.saturating_sub(COMPLETED_ARCHIVE_DELAY_MS)
-                ],
+                "UPDATE sessions SET archived=0,task_stage='completed',
+                 completed_at=COALESCE(completed_at,updated_at) WHERE archived=1",
+                [],
             )
             .map_err(|e| e.to_string())
     }
@@ -1453,7 +1490,28 @@ impl Store {
                 params![sid, resume_id],
             )
             .map_err(|e| e.to_string())?;
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO task_usage_links(session_id,harness_id,created_at) VALUES (?1,?2,?3)",
+                params![sid, resume_id, now()],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(())
+    }
+    /// Every harness session id the task has run under, including the current resume id.
+    pub fn usage_links(&self, sid: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT harness_id FROM task_usage_links WHERE session_id=?1 UNION SELECT resume_id FROM sessions WHERE id=?1 AND resume_id IS NOT NULL")
+            .map_err(|e| e.to_string())?;
+        let mut ids: Vec<String> = stmt
+            .query_map([sid], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
     pub fn message(&self, sid: &str, role: &str, content: &str) -> Result<()> {
         self.db
@@ -1877,6 +1935,97 @@ mod tests {
         (store, session)
     }
 
+    /// Usage-limit resumes list only flagged tasks whose reset has passed (serve mode).
+    #[test]
+    fn limit_resumes_are_only_the_due_flagged_live_tasks() {
+        let (store, due) = empty_session();
+        let future = store.create_session(&due.project_id, "claude", "sonnet", "auto").unwrap();
+        let draft = store.create_session(&due.project_id, "claude", "sonnet", "auto").unwrap();
+        store.mark_draft(&draft.id).unwrap();
+        for (sid, until) in [(&due.id, Some(1000)), (&future.id, Some(4_000_000_000_000)), (&draft.id, Some(1000))] {
+            store.set_limited(sid, until).unwrap();
+            store.set_resume_at_reset(sid, true).unwrap();
+        }
+        assert!(store.due_limit_resumes(500).unwrap().is_empty());
+        assert_eq!(store.due_limit_resumes(2000).unwrap(), vec![due.id.clone()]);
+        // A task that is no longer flagged waits like any other.
+        store.set_resume_at_reset(&due.id, false).unwrap();
+        assert!(store.due_limit_resumes(2000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_new_task_published_after_a_manual_reorder_is_listed_first_and_stays_there() {
+        let (store, first) = empty_session();
+        let second = store.create_session(&first.project_id, "claude", "sonnet", "auto").unwrap();
+        let ids = |store: &Store| store.sessions().unwrap().into_iter().map(|task| task.id).collect::<Vec<_>>();
+        // Nothing arranged yet: a published draft stays unranked and activity orders the list.
+        let early = store.mark_draft(&store.create_session(&first.project_id, "claude", "sonnet", "auto").unwrap().id).unwrap();
+        store.message(&early.id, "user", "First").unwrap();
+        assert_eq!(store.session(&early.id).unwrap().sidebar_order, None);
+        store.reorder_sessions(&[first.id.clone(), second.id.clone(), early.id.clone()]).unwrap();
+        let draft = store.mark_draft(&store.create_session(&first.project_id, "codex", "gpt-5", "auto").unwrap().id).unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, None, "drafts are not ranked");
+        store.message(&draft.id, "user", "Build the thing").unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, Some(0));
+        assert_eq!(ids(&store), vec![draft.id.clone(), first.id.clone(), second.id.clone(), early.id.clone()]);
+        // Reordering two other tasks keeps it on top instead of ranking it last.
+        store.reorder_sessions(&[second.id.clone(), first.id.clone()]).unwrap();
+        assert_eq!(ids(&store), vec![draft.id.clone(), second.id.clone(), first.id.clone(), early.id.clone()]);
+    }
+
+    #[test]
+    fn projects_list_by_name_and_carry_the_order_they_were_added() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let root = std::env::temp_dir().join(format!("pandacode-added-{}", id()));
+        for name in ["zeta", "alpha", "mid"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
+        let added = ["zeta", "alpha", "mid"].map(|name| store.add_project(&root.join(name)).unwrap());
+        assert!(added[0].added_order < added[1].added_order && added[1].added_order < added[2].added_order);
+        let listed = store.projects().unwrap();
+        assert_eq!(listed.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["alpha", "mid", "zeta"]);
+        assert_eq!(listed.iter().find(|p| p.name == "zeta").unwrap().added_order, added[0].added_order);
+        assert_eq!(store.project(&added[2].id).unwrap().added_order, added[2].added_order);
+        let json = serde_json::to_value(&listed[0]).unwrap();
+        assert!(json.get("addedOrder").is_some_and(|value| value.is_i64()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_draft_open_during_a_reorder_stays_unranked_and_publishes_to_the_top() {
+        let (store, first) = empty_session();
+        let second = store.create_session(&first.project_id, "claude", "sonnet", "auto").unwrap();
+        let draft = store.mark_draft(&store.create_session(&first.project_id, "codex", "gpt-5", "auto").unwrap().id).unwrap();
+        // The draft is invisible, so a reorder must not rank it (it would then skip the publish rank).
+        store.reorder_sessions(&[second.id.clone(), first.id.clone()]).unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, None);
+        assert_eq!(store.session(&second.id).unwrap().sidebar_order, Some(0));
+        store.message(&draft.id, "user", "Now publish").unwrap();
+        assert_eq!(store.session(&draft.id).unwrap().sidebar_order, Some(0));
+        let ids = store.sessions().unwrap().into_iter().map(|task| task.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![draft.id.clone(), second.id.clone(), first.id.clone()]);
+    }
+
+    #[test]
+    fn resume_links_harness_sessions_and_usage_links_include_the_current_id() {
+        let (store, session) = empty_session();
+        assert!(store.usage_links(&session.id).unwrap().is_empty(), "a fresh task has no harness sessions");
+        store.resume(&session.id, "alpha").unwrap();
+        store.resume(&session.id, "beta").unwrap();
+        assert_eq!(store.usage_links(&session.id).unwrap(), vec!["alpha", "beta"]);
+        // A task whose id arrived outside the run loop still reports through its links.
+        store
+            .db
+            .execute("INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at) VALUES ('imported',?1,'Imported','claude','sonnet','auto',0,0,0)", [&session.project_id])
+            .unwrap();
+        store.resume("imported", "gamma").unwrap();
+        assert_eq!(store.usage_links("imported").unwrap(), vec!["gamma"]);
+        // Ids written without resume() (imports, forks) still count through the current resume id.
+        store
+            .db
+            .execute("INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at,resume_id) VALUES ('forked',?1,'Forked','codex','gpt-5','auto',0,0,0,'direct-id')", [&session.project_id])
+            .unwrap();
+        assert_eq!(store.usage_links("forked").unwrap(), vec!["direct-id"]);
+    }
+
     #[test]
     fn new_task_drafts_stay_hidden_until_their_first_prompt() {
         let (store, listed) = empty_session();
@@ -2068,27 +2217,6 @@ mod tests {
     }
 
     #[test]
-    fn archive_sweep_includes_completed_tasks_outside_the_recent_list() {
-        let (store, task) = empty_session();
-        store.set_task_stage(&task.id, "completed").unwrap();
-        store
-            .db
-            .execute(
-                "UPDATE sessions SET created_at=0,updated_at=0,completed_at=?2 WHERE id=?1",
-                params![task.id, now() - COMPLETED_ARCHIVE_DELAY_MS],
-            )
-            .unwrap();
-        store.db.execute("WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<501)
-            INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at)
-            SELECT 'filler-'||value,?1,'Recent task','codex','default','ask','idle',1,1 FROM n", [&task.project_id]).unwrap();
-        let recent = store.sessions().unwrap();
-        assert_eq!(recent.len(), 500);
-        assert!(recent.iter().all(|item| item.id != task.id));
-        assert_eq!(store.archive_completed(now()).unwrap(), 1);
-        assert!(store.session(&task.id).unwrap().archived);
-    }
-
-    #[test]
     fn starting_a_task_claims_running_and_message_atomically() {
         let (store, task) = empty_session();
         store.db.execute_batch("CREATE TRIGGER reject_prompt BEFORE INSERT ON messages WHEN NEW.role='user' BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;").unwrap();
@@ -2134,9 +2262,16 @@ mod tests {
         let stopped = store.session(&task.id).unwrap();
         assert_eq!(stopped.status, "interrupted");
         assert_eq!(stopped.task_stage, "in_progress");
+        // Completing a stopped run can be undone back to work in progress.
+        store.set_task_stage(&task.id, "completed").unwrap();
+        let undone = store.set_task_stage(&task.id, "in_progress").unwrap();
+        assert_eq!(undone.task_stage, "in_progress");
+        assert!(undone.completed_at.is_none());
         store.begin_task_turn(&task.id, "Finish").unwrap();
         store.finish_task_turn(&task.id, true, false).unwrap();
         let review = store.session(&task.id).unwrap();
+        // Undoing a completion puts a stopped run back in progress; nothing else may.
+        assert!(store.set_task_stage(&task.id, "in_progress").is_err());
         assert_eq!(review.status, "idle");
         assert_eq!(review.task_stage, "review");
         assert!(review.completed_at.is_none());
@@ -2168,49 +2303,30 @@ mod tests {
     }
 
     #[test]
-    fn completed_archive_uses_exact_deadline_and_manual_restore_grants_another_week() {
-        let (store, task) = empty_session();
-        store.set_task_stage(&task.id, "completed").unwrap();
-        let completed_at = now() - COMPLETED_ARCHIVE_DELAY_MS;
+    fn settle_archived_completes_archived_tasks_only() {
+        let (store, review) = empty_session();
+        let done = store.create_session(&review.project_id, "codex", "default", "ask").unwrap();
+        let live = store.create_session(&review.project_id, "codex", "default", "ask").unwrap();
+        store.set_task_stage(&done.id, "completed").unwrap();
         store
             .db
-            .execute(
-                "UPDATE sessions SET completed_at=?2 WHERE id=?1",
-                params![task.id, completed_at],
-            )
+            .execute("UPDATE sessions SET archived=1,completed_at=5 WHERE id=?1", [&done.id])
             .unwrap();
         store
-            .update_task_details(&task.id, "Edited later", "Still complete")
+            .db
+            .execute("UPDATE sessions SET archived=1,task_stage='review',updated_at=9,completed_at=NULL WHERE id=?1", [&review.id])
             .unwrap();
-        assert_eq!(
-            store
-                .archive_completed(completed_at + COMPLETED_ARCHIVE_DELAY_MS - 1)
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .archive_completed(completed_at + COMPLETED_ARCHIVE_DELAY_MS)
-                .unwrap(),
-            1
-        );
-        assert_eq!(store.archive_completed(now()).unwrap(), 0);
-        assert!(store.session(&task.id).unwrap().archived);
-        store
-            .update(&task.id, None, Some(false), None, None)
-            .unwrap();
-        let restored = store.session(&task.id).unwrap();
-        assert!(!restored.archived);
-        assert!(restored.completed_at.unwrap() > completed_at);
-        assert_eq!(store.archive_completed(now()).unwrap(), 0);
-        store.set_task_stage(&task.id, "pending").unwrap();
-        assert_eq!(
-            store
-                .archive_completed(now() + 2 * COMPLETED_ARCHIVE_DELAY_MS)
-                .unwrap(),
-            0
-        );
-        assert!(store.session(&task.id).unwrap().completed_at.is_none());
+        assert_eq!(store.settle_archived().unwrap(), 2);
+        let done = store.session(&done.id).unwrap();
+        assert!(!done.archived);
+        assert_eq!(done.completed_at, Some(5));
+        let review = store.session(&review.id).unwrap();
+        assert!(!review.archived);
+        assert_eq!(review.task_stage, "completed");
+        assert_eq!(review.completed_at, Some(9));
+        assert_eq!(review.updated_at, 9);
+        assert!(!store.session(&live.id).unwrap().archived);
+        assert_eq!(store.settle_archived().unwrap(), 0);
     }
 
     #[test]
@@ -2266,14 +2382,14 @@ mod tests {
                 .db
                 .execute(
                     "UPDATE sessions SET completed_at=?2 WHERE id=?1",
-                    params![answered, now() - COMPLETED_ARCHIVE_DELAY_MS],
+                    params![answered, now() - 8 * 24 * 60 * 60 * 1000],
                 )
                 .unwrap();
         }
         {
             let store = Store::open(&path).unwrap();
             let archived = store.session(&answered).unwrap();
-            assert!(archived.archived);
+            assert!(!archived.archived);
             assert_eq!(archived.task_stage, "completed");
             assert_eq!(archived.task_description, "Original requirements");
             assert_eq!(store.messages(&answered, None).unwrap().len(), 2);
@@ -3264,7 +3380,7 @@ mod tests {
                 .create_session(&source.id, "claude", "sonnet", "auto")
                 .unwrap();
             store
-                .update(&task.id, Some("Draft task".into()), Some(true), None, None)
+                .update(&task.id, Some("Draft task".into()), None, None, None)
                 .unwrap();
             store
                 .db

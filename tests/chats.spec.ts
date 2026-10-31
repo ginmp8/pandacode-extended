@@ -115,9 +115,8 @@ test.beforeEach(async ({ page }) => {
   await probe(page);
 });
 
-test('a new chat lists under Chats, not projects, without project affordances', async ({ page }) => {
+test('a new chat lists under Finished, not a project folder, without project affordances', async ({ page }) => {
   await newChat(page);
-  await expect(page.locator('.folder-group .task-item.selected')).toHaveCount(0);
   await expect(page.locator('.folder-heading', { hasText: 'Chat' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'What’s on your mind?' })).toBeVisible();
   await expect(page.locator('#breadcrumb')).toHaveText('Chat');
@@ -126,16 +125,17 @@ test('a new chat lists under Chats, not projects, without project affordances', 
   await expect(page.locator('#prompt')).toHaveAttribute('placeholder', 'Ask anything…');
 
   // Leaving the chat brings the project affordances back.
-  await page.locator('.folder-group .task-item').first().click();
+  await page.locator('#navigation .task-item[data-id="session-1"]').click();
   await expect(page.locator('#deploy-button')).toBeVisible();
 });
 
 test('deleting a chat removes it and its hidden project', async ({ page }) => {
   await newChat(page);
+  const id = await chats(page).locator('.task-item.selected').getAttribute('data-id');
   await page.getByRole('button', { name: 'Task actions', exact: true }).click();
   await page.getByRole('dialog', { name: 'Task actions', exact: true }).getByRole('menuitem', { name: 'Delete task…', exact: true }).click();
   await page.getByRole('dialog', { name: 'Delete task?', exact: true }).getByRole('button', { name: 'Delete task', exact: true }).click();
-  await expect(chats(page)).toHaveCount(0);
+  await expect(page.locator(`#navigation .task-item[data-id="${id}"]`)).toHaveCount(0);
   // The project filter lists real projects only.
   await page.locator('#project-filter').click();
   await expect(page.getByRole('menuitemradio', { name: /orbit/ })).toBeVisible();

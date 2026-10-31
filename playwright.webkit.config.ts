@@ -1,5 +1,5 @@
 import { defineConfig } from '@playwright/test';
-import base from './playwright.config';
+import base, { outputRoot, perfSpecs } from './playwright.config';
 
 // Native macOS uses WebKit: cover range dragging and the board lifecycle independently of Chrome.
 export default defineConfig(base, {

@@ -117,14 +117,14 @@ test('team entry suggests configured workers and worker review uses the worker t
     (window as any).__assistTeam={sessionId:'session-2',config:{workers:[profile],maxParallel:1,maxRounds:4,maxAssignments:8,workspace:'shared',summaryLimit:1800},status:'ready',round:1,revision:1,updatedAt:200,workers:[{...profile,id:'worker-1',profileId:'fast',sessionId:'worker-1-session',status:'completed',assignment:'Check keyboard navigation',summary:'Checked the task',dependsOn:[],files:['src/app.ts'],attempt:1,createdAt:100,updatedAt:200}]};
   });
   await page.locator('.task-item[data-id="session-2"]').click();
-  await page.getByRole('button',{name:'Open workers',exact:true}).click();
+  await page.locator('#agents-toggle').click();
   await page.getByRole('button',{name:'Suggest worker',exact:true}).click();
   await expect(page.getByRole('tab',{name:'Choose worker',exact:true})).toHaveAttribute('aria-selected','true');
   await page.locator('#jev-assist-query').fill('Add meaningful keyboard tests');
   await page.locator('[data-assist-prepare]').click(); await prepared(page);
   expect((await calls(page,'jev_assist_prepare')).at(-1).args).toEqual({sessionId:'session-2',request:{kind:'route',query:'Add meaningful keyboard tests'}});
   await page.locator('[data-assist-close]').click();
-  await page.getByRole('button',{name:'Open workers',exact:true}).click();
+  await page.locator('#agents-toggle').click();
   await page.locator('.architect-worker-row[data-worker-id="worker-1"]').click();
   await page.getByRole('button',{name:'Review with Jev',exact:true}).click(); await prepared(page);
   expect((await calls(page,'jev_assist_prepare')).at(-1).args).toEqual({sessionId:'worker-1-session',request:{kind:'review'}});

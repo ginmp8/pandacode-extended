@@ -8,23 +8,30 @@
 pub mod agentcore;
 pub mod aws;
 pub mod aws_screen;
+pub mod blaxel;
+pub mod boat;
 pub mod cloudflare;
+pub mod codesandbox;
 pub mod commands;
 pub mod daytona;
 pub mod deploy;
-pub mod http;
-pub mod sandbox;
+pub mod digitalocean;
+pub mod docker;
 pub mod e2b;
-pub mod modal;
-pub mod vercel_sandbox;
-pub mod codesandbox;
-pub mod runloop;
-pub mod blaxel;
-pub mod tensorlake;
 pub mod freestyle;
-pub mod boat;
-pub mod instabox;
 pub mod gcloud_vm;
+pub mod hetzner;
+pub mod http;
+pub mod instabox;
+pub mod modal;
+pub mod railway_sandbox;
+pub mod runloop;
+pub mod runpod;
+pub mod sandbox;
+pub mod ssh;
+pub mod tensorlake;
+pub mod vercel_sandbox;
+pub mod vultr;
 
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +85,16 @@ impl Serialize for Machine {
 /// `daytona:abc` → (`daytona`, `abc`) for known providers.
 pub fn split(id: &str) -> Option<(&str, &str)> {
     let (provider, native) = id.split_once(':')?;
-    (PROVIDERS.contains(&provider) && !native.is_empty() && native.len() <= 200 && !native.contains(char::is_control)).then_some((provider, native))
+    (PROVIDERS.contains(&provider) && valid_native(native)).then_some((provider, native))
+}
+
+/// Native IDs go into provider URLs and paths, so they are plain names: letters, digits,
+/// `-`, `_` and `.` (Google Cloud joins name and zone with one), never a `..` or leading dot.
+pub fn valid_native(native: &str) -> bool {
+    (1..=200).contains(&native.len())
+        && native.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && !native.starts_with('.')
+        && !native.contains("..")
 }
 
 /// Non-secret connection settings, stored as one JSON value in the secure store.
@@ -134,7 +150,13 @@ mod tests {
         assert_eq!(split("daytona:3f2a"), Some(("daytona", "3f2a")));
         assert_eq!(split("pandacode-ubuntu"), None);
         assert_eq!(split("other:x"), None);
+        assert_eq!(split("netlify:project"), None);
         assert_eq!(split("daytona:"), None);
+        assert_eq!(split("gcloud:pc-a.us-central1-a"), Some(("gcloud", "pc-a.us-central1-a")));
+        for bad in ["instabox:m_1/exec", "instabox:m_1?x=1", "instabox:m_1#x", "instabox:..", "instabox:a..b", "instabox:.x", "instabox:m 1", "instabox:m%2F1", "instabox:m:1", "instabox:m\\1"] {
+            assert_eq!(split(bad), None, "{bad}");
+        }
+        assert_eq!(split(&format!("e2b:{}", "a".repeat(201))), None);
     }
     #[test]
     fn quotes_for_the_shell() {

@@ -109,6 +109,17 @@ The safety scan flags secret-shaped values, attempts to disable approvals/sandbo
 and downloads piped into a shell. Acknowledgement is explicit and specific to the
 content hash. It is an inspection aid, not proof that a skill is safe.
 
+## Repository catalogs and discovery (#114, #115)
+
+`skills/catalog.rs`. A catalog source is a GitHub repository indexed for skills, kept apart from the library and from activation.
+
+- Scanning reads the commit for the ref, then one recursive Git tree. Every `SKILL.md` (at the root, `skills/<name>/`, or deeper in nested collections) counts only when its frontmatter has both `name` and `description` (YAML `>`/`|` block values work). A repository named "skills" without such a file is never registered. Hidden paths are skipped. A skill's files are its folder minus any nested skill folder.
+- Importing copies the chosen skills (or all of them) at the indexed commit, each with its supporting files and `owner/name/path`, ref and commit as its source. Nothing is activated. The 64-file and 1 MB limits apply per skill, and a skill over them is skipped with a reason. Per-catalog limits: 20,000 tree entries, 300 `SKILL.md` files, and a truncated GitHub tree, each refused with a clear error.
+- Same names: each indexed skill lists other catalog paths and library items with the same id (`conflicts`). An import whose id the library already holds from another source is skipped, never overwritten.
+- Refresh re-reads the index only. A library copy keeps its commit (`imported`), and the UI says when a newer version is upstream. Importing again updates the library, and harnesses then show `outdated`, as before.
+- Discovery (`skills_discover`) uses the same `gh` login as GitHub import, with no new scopes. It lists `user/repos?affiliation=owner` 100 at a time, up to 10 pages; organizations are not scanned. Matching repositories are registered as `discovered` sources. Ignored and disabled sources are left alone, unchanged repositories (same `pushed_at`) are not read again, and empty ones are skipped, so repeating discovery is idempotent. A rate limit or sign-in failure stops discovery with a clear message after saving progress; other per-repository failures are listed in the report.
+- Settings shows the sources with Refresh, Disable/Enable and Ignore (ignored sources are listed with Stop ignoring), each source's skills with checkboxes, and Import selected / Import all.
+
 ## Commands
 
 Existing commands remain available: `skills_list`, `skills_import_folder`,

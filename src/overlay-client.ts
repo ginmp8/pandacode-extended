@@ -12,6 +12,7 @@ try { previewPreferences = JSON.parse(localStorage.getItem('pandacode.overlay-pr
 function effectiveContext(): LaunchContext { return {...previewPreferences.context,...previewPreferences.modelSelection,mode:previewPreferences.context.mode ?? 'ask'}; }
 // Preview fixtures only. Native catalogs come from the installed harnesses.
 const previewCatalogs: Record<ProviderId, ProviderModel[]> = {
+  kilo:[{id:'kilo/anthropic/claude-sonnet-4.6',name:'Kilo Gateway/Anthropic: Claude Sonnet 4.6',description:'Sample Kilo model.'}],
   pi:[{id:'anthropic/claude-sonnet-4-5',name:'Claude Sonnet 4.5',description:'Sample Pi model.'}],
   codex:[{id:'gpt-6-astra',name:'GPT-6-Astra',description:'Sample Codex model metadata.'},{id:'gpt-5.6-sol',name:'GPT-5.6-Sol',description:'Sample Codex model metadata.'}],
   claude:[{id:'sonnet',name:'Claude Sonnet 5',description:'Sample Claude Code model metadata.',contextWindow:200000},{id:'opus',name:'Claude Opus 5',description:'Sample Claude Code model metadata.'}],
@@ -23,14 +24,15 @@ const previewCatalogs: Record<ProviderId, ProviderModel[]> = {
   mimo:[{id:'mimo-v2.6-pro',name:'MiMo-V2.6-Pro',description:'Sample MiMo Token Plan model.'}],
   deepseek:[{id:'deepseek-v4-flash',name:'DeepSeek V4 Flash',description:'Sample DeepSeek model.'}],
   commandcode:[{id:'claude-sonnet-5-5',name:'Claude Sonnet 5.5',description:'Sample Command Code model.'}],
-  kilo:[{id:'kilo/stealth/claude-sonnet-4.6',name:'Kilo Gateway/Stealth: Claude Sonnet 4.6',description:'Sample Kilo model.'}],
+  hermes:[{id:'hermes/default',name:'Hermes default',description:'Sample Hermes model.'}],
+  zcode:[{id:'zcode/default',name:'ZCode default',description:'Sample ZCode model.'}],
   cline:[{id:'anthropic/claude-sonnet-5.5',name:'Claude Sonnet 5.5',description:'Sample Cline model.'}],
   omp:[{id:'anthropic/claude-sonnet-4-5',name:'Claude Sonnet 4.5',description:'Sample omp model.'}],
   'github-copilot':[{id:'default',name:'Default',description:'Use the model configured in GitHub Copilot CLI.'}],
   muse:[{id:'muse-spark-1.3',name:'muse-spark-1.3',description:'Sample Muse Code model.'}],
   devin:[{id:'swe-2-high',name:'SWE-2',description:'Sample Devin model.'}],
 };
-const previewProviders: Provider[] = (Object.entries({codex:'Codex',claude:'Claude Code',kimi:'Kimi Code',opencode:'OpenCode',glm:'GLM Coding Plan',antigravity:'Antigravity',grok:'Grok Build',mimo:'MiMo Token Plan',pi:'Pi',deepseek:'DeepSeek',commandcode:'Command Code',cline:'Cline',kilo:'Kilo Code',omp:'Oh My Pi','github-copilot':'GitHub Copilot CLI',muse:'Muse Code',devin:'Devin CLI'}) as [ProviderId,string][]).map(([id,name]) => ({id,name,installed:id !== 'antigravity',path:id === 'antigravity' ? null : `/sample/bin/${id === 'github-copilot' ? 'copilot' : id === 'commandcode' ? 'command-code' : id}`,version:'Sample provider',models:[]}));
+const previewProviders: Provider[] = (Object.entries({codex:'Codex',claude:'Claude Code',kimi:'Kimi Code',opencode:'OpenCode',glm:'GLM Coding Plan',antigravity:'Antigravity',grok:'Grok Build',mimo:'MiMo Token Plan',pi:'Pi',deepseek:'DeepSeek',commandcode:'Command Code',cline:'Cline',kilo:'Kilo Code',omp:'Oh My Pi','github-copilot':'GitHub Copilot CLI',muse:'Muse Code',devin:'Devin CLI',hermes:'Hermes Agent',zcode:'ZCode'}) as [ProviderId,string][]).map(([id,name]) => ({id,name,installed:id !== 'antigravity',path:id === 'antigravity' ? null : `/sample/bin/${id === 'github-copilot' ? 'copilot' : id === 'commandcode' ? 'command-code' : id}`,version:'Sample provider',models:[]}));
 const tasks: OverlayTask[] = [
   {id:'preview-active', sessionId:'preview-active', kind:'task', title:'Polish the new onboarding', projectId:'preview-project', projectName:'PandaCode', provider:'codex', status:'running', updatedAt:Date.now()},
   {id:'preview-approval', sessionId:'preview-approval', kind:'task', title:'Build a responsive gallery', projectId:'preview-project', projectName:'PandaCode', provider:'claude', status:'waiting', updatedAt:Date.now()},

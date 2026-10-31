@@ -3,8 +3,9 @@ import { deleteAccountState } from "./account-delete.ts";
 import { type Bucket, fullBucket, take } from "./bucket.ts";
 import { type Env, fail, json } from "./env.ts";
 import { type DeviceView, errorFrame, forwardFrame, parseClientFrame, presenceFrame, undeliverableFrame } from "./frames.ts";
-import { MAX_DEVICES, RATE_LIMITED_PARSE_CHARS } from "./limits.ts";
+import { MAX_DEVICES, MAX_PUSH_TOKENS_PER_DEVICE, RATE_LIMITED_PARSE_CHARS, readJsonLimited } from "./limits.ts";
 import { hostChanged, isStale, keyChanged, tokenCurrent } from "./policy.ts";
+import { deliverPush, parsePushRegistration, shouldNotify, type NotifyBody } from "./push.ts";
 import { isUuid, parseDevice } from "./validate.ts";
 
 interface Attachment extends Bucket {
@@ -13,7 +14,7 @@ interface Attachment extends Bucket {
   joinedAt: number;
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 interface Row {
   id: string;
@@ -27,6 +28,14 @@ interface Row {
   [column: string]: SqlStorageValue;
 }
 
+interface PushRow {
+  device_id: string;
+  platform: string;
+  token: string;
+  created_at: number;
+  [column: string]: SqlStorageValue;
+}
+
 /** One per account (`idFromName("gh:<id>")`). Only the Worker reaches it, after checking the token. */
 export class Account extends DurableObject<Env> {
   // Frame buckets per device id, so a reconnect does not refill the burst. After hibernation the socket attachment seeds it.
@@ -36,6 +45,8 @@ export class Account extends DurableObject<Env> {
   /** deleteAll removes the schema too. Only an explicit new sign-in recreates it. */
   private deleted = false;
   private deleting = false;
+  /** Last push coalescing decision for this active Durable Object instance. */
+  private lastNotify?: { kind: NotifyBody["kind"] | ""; at: number };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -66,6 +77,11 @@ export class Account extends DurableObject<Env> {
     if (!sql.exec<{ name: string }>("PRAGMA table_info(devices)").toArray().some((c) => c.name === "gen")) {
       sql.exec("ALTER TABLE devices ADD COLUMN gen TEXT NOT NULL DEFAULT ''");
     }
+    // Push registrations arrive from an authenticated phone. Preserve the UUID generation
+    // column from Extended schema 2 while upgrading its storage for upstream push.
+    sql.exec(`CREATE TABLE IF NOT EXISTS push_tokens (
+      device_id TEXT NOT NULL, platform TEXT NOT NULL, token TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (device_id, token))`);
     if (version >= 0) sql.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -91,6 +107,7 @@ export class Account extends DurableObject<Env> {
     if (pathname === "/v1/connect") return this.join(request, device);
     // The Worker signs the fresh token after this 200; reaching here means the device is still registered.
     if (pathname === "/v1/token") return request.method === "POST" ? json({ ok: true, gen: row.gen }) : fail(405, "method not allowed");
+    if (pathname === "/v1/push/devices") return request.method === "POST" ? this.pushRegister(request, device) : fail(405, "method not allowed");
     if (pathname === "/v1/devices" && request.method === "GET") {
       if (this.reap()) this.broadcastPresence();
       return json({ devices: this.devices() });
@@ -120,10 +137,54 @@ export class Account extends DurableObject<Env> {
     if (!isUuid(id)) return fail(400, "device id must be a UUID");
     if (!this.row(id)) return fail(404, "device not found");
     this.ctx.storage.sql.exec("DELETE FROM devices WHERE id = ?", id);
+    this.ctx.storage.sql.exec("DELETE FROM push_tokens WHERE device_id = ?", id);
     this.buckets.delete(id);
     for (const ws of this.ctx.getWebSockets(id)) this.close(ws, 4001, "revoked");
     this.broadcastPresence();
     return json({ ok: true });
+  }
+
+  /** Phone-to-relay registration: `{ platform, token }` from the signed-in device. The token is
+   * account data, never shared with other devices; a reinstall makes a new row, old ones fall
+   * off the per-device cap. */
+  private async pushRegister(request: Request, device: string): Promise<Response> {
+    // Do not copy the upstream unbounded request.json() reader into the hardened relay.
+    const read = await readJsonLimited(request, 2048);
+    if (read.tooLarge) return fail(413, "request too large");
+    const registration = parsePushRegistration(read.value);
+    if (typeof registration === "string") return fail(400, registration);
+    const sql = this.ctx.storage.sql;
+    if (sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM push_tokens WHERE device_id = ? AND platform = ? AND token != ?",
+      device, registration.platform, registration.token).one().n >= MAX_PUSH_TOKENS_PER_DEVICE) {
+      sql.exec(`DELETE FROM push_tokens WHERE device_id = ? AND platform = ? AND token != ?
+                AND created_at <= (SELECT MIN(created_at) FROM (SELECT created_at FROM push_tokens
+                WHERE device_id = ? AND platform = ? AND token != ? ORDER BY created_at DESC LIMIT ?))`,
+        device, registration.platform, registration.token, device, registration.platform, registration.token, MAX_PUSH_TOKENS_PER_DEVICE - 1);
+    }
+    sql.exec(
+      "INSERT INTO push_tokens (device_id, platform, token, created_at) VALUES (?, ?, ?, ?)" +
+      " ON CONFLICT(device_id, token) DO UPDATE SET created_at = excluded.created_at",
+      device, registration.platform, registration.token, Date.now(),
+    );
+    return json({ ok: true });
+  }
+
+  /** A host's notify frame arrived on the socket: coalesce, then push every registered token of
+   * the account. Only a device with `host = 1` may send it, and the payload carries counts,
+   * never task text. */
+  private notify(frame: { kind: "notify"; body: NotifyBody }, ws: WebSocket, device: string): void {
+    const row = this.row(device);
+    if (!row || row.host !== 1) return this.send(ws, errorFrame("only hosts notify"));
+    if (!shouldNotify(Date.now(), this.lastNotify, frame.body)) return;
+    this.lastNotify = { kind: frame.body.kind, at: Date.now() };
+    const tokens = this.ctx.storage.sql.exec<PushRow>("SELECT * FROM push_tokens").toArray();
+    if (tokens.length > 0) {
+      this.ctx.waitUntil((async () => {
+        const results = await Promise.allSettled(tokens.map((t) => deliverPush(this.env, { platform: t.platform as "ios" | "android", token: t.token }, frame.body)));
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed > 0) console.log(`push: ${failed}/${tokens.length} deliveries failed`);
+      })());
+    }
   }
 
   private join(request: Request, device: string): Response {
@@ -176,6 +237,7 @@ export class Account extends DurableObject<Env> {
       this.ctx.storage.sql.exec("UPDATE devices SET host = ? WHERE id = ?", frame.enabled ? 1 : 0, att.device);
       return this.broadcastPresence();
     }
+    if (frame.kind === "notify") return this.notify(frame, ws, att.device);
     if (this.reap(frame.to)) this.broadcastPresence();
     const targets = this.ctx.getWebSockets(frame.to).filter((s) => this.live(s, now));
     if (targets.length === 0) return this.send(ws, undeliverableFrame(frame.to, "offline", frame.ref));

@@ -203,7 +203,7 @@ fn sibling_launcher(shim: &Path, directory: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The double-quoted words of a batch shim.
+/// The quoted words of a batch shim, retaining a literal unquoted Node command.
 fn shim_tokens(shim: &Path) -> Option<Vec<String>> {
     let mut text = String::new();
     std::fs::File::open(shim)
@@ -211,7 +211,12 @@ fn shim_tokens(shim: &Path) -> Option<Vec<String>> {
         .take(64 * 1024)
         .read_to_string(&mut text)
         .ok()?;
-    Some(text.split('"').skip(1).step_by(2).map(str::to_owned).collect())
+    Some(text.lines().flat_map(|line| {
+        let head = line.split('"').next().unwrap_or_default().trim().trim_start_matches('@');
+        let node = matches!(head.to_ascii_lowercase().as_str(), "node" | "node.exe")
+            .then(|| head.to_owned());
+        node.into_iter().chain(line.split('"').skip(1).step_by(2).map(str::to_owned))
+    }).collect())
 }
 
 /// A `%~dp0`-relative shim word as a real path, refusing other variables.
@@ -623,6 +628,21 @@ mod tests {
     }
 
     #[test]
+    fn windows_netlify_and_npx_shims_use_node_without_a_batch_shell() {
+        for (name, package) in [("netlify", "netlify-cli"), ("npx", "npm")] {
+            let f = Fixture::new();
+            let node = f.file("npm/node.exe", "");
+            let shim = f.file(&format!("npm/{name}.cmd"), "@echo off\r\n");
+            f.file(&format!("npm/node_modules/{package}/package.json"),
+                &serde_json::json!({"bin": {name: format!("bin/{name}.js")}}).to_string());
+            let script = f.file(&format!("npm/node_modules/{package}/bin/{name}.js"), "");
+            let launch = resolve(&shim, true).unwrap();
+            assert_eq!(launch.program, external_path_for(&node, true));
+            assert_eq!(launch.args, [external_path_for(&script, true).into_os_string()]);
+        }
+    }
+
+    #[test]
     fn windows_pnpm_shims_run_only_the_entry_their_package_declares() {
         let f = Fixture::new();
         let package = "pnpm/global/v11/hash/node_modules/opencode-ai";
@@ -672,6 +692,16 @@ mod tests {
         let launch = resolve(&shim, true).unwrap();
         assert_eq!(launch.program, external_path_for(&node, true));
         assert_eq!(launch.args, [external_path_for(&launcher, true).into_os_string()]);
+        // Managed launchers may leave the Node command unquoted.
+        for body in [
+            "@ECHO off\r\nnode \"%~dp0pi-launcher.js\" %*\r\n",
+            "@node.exe \"%~dp0pi-launcher.js\" %*\r\n",
+        ] {
+            fs::write(&shim, body).unwrap();
+            let launch = resolve(&shim, true).unwrap();
+            assert_eq!(launch.program, external_path_for(&node, true));
+            assert_eq!(launch.args, [external_path_for(&launcher, true).into_os_string()]);
+        }
         // Not node, not beside the shim, or not a script: refused, with the npm hint.
         f.file("pi/agent/elsewhere.js", "");
         f.file("pi/agent/bin/pi-launcher.exe", "");
@@ -680,6 +710,11 @@ mod tests {
             "\"%node%\" \"%~dp0..\\elsewhere.js\" %*",
             "\"%node%\" \"%~dp0pi-launcher.exe\" %*",
             "\"%node%\" \"%~dp0missing.js\" %*",
+            "echo node \"%~dp0pi-launcher.js\" %*",
+            "node --require other.js \"%~dp0pi-launcher.js\" %*",
+            "node \"%~dp0..\\elsewhere.js\" %*",
+            "node \"%~dp0pi-launcher.exe\" %*",
+            "node \"%~dp0missing.js\" %*",
         ] {
             f.file("pi/agent/bin/pi.cmd", body);
             let error = resolve(&shim, true).err().unwrap();

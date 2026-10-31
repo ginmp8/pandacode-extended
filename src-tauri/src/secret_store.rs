@@ -3,8 +3,21 @@
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::Write;
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+// The cloud agent bridge uses this metadata only. Credentials still reside
+// exclusively in the OS credential store (including on macOS).
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn setup(dir: &Path) {
+    let _ = DATA_DIR.set(dir.to_owned());
+}
+
+pub(crate) fn dir() -> Option<&'static Path> {
+    DATA_DIR.get().map(PathBuf::as_path)
+}
+
 
 #[cfg(test)]
 fn memory() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {

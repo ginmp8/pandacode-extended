@@ -30,6 +30,7 @@ fn setup() -> TeamSetup {
             reasoning_effort: Some("high".into()),
         },
         config: TeamConfig {
+            catalog: Vec::new(),
             auto: false,
             roster_only: false,
             name: None,
@@ -150,6 +151,7 @@ fn new_user_tasks_default_to_ask_without_overriding_requested_modes_or_saved_tas
             "pi",
             "deepseek",
             "cline",
+            "kilo",
             "github-copilot",
             "devin",
         ] {

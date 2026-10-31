@@ -429,7 +429,7 @@ pub(crate) fn pick_branch(root: &Path, wanted: Option<&str>, fetch: bool) -> Res
 }
 
 /// Why the main checkout can't take a remote task in place, if it can't. Only a clean,
-/// idle checkout already on the requested branch runs one.
+/// idle checkout already on the requested branch runs one; any other gets a worktree.
 pub(crate) fn in_place_refusal(host: &str, project: &str, current: &str, branch: &str, dirty: bool, busy: bool) -> Option<String> {
     let problem = if busy {
         format!("{host} has an agent working in {project}.")
@@ -441,7 +441,7 @@ pub(crate) fn in_place_refusal(host: &str, project: &str, current: &str, branch:
     } else {
         return None;
     };
-    Some(format!("{problem} Start it in a Worktree instead."))
+    Some(problem)
 }
 
 /// Readies the main checkout for a task in place: refuses unless it is clean, idle and on
@@ -455,12 +455,43 @@ fn ready_in_place_checked(root: &Path, project: &str, branch: &str, busy: bool, 
     let current = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], GIT).unwrap_or_default();
     let dirty = !git(root, &["status", "--porcelain"], GIT)?.is_empty();
     if let Some(refusal) = in_place_refusal(&super::config::device_name(), project, &current, branch, dirty, busy) {
-        return Err(refusal);
+        return Ok(Some(refusal));
     }
     authorize()?;
     // A local branch that diverged keeps its own commits; the agent starts from them.
     let _ = git(root, &["merge", "--ff-only", "--quiet", &format!("origin/{branch}")], GIT);
-    Ok(())
+    Ok(None)
+}
+
+/// The note a start that fell back from the main checkout to a worktree reports.
+fn worktree_note(reason: &str) -> String {
+    format!("Started in a worktree: {reason}")
+}
+
+/// Projects whose main checkout a remote start has claimed and not yet launched in.
+static IN_PLACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A remote start's claim on a project's main checkout, from the busy check until its agent
+/// is registered (then [`busy_in_place`] sees the agent itself); dropping it releases it.
+pub(crate) struct Reservation(String);
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Ok(mut held) = IN_PLACE.lock() {
+            held.retain(|id| *id != self.0);
+        }
+    }
+}
+
+/// Claims the project's main checkout unless `busy` (a local agent there) or another remote
+/// start holds it, so two starts never both decide it is free.
+fn reserve_in_place(project_id: &str, busy: impl FnOnce() -> Result<bool>) -> Result<Option<Reservation>> {
+    let mut held = IN_PLACE.lock().map_err(|e| e.to_string())?;
+    if held.iter().any(|id| id == project_id) || busy()? {
+        return Ok(None);
+    }
+    held.push(project_id.to_owned());
+    Ok(Some(Reservation(project_id.to_owned())))
 }
 
 /// Whether a local agent is running in the project's main checkout.
@@ -675,7 +706,10 @@ async fn start_task(app: &tauri::AppHandle, from: &str, authenticated_key: &str,
     crate::send_message(app.clone(), state, task.id.clone(), start.prompt, Some(start.image_ids), None).await?;
     use tauri::Emitter;
     let _ = app.emit("sessions-changed", ());
-    Ok(json!({"sessionId": task.id}))
+    Ok(match note {
+        Some(note) => json!({"sessionId": task.id, "worktree": true, "note": note}),
+        None => json!({"sessionId": task.id}),
+    })
 }
 
 #[cfg(test)]
@@ -683,7 +717,7 @@ mod tests {
     use super::*;
 
     fn project(id: &str) -> Project {
-        Project { id: id.into(), name: id.into(), path: format!("/p/{id}") }
+        Project { id: id.into(), name: id.into(), path: format!("/p/{id}"), added_order: 0 }
     }
 
     #[test]
@@ -711,10 +745,11 @@ mod tests {
     #[test]
     fn only_a_clean_idle_checkout_on_the_branch_runs_in_place() {
         assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", false, false), None);
-        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, false).unwrap(), "Studio has uncommitted changes in orbit. Start it in a Worktree instead.");
-        assert_eq!(in_place_refusal("Studio", "orbit", "dev", "main", false, false).unwrap(), "Studio has orbit on dev, not main. Start it in a Worktree instead.");
-        assert_eq!(in_place_refusal("Studio", "orbit", "", "main", false, false).unwrap(), "Studio has orbit on a detached HEAD, not main. Start it in a Worktree instead.");
-        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, true).unwrap(), "Studio has an agent working in orbit. Start it in a Worktree instead.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, false).unwrap(), "Studio has uncommitted changes in orbit.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "dev", "main", false, false).unwrap(), "Studio has orbit on dev, not main.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "", "main", false, false).unwrap(), "Studio has orbit on a detached HEAD, not main.");
+        assert_eq!(in_place_refusal("Studio", "orbit", "main", "main", true, true).unwrap(), "Studio has an agent working in orbit.");
+        assert_eq!(worktree_note("Studio has an agent working in orbit."), "Started in a worktree: Studio has an agent working in orbit.");
         assert!(WORST_CASE <= Duration::from_secs(10 * 60));
     }
 
@@ -970,11 +1005,20 @@ mod tests {
         assert_eq!(pick_branch(&clone, Some("unpushed"), true).unwrap(), "main");
         assert_eq!(pick_branch(&clone, None, true).unwrap(), "main");
         // An existing checkout on another branch, dirty or busy is never switched.
-        assert!(ready_in_place(&clone, "orbit", "feature", false).unwrap_err().contains("on main, not feature"));
-        assert!(ready_in_place(&clone, "orbit", "main", true).unwrap_err().contains("an agent working"));
+        assert!(ready_in_place(&clone, "orbit", "feature", false).unwrap().unwrap().contains("on main, not feature"));
+        assert!(ready_in_place(&clone, "orbit", "main", true).unwrap().unwrap().contains("an agent working"));
         std::fs::write(clone.join("notes.txt"), "work").unwrap();
-        assert!(ready_in_place(&clone, "orbit", "main", false).unwrap_err().contains("uncommitted changes"));
+        assert!(ready_in_place(&clone, "orbit", "main", false).unwrap().unwrap().contains("uncommitted changes"));
         assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main");
+        // The fallback worktree leaves the busy checkout's branch and files alone.
+        let root = std::fs::canonicalize(&clone).unwrap();
+        let made = remote_worktree(&root, "feature").unwrap();
+        assert!(made.branch.starts_with("pandacode/remote-"));
+        assert_eq!(std::fs::read_to_string(clone.join("notes.txt")).unwrap(), "work");
+        assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "main");
+        assert_eq!(git(&made.path, &["rev-parse", "HEAD"], GIT).unwrap(), git(&clone, &["rev-parse", "origin/feature"], GIT).unwrap());
+        assert!(!made.path.join("notes.txt").exists());
+        discard(&root, &made);
         std::fs::remove_file(clone.join("notes.txt")).unwrap();
         // Clean, idle and on the branch: fast-forwarded and used in place.
         run(&origin, &["commit", "-q", "--allow-empty", "-m", "two"]);

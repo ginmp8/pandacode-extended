@@ -1,6 +1,7 @@
 import type { Mode, ProviderId } from './types';
 
 export interface ApprovalMode { id: Mode; label: string; description: string; icon: string; disabled?: boolean; }
+const CLAUDE_FAMILY: ProviderId[] = ['claude', 'glm', 'mimo'];
 
 /** Labels describe the native policy for each harness, not a simulated approval layer. */
 export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMode[] {
@@ -31,6 +32,10 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? 'Kilo reads and searches; PandaCode asks before edits, commands and other tools.'
     : provider === 'muse'
     ? 'Muse asks before actions its rules do not allow. Its own reviewer may approve low-risk ones.'
+    : provider === 'zcode'
+    ? 'ZCode’s build mode: it works in this project and asks you when an action needs permission.'
+    : provider === 'hermes'
+    ? 'Hermes works in this project. Asks you before terminal commands or dangerous actions.'
     : 'Use the harness’s normal rules. Ask you when approval is needed.' };
   const full: ApprovalMode = { id: 'full', label: 'Full access', icon: 'unlock', description: provider === 'antigravity'
     ? 'Automatically approve permission requests. Server restrictions still apply.'
@@ -50,6 +55,8 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? 'Devin’s Bypass Permissions mode: every tool runs without asking, unless your organization requires approval.'
     : provider === 'github-copilot'
     ? 'Use Copilot Agent mode with Allow All on. Copilot automatically approves tool, path, and URL requests.'
+    : provider === 'zcode'
+    ? 'Always approve: ZCode runs every tool without asking (its yolo mode).'
     : 'Run tools without approval prompts, including outside this project.' };
   if (provider === 'github-copilot') return [standard, ...review,
     { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Use Copilot Plan mode. Read, search, and think requests are allowed; other permission requests are declined.' },
@@ -84,6 +91,14 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Read-only: Muse cannot write files or run shell commands, and proposes a plan.' }
     : provider === 'commandcode'
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Read-only: Command Code researches and plans; edits and commands are declined.' }
+    : provider === 'zcode'
+    ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'ZCode’s plan mode: it investigates and proposes a plan; implementation waits for your approval.' }
+    : provider === 'hermes'
+    ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Read-only: Hermes researches and proposes a plan; edits and commands are declined.' }
+    : CLAUDE_FAMILY.includes(provider)
+    ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Explore and plan: reads and web lookups run, even outside this project; edits wait for implementation and commands ask you.' }
+    : provider === 'opencode'
+    ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Explore and plan: reads and web lookups run; reading outside this project asks you; edits and commands are declined.' }
     : { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Explore and plan changes before implementation.' }, full];
 }
 

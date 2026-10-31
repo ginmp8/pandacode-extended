@@ -7,6 +7,7 @@ use crate::{providers::AgentEvent, storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -26,6 +27,13 @@ const START_POLL: Duration = Duration::from_secs(3);
 /// Pages per sync; a longer history continues at the next run end or subscription.
 const MAX_PAGES: usize = 50;
 /// Replay pages per host and subscribe round; a replay longer still becomes a gap.
+/// Bounded message reads remain under the sealed frame size on both peers.
+pub(super) const TAIL_PAGE: i64 = 30;
+pub(super) const TAIL_BUDGET: usize = 32 * 1024;
+pub(super) const OLDER_PAGE: i64 = 200;
+pub(super) const PACKED_BUDGET: usize = host::PAGE_BUDGET;
+const BACKFILL_PAGES: usize = 8;
+const BACKFILL_YIELD: Duration = Duration::from_secs(10);
 const MAX_REPLAY_PAGES: usize = 20;
 /// Live entries held per host while its subscribe is in flight; past this they are dropped
 /// and the host is asked again from where this viewer is.
@@ -363,6 +371,7 @@ fn show(app: &tauri::AppHandle, from: &str, list: &[Value]) {
         let Ok(store) = state.store.lock() else { return };
         let mut ids: HashMap<String, Option<String>> = HashMap::new();
         let events = relabel(list, |remote| ids.entry(remote.to_owned()).or_insert_with(|| local_id(&store, from, remote)).clone());
+        save_subagents(&store, &events);
         let mut changed = false;
         for event in &events {
             let (Some(id), Some(kind)) = (event["sessionId"].as_str(), event["kind"].as_str()) else { continue };
@@ -387,6 +396,128 @@ fn show(app: &tauri::AppHandle, from: &str, list: &[Value]) {
     if changed {
         let _ = app.emit("sessions-changed", ());
     }
+}
+
+/// Saves the newest snapshot of each child agent among relabelled events, so a mirror's
+/// Subagents panel (`list_subagents`) has them after a reload, as a local run's does.
+fn save_subagents(store: &Store, events: &[Value]) {
+    for (session, data) in newest_subagents(events) {
+        let saved = serde_json::from_value::<crate::providers::SubagentActivity>(data.clone()).map_err(|e| e.to_string()).and_then(|activity| store.save_subagent(session, &activity));
+        if let Err(error) = saved {
+            eprintln!("PandaCode Connect: could not keep a remote subagent: {error}");
+        }
+    }
+}
+
+/// The last `subagent` snapshot per (task, child), in first-seen order.
+fn newest_subagents(events: &[Value]) -> Vec<(&str, &Value)> {
+    let mut newest: Vec<(&str, &str, &Value)> = Vec::new();
+    for event in events.iter().filter(|event| event["kind"] == "subagent") {
+        let (Some(session), Some(id)) = (event["sessionId"].as_str(), event["data"]["id"].as_str()) else { continue };
+        match newest.iter_mut().find(|(s, i, _)| *s == session && *i == id) {
+            Some(slot) => slot.2 = &event["data"],
+            None => newest.push((session, id, &event["data"])),
+        }
+    }
+    newest.into_iter().map(|(session, _, data)| (session, data)).collect()
+}
+
+/// Forward pages read per call: after a tail page cut to fit, or from an older host.
+// ponytail: an older host is read from the start; its workers' newest work past this is missed until it updates.
+const WORKER_PAGES: usize = 10;
+const WORKER_TAIL: usize = 200;
+
+/// A mirror's architect team, read from its host (`task.team`) in the desktop's
+/// TeamSnapshot shape. None for a task without a team or a host too old to say.
+#[tauri::command]
+pub async fn remote_team(app: tauri::AppHandle, state: tauri::State<'_, AppState>, session_id: String) -> Result<Option<Value>> {
+    let Ok(Some(mirror)) = of(&*lock(&state)?, &session_id) else { return Ok(None) };
+    match client::call(&app, &mirror.device, "task.team", json!({"sessionId": mirror.session})).await {
+        Ok(reply) => Ok(desktop_team(&reply["team"], &session_id)),
+        Err(error) if error == "Unknown method." => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A worker's transcript on a mirror's host (`task.workerMessages`) as a desktop MessagePage:
+/// the newest page, or the one before `before_id`, with the host's `hasOlder`.
+#[tauri::command]
+pub async fn remote_worker_messages(app: tauri::AppHandle, state: tauri::State<'_, AppState>, session_id: String, worker_id: String, before_id: Option<i64>) -> Result<Value> {
+    let mirror = of(&*lock(&state)?, &session_id)?.ok_or("That task does not run on another computer.")?;
+    let ask = |key: &str, value: Value| {
+        let mut params = json!({"sessionId": mirror.session, "workerId": worker_id});
+        params[key] = value;
+        client::call(&app, &mirror.device, "task.workerMessages", params)
+    };
+    worker_pages(ask, before_id).await
+}
+
+/// Reads one desktop page of a worker's transcript with `ask(param, value)`. A backward host
+/// answers the tail or the page before `before_id` in one call: a page it cut keeps the rows
+/// next to the cursor and reports `hasOlder`, so the viewer goes on backward with its next
+/// `beforeId`, never forward (the newer rows are already shown). An older host reads forward
+/// from the start, following `hasMore`.
+pub(crate) async fn worker_pages<Ask, Reply>(ask: Ask, before_id: Option<i64>) -> Result<Value>
+where
+    Ask: Fn(&str, Value) -> Reply,
+    Reply: std::future::Future<Output = Result<Value>>,
+{
+    let first = match before_id { Some(id) => ask("beforeId", json!(id)), None => ask("tail", json!(true)) }.await?;
+    let backward = first["tail"] == true;
+    if !backward && before_id.is_some() {
+        // An older host pages forward only; its first page was everything it could give.
+        return Ok(json!({"messages": [], "hasOlder": false}));
+    }
+    let mut pages = vec![first];
+    while !backward && pages.len() < WORKER_PAGES && pages.last().is_some_and(|page| page["hasMore"] == true) {
+        let Some(after) = pages.last().and_then(|page| page["messages"].as_array()?.last()?["id"].as_i64()) else { break };
+        pages.push(ask("afterId", json!(after)).await?);
+    }
+    Ok(worker_page(&pages, backward))
+}
+
+/// Joins a worker's pages into one MessagePage. A backward first page reports the host's
+/// `hasOlder`. An older host can't page backward, so its forward read never offers older
+/// messages, even when only the newest are kept.
+fn worker_page(pages: &[Value], backward: bool) -> Value {
+    let mut messages: Vec<Value> = Vec::new();
+    for message in pages.iter().flat_map(|page| page["messages"].as_array().cloned().unwrap_or_default()) {
+        if messages.last().and_then(|last| last["id"].as_i64()) < message["id"].as_i64() {
+            messages.push(message);
+        }
+    }
+    let keep = messages.len().saturating_sub(WORKER_TAIL);
+    let has_older = backward && (pages.first().is_some_and(|page| page["hasOlder"] == true) || keep > 0);
+    json!({"messages": messages.split_off(keep), "hasOlder": has_older})
+}
+
+/// The host's `task.team` reply as the desktop's TeamSnapshot, under the local task id.
+fn desktop_team(team: &Value, local: &str) -> Option<Value> {
+    let text = |value: &Value| json!(value.as_str().unwrap_or_default());
+    let number = |value: &Value| json!(value.as_u64().unwrap_or_default());
+    let workers: Vec<Value> = team["workers"]
+        .as_array()?
+        .iter()
+        .filter(|worker| worker["id"].is_string() && worker["sessionId"].is_string())
+        .map(|w| {
+            json!({
+                "id": w["id"], "sessionId": w["sessionId"], "name": text(&w["name"]), "profileId": text(&w["profileId"]),
+                "provider": text(&w["provider"]), "model": text(&w["model"]), "reasoningEffort": w["reasoningEffort"].as_str(),
+                "status": text(&w["status"]), "assignment": text(&w["assignment"]), "summary": text(&w["summary"]), "error": w["error"].as_str(),
+                "dependsOn": w["dependsOn"].as_array().map_or_else(Vec::new, |ids| ids.iter().filter(|id| id.is_string()).cloned().collect()),
+                "files": w["files"].as_array().map_or_else(Vec::new, |files| files.iter().filter(|file| file.is_string()).cloned().collect()),
+                "readOnly": w["readOnly"] == true, "abandoned": w["abandoned"] == true, "attempt": number(&w["attempt"]),
+                "checkpoint": w["checkpoint"].is_object().then(|| &w["checkpoint"]), "createdAt": number(&w["createdAt"]), "updatedAt": number(&w["updatedAt"]),
+                "parentWorker": w["parentWorker"].as_str(),
+            })
+        })
+        .collect();
+    Some(json!({
+        "sessionId": local,
+        "config": {"auto": team["mode"] == "auto", "workers": [], "maxParallel": 0, "maxRounds": number(&team["rounds"]["max"]), "maxAssignments": 0, "workspace": "shared", "summaryLimit": 0},
+        "status": text(&team["status"]), "round": number(&team["round"]), "revision": number(&team["revision"]),
+        "workers": workers, "error": null, "summary": team["summary"].as_str(), "updatedAt": number(&team["updatedAt"]),
+    }))
 }
 
 /// `run.finished` from the task's host. Newer hosts number it like an event (`seq`), so it
@@ -474,20 +605,195 @@ pub(crate) async fn stop(app: &tauri::AppHandle, state: &AppState, local: &str) 
     }
 }
 
-/// Copies the host's messages after the last one copied, page by page.
+/// Copies the host's messages after the last one copied, page by page. A mirror with
+/// nothing copied yet gets the host's newest page first, so a long thread shows at once
+/// on a slow link; older pages follow in the background ([`backfill`]).
 pub(crate) async fn sync(app: &tauri::AppHandle, local: &str) -> Result<()> {
     let state = app.state::<AppState>();
+    let (mirror, synced) = position(&state, local)?;
+    if synced == 0 {
+        // Hosts before newest-first paging ignore `tail` and answer the oldest page,
+        // without `hasOlder`: that page is the first afterId page.
+        if let Ok(page) = client::call(app, &mirror.device, "task.messages", json!({"sessionId": mirror.session, "tail": true, "limit": TAIL_PAGE, "budget": TAIL_BUDGET})).await {
+            store_first(&*lock(&state)?, local, 0, &page)?;
+            let _ = app.emit("mirror-messages", json!({"sessionId": local, "older": false}));
+        }
+    }
+    let copied = copy_newer(app, local).await;
+    // A failed catch-up still repairs cut copies and fills the older history it has.
+    fill_in(app, local).await;
+    copied
+}
+
+/// Copies the host's messages after the last one copied, page by page.
+async fn copy_newer(app: &tauri::AppHandle, local: &str) -> Result<()> {
+    let state = app.state::<AppState>();
     for _ in 0..MAX_PAGES {
-        let (mirror, after) = {
-            let store = lock(&state)?;
-            let mirror = of(&store, local)?.ok_or("That task does not run on another computer.")?;
-            let after: i64 = store.db.query_row("SELECT remote_synced_id FROM sessions WHERE id=?1", [local], |r| r.get(0)).map_err(|e| e.to_string())?;
-            (mirror, after)
-        };
-        let page = client::call(app, &mirror.device, "task.messages", json!({"sessionId": mirror.session, "afterId": after})).await?;
+        let (mirror, after) = position(&state, local)?;
+        let page = client::call(app, &mirror.device, "task.messages", json!({"sessionId": mirror.session, "afterId": after, "budget": PACKED_BUDGET})).await?;
         if !store_page(&*lock(&state)?, local, after, &page)? {
             break;
         }
+    }
+    Ok(())
+}
+
+/// Fetches cut copies whole, then starts the backfill. A failed fetch is not fatal: the cut
+/// copy stays marked and the next sync tries again.
+async fn fill_in(app: &tauri::AppHandle, local: &str) {
+    if let Err(error) = uncut(app, local).await {
+        super::diagnostics::record("mirror.uncut", format!("could not fetch a cut message whole: {error}"));
+    }
+    backfill_soon(app, local);
+}
+
+/// A mirror's copies the host cut (`cut: true`: the newest message, cut to fit a small first
+/// page), as (local id, host id). They stay marked (`messages.remote_cut`) across restarts
+/// until [`uncut`] fetches them whole.
+fn cut_copies(store: &Store, local: &str) -> Result<Vec<(i64, i64)>> {
+    let mut statement = store.db.prepare("SELECT id,remote_cut FROM messages WHERE session_id=?1 AND remote_cut IS NOT NULL ORDER BY id").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([local], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
+}
+
+/// Fetches each cut copy of `local` whole (afterId id-1, the full budget) and replaces it.
+async fn uncut(app: &tauri::AppHandle, local: &str) -> Result<()> {
+    let state = app.state::<AppState>();
+    let pending = cut_copies(&*lock(&state)?, local)?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let (mirror, _) = position(&state, local)?;
+    for (id, host_id) in pending {
+        let page = client::call(app, &mirror.device, "task.messages", json!({"sessionId": mirror.session, "afterId": host_id - 1, "limit": 1, "budget": PACKED_BUDGET})).await?;
+        replace_cut(&*lock(&state)?, local, (id, host_id), &page)?;
+    }
+    let _ = app.emit("mirror-messages", json!({"sessionId": local, "older": false}));
+    Ok(())
+}
+
+/// Replaces a cut copy with the page's whole message. The copy is forgotten either way: a
+/// message the host no longer has, or cuts again, stays as it is.
+pub(crate) fn replace_cut(store: &Store, local: &str, (id, host_id): (i64, i64), page: &Value) -> Result<bool> {
+    store.db.execute("UPDATE messages SET remote_cut=NULL WHERE id=?1 AND session_id=?2", params![id, local]).map_err(|e| e.to_string())?;
+    let Some(message) = page["messages"].as_array().and_then(|messages| messages.first()).filter(|m| m["id"].as_i64() == Some(host_id) && m["cut"] != true) else { return Ok(false) };
+    let (_, role, content, created_at) = valid_message(message)?;
+    let changed = store.db.execute("UPDATE messages SET role=?3,content=?4,created_at=?5,turn_duration_ms=?6 WHERE id=?1 AND session_id=?2", params![id, local, role, content, created_at, message["turnDurationMs"].as_i64()]).map_err(|e| e.to_string())?;
+    Ok(changed > 0)
+}
+
+fn position(state: &AppState, local: &str) -> Result<(Mirror, i64)> {
+    let store = lock(state)?;
+    let mirror = of(&store, local)?.ok_or("That task does not run on another computer.")?;
+    let after: i64 = store.db.query_row("SELECT remote_synced_id FROM sessions WHERE id=?1", [local], |r| r.get(0)).map_err(|e| e.to_string())?;
+    Ok((mirror, after))
+}
+
+/// Copies older pages, newest first, until the host has none left, in rounds of
+/// [`BACKFILL_PAGES`]. One run per mirror; a failure stops it until the next sync.
+fn backfill_soon(app: &tauri::AppHandle, local: &str) {
+    static RUNNING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let running = RUNNING.get_or_init(Default::default);
+    if !running.lock().unwrap_or_else(|e| e.into_inner()).insert(local.to_owned()) {
+        return;
+    }
+    let (app, local) = (app.clone(), local.to_owned());
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let page = |mirror: Mirror, before: i64| {
+            let app = app.clone();
+            async move {
+                yield_to_calls(&app, &mirror.device).await;
+                client::call(&app, &mirror.device, "task.messages", json!({"sessionId": mirror.session, "beforeId": before, "limit": OLDER_PAGE, "budget": PACKED_BUDGET})).await
+            }
+        };
+        let stored = || {
+            let _ = app.emit("mirror-messages", json!({"sessionId": &local, "older": true}));
+        };
+        if let Err(error) = backfill(&state.store, &local, page, stored).await {
+            eprintln!("PandaCode Connect: could not copy a remote task's older messages: {error}");
+        }
+        running.lock().unwrap_or_else(|e| e.into_inner()).remove(&local);
+    });
+}
+
+/// Backfill rounds until nothing older is left (or a page fails): `page` asks the host for the
+/// page before a host id, `stored` follows each stored page.
+async fn backfill<F, Fut>(store: &Mutex<Store>, local: &str, mut page: F, stored: impl Fn()) -> Result<()>
+where
+    F: FnMut(Mirror, i64) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let lock = || store.lock().map_err(|e| e.to_string());
+    loop {
+        for _ in 0..BACKFILL_PAGES {
+            let (mirror, oldest) = {
+                let store = lock()?;
+                let Some(oldest) = oldest_copied(&store, local)? else { return Ok(()) };
+                (of(&store, local)?.ok_or("That task does not run on another computer.")?, oldest)
+            };
+            let page = page(mirror, oldest.1).await?;
+            let more = store_older(&*lock()?, local, oldest, &page)?;
+            stored();
+            if !more {
+                return Ok(());
+            }
+        }
+        // The round ended on its cap with more to copy: another follows, so an idle mirror
+        // never keeps a missing middle.
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Waits while calls to `device` are pending (a thread opening, a prompt), so a backfill page
+/// never queues ahead of them on a slow link; at most [`BACKFILL_YIELD`].
+async fn yield_to_calls(app: &tauri::AppHandle, device: &str) {
+    let started = Instant::now();
+    while started.elapsed() < BACKFILL_YIELD && remote(app).lock().pending.values().any(|(to, _)| to == device) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The backfill base and the oldest host id copied so far, while older messages remain.
+fn oldest_copied(store: &Store, local: &str) -> Result<Option<(i64, i64)>> {
+    let base: Option<i64> = store.db.query_row("SELECT remote_backfill_base FROM sessions WHERE id=?1", [local], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let Some(base) = base else { return Ok(None) };
+    let oldest: Option<i64> = store.db.query_row("SELECT MIN(id) FROM messages WHERE session_id=?1 AND id>?2", params![local, base], |r| r.get(0)).map_err(|e| e.to_string())?;
+    Ok(oldest.map(|id| (base, id - base)))
+}
+
+/// One copied message, checked: (host id, role, content, created at).
+fn valid_message(message: &Value) -> Result<(i64, &str, &str, i64)> {
+    let (Some(id), Some(role), Some(content), Some(created_at)) = (message["id"].as_i64(), message["role"].as_str(), message["content"].as_str(), message["createdAt"].as_i64()) else { return Err("The other computer sent an invalid message.".into()) };
+    if id <= 0 || role.is_empty() || role.len() > 32 || !role.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+        return Err("The other computer sent an invalid message.".into());
+    }
+    Ok((id, role, content, created_at))
+}
+
+fn insert_copy(store: &Store, local: &str, id: Option<i64>, message: &Value) -> Result<()> {
+    let (host_id, role, content, created_at) = valid_message(message)?;
+    let cut = (message["cut"] == true).then_some(host_id);
+    store.db.execute("INSERT INTO messages(id,session_id,role,content,created_at,turn_duration_ms,remote_cut) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id, local, role, content, created_at, message["turnDurationMs"].as_i64(), cut]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn store_title(store: &Store, local: &str, page: &Value) -> Result<()> {
+    if let Some(title) = page["title"].as_str().map(str::trim).filter(|title| !title.is_empty() && title.chars().count() <= 200) {
+        store.db.execute("UPDATE sessions SET title=?2 WHERE id=?1 AND title<>?2", params![local, title]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Checks a page's host ids rise strictly, all inside `(low, high)`.
+fn ascending(messages: &[Value], low: i64, high: i64) -> Result<()> {
+    let mut last = low;
+    for message in messages {
+        let (id, ..) = valid_message(message)?;
+        if id <= last || id >= high {
+            return Err("The other computer sent an invalid message.".into());
+        }
+        last = id;
     }
     Ok(())
 }
@@ -497,6 +803,14 @@ pub(crate) async fn sync(app: &tauri::AppHandle, local: &str) -> Result<()> {
 /// Stores one `task.messages` page copied after `after` and advances the mirror's
 /// position, all or nothing. Returns whether to ask for the next page. A page that no
 /// longer starts at the stored position (another sync got there first) is skipped.
+fn store_first(store: &Store, local: &str, after: i64, page: &Value) -> Result<bool> {
+    if after == 0 && page.get("hasOlder").is_some() {
+        store_tail(store, local, page)
+    } else {
+        store_page(store, local, after, page)
+    }
+}
+
 pub(crate) fn store_page(store: &Store, local: &str, after: i64, page: &Value) -> Result<bool> {
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let current: i64 = store.db.query_row("SELECT remote_synced_id FROM sessions WHERE id=?1", [local], |r| r.get(0)).map_err(|e| e.to_string())?;
@@ -522,9 +836,54 @@ pub(crate) fn store_page(store: &Store, local: &str, after: i64, page: &Value) -
     if let Some(title) = page["title"].as_str().map(str::trim).filter(|title| !title.is_empty() && title.chars().count() <= 200) {
         store.db.execute("UPDATE sessions SET title=?2 WHERE id=?1 AND title<>?2", params![local, title]).map_err(|e| e.to_string())?;
     }
+    // The validated cursor was already advanced while storing this page.
     store.db.execute("UPDATE sessions SET remote_synced_id=?2 WHERE id=?1", params![local, last]).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(page["hasMore"] == true && last > after)
+}
+
+/// Stores the host's newest page into a mirror with nothing copied. Its messages take local
+/// ids `base + host id` above every id in use, so the range below them stays free for older
+/// pages ([`store_older`]) and the thread still reads in host order. Returns whether it stored.
+pub(crate) fn store_tail(store: &Store, local: &str, page: &Value) -> Result<bool> {
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let current: i64 = store.db.query_row("SELECT remote_synced_id FROM sessions WHERE id=?1", [local], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if current != 0 {
+        return Ok(false);
+    }
+    let messages = page["messages"].as_array().map(Vec::as_slice).unwrap_or_default();
+    ascending(messages, 0, i64::MAX)?;
+    let Some(last) = messages.last().and_then(|m| m["id"].as_i64()) else { return Ok(false) };
+    let base: i64 = store.db.query_row("SELECT MAX(COALESCE((SELECT MAX(id) FROM messages),0),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='messages'),0))", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    base.checked_add(last).ok_or("The other computer sent an invalid message.")?;
+    for message in messages {
+        insert_copy(store, local, Some(base + message["id"].as_i64().unwrap_or_default()), message)?;
+    }
+    store_title(store, local, page)?;
+    let older = (page["hasOlder"] == true).then_some(base);
+    store.db.execute("UPDATE sessions SET remote_synced_id=?2,remote_backfill_base=?3 WHERE id=?1", params![local, last, older]).map_err(|e| e.to_string())?;
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Stores one older page (`beforeId` the oldest copied host id) under the copied messages.
+/// Returns whether older pages remain. A page for a position that moved is skipped.
+pub(crate) fn store_older(store: &Store, local: &str, (base, before): (i64, i64), page: &Value) -> Result<bool> {
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if oldest_copied(store, local)? != Some((base, before)) {
+        return Ok(false);
+    }
+    let messages = page["messages"].as_array().map(Vec::as_slice).unwrap_or_default();
+    ascending(messages, 0, before)?;
+    for message in messages {
+        insert_copy(store, local, Some(base + message["id"].as_i64().unwrap_or_default()), message)?;
+    }
+    let more = page["hasOlder"] == true && !messages.is_empty();
+    if !more {
+        store.db.execute("UPDATE sessions SET remote_backfill_base=NULL WHERE id=?1", [local]).map_err(|e| e.to_string())?;
+    }
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(more)
 }
 
 /// What a host's status means for a mirror that shows `local`.
@@ -777,9 +1136,10 @@ fn catch_up(app: &tauri::AppHandle, device: &str, reply: &Value, requested: &[St
         let (Some(session), Some(status)) = (task["sessionId"].as_str(), task["status"].as_str()) else { continue };
         let row = app.state::<AppState>().store.lock().ok().and_then(|store| {
             let local = local_id(&store, device, session)?;
-            store.db.query_row("SELECT status,remote_synced_id FROM sessions WHERE id=?1", [&local], |r| Ok((local.clone(), r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).ok()
+            // Unfinished: a backfill or a cut copy left by an earlier run (say, before a quit).
+            store.db.query_row("SELECT status,remote_synced_id,remote_backfill_base IS NOT NULL OR EXISTS(SELECT 1 FROM messages WHERE session_id=sessions.id AND remote_cut IS NOT NULL) FROM sessions WHERE id=?1", [&local], |r| Ok((local.clone(), r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?))).ok()
         });
-        let Some((local, current, synced)) = row else { continue };
+        let Some((local, current, synced, unfinished)) = row else { continue };
         match reconcile(&current, status) {
             Reconcile::Ended { successful, stopped } => {
                 pending.push((local, Some((successful, stopped))));
@@ -1050,6 +1410,10 @@ fn settle_cancel(app: &tauri::AppHandle, state: &AppState, local: &str, outcome:
 }
 
 /// The host task id in a `task.start` (or `task.startStatus`) reply.
+fn start_note(reply: &Value) -> Option<String> {
+    reply["note"].as_str().map(|note| note.lines().next().unwrap_or_default().chars().take(300).collect::<String>()).filter(|note| !note.trim().is_empty())
+}
+
 fn started_session(reply: &Value) -> Result<String> {
     reply["sessionId"].as_str().filter(|id| host::valid_id(id).is_ok()).map(str::to_owned).ok_or_else(|| "The other computer did not start the task.".to_string())
 }
@@ -1159,11 +1523,15 @@ pub async fn remote_start_task(
         remote(&app).lock().viewer.starts.insert(local.clone(), PendingStart { device: device_id.clone(), start_id: start_id.clone(), created, cancel: cancel.clone(), busy: true, cancelling: false });
     }
     let request = json!({"repo": repo, "branch": branch, "worktree": worktree.unwrap_or(false), "prompt": prompt, "provider": provider, "model": model, "mode": mode, "effort": effort, "startId": start_id, "imageIds": image_ids});
+    let mut note = None;
     let started = tokio::select! {
         reply = client::call_within(&app, &device_id, "task.start", request, START_TIMEOUT) => reply,
         _ = cancel.notified() => Err(super::start::CANCELLED.into()),
     }
-    .and_then(|reply| started_session(&reply));
+    .and_then(|reply| {
+        note = start_note(&reply);
+        started_session(&reply)
+    });
     match started {
         // The reply was lost, maybe not the start: the row stays (running) in `starts`, so
         // Stop cancels it, and the host is asked by `startId` how it went once it is back
@@ -1203,6 +1571,9 @@ pub async fn remote_start_task(
     let _ = app.emit("sessions-changed", ());
     let mut session = serde_json::to_value(lock(&state)?.session(&local)?).map_err(|e| e.to_string())?;
     session["sessionId"] = json!(local);
+    if let Some(note) = note {
+        session["note"] = json!(note);
+    }
     Ok(session)
 }
 
@@ -1281,6 +1652,71 @@ mod tests {
         let task = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
         store.db.execute("UPDATE sessions SET remote_device='host',remote_session='h1' WHERE id=?1", [&task.id]).unwrap();
         (store, task.id)
+    }
+
+    #[test]
+    fn a_worktree_fallback_note_is_one_short_line() {
+        assert_eq!(start_note(&json!({"sessionId": "s"})), None);
+        assert_eq!(start_note(&json!({"note": "  "})), None);
+        assert_eq!(start_note(&json!({"note": "Started in a worktree: busy.\nmore"})).as_deref(), Some("Started in a worktree: busy."));
+        assert_eq!(start_note(&json!({"note": "x".repeat(500)})).map(|note| note.len()), Some(300));
+    }
+
+    #[test]
+    fn subagent_snapshots_keep_the_newest_per_child() {
+        let events = [
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "r:a", "status": "running"}}),
+            json!({"sessionId": "l", "kind": "text", "text": "x"}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "r:b", "status": "running"}}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {"id": "r:a", "status": "completed"}}),
+            json!({"sessionId": "l", "kind": "subagent", "data": {}}),
+        ];
+        let newest = newest_subagents(&events);
+        assert_eq!(newest.iter().map(|(s, d)| (*s, d["id"].as_str().unwrap(), d["status"].as_str().unwrap())).collect::<Vec<_>>(), [("l", "r:a", "completed"), ("l", "r:b", "running")]);
+    }
+
+    #[test]
+    fn a_mirror_never_gets_a_local_team() {
+        let (store, mirror) = store();
+        assert!(crate::architect::refuse_mirror(&store, &mirror).unwrap_err().starts_with("This task's team runs on "));
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let local = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
+        assert_eq!(crate::architect::refuse_mirror(&store, &local.id), Ok(()));
+    }
+
+    #[test]
+    fn worker_pages_join_in_order_and_say_when_older_ones_exist() {
+        let page = |ids: &[i64], older: bool| json!({"messages": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>(), "hasOlder": older, "tail": true});
+        let ids = |page: &Value| page["messages"].as_array().unwrap().iter().map(|m| m["id"].as_i64().unwrap()).collect::<Vec<_>>();
+        let joined = worker_page(&[page(&[5, 6], true), page(&[6, 7], true)], true);
+        assert_eq!((ids(&joined), joined["hasOlder"].as_bool()), (vec![5, 6, 7], Some(true)), "a repeat is dropped, the host's hasOlder kept");
+        assert_eq!(worker_page(&[page(&[1], false)], true)["hasOlder"], false);
+        let long: Vec<i64> = (1..=(WORKER_TAIL as i64 + 3)).collect();
+        let legacy = worker_page(&[page(&long, false)], false);
+        assert_eq!((ids(&legacy).len(), ids(&legacy)[0], legacy["hasOlder"].as_bool()), (WORKER_TAIL, 4, Some(false)), "an older host's read keeps the newest and offers nothing older it cannot page back to");
+    }
+
+    #[test]
+    fn a_host_team_becomes_a_desktop_snapshot_under_the_local_id() {
+        assert_eq!(desktop_team(&Value::Null, "local"), None, "no team");
+        let host = json!({"sessionId": "h1", "status": "running", "round": 2, "revision": 7, "mode": "auto", "rounds": {"used": 2, "max": 6}, "summary": null, "updatedAt": 5, "messages": [{"id": 1}],
+            "workers": [{"id": "w1", "sessionId": "hw1", "name": "Docs", "provider": "codex", "model": "gpt", "status": "running", "attempt": 1, "summary": "", "files": ["a.md", 3], "dependsOn": [], "checkpoint": {"summary": "half", "nextSteps": "", "blocker": null, "updatedAt": 4}, "createdAt": 1, "updatedAt": 2, "profileId": "auto", "assignment": "Write", "error": null, "readOnly": true, "abandoned": false},
+                {"name": "no id"}]});
+        let team = desktop_team(&host, "local").unwrap();
+        assert_eq!(team["sessionId"], "local");
+        assert_eq!(team["config"]["auto"], true);
+        assert_eq!(team["config"]["maxRounds"], 6);
+        assert_eq!((team["status"].as_str(), team["round"].as_u64(), team["revision"].as_u64()), (Some("running"), Some(2), Some(7)));
+        assert!(team.get("messages").is_none() && team.get("mode").is_none());
+        let workers = team["workers"].as_array().unwrap();
+        assert_eq!(workers.len(), 1, "a row without ids is dropped");
+        assert_eq!(workers[0]["files"], json!(["a.md"]));
+        assert_eq!(workers[0]["checkpoint"]["summary"], "half");
+        assert_eq!((workers[0]["readOnly"].as_bool(), workers[0]["reasoningEffort"].is_null()), (Some(true), true));
+        assert!(workers[0]["parentWorker"].is_null());
+        let sub = json!({"workers": [{"id": "s1", "sessionId": "hs1", "status": "parked", "parentWorker": "w1"}]});
+        let sub = &desktop_team(&sub, "local").unwrap()["workers"][0];
+        assert_eq!((sub["status"].as_str(), sub["parentWorker"].as_str()), (Some("parked"), Some("w1")));
     }
 
     #[test]

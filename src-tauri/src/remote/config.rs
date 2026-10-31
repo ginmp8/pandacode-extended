@@ -120,6 +120,9 @@ pub(crate) struct Settings {
     pub device_id: String,
     #[serde(default)]
     pub host_enabled: bool,
+    /// Push notifications remain off unless explicitly opted in on the local machine.
+    #[serde(default)]
+    pub notify_enabled: bool,
     /// Independent local-only grant. Old settings and new installs both default off.
     #[serde(default)]
     pub allow_full_access: bool,

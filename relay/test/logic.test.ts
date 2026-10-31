@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readJsonCapped } from "../src/body.ts";
+import { configured } from "../src/config.ts";
 import { fullBucket, take } from "../src/bucket.ts";
 import { byteLength, parseClientFrame, undeliverableFrame } from "../src/frames.ts";
 import { githubUser } from "../src/github.ts";
 import { MAX_FRAME_BYTES, STALE_MS, TOKEN_TTL_SECONDS } from "../src/limits.ts";
-import { hostChanged, isStale, issuedAfterRegistration, keyChanged } from "../src/policy.ts";
+import { hostChanged, isStale, issuedAfterRegistration, keyChanged, tokenCurrent } from "../src/policy.ts";
+import { isKnownRoute } from "../src/routes.ts";
 import { signToken, verifyToken } from "../src/token.ts";
 import { parseDevice } from "../src/validate.ts";
 
 const ID = "3f2b8c1e-9a4d-4e0b-8c55-0a1b2c3d4e5f";
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 const device = { id: ID, name: "Mac", platform: "macos", publicKey: KEY };
+
+test("account deletion is included in the authenticated route set", () => {
+  assert.equal(isKnownRoute("/v1/account"), true);
+  assert.equal(isKnownRoute("/v1/account/extra"), false);
+});
 
 test("token round trip, expiry, tampering, wrong secret", async () => {
   const t = await signToken("s3cret", "gh:1", ID, 1000);
@@ -137,4 +145,39 @@ test("host frame that repeats the stored value is a no-op", () => {
   assert.equal(hostChanged(0, true), true);
   assert.equal(hostChanged(1, false), true);
   assert.equal(hostChanged(undefined, false), true);
+});
+
+test("capped body reader stops at the cap, chunked or not", async () => {
+  const post = (body: BodyInit) => new Request("https://x/", { method: "POST", body, duplex: "half" } as RequestInit);
+  assert.deepEqual(await readJsonCapped(post('{"a":1}'), 100), { value: { a: 1 } });
+  assert.equal(await readJsonCapped(post(JSON.stringify({ a: "x".repeat(200) })), 100), "too-large");
+  const chunks = new ReadableStream({ start(c) { for (let i = 0; i < 5; i++) c.enqueue(new TextEncoder().encode("x".repeat(30))); c.close(); } });
+  assert.equal(await readJsonCapped(post(chunks), 100), "too-large");
+  assert.equal(await readJsonCapped(post("{nope"), 100), "invalid");
+});
+
+test("secret config check", () => {
+  const ok = { SESSION_SECRET: "s".repeat(32), GITHUB_CLIENT_ID: "id", GITHUB_CLIENT_SECRET: "sec" };
+  assert.equal(configured(ok, true), true);
+  assert.equal(configured({ ...ok, SESSION_SECRET: "s".repeat(31) }, false), false);
+  assert.equal(configured({ ...ok, SESSION_SECRET: undefined }, false), false);
+  assert.equal(configured({ SESSION_SECRET: ok.SESSION_SECRET }, false), true);
+  assert.equal(configured({ SESSION_SECRET: ok.SESSION_SECRET }, true), false);
+});
+
+test("registration generations bind tokens to UUIDs; legacy claims apply only to legacy rows", async () => {
+  const gen = "16ac34d5-8ab0-4d25-932b-0d7f0b3a5e42";
+  const revokedGen = "badf7e3a-c2fd-4e41-8717-785eae3b5206";
+  const c = await verifyToken("s3cret", await signToken("s3cret", "gh:1", ID, 1000, gen), 1001);
+  assert.equal(c?.gen, gen);
+  assert.equal(tokenCurrent({ gen, iat: 1000 }, { gen, registered_at: 1000 }), true);
+  // Re-registration in the same second must reject all old generation claims.
+  assert.equal(tokenCurrent({ gen, iat: 1000 }, { gen: revokedGen, registered_at: 1000 }), false);
+  assert.equal(tokenCurrent({ iat: 1000 }, { gen: "", registered_at: 1000 }), true);
+  assert.equal(tokenCurrent({ iat: 999 }, { gen: "", registered_at: 1000 }), false);
+  // Legacy tokens cannot authenticate a newly registered device with a fresh UUID.
+  assert.equal(tokenCurrent({ iat: 1000 }, { gen, registered_at: 1000 }), false);
+  await assert.rejects(signToken("s3cret", "gh:1", ID, 1000, "x"), /invalid registration generation/);
+  const bad = btoa(JSON.stringify({ acct: "a", dev: ID, iat: 1, exp: 9e9, gen: "x" })).replace(/=+$/, "");
+  assert.equal(await verifyToken("s3cret", `${bad}.x`, 2), null);
 });

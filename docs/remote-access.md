@@ -1,10 +1,11 @@
 # Remote access (PandaCode Connect)
 
 Opt-in. Off by default. Signing in lets a task *run on another computer*: one of the user's
-computers signed in to the same account, trusted, with **Allow remote control of this computer**
+computers signed in to the same GitHub account, with **Allow remote control of this computer**
 turned on. The task stays an ordinary task in the local sidebar and conversation pane, with the
 same streaming, composer, approvals and model picker as a local one; there is no separate remote
-view. Nothing is sent anywhere until the user signs in.
+view. Nothing is sent anywhere until the user signs in. A computer can also be an always-on
+server with no screen or desktop app: `pandacode serve` ([headless](headless.md)).
 
 **Full access for remote tasks** is a separate switch in Settings → Remote access,
 off for new installs and existing settings. Starting tasks requires a Full device
@@ -51,7 +52,14 @@ while H is still starting it) and `remote_synced_id` (the last of H's message id
 - `list_sessions` (and every `Session`) carries `remoteDevice: { id, name }`. The name comes
   from presence ("another computer" until presence names it).
 - Running state is the row's status, set from H's events, so the sidebar and composer show it
-  as for a local run. A mirror is never reset to interrupted because no local agent runs it.
+  as for a local run. A mirror interrupted by this computer's restart takes H's status at the
+  next subscription (and its messages are copied). A run end always copies the messages, even
+  when the turn already ended here (Stop, an offline host).
+- A subscribed task that H says no longer exists (`missing`) ends a running mirror as failed
+  (`This task is no longer on <host>.`). A row left without `remote_session` by a start this
+  computer quit during is a local draft again at the next launch.
+- Approval and question cards follow H's `pending` list at each subscription: a card missing
+  here (after a restart or a lost frame) is shown again, and one answered elsewhere is cleared.
 - Anything that needs the checkout (git, worktree and diff commands, file reads, launching an
   agent) goes through `Store::workspace_root`, which refuses a mirror with
   `This task runs on <name>.` and never touches the local disk.
@@ -63,13 +71,25 @@ Sign in with GitHub using the OAuth **device flow** (no client secret anywhere):
 1. Desktop: `POST https://github.com/login/device/code` with `client_id`, and the scope is empty (identity only).
 2. The user enters the code at `verification_uri`. The desktop polls `https://github.com/login/oauth/access_token`.
 3. Desktop → relay `POST /v1/auth/github` `{ githubToken, device: { id, name, platform, publicKey } }`.
-   The relay calls `GET https://api.github.com/user` and gets the numeric id, login and avatar_url. It
+   The relay checks the token against its own OAuth app (`POST /applications/{client_id}/token`, so a
+   token issued to any other app is refused) and gets the numeric id, login and avatar_url. It
    registers the device and returns `{ token, account: { id: "gh:<id>", login, avatarUrl } }`.
-4. The desktop stores only the relay token in the keychain (`app.pandacode.remote`, with account names scoped to the install's data folder, so a dev build and the installed app never share an item). It discards the GitHub token.
+4. The desktop stores only the relay token, in `connect-secrets.json`, and discards the GitHub token.
+
+**Where secrets live.** The relay token and the base64 X25519 private key are one JSON file,
+`<app data dir>/connect-secrets.json` (`{ token?, key? }`), mode 0600 on unix, written
+atomically (temp file in the same folder, fsync, rename). Each install's data folder is its own
+scope, so a dev build and the installed app never share secrets. A missing, unreadable or
+corrupt file means none (signed out). Connect never uses the OS keychain: macOS pins each item
+to the exact code hash of the build that made it, and PandaCode has no Apple Team ID, so every
+update asked for the login password on every read. Other app secrets moved the same way, to
+`secrets.json` (see `secret_store.rs`). Nothing is migrated from the keychain for Connect
+(reading it is what prompted); users from before this change sign in once more, and the `409`
+path below gives them a new device id.
 
 The device key is made once, at sign-in, behind a lock (so two sign-ins cannot race) and before
-polling starts. A keychain *error* (a denied prompt, a locked keychain) fails sign-in; only a
-missing key is ever generated, so an existing key is never overwritten. `remote_sign_in_cancel`
+polling starts. Only a missing (or undecodable) key is ever generated, so an existing key is
+never overwritten; a failed write fails sign-in. `remote_sign_in_cancel`
 stops the device-flow poll, and a new `remote_sign_in_start` cancels any earlier flow.
 
 A relay `401` (or close code `4001`) signs this computer out only if the token that request
@@ -79,28 +99,21 @@ sign-in.
 If the relay answers `409` (this device id is already registered with a different public key), the
 desktop makes a new device id, saves it, and retries once.
 
-Relay token: `base64url(JSON {acct, dev, iat, exp}) + "." + base64url(HMAC-SHA256(SESSION_SECRET))`.
-It is valid for 30 days, and only while the device is still registered on the account. Revoking a
-device closes its socket and makes its token invalid.
+Relay token: `base64url(JSON {acct, dev, iat, exp, gen}) + "." + base64url(HMAC-SHA256(SESSION_SECRET))`.
+It is valid for 30 days, and only while the device is still registered on the account with the same
+`gen` (a random value set when the device row is created; older tokens without `gen` fall back to
+`iat >= registered_at`, and a refresh adds it). Revoking a device closes its socket and makes its
+tokens invalid, even after a re-registration in the same second. The relay refuses to run with a
+`SESSION_SECRET` shorter than 32 characters.
 
 **Refresh.** While connected, the desktop checks the token at connect and every 12 hours. With
 fewer than 7 days left it calls `POST /v1/token` and stores the fresh token (same account and
-device, later expiry) in the keychain and in memory. A failure is left for the next check; a
+device, later expiry) in the secrets file and in memory. A failure is left for the next check; a
 `401` follows the sign-out rule above.
 
-**Startup.** Only a computer with an account in `remote.json` reads the keychain. A missing (or
-expired) token means signed out. Any other keychain error (a locked keychain, `-25308` right
-after an update relaunch) is not a sign-out: status shows signed in but not connected, and the
-token is read again after 5 s, 15 s and 60 s; when it reads, the socket starts and
-`remote://status` is sent.
-
-**Adopting pre-0.3.20 items.** Before 0.3.20 the keychain accounts were `relay-token` and
-`device-key`. At startup, when the scoped token or key is missing, the installed app (data
-folder `ai.pandacode.desktop`, never a dev build) reads those once per launch. It adopts them only
-if the legacy token parses, is unexpired and its `dev` is this device id: the token is written
-to the scoped name, and so is the legacy key when it differs from the scoped one (the relay
-registered the legacy key for this device id). After both writes succeed the legacy items are
-deleted.
+**Startup.** Only a computer with an account in `remote.json` reads the secrets file. A
+missing (or expired) token means signed out. Nothing prompts and nothing touches the network
+unless signed in.
 
 Build config is `option_env!("PANDACODE_RELAY_URL")` and `option_env!("PANDACODE_GITHUB_CLIENT_ID")`.
 Environment variables of the same names override them at run time. If either is missing, remote
@@ -112,10 +125,16 @@ All routes except auth take `Authorization: Bearer <relay token>`. Errors are `{
 
 - `POST /v1/auth/github` → `{ token, account }`
 - `GET /v1/devices` → `{ devices: [{ id, name, platform, publicKey, host, online, lastSeen }] }`.
-  The desktop uses it only for an explicit `remote_devices` (or trust) call made before the
+  The desktop uses it only for an explicit `remote_devices` call made before the
   socket's first presence frame.
 - `DELETE /v1/devices/:id` → `{ ok: true }`
+- `DELETE /v1/account` → `{ ok: true }`: deletes all relay state for the account and closes its
+  sockets with `4001 (signed out)`. Since tokens are accepted only for registered devices, all
+  existing tokens become invalid; signing in again creates a fresh relay account.
 - `POST /v1/token` → `{ token }`: a fresh 30-day token for the same account and device
+- `POST /v1/push/devices` → `{ ok: true }`: registers a push device token for this device
+  (`{ platform: "ios" | "android", token }`; up to 3 per platform). A revocation or account
+  deletion drops the device's tokens with it.
 - `GET /v1/connect?host=0|1` (WebSocket upgrade) → joins the account's Durable Object, advertising
   whether this device hosts
 
@@ -131,12 +150,22 @@ Relay → client:
 - `{ kind: "presence", devices: [{ id, name, platform, publicKey, host, online, lastSeen }] }`, the
   account's full device rows, sent on connect and on every join, leave or device change.
   Each presence frame makes the viewer subscribe again to the hosts it mirrors (a host that
-  restarted has forgotten its subscribers).
+  restarted has forgotten its subscribers). Frames within 250 ms share one round, except the
+  socket's first presence, whose round starts at once: with it, the desktop asks the afterId
+  page of up to 3 mirrors with messages copied (running ones first) right behind `subscribe`,
+  and the phone does the same for its open threads, so a reconnect catches up in one round trip
+  after the upgrade instead of two. One round
+  runs at a time (a call during it runs one more after it), every host is asked at once, and a
+  round in which a host with a running mirror failed is retried after 2 s, 4 s… up to 60 s.
 - `{ kind: "undeliverable", ... }` (above)
 - `{ kind: "error", error }`
 
 Client → relay control: `{ kind: "host", enabled: boolean }` changes the advertised host flag
-after connecting. `"ping"` gets `"pong"` as a hibernation auto-response.
+after connecting. A host can also send `{ kind: "notify", body: { kind: "waiting" | "finished",
+count } }`: the object coalesces these (30 s window, halved when the waiting count grows) and
+pushes a generic notice — counts and a deep link, never task text — to every push token the
+account's phones have registered via `POST /v1/push/devices`. `"ping"` gets `"pong"` as a
+hibernation auto-response.
 
 Presence is the device list: the desktop takes devices, names and keys from it and never fetches
 on connect or for an unknown sender. A device missing from presence is removed, and its event
@@ -144,8 +173,22 @@ subscription with it.
 
 Close codes: `4000` (replaced by a newer socket) makes the client wait at least 60 s before it
 reconnects. `4001` (device revoked) signs this computer out locally. Otherwise the client
-reconnects with a backoff that starts at 1 s and doubles to 60 s. The backoff resets to 1 s only
-after a socket stayed up for 30 s or more.
+reconnects at once, then after 1 s, doubling to 60 s, each wait spread over 75–125 %. The
+backoff starts over only after a socket stayed up for 30 s or more, or after a wake. The phone
+(`mobile/src/store/backoff.ts`) follows the same schedule.
+
+The desktop keeps one rustls client config for every connect, so a reconnect resumes the TLS
+session: no certificate chain is sent or checked again (bytes and CPU, not a round trip). TLS
+1.3 0-RTT early data is not used. The upgrade request carries the bearer token, and a replay
+of it would let anyone on the path replace the device's socket at the relay (close `4000`, which
+then waits 60 s), so a replayable upgrade is not safe; the relay would also need Cloudflare's
+0-RTT zone setting.
+
+The client pings every 25 s and treats the socket as dead when nothing arrives within 10 s of a
+ping, or when a frame can't be written within 10 s. Every 2 s it compares the wall clock with
+the monotonic one (which, like tokio's timers, stands still while the computer sleeps); a jump
+of more than 10 s means it slept, and it reconnects at once. At most 512 frames wait for the
+socket; past that a send fails at once (`Too much is waiting to go to the relay.`).
 
 The relay uses the hibernation API (`ctx.acceptWebSocket`, tagged with the device id), so idle
 sockets cost no duration. Device rows live in the Durable Object's SQLite storage.
@@ -163,7 +206,7 @@ sockets cost no duration. Device rows live in the Durable Object's SQLite storag
 
 ## End-to-end encryption
 
-Each device has an X25519 key pair. The private key stays in the keychain, and the public key is
+Each device has an X25519 key pair. The private key stays in `connect-secrets.json`, and the public key is
 registered with the device. For a pair of devices:
 
 `key = HKDF-SHA256(ikm = X25519(mine, theirs), salt = sorted(idA, idB).join("|"), info = "pandacode-remote v1")`.
@@ -175,25 +218,18 @@ The relay sees only device ids and ciphertext. Settings shows each device's key 
 compare them. Existing device IDs, key pairs and pinned public keys are unchanged;
 the longer display requires no re-pairing and is never used as an authentication key.
 
-### Trust (key pinning)
+### Account access
 
-The relay lists the public keys, so it could add a device or swap a key. A host therefore answers
-only computers that the user trusted on that host. `remote.json` keeps
-`trusted: { deviceId: publicKeyBase64 }`, and the key is pinned when the user trusts the device.
+Devices signed in to the same GitHub account can control each other while **Allow remote control**
+is on. The host accepts requests only from devices listed in the account's current presence, and
+still checks the timestamp and nonce for replay. The viewer opens responses and events only from
+devices in presence, using each device's current public key to derive the encrypted pair key.
+Subscribers are dropped when their device leaves presence or their subscription expires.
 
-- A device is trusted only while its pinned key equals the key the relay lists now. After a key
-  change it is untrusted until the user trusts it again.
-Trust is symmetric: `remote_set_trusted` pins a device's key for both directions.
-
-- Host side: a request from an untrusted device gets only the error `This computer isn't trusted
-  on <host name>. Trust it in Settings → Remote access on that computer.` Trust is checked before
-  the replay check, so untrusted callers never fill the nonce set. Task content and events are
-  encrypted only to pinned keys.
-- Viewer side: the desktop refuses to call or seal to a host that isn't trusted with its current
-  key: `<host name> isn't trusted on this computer yet. Trust it in Settings → Remote access.`
-  Responses and events from an untrusted device are dropped.
-- Subscribers that are no longer on the device list or no longer trusted are dropped.
-- Revoking a device removes its pin.
+There is no per-device key pinning. The relay could add a device to the account, and that device
+could then control a host while remote control is enabled. This is the trade-off of removing
+pinning. Fingerprints remain visible in Settings as identifying information; they do not gate
+access.
 
 ## App protocol (encrypted plaintext, JSON)
 
@@ -219,10 +255,33 @@ blocks subsequent admissions and sends; it cannot undo already executed actions.
 A relay can still delay, reorder or drop a first delivery. Sign out to disconnect
 all Connect traffic; disabling hosting alone leaves the connection active.
 
-A host answers only while **Allow remote control** is on. Otherwise it returns
-`{ ok: false, error: "Remote control is off on this computer" }`. It answers only devices that are
-trusted on it (see Trust). A host still applies its own approval policy: remote prompts get no
-more power than local ones.
+Every sealed message carries `ts` and `nonce`. The viewer (desktop and phone) applies the same
+window and seen-nonce check to responses and events and drops a stale, repeated or unstamped one;
+a dropped response fails its call at once with `That computer's reply was stale or repeated…`.
+A viewer therefore needs a host on a version that stamps replies.
+
+**Packed frames.** Requests from current viewers carry `z: 1`: the sender opens packed frames.
+The host remembers this per device (in memory) from each fresh request (a stale or repeated one
+changes nothing) and forgets a device that leaves presence; an older app's requests lack it and
+turn packing off again. A reply is packed by its own request's `z`, never by what the host
+remembers when it is sent. To such a peer, a reply or event whose JSON plaintext is
+over 1 KB is sealed as `"z"` + raw deflate (level 6) when that is smaller. JSON plaintexts
+start with `{`, so `open` tells the two apart. Inflated output is capped at 2 MB (the largest
+real frame, a 1 MiB messages page, is about 1.05 MB). Requests are never packed; a host drops a
+packed request. The relay and direct links carry the same sealed body. A real 178 KB
+messages page deflates to 16 % (29 KB).
+
+A host answers requests from other devices listed in its account presence only while **Allow
+remote control** is on. Otherwise it returns
+`{ ok: false, error: "Remote control is off on this computer" }`. A host still applies its own
+approval policy: remote prompts get no more power than local ones. Access (remote control on, the
+sender in presence, replay) is checked again when a queued request runs, not only when it arrives.
+
+**Full access for remote tasks** (`remote_full_access` in `remote.json`, off by default): while
+off, `task.start` without a mode starts in `ask`; an explicit `full` in `task.start` or
+`task.configure`, and any `task.send`, `task.steer` or mode-less `task.configure` on a task whose
+stored mode is `full`, are refused with `Full access is off for remote tasks on <host>.` This
+prevents accidents; it is not a boundary against a device that can also answer approvals.
 
 | Method | Params | Result |
 |---|---|---|
@@ -330,6 +389,14 @@ clone percentage when available. Progress and task-event batches stay bound to t
 authenticated key throughout asynchronous work; re-pinning a device ID cannot redirect
 an older operation's content to its replacement key.
 
+The viewer sends a `startId`; the host runs each one once, on its own, so a lost reply never
+stops it halfway. When the reply to `task.start` times out or the socket drops, the mirror row
+stays (running, no `remote_session`) and, once the host is online again, the viewer asks
+`task.startStatus` every 3 s until the start is done (the row is linked), failed or unknown
+(the row is put back and `remote://start-progress` reports `error`). `remote_cancel_start`
+sends `task.cancelStart` and puts the row back; a start cancelled after its task was made is
+stopped on the host. Older hosts refuse both methods (`Unknown method.`): the row is put back.
+
 ### Model lists for another computer
 
 A mirror's model picker lists the host's harnesses and models, not this computer's:
@@ -337,9 +404,9 @@ A mirror's model picker lists the host's harnesses and models, not this computer
 (`providers.list`, `providers.models`). This computer's own id, or an empty one, lists locally.
 The viewer keeps each reply for 10 minutes per device (and per device and provider for models);
 `force` asks again, and concurrent identical requests share one call. A device's lists are
-dropped when it goes offline, comes back, changes hosting, is untrusted or revoked, and on
-sign-out. Every request, cached or not, first gets the usual errors for an unknown, untrusted or
-offline (`That computer is offline.`) host.
+dropped when it goes offline, comes back, changes hosting or is revoked, and on sign-out. Every
+request, cached or not, first gets the usual errors for an unknown or offline
+(`That computer is offline.`) host.
 
 `remote_start_task` and a mirror's `configure_session` are refused here when the cached lists
 show the provider isn't installed there (`<Provider> is not installed on <host>.`) or the model
@@ -349,16 +416,117 @@ passes). With nothing cached the host decides, and it refuses a provider it does
 ### Events
 
 Push only; nothing polls. The host buffers the agent events of each subscriber's tasks and sends
-each subscriber at most one `agent.events { events: [...] }` frame every 100 ms (more only when
-the events pass the 180 KiB frame budget; an event over 120 KiB is cut). Consecutive text deltas
-of the same message are merged, so streaming costs at most 10 frames a second per subscriber,
-whatever the token rate. A subscriber more than 4096 events behind stops buffering until it
-catches up at the run end. Each event is the host's raw `AgentEvent` (`sessionId`, `kind`, `text`,
-`requestId`, `data`, `tool`), approval ids included.
+each subscriber an `agent.events { events: [...], epoch }` frame: the first event after a quiet
+100 ms goes at once (a turn's first delta shows without waiting), the next ones wait out the rest
+of 40 ms since the last flush, and after a burst's first 5 frames of 100 ms per frame the last flush
+sent (more frames only when the events pass the 180 KiB frame budget; an event over 120 KiB is cut).
+Pacing counts frames, not flushes, so however many viewers subscribe, streaming costs the host's
+socket about 10 frames a second, whatever the token rate, under the relay's 20 frames a second
+(replies included). Consecutive text deltas of the same message are merged.
 
-At a run end the host queues `run.finished { sessionId, successful, stopped, text }` after that
-run's last events. The viewer copies the new messages, ends the local turn, then emits the
+Every agent event of a followed task carries `seq`, one counter per host launch (`epoch`, new
+at each launch). The host keeps each task's last 2000 events (at most 2 MiB per task, 32 MiB in
+all) in memory. A viewer remembers the newest `seq` per task and subscribes with `epoch` and
+`afterSeq`; the reply then holds, per task, the events after that position (`events`, in order,
+deltas merged, within a third of the reply; for a viewer that sent `"z": 1`, within 180 KiB of JSON
+while the packed reply fits 180 KiB) or `gap: true` when some are gone (dropped, too
+many, or another epoch), when the viewer copies the messages instead. Each task's `seq` is the
+position to use next. The viewer drops an event at or before the newest `seq` it saw, so a
+replay and live frames never show twice. Events without `seq` (older hosts) are shown as before,
+and older viewers ignore the new fields.
+
+A subscriber more than 4096 events behind stops buffering until it catches up at the run end.
+Each event is an `AgentEvent` with `sessionId`, `kind`, `text`,
+`requestId`, `data`, and optional `tool`; request ids are included where applicable. These are
+the kinds sent in `agent.events`:
+
+| Kind | Meaning |
+|---|---|
+| `approval` | The agent requests permission for a tool action. `requestId`, `data` and optional `tool` describe the request. |
+| `approval_cancelled` | An outstanding approval was withdrawn or cancelled. |
+| `commands_changed` | The harness's available command catalogue changed. |
+| `error` | The provider reports a run error; the explanation is in `text`. |
+| `goal` | Snapshot of the Codex goal state. |
+| `goal_input` | The goal runtime is asking for user input. |
+| `goal_ready` | Goal setup completed and its initial state is available. |
+| `input_cancelled` | An outstanding structured-input request was withdrawn or cancelled. |
+| `input_request` | The agent requests structured user input; `requestId`, `data` and optional `tool` carry the answerable request. |
+| `limited` | The provider reports an account usage limit; `data` may include `resetsAt` and `window`. |
+| `message_start` | A new assistant message or phase starts; `data.messageId` identifies it and `data.phase` may identify its phase. |
+| `session` | The provider's native session id is available in `text`. |
+| `status` | Progress or state text. Plan updates and reasoning/thinking notices use this kind; any provider metadata is reduced to recognized scalar fields. |
+| `steer` | A steer was accepted, delivered, or failed; `data` includes its id, status and mode. |
+| `subagent` | A child-agent snapshot changed. `data` is a desktop `SubagentActivity` (`id`, `parentId`, `name`, `prompt`, `status`, `response`, `tools`, `startedAt`, `updatedAt`); ids are scoped to the parent run. |
+| `team` | A worker row changed in the task's architect team. `sessionId` is the architect task id and `data` is the changed worker row in `task.team` shape. If the team is removed, `data` is `{ "removed": true }`. The desktop emits full `architect-event` snapshots; Connect sends only changed rows through the same event buffer. |
+| `task_settings` | Goal runtime task settings changed. |
+| `text` | Assistant text delta. `data.messageId` and optional phase associate it with its message. |
+| `tool` | A tool started or changed; the current `ToolActivity` is in `tool` (`id`, `name`, `status`, `input`, `output`, and optional `writePaths`). |
+| `turn_complete` | A Codex goal turn completed. |
+| `turn_start` | A Codex goal turn started. |
+| `usage` | Sanitized context-token usage snapshot; `data` carries recognized usage fields only. |
+
+A desktop mirror keeps `subagent` snapshots (live and from `subscribe`'s `subagents`) in its own store, so its Subagents panel matches the host's after missed frames or a reopen. It reads the host's team with `task.team` when the task opens and after each `team` event or run end (`remote_team` in `remote/mirror.rs`, mapped to the desktop TeamSnapshot) and a worker's transcript with `task.workerMessages` (`remote_worker_messages`). The workers panel is read-only there: no pause, resume, setup or team messages. Hosts without these methods show no team.
+
+There are no separate `plan`, `todo`, `thinking` or `reasoning` event kinds: those provider
+updates are represented as `status` text and/or data. The provider's `done` event is consumed by
+the desktop run loop and is not sent in `agent.events`. Likewise, local `status: running`,
+`turn_changes`, persistence errors, and final `done` emissions are window events rather than
+Connect `AgentEvent`s. The desktop's `architect-event` is also a window event; Connect translates
+it to the `team` kind for subscribed architect tasks. Connect signals run end with `run.finished`.
+
+For example, a live child update is an ordinary `agent.events` item:
+
+```json
+{
+  "sessionId": "host-session-id",
+  "kind": "subagent",
+  "text": "",
+  "requestId": null,
+  "data": {
+    "id": "run-id:child-id",
+    "parentId": null,
+    "name": "Tests",
+    "prompt": "Run the focused tests",
+    "status": "running",
+    "response": "Checking the project setup…",
+    "tools": [{ "id": "run-id:child-id:tool-id", "name": "Bash", "status": "running", "input": "cargo test", "output": "" }],
+    "startedAt": 1792866000000,
+    "updatedAt": 1792866000500
+  }
+}
+```
+
+At a run end the host queues `run.finished { sessionId, successful, stopped, text, status?, team? }`
+after that run's last events. The viewer copies the new messages, ends the local turn, then emits the
 `done` agent event with `text`, so the transcript reloads with everything in it.
+
+#### Team tasks
+
+An architect task can be working while no agent of its own runs: the architect ends its turn
+(the team becomes `waiting`) while its workers carry on, and the desktop still shows the task as
+running. Connect reports it the same way. Every task row of `tasks.list` and `subscribe`, and every
+`run.finished`, of a task that leads a team carries
+`team: { status, activeWorkers }`, where `status` is the team snapshot's status (`ready`,
+`running`, `waiting`, `paused`, `failed`, `completed`) and `activeWorkers` counts workers that are
+not abandoned and are `queued`, `running` or `waiting`. Other tasks have no `team`. The values are
+read in one query from the saved team, on the blocking pool.
+
+- While the team is `running` or `waiting`, the row's `status` is `running`, whatever the saved
+  status (`completed`, `idle`, or `interrupted` because no agent is registered). The one exception
+  is a row whose own architect run is registered and `waiting` for input or approval: it stays
+  `waiting`. Once the team is paused, failed or completed, `status` is what it would be without a
+  team.
+- A `run.finished` whose team is still running or waiting has `status: "running"`: the run ended,
+  but the task did not, so the phone keeps it under Running. Without `status`, `run.finished`
+  means what it always did.
+- When a team the host has reported or seen as active stops being `running` or `waiting` and no
+  agent of the architect task is registered, the host sends a further `run.finished`:
+  `{ sessionId, successful: team.status == "completed", stopped: team.status == "paused", text:
+  "Team completed" | "Team paused" | "Team failed" | "Team stopped", status, team, teamSettled: true }`,
+  with `status` as a task row would show it then. If the architect itself still runs, its own run
+  end reports the settled team instead. A settling `run.finished` is skipped while the same task's
+  `run.finished` is still waiting in the buffer, but it can follow one already sent; viewers treat
+  a repeated `run.finished` as a no-op (the desktop mirror ends a turn only once).
 
 The viewer re-emits each event as the window's ordinary `agent-event` with the mirror's *local*
 session id (events for tasks it doesn't mirror from that host are dropped), and moves the row's
@@ -368,19 +536,116 @@ that ended while this computer wasn't listening, and messages newer than `remote
 
 ### Message copies
 
-`task.messages` returns the messages after `afterId`, oldest first: at most 400 rows, kept
-within 180 KiB of JSON, `hasMore` when more remain. Any message over 120 KiB is cut and ends with
+`task.messages` keeps the legacy `afterId` path for desktop mirrors: rows after the cursor, oldest
+first, at most 400 rows by default. `tail: true` starts at the newest message, and `beforeId` pages
+backward from that id; those modes default to 100 rows. Every mode is kept within 180 KiB of JSON,
+and newest-first pages keep the newest rows that fit. An optional `budget` sets the page's JSON
+bytes instead: clamped to 4 KiB..1 MiB, and to at most 180 KiB unless the request carried `"z": 1`
+(the viewer opens packed frames). A page over 180 KiB is cut until it packs (deflates) into 180 KiB,
+so its sealed frame still fits the relay's 256 KB. A page always holds at least one message. The
+desktop mirror's and phone's first tail page ask for 32 KiB (about 12 KB on the wire, one round trip
+on 3G), and the mirror's afterId and `beforeId` copies ask for 1 MiB. Hosts before `budget` ignore it. `hasMore` reports newer rows after the page;
+`hasOlder` reports older rows before its first row. `lastId` is the current newest message id, or
+`null` for an empty thread. Any message over 120 KiB is cut and ends with
 `…[cut on the host to fit a remote page]` (JSON tool content is cut inside, so it still parses).
-The viewer stores a page and advances `remote_synced_id` in one transaction, and skips a page
-that no longer starts at the stored position (a concurrent copy got there first), so messages
-are never copied twice. It follows `hasMore` for up to 50 pages per copy, and also takes the
-host's title.
+When a page's single message does not fit a smaller `budget`, it is cut to the budget the same way
+and marked `cut: true` (same id); viewers fetch it whole later with `afterId: id - 1` and a full
+budget and replace their copy. The desktop mirror does this at the end of each copy and marks such
+a copy in `messages.remote_cut` (schema 33, H's message id) until it is replaced, so a failed fetch
+or a restart leaves it for the next copy; older viewers ignore the flag. The desktop copies older
+pages (`beforeId`) in rounds of 8 until none are left, each page waiting (up to 10 s) while other
+calls to that host are pending.
+The desktop mirror stores an `afterId` page and advances `remote_synced_id` in one transaction,
+and skips a page that no longer starts at the stored position (a concurrent copy got there first),
+so messages are never copied twice. It follows `hasMore` for up to 50 pages per copy and also takes
+the host's title.
 
 Known limit: a message the host rewrites in place after it was copied (a tool's status, say)
 is not copied again.
 
 Responses and events are handled as soon as they arrive and never wait behind a slow request.
-Requests from one peer are answered in order, except `task.start` (above).
+Each peer can have up to four read requests in flight. The read lane includes `subscribe`,
+`tasks.list`, `projects.icons`, `providers.list`, `providers.models`, `task.startStatus`,
+`task.cancelStart` (never behind the start it cancels), `task.messages`, `task.team`,
+`task.workerMessages`, `task.attachment`, `task.workspaceImage`, `task.pull`, `task.pullDiff`, `task.pullDetect`,
+`task.changes`, `task.diff` and `bots.list`. Replies may arrive out of order; both the phone
+and desktop client match them by request id. The desktop mirror still copies messages by its
+`afterId` cursor and commits each page before advancing it.
+
+State-changing requests from one peer remain serial and keep their arrival order relative to one
+another. This includes `task.send`, `task.steer`, `task.stop`, `task.configure`,
+`approval.respond`, `input.respond`, `bot.thread`, `bot.message`, `bot.pause` and `task.pullMerge`.
+Each `task.start` runs on its own, so a stop or an answer never waits behind a clone.
+Read requests may run while that ordered lane is busy. The event flush only batches mirror
+events; an RPC reply is placed directly on the socket outbox and does not wait for an event tick.
+
+A request's `ts` and `nonce` are checked when it arrives, not when it runs, so time in the queue
+never makes it expire. A request (other than `task.start`) that waited 18 s or more, past its
+caller's 20 s timeout, is refused instead of run, so a prompt the caller sent again can't run twice.
+
+### Batch requests
+
+`batch` combines 1–8 read-only calls into one request. Calls are validated before running; a
+write method or malformed batch shape rejects the batch, while invalid parameters for one allowed
+call become that call's error. Calls run in the listed order and results stay in the same order.
+The `calls` list cannot contain another `batch`.
+
+For example, opening a task can fetch its newest messages, subscribe for live updates and check
+for a pull request in one phone round trip:
+
+```json
+{
+  "type": "req",
+  "id": "request-id",
+  "method": "batch",
+  "params": {
+    "calls": [
+      { "method": "task.messages", "params": { "sessionId": "task-id", "tail": true } },
+      { "method": "subscribe", "params": { "sessionIds": ["task-id"] } },
+      { "method": "task.pullDetect", "params": { "sessionId": "task-id" } }
+    ]
+  }
+}
+```
+
+The response uses the ordinary outer request id and returns one `{ok, result|error}` entry per
+call:
+
+```json
+{
+  "type": "res",
+  "id": "request-id",
+  "ok": true,
+  "result": {
+    "results": [
+      { "ok": true, "result": { "messages": [], "lastId": null } },
+      { "ok": true, "result": { "tasks": [] } },
+      { "ok": false, "error": "..." }
+    ]
+  }
+}
+```
+
+The combined results fit within the 180 KiB JSON budget, so calls inside a batch get plain-sized
+`task.messages` pages and replays even for a viewer that opens packed frames. If successful results would exceed it,
+the largest entries are returned as per-call errors asking the client to request them separately.
+
+### Host timing and slow paths
+
+Set `PANDACODE_CONNECT_TIMING=1` before launching the desktop app to emit one debug timing line
+per handled request. It includes method, time waiting in the peer queue, handler time, JSON
+serialization time, sealing time, and payload/frame byte counts. `task.start` also reports any
+wait for the global four-start limit. A batch logs its outer queue wait and per-call handler times.
+It logs no task or peer ids.
+
+The request path previously did message-page queries, subscription snapshots, and session/root
+lookups while polling on the async socket worker. Those database operations now use the blocking
+pool; the existing `(session_id, id)` message index already supports paging. Icon generation,
+image reads/transforms, git changes/diff and GitHub detail/diff work already used blocking
+workers. Pull detail and file-diff results are now cached for 30 seconds per session and PR;
+pull-detection results are keyed by the latest message id and linked PR number, and a merge
+invalidates that session's cache. This avoids repeated GitHub CLI work while the inspected task
+state is unchanged.
 
 ## Tauri commands (UI contract)
 
@@ -396,17 +661,18 @@ Requests from one peer are answered in order, except `task.start` (above).
 | `remote_devices` | | `[{ id, name, platform, fingerprint, host, online, lastSeen, current, trusted }]`, from presence (fetched only before the first presence frame) |
 | `remote_set_trusted` | `{ deviceId, trusted }` | the `remote_devices` list. Pins the device's current key for both directions, or removes the pin. |
 | `remote_revoke_device` | `{ deviceId }` | `{}` |
-| `remote_targets` | | `[{ deviceId, name, platform, online }]`: other devices trusted here (so, symmetrically, trusting this one) with hosting on |
+| `remote_targets` | | `[{ deviceId, name, platform, online }]`: other online devices with hosting on |
 | `remote_repo_check` | `{ projectId }` | `{ repo: "owner/name" \| null, branch, ahead, dirty, pushed }`. `repo` is null without a GitHub `origin`; `ahead` is `rev-list --count @{u}..HEAD` (0 without an upstream); `pushed` is whether `origin/<branch>` exists. Local refs only, no network. |
 | `list_providers` | `{ force?, deviceId? }` | as without `deviceId`, from that host (see Model lists) |
 | `list_provider_models` | `{ provider, force?, deviceId? }` | as without `deviceId`, from that host |
-| `remote_start_task` | `{ deviceId, projectId, prompt, provider, model, mode?, effort?, worktree?, branch?, sessionId? }` | the mirror `Session` plus `sessionId`. `branch` defaults to the checkout's. An empty New task draft without its own worktree passed as `sessionId` becomes the mirror; otherwise a new task is made. On failure nothing is left: a new row is deleted, a draft stays a draft. |
+| `remote_start_task` | `{ deviceId, projectId, prompt, provider, model, mode?, effort?, worktree?, branch?, sessionId? }` | the mirror `Session` plus `sessionId`. `branch` defaults to the checkout's. An empty New task draft without its own worktree passed as `sessionId` becomes the mirror; otherwise a new task is made. On failure nothing is left: a new row is deleted, a draft stays a draft. With `startId`, a timeout or a dropped socket keeps the row and returns it (see Starting a task). |
+| `remote_cancel_start` | `{ sessionId }` (the local row) | `{ cancelled }`. Cancels a start that has no host task yet and puts the row back (also when the host can't be reached); `cancelled: false` when the host had already made the task, which then runs as a mirror. |
 
 Window events: `remote://status` (status), `remote://presence` (devices), and for mirrors the
 ordinary `agent-event` and `sessions-changed`.
 
 The agent-event hook in `lib.rs` clones and allocates nothing while hosting is off or nobody
-mirrors that task.
+follows (or followed, since this launch) that task.
 
 ## Privacy
 

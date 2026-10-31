@@ -23,6 +23,8 @@ export type AttachmentsHost = {
   imagesUnsupported?(taskId: string): string | null;
   notify(message: string): void;
   report(error: unknown): void;
+  /** Puts text at the composer's caret; false when there is no prompt to type into. */
+  insertText(text: string): boolean;
   rerender(taskId: string): void;
   menu(anchor: HTMLElement, items: MenuItem[], onSelect: (id: string) => Promise<void>): Promise<void>;
   projectFiles(): void;
@@ -39,7 +41,7 @@ const MAX_INLINE_TEXT = 32768;
 function id(): string { return crypto.randomUUID(); }
 function baseName(path: string): string { return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path; }
 function formatSize(bytes: number): string { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
-function quotePath(path: string): string { return /[\s"\\]/.test(path) ? JSON.stringify(path) : path; }
+export function quotePath(path: string): string { return /[\s"\\]/.test(path) ? JSON.stringify(path) : path; }
 function alreadyAttached(error: unknown): boolean { return String(error instanceof Error ? error.message : error).includes('already attached'); }
 function documentLabel(document: PromptDocument): string {
   if (document.method === 'history') return 'Saved attachment snapshot';
@@ -246,6 +248,8 @@ export function mountPromptAttachments(host: AttachmentsHost) {
           event.preventDefault();
           attachFiles(files, 'drop').catch(host.report);
         });
+        // Tests stand in for the native drop, which delivers paths.
+        window.addEventListener('pandacode-preview-drop', event => { if (accepting()) attachPaths((event as CustomEvent<string[]>).detail, 'unknown', true).catch(host.report); });
         return;
       }
       import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent(event => {

@@ -109,6 +109,7 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   }
   async function navigate(input: string): Promise<void> {
     const url = normalizeUrl(input);
+    if (linuxBrowser() && !preview) { await call('open_external_url', { url }); if (!disposed) { address.value = ''; tell(EXTERNAL_NOTICE); } return; }
     options.navigated?.(url);
     live?.leave();
     busy = true; tell(''); updateControls();

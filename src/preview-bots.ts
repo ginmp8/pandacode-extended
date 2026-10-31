@@ -1,6 +1,7 @@
 /** Browser preview for bots: in-memory sample data, no network, no channels. Native builds use src-tauri/src/bots. */
-import type { Activity, Bot, BotDetail, BotInput, Channel, Memory, Pairing, Rule, Schedule, Thread } from './bots';
+import type { Activity, Bot, BotDetail, BotInput, Channel, FailoverAsk, Memory, Pairing, Rule, Schedule, Thread } from './bots';
 import type { Project, Session } from './types';
+import type { SharedChannelDetail, SharedChannelMessage, SharedChannelSummary } from './bot-shared-channels';
 
 export interface PreviewBotsHost {
   invoke<T>(command: string, args: Record<string, any>): Promise<T>;
@@ -13,7 +14,11 @@ export interface PreviewBotsHost {
 }
 interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; activity: Activity[] }
 const bots = new Map<string, Store>();
+const failoverAsks = new Map<string, FailoverAsk>();
+const sharedChannels = new Map<string, SharedChannelDetail>();
 let activityId = 1;
+/** Ordinary tasks started with a bot, and those that have had its brief. */
+
 const MINUTE = 60_000;
 const MODES = ['ask', 'auto', 'review', 'plan', 'full'];
 const taskBots = new Map<string, string>();
@@ -103,15 +108,55 @@ async function lastMessage(host: PreviewBotsHost, sessionId: string): Promise<Bo
   const page = await host.invoke<{ messages: { role: string; content: string; createdAt?: number; created_at?: number }[] }>('get_messages', { sessionId }).catch(() => null);
   const latest = [...(page?.messages ?? [])].reverse().find(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim());
   if (!latest) return null;
-  const line = latest.content.replace(/[*_`#>]/g, '').split(/\s+/).filter(Boolean).join(' ');
+  const line = latest.content.split(/\n\nBot brief:/)[0].replace(/[*_`#>]/g, '').split(/\s+/).filter(Boolean).join(' ');
   return { role: latest.role as 'user' | 'assistant', text: [...line].length > 160 ? [...line].slice(0, 160).join('') + '…' : line, at: latest.createdAt ?? latest.created_at ?? Date.now() };
+}
+
+const params = typeof location === 'undefined' ? new URLSearchParams() : new URLSearchParams(location.search);
+let sampled = false;
+let sampleChannelSeeded = false;
+/** Sample threads that look busy (their work is simulated by events, not a preview run), so a message waits in the queue as it would natively. */
+const sampleBusy = new Set<string>();
+/** Sample threads that show as working without a preview run behind them. */
+export const previewBotBusy = (sessionId: string): boolean => sampleBusy.has(sessionId);
+/** `?bots=sample` starts with four bots, one in each sidebar state: waiting for approval, working,
+ *  at a usage limit, and paused. `?botsDelay=ms` holds the first list, to show the loading rows. */
+async function seedSamples(host: PreviewBotsHost): Promise<void> {
+  if (sampled || params.get('bots') !== 'sample') return;
+  sampled = true;
+  const base = { instructions: 'Sample bot.', goals: '', provider: 'claude', model: 'sonnet', mode: 'ask', heartbeatMinutes: 0 };
+  const make = (name: string, role: string, avatar: string, profile: Partial<BotInput> = {}) => invokeBots<Bot>('bot_create', { input: { ...base, name, role, avatar, ...profile } }, host);
+  const [waiting, working, limited, paused] = await Promise.all([make('Scout', 'Research', 'panda:5'), make('Writer', 'Drafts posts', 'panda:4'), make('Ledger', 'Finance', 'panda:7', { color: '#14b8a6', reasoningEffort: 'high', backupModels: [{ provider: 'codex', model: 'gpt-5' }], fallbackMode: 'auto', notify: false, whileWorking: 'steer', showPlan: true }), make('Dozy', 'Night shift', 'panda:8')]);
+  if (!sampleChannelSeeded) {
+    sampleChannelSeeded = true;
+    const at = Date.now();
+    sharedChannels.set('sample-launch', { id: 'sample-launch', name: 'launch', memberIds: [waiting.id, working.id, limited.id, paused.id], leadBotId: waiting.id, archived: false, updatedAt: at, activeBotIds: [], messages: [] });
+  }
+  await invokeBots('bot_set_paused', { botId: paused.id, paused: true }, host);
+  const [ask, busy, capped] = await Promise.all([waiting, working, limited].map(bot => invokeBots<string>('bot_desktop_thread', { botId: bot.id }, host)));
+  sampleBusy.add(ask); sampleBusy.add(busy);
+  // Once the window has the new threads, they report live work like real runs do.
+  window.setTimeout(() => {
+    host.emit('agent-event', { sessionId: ask, kind: 'approval', requestId: 'sample-approval', text: 'Run `curl https://example.com`?' });
+    host.emit('agent-event', { sessionId: busy, kind: 'status', text: 'Working…' });
+    host.emit('agent-event', { sessionId: capped, kind: 'limited', text: 'Usage limit reached', data: { resetsAt: Date.now() + 3 * 3_600_000 } });
+  }, 600);
+}
+
+/** Stops a sample channel's work (only `botIds`' assignments, when given), as Stop, archive and member removal do natively. */
+function stopChannelWork(channel: SharedChannelDetail, botIds?: string[]): void {
+  const mine = (item: SharedChannelDetail['messages'][number]) => !botIds || botIds.includes(item.authorBotId ?? '');
+  for (const marker of channel.messages.filter(item => item.kind === 'assigned' && (item.status === 'In progress' || item.status === 'Queued') && mine(item))) marker.status = 'Stopped';
+  const latest = [...channel.messages].reverse().find(item => item.kind === 'user' && item.status === 'In progress');
+  channel.activeBotIds = channel.activeBotIds.filter(id => botIds && !botIds.includes(id));
+  if (latest && !channel.activeBotIds.length) latest.status = 'Stopped';
 }
 
 export async function invokeBots<T>(command: string, args: Record<string, any>, host: PreviewBotsHost): Promise<T> {
   const changed = () => host.emit('bots-changed', null);
   let result: unknown = null;
   switch (command) {
-    case 'bots_list': result = await Promise.all([...bots.values()].map(async entry => {
+    case 'bots_list': await seedSamples(host); if (params.has('botsDelay')) await new Promise(done => window.setTimeout(done, Number(params.get('botsDelay')) || 0)); result = await Promise.all([...bots.values()].map(async entry => {
       const desktopSession = entry.threads.find(thread => thread.channelId === 'desktop')?.sessionId ?? null;
       return { ...structuredClone(entry.bot), desktopSession, lastMessage: desktopSession ? await lastMessage(host, desktopSession) : null };
     })); break;
@@ -127,7 +172,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const input = validate(args.input);
       const id = crypto.randomUUID(), now = Date.now();
       const project = host.addProject(input.name);
-      const bot: Bot = { ...input, mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
+      const bot: Bot = { ...input, soul: input.soul ?? '', color: input.color ?? '', reasoningEffort: input.reasoningEffort ?? '', backupModels: input.backupModels ?? [], fallbackMode: input.fallbackMode ?? 'ask', notify: input.notify ?? true, whileWorking: input.whileWorking ?? 'queue', showPlan: input.showPlan ?? false, skills: [], mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
       const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [] };
       log(entry, 'created', `Created ${bot.name}`);
       bots.set(id, entry); result = structuredClone(bot); changed(); break;
@@ -142,7 +187,13 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const entry = store(args.botId), values = args.mcp;
       if (!Array.isArray(values) || values.length > 50 || values.some(value => typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value.trim()).length > 100 || /[\x00-\x1f\x7f]/.test(value))) throw new Error('Use up to 50 bounded MCP server names.');
       const mcp = [...new Set<string>(values.map(value => value.trim()))];
-      if (JSON.stringify(mcp) !== JSON.stringify(entry.bot.mcp)) entry.bot = { ...entry.bot, mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      if (args.skills !== undefined) {
+        const skills = args.skills;
+        if (!Array.isArray(skills) || skills.length > 50 || skills.some(value => typeof value !== 'string' || !/^[a-z0-9-]{1,64}$/.test(value))) throw new Error('Use up to 50 library skill identifiers.');
+        entry.bot = { ...entry.bot, skills: [...new Set<string>(skills)], mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      } else if (JSON.stringify(mcp) !== JSON.stringify(entry.bot.mcp)) {
+        entry.bot = { ...entry.bot, mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      }
       result = structuredClone(entry.bot); changed(); break;
     }
     case 'bot_assign_task': {
@@ -187,6 +238,14 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       briefed.set(thread.sessionId, entry.bot.memoryVersion);
       await host.invoke('send_message', { sessionId: thread.sessionId, text: text + brief, imageIds: [], moodboardIds: [] });
       result = thread.sessionId; changed(); break;
+    }
+    case 'bot_task_brief': {
+      // Preview tasks use the same version-bound, read-only profile as native task admission.
+      const botId = taskBots.get(args.sessionId);
+      const bot = botId ? store(botId).bot : null;
+      if (!bot || taskBriefVersions.get(args.sessionId) === bot.memoryVersion) { result = null; break; }
+      taskBriefVersions.set(args.sessionId, bot.memoryVersion);
+      result = profileBrief(bot, true); break;
     }
     case 'bot_schedule_create': {
       const entry = store(args.botId); const input = args.input ?? {};

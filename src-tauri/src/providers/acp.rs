@@ -25,9 +25,10 @@ fn transport_error(pipe: &Pipe, stage: &str) -> String {
 /// Shown when Grok Build has no usable cached credentials.
 pub(super) const GROK_SIGN_IN: &str =
     "Grok Build is not signed in. Run `grok login` in a terminal, then send again.";
-/// Grok Build has no read-only session mode over ACP; plan mode is enforced by
-/// declining state-changing permission requests and telling the model up front.
-pub(super) const GROK_PLAN_PREFIX: &str = "Plan mode is on for this session: work read-only. Investigate with read-only tools, then reply with a concrete, step-by-step plan. Do not edit files or run commands that change state; requests to do so will be declined.";
+/// For ACP harnesses with no read-only session mode (Grok Build, DeepSeek, Muse,
+/// Hermes): plan mode is enforced by declining state-changing permission requests
+/// and telling the model up front with this prefix.
+pub(super) const READ_ONLY_PLAN_PREFIX: &str = "Plan mode is on for this session: work read-only. Investigate with read-only tools, then reply with a concrete, step-by-step plan. Do not edit files or run commands that change state; requests to do so will be declined.";
 
 /// DeepSeek Harness serves ACP from its `acp` profile.
 pub(super) const DEEPSEEK_ARGS: [&str; 2] = ["--profile", "acp"];
@@ -107,7 +108,8 @@ pub(super) fn configuration(mode: &str) -> String {
     let permission = match mode {
         "full" => json!({"*":"allow"}),
         "auto" => json!({"*":"ask","read":"allow","glob":"allow","grep":"allow","edit":"allow"}),
-        "plan" => json!({"*":"deny","read":"allow","glob":"allow","grep":"allow","lsp":"allow"}),
+        // Investigation stays open: web lookups run; reads outside the project ask.
+        "plan" => json!({"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","webfetch":"allow","websearch":"allow","external_directory":"ask"}),
         _ => json!({"*":"ask","read":"allow","glob":"allow","grep":"allow"}),
     };
     // Inline settings have the highest documented precedence and are private
@@ -240,9 +242,11 @@ impl Protocol {
                         if self.mcp_required {
                             return Err("This harness does not advertise HTTP MCP support required for PandaCode tools. Update its ACP server.".into());
                         }
-                        // Title suggestions are optional metadata. Older ACP
-                        // agents can continue normally using the local fallback.
+                        // Title suggestions and host tools are optional capabilities.
+                        // Older ACP agents or harnesses without HTTP MCP can continue
+                        // normally using the local fallback.
                         self.mcp_server = None;
+                        self.mcp_tool_names.clear();
                     }
                     let mut params = json!({"cwd":launch::external_path(&self.config.cwd),"mcpServers":self.mcp_server.iter().collect::<Vec<_>>()});
                     let method = if self.remote_id.is_empty() {
@@ -386,10 +390,10 @@ impl Protocol {
                     return Ok(step);
                 }
             }
-            // Read and search requests keep the ordinary approval path, as in Standard mode.
+            // Read, search and fetch requests keep the ordinary approval path, as in Standard mode.
             if copilot
                 && self.config.mode == "plan"
-                && !matches!(field(&value["params"]["toolCall"], "kind"), "read" | "search")
+                && !matches!(field(&value["params"]["toolCall"], "kind"), "read" | "search" | "fetch")
             {
                 let tool = &value["params"]["toolCall"];
                 let kind = field(tool, "kind");
@@ -738,14 +742,14 @@ impl Protocol {
 /// Grok Build lists its models, context sizes and reasoning efforts in the
 /// `initialize` result, so discovery never has to create a session.
 pub(super) async fn grok_models(path: &Path) -> Result<Vec<ModelInfo>, String> {
-    let mut command = super::command(path)?;
+    let mut command = super::provider_command("grok", path)?;
     command.args(["--no-auto-update", "agent", "stdio"]);
     let capabilities = handshake(command, &std::env::temp_dir()).await?;
     let models = parse_grok_models(&capabilities["_meta"]["modelState"]);
     if models.len() > 1 {
         return Ok(models);
     }
-    let mut command = super::command(path)?;
+    let mut command = super::provider_command("grok", path)?;
     command.args(["--no-auto-update", "agent", "stdio"]);
     let (metadata, _) = inspect_with(command, &std::env::temp_dir(), false, true).await?;
     Ok(parse_models(&metadata))
@@ -825,7 +829,7 @@ pub(super) async fn models(path: &Path) -> Result<Vec<ModelInfo>, String> {
     if let Some(models) = super::acp_catalog::get("antigravity", path) { return Ok(models); }
     let discovery = super::acp_catalog::begin("antigravity", path);
     #[allow(unused_mut)]
-    let mut command = super::command(path)?;
+    let mut command = super::provider_command("antigravity", path)?;
     #[cfg(target_os = "linux")]
     command.arg("--uid=");
     let (metadata, _) = inspect(command, &std::env::temp_dir(), false).await?;
@@ -833,6 +837,10 @@ pub(super) async fn models(path: &Path) -> Result<Vec<ModelInfo>, String> {
     Ok(parse_models(&metadata))
 }
 pub(crate) fn parse_models(metadata: &Value) -> Vec<ModelInfo> {
+    parse_models_for("antigravity", metadata)
+}
+
+pub(crate) fn parse_models_for(provider: &str, metadata: &Value) -> Vec<ModelInfo> {
     let mut models = vec![ModelInfo::default_choice()];
     if let Some(option) = options(metadata, "model") {
         for choice in choices(option) {
@@ -865,13 +873,16 @@ pub(crate) fn parse_models(metadata: &Value) -> Vec<ModelInfo> {
             });
         }
     }
-    // Reasoning options describe the current model, never claim they apply to all.
+    // dsh shares its effort option across models. Other ACP harnesses report
+    // choices for the current model only.
     let current = options(metadata, "model")
         .map(|option| field(option, "currentValue"))
         .unwrap_or_else(|| field(&metadata["models"], "currentModelId"));
     if let Some(effort) = options(metadata, "thought_level").or_else(|| options(metadata, "effort"))
     {
-        if let Some(model) = models.iter_mut().find(|model| model.id == current) {
+        for model in models.iter_mut().filter(|model| {
+            model.id == current || (provider == "deepseek" && model.id != "default")
+        }) {
             model.reasoning_efforts = choices(effort)
                 .into_iter()
                 .filter_map(|choice| {
@@ -1022,7 +1033,7 @@ pub async fn provider_check_connection(provider: String) -> Result<ConnectionSta
     let Some(path) = super::executable(&provider).filter(|path| path.is_file()) else {
         return Ok(ConnectionStatus { installed: false, acp_ready: false, session_ready: false, state: "missing", message: "Select the installed official Antigravity ACP server executable.".into() });
     };
-    let command = match super::command(&path) {
+    let command = match super::provider_command(&provider, &path) {
         Ok(command) => command,
         Err(message) => return Ok(connection_status(Err(DiscoveryFailure { acp_ready: false, authentication_required: false, message }))),
     };
@@ -1357,12 +1368,12 @@ mod tests {
         }
     }
     #[test]
-    fn copilot_plan_mode_sends_read_and_search_through_normal_approval() {
+    fn copilot_plan_mode_sends_read_search_and_fetch_through_normal_approval() {
         let mut cfg = config("github-copilot");
         cfg.mode = "plan".into();
         let mut p = Protocol::new(cfg);
         p.remote_id = "copilot-session".into();
-        for kind in ["read", "search"] {
+        for kind in ["read", "search", "fetch"] {
             let request = json!({"jsonrpc":"2.0","id":"permission","method":"session/request_permission","params":{"sessionId":"copilot-session","toolCall":{"title":"Requested action","kind":kind},"options":[{"optionId":"yes","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]}});
             let step = p.receive(request).unwrap();
             assert!(step.write.is_empty(), "{kind} must wait for the user");
@@ -1660,7 +1671,7 @@ mod tests {
     #[test]
     fn grok_plan_mode_prefixes_the_prompt_and_declines_state_changing_permissions() {
         let (mut p, text) = grok_ready("plan");
-        assert!(text.starts_with(GROK_PLAN_PREFIX));
+        assert!(text.starts_with(READ_ONLY_PLAN_PREFIX));
         assert!(text.ends_with("Explain this project"));
         let step = p.receive(grok_permission("edit", false)).unwrap();
         assert_eq!(step.write[0]["result"]["outcome"]["optionId"], "reject-once");
@@ -1961,10 +1972,167 @@ mod tests {
         let value: Value = serde_json::from_str(inline.to_str().unwrap()).unwrap();
         assert_eq!(value["permission"]["*"], "deny");
         assert_eq!(value["permission"]["read"], "allow");
+        for (tool, expected) in [("webfetch", "allow"), ("websearch", "allow"), ("list", "allow"), ("external_directory", "ask"), ("edit", "deny"), ("bash", "deny")] {
+            let actual = value["permission"].get(tool).unwrap_or(&value["permission"]["*"]);
+            assert_eq!(actual, expected, "{tool}");
+        }
         assert_eq!(value["agent"]["plan"]["permission"]["*"], "deny");
         let mut c = Command::new("agy_acp_server.par");
         configure(&mut c, &config("antigravity"));
         assert!(!c.as_std().get_args().any(|arg| arg == "acp"));
+        let mut c_hermes = Command::new("hermes");
+        configure(&mut c_hermes, &config("hermes"));
+        assert!(c_hermes.as_std().get_args().any(|arg| arg == "acp"));
+    }
+
+    #[test]
+    fn hermes_storage_unavailable_reports_setup_and_model_guidance() {
+        let mut p = Protocol::new(config("hermes"));
+        assert_eq!(p.initial()["method"], "initialize");
+        let step = p.receive(capabilities()).unwrap();
+        assert_eq!(step.write[0]["method"], "session/new");
+        let error = p.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {
+                "code": -32603,
+                "message": "Internal error",
+                "data": { "details": "storage_unavailable" }
+            }
+        })).err().unwrap();
+        assert!(error.contains("Hermes Agent is not configured with a default model"));
+        assert!(error.contains("hermes model"));
+    }
+
+    #[test]
+    fn hermes_provider_not_configured_reports_provider_guidance() {
+        let mut p = Protocol::new(config("hermes"));
+        assert_eq!(p.initial()["method"], "initialize");
+        let step = p.receive(capabilities()).unwrap();
+        assert_eq!(step.write[0]["method"], "session/new");
+        let error = p.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "error": {
+                "code": -32603,
+                "message": "Internal error",
+                "data": "admitted_turn_failed\nagent.auxiliary_unavailable.ProviderNotConfiguredError: No LLM provider configured."
+            }
+        })).err().unwrap();
+        assert!(error.contains("Hermes Agent has no inference provider configured"));
+        assert!(error.contains("model.provider"));
+    }
+
+    #[test]
+    fn hermes_full_access_sets_yolo_env_and_selects_dont_ask_mode() {
+        let mut cfg = config("hermes");
+        cfg.mode = "full".into();
+        let mut c = Command::new("hermes");
+        configure(&mut c, &cfg);
+        assert_eq!(c.as_std().get_envs().find(|(k, _)| *k == "HERMES_YOLO_MODE").unwrap().1.unwrap(), "1");
+
+        let mut p = Protocol::new(cfg);
+        assert_eq!(p.initial()["method"], "initialize");
+        p.receive(capabilities()).unwrap();
+        let session = json!({
+            "sessionId": "hermes-123",
+            "modes": {
+                "availableModes": [
+                    { "id": "default", "name": "Default" },
+                    { "id": "accept_edits", "name": "Accept Edits" },
+                    { "id": "dont_ask", "name": "Don't Ask" }
+                ],
+                "currentModeId": "default"
+            }
+        });
+        let step = p.receive(response(2, session)).unwrap();
+        assert_eq!(step.write[0]["method"], "session/set_mode");
+        assert_eq!(step.write[0]["params"]["modeId"], "dont_ask");
+    }
+
+    #[test]
+    fn hermes_specific_errors_not_masked_by_code_32000() {
+        let mut p = Protocol::new(config("hermes"));
+        assert_eq!(p.initial()["method"], "initialize");
+        let step = p.receive(capabilities()).unwrap();
+        assert_eq!(step.write[0]["method"], "session/new");
+        let error = p.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "error": {
+                "code": -32000,
+                "message": "Server error",
+                "data": "agent.auxiliary_unavailable.ProviderNotConfiguredError: No LLM provider configured."
+            }
+        })).err().unwrap();
+        assert!(error.contains("Hermes Agent has no inference provider configured"), "{error}");
+
+        let mut p2 = Protocol::new(config("hermes"));
+        p2.receive(capabilities()).unwrap();
+        let error2 = p2.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "error": {
+                "code": -32000,
+                "message": "Key limit exceeded",
+                "data": "Key limit exceeded (total limit)"
+            }
+        })).err().unwrap();
+        assert!(error2.contains("API key quota or credit limit exceeded"), "{error2}");
+    }
+
+    #[test]
+    fn hermes_plan_mode_declines_state_changing_tools_and_allows_reads() {
+        let mut cfg = config("hermes");
+        cfg.mode = "plan".into();
+        cfg.prompt = "Audit the codebase".into();
+        let mut p = Protocol::new(cfg);
+        p.remote_id = "hermes-session-plan".into();
+        let mut prompt_step = Step::default();
+        p.kimi_prompt(&mut prompt_step);
+        let prompt_text = prompt_step.write[0]["params"]["prompt"][0]["text"].as_str().unwrap();
+        assert!(prompt_text.starts_with(READ_ONLY_PLAN_PREFIX));
+
+        let edit_req = json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "hermes-session-plan",
+                "toolCall": {
+                    "toolCallId": "call-1",
+                    "title": "Edit src/main.rs",
+                    "kind": "edit"
+                },
+                "options": [
+                    { "optionId": "allow", "kind": "allow_once" },
+                    { "optionId": "reject", "kind": "reject_once" }
+                ]
+            }
+        });
+        let edit_step = p.receive(edit_req).unwrap();
+        assert_eq!(edit_step.write[0]["result"]["outcome"]["optionId"], "reject");
+        assert!(edit_step.events.iter().any(|e| e.kind == "status" && e.text.contains("Plan mode declined")));
+
+        let read_req = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "hermes-session-plan",
+                "toolCall": {
+                    "toolCallId": "call-2",
+                    "title": "Read Cargo.toml",
+                    "kind": "read"
+                },
+                "options": [
+                    { "optionId": "allow", "kind": "allow_once" },
+                    { "optionId": "reject", "kind": "reject_once" }
+                ]
+            }
+        });
+        let read_step = p.receive(read_req).unwrap();
+        assert_eq!(read_step.write[0]["result"]["outcome"]["optionId"], "allow");
     }
     #[test]
     fn glm_explicit_model_remains_a_cli_override_and_default_is_real_glm() {
@@ -2032,7 +2200,7 @@ mod tests {
         assert_eq!(prompt["id"], 3);
         assert_eq!(prompt["params"]["sessionId"], p.remote_id);
         let text = prompt["params"]["prompt"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with(GROK_PLAN_PREFIX) && text.ends_with("use the parser\n\nand add tests"), "{text}");
+        assert!(text.starts_with(READ_ONLY_PLAN_PREFIX) && text.ends_with("use the parser\n\nand add tests"), "{text}");
         let delivered: Vec<_> = steer_statuses(&step).into_iter().map(|(id, status, _)| (id, status)).collect();
         assert_eq!(delivered, [("s1".into(), "delivered".into()), ("s2".into(), "delivered".into())]);
 

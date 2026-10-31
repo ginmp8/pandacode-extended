@@ -31,6 +31,8 @@ const JOURNAL_EVENTS: usize = 2000;
 const JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 const JOURNAL_TOTAL: usize = 32 * 1024 * 1024;
 const JOURNAL_TASKS: usize = 2048;
+/// Completed streams expire after ten minutes without a viewer, retaining bounded replay.
+const JOURNAL_IDLE: Duration = Duration::from_secs(10 * 60);
 /// The part of a subscribe reply that replayed events may fill; the rest comes in later
 /// pages (`more`), each another subscribe from where the viewer now is.
 const REPLAY_BUDGET: usize = PAGE_BUDGET / 3;
@@ -69,20 +71,12 @@ const MAX_BUFFER: usize = 4096;
 const LAGGED: &str = "lagged";
 const CUT: &str = "\n…[cut on the host to fit a remote page]";
 /// Harness ids `providers.models` accepts (the same list `storage` allows).
-pub(crate) const PROVIDERS: [&str; 17] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin"];
+pub(crate) const PROVIDERS: [&str; 19] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "zcode", "hermes"];
 
-pub(crate) fn untrusted(host_name: &str) -> String {
-    format!("This computer isn't trusted on {host_name}. Trust it in Settings → Remote access on that computer.")
-}
-
-/// Hosting must be on, and the frame must have been sealed with the caller's pinned key.
+/// Presence is not authorization: every ordinary request requires a pinned current key.
 pub(crate) fn gate(host_enabled: bool, trusted: bool, host_name: &str) -> Result<()> {
-    if !host_enabled {
-        return Err(OFF.into());
-    }
-    if !trusted {
-        return Err(untrusted(host_name));
-    }
+    if !host_enabled { return Err(OFF.into()); }
+    if !trusted { return Err(format!("This computer isn't trusted on {host_name}. Trust it in Settings → Remote access on that computer.")); }
     Ok(())
 }
 
@@ -1200,6 +1194,13 @@ fn team_event_cache() -> &'static StdMutex<HashMap<String, HashMap<String, Value
     CACHE.get_or_init(Default::default)
 }
 
+fn forget_unfollowed_teams(inner: &super::Inner) {
+    team_event_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|session, _| inner.subscribers.values().any(|s| s.sessions.contains(session)));
+}
+
 fn queue_team_event(app: &tauri::AppHandle, session_id: &str, data: Value) {
     journaled(app, session_id, team_event_value(session_id, data), Queue::Event);
 }
@@ -1705,7 +1706,8 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotMessage { bot_id, text } => {
-            let session_id = crate::bots::bot_message(app.clone(), bot_id, text).await?;
+            require_method(app, from, authenticated_key, "bot.message")?;
+            let session_id = crate::bots::bot_message(app.clone(), bot_id, text, None, None, None).await?;
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotPause { bot_id, paused } => {
@@ -1842,11 +1844,12 @@ pub(crate) struct Journal {
     seq: u64,
     bytes: usize,
     rings: HashMap<String, Ring>,
+    sweeping: bool,
 }
 
 impl Default for Journal {
     fn default() -> Self {
-        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new() }
+        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new(), sweeping: false }
     }
 }
 
@@ -1857,6 +1860,8 @@ struct Ring {
     /// The newest `seq` dropped to stay in bounds.
     dropped: u64,
     bytes: usize,
+    touched: Option<Instant>,
+    finished: bool,
     events: std::collections::VecDeque<(u64, usize, Value)>,
 }
 
@@ -1878,21 +1883,55 @@ pub(crate) struct Resumed {
 impl Journal {
     /// Starts recording a task's events, unless it already is.
     fn watch(&mut self, session: &str) {
-        if self.rings.contains_key(session) {
+        let now = Instant::now();
+        if let Some(ring) = self.rings.get_mut(session) {
+            ring.touched = Some(now);
             return;
         }
+        self.sweep(now);
         if self.rings.len() >= JOURNAL_TASKS {
             let quiet = self.rings.iter().min_by_key(|(_, ring)| ring.events.back().map_or(ring.since, |(seq, ..)| *seq)).map(|(id, _)| id.clone());
             if let Some(ring) = quiet.and_then(|id| self.rings.remove(&id)) {
                 self.bytes -= ring.bytes;
             }
         }
-        self.rings.insert(session.to_owned(), Ring { since: self.seq, ..Default::default() });
+        self.rings.insert(session.to_owned(), Ring { since: self.seq, touched: Some(now), ..Default::default() });
+    }
+
+    /// Arm one delayed sweep only when a completed stream is eligible for expiry.
+    fn arm(&mut self, now: Instant) -> Option<Duration> {
+        if self.sweeping {
+            return None;
+        }
+        let due = self.rings.values().filter(|ring| ring.finished).filter_map(|ring| ring.touched.map(|time| time + JOURNAL_IDLE)).min()?;
+        self.sweeping = true;
+        Some(due.saturating_duration_since(now))
+    }
+
+    fn fire(&mut self, now: Instant) -> Option<Duration> {
+        self.sweeping = false;
+        self.sweep(now);
+        self.arm(now)
+    }
+
+    /// Keep active streams; evict completed streams only after their last subscription.
+    fn sweep(&mut self, now: Instant) {
+        let bytes = &mut self.bytes;
+        self.rings.retain(|_, ring| {
+            let keep = !ring.finished || ring.touched.is_some_and(|last| now.saturating_duration_since(last) < JOURNAL_IDLE);
+            if !keep {
+                *bytes -= ring.bytes;
+            }
+            keep
+        });
     }
 
     /// Numbers and keeps an event of a recorded (or, with `subscribed`, newly recorded)
     /// task; the event as sent, with its `seq`, or None when nobody follows the task.
     fn record(&mut self, session: &str, mut event: Value, subscribed: bool) -> Option<Value> {
+        let now = Instant::now();
+        let finished = event["kind"] == "run.finished";
+        if finished { self.sweep(now); }
         if !self.rings.contains_key(session) {
             if !subscribed {
                 return None;
@@ -1903,6 +1942,8 @@ impl Journal {
         event["seq"] = json!(self.seq);
         let size = event.to_string().len();
         let ring = self.rings.get_mut(session)?;
+        if subscribed || finished { ring.touched = Some(now); }
+        ring.finished = finished;
         ring.events.push_back((self.seq, size, event.clone()));
         ring.bytes += size;
         self.bytes += size;
@@ -2769,13 +2810,17 @@ pub(crate) fn messages_page_with(db: &rusqlite::Connection, session_id: &str, pa
         if message.to_string().len() > MAX_MESSAGE {
             fit_message(&mut message);
         }
-        let size = message.to_string().len() + 1;
-        // The first message always fits: once cut it is under the budget.
-        if size > room && !kept.is_empty() {
+        let mut extra = json!({"subagents": children});
+        if truncated {
+            extra["subagentsTruncated"] = json!(true);
+        }
+        let added = extra.to_string().len();
+        if size + added > PAGE_BUDGET {
             break;
         }
-        room = room.saturating_sub(size);
-        kept.push(message);
+        let Some(task) = reply["tasks"].as_array_mut().and_then(|tasks| tasks.iter_mut().find(|task| task["sessionId"] == id.as_str())) else { continue };
+        task.as_object_mut().into_iter().for_each(|task| task.extend(extra.as_object().cloned().unwrap_or_default()));
+        size += added;
     }
     if newest_first {
         kept.reverse();
@@ -2877,11 +2922,15 @@ pub(crate) fn follow(app: &tauri::AppHandle, device: &str, authenticated_key: &s
     Ok(())
 }
 
-/// Drops subscribers that expired, left the account or lost trust; true if any remain.
+/// Drops expired subscribers and devices no longer in presence; true if any remain.
 fn prune_subscribers(inner: &mut super::Inner, now: Instant) -> bool {
-    let super::Inner { subscribers, devices, settings, .. } = inner;
-    subscribers.retain(|id, subscriber| subscriber.until.is_some_and(|until| until > now) && devices.iter().any(|d| &d.id == id && settings.is_trusted(id, &d.public_key)));
-    !subscribers.is_empty()
+    let super::Inner { subscribers, devices, .. } = inner;
+    let before = subscribers.len();
+    subscribers.retain(|id, subscriber| subscriber.until.is_some_and(|until| until > now) && devices.iter().any(|d| &d.id == id));
+    if inner.subscribers.len() < before {
+        forget_unfollowed_teams(inner);
+    }
+    !inner.subscribers.is_empty()
 }
 
 /// Numbers an event, keeps it for viewers that come back, and queues it for every device
@@ -2926,9 +2975,27 @@ fn followed(inner: &super::Inner, session_id: &str) -> Option<bool> {
 /// that comes back gets it in its replay too.
 fn journaled(app: &tauri::AppHandle, session_id: &str, value: Value, queue: Queue) {
     let Some(state) = app.try_state::<super::Remote>() else { return };
-    let delay = journal_and_enqueue(&mut state.lock(), session_id, value, queue);
+    let (delay, sweep) = {
+        let mut inner = state.lock();
+        let delay = journal_and_enqueue(&mut inner, session_id, value, queue);
+        (delay, inner.journal.arm(Instant::now()))
+    };
     if let Some(delay) = delay {
         tauri::async_runtime::spawn(flush(app.clone(), delay));
+    }
+    if let Some(sweep) = sweep {
+        tauri::async_runtime::spawn(sweep_later(app.clone(), sweep));
+    }
+}
+
+/// Sweeps the journal when its first finished ring goes idle, so an idle host does not keep
+/// rings after the last run ends; one task, re-armed only while finished rings remain.
+async fn sweep_later(app: tauri::AppHandle, mut delay: Duration) {
+    loop {
+        tokio::time::sleep(delay).await;
+        let Some(state) = app.try_state::<super::Remote>() else { return };
+        let Some(next) = state.lock().journal.fire(Instant::now()) else { return };
+        delay = next;
     }
 }
 
@@ -2971,13 +3038,20 @@ fn enqueue(inner: &mut super::Inner, session_id: &str, mut add: impl FnMut(&mut 
 }
 
 /// The first event after a quiet spell goes at once (a turn's first delta shows without
-/// waiting); events right behind it are gathered for [`FLUSH`], and once a burst has sent
-/// `frames` frames, for [`SUSTAINED`].
+/// waiting); events right behind it wait out the rest of [`FLUSH`] since `last`, and once a
+/// burst has sent `frames` frames, of [`SUSTAINED`]. `last` is when the last flush's frames
+/// are paid for ([`paid_until`]), so several viewers share the relay's frames/s.
 pub(crate) fn flush_delay(last: Option<Instant>, frames: u32, now: Instant) -> Duration {
     match last {
-        Some(at) if now.saturating_duration_since(at) < SUSTAINED => if frames < BURST_FRAMES { FLUSH } else { SUSTAINED },
+        Some(at) if now < at + SUSTAINED => (at + if frames < BURST_FRAMES { FLUSH } else { SUSTAINED }).saturating_duration_since(now),
         _ => Duration::ZERO,
     }
+}
+
+/// When a flush that sent `sent` frames at `now` is paid for: past the burst every frame
+/// after the first takes [`SUSTAINED`] of the socket's budget.
+pub(crate) fn paid_until(now: Instant, frames: u32, sent: u32) -> Instant {
+    if frames < BURST_FRAMES { now } else { now + SUSTAINED * sent.saturating_sub(1) }
 }
 
 /// Sends each subscriber one `agent.events` frame (more only past the frame budget),
@@ -3030,7 +3104,7 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
             let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
         }
         for data in finished {
-            let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
+            let _ = socket::send_to_device(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
         }
     }
     if !amended.is_empty() {
@@ -3082,12 +3156,19 @@ fn shrink(value: &mut Value, max: usize) {
 
 /// Cuts one oversized message. JSON content (tool calls) is cut inside, so it still parses.
 fn cut(message: &mut Value) {
+    cut_to(message, MAX_MESSAGE);
+}
+
+fn cut_to(message: &mut Value, max: usize) {
+    if message.to_string().len() <= max {
+        return;
+    }
     let parsed = message["content"].as_str().and_then(|content| serde_json::from_str::<Value>(content).ok()).filter(Value::is_object);
     if let Some(mut content) = parsed {
-        shrink(&mut content, MAX_MESSAGE * 3 / 4);
+        shrink(&mut content, max * 3 / 4);
         message["content"] = json!(content.to_string());
     }
-    shrink(message, MAX_MESSAGE);
+    shrink(message, max);
 }
 
 #[cfg(test)]
@@ -4372,12 +4453,188 @@ mod extended_security_tests {
         assert!(parse(true, "task.send", &json!({"sessionId": "s1", "text": "  "})).is_err());
         assert!(parse(true, "task.messages", &json!({"sessionId": "a\nb"})).is_err());
         assert!(parse(true, "task.stop", &json!({})).is_err());
+        let image_id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(parse(true, "task.attachment", &json!({"sessionId":"s1","id":image_id,"variant":"thumb"})), Ok(Call::Attachment { offset: 0, .. })));
+        assert!(parse(true, "task.attachment", &json!({"sessionId":"s1","id":"../../secret","variant":"full"})).is_err());
+        assert!(parse(true, "task.workspaceImage", &json!({"sessionId":"s1","path":"../secret.png","variant":"thumb"})).is_err());
+        assert!(parse(true, "task.workspaceImage", &json!({"sessionId":"s1","path":"src/pic.png","variant":"full","offset":-1})).is_err());
         assert!(parse(true, "approval.respond", &json!({"sessionId": "s", "requestId": "r"})).is_err());
         assert!(parse(true, "input.respond", &json!({"sessionId": "s", "requestId": "r"})).is_err());
         for gone in ["task.get", "shell.exec"] {
             assert!(parse(true, gone, &json!({})).is_err(), "{gone}");
         }
         assert!(valid_id(&"a".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn team_requests_are_read_only_and_validate_worker_paging() {
+        assert_eq!(
+            parse(true, "task.team", &json!({"sessionId": "s1"})),
+            Ok(Call::Team {
+                session_id: "s1".into()
+            })
+        );
+        assert_eq!(
+            parse(
+                true,
+                "task.workerMessages",
+                &json!({"sessionId": "s1", "workerId": "w1"})
+            ),
+            Ok(Call::WorkerMessages {
+                session_id: "s1".into(),
+                worker_id: "w1".into(),
+                after_id: 0,
+                before_id: None,
+                limit: WORKER_MESSAGE_PAGE_DEFAULT
+            })
+        );
+        assert_eq!(
+            parse(true, "task.workerMessages", &json!({"sessionId": "s1", "workerId": "w1", "tail": true})),
+            Ok(Call::WorkerMessages { session_id: "s1".into(), worker_id: "w1".into(), after_id: 0, before_id: Some(i64::MAX), limit: WORKER_MESSAGE_PAGE_DEFAULT })
+        );
+        assert_eq!(
+            parse(true, "task.workerMessages", &json!({"sessionId": "s1", "workerId": "w1", "beforeId": 40, "limit": 10})),
+            Ok(Call::WorkerMessages { session_id: "s1".into(), worker_id: "w1".into(), after_id: 0, before_id: Some(40), limit: 10 })
+        );
+        assert_eq!(
+            parse(
+                true,
+                "task.workerMessages",
+                &json!({"sessionId": "s1", "workerId": "w1", "afterId": 7, "limit": 25})
+            ),
+            Ok(Call::WorkerMessages {
+                session_id: "s1".into(),
+                worker_id: "w1".into(),
+                after_id: 7,
+                before_id: None,
+                limit: 25
+            })
+        );
+        for params in [
+            json!({"workerId": "w1"}),
+            json!({"sessionId": "s1"}),
+            json!({"sessionId": "s1", "workerId": "w1", "afterId": -1}),
+            json!({"sessionId": "s1", "workerId": "w1", "afterId": "7"}),
+            json!({"sessionId": "s1", "workerId": "w1", "limit": 0}),
+            json!({"sessionId": "s1", "workerId": "w1", "beforeId": 0}),
+            json!({"sessionId": "s1", "workerId": "w1", "beforeId": "9"}),
+            json!({"sessionId": "s1", "workerId": "w1", "limit": WORKER_MESSAGE_PAGE_MAX + 1}),
+        ] {
+            assert!(
+                parse(true, "task.workerMessages", &params).is_err(),
+                "{params}"
+            );
+        }
+        for method in ["task.team", "task.workerMessages"] {
+            assert!(is_read_only_method(method));
+            assert!(METHODS.contains(&method));
+        }
+        assert!(parse(false, "task.team", &json!({"sessionId": "s1"})).is_err());
+    }
+
+    #[test]
+    fn task_pull_changes_and_bot_requests_are_validated() {
+        for (method, params) in [
+            ("task.pull", json!({"sessionId": "s1"})),
+            ("task.pullDiff", json!({"sessionId": "s1"})),
+            ("task.pullDiff", json!({"sessionId": "s1", "path": "src/main.rs"})),
+            ("task.pullMerge", json!({"sessionId": "s1", "method": "squash"})),
+            ("task.pullDetect", json!({"sessionId": "s1"})),
+            ("task.changes", json!({"sessionId": "s1"})),
+            ("task.diff", json!({"sessionId": "s1"})),
+            ("task.diff", json!({"sessionId": "s1", "path": "src/main.rs", "staged": true})),
+            ("bots.list", json!({})),
+            ("bot.thread", json!({"botId": "b1"})),
+            ("bot.message", json!({"botId": "b1", "text": "hello"})),
+            ("bot.pause", json!({"botId": "b1", "paused": true})),
+        ] {
+            assert!(parse(true, method, &params).is_ok(), "{method} {params}");
+        }
+
+        for (method, params) in [
+            ("task.pull", json!({})),
+            ("task.pullMerge", json!({"sessionId": "s1", "method": "--admin"})),
+            ("task.changes", json!({"sessionId": "bad id"})),
+            ("task.diff", json!({"sessionId": "s1", "path": "../secret"})),
+            ("task.diff", json!({"sessionId": "s1", "staged": "yes"})),
+            ("bot.thread", json!({"botId": "bad id"})),
+            ("bot.message", json!({"botId": "b1", "text": "  "})),
+            ("bot.pause", json!({"botId": "b1", "paused": "yes"})),
+        ] {
+            assert!(parse(true, method, &params).is_err(), "{method} {params}");
+        }
+    }
+
+    #[test]
+    fn message_paging_options_are_parsed_and_validated() {
+        let tail = parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true})).unwrap();
+        assert_eq!(tail, Call::Messages { session_id: "s1".into(), page: MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT }, budget: PAGE_BUDGET });
+
+        let before = parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19, "limit": 25})).unwrap();
+        assert_eq!(before, Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: 25 }, budget: PAGE_BUDGET });
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: MESSAGE_PAGE_DEFAULT }, budget: PAGE_BUDGET }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "limit": 1})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Tail { limit: 1 }, budget: PAGE_BUDGET }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19, "limit": 400})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: 400 }, budget: PAGE_BUDGET }));
+
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "afterId": 1})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 1, "afterId": 2})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "beforeId": 1})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "limit": 0})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "limit": 401})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": "19"})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": -1})).is_err());
+        assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": "yes"})).is_err());
+    }
+
+    #[test]
+    fn pull_diff_and_detail_replies_fit_the_remote_budget() {
+        let mut pull = json!({
+            "number": 42,
+            "title": "A pull request",
+            "body": "b".repeat(64 * 1024),
+            "bodyTruncated": false,
+            "timeline": vec![json!({"body": "c".repeat(16 * 1024)}); 60],
+            "files": vec![json!({"path": "src/".to_owned() + &"f".repeat(2048), "additions": 1, "deletions": 0}); 200],
+            "commits": [],
+            "checks": [],
+            "labels": [],
+        });
+        fit_pull_detail(&mut pull);
+        assert_eq!(pull["truncated"], true);
+        assert!(pull.to_string().len() <= PAGE_BUDGET);
+        assert!(json!({"pull": &pull}).to_string().len() <= PAGE_BUDGET);
+
+        let files = fit_pull_files(json!(vec![json!({"path": "p".repeat(1024), "additions": 3, "deletions": 1}); 300]));
+        assert_eq!(files["truncated"], true);
+        assert!(files.to_string().len() <= PAGE_BUDGET);
+
+        let mut bots = vec![json!({"avatar": "data:image/png;base64,{}", "id": "bot".repeat(100) }); 12];
+        fit_list(&mut bots, PAGE_BUDGET.saturating_sub(json!({"bots": []}).to_string().len()));
+        let bots = json!({"bots": bots});
+        assert!(bots.to_string().len() <= PAGE_BUDGET);
+
+        let (patch, truncated) = bounded_diff("λ".repeat(DIFF_BUDGET), false);
+        assert!(truncated);
+        assert!(patch.len() <= DIFF_BUDGET);
+        assert!(patch.ends_with("[cut on the host to fit a remote diff]"));
+
+        let source = "diff --git a/first.rs b/first.rs\n--- a/first.rs\n+++ b/first.rs\n@@ -1 +1 @@\n+first\ndiff --git \"a/space name.rs\" \"b/space name.rs\"\n--- \"a/space name.rs\"\n+++ \"b/space name.rs\"\n@@ -1 +1 @@\n+second\n";
+        let (selected, truncated) = pull_file_patch(source, "space name.rs", false);
+        assert!(selected.contains("+second"));
+        assert!(!selected.contains("+first"));
+        assert!(!truncated);
+        assert_eq!(pull_file_patch(source, "missing.rs", true), (String::new(), true));
+
+        let changes = changes_reply(
+            crate::workspace::GitStatus {
+                branch: "b".repeat(PAGE_BUDGET),
+                files: (0..500).map(|n| crate::workspace::GitFile { path: format!("src/{}-{n}", "f".repeat(512)), index: " ".into(), working: "M".into() }).collect(),
+                is_repo: true,
+            },
+            2,
+            1,
+        );
+        assert!(changes.to_string().len() <= PAGE_BUDGET);
     }
 
     #[test]
@@ -4390,6 +4647,119 @@ mod extended_security_tests {
         for bad in [json!({}), json!({"provider": "../bin/sh"}), json!({"provider": "gemini"}), json!({"provider": 3})] {
             assert!(parse(true, "providers.models", &bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn read_only_request_classification_is_explicit() {
+        for method in [
+            "tasks.list", "task.messages", "task.changes", "task.diff", "task.pull", "task.pullDiff",
+            "task.pullDetect", "task.attachment", "task.workspaceImage", "projects.icons", "providers.list",
+            "providers.models", "bots.list", "subscribe",
+        ] {
+            assert!(is_read_only_method(method), "{method}");
+        }
+        for method in [
+            "task.send", "task.steer", "task.stop", "task.configure", "approval.respond", "input.respond",
+            "bot.thread", "bot.message", "bot.pause", "task.pullMerge", "task.start", "unknown",
+        ] {
+            assert!(!is_read_only_method(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn batches_accept_up_to_eight_read_only_calls_and_keep_call_errors_local() {
+        let parsed = parse(
+            true,
+            "batch",
+            &json!({"calls": [
+                {"method": "task.messages", "params": {"sessionId": "s", "tail": true}},
+                {"method": "task.messages", "params": {}},
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Call::Batch(vec![
+                Ok(Call::Messages { session_id: "s".into(), page: MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT }, budget: PAGE_BUDGET }),
+                Err("Missing sessionId.".into()),
+            ])
+        );
+        assert!(parse(true, "batch", &json!({"calls": []})).is_err());
+        let eight = std::iter::repeat_n(json!({"method": "tasks.list", "params": {}}), 8).collect::<Vec<_>>();
+        assert!(parse(true, "batch", &json!({"calls": eight})).is_ok());
+        let too_many = std::iter::repeat_n(json!({"method": "tasks.list", "params": {}}), 9).collect::<Vec<_>>();
+        assert!(parse(true, "batch", &json!({"calls": too_many})).is_err());
+        assert!(parse(true, "batch", &json!({"calls": [{"method": "task.send", "params": {"sessionId": "s", "text": "x"}}]})).is_err());
+        assert!(parse(true, "batch", &json!({"calls": [{"method": "batch", "params": {"calls": []}}]})).is_err());
+    }
+
+    #[test]
+    fn batch_results_stay_within_the_single_reply_budget() {
+        let reply = fit_batch_results(vec![
+            Ok(json!({"value": "small"})),
+            Ok(json!({"value": "x".repeat(PAGE_BUDGET)})),
+            Err("failed".into()),
+        ]);
+        assert!(reply.to_string().len() <= PAGE_BUDGET);
+        assert_eq!(reply["results"].as_array().unwrap().len(), 3);
+        assert_eq!(reply["results"][0]["ok"], true);
+        assert_eq!(reply["results"][1]["ok"], false);
+        assert_eq!(reply["results"][2]["error"], "failed");
+    }
+
+    #[test]
+    fn pull_cache_entries_are_scoped_and_expire_after_the_ttl() {
+        let key = ("task".to_owned(), 42);
+        let mut entries = HashMap::new();
+        store_pull_entry(&mut entries, key.clone(), json!({"number": 42}));
+        assert_eq!(cached_pull_entry(&mut entries, &key), Some(json!({"number": 42})));
+        assert_eq!(cached_pull_entry(&mut entries, &("other-task".into(), 42)), None);
+        entries.get_mut(&key).unwrap().expires = Instant::now() - Duration::from_secs(1);
+        assert_eq!(cached_pull_entry(&mut entries, &key), None);
+        assert_eq!(PULL_CACHE_TTL, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn concurrent_pull_misses_for_the_same_key_share_a_flight() {
+        let key = PullFlightKey::Detail("flight-test-task".into(), 101);
+        let first = pull_flight(key.clone());
+        let second = pull_flight(key);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn project_icon_requests_are_validated() {
+        assert_eq!(parse(true, "projects.icons", &json!({"projectIds": ["p1", "p2"]})), Ok(Call::ProjectIcons { project_ids: vec!["p1".into(), "p2".into()] }));
+        let fifty: Vec<String> = (0..MAX_PROJECT_ICON_IDS).map(|i| format!("p{i}")).collect();
+        assert!(parse(true, "projects.icons", &json!({"projectIds": fifty})).is_ok());
+        assert!(parse(true, "projects.icons", &json!({})).is_err());
+        assert!(parse(true, "projects.icons", &json!({"projectIds": []})).is_err());
+        assert!(parse(true, "projects.icons", &json!({"projectIds": vec!["p"; 51]})).is_err());
+        for bad in [json!({"projectIds": [""]}), json!({"projectIds": ["bad id"]}), json!({"projectIds": [1]}), json!({"projectIds": "p1"})] {
+            assert!(parse(true, "projects.icons", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn project_icons_obey_single_icon_and_reply_budgets() {
+        let result = fit_project_icons(vec![
+            ("oversized".into(), Some("x".repeat(64 * 1024 + 1))),
+            ("empty".into(), None),
+            ("first".into(), Some("x".repeat(60 * 1024))),
+            ("second".into(), Some("x".repeat(60 * 1024))),
+            ("third".into(), Some("x".repeat(60 * 1024))),
+            ("after".into(), Some("small".into())),
+        ]);
+        assert_eq!(result["icons"]["oversized"], Value::Null);
+        assert_eq!(result["icons"]["empty"], Value::Null);
+        assert!(result["icons"].get("first").is_some());
+        assert!(result["icons"].get("second").is_some());
+        assert!(result["icons"].get("third").is_none());
+        assert!(result["icons"].get("after").is_none());
+        assert!(result.to_string().len() <= PAGE_BUDGET);
+
+        let at_limit = fit_project_icons(vec![("at-limit".into(), Some("x".repeat(MAX_PROJECT_ICON_BYTES)))]);
+        assert_eq!(at_limit["icons"]["at-limit"].as_str().unwrap().len(), MAX_PROJECT_ICON_BYTES);
     }
 
     #[test]
@@ -4408,10 +4778,121 @@ mod extended_security_tests {
     }
 
     #[test]
-    fn untrusted_callers_are_refused_by_name() {
-        assert_eq!(gate(false, true, "Mac"), Err(OFF.to_string()));
-        assert_eq!(gate(true, false, "Mac"), Err("This computer isn't trusted on Mac. Trust it in Settings → Remote access on that computer.".to_string()));
-        assert_eq!(gate(true, true, "Mac"), Ok(()));
+    fn task_and_project_lists_fit_one_reply() {
+        let tasks = vec![json!({"title": "t".repeat(1024)}); 110];
+        let projects = vec![json!({"name": "p".repeat(900)}); 70];
+        let result = fit_task_lists(tasks, projects);
+        assert!(result.to_string().len() <= PAGE_BUDGET);
+        assert!(!result["tasks"].as_array().unwrap().is_empty());
+        assert!(!result["projects"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_pending_requests_keep_answer_payloads_within_one_message_budget() {
+        let request_id = "run-id:provider-id";
+        let requests = HashMap::from([(
+            request_id.to_owned(),
+            AgentEvent {
+                session_id: "task-id".into(),
+                kind: "input_request".into(),
+                text: "Choose one".into(),
+                request_id: Some(request_id.into()),
+                data: Some(json!({"question": "x".repeat(MAX_MESSAGE * 2)})),
+                tool: None,
+            },
+        )]);
+        let pending = pending_items(&requests);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["kind"], "input_request");
+        assert_eq!(pending[0]["requestId"], request_id);
+        assert_eq!(pending[0]["text"], "Choose one");
+        assert!(pending[0]["data"]["question"].as_str().unwrap().contains("[cut on the host"));
+        assert!(pending[0].get("tool").is_none());
+        assert!(json!(pending).to_string().len() <= MAX_MESSAGE);
+    }
+
+    #[test]
+    fn host_gate_only_checks_remote_control() {
+        assert_eq!(gate(false, true, "Test"), Err(OFF.to_string()));
+        assert!(gate(true, false, "Test").unwrap_err().contains("isn't trusted"));
+        assert_eq!(gate(true, true, "Test"), Ok(()));
+    }
+
+    #[test]
+    fn a_present_device_keeps_its_subscription_without_a_pin() {
+        let now = Instant::now();
+        let subscriber = Subscriber {
+            until: Some(now + Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device {
+                id: "viewer".into(), name: "Phone".into(), platform: "iOS".into(), public_key: "current-key".into(),
+                host: false, online: true, last_seen: Value::Null,
+            }],
+            ..Default::default()
+        };
+        inner.subscribers.insert("viewer".into(), subscriber);
+        assert!(prune_subscribers(&mut inner, now));
+        assert!(inner.subscribers.contains_key("viewer"));
+    }
+
+    #[test]
+    fn access_is_checked_when_a_request_runs() {
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
+            ..Default::default()
+        };
+        let now = 1_000_000_000;
+        let request = |nonce: &str| json!({"ts": now, "nonce": nonce});
+        assert_eq!(admit(&inner, "viewer"), Err(OFF.to_string()));
+        inner.settings.host_enabled = true;
+        assert_eq!(admit(&inner, "viewer"), Ok(false));
+        inner.settings.remote_full_access = true;
+        assert_eq!(admit(&inner, "viewer"), Ok(true));
+        // Revoked (gone from presence) after the request was queued.
+        inner.devices.clear();
+        assert_eq!(admit(&inner, "viewer"), Err(super::super::UNKNOWN_DEVICE.to_string()));
+        // Freshness is checked on arrival: a request that then waits a minute in the
+        // queue still runs, and a replay of it is refused when it arrives.
+        assert_eq!(fresh_request(&mut inner, &request("nonce-0000000000000003"), now), Ok(()));
+        assert!(fresh_request(&mut inner, &request("nonce-0000000000000003"), now + 90_000).is_err(), "replayed or stale");
+        assert!(fresh_request(&mut inner, &request("nonce-0000000000000004"), now + 90_000).is_err(), "stale on arrival");
+    }
+
+    #[test]
+    fn full_access_is_capped_for_remote_tasks() {
+        let start = |mode: Option<&str>| {
+            let mut params = json!({"projectId": "p", "prompt": "go", "provider": "claude", "model": "sonnet"});
+            if let Some(mode) = mode {
+                params["mode"] = json!(mode);
+            }
+            parse(true, "task.start", &params).unwrap()
+        };
+        let mode = |call: Call| match call {
+            Call::Start(start) => start.mode,
+            Call::Configure { mode, .. } => mode,
+            _ => unreachable!(),
+        };
+        assert_eq!(mode(cap_mode(start(None), false).unwrap()).as_deref(), Some("ask"), "the full default asks instead");
+        assert_eq!(mode(cap_mode(start(Some("auto")), false).unwrap()).as_deref(), Some("auto"));
+        assert!(cap_mode(start(Some("full")), false).unwrap_err().starts_with("Full access is off for remote tasks on "));
+        assert_eq!(mode(cap_mode(start(None), true).unwrap()), None);
+        assert_eq!(mode(cap_mode(start(Some("full")), true).unwrap()).as_deref(), Some("full"));
+        let configure = |mode: &str| parse(true, "task.configure", &json!({"sessionId": "s", "mode": mode})).unwrap();
+        assert!(cap_mode(configure("full"), false).is_err());
+        assert_eq!(mode(cap_mode(configure("plan"), false).unwrap()).as_deref(), Some("plan"));
+        assert_eq!(mode(cap_mode(configure("full"), true).unwrap()).as_deref(), Some("full"));
+    }
+
+    #[test]
+    fn a_full_task_takes_no_remote_prompts_without_full_access() {
+        let off = |stored, requested| allow_task_mode(stored, requested, false);
+        assert!(off("full", None).unwrap_err().starts_with("Full access is off for remote tasks on "), "send, steer, model-only configure");
+        assert!(off("full", Some("full")).is_err());
+        assert!(off("full", Some("ask")).is_ok(), "switching it to an approving mode");
+        assert!(off("ask", None).is_ok() && off("auto", None).is_ok());
+        assert!(allow_task_mode("full", None, true).is_ok());
     }
 
     #[test]
@@ -4460,7 +4941,107 @@ mod extended_security_tests {
         tagged["data"] = json!({"messageId": "m2"});
         push_event(&mut events, tagged);
         assert_eq!(events.len(), 6);
-        // A viewer that falls far behind stops buffering; it catches up at the run end.
+        // A joined delta carries the newest seq, so a viewer's position covers all its text.
+        let mut numbered = Vec::new();
+        for seq in [7, 8] {
+            let mut delta = event("a", "text", "x");
+            delta["seq"] = json!(seq);
+            push_event(&mut numbered, delta);
+        }
+        assert_eq!((numbered.len(), numbered[0]["seq"].as_u64(), numbered[0]["text"].as_str()), (1, Some(8), Some("xx")));
+    }
+
+    #[test]
+    fn a_viewer_that_comes_back_gets_exactly_what_it_missed() {
+        let mut journal = Journal::default();
+        assert!(journal.record("a", event("a", "text", "lost"), false).is_none(), "nobody follows the task");
+        let first = journal.record("a", event("a", "text", "Hel"), true).unwrap();
+        assert_eq!(first["seq"], 1);
+        journal.record("b", event("b", "tool", "ls"), true);
+        journal.record("a", event("a", "text", "lo"), false).unwrap();
+        journal.record("a", event("a", "approval", "Run ls"), false).unwrap();
+        // After seq 1: the rest of a's events, in order, deltas joined under the newest seq.
+        let Missed::Events { events: missed, more: false, last: 4 } = journal.missed("a", 1, REPLAY_BUDGET, true) else { panic!("no gap") };
+        assert_eq!(missed.iter().map(|e| (e["kind"].as_str().unwrap(), e["text"].as_str().unwrap(), e["seq"].as_u64().unwrap())).collect::<Vec<_>>(), [("text", "lo", 3), ("approval", "Run ls", 4)]);
+        assert_eq!(journal.missed("a", 4, REPLAY_BUDGET, true), Missed::Events { events: vec![], more: false, last: 4 });
+        // More than fits: the first page, and where the next one starts.
+        let Missed::Events { events, more: true, last: 1 } = journal.missed("a", 0, 10, true) else { panic!("a first page") };
+        assert_eq!(events.len(), 1, "one event always goes first, cut to fit");
+        assert_eq!(journal.missed("a", 0, 10, false), Missed::Events { events: vec![], more: true, last: 0 }, "or waits for the next page");
+        assert_eq!(journal.missed("a", 99, REPLAY_BUDGET, true), Missed::Gap, "a position this journal never gave");
+        assert_eq!(journal.missed("c", 0, REPLAY_BUDGET, true), Missed::Gap, "a task it never recorded");
+        // A task recorded from a later point can't account for what came before.
+        journal.watch("c");
+        journal.record("c", event("c", "tool", "x"), false).unwrap();
+        assert_eq!(journal.missed("c", 2, REPLAY_BUDGET, true), Missed::Gap);
+        assert!(matches!(journal.missed("c", 4, REPLAY_BUDGET, true), Missed::Events { events, .. } if events.len() == 1));
+    }
+
+    #[test]
+    fn a_long_replay_is_paged_instead_of_starving_later_tasks() {
+        let mut journal = Journal::default();
+        let epoch = journal.epoch.clone();
+        let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
+        journal.resume(&mut tasks, &HashMap::new(), None, REPLAY_BUDGET);
+        // a's missed tool output is several pages; b missed one event after it.
+        let chunk = "o".repeat(20 * 1024);
+        for i in 0..12 {
+            journal.record("a", event("a", "tool", &format!("{i}{chunk}")), false).unwrap();
+        }
+        journal.record("b", event("b", "tool", "pwd"), false).unwrap();
+        let mut after = HashMap::from([("a".to_string(), 0u64), ("b".to_string(), 0u64)]);
+        let (mut seen_a, mut seen_b, mut pages) = (Vec::new(), Vec::new(), 0);
+        loop {
+            pages += 1;
+            let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
+            let resumed = journal.resume(&mut tasks, &after, Some(&epoch), REPLAY_BUDGET);
+            assert_eq!(resumed.gaps, 0, "nothing turns into a gap");
+            assert!(json!(tasks).to_string().len() <= REPLAY_BUDGET + 512, "each page fits");
+            for (task, seen) in tasks.iter().zip([&mut seen_a, &mut seen_b]) {
+                seen.extend(task["events"].as_array().cloned().unwrap_or_default());
+                assert!(task.get("gap").is_none());
+                after.insert(task["sessionId"].as_str().unwrap().into(), task["seq"].as_u64().unwrap());
+            }
+            if !resumed.more {
+                break;
+            }
+            assert!(tasks.iter().any(|task| task["more"] == true));
+        }
+        assert!(pages > 2, "paged");
+        assert_eq!(seen_a.iter().map(|e| e["text"].as_str().unwrap().split('o').next().unwrap().to_owned()).collect::<Vec<_>>(), (0..12).map(|i| i.to_string()).collect::<Vec<_>>(), "every event once, in order");
+        assert_eq!(seen_b.iter().map(|e| e["text"].as_str().unwrap()).collect::<Vec<_>>(), ["pwd"]);
+        assert_eq!(after["a"], 13, "caught up to the newest seq");
+    }
+
+    #[test]
+    fn team_updates_and_run_ends_are_journaled_and_replayed() {
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
+            outbox: Some(tokio::sync::mpsc::channel(1).0),
+            ..Default::default()
+        };
+        inner.settings.host_enabled = true;
+        inner.subscribers.insert("viewer".into(), Subscriber { until: Some(Instant::now() + SUBSCRIPTION), sessions: HashSet::from(["h1".to_string()]), ..Default::default() });
+        let epoch = inner.journal.epoch.clone();
+        journal_and_enqueue(&mut inner, "h1", event("h1", "text", "Hi"), Queue::Event);
+        journal_and_enqueue(&mut inner, "h1", team_event_value("h1", json!({"id": "w1", "status": "running"})), Queue::Event);
+        journal_and_enqueue(&mut inner, "h1", json!({"sessionId": "h1", "successful": true, "stopped": false, "text": "Turn complete"}), Queue::Finished);
+        // A team settling while that run end still waits to go adds nothing.
+        journal_and_enqueue(&mut inner, "h1", json!({"sessionId": "h1", "successful": true, "teamSettled": true}), Queue::Settled);
+        let subscriber = &inner.subscribers["viewer"];
+        assert_eq!(subscriber.events.iter().map(|e| (e["kind"].as_str().unwrap(), e["seq"].as_u64().unwrap())).collect::<Vec<_>>(), [("text", 1), ("team", 2)]);
+        assert_eq!(subscriber.finished, vec![json!({"sessionId": "h1", "successful": true, "stopped": false, "text": "Turn complete", "kind": "run.finished", "seq": 3})], "the live frame carries its seq");
+        // The run end is shaped with its team when sent; the replay says the same.
+        inner.journal.amend("h1", 3, json!({"sessionId": "h1", "kind": "run.finished", "status": "running", "seq": 3}));
+        let mut tasks = vec![json!({"sessionId": "h1"})];
+        inner.journal.resume(&mut tasks, &HashMap::from([("h1".to_string(), 0)]), Some(&epoch), REPLAY_BUDGET);
+        assert_eq!(tasks[0]["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "team", "run.finished"]);
+        assert_eq!(tasks[0]["events"][2]["status"], "running");
+        assert_eq!(inner.journal.bytes, inner.journal.rings.values().map(|ring| ring.bytes).sum::<usize>());
+    }
+
+    #[test]
+    fn a_full_buffer_tells_the_viewer_it_lagged() {
         let mut full: Vec<Value> = (0..MAX_BUFFER).map(|i| event("a", "tool", &i.to_string())).collect();
         push_event(&mut full, event("a", "tool", "late"));
         assert_eq!(full.len(), MAX_BUFFER + 1, "the overflow marker is retained for recovery");
@@ -4488,13 +5069,181 @@ mod extended_security_tests {
         db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task'),('t','Other');").unwrap();
         let tool = json!({"status": "completed", "output": "o".repeat(300 * 1024)}).to_string();
         db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','tool',?1,1),('t','user','elsewhere',2),('s','assistant','done',3)", [&tool]).unwrap();
-        let page = messages_page(&db, "s", 0).unwrap();
+        let page = messages_page_with(&db, "s", MessagePaging::After { after_id: 0, limit: PAGE_ROWS }).unwrap();
         let messages = page["messages"].as_array().unwrap();
         assert_eq!((messages.len(), page["hasMore"].as_bool(), page["title"].as_str()), (2, Some(false), Some("Task")), "only this task's messages");
+        assert_eq!(page["lastId"], 3);
+        assert_eq!(page["hasOlder"], false);
         assert!(messages[0].to_string().len() <= MAX_MESSAGE);
         let parsed = serde_json::from_str::<Value>(messages[0]["content"].as_str().unwrap()).expect("tool content still parses");
         assert!(parsed["output"].as_str().unwrap().ends_with(CUT) && parsed["status"] == "completed");
         assert_eq!(messages[1]["content"], "done");
-        assert!(messages_page(&db, "missing", 0).is_err());
+        assert!(messages_page_with(&db, "missing", MessagePaging::After { after_id: 0, limit: PAGE_ROWS }).is_err());
+    }
+
+    #[test]
+    fn message_pages_report_older_rows_last_id_and_empty_threads() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task'),('empty','Empty'); INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','user','first',1),('s','assistant','last',2);").unwrap();
+
+        let page = messages_page_with(&db, "s", MessagePaging::After { after_id: 1, limit: PAGE_ROWS }).unwrap();
+        assert_eq!(page["messages"][0]["content"], "last");
+        assert_eq!(page["hasOlder"], true);
+        assert_eq!(page["lastId"], 2);
+
+        let empty = messages_page_with(&db, "empty", MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT }).unwrap();
+        assert_eq!(empty["messages"], json!([]));
+        assert_eq!(empty["hasMore"], false);
+        assert_eq!(empty["hasOlder"], false);
+        assert_eq!(empty["lastId"], Value::Null);
+    }
+
+    #[test]
+    fn tail_and_before_pages_return_the_newest_rows_oldest_first() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        for index in 1..=5 {
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','user',?1,?2)", rusqlite::params![format!("message-{index}"), index]).unwrap();
+        }
+
+        let tail = messages_page_with(&db, "s", MessagePaging::Tail { limit: 2 }).unwrap();
+        assert_eq!(tail["messages"].as_array().unwrap().iter().map(|message| message["id"].as_i64().unwrap()).collect::<Vec<_>>(), [4, 5]);
+        assert_eq!(tail["hasOlder"], true);
+        assert_eq!(tail["hasMore"], false);
+        assert_eq!(tail["lastId"], 5);
+
+        let before = messages_page_with(&db, "s", MessagePaging::Before { before_id: 4, limit: 2 }).unwrap();
+        assert_eq!(before["messages"].as_array().unwrap().iter().map(|message| message["id"].as_i64().unwrap()).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(before["hasOlder"], true);
+        assert_eq!(before["hasMore"], true);
+        assert_eq!(before["lastId"], 5);
+    }
+
+    #[test]
+    fn a_packed_page_fills_most_of_its_frame() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        // Transcript-like text: prose and paths that pack well, ids that don't.
+        let words = ["the", "test", "passes", "src/remote/host.rs", "fn", "page", "budget", "let", "mirror", "ok", "error", "frame", "packed", "viewer", "cargo", "message", "=>", "{", "}", "Value"];
+        let mut seed = 7u64;
+        for index in 1..=400 {
+            let content: String = (0..600).map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                if seed >> 60 == 0 { format!("{:x} ", seed) } else { format!("{} ", words[(seed >> 33) as usize % words.len()]) }
+            }).collect();
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','tool',?1,?2)", rusqlite::params![content, index]).unwrap();
+        }
+        let page = messages_page_fit(&db, "s", MessagePaging::Before { before_id: 401, limit: PAGE_ROWS }, PACKED_PAGE_MAX).unwrap();
+        let packed = super::super::crypto::pack(page.to_string().as_bytes()).len();
+        assert!(page.to_string().len() > PAGE_BUDGET && packed <= PAGE_BUDGET);
+        assert!(packed > PAGE_BUDGET * 4 / 5, "a packed page of {packed} bytes ({} plain) leaves much of its frame empty", page.to_string().len());
+    }
+
+    #[test]
+    fn page_budgets_are_asked_clamped_and_held_for_plain_viewers() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        for index in 1..=40 {
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','assistant',?1,?2)", rusqlite::params![format!("{index} {}", "the build passes ".repeat(500)), index]).unwrap();
+        }
+        let ids = |page: &Value| page["messages"].as_array().unwrap().iter().map(|message| message["id"].as_i64().unwrap()).collect::<Vec<_>>();
+
+        // A small tail budget keeps the newest messages that fit, oldest first.
+        let tail = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 60 }, 32 * 1024).unwrap();
+        assert!(tail.to_string().len() <= 32 * 1024);
+        assert_eq!(ids(&tail).last(), Some(&40));
+        assert!(ids(&tail).len() >= 2 && ids(&tail).windows(2).all(|pair| pair[0] + 1 == pair[1]));
+        assert_eq!((tail["hasOlder"].as_bool(), tail["hasMore"].as_bool()), (Some(true), Some(false)));
+        // Below one message there is still one.
+        let one = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 60 }, MIN_PAGE_BUDGET).unwrap();
+        assert_eq!((ids(&one), one["hasOlder"].as_bool()), (vec![40], Some(true)));
+        // A big budget for a packing viewer takes the whole thread in one page that packs small.
+        let all = messages_page_fit(&db, "s", MessagePaging::After { after_id: 0, limit: PAGE_ROWS }, PACKED_PAGE_MAX).unwrap();
+        assert_eq!((ids(&all).len(), all["hasMore"].as_bool(), all["hasOlder"].as_bool()), (40, Some(false), Some(false)));
+        assert!(all.to_string().len() > PAGE_BUDGET && super::super::crypto::pack(all.to_string().as_bytes()).len() <= PAGE_BUDGET);
+
+        // Text that packs poorly is cut until the packed page fits a frame.
+        for index in 41..=200 {
+            let noise: String = (0..200).map(|_| uuid::Uuid::new_v4().simple().to_string()).collect();
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','tool',?1,?2)", rusqlite::params![noise, index]).unwrap();
+        }
+        let cut = messages_page_fit(&db, "s", MessagePaging::Before { before_id: 201, limit: PAGE_ROWS }, PACKED_PAGE_MAX).unwrap();
+        assert!(super::super::crypto::pack(cut.to_string().as_bytes()).len() <= PAGE_BUDGET);
+        assert_eq!((ids(&cut).last(), cut["hasOlder"].as_bool(), cut["hasMore"].as_bool()), (Some(&200), Some(true), Some(false)));
+
+        // Params: default, clamped, refused; a viewer without "z" is held to PAGE_BUDGET, in batches too.
+        let budget = |params: Value| match parse(true, "task.messages", &params) { Ok(Call::Messages { budget, .. }) => Ok(budget), Ok(_) => unreachable!(), Err(error) => Err(error) };
+        assert_eq!(budget(json!({"sessionId": "s", "tail": true})), Ok(PAGE_BUDGET));
+        assert_eq!(budget(json!({"sessionId": "s", "tail": true, "budget": 1})), Ok(MIN_PAGE_BUDGET));
+        assert_eq!(budget(json!({"sessionId": "s", "budget": u64::MAX})), Ok(PACKED_PAGE_MAX));
+        assert_eq!(budget(json!({"sessionId": "s", "budget": "big"})), Err("Invalid budget.".into()));
+        let big = || Call::Messages { session_id: "s".into(), page: MessagePaging::Tail { limit: 1 }, budget: PACKED_PAGE_MAX };
+        assert_eq!(plain_budget(big(), true), big());
+        assert!(matches!(plain_budget(big(), false), Call::Messages { budget: PAGE_BUDGET, .. }));
+        assert!(matches!(plain_budget(Call::Batch(vec![Ok(big())]), false), Call::Batch(calls) if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))));
+        // A batch reply is measured plain, so its pages stay plain-sized for packing viewers too.
+        assert!(matches!(plain_budget(Call::Batch(vec![Ok(big())]), true), Call::Batch(calls) if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))));
+        // A packing viewer gets a bigger replay, except inside a batch.
+        let subscribe = || Call::Subscribe { session_ids: vec!["s".into()], after: HashMap::new(), epoch: None, replay: REPLAY_BUDGET };
+        assert!(matches!(plain_budget(subscribe(), true), Call::Subscribe { replay: PACKED_REPLAY_BUDGET, .. }));
+        assert!(matches!(plain_budget(subscribe(), false), Call::Subscribe { replay: REPLAY_BUDGET, .. }));
+        assert!(matches!(plain_budget(Call::Batch(vec![Ok(subscribe())]), true), Call::Batch(calls) if matches!(calls[0], Ok(Call::Subscribe { replay: REPLAY_BUDGET, .. }))));
+    }
+
+    #[test]
+    fn pages_read_attachments_in_one_pass_and_fit_without_the_database() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER);
+            CREATE TABLE message_attachments(message_id INTEGER, session_id TEXT, id TEXT, kind TEXT, name TEXT, mime TEXT, width INTEGER, height INTEGER, bytes INTEGER);
+            INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        for index in 1..=6 {
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','user',?1,?2)", rusqlite::params![format!("prompt {index}"), index]).unwrap();
+        }
+        for (message, id) in [(2, "a"), (2, "b"), (5, "c")] {
+            db.execute("INSERT INTO message_attachments VALUES (?1,'s',?2,'image','x.png','image/png',1,2,3)", rusqlite::params![message, id]).unwrap();
+        }
+        let rows = read_page(&db, "s", MessagePaging::Before { before_id: 6, limit: 3 }).unwrap();
+        drop(db);
+        let page = fit_page(rows, PAGE_BUDGET);
+        let messages = page["messages"].as_array().unwrap();
+        assert_eq!(messages.iter().map(|m| m["id"].as_i64().unwrap()).collect::<Vec<_>>(), [3, 4, 5]);
+        assert_eq!(messages[2]["attachments"], json!([{"id": "c", "kind": "image", "name": "x.png", "mime": "image/png", "bytes": 3, "width": 1, "height": 2}]));
+        assert_eq!((page["hasOlder"].as_bool(), page["hasMore"].as_bool(), page["lastId"].as_i64()), (Some(true), Some(true), Some(6)));
+    }
+
+    #[test]
+    fn a_small_page_cuts_its_one_oversized_message_and_marks_it() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','assistant',?1,1)", [r#"{"tool":"x"} "#.to_string() + &"y".repeat(100 * 1024)]).unwrap();
+        let small = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 30 }, 32 * 1024).unwrap();
+        assert!(small.to_string().len() <= 32 * 1024);
+        assert_eq!((small["messages"][0]["id"].as_i64(), small["messages"][0]["cut"].as_bool()), (Some(1), Some(true)));
+        // A normal page keeps it whole (under the 120 KB cap) and unmarked.
+        let full = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 30 }, PAGE_BUDGET).unwrap();
+        assert!(full["messages"][0].get("cut").is_none() && full["messages"][0]["content"].as_str().unwrap().len() > 100 * 1024);
+    }
+
+    #[test]
+    fn newest_first_pages_keep_the_newest_messages_that_fit_the_budget() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        for index in 1..=4 {
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','user',?1,?2)", rusqlite::params!["x".repeat(72 * 1024), index]).unwrap();
+        }
+
+        let page = messages_page_with(&db, "s", MessagePaging::Tail { limit: 4 }).unwrap();
+        let messages = page["messages"].as_array().unwrap();
+        assert_eq!(messages.iter().map(|message| message["id"].as_i64().unwrap()).collect::<Vec<_>>(), [3, 4]);
+        assert!(page.to_string().len() <= PAGE_BUDGET);
+        assert_eq!(page["hasOlder"], true);
+        assert_eq!(page["lastId"], 4);
+
+        let before = messages_page_with(&db, "s", MessagePaging::Before { before_id: 4, limit: 4 }).unwrap();
+        let messages = before["messages"].as_array().unwrap();
+        assert_eq!(messages.iter().map(|message| message["id"].as_i64().unwrap()).collect::<Vec<_>>(), [2, 3]);
+        assert!(before.to_string().len() <= PAGE_BUDGET);
+        assert_eq!(before["hasOlder"], true);
+        assert_eq!(before["hasMore"], true);
     }
 }

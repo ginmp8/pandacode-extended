@@ -1,14 +1,16 @@
 /* Sentence-style tool rows: `Verb [chip] object ›`, a soft result card, raw record behind a quiet disclosure. */
-.tool-trace>summary{gap:6px;font-size:.78rem;line-height:1.5}
-.tool-trace>summary>.tool-trace-icon{width:12px;height:12px;flex:none}
-.tool-trace-verb{flex:none;color:var(--muted)}
-.tool-trace-chip{display:inline-flex;align-items:center;gap:4px;flex:none;max-width:22ch;padding:0 6px;border:1px solid var(--border);border-radius:6px;background:var(--raised);color:var(--text);font-size:.74rem;line-height:1.55}
+.tool-trace>:is(summary,.tool-trace-summary){gap:6px;font-size:var(--thread-font);line-height:1.5}
+/* A row with nothing to expand: same line, no chevron, no pointer. */
+.tool-trace-summary{display:flex;align-items:center;width:fit-content;max-width:100%;min-height:28px}
+.tool-trace>:is(summary,.tool-trace-summary)>.tool-trace-icon{width:12px;height:12px;flex:none}
+.tool-trace-verb{flex:none;white-space:nowrap;color:var(--muted);font-weight:var(--weight-regular)}
+.tool-trace-chip{display:inline-flex;align-items:center;gap:4px;flex:none;max-width:22ch;padding:0 6px;border-radius:var(--radius-sm);background:var(--raised);color:var(--text);font-size:var(--text-sm);line-height:1.55}
 .tool-trace-chip .icon{width:11px;height:11px;flex:none;color:var(--muted)}
 .tool-trace-chip .brand-icon{width:12px;height:12px;flex:none}
 .tool-trace-chip b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tool-trace-object{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
-.tool-trace-object.is-mono{font-family:var(--mono);font-size:.72rem}
-.tool-trace-delta{flex:none;font-family:var(--mono);font-size:.7rem}
+.tool-trace-object.is-mono{font-family:var(--mono);font-size:var(--thread-font)}
+.tool-trace-delta{flex:none;font-family:var(--mono);font-size:var(--thread-font)}
 .tool-trace-delta ins,.tool-trace-diff ins{text-decoration:none;color:var(--success)}
 .tool-trace-delta del,.tool-trace-diff del{text-decoration:none;color:var(--danger)}
 .tool-trace>summary>.tool-trace-chevron{width:10px;height:10px;flex:none;color:var(--muted)}
@@ -31,17 +33,22 @@ html[data-theme="dark"]{--trace-card-fill:color-mix(in srgb,var(--text) 5%,trans
 .tool-trace-card>:not(.tc,.trace-rows){margin:0;padding:9px 12px}
 .tool-trace-card>:not(.tc,.trace-rows)+*{border-top:1px solid var(--trace-hair)}
 .tool-trace-card-head{display:flex;align-items:center;gap:8px;min-width:0}
-.tool-trace-card-meta{margin-left:auto;flex:none;color:var(--muted);font-size:.7rem}
-.tool-trace-command{min-width:0;overflow-wrap:anywhere;font-family:var(--mono);font-size:.72rem}
-.tool-trace-badge{margin-left:auto;flex:none;padding:0 6px;border-radius:6px;background:color-mix(in srgb,var(--success) 14%,transparent);color:var(--success);font-size:.68rem;font-weight:600}
+.tool-trace-card-meta{margin-left:auto;flex:none;color:var(--muted);font-size:var(--thread-font)}
+.tool-trace-command{min-width:0;overflow-wrap:anywhere;font-family:var(--mono);font-size:var(--thread-font)}
+.tool-trace-badge{display:inline-flex;align-items:center;gap:4px;margin-left:auto;flex:none;padding:0 6px;border-radius:var(--radius-sm);background:color-mix(in srgb,var(--success) 14%,transparent);color:var(--success);font-size:var(--text-xs);font-weight:var(--weight-medium);line-height:1.6;white-space:nowrap}
+/* Running: accent tint and a still dot (no spinner; the row verb already breathes). */
+.tool-trace-badge.is-live{background:rgb(var(--accent-rgb) / .2);color:var(--accent-ink)}
+.tool-trace-badge.is-live::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
 .tool-trace-badge.is-failed{background:color-mix(in srgb,var(--danger) 14%,transparent);color:var(--danger)}
 .tool-activity .tool-trace-card pre{max-height:220px;padding:8px 12px;border:0;border-radius:0;background:var(--panel);font-size:.76rem;line-height:1.55}
 .tool-trace-list,.tool-trace-todos{display:grid;margin:0;padding:0;list-style:none}
-.tool-trace-list li{display:flex;align-items:baseline;gap:8px;min-width:0;padding:4px 0;border-top:1px solid var(--border)}
+.tool-trace-list li{display:flex;align-items:baseline;gap:8px;min-width:0;padding:4px 0}
 .tool-trace-list li:first-child{border-top:0}
-.tool-trace-item-title{flex:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.tool-trace-item-title{flex:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--weight-strong)}
 .tool-trace-item-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
-.tool-trace-more{margin:0;color:var(--muted);font-size:.7rem}
+.tool-trace-more{margin:0;color:var(--muted);font-size:var(--thread-font)}
+/* A lone short result (a screenshot size, one error line) without the card plate. */
+.tool-trace-inline{margin:0 0 2px;font-size:var(--thread-font)}
 .tool-trace-list .tool-trace-more{display:block}
 .tool-trace-todos li{display:flex;align-items:flex-start;gap:6px;padding:2px 0}
 .tool-trace-todos .icon{width:12px;height:12px;flex:none;margin-top:3px;color:var(--muted)}
@@ -51,23 +58,28 @@ html[data-theme="dark"]{--trace-card-fill:color-mix(in srgb,var(--text) 5%,trans
 .tool-trace-note{color:var(--muted)}
 
 .tool-trace-raw{margin-top:2px}
-.tool-activity .tool-trace-raw>summary{min-height:22px;gap:5px;font-size:.7rem;color:var(--muted)}
+.tool-activity .tool-trace-raw>summary{min-height:22px;gap:5px;font-size:var(--thread-font);color:var(--muted)}
 .tool-activity[open] .tool-trace-raw>summary>.icon:last-child{width:9px;height:9px;transform:none}
 .tool-activity[open] .tool-trace-raw[open]>summary>.icon:last-child{transform:rotate(90deg)}
 .tool-trace-raw-body{display:grid;gap:8px;margin-top:4px}
 
 .tool-trace-stack{display:inline-flex;flex:none;align-items:center;gap:2px;color:var(--muted)}
-.tool-trace-stack .icon{width:12px;height:12px;padding:2px;box-sizing:content-box;border:1px solid var(--border);border-radius:5px;background:var(--raised)}
+.tool-trace-stack .icon{width:12px;height:12px;padding:2px;box-sizing:content-box;border-radius:var(--radius-sm);background:var(--raised)}
+.tool-group-status.is-running{color:var(--accent-ink)}
 .tool-group[data-running] .tool-group-label{color:var(--text)}
 /* A message's hover actions hang below it (smooth.css); short summaries must stay clickable above them. */
 .tool-group-summary{position:relative;z-index:3}
 /* The thin rail the group's rows hang off; plain --border vanishes over dark wallpapers. */
-.tool-group-body{border-left-color:color-mix(in srgb,var(--border) 55%,var(--muted))}
+.tool-group-body{border-left-color:transparent}
 
 html[data-theme="dark"] .tool-activity .tool-trace-card pre{background:var(--bg)}
 @media(prefers-contrast:more){
-  .tool-trace-chip,.tool-trace-card,.tool-trace-stack .icon{border-color:var(--text)}
-  .tool-trace-verb,.tool-trace-object,.tool-trace-item-meta,.tool-trace-card-meta,.tool-trace-note,.tool-trace-more{color:var(--text)}
+  .tool-trace-chip,.tool-trace-card,.tool-trace-roster>li,.tool-trace-files code,.tool-trace-list li{border-color:var(--text)}
+  .tool-trace-badge{outline:1px solid currentColor}
+  .tool-activity .tool-trace-raw>summary{color:var(--text)}
+  .tool-trace-stack,.tool-group-status.is-running,.tool-trace-aside>summary,.tool-trace-verb,.tool-trace-object,.tool-trace-item-meta,.tool-trace-card-meta,.tool-trace-note,.tool-trace-more,.tool-trace-label,.tool-trace-route,.tool-trace-kv dt,.tool-trace-roster-text,.tool-trace-badge.is-quiet{color:var(--text)}
+  .tool-trace{--trace-tint:var(--text)}
+  .tool-trace-bubble{border-left-color:var(--text)}
 }
 
 /* --- Step rail (live turns and tool-only saved turns), measured from the reference at 30 fps -------

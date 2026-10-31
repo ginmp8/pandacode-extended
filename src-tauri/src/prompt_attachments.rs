@@ -543,6 +543,18 @@ mod tests {
 
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
+    #[test]
+    fn sent_images_are_read_back_by_registry_id_only() {
+        let dir = temp_dir("sent-image");
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(dir.join(format!("{id}.png")), STANDARD.decode(PNG).unwrap()).unwrap();
+        let encoded = format!("data:image/png;base64,{PNG}");
+        assert_eq!(image_data_url(&dir, &id, true).unwrap().as_deref(), Some(encoded.as_str()));
+        assert_eq!(image_data_url(&dir, &uuid::Uuid::new_v4().to_string(), true).unwrap(), None);
+        assert!(image_data_url(&dir, "../secret", true).is_err());
+        assert!(image_data_url(&dir, &id.to_uppercase(), true).is_err());
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pandacode-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

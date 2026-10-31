@@ -13,9 +13,24 @@ const ASSETS = {
   'linux-arm64': 'PandaCode-Linux-aarch64.AppImage',
 };
 
+/** How each published build is named for people. */
+const PLATFORMS = {
+  'darwin-arm64': 'macOS Apple silicon',
+  'darwin-x64': 'macOS Intel',
+  'win32-x64': 'Windows x64',
+  'win32-arm64': 'Windows arm64',
+  'linux-x64': 'Linux x64',
+  'linux-arm64': 'Linux arm64',
+};
+
+/** Every build a release publishes, named for people. */
+export function supportedPlatforms() {
+  return Object.keys(ASSETS).map(key => PLATFORMS[key]);
+}
+
 export function assetFor(platform = process.platform, arch = process.arch) {
   const asset = ASSETS[`${platform}-${arch}`];
-  if (!asset) throw new Error(`PandaCode has no build for ${platform}-${arch}. Supported: macOS (Apple silicon or Intel), Windows x64, Linux x64.`);
+  if (!asset) throw new Error(`PandaCode has no build for ${platform}-${arch}. Supported: ${supportedPlatforms().join(', ')}.`);
   return asset;
 }
 

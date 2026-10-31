@@ -65,6 +65,81 @@ test.describe('thread panels', () => {
     await expect.poll(async () => (await calls(page, 'browser_bounds')).slice(shown).some(entry => entry.args.visible)).toBe(true);
   });
 
+  test('files expand as a tree in place and collapse back', async ({ page }) => {
+    await open(page);
+    await openInspectorTab(page, 'Files');
+    await page.getByRole('button', { name: 'Files', exact: true }).click();
+    const entry = (name: string) => page.locator('.file-row').getByRole('button', { name, exact: true });
+    await entry('src').click();
+    await entry('components').click();
+    await expect(entry('search.ts')).toBeVisible();
+    await expect(entry('README.md')).toBeVisible();
+    await expect(entry('components')).toHaveAttribute('aria-expanded', 'true');
+    const indent = (name: string) => entry(name).evaluate(element => parseFloat(getComputedStyle(element).paddingLeft));
+    expect(await indent('search.ts')).toBeGreaterThan(await indent('main.ts'));
+    expect(await indent('main.ts')).toBeGreaterThan(await indent('README.md'));
+    await entry('src').focus();
+    await page.keyboard.press('Enter');
+    await expect(entry('src')).toHaveAttribute('aria-expanded', 'false');
+    await expect(entry('src')).toBeFocused();
+    await expect(entry('main.ts')).toHaveCount(0);
+    await entry('public').click();
+    await expect(entry('favicon.svg')).toBeVisible();
+    await page.getByRole('button', { name: 'Collapse folders', exact: true }).click();
+    await expect(entry('favicon.svg')).toHaveCount(0);
+  });
+
+  test('files open as tabs in the inspector beside the conversation, switch back and forth, and close', async ({ page }) => {
+    await open(page);
+    const transcript = page.locator('#transcript');
+    await transcript.evaluate(element => { element.scrollTop = 40; });
+    const scrolled = await transcript.evaluate(element => element.scrollTop);
+    await openInspectorTab(page, 'Files');
+    const files = page.getByRole('button', { name: 'Files', exact: true });
+    await files.click();
+    await page.locator('.file-row').getByRole('button', { name: 'README.md', exact: true }).click();
+    const openFiles = page.locator('.file-panel-tab .inspector-tab-button');
+    await expect(openFiles).toHaveAttribute('aria-current', 'true');
+    await files.click();
+    await expect(openFiles).not.toHaveAttribute('aria-current', 'true');
+    await page.locator('.file-row').getByRole('button', { name: 'package.json', exact: true }).click();
+    const tab = (name: string) => page.locator('#inspector #file-tabs').getByRole('tab', { name, exact: true });
+    await expect(tab('package.json')).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#inspector .file-view-path')).toHaveText('package.json');
+    // The conversation stays on screen and usable, with its scroll position.
+    await expect(transcript).toBeVisible();
+    await expect(page.locator('#composer-area')).toHaveJSProperty('inert', false);
+    await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
+    expect(await transcript.evaluate(element => element.scrollTop)).toBe(scrolled);
+    await tab('README.md').click();
+    await expect(page.locator('.file-view-path')).toHaveText('README.md');
+    await tab('README.md').press('ArrowRight');
+    await expect(tab('package.json')).toBeFocused();
+    await tab('package.json').press('ArrowLeft');
+    await expect(tab('README.md')).toBeFocused();
+    await page.getByRole('button', { name: 'Close README.md', exact: true }).click();
+    await expect(page.locator('.file-view-path')).toHaveText('package.json');
+    await expect(tab('package.json')).toBeFocused();
+    await page.keyboard.press('Delete');
+    // The last tab closing leaves Open files for the view underneath.
+    await expect(page.locator('#file-tabs')).toBeHidden();
+    await expect(page.locator('.file-panel-tab')).toBeHidden();
+    await expect(page.locator('.file-row').first()).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeFocused();
+  });
+
+  test('closing the Open files tab closes every file tab', async ({ page }) => {
+    await open(page);
+    await openInspectorTab(page, 'Files');
+    await page.getByRole('button', { name: 'Files', exact: true }).click();
+    await page.locator('.file-row').getByRole('button', { name: 'README.md', exact: true }).click();
+    await expect(page.locator('#inspector .file-view-path')).toHaveText('README.md');
+    await page.getByRole('button', { name: 'Close open files', exact: true }).click();
+    await expect(page.locator('.file-panel-tab')).toBeHidden();
+    await expect(page.locator('#file-panel')).toBeHidden();
+    await expect(page.locator('.file-row').first()).toBeVisible();
+  });
+
   test('keeps folder, selected file, tab, and closed state separate for same-project tasks', async ({ page }) => {
     await open(page);
     await expect(inspector(page)).toBeVisible();
@@ -74,6 +149,7 @@ test.describe('thread panels', () => {
     await page.locator('.file-row').getByRole('button', { name: 'main.ts', exact: true }).click();
     await expect(page.locator('.file-view-path')).toHaveText('src/main.ts');
     await select(page, 'session-2');
+    await expect(page.locator('#file-tabs')).toBeHidden();
     await expect(inspector(page)).toBeVisible();
     await openInspectorTab(page, 'Files');
     await page.getByRole('button', { name: 'Files', exact: true }).click();
@@ -137,7 +213,7 @@ test.describe('thread panels', () => {
 
   test('restores task panels through board and launcher navigation and clears them on deletion', async ({ page }) => {
     await open(page); await navigate(page, 'http://localhost:3000/kept');
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     await expect(inspector(page)).toBeHidden();
     await page.getByRole('button', { name: 'Open task: Refine the navigation', exact: true }).click();
     await expect(inspector(page)).toBeHidden();

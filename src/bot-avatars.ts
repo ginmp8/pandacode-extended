@@ -7,6 +7,7 @@ export const PANDAS: { id: string; name: string; color: string }[] = [
 ].map(([name, color], i) => ({ id: `panda:${i}`, name, color }));
 
 const IMAGE = /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/;
+const COLOR = /^#[0-9a-f]{6}$/i;
 const UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const MAX_UPLOAD = 5 * 1024 * 1024;
 const SIZE = 128;
@@ -28,20 +29,27 @@ export function pandaSvg(id: string): string {
     + `<ellipse cx="32" cy="42" rx="2.8" ry="1.9" fill="${INK}"/><path d="M29 45.5q3 2.5 6 0" fill="none" stroke="${INK}" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 }
 
-export function botAvatarHtml(avatar: string, name: string, cls = ''): string {
+export function botAvatarHtml(avatar: string, name: string, cls = '', color = ''): string {
   const value = avatar.trim();
   const art = pandaSvg(value) || (value.length <= MAX_AVATAR_URL && IMAGE.test(value) ? `<img alt="" src="${value}">` : '');
   const content = art || escape(value || name.trim().slice(0, 1).toUpperCase() || '?');
-  return `<span class="bot-avatar${art ? ' has-art' : ''}${cls ? ` ${cls}` : ''}" aria-hidden="true">${content}</span>`;
+  const tint = COLOR.test(color) ? ` style="--bot-color:${color};--panda-bg:${color}"` : '';
+  return `<span class="bot-avatar${art ? ' has-art' : ''}${cls ? ` ${cls}` : ''}"${tint} aria-hidden="true">${content}</span>`;
 }
 
 function customSwatch(url: string, pressed: boolean): string {
   return `<button type="button" class="avatar-swatch" data-avatar-choice="custom" aria-pressed="${pressed}" aria-label="Uploaded image"><img alt="" src="${url}"></button>`;
 }
 
-export function avatarPicker(current: string): string {
+export function colorPicker(current: string): string {
+  const safe = COLOR.test(current) ? current : '';
+  const swatch = (value: string, label: string) => `<button type="button" class="color-swatch${value ? '' : ' auto'}" data-color-choice="${value}" aria-pressed="${value === safe}" aria-label="${label}" title="${label}"${value ? ` style="background:${value}"` : ''}></button>`;
+  return `<div class="color-picker" role="group" aria-label="Color"><input type="hidden" name="color" value="${escape(safe)}">` + swatch('', 'Automatic') + PANDAS.map(p => swatch(p.color, p.name)).join('') + '</div>';
+}
+
+export function avatarPicker(current: string, color = ''): string {
   const swatches = PANDAS.map(p => `<button type="button" class="avatar-swatch" data-avatar-choice="${p.id}" aria-pressed="${p.id === current}" aria-label="${p.name} panda">${pandaSvg(p.id)}</button>`).join('');
-  return `<div class="avatar-picker" role="radiogroup" aria-label="Icon"><input type="hidden" name="avatar" value="${escape(current)}">${swatches}`
+  return `<div class="avatar-picker" role="radiogroup" aria-label="Icon"${COLOR.test(color) ? ` style="--panda-bg:${color}"` : ''}><input type="hidden" name="avatar" value="${escape(current)}">${swatches}`
     + `${current.length <= MAX_AVATAR_URL && IMAGE.test(current) ? customSwatch(current, true) : ''}<button type="button" class="avatar-upload" data-avatar-upload-button>Upload…</button>`
     + `<input type="file" hidden accept="${UPLOAD_TYPES.join(',')}" data-avatar-upload><span class="avatar-error" role="alert" hidden></span></div>`;
 }
@@ -93,7 +101,7 @@ async function upload(picker: HTMLElement, input: HTMLInputElement): Promise<voi
 export function handleAvatarPicker(event: Event): boolean {
   const target = event.target;
   if (!(target instanceof Element)) return false;
-  const picker = target.closest<HTMLElement>('.avatar-picker');
+  const picker = target.closest<HTMLElement>('.avatar-picker, .color-picker');
   if (!picker) return false;
   if (event.type === 'change') {
     if (!(target instanceof HTMLInputElement) || !target.matches('[data-avatar-upload]')) return false;
@@ -102,6 +110,16 @@ export function handleAvatarPicker(event: Event): boolean {
   }
   if (event.type !== 'click') return false;
   if (target.closest('[data-avatar-upload-button]')) { picker.querySelector<HTMLInputElement>('[data-avatar-upload]')!.click(); return true; }
+  const color = target.closest<HTMLElement>('[data-color-choice]');
+  if (color && picker.matches('.color-picker')) {
+    const next = color.dataset.colorChoice ?? '';
+    const hidden = picker.querySelector<HTMLInputElement>('input[name=color]')!;
+    hidden.value = COLOR.test(next) ? next : '';
+    picker.querySelectorAll('[data-color-choice]').forEach(button => button.setAttribute('aria-pressed', String(button === color)));
+    picker.closest('form')?.querySelector<HTMLElement>('.avatar-picker')?.style.setProperty('--panda-bg', hidden.value || 'initial');
+    hidden.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
   const swatch = target.closest<HTMLElement>('[data-avatar-choice]');
   if (!swatch) return false;
   const choice = swatch.dataset.avatarChoice!;

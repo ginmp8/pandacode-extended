@@ -6,7 +6,7 @@ import './cloud-settings.css';
 import { escape } from './dom';
 import { infoMark } from './tooltip';
 
-export type CloudConnection = { provider: 'daytona' | 'cloudflare' | 'aws' | 'vercel' | 'railway' | 'gcloud' | KeyedProvider; connected: boolean; detail: string | null; sandboxes?: boolean };
+export type CloudConnection = { provider: 'daytona' | 'cloudflare' | 'aws' | 'vercel' | 'railway' | 'netlify' | 'gcloud' | KeyedProvider; connected: boolean; detail: string | null; sandboxes?: boolean };
 export type CloudSettingsHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen(name: 'cloud-setup', callback: (event: { provider: string; label: string }) => void): Promise<() => void>;
@@ -57,6 +57,12 @@ const PROVIDERS: Record<CloudConnection['provider'], { name: string; summary: st
     fields: [{ name: 'workspace', label: 'Workspace ID', placeholder: 'Optional; needed for a workspace token', optional: true }],
     note: 'Use an account token, or a workspace token with its workspace ID. Agents run the Railway CLI with it (install the CLI yourself before use); it never enters their prompts.', connect: 'Connect',
   },
+  netlify: {
+    name: 'Netlify', summary: 'Deploys by agents, draft and production.',
+    key: { name: 'key', label: 'Personal access token', placeholder: 'Netlify user settings / Applications', secret: true },
+    fields: [{ name: 'siteId', label: 'Project ID', placeholder: 'Optional; from Project configuration', optional: true }],
+    note: 'Create a personal access token in Netlify user settings. The optional project ID selects an existing project; otherwise the CLI uses this checkout. Tokens never enter agent prompts.', connect: 'Connect',
+  },
   gcloud: {
     name: 'Google Cloud', summary: 'Compute Engine command VMs, Cloud Run and Cloud Storage.',
     fields: [{ name: 'project', label: 'Project ID', placeholder: 'my-app-123456' }, { name: 'region', label: 'Region', placeholder: 'Optional, such as us-central1', optional: true }, { name: 'zone', label: 'Zone', placeholder: 'Optional; VM zone such as us-central1-a', optional: true, sparse: true }],
@@ -71,9 +77,18 @@ const PROVIDERS: Record<CloudConnection['provider'], { name: string; summary: st
 /** `cloud_instabox_images`: what new InstaBox machines can start from, and the saved choice. */
 type InstaboxImages = { images: { value: string; label: string }[]; selected: string };
 const IMAGE_HELP = 'New InstaBox machines start from this image. Only ready snapshots and templates available to your account are listed. Existing machines keep their original image.';
+const CLAUDE_TOKEN_HELP = 'Run `claude setup-token` and paste its long-lived token. Without one, PandaCode uses the explicit Claude login transport configured for cloud runs.';
 
 export function mountCloudSettings(host: HTMLElement, options: CloudSettingsHost): () => void {
-  host.innerHTML = `<div class="settings-group cloud-settings" aria-label="Cloud sandboxes">${(Object.keys(PROVIDERS) as CloudConnection['provider'][]).map(id => {
+  host.innerHTML = `<div class="settings-group cloud-settings" aria-label="Cloud sandboxes"><div class="cloud-provider cloud-claude">
+      <div class="setting-row"><div><strong>Claude login for cloud agents</strong>${infoMark(CLAUDE_TOKEN_HELP, 'About the Claude login')}<small class="cloud-detail">Optional long-lived token</small></div></div>
+      <form class="cloud-form cloud-claude-form" novalidate aria-label="Claude login for cloud agents">
+        <label><span>Token</span><input name="token" type="password" autocomplete="off" spellcheck="false" placeholder="From claude setup-token" aria-label="Claude token for cloud agents" required></label>
+        <p class="cloud-progress" role="status" hidden></p>
+        <p class="cloud-error" role="alert" hidden></p>
+        <div class="cloud-actions"><button type="submit" class="primary-button">Save token</button></div>
+      </form>
+    </div>${(Object.keys(PROVIDERS) as CloudConnection['provider'][]).map(id => {
     const provider = PROVIDERS[id];
     const fields = [...(provider.key ? [provider.key] : []), ...provider.fields];
     return `<div class="cloud-provider" data-provider="${id}">
@@ -201,6 +216,13 @@ export function mountCloudSettings(host: HTMLElement, options: CloudSettingsHost
     try { connections = await options.call<CloudConnection[]>('cloud_setup_sandboxes'); line.textContent = 'Sandboxes are ready.'; }
     catch (error) { line.textContent = error instanceof Error ? error.message : String(error); line.classList.add('cloud-error'); }
     finally { busy = ''; if (!disposed) render(); }
+  }
+  async function saveClaudeToken(form: HTMLFormElement): Promise<void> {
+    const root = form.closest<HTMLElement>('.cloud-provider')!, input = form.querySelector<HTMLInputElement>('input')!, token = input.value.trim();
+    say(root, 'progress', ''); say(root, 'error', '');
+    if (!token) { say(root, 'error', 'Paste the token from claude setup-token.'); return; }
+    try { await options.call('cloud_agent_set_claude_token', { token }); if (!disposed) { form.reset(); say(root, 'progress', 'Saved. Cloud agents sign in to Claude with this token.'); } }
+    catch (error) { if (!disposed) say(root, 'error', error instanceof Error ? error.message : String(error)); }
   }
   async function disconnect(id: CloudConnection['provider']): Promise<void> {
     if (busy || imageSaving || disposed) return;

@@ -241,7 +241,11 @@ fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, Strin
     let executable = connection.as_ref().and_then(|connection| connection.executable.clone())
         .or_else(|| crate::providers::executable(context.provider))
         .ok_or("Install this harness before opening its console.")?;
+    if context.provider == "hermes" && executable.file_stem().is_some_and(|s| s == "hermes-acp") {
+        return Err("Hermes ACP server does not have an interactive console. Install the `hermes` CLI for terminal chat, or continue in PandaCode.".into());
+    }
     let mut cmd = crate::providers::pty_command(&executable)?;
+    crate::provider_settings::apply_environment(context.provider, &mut cmd);
     for name in crate::providers::claude_auth::removed_environment(context.provider) { cmd.env_remove(name); }
     cmd.args(args);
     if matches!(context.provider, "claude" | "glm" | "mimo") {
@@ -1019,6 +1023,7 @@ mod tests {
             ("kimi", "--session"),
             ("glm", "--resume"),
             ("opencode", "--session"),
+            ("cline", "--id"),
         ] {
             let context = HarnessContext {
                 session_id: "task",
@@ -1279,6 +1284,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(mimo, ["--permission-mode", "acceptEdits", "--model", "mimo-v2.6-pro"]);
+        // Approve for me is Claude Code's auto mode, as in task runs.
+        for provider in ["claude", "glm", "mimo"] {
+            let review = harness_arguments(&HarnessContext { provider, mode: "review", ..context }).unwrap();
+            assert!(review.windows(2).any(|args| args == ["--permission-mode", "auto"]), "{provider}");
+        }
     }
 
     struct TestShell {

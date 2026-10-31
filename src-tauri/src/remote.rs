@@ -25,7 +25,7 @@ use crate::{secret_store, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 use tauri::{Emitter, Manager};
@@ -65,7 +65,7 @@ type Reply = tokio::sync::oneshot::Sender<Result<Value>>;
 
 const UNKNOWN_DEVICE: &str = "That computer is not on this account.";
 
-/// A trusted device mirroring some of this computer's tasks, and the events waiting
+/// A device mirroring some of this computer's tasks, and the events waiting
 /// for its next frame.
 #[derive(Default)]
 pub(crate) struct Subscriber {
@@ -83,7 +83,6 @@ pub(crate) struct Inner {
     /// sign-out may recover an earlier failed transaction.
     access_locked_down: bool,
     token: Option<String>,
-    /// Signed in, but the keychain refused the token read at startup; retried in the background.
     unreadable: bool,
     connected: bool,
     /// Bumped on every start/stop so an old socket task knows to exit.
@@ -158,7 +157,7 @@ impl Inner {
         }
     }
 
-    /// Calls and task content go only to a device trusted here with its current key.
+    /// Calls and task content go only to a device in the latest account presence list.
     fn callable(&self, device_id: &str) -> Result<()> {
         if self.access_locked_down { return Err(config::ACCESS_LOCKED.into()); }
         let device = self.devices.iter().find(|d| d.id == device_id).ok_or(UNKNOWN_DEVICE)?;
@@ -217,7 +216,7 @@ pub(crate) struct Remote {
     dir: PathBuf,
     accounts: config::Accounts,
     inner: Mutex<Inner>,
-    /// The device key, separate from `inner` so a slow keychain prompt blocks nothing else.
+    /// The device key, separate from `inner` so reading or creating it blocks nothing else.
     key: Mutex<Option<StaticSecret>>,
 }
 
@@ -272,6 +271,7 @@ impl Remote {
             "signedIn": inner.token.is_some() || inner.unreadable,
             "device": {"id": inner.settings.device_id, "name": config::device_name(), "fingerprint": fingerprint},
             "hostEnabled": inner.settings.host_enabled,
+            "notifyEnabled": inner.settings.notify_enabled,
             "allowFullAccess": inner.settings.allow_full_access,
             "directRoutes": routes::enabled(&self.dir),
             "connected": inner.connected,
@@ -545,7 +545,7 @@ pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
     };
     let device = |id: String| json!({"id": id, "name": config::device_name(), "platform": std::env::consts::OS, "publicKey": public_key});
     let (token, account) = match auth::register(&build, &github_token, device(state.device_id())).await {
-        // This id is registered with another key (a restored keychain, say): become a new device once.
+        // This id is registered with another key (the key file was lost, say): become a new device once.
         Err(error) if error == auth::KEY_CHANGED => {
             let settings = {
                 let mut inner = state.lock();
@@ -590,6 +590,7 @@ pub async fn remote_sign_out(app: tauri::AppHandle) -> Result<Value> {
     Ok(remote(&app).status())
 }
 
+/// Hosting uses Extended's persisted revocation fence.
 #[tauri::command]
 pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
     let state = remote(&app);
@@ -630,6 +631,20 @@ pub async fn remote_set_full_access(app: tauri::AppHandle, enabled: bool) -> Res
     };
     emit_status(&app);
     result?;
+    Ok(state.status())
+}
+
+#[tauri::command]
+pub async fn remote_set_notify_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
+    let state = remote(&app);
+    {
+        let mut inner = state.lock();
+        let mut next = inner.settings.clone();
+        next.notify_enabled = enabled;
+        config::save(&state.dir, &next)?;
+        inner.settings = next;
+    }
+    emit_status(&app);
     Ok(state.status())
 }
 
@@ -732,8 +747,7 @@ pub async fn remote_revoke_device(app: tauri::AppHandle, device_id: String) -> R
     Ok(json!({}))
 }
 
-/// Computers a task can run on: trusted here (and so, symmetrically, trusting this one)
-/// with hosting on.
+/// Other online account devices with remote control enabled.
 #[tauri::command]
 pub async fn remote_targets(app: tauri::AppHandle) -> Vec<Value> {
     let state = remote(&app);
@@ -748,6 +762,140 @@ fn targets(inner: &Inner) -> Vec<Value> {
         .filter(|d| d.id != inner.settings.device_id && d.host && inner.settings.is_trusted(&d.id, &d.public_key))
         .map(|d| json!({"deviceId": d.id, "name": d.name, "platform": d.platform, "online": d.online}))
         .collect()
+}
+
+// Headless host support (`pandacode serve`, docs/headless.md): the sign-in, settings and
+// status paths a server needs, without a webview to click through.
+
+/// Full headless sign-in: the GitHub device flow on stdout, then [`headless_register`].
+pub(crate) async fn headless_sign_in(dir: &Path, name: Option<String>) -> Result<String> {
+    let build = config::build().ok_or(
+        "Remote access is not configured in this build (PANDACODE_RELAY_URL / PANDACODE_GITHUB_CLIENT_ID).",
+    )?;
+    let (flow, view) = auth::start(&build).await?;
+    println!(
+        "PandaCode Connect sign-in: open {} and enter the code {}.",
+        view["verificationUri"].as_str().unwrap_or_default(),
+        view["userCode"].as_str().unwrap_or_default()
+    );
+    let github_token = auth::github_token(&build, flow).await?;
+    let settings = headless_register(&build, &github_token, dir, name).await?;
+    let login = settings.account.as_ref().map(|account| account.login.clone()).unwrap_or_default();
+    println!("Signed in as {login} — this server is now hosting for your devices.");
+    Ok(login)
+}
+
+/// Registers this device for `github_token` and enables hosting on disk. The last half of
+/// [`headless_sign_in`], separate so tests can run it against a mock relay.
+async fn headless_register(build: &config::Build, github_token: &str, dir: &Path, name: Option<String>) -> Result<config::Settings> {
+    let mut settings = config::load(dir);
+    let accounts = config::accounts(dir);
+    let secret = config::load_or_create_key(config::read_key(&accounts.key), |text| secret_store::set(config::SERVICE, &accounts.key, text))?;
+    let public_key = crypto::public_key(&secret);
+    let name = name.unwrap_or_else(config::device_name);
+    let device = |id: String| json!({"id": id, "name": name, "platform": std::env::consts::OS, "publicKey": public_key});
+    let (token, account) = match auth::register(build, github_token, device(settings.device_id.clone())).await {
+        // This id is registered with another key (the key file was lost, say): become a new device once.
+        Err(error) if error == auth::KEY_CHANGED => {
+            settings.device_id = uuid::Uuid::new_v4().to_string();
+            config::save(dir, &settings)?;
+            auth::register(build, github_token, device(settings.device_id.clone())).await?
+        }
+        other => other?,
+    };
+    if config::parse_token(&token).is_none_or(|claims| claims.dev != settings.device_id) {
+        return Err("The relay returned an unexpected sign-in token.".into());
+    }
+    secret_store::set(config::SERVICE, &accounts.token, &token)?;
+    settings.host_enabled = true;
+    settings.account = Some(account);
+    config::save(dir, &settings)?;
+    Ok(settings)
+}
+
+/// Revoke locally before performing any potentially slow relay network request.
+pub(crate) async fn headless_sign_out(app: &tauri::AppHandle) {
+    let (build, token, me) = {
+        let state = remote(app);
+        let inner = state.lock();
+        (config::build(), inner.token.clone(), inner.settings.device_id.clone())
+    };
+    if let Err(error) = sign_out_local_checked(app, None) {
+        eprintln!("Could not revoke Connect access locally: {error}");
+        return;
+    }
+    if let (Some(build), Some(token)) = (build, token) {
+        let _ = auth::relay(&build, &token, reqwest::Method::DELETE, &format!("/v1/devices/{me}")).await;
+    }
+}
+
+/// Persists the Full access toggle for remote tasks (headless settings command).
+pub(crate) fn headless_set_full_access(dir: &Path, enabled: bool) -> Result<()> {
+    let mut settings = config::load(dir);
+    settings.allow_full_access = enabled;
+    if enabled {
+        let mut current = config::load(dir);
+        config::update_access(dir, &mut current, settings, false)
+    } else {
+        let already_locked = config::locked_down(dir);
+        config::begin_lockdown(dir)?;
+        config::save(dir, &settings)?;
+        grants::downgrade_full_access(dir)?;
+        if !already_locked { config::end_lockdown(dir)?; }
+        Ok(())
+    }
+}
+
+/// Whether saved Connect credentials exist (serve requires them before serving).
+pub(crate) fn signed_in(dir: &Path) -> bool {
+    let settings = config::load(dir);
+    settings.account.is_some()
+        && config::read_key(&config::accounts(dir).token).ok().flatten().as_deref().is_some_and(|token| config::token_valid(token, chrono::Utc::now().timestamp()))
+}
+
+/// Whether this build can reach a relay at all (plain `serve` refuses without it).
+pub(crate) fn configured() -> bool {
+    config::build().is_some()
+}
+
+/// Whether the saved settings turn hosting on.
+pub(crate) fn host_enabled(dir: &Path) -> bool {
+    !config::locked_down(dir) && config::load(dir).host_enabled
+}
+
+/// Persists "Allow remote control" (headless settings command).
+pub(crate) fn headless_set_host_enabled(dir: &Path, enabled: bool) -> Result<()> {
+    let mut settings = config::load(dir);
+    settings.host_enabled = enabled;
+    let mut current = config::load(dir);
+    config::update_access(dir, &mut current, settings, !enabled)
+}
+
+/// After a CLI sign-in on disk: load it into the managed state and connect the socket.
+pub(crate) fn headless_reload(app: &tauri::AppHandle, dir: &Path) {
+    let settings = config::load(dir);
+    let token = config::read_key(&config::accounts(dir).token).ok().flatten().filter(|token| config::token_valid(token, chrono::Utc::now().timestamp()));
+    {
+        let state = remote(app);
+        let mut inner = state.lock();
+        inner.settings = settings;
+        inner.token = token;
+    }
+    socket::start(app);
+    emit_status(app);
+}
+
+/// One-line serve status for journald, logged only when it changes.
+pub(crate) fn headless_status(app: &tauri::AppHandle) -> String {
+    let state = remote(app);
+    let inner = state.lock();
+    format!(
+        "pandacode serve: {} · hosting {} · relay {} · {} device(s) online",
+        inner.settings.account.as_ref().map(|account| account.login.as_str()).unwrap_or("signed out"),
+        if inner.settings.host_enabled { "on" } else { "off" },
+        if inner.connected { "connected" } else { "disconnected" },
+        inner.devices.iter().filter(|device| device.online).count(),
+    )
 }
 
 #[cfg(test)]
@@ -836,6 +984,66 @@ mod tests {
         inner.token = Some("again".into());
         assert!(inner.clear_sign_in(None));
         assert!(inner.token.is_none());
+    }
+}
+
+#[cfg(test)]
+mod permission_regression_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_device_cannot_send_events_or_responses_to_pending_calls() {
+        let mut inner = Inner::default();
+        inner.devices.push(Device {
+            id: "peer".into(), name: "Test peer".into(), platform: "test".into(),
+            public_key: "key-1".into(), host: true, online: true, last_seen: Value::Null,
+        });
+        inner.settings.trusted.insert("peer".into(), "key-1".into());
+        assert!(inner.allows_incoming("peer", "key-1", "event", None));
+        assert!(inner.allows_incoming("peer", "key-1", "res", Some("call")));
+        inner.settings.trusted.clear();
+        assert!(!inner.allows_incoming("peer", "key-1", "event", None));
+        assert!(!inner.allows_incoming("peer", "key-1", "res", Some("call")));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        inner.pending.insert("pair-1".into(), ("peer".into(), tx));
+        inner.pairing_pending.insert("pair-1".into(), ("peer".into(), "key-1".into()));
+        assert!(inner.allows_incoming("peer", "key-1", "res", Some("pair-1")));
+        assert!(!inner.allows_incoming("peer", "key-1", "event", Some("pair-1")));
+        assert!(!inner.allows_incoming("peer", "key-2", "res", Some("pair-1")));
+        inner.devices[0].public_key = "key-2".into();
+        assert!(!inner.allows_incoming("peer", "key-1", "res", Some("pair-1")));
+        inner.fail_pending(Some("peer"), "revoked");
+        assert!(inner.pairing_pending.is_empty());
+    }
+
+    #[test]
+    fn stale_or_missing_displayed_fingerprint_never_trusts_a_new_key() {
+        let original = crypto::public_key(&crypto::generate());
+        let rotated = crypto::public_key(&crypto::generate());
+        let reviewed = crypto::fingerprint(&original);
+        assert!(verified_fingerprint(&original, Some(&reviewed)).is_ok());
+        assert!(verified_fingerprint(&rotated, Some(&reviewed)).is_err());
+        assert!(verified_fingerprint(&original, None).is_err());
+        assert!(verified_fingerprint(&original, Some("bad")).is_err());
+        assert!(verified_fingerprint("not a valid public key", Some(&reviewed)).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod headless_policy_tests {
+    use super::*;
+    #[test]
+    fn headless_toggles_keep_full_access_off_and_revoke_hosting_durably() {
+        let dir = std::env::temp_dir().join(format!("headless-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(headless_set_full_access(&dir, false).is_ok());
+        assert!(!config::load(&dir).allow_full_access);
+        assert!(headless_set_host_enabled(&dir, true).is_ok());
+        assert!(host_enabled(&dir));
+        assert!(headless_set_host_enabled(&dir, false).is_ok());
+        assert!(!host_enabled(&dir));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

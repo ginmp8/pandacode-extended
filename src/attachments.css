@@ -13,7 +13,7 @@
 :is(.attachments,.message-attachments)>.prompt-chip>.icon:first-child{width:14px;height:14px}
 .prompt-chip-edit{margin-left:auto}
 /* A dragged file lights the composer so the target is unambiguous. */
-.composer-area.drop-active .composer{border-color:var(--focus);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 22%,transparent),0 8px 24px rgb(0 0 0 / .05)}
+.composer-area.drop-active .composer{box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 22%,transparent),0 8px 24px rgb(0 0 0 / .05)}
 .composer-area.drop-active .composer textarea::placeholder{color:var(--accent-ink)}
 /* Collapsed context in sent messages: the note stays readable, the payload stays a click away. */
 .message-context{margin-top:10px;font-size:.78rem}

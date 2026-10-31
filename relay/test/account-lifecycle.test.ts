@@ -65,6 +65,27 @@ function fixture() {
   };
 }
 
+test("push registrations are authenticated, bounded and deleted on device revoke", async () => {
+  const f = fixture();
+  try {
+    const { gen } = await (await f.account.fetch(registration())).json() as { gen: string };
+    const push = (generation: string, payload: unknown) => new Request("https://account/v1/push/devices", {
+      method: "POST",
+      headers: { "x-device-id": ID, "x-token-iat": String(Math.floor(Date.now() / 1000)), "x-token-gen": generation },
+      body: JSON.stringify(payload),
+    });
+    assert.equal((await f.account.fetch(push("not-the-generation", { platform: "ios", token: "device-token" }))).status, 401);
+    assert.equal((await f.account.fetch(push(gen, { platform: "ios", token: "device-token" }))).status, 200);
+    assert.equal((f.database.prepare("SELECT COUNT(*) AS n FROM push_tokens WHERE device_id = ?").get(ID) as { n: number }).n, 1);
+    assert.equal((await f.account.fetch(push(gen, { platform: "ios", token: "x".repeat(3000) }))).status, 413);
+    assert.equal((f.database.prepare("SELECT COUNT(*) AS n FROM push_tokens WHERE device_id = ?").get(ID) as { n: number }).n, 1);
+    assert.equal((await f.account.fetch(request(`/v1/devices/${ID}`, gen, "DELETE"))).status, 200);
+    assert.equal((f.database.prepare("SELECT COUNT(*) AS n FROM push_tokens WHERE device_id = ?").get(ID) as { n: number }).n, 0);
+  } finally {
+    f.database.close();
+  }
+});
+
 test("actual account deletion blocks racing work and requires a fresh registration", async () => {
   const f = fixture();
   try {

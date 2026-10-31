@@ -179,7 +179,7 @@ pub(crate) async fn api(app: &tauri::AppHandle, channel_id: &str, action: &str, 
             }
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
             let text = body["text"].as_str().unwrap_or_default().to_owned();
-            let inbound = gateway::Inbound { bot_id: channel.bot_id.clone(), channel_id: channel.id.clone(), thread: THREAD.into(), sender_id: "web".into(), sender_name: "You (web)".into(), text, trusted: true };
+            let inbound = gateway::Inbound { bot_id: channel.bot_id.clone(), channel_id: channel.id.clone(), thread: THREAD.into(), sender_id: "web".into(), sender_name: "You (web)".into(), text, trusted: true, image_ids: None, moodboard_ids: None };
             match gateway::deliver(app, inbound).await {
                 Ok(_) => Response::json(200, &json!({"ok": true, "busy": busy(app, &channel)})),
                 Err(error) => Response::json(400, &json!({"error": error})),
@@ -234,6 +234,7 @@ main{flex:1;overflow-y:auto;padding:20px 16px 10px;display:flex;flex-direction:c
 .dots{display:inline-flex;gap:3px;padding:8px 10px;border-radius:12px;background:var(--bubble)}.dots i{width:5px;height:5px;border-radius:50%;background:var(--muted);animation:bob 1.2s ease-in-out infinite}.dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
 @keyframes bob{0%,60%,100%{transform:none;opacity:.45}30%{transform:translateY(-3px);opacity:1}}
 .hello{margin:auto;text-align:center;color:var(--muted);max-width:420px;display:flex;flex-direction:column;align-items:center;gap:8px}
+:is(.avatar,.mini) img{width:100%;height:100%;border-radius:50%;object-fit:cover}
 .hello .avatar{width:64px;height:64px;font-size:30px;box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 40%,transparent)}
 .hello b{color:var(--ink);font-size:17px;margin-top:6px}
 .chips{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:8px}.chips button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer}
@@ -357,6 +358,11 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
     document.body.classList.toggle("busy", Boolean(value));
     if (value && !typing) { typing = document.createElement("div"); typing.className = "typing"; typing.setAttribute("role", "status"); typing.innerHTML = '<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>'; typing.append(botName + " is working…"); log.append(typing); scroll(); }
     if (!value && typing) { typing.remove(); typing = null; }
+  }
+  // Uploaded icons are data: URLs, set through .src so they are never parsed as markup.
+  function showAvatar(el) {
+    if (!image) { el.textContent = glyph; return; }
+    const img = document.createElement("img"); img.alt = ""; img.src = image; el.replaceChildren(img);
   }
   function hello() {
     const box = document.createElement("div"); box.className = "hello";

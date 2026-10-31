@@ -755,7 +755,9 @@ mod tests {
     #[test]
     fn listed_hosts_are_callable_without_a_pin() {
         let key = crypto::public_key(&crypto::generate());
-        let inner = Inner { devices: vec![device("host", "Studio Mac", &key)], ..Default::default() };
+        let mut inner = Inner { devices: vec![device("host", "Studio Mac", &key)], ..Default::default() };
+        assert_eq!(inner.callable("host"), Err("PandaCode Connect is disabled. Enable it in Settings.".into()));
+        inner.settings.connection_enabled = true;
         assert_eq!(inner.callable("host"), Ok(()));
         assert_eq!(inner.callable("gone"), Err(UNKNOWN_DEVICE.to_string()));
     }
@@ -769,6 +771,8 @@ mod tests {
         offline.online = false;
         let mut inner = Inner { devices: vec![device("me", "This Mac", &key), device("studio", "Studio Mac", &key), device("other", "Other", &key), offline, guest], ..Default::default() };
         inner.settings.device_id = "me".into();
+        assert!(targets(&inner).is_empty(), "disabling Connect hides remote targets");
+        inner.settings.connection_enabled = true;
         assert_eq!(targets(&inner), vec![
             json!({"deviceId": "studio", "name": "Studio Mac", "platform": "", "online": true}),
             json!({"deviceId": "other", "name": "Other", "platform": "", "online": true}),

@@ -42,7 +42,7 @@ export const appUpdates = (): AppUpdates | undefined => instance;
 export function startAppUpdates(host: UpdatesHost): AppUpdates {
   const listeners = new Set<() => void>();
   let state: UpdateState = preview ? { kind: 'off' } : { kind: 'idle' };
-  let mode: UpdateMode = (() => { try { return parseUpdateMode(localStorage.getItem(KEY)); } catch { return 'automatic' as const; } })();
+  let mode: UpdateMode = (() => { try { return parseUpdateMode(localStorage.getItem(KEY)); } catch { return 'off' as const; } })();
   // Until the native answer arrives nothing has been checked, so nothing can install.
   let installable = false, approved = false;
   const known = preview ? Promise.resolve() : call<boolean>('app_update_install_supported')
@@ -122,6 +122,7 @@ export function startAppUpdates(host: UpdatesHost): AppUpdates {
     setMode(next) {
       mode = next;
       try { localStorage.setItem(KEY, next); } catch { /* A per-device preference only. */ }
+      if (next === 'off') approved = false;
       if (next !== 'off' && state.kind !== 'ready') void check();
       listeners.forEach(listener => listener());
     },

@@ -64,11 +64,15 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     }
     if (!status) return failure('Couldn’t load remote access.', 'Try again.');
     if (!status.configured) return '<p class="remote-note" role="status">Remote access is not configured in this build.</p>';
+    const connection = `<div class="setting-row"><div><strong>Enable PandaCode Connect</strong><small>Off by default. No remote relay or direct connections while disabled.</small></div><input type="checkbox" class="settings-switch" id="remote-connection" aria-label="Enable PandaCode Connect" ${status.connectionEnabled ? 'checked' : ''}></div>`;
+    if (!status.connectionEnabled) return connection + (status.signedIn
+      ? `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Connection paused. No remote devices are reachable.</small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>`
+      : '<p class="remote-note" role="status">Connect is off. Turn it on to sign in.</p>');
     if (!status.signedIn) {
       const flow = code ? `<div class="remote-code"><p>Enter this code at <strong>${escape(code.verificationUri)}</strong>:</p><div class="remote-code-row"><output class="remote-user-code" aria-label="Device code">${escape(code.userCode)}</output><button type="button" class="secondary-button" data-copy>${icon('copy')}Copy code</button></div><p class="remote-note" role="status">Waiting for you to approve in the browser… The code expires at ${new Date(expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p><button type="button" class="secondary-button" data-cancel>Cancel</button></div>` : '';
-      return `<div class="setting-row"><div><strong>PandaCode Connect</strong><small>Sign in with GitHub to reach your other computers. Task content is end-to-end encrypted; the relay sees only ciphertext.</small></div><button type="button" class="secondary-button" data-sign-in ${signingIn ? 'disabled' : ''}>${icon('github')}Sign in with GitHub</button></div>${flow}`;
+      return connection + `<div class="setting-row"><div><strong>PandaCode Connect</strong><small>Sign in with GitHub to reach your other computers. Task content is end-to-end encrypted; the relay sees only ciphertext.</small></div><button type="button" class="secondary-button" data-sign-in ${signingIn ? 'disabled' : ''}>${icon('github')}Sign in with GitHub</button></div>${flow}`;
     }
-    return `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Signed in with GitHub · ${status.connected ? 'connected' : 'connecting…'}</small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
+    return connection + `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Signed in with GitHub · ${status.connected ? 'connected' : 'connecting…'}</small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
       <div class="setting-row"><div><strong>Allow remote control of this computer ${infoMark(ALLOW_TIP, 'About remote control')}</strong><small>Your other signed-in computers can see and drive tasks here.</small></div><input type="checkbox" class="settings-switch" id="remote-host" aria-label="Allow remote control of this computer" ${status.hostEnabled ? 'checked' : ''}></div>
       <div class="setting-row"><div><strong>Notify my phone ${infoMark(NOTIFY_TIP, 'About phone notifications')}</strong><small>Pushes a generic notice when a hosted task needs approval or finishes. The relay never sees task content.</small></div><input type="checkbox" class="settings-switch" id="remote-notify" aria-label="Notify my phone" ${status.notifyEnabled ? 'checked' : ''}></div>
       <div class="setting-row"><div><strong>Full access for remote tasks ${infoMark(FULL_TIP, 'About full access for remote tasks')}</strong><small>Off: remote tasks always ask before acting.</small></div><input type="checkbox" class="settings-switch" id="remote-full-access" aria-label="Full access for remote tasks" ${status.remoteFullAccess ? 'checked' : ''}></div>
@@ -82,19 +86,19 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     const keep = active?.id, caret = active instanceof HTMLInputElement ? active.selectionStart : null;
     main.innerHTML = `<div class="settings-group remote-settings">${body()}</div>${error ? `<p class="remote-error" role="alert">${escape(error)}</p>` : ''}`;
     if (keep) { const again = main.querySelector<HTMLElement>(`#${CSS.escape(keep)}`); again?.focus(); if (again instanceof HTMLInputElement && caret !== null) again.setSelectionRange(caret, caret); }
-    if (status?.signedIn && !unmountOrchestration) unmountOrchestration = mountOrchestrationSettings(orchestration, host);
-    else if (!status?.signedIn && unmountOrchestration) { unmountOrchestration(); unmountOrchestration = undefined; orchestration.innerHTML = ''; }
+    if (status?.signedIn && status.connectionEnabled && !unmountOrchestration) unmountOrchestration = mountOrchestrationSettings(orchestration, host);
+    else if ((!status?.signedIn || !status.connectionEnabled) && unmountOrchestration) { unmountOrchestration(); unmountOrchestration = undefined; orchestration.innerHTML = ''; }
   }
-  const apply = (next: RemoteStatus) => { status = next; if (next.signedIn) { code = undefined; signingIn = false; } else { pairCode = undefined; grants = []; } };
+  const apply = (next: RemoteStatus) => { status = next; if (!next.connectionEnabled) { code = undefined; signingIn = false; attempt++; } if (next.signedIn) { code = undefined; signingIn = false; } else { pairCode = undefined; grants = []; } };
   async function loadGrants(): Promise<void> {
     grantsError = '';
-    if (!status?.signedIn) { grants = []; return; }
+    if (!status?.signedIn || !status.connectionEnabled) { grants = []; return; }
     try { grants = await host.call<DeviceGrant[]>('remote_device_grants'); }
     catch (e) { grants = []; grantsError = message(e); }
   }
   async function loadDevices(): Promise<void> {
     devicesLoaded = false; devicesError = '';
-    if (!status?.signedIn) { devices = []; devicesLoaded = true; return; }
+    if (!status?.signedIn || !status.connectionEnabled) { devices = []; devicesLoaded = true; return; }
     try { devices = await host.call<RemoteDevice[]>('remote_devices'); devicesLoaded = true; }
     catch (e) { devicesError = message(e); }
     await loadGrants();
@@ -166,6 +170,16 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     if (input.id === 'remote-code-scope') { codeScope = input.value as GrantScope; return; }
     if (input instanceof HTMLSelectElement && input.dataset.pick) { picks[input.dataset.pick] = input.value; return; }
     if (input instanceof HTMLSelectElement && input.dataset.grant) { setGrant(input.dataset.grant, input.value); return; }
+    if (input.id === 'remote-connection') {
+      const enabled = (input as HTMLInputElement).checked;
+      void host.call<RemoteStatus>('remote_set_connection_enabled', { enabled }).then(async next => {
+        apply(next);
+        if (next.connectionEnabled && next.signedIn) await loadDevices();
+        else { devices = []; devicesLoaded = true; grants = []; }
+        render();
+      }, e => { (input as HTMLInputElement).checked = !enabled; fail(e); });
+      return;
+    }
     const args = input.id === 'remote-host' ? { enabled: (input as HTMLInputElement).checked } : input.id === 'remote-full-access' ? { fullAccess: (input as HTMLInputElement).checked } : undefined;
     if (args) void host.call<RemoteStatus>('remote_set_host_enabled', args).then(next => { apply(next); render(); }, e => { (input as HTMLInputElement).checked = !(input as HTMLInputElement).checked; fail(e); });
     if (input.id === 'remote-notify') void host.call<RemoteStatus>('remote_set_notify_enabled', { enabled: (input as HTMLInputElement).checked }).then(next => { apply(next); render(); }, e => { (input as HTMLInputElement).checked = !(input as HTMLInputElement).checked; fail(e); });

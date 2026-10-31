@@ -130,13 +130,13 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
                 crate::headless_bots::run_import(app, &path);
             }
             // serve exists to host: flip the host switch if a saved sign-in left it off.
-            if !crate::remote::host_enabled(dir) {
+            if !crate::remote::host_enabled(dir) || !crate::remote::connection_enabled(dir) {
                 if let Err(error) = crate::remote::headless_set_host_enabled(dir, true) {
                     eprintln!("Could not enable hosting: {error}");
                     std::process::exit(1)
                 }
                 crate::remote::headless_reload(app, dir);
-                println!("Hosting was off in the saved sign-in; turned it on.");
+                println!("Hosting and PandaCode Connect are enabled for this headless server.");
             }
             start_services(app.clone());
         }

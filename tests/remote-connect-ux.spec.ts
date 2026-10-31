@@ -12,6 +12,7 @@ async function openRemoteSettings(page: Page) {
 }
 async function chooseStudioOnNewTask(page: Page) {
   const panel = await openRemoteSettings(page);
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.getByRole('button', { name: /^back/i }).click();
@@ -161,6 +162,7 @@ test('remote settings distinguish loading, empty, and retryable status/device fa
   await expect(panel.getByRole('button', { name: 'Sign in with GitHub' })).toBeVisible();
   // The app's presence refresh asks first; the settings panel asks second.
   await page.evaluate(() => { (window as any).__remoteDevicesFailures = 2; });
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('alert')).toContainText('Couldn’t load devices');
   await expect(panel.getByText('No devices yet.')).toHaveCount(0);

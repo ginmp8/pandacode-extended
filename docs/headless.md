@@ -7,7 +7,7 @@ steer and approve tasks on it, including cloud runs ([cloud agents](cloud-agents
 is no webview and no window: the desktop frontend never runs on a server.
 
 Nothing changes for the desktop app. `pandacode` with no arguments is the ordinary GUI;
-`pandacode serve …` is the host.
+`pandacode serve …` is the host and explicitly enables Connect and hosting for that invocation, even when the desktop's saved Connect switch was off.
 
 ## What the server runs
 

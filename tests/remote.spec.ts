@@ -10,8 +10,24 @@ async function openRemoteSettings(page: Page) {
   return page.getByRole('tabpanel', { name: 'Remote access' });
 }
 
+test('Connect is disabled by default and can be paused and resumed in Settings', async ({ page }) => {
+  const panel = await openRemoteSettings(page);
+  const connection = panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' });
+  await expect(connection).not.toBeChecked();
+  await expect(panel.getByRole('button', { name: 'Sign in with GitHub' })).toHaveCount(0);
+  await connection.check();
+  await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
+  await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await expect(panel.locator('.remote-device[data-device="dev-studio"]')).toBeVisible();
+  await connection.uncheck();
+  await expect(panel.getByText('Connection paused. No remote devices are reachable.')).toBeVisible();
+  await expect(panel.locator('.remote-device')).toHaveCount(0);
+  await connection.check();
+  await expect(panel.locator('.remote-device[data-device="dev-studio"]')).toBeVisible();
+});
 test('signs in with a device code, toggles remote control and lists devices', async ({ page }) => {
   const panel = await openRemoteSettings(page);
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByLabel('Device code')).toHaveText('WDJB-MJHT');
   await expect(panel.getByRole('button', { name: 'Copy code' })).toBeVisible();
@@ -47,6 +63,7 @@ test('signs in with a device code, toggles remote control and lists devices', as
 
 async function signedInNewTask(page: Page) {
   const panel = await openRemoteSettings(page);
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.getByRole('button', { name: /^back/i }).click();
@@ -148,6 +165,7 @@ test('a project without a GitHub remote cannot start on another computer', async
 test('sign-in can be cancelled', async ({ page }) => {
   await page.addInitScript(() => { (window as any).__signInDelay = 60_000; });
   const panel = await openRemoteSettings(page);
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByLabel('Device code')).toHaveText('WDJB-MJHT');
   await expect(panel.getByText(/code expires at/)).toBeVisible();
@@ -159,6 +177,7 @@ test('sign-in can be cancelled', async ({ page }) => {
 
 test('device fingerprints are listed without trust controls when host mode is off', async ({ page }) => {
   const panel = await openRemoteSettings(page);
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('checkbox', { name: 'Allow remote control of this computer' })).not.toBeChecked();
   await expect(panel.locator('.remote-device[data-device="dev-studio"]')).toContainText('9b02e4aa71c3d605');

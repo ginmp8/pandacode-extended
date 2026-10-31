@@ -4,6 +4,7 @@
 // into 'unsupported' and this module stops trying until the next launch. No task content ever
 // leaves the phone: the register body is platform + token, nothing else.
 import * as Notifications from 'expo-notifications';
+import { AndroidImportance, IosAuthorizationStatus } from 'expo-notifications';
 import { Linking, Platform } from 'react-native';
 import { useEffect } from 'react';
 import { build } from '../connect/config.ts';
@@ -32,13 +33,13 @@ export async function pushAvailable(): Promise<boolean> {
 
 export async function notificationsGranted(): Promise<boolean> {
   const status = await Notifications.getPermissionsAsync();
-  return status.granted || status.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
+  return status.granted || status.ios?.status === IosAuthorizationStatus.PROVISIONAL;
 }
 
 /** Asks (once, from the Settings toggle only) and registers if granted. Returns whether push is on. */
 export async function enableNotifications(): Promise<boolean> {
   if (Platform.OS === 'android' && Platform.Version >= 33) {
-    await Notifications.setNotificationChannelAsync('tasks', { name: 'Tasks', importance: Notifications.AndroidImportance.HIGH });
+    await Notifications.setNotificationChannelAsync('tasks', { name: 'Tasks', importance: AndroidImportance.HIGH });
   }
   const status = await Notifications.requestPermissionsAsync();
   if (!status.granted) return false;

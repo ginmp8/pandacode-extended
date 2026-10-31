@@ -29,6 +29,28 @@ jobs:
         if: ${{ always() }}
         run: npm audit --prefix relay --audit-level=low
 
+  mobile:
+    name: Mobile dependency and Expo compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Frozen mobile install (no dependency lifecycle scripts)
+        run: npm ci --prefix mobile --ignore-scripts
+      - name: Mobile typecheck
+        run: npm run typecheck --prefix mobile
+      - name: Mobile unit tests
+        run: npm test --prefix mobile
+      - name: Expo config compatibility
+        run: cd mobile && ./node_modules/.bin/expo config --json > /dev/null
+      - name: ESLint compatibility
+        run: npm run lint --prefix mobile
+
   web:
     name: Typecheck, unit tests, website
     runs-on: ubuntu-latest

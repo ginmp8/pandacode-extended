@@ -70,7 +70,6 @@ mod usage_ledger;
 mod tray;
 mod workspace;
 mod jj;
-mod tray;
 mod headless;
 mod headless_bots;
 
@@ -3984,7 +3983,7 @@ pub fn run() {
                 bots::failover::bot_failover_decide,
                 bots::failover::bot_failover_pending,
                 bots::failover::bot_model_switches,
-                bots::bot_set_capabilities, bots::bot_assign_task, bots::bot_task_links, bots::bot_task_brief,
+                bots::bot_task_brief,
                 bots::schedule::bot_schedule_create,
                 bots::schedule::bot_schedule_set_enabled,
                 bots::schedule::bot_schedule_delete,
@@ -4202,7 +4201,6 @@ pub fn run() {
                 progress::progress_thumb,
                 progress::progress_clear,
                 workspace_image,
-                read_document_file,
                 resolve_workspace_files,
                 prepare_file_preview,
                 get_run_script,
@@ -4218,7 +4216,6 @@ pub fn run() {
                 get_metrics,
                 list_local_servers,
                 jev::jev_configuration,
-            jev::jev_decision_models,
                 jev::jev_save_configuration,
                 jev::jev_decision_models,
                 jev::jev_doctor,

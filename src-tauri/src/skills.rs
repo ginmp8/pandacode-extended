@@ -743,27 +743,6 @@ pub async fn skills_task_resolve(app: AppHandle, state: State<'_, AppState>, ses
 }
 
 #[tauri::command]
-pub async fn skills_catalogs(app: AppHandle) -> crate::Result<catalog::Catalogs> {
-    crate::blocking(move || library(&app)?.catalogs()).await
-}
-#[tauri::command]
-pub async fn skills_catalog_add(app: AppHandle, repo: String, git_ref: Option<String>) -> crate::Result<catalog::Catalogs> {
-    let git_ref = git_ref.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
-    crate::blocking(move || library(&app)?.add_catalog(&github::api, &repo_name(&repo), git_ref)).await
-}
-#[tauri::command]
-pub async fn skills_catalog_refresh(app: AppHandle, repo: String) -> crate::Result<catalog::Catalogs> {
-    crate::blocking(move || library(&app)?.refresh_catalog(&github::api, &repo)).await
-}
-#[tauri::command]
-pub async fn skills_catalog_state(app: AppHandle, repo: String, state: catalog::State) -> crate::Result<catalog::Catalogs> {
-    crate::blocking(move || library(&app)?.set_catalog_state(&repo, state)).await
-}
-#[tauri::command]
-pub async fn skills_catalog_import(app: AppHandle, repo: String, paths: Option<Vec<String>>) -> crate::Result<catalog::Imported> {
-    crate::blocking(move || library(&app)?.import_catalog(&github::api, &repo, paths.as_deref())).await
-}
-#[tauri::command]
 pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs> {
     crate::blocking(move || library(&app)?.discover(&github::api)).await
 }

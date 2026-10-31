@@ -1419,37 +1419,6 @@ pub fn read_file(root: &Path, path: String) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not UTF-8 text".into())
 }
 
-/// Largest PDF, Word, spreadsheet or image file the viewer will open.
-const DOCUMENT_LIMIT: u64 = 64 * 1024 * 1024;
-
-/// The bytes of a PDF, Word, spreadsheet or image file for the viewer, which renders it in the window.
-/// Only those types, only inside the project, and bounded in size.
-pub fn read_document_bytes(root: &Path, path: &str) -> Result<Vec<u8>, String> {
-    let target = scoped_path(root, path)?;
-    // A link named report.pdf must not reach another kind of file, such as .git/config.
-    let resolved = fs::canonicalize(&target).map_err(|e| e.to_string())?;
-    let document = |file: &Path| {
-        let extension = file.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-        matches!(extension.as_deref(), Some("pdf" | "docx" | "xlsx" | "xlsm" | "xls" | "ods" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "ico" | "svg"))
-    };
-    let inside = fs::canonicalize(root).ok().and_then(|base| resolved.strip_prefix(base).ok().map(Path::to_path_buf));
-    let in_git = inside.is_none_or(|relative| relative.components().any(|part| part.as_os_str() == ".git"));
-    if !document(&target) || !document(&resolved) || in_git {
-        return Err("Only PDF, Word (.docx), spreadsheet and image files can be shown".into());
-    }
-    let file = File::open(&resolved).map_err(|e| e.to_string())?;
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > DOCUMENT_LIMIT {
-        return Err("The file is missing or larger than 64 MB".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(DOCUMENT_LIMIT + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > DOCUMENT_LIMIT {
-        return Err("The file is missing or larger than 64 MB".into());
-    }
-    Ok(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

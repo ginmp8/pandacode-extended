@@ -818,10 +818,6 @@ fn decision_needs_key(next: &Saved, incoming: &Option<String>) -> bool {
             None => openrouter_key().is_none(),
         }
 }
-#[tauri::command]
-pub async fn jev_decision_models(provider: String) -> Result<Vec<crate::jev_decisions::DecisionModel>> {
-    crate::jev_decisions::models::list(&provider).await
-}
 
 fn venv_python(dir: &Path) -> PathBuf {
     if cfg!(windows) {

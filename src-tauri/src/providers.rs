@@ -45,7 +45,6 @@ mod mimo;
 mod muse;
 mod deepseek;
 mod kimi_models;
-mod kilo;
 mod launch;
 mod pi;
 mod zcode;

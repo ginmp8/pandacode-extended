@@ -25,7 +25,7 @@ function materialIconThemeAssets(): Plugin {
 // Keep optimized dependencies local to each checkout, including worktrees that
 // share installed packages. Concurrent preview servers must not rewrite each
 // other's dependency hashes.
-export default defineConfig({ plugins: [materialIconThemeAssets()], clearScreen: false, cacheDir: '.vite-cache', optimizeDeps: { include: ['docx-preview', 'pdfjs-dist/legacy/build/pdf.mjs', 'xlsx'] }, server: {
+export default defineConfig({ plugins: [materialIconThemeAssets()], clearScreen: false, worker: { format: 'es' }, cacheDir: '.vite-cache', optimizeDeps: { include: ['docx-preview', 'pdfjs-dist/legacy/build/pdf.mjs', 'xlsx'] }, server: {
   port: 1420,
   strictPort: true,
   // Pre-transform first-open UI modules so concurrent browser tests do not wait

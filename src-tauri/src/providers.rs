@@ -39,6 +39,7 @@ mod kilo;
 mod commandcode;
 mod extra_models;
 mod github_copilot;
+pub(crate) mod hermes;
 mod devin;
 mod glm;
 mod mimo;
@@ -73,7 +74,12 @@ const TOOL_INPUT_LIMIT: usize = 4096;
 const TOOL_OUTPUT_LIMIT: usize = 8192;
 const TOOL_CACHE_LIMIT: usize = 64;
 const PREVIEW_TRUNCATED: &str = "\n[Preview truncated]";
-pub(crate) const PROVIDERS: [(&str, &str); 17] = [
+
+/// Return oversized stream buffers to the allocator once drained.
+fn should_shrink(len: usize, capacity: usize) -> bool {
+    capacity > 1024 * 1024 && len <= FRAME_KEEP / 2
+}
+pub(crate) const PROVIDERS: [(&str, &str); 19] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("kimi", "Kimi Code"),
@@ -91,6 +97,8 @@ pub(crate) const PROVIDERS: [(&str, &str); 17] = [
     ("github-copilot", "GitHub Copilot CLI"),
     ("muse", "Muse Code"),
     ("devin", "Devin CLI"),
+    ("zcode", "ZCode"),
+    ("hermes", "Hermes Agent"),
 ];
 
 /// Claude Code tools that only report back to a session that stays open after its turn.
@@ -587,7 +595,14 @@ pub(crate) fn executable(name: &str) -> Option<PathBuf> {
     if let Some(path) = crate::provider_settings::executable_override(name) {
         return Some(path);
     }
-    launch::find(executable_name(name)).or_else(|| if name == "devin" { devin::bundled() } else { None })
+    launch::find(executable_name(name)).or_else(|| if name == "hermes" { launch::find("hermes-acp") } else if name == "devin" { devin::bundled() } else { None })
+}
+
+/// Provider-specific process variables are applied before launch-specific credentials.
+pub(crate) fn provider_command(provider: &str, path: &Path) -> Result<Command, String> {
+    let mut command = command(path)?;
+    crate::provider_settings::apply_environment(provider, &mut command);
+    Ok(command)
 }
 
 fn executable_name(name: &str) -> &str {

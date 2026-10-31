@@ -50,6 +50,8 @@ mod attachments;
 mod prompt_attachments;
 mod overlay;
 mod panda_router;
+mod model_routing;
+mod model_health;
 mod provider_settings;
 mod remote;
 mod providers;

@@ -15,6 +15,11 @@ test('Expo config deep-merge dependency preserves values without prototype poiso
   assert.equal(Object.getPrototypeOf(actual), Object.prototype);
   assert.equal(({} as Record<string, unknown>).injectedByConfig, undefined);
   assert.equal(actual.injectedByConfig, undefined);
+  const craftedTarget = JSON.parse('{"__proto__":{"elevatedByTarget":true},"ios":{"name":"example"}}');
+  const fromTarget = merge(craftedTarget, { ios: { supportsTablet: false } });
+  assert.equal(Object.getPrototypeOf(fromTarget), Object.prototype);
+  assert.equal(({} as Record<string, unknown>).elevatedByTarget, undefined);
+  assert.deepEqual(fromTarget.ios, { name: 'example', supportsTablet: false });
 });
 
 test('patched glob and minimatch retain basic Expo tool patterns', () => {

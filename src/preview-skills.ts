@@ -1,10 +1,9 @@
 /* Browser preview of the skills library (src-tauri/src/skills.rs): an in-memory library, a
  * pretend Claude Code and Codex install, and the same refusals the native side gives. */
-import type { SkillCatalog, SkillCatalogs } from './skills-catalog';
+import type { CatalogImport, CatalogSkill, CatalogSource, SkillActivation, SkillCatalogs, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 import type { SkillPin } from './skills-scope';
-import type { SkillActivation, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 
-const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'omp', 'muse', 'devin']);
+const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'omp', 'muse', 'devin', 'zcode', 'hermes']);
 const FILES = ['claude', 'codex'];
 const PROJECT_ROOT = '/Users/you/Projects/orbit';
 
@@ -35,9 +34,7 @@ const at = (repo: string, path: string) => path ? `${repo}/${path}` : repo;
 
 export function createPreviewSkills() {
   const entries = new Map<string, Entry>();
-  const catalogs: SkillCatalogs = { sources: [] };
   const selections = new Map<string, SkillPin[]>();
-  const catalogState = () => structuredClone(catalogs);
   /** What sits on disk per activation surface: library text, or an edit. */
   const disk = new Map<string, string>();
   const key = (id: string, harness: string, scope: SkillScope) => `${harness}:${scope}:${id}`;
@@ -147,57 +144,28 @@ export function createPreviewSkills() {
     return { id: entry.item.id, scope, status, surface };
   }
 
-  function catalog(repo: string): SkillCatalog {
-    const source = catalogs.sources.find(s => s.repo === repo);
-    if (!source) throw new Error('Unknown catalog.'); return source;
+  function scopeSet(target: string, targetId: string, ids: string[], acknowledge: boolean): SkillPin[] {
+    if (!['bot', 'project'].includes(target) || !targetId || !Array.isArray(ids) || ids.length > 32) throw new Error('Invalid skill scope.');
+    const pins: SkillPin[] = [...new Set(ids)].map(id => {
+      const entry = find(id);
+      if (entry.item.kind !== 'skill') throw new Error('Only skills can be selected.');
+      if (hash(entry.text) !== entry.item.sha256) throw new Error('Library files were edited on disk.');
+      if (entry.item.findings.length && entry.item.acknowledged !== entry.item.sha256) {
+        if (!acknowledge) throw new Error(`Review the safety findings for ${entry.item.name} before assigning it.`);
+        entry.item.acknowledged = entry.item.sha256;
+      }
+      return { id, sha256: entry.item.sha256 };
+    });
+    selections.set(`${target}:${targetId}`, pins);
+    return structuredClone(pins);
   }
-  function annotate(): SkillCatalogs {
-    for (const source of catalogs.sources) for (const skill of source.skills) {
-      const entry = entries.get(skill.id);
-      skill.imported = entry?.item.source.location === `${source.repo}/${skill.path}` ? entry.item.source.commit : null;
-      skill.conflicts = entry && entry.item.source.location !== `${source.repo}/${skill.path}` ? [entry.item.source.location] : [];
-    }
-    return catalogState();
-  }
+
   return {
     PROJECT_ROOT,
     editLibrary(id: string) { find(id).text = 'user edit'; },
-    catalogAdd(repo: string, gitRef: string | null) {
-      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error('Enter the repository as owner/name.');
-      const source: SkillCatalog = { repo, gitRef, commit: 'a'.repeat(40), state: 'enabled', scannedAt: Date.now(), skills: [
-        { path: 'skills/nested/review', id: 'catalog-review', name: 'Catalog review', description: 'Review code changes.', files: 2, bytes: 180, imported: null, conflicts: [] },
-        { path: 'skills/test-plan', id: 'catalog-test-plan', name: 'Catalog test plan', description: 'Plan focused tests.', files: 1, bytes: 90, imported: null, conflicts: [] },
-      ] };
-      catalogs.sources = catalogs.sources.filter(s => s.repo !== repo); catalogs.sources.push(source); return annotate();
-    },
-    catalogImport(repo: string, paths: string[]) {
-      const source = catalog(repo);
-      if (source.state !== 'enabled') throw new Error('Enable this catalog before importing.');
-      if (!paths.length || paths.some(path => !source.skills.some(s => s.path === path))) throw new Error('Choose valid catalog skills.');
-      const imported: string[] = [], skipped: { path: string; name: string; reason: string }[] = [];
-      for (const skill of source.skills.filter(s => paths.includes(s.path))) {
-        const previous = entries.get(skill.id), location = `${repo}/${skill.path}`;
-        if (previous && (previous.item.source.location !== location || hash(previous.text) !== previous.item.sha256)) {
-          skipped.push({ path: skill.path, name: skill.name, reason: 'Name conflict or edited library files; not overwritten.' }); continue;
-        }
-        add('skill', skill.name, `# ${skill.name}\n${skill.description} Version ${source.commit}`, { kind: 'github', location, gitRef: source.gitRef, commit: source.commit }); imported.push(skill.name);
-      }
-      annotate(); return { items: list(), imported, skipped };
-    },
-    scopeSet(target: string, targetId: string, ids: string[], acknowledge: boolean) {
-      if (!['bot', 'project'].includes(target) || !targetId || ids.length > 32) throw new Error('Invalid skill scope.');
-      const pins = [...new Set(ids)].map(id => {
-        const entry = find(id);
-        if (entry.item.kind !== 'skill') throw new Error('Only skills can be selected.');
-        if (hash(entry.text) !== entry.item.sha256) throw new Error('Library files were edited on disk.');
-        if (entry.item.findings.length && entry.item.acknowledged !== entry.item.sha256) {
-          if (!acknowledge) throw new Error(`Review the safety findings for ${entry.item.name} before assigning it.`);
-          entry.item.acknowledged = entry.item.sha256;
-        }
-        return { id, sha256: entry.item.sha256 };
-      });
-      selections.set(`${target}:${targetId}`, pins); return structuredClone(pins);
-    },
+    catalogAdd(repo: string, gitRef: string | null) { return addCatalog(repo, gitRef); },
+    catalogImport(repo: string, paths: string[]) { return importCatalog(repo, paths); },
+    scopeSet,
     /** Simulate a hand edit of an activated file. */
     edit(id: string, harness: string, scope: SkillScope) { disk.set(key(id, harness, scope), 'edited'); },
     list,
@@ -246,7 +214,7 @@ export function createPreviewSkills() {
     scan(id: unknown) { return find(id).item.findings; },
     remove(id: unknown) {
       const entry = find(id);
-      if (entry.item.activations.length || [...selections.values()].some(pins => pins.some(p => p.id === entry.item.id))) throw new Error(`Turn ${entry.item.name} off everywhere before removing it.`);
+      if (entry.item.activations.length || [...selections.values()].some(pins => pins.some(pin => pin.id === entry.item.id))) throw new Error(`Turn ${entry.item.name} off and unassign it everywhere before removing it.`);
       entries.delete(entry.item.id);
       return list();
     },
@@ -265,14 +233,8 @@ export function createPreviewSkills() {
     call(command: string, args: Record<string, any>): unknown {
       switch (command) {
         case 'skills_list': return list();
-        case 'bots_list': return [{ id: 'review-bot', name: 'Review bot' }];
-        case 'skills_catalogs': return annotate();
-        case 'skills_catalog_add': return this.catalogAdd(args.repo, args.gitRef ?? null);
-        case 'skills_catalog_refresh': { const source = catalog(args.repo); if (source.state !== 'enabled') throw new Error('Enable this catalog first.'); source.commit = 'b'.repeat(40); return annotate(); }
-        case 'skills_catalog_state': { const source = catalog(args.repo); if (args.state === null) catalogs.sources = catalogs.sources.filter(s => s !== source); else source.state = args.state; return annotate(); }
-        case 'skills_catalog_import': return this.catalogImport(args.repo, args.paths);
         case 'skills_scope_get': return structuredClone(selections.get(`${args.target}:${args.targetId}`) ?? []);
-        case 'skills_scope_set': return this.scopeSet(args.target, args.targetId, args.ids, !!args.acknowledge);
+        case 'skills_scope_set': return scopeSet(args.target, args.targetId, args.ids, !!args.acknowledge);
         case 'skills_task_resolve': {
           const bot = selections.get(`bot:${args.botId ?? ''}`) ?? [];
           const project = selections.get(`project:${args.projectId ?? 'orbit'}`) ?? [];
@@ -284,6 +246,7 @@ export function createPreviewSkills() {
             return { id, name: item.name, provenance: bot.some(pin => pin.id === id) ? project.some(pin => pin.id === id) ? 'both' : 'bot' : 'project', delivery: current ? 'prompt' : 'skipped', reason: conflict ? 'Bot and project selected different versions. Review their selections.' : current ? null : 'A newer version was imported. Select it again to approve that version.' };
           }) };
         }
+
         case 'skills_import_folder': return this.importFolder(args.path, args.kind);
         case 'skills_import_github': return this.importGithub(args.repo, args.path, args.gitRef, args.kind);
         case 'skills_activate': return this.activate(args.id, args.harness, args.scope, args.projectId, args.acknowledge);

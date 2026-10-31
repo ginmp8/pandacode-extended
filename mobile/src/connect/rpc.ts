@@ -26,15 +26,15 @@ export const maybeRan = (error: unknown) => {
 export const UNKNOWN_METHOD = 'Unknown method.';
 export const outdated = (computer: string) => `Update PandaCode on ${computer} to use this.`;
 
-export interface Request { type: 'req'; id: string; method: Method; params: unknown; ts: number; nonce: string }
+/** `z: 1`: this phone opens packed (deflated) replies and events. */
+export interface Request { type: 'req'; id: string; method: Method; params: unknown; ts: number; nonce: string; z: 1 }
 
 export function request(method: Method, params: unknown, now = Date.now()): Request {
   if (!METHODS.includes(method)) throw new Error('Unknown remote method.');
-  if (new TextEncoder().encode(JSON.stringify(params)).byteLength > MAX_PARAMS) throw new Error('That request is too large.');
-  if (!Number.isSafeInteger(now) || now < 0) throw new Error('The device clock is invalid.');
+  if (JSON.stringify(params).length > MAX_PARAMS) throw new Error('That request is too large.');
   // `ts` and a fresh `nonce` let the host refuse replays.
   const nonce = Array.from(randomBytes(16), b => b.toString(16).padStart(2, '0')).join('');
-  return { type: 'req', id: uuid(), method, params, ts: now, nonce };
+  return { type: 'req', id: uuid(), method, params, ts: now, nonce, z: 1 };
 }
 
 const WINDOW_MS = 60_000;
@@ -48,7 +48,7 @@ export class Replay {
   private readonly seen = new Map<string, number>();
 
   check(ts: unknown, nonce: unknown, now = Date.now()): boolean {
-    if (typeof ts !== 'number' || !Number.isSafeInteger(ts) || ts < 0 || !Number.isSafeInteger(now) || now < 0 || typeof nonce !== 'string' || !/^[\x21-\x7e]{16,64}$/.test(nonce) || Math.abs(now - ts) > WINDOW_MS) return false;
+    if (typeof ts !== 'number' || typeof nonce !== 'string' || !/^[\x21-\x7e]{16,64}$/.test(nonce) || Math.abs(now - ts) > WINDOW_MS) return false;
     for (const [seen, at] of this.seen) if (at < now - WINDOW_MS) this.seen.delete(seen);
     if (this.seen.has(nonce) || this.seen.size >= MAX_SEEN) return false;
     this.seen.set(nonce, ts);

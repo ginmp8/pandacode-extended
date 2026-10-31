@@ -1,30 +1,34 @@
 # Desktop platform support
 
-The retained build configuration describes six architecture targets across three
-operating systems. This source-only 0.3.34.hardened archive includes no installers. Artifact filenames below are build targets, not proof of completed builds.
-Use the local packaging commands in [releasing](releasing.md); upstream releases
-do not include this fork's changes. Native platform support requires its own
-build and desktop checks and is not established by this installation review.
+PandaCode is built for three targets. Each [GitHub Release](https://github.com/aicodeking/pandacode/releases)
+carries one installer per target, built by `.github/workflows/release.yml`
+(see [releasing](releasing.md)). Windows and Linux builds are still previews:
+CI builds them and checks that the packaged app starts, but interactive desktop
+validation is incomplete.
 
 | Target | Platform requirements | Release asset |
 | --- | --- | --- |
-| `darwin-aarch64` | Apple silicon, macOS 12 or later | `PandaCode-0.3.34.hardened-macOS-arm64.dmg` containing `PandaCode.app` |
-| `darwin-x86_64` | Intel Mac, macOS 12 or later | `PandaCode-0.3.34.hardened-macOS-x64.dmg` containing `PandaCode.app` |
-| `windows-x86_64` | x64 Windows 10 version 1809 or later, or Windows 11 | `PandaCode-0.3.34.hardened-Windows-x64-setup.exe` (current-user NSIS installer) |
-| `windows-aarch64` | Windows 11 on ARM (arm64) | `PandaCode-0.3.34.hardened-Windows-arm64-setup.exe` (current-user NSIS installer, native arm64) |
-| `linux-x86_64` | x64 Ubuntu 22.04 or a compatible newer distribution, glibc 2.35+, graphical X11 or XWayland session | `PandaCode-0.3.34.hardened-Linux-x86_64.AppImage` built on Ubuntu 22.04 |
-| `linux-aarch64` | arm64 Ubuntu 24.04 or a compatible newer distribution, glibc 2.39+, graphical X11 or XWayland session | `PandaCode-0.3.34.hardened-Linux-aarch64.AppImage` built on Ubuntu 24.04 |
+| `darwin-aarch64` | Apple silicon, macOS 12 or later | `PandaCode-macOS-arm64.dmg` containing `PandaCode.app` |
+| `darwin-x86_64` | Intel Mac, macOS 12 or later | `PandaCode-macOS-x64.dmg` containing `PandaCode.app` |
+| `windows-x86_64` | x64 Windows 10 version 1809 or later, or Windows 11 | `PandaCode-Windows-x64-setup.exe` (current-user NSIS installer) |
+| `windows-aarch64` | Windows 11 on ARM (arm64) | `PandaCode-Windows-arm64-setup.exe` (current-user NSIS installer, native arm64) |
+| `linux-x86_64` | x64 Ubuntu 22.04 or a compatible newer distribution, glibc 2.35+, graphical X11 or XWayland session | `PandaCode-Linux-x86_64.AppImage` built on Ubuntu 22.04 |
+| `linux-aarch64` | arm64 Ubuntu 24.04 or a compatible newer distribution, glibc 2.39+, graphical X11 or XWayland session | `PandaCode-Linux-aarch64.AppImage` built on Ubuntu 24.04 |
 
 Other architectures are not release targets, but you can try building them
-from source with `npm run package`.
+from source with `npm run tauri build`.
 
 ## Unsigned builds
 
-Windows and Linux local builds are unsigned unless an independently reviewed
-signing process is added. macOS supports the explicit signing choices documented
-in [releasing](releasing.md). An unsigned build or reputation warning is not proof
-of malware or safety. Do not disable antivirus, add exclusions, or override a
-security block to use this distribution; investigate the exact detection first.
+Release builds are unsigned unless the maintainers configure signing secrets
+(see [releasing](releasing.md#optional-signing)).
+
+- **macOS:** an unsigned build has an ad-hoc signature. The first time you open
+  it, macOS may say it cannot verify the app. Open **System Settings → Privacy &
+  Security** and choose **Open Anyway**.
+- **Windows:** SmartScreen may show an unknown-publisher warning. Choose
+  **More info → Run anyway**.
+- **Linux:** mark the AppImage executable (see below).
 
 Each asset has a `.sha256` file beside it so you can check the download.
 
@@ -42,11 +46,9 @@ AppKit Liquid Glass and vibrancy are Mac-only window materials. Windows and
 Linux retain their native window controls; the app's wallpaper opacity and blur
 settings are shared UI features, not a promise of equivalent native materials.
 
-Windows requires an existing Microsoft WebView2 runtime. This revision sets
-`webviewInstallMode.type` to `skip`: the installer neither downloads nor installs
-the runtime and does not bundle a fixed copy. Provision it separately under your
-Windows administration policy; without it the app cannot run. See
-[Windows installation](install-windows-hardened.md). The integrated terminal uses ConPTY,
+Windows uses Microsoft's Evergreen WebView2 runtime. The installer downloads the
+bootstrapper only if the runtime is missing, which requires internet access; it
+does not bundle a fixed WebView2 runtime. The integrated terminal uses ConPTY,
 which sets the Windows 10 version 1809 minimum.
 
 The Linux AppImage's GTK launch hook selects the X11 backend. A graphical X11
@@ -59,8 +61,8 @@ also require FUSE 2 (`libfuse2` on Ubuntu 22.04). Where FUSE is unavailable,
 AppImage supports extract-and-run:
 
 ```sh
-chmod +x ./PandaCode-0.3.34.hardened-Linux-x86_64.AppImage   # or PandaCode-0.3.34.hardened-Linux-aarch64.AppImage
-APPIMAGE_EXTRACT_AND_RUN=1 ./PandaCode-0.3.34.hardened-Linux-x86_64.AppImage
+chmod +x ./PandaCode-Linux-x86_64.AppImage   # or PandaCode-Linux-aarch64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./PandaCode-Linux-x86_64.AppImage
 ```
 
 Linux GLM key storage requires an unlocked desktop Secret Service. If it is
@@ -92,13 +94,12 @@ Wayland portal implementation.
 
 CI (`.github/workflows/ci.yml`) typechecks, runs the unit tests, builds the
 website and runs `cargo check`, `cargo test --lib` and strict Clippy on Linux.
-The previous automatic release/publication workflow is removed in this revision.
-The retained `scripts/release/ci-startup-smoke.mjs` is an optional local probe;
-WebView2 must already be provisioned on Windows. Staying alive alone would not
-prove that a webview rendered, a window accepted input, or a provider turn
-completed. Browser fixtures on a different OS do not establish native platform
-compatibility. Current executed checks and limitations are in
-[the installation review](../SECURITY-INSTALLATION-REVIEW.md).
+The release workflow builds each installer on its native runner and, on Windows
+and Linux, installs or launches the packaged app and checks that it stays alive
+for a fixed interval (`scripts/release/ci-startup-smoke.mjs`). Staying alive
+proves only that the process did not exit: it does not prove the webview
+rendered, the window accepted input, or a provider turn completed. Browser
+fixtures on a Mac do not establish native Windows/Linux compatibility either.
 
 ### Recording validation results
 
@@ -121,7 +122,7 @@ a Windows Server runner, or Linux desktop behavior from Xvfb.
 
 | Check | Evidence to record |
 | --- | --- |
-| Install and launch | Window visibly renders and accepts input; close/reopen preserves settings. Windows does not install/download WebView2; test with the runtime present and record the failure when absent. Linux launches with FUSE and with extract-and-run; record X11 or XWayland. |
+| Install and launch | Window visibly renders and accepts input; close/reopen preserves settings. Windows installs WebView2 when absent. Linux launches with FUSE and with extract-and-run; record X11 or XWayland. |
 | Workspace and terminal | Open a Git project, inspect files/diffs, create a worktree, run and resize the terminal, then close it. Include a path with spaces. |
 | Providers and persistence | Discover each provider being advertised on that OS. With a signed-in CLI, stream a small turn, handle approval, stop, restart the app, and resume the same task. Note any provider not tested. |
 | Concurrent work | Run separate tasks and a team, inspect worker output, cancel them, and confirm their child processes exit. |

@@ -1,7 +1,10 @@
 mod agent_tools;
+mod agents_dock;
 mod agent_usage;
 mod agent_updates;
 mod agent_usage_providers;
+mod memory;
+mod app_updates;
 mod appearance;
 mod architect;
 mod bots;
@@ -16,6 +19,7 @@ mod context_recovery;
 mod conversation_fork;
 mod conversation_import;
 mod design;
+mod progress;
 mod file_preview;
 mod run_script;
 mod github;
@@ -26,9 +30,11 @@ mod simulator;
 mod vm;
 mod secret_store;
 mod cloud;
+mod cloud_agents;
 mod capabilities;
 mod vsix_themes;
 mod token_saver;
+mod task_usage;
 mod skills;
 mod goal_state;
 #[cfg(test)]
@@ -39,18 +45,20 @@ mod jev_decisions;
 mod local_servers;
 mod local_signing;
 mod message_queue;
-mod message_attachments;
+mod model_health;
+mod model_routing;
 mod moodboards;
 mod attachments;
 mod prompt_attachments;
 mod overlay;
+mod panda_router;
 mod provider_settings;
 mod remote;
 mod providers;
 mod session_titles;
 mod slash_commands;
 mod recipes;
-mod review;
+mod schedules;
 mod storage;
 mod subagent_state;
 mod support;
@@ -61,11 +69,15 @@ mod terminal_preferences;
 mod turn_changes;
 mod usage_keychain;
 mod usage_ledger;
-mod tray;
 mod workspace;
 mod jj;
+mod tray;
+mod headless;
+mod headless_bots;
 
 pub use usage_keychain::handle_usage_keychain_helper;
+pub use cloud_agents::handle_cloud_bridge;
+pub use headless::handle as handle_serve;
 
 use providers::{AgentEvent, RunConfig, RunInput};
 use serde::Serialize;
@@ -88,6 +100,7 @@ struct RunningAgent {
     run_id: String,
     approvals: Arc<Mutex<HashSet<String>>>,
     pending_requests: Arc<Mutex<HashMap<String, AgentEvent>>>,
+    started_at_ms: i64,
     subagents: Arc<Mutex<subagent_state::SubagentState>>,
     assistant: Arc<Mutex<String>>,
     /// When the harness last sent anything; team watchdogs stop a turn that went silent.
@@ -101,6 +114,7 @@ impl RunningAgent {
             run_id: uuid::Uuid::new_v4().to_string(),
             approvals: Arc::new(Mutex::new(HashSet::new())),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            started_at_ms: storage::now(),
             subagents: Arc::new(Mutex::new(subagent_state::SubagentState::default())),
             assistant: Arc::new(Mutex::new(String::new())),
             last_event: Arc::new(std::sync::atomic::AtomicI64::new(storage::now())),
@@ -113,6 +127,12 @@ impl RunningAgent {
 
     pub(crate) fn has_pending_approvals(&self) -> bool {
         self.approvals.lock().map_or(true, |approvals| !approvals.is_empty())
+    }
+
+    fn waiting_for_input(&self) -> bool {
+        self.pending_requests
+            .lock()
+            .is_ok_and(|requests| requests.values().any(|request| request.kind == "input_request"))
     }
 
     fn respond_approval(
@@ -259,8 +279,6 @@ mod pending_request_tests {
 
 #[cfg(test)]
 mod concurrent_task_tests;
-#[cfg(test)]
-mod skills_admission_tests;
 
 /// A provider can finish while the database is temporarily unable to write its
 /// final status. The process registry remains authoritative for whether work is
@@ -283,8 +301,10 @@ fn reconcile_inactive_task(
         task.task_stage = "in_progress".into();
         return task;
     }
-    // A mirror runs on its host; its events keep the status.
-    if matches!(task.status.as_str(), "running" | "waiting") && !agents.contains_key(&task.id) && task.remote_device.is_none() {
+    // A mirror runs on its host; its events keep the status. A cloud run keeps going on its
+    // machine until `cloud_agents::resume` re-attaches and finishes it.
+    if matches!(task.status.as_str(), "running" | "waiting") && !agents.contains_key(&task.id) && task.remote_device.is_none()
+        && !cloud_agents::load(store, &task.id).ok().flatten().is_some_and(|cloud| cloud.active()) {
         if let Err(error) = store.finish_task_turn(&task.id, false, true) {
             eprintln!("Could not persist interrupted task state: {error}");
         }
@@ -516,20 +536,28 @@ impl AppState {
     }
 }
 /// Fixed instructions for every task turn: sidebar titles, the run script, change tracking.
-/// Projectless chats have nothing to run, so they skip the run script.
-fn app_instructions(chat: bool) -> String {
+/// Projectless chats have nothing to run, so they skip the run script. Managed team workers
+/// report to their lead, not the user: no titles (they never get a title run), run script,
+/// rich questions or generative UI.
+fn app_instructions(chat: bool, worker: bool) -> String {
+    if worker {
+        return [turn_changes::instruction(), TURN_ENDS].concat();
+    }
     let run = if chat { "" } else { run_script::INSTRUCTIONS };
-    [session_titles::GUIDANCE, run, turn_changes::instruction(), TURN_ENDS, RICH_QUESTIONS, GENERATIVE_UI].concat()
+    [session_titles::GUIDANCE, run, turn_changes::instruction(), TURN_ENDS, RICH_QUESTIONS, GENERATIVE_UI, VISUAL_PROGRESS].concat()
 }
 
 /// PandaCode closes the harness when a turn ends, so background waits never come back.
-const TURN_ENDS: &str = "\n\nYour turn ends when you reply, and PandaCode then closes this session's process: background commands, monitors and scheduled wakeups started in this turn never report back. Wait for long-running commands in the foreground (or poll them) before you reply.";
+const TURN_ENDS: &str = "\n\nYour turn ends when you reply, and PandaCode then closes this session's process: background commands, monitors and harness wakeups started in this turn never report back (pandacode_schedule_wakeup, when listed, does: it wakes this thread later). Wait for long-running commands in the foreground (or poll them) before you reply.";
 
 /// Questions to the user render rich Markdown in PandaCode; agents only use it if told.
 const RICH_QUESTIONS: &str = "\n\nQuestions you ask through the request_user_input tool, where available, render Markdown in PandaCode: use links, images by workspace path (![alt](relative/path.png)), ```chart blocks with JSON {\"type\":\"bar\"|\"line\"|\"pie\",\"title\",\"labels\":[…],\"series\":[{\"name\",\"values\":[…]}]}, ```svg drawings, or static ```html views when a visual helps the user decide. Remote images show as links; scripts never run.";
 
 /// Replies may carry generative UI blocks that PandaCode draws in the thread.
 const GENERATIVE_UI: &str = "\n\nGenerative UI: when a visual beats prose, a reply may include a ```ui block holding JSON {\"type\":…}; ```chart, ```svg and ```html work too. Types (fields): callout(tone info|success|warning|danger|note,title,body), card(title,body,footer,actions,children), stats(items[{label,value,delta,hint,spark[]}]), table(title,columns[],rows[[…]]), chart(chart bar|line|pie|area|sparkline,title,labels,series[{name,values}]), progress(label,value,max), plan|steps|timeline(title,summary,items[{title,detail,status done|active|pending|error|skipped,time}],actions), checklist(items[{text,done}]), tabs|accordion(items[{label,body,children}]), tree(paths[] or items[{name,status,children}]), diff(file,diff), code(file,language,code), terminal(command,output,exitCode), compare(items[{title,pros,cons,verdict}]), gallery(images[{path,caption}]), actions(buttons[{label,prompt,tone}]), chips|followups(options[{label,prompt}]), or inline :codex-followup[Label]{prompt=\"…\"}, form(title,fields[{name,label,type text|textarea|number|select|checkbox,options}],submit,prompt with {name}), stack|grid(columns,children), custom(html,css,state; data-ui-toggle=\"#id\", data-ui-tab/data-ui-panel, data-ui-set=\"k=v\", data-ui-bind=\"k\", data-ui-prompt). Bodies are Markdown. Buttons and forms only put a prompt in the user's composer; nothing runs, and remote URLs are not loaded. ```mermaid shows as labelled source. For a page that needs scripts, write an HTML file and open it with pandacode_preview_file.";
+
+/// Agents building a GUI post one annotated screenshot per iteration to the progress timeline.
+const VISUAL_PROGRESS: &str = "\n\nVisual progress: only when your work has a graphical interface you can actually capture (a web page, desktop or mobile app, simulator, VM screen or design artboard), after each meaningful visual iteration save a screenshot of only that app's own window or page (a headless browser screenshot, a simulator or VM screenshot tool, or `screencapture -l<windowid>` on macOS; never the whole screen or other windows) under .pandacode/progress-shots/, call pandacode_progress_snapshot with a short title, an optional note and a few annotations pointing at what changed, then delete the file, since the image is copied. Before a UI exists you may post an svg idea sketch instead. Post at most one per iteration, and skip this entirely for CLIs, libraries, backend or docs work, or when no such screenshot can be taken.";
 
 /// Harnesses without a system prompt hear the app instructions again every few turns.
 const INSTRUCTION_REMINDER_EVERY: i64 = 8;
@@ -546,12 +574,25 @@ mod instruction_tests {
         let reminded: Vec<i64> = (1..=20).filter(|turn| reminder_turn(*turn)).collect();
         assert_eq!(reminded, [1, 9, 17]);
         assert!(!reminder_turn(0));
-        let text = app_instructions(false);
-        for part in ["Sidebar titles:", "Run and preview workflow:", "File change tracking:", "Questions you ask through the request_user_input tool", "Your turn ends when you reply", "Generative UI:"] {
+        let text = app_instructions(false, false);
+        for part in ["Sidebar titles:", "Run and preview workflow:", "File change tracking:", "Questions you ask through the request_user_input tool", "Your turn ends when you reply", "Generative UI:", "Visual progress:"] {
             assert!(text.contains(part), "{part}");
         }
-        let chat = app_instructions(true);
-        assert!(!chat.contains("Run and preview workflow:") && chat.contains("Sidebar titles:"));
+        let chat = app_instructions(true, false);
+        assert!(!chat.contains("Run and preview workflow:") && chat.contains("Sidebar titles:") && chat.contains("Visual progress:"));
+    }
+
+    #[test]
+    fn team_workers_get_only_change_tracking_and_turn_end() {
+        let lead = app_instructions(false, false);
+        let worker = app_instructions(false, true);
+        assert_eq!(lead, [session_titles::GUIDANCE, run_script::INSTRUCTIONS, turn_changes::instruction(), TURN_ENDS, RICH_QUESTIONS, GENERATIVE_UI, VISUAL_PROGRESS].concat());
+        assert_eq!(worker, [turn_changes::instruction(), TURN_ENDS].concat());
+        assert!(worker.contains("File change tracking:") && worker.contains("Your turn ends when you reply"));
+        for gone in ["Sidebar titles:", "Run and preview workflow:", "Generative UI:", "request_user_input"] {
+            assert!(!worker.contains(gone), "{gone}");
+        }
+        eprintln!("app instructions: lead {} B, worker {} B", lead.len(), worker.len());
     }
 }
 
@@ -573,8 +614,11 @@ async fn delete_session_with_attachment_cleanup(
             let sessions = deleted.deleted_session_ids.clone();
             if let Err(error) = crate::blocking(move || {
                 for sid in sessions {
-                    if let Err(error) = attachments::remove_task_files(&data_dir, &sid) {
-                        eprintln!("PandaCode: could not remove deleted task attachments: {error}");
+                    let path = data_dir.join("attachments").join(sid);
+                    if let Err(error) = std::fs::remove_dir_all(path) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            eprintln!("PandaCode: could not remove deleted task attachments: {error}");
+                        }
                     }
                 }
                 Ok(())
@@ -618,7 +662,7 @@ async fn remove_project(state: State<'_, AppState>, project_id: String) -> Resul
 async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>> {
     listed_sessions(&state)
 }
-/// Use the same session reconciliation as the sidebar when the menu is opened.
+/// Tasks as the sidebar shows them, with stale running states settled.
 pub(crate) fn listed_sessions(state: &AppState) -> Result<Vec<Session>> {
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -759,19 +803,25 @@ async fn update_task_details(
 }
 #[tauri::command]
 async fn set_task_stage(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     stage: String,
 ) -> Result<Session> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
-    if agents.contains_key(&session_id) {
-        return Err("Stop the agent before changing its task stage.".into());
-    }
-    state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .set_task_stage(&session_id, &stage)
+    let task = {
+        let agents = state.agents.lock().map_err(|e| e.to_string())?;
+        if agents.contains_key(&session_id) {
+            return Err("Stop the agent before changing its task stage.".into());
+        }
+        state
+            .store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .set_task_stage(&session_id, &stage)?
+    };
+    // Reopened: machine threads that settled meanwhile are reported now.
+    remote::orchestrate::retry(&app, &session_id);
+    Ok(task)
 }
 #[tauri::command]
 async fn configure_session(
@@ -790,9 +840,7 @@ async fn configure_session(
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its project, provider, or model.".into());
     }
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    remote::check_current_request(&store.session(&session_id)?.mode)?;
-    store.configure(
+    state.store.lock().map_err(|e| e.to_string())?.configure(
         &session_id,
         &provider,
         &model,
@@ -813,9 +861,11 @@ async fn set_reasoning_effort(
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its reasoning effort.".into());
     }
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    remote::check_current_request(&store.session(&session_id)?.mode)?;
-    store.set_reasoning_effort(&session_id, reasoning_effort.as_deref())
+    state
+        .store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .set_reasoning_effort(&session_id, reasoning_effort.as_deref())
 }
 #[tauri::command]
 async fn update_session(
@@ -848,17 +898,17 @@ async fn update_session(
     if (model.is_some() || mode.is_some()) && agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its model or permissions.".into());
     }
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let task = store.session(&session_id)?;
-    let mode_for_check = mode.as_deref().unwrap_or(&task.mode).to_owned();
-    let privileged_mode = matches!(mode.as_deref(), Some("full" | "review"));
-    let persist = || store.update(&session_id, title, archived, model, mode);
-    if privileged_mode {
-        remote::grants::with_current_full_request(&mode_for_check, persist)
-    } else {
-        remote::check_current_request(&mode_for_check)?;
-        persist()
+    let restored = archived == Some(false);
+    state
+        .store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .update(&session_id, title, archived, model, mode)?;
+    drop(agents);
+    if restored {
+        remote::orchestrate::retry(&app, &session_id);
     }
+    Ok(())
 }
 #[tauri::command]
 async fn get_messages(
@@ -892,10 +942,11 @@ fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<providers::S
         .transpose()
         .map_err(|error| error.to_string())?;
     let store = state.store.lock().map_err(|error| error.to_string())?;
-    if live.is_none() {
+    // A mirror's children run on its host: they settle there while its turn is open.
+    let task = live.is_none().then(|| store.session(session_id)).transpose()?;
+    if let Some(task) = task.filter(|task| task.remote_device.is_none() || !matches!(task.status.as_str(), "running" | "waiting")) {
         // Retry a completion write that may have failed without reviving old
         // children just because their final snapshot could not reach disk.
-        let task = store.session(session_id)?;
         store.finish_subagents(
             session_id,
             if task.status == "error" {
@@ -1005,6 +1056,38 @@ fn flush_assistant(db: &Store, sid: &str, assistant: &Mutex<String>) -> Result<(
         text.clear();
     }
     Ok(())
+}
+
+/// Streams an agent event to the window and remote viewers, merging text deltas
+/// (`providers::Coalescer`). The lock is held while emitting so order is kept.
+fn emit_coalesced(app: &tauri::AppHandle, coalescer: &Arc<Mutex<providers::Coalescer>>, event: AgentEvent) {
+    let mut buffer = coalescer.lock().unwrap_or_else(|poison| poison.into_inner());
+    let now = std::time::Instant::now();
+    for event in buffer.push(event, now) {
+        remote::agent_event(app, &event);
+        let _ = app.emit("agent-event", event);
+    }
+    if buffer.started_at() == Some(now) {
+        let (app, coalescer) = (app.clone(), coalescer.clone());
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(providers::COALESCE_WINDOW).await;
+            let mut buffer = coalescer.lock().unwrap_or_else(|poison| poison.into_inner());
+            if buffer.started_at() == Some(now) {
+                if let Some(event) = buffer.flush() {
+                    remote::agent_event(&app, &event);
+                    let _ = app.emit("agent-event", event);
+                }
+            }
+        });
+    }
+}
+
+fn flush_coalesced(app: &tauri::AppHandle, coalescer: &Arc<Mutex<providers::Coalescer>>) {
+    let mut buffer = coalescer.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(event) = buffer.flush() {
+        remote::agent_event(app, &event);
+        let _ = app.emit("agent-event", event);
+    }
 }
 
 fn save_agent_activity(
@@ -1253,12 +1336,25 @@ async fn send_message(
     image_ids: Option<Vec<String>>,
     moodboard_ids: Option<Vec<String>>,
 ) -> Result<()> {
+    if let Some(ids) = moodboard_ids.as_deref().filter(|ids| !ids.is_empty()) {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let project_id = store.session(&session_id)?.project_id;
+        text.push_str(&moodboards::resolve_refs(&store, &project_id, ids)?);
+    }
+    send_prompt(app, state, session_id, text, image_ids).await
+}
+
+/// Sends a prompt the way the composer does (see `send_target`). Scheduled messages use it too.
+pub(crate) async fn send_prompt(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    text: String,
+    image_ids: Option<Vec<String>>,
+) -> Result<()> {
     let (target, project_id) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = store.session(&session_id)?;
-        if let Some(ids) = moodboard_ids.as_deref().filter(|ids| !ids.is_empty()) {
-            text.push_str(&moodboards::resolve_refs(&store, &task.project_id, ids)?);
-        }
         (send_target(&store, &session_id)?, task.project_id)
     };
     if target == SendTarget::Team {
@@ -1275,6 +1371,9 @@ async fn send_message(
     if target == SendTarget::Mirror {
         // Screenshots and images are files on this computer: they are copied to the host first.
         return remote::mirror::send(&app, &state, &session_id, text, image_ids.as_deref().unwrap_or_default()).await;
+    }
+    if image_ids.as_ref().is_some_and(|ids| !ids.is_empty()) && cloud_agents::transport::is_cloud(&session_id) {
+        return Err("Images can't be sent to a cloud machine yet.".into());
     }
     launch_task_in_project(
         app,
@@ -1315,11 +1414,13 @@ async fn start_task(
 #[derive(Default)]
 struct RunAdmission<'a> {
     expected_project: Option<&'a str>,
-    skills: Option<&'a skills::Library>,
     command: Option<PreparedCommand>,
     goal: Option<goal_state::GoalRequest>,
     team: Option<architect::Admission>,
-    scheduled: Option<&'a bots::schedule::Admission>,
+    /// Re-attach to a cloud task's remote run (`cloud_agents::resume`): no new turn.
+    cloud_attach: bool,
+    /// An app-origin turn PandaCode itself starts (`launch_app_turn`).
+    kind: Option<architect::internal_turns::CoordinationKind>,
 }
 
 struct PreparedRun {
@@ -1377,21 +1478,10 @@ fn prepare_task_run_in_project(
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
     architect::validate_admission(&store, &session_id, admission.team.as_ref())?;
-    let mut session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
-    bots::check_task_admission(&store, &session)?;
-    let scheduled_work = if let Some(scheduled) = admission.scheduled {
-        if admission.team.is_some() || admission.goal.is_some() {
-            return Err("Scheduled work must use an ordinary bot conversation.".into());
-        }
-        // The permission ceiling belongs to this occurrence. Never read it from
-        // a shared mutable session mode prepared by another scheduled request.
-        let work = bots::schedule::admission_work(&store, &session_id, scheduled, storage::now())?;
-        session.mode = work.mode.to_owned();
-        Some(work)
-    } else {
-        None
-    };
-    remote::check_current_request(&session.mode)?;
+    let session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    if admission.cloud_attach {
+        return prepare_cloud_attach(&store, &mut agents, session, tx, stopped);
+    }
     if admission.goal.is_some() && session.provider != "codex" {
         return Err(
             "Goals require the Codex harness. The task provider changed before it started.".into(),
@@ -1403,11 +1493,23 @@ fn prepare_task_run_in_project(
     {
         return Err("Task moved to a different project. Read its details again.".into());
     }
+    // A wake turn reports the task's settled machine threads, claimed under this lock and
+    // marked reported in the transaction that saves the turn.
+    // A link answer stays unread until its turn is saved.
+    let (text, reported, link_answer) = match admission.kind {
+        Some(architect::internal_turns::CoordinationKind::MachineThreads) => {
+            let (message, ids) = remote::orchestrate::claim(&store, &session_id)?.ok_or("No machine threads to report.")?;
+            (Some(message), ids, None)
+        }
+        Some(architect::internal_turns::CoordinationKind::MachineLink) => {
+            let (message, id) = remote::orchestrate::claim_link(&session_id).ok_or("No machine link answer to report.")?;
+            (Some(message), Vec::new(), Some(id))
+        }
+        _ => (text, Vec::new(), None),
+    };
     // Resolve the saved task details under the same lock as the execution
     // claim, so Start cannot race a details edit or completion action.
-    let text = scheduled_work
-        .map(|work| work.prompt)
-        .or(text)
+    let text = text
         .unwrap_or_else(|| {
             if session.task_description.trim().is_empty() {
                 session.title.clone()
@@ -1448,12 +1550,14 @@ fn prepare_task_run_in_project(
         }
         None if admission.goal.is_none()
             && admission.team.is_none()
+            && admission.kind.is_none()
             && slash_commands::split_command(&text).is_some() =>
         {
             return Err("The task command changed. Try again to load its commands.".into());
         }
         None => (text.clone(), None, false),
     };
+    let needs_context = context_recovery::pending(&store, &session)?;
     let goal_control = matches!(
         admission.goal,
         Some(
@@ -1462,24 +1566,12 @@ fn prepare_task_run_in_project(
                 | goal_state::GoalRequest::Clear
         )
     );
-    let selected_skills = if !goal_control {
-        if let Some(library) = admission.skills {
-            let selected = skills::scoped::task(library, &store, &session, &cwd)?;
-            library.synchronize_context(&store, &mut session, &selected)?;
-            Some(selected)
-        } else { None }
-    } else { None };
-    let needs_context = context_recovery::pending(&store, &session)?;
-    let fork_brief = if goal_control { None } else { bots::fork_task_brief(&store, &session, session.resume_id.is_none() || needs_context)? };
-    let bot_brief = if goal_control || maintenance { None } else { bots::tasks::prepare(&store, &session, session.resume_id.is_none() || needs_context)? };
     if needs_context
         && ((!goal_control && admission.goal.is_some())
             || slash_commands::split_command(&prompt).is_some())
     {
         return Err(context_recovery::RECOVERY_REQUIRED.into());
     }
-    let prompt = match fork_brief { Some(brief) => format!("{prompt}{brief}"), None => prompt };
-    let prompt = match &bot_brief { Some(brief) => format!("{prompt}{}", brief.text), None => prompt };
     let (prompt, context_handoff) = if goal_control {
         if needs_context {
             context_recovery::queue(&store, &session_id)?;
@@ -1488,27 +1580,29 @@ fn prepare_task_run_in_project(
     } else {
         context_recovery::prepare(&store, &session, &prompt)?
     };
-    let prompt = if !goal_control && !maintenance {
-        if let Some(selected) = selected_skills { format!("{prompt}{}", selected.text) } else { prompt }
-    } else { prompt };
     let turn_started = std::time::Instant::now();
-    let turn_message_id = if let Some(scheduled) = admission.scheduled {
-        store.begin_scheduled_task_turn(&session_id, &text, scheduled)?
-    } else if admission.goal.is_some() {
+    let turn_message_id = if admission.goal.is_some() {
         if matches!(admission.goal, Some(goal_state::GoalRequest::Set { .. })) {
-            store.begin_task_turn_with_context(&session_id, &text, None, bot_brief.as_ref())?
+            store.begin_task_turn(&session_id, &text)?
         } else {
             store.begin_goal_operation(&session_id)?;
             0
         }
     } else {
-        let kind = architect::internal_turns::pending_kind(
-            &store,
-            &session_id,
-            &text,
-            admission.team.as_ref(),
-        )?;
-        store.begin_task_turn_with_context(&session_id, &text, kind, bot_brief.as_ref())?
+        let kind = match admission.kind {
+            Some(kind) => Some(kind),
+            None => architect::internal_turns::pending_kind(
+                &store,
+                &session_id,
+                &text,
+                admission.team.as_ref(),
+            )?,
+        };
+        let id = store.begin_task_turn_reporting(&session_id, &text, kind, &reported)?;
+        if let Some(answer) = &link_answer {
+            remote::orchestrate::link_claimed(&session_id, answer);
+        }
+        id
     };
     let maintenance = maintenance
         || matches!(
@@ -1519,7 +1613,16 @@ fn prepare_task_run_in_project(
                     | goal_state::GoalRequest::Clear
             )
         );
-    let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref())?;
+    // A wake turn that cannot start after it was saved gives its claim back.
+    let restore = |error: String| {
+        if matches!(admission.kind, Some(architect::internal_turns::CoordinationKind::MachineThreads | architect::internal_turns::CoordinationKind::MachineLink)) {
+            if let Err(cleanup) = remote::orchestrate::abandon_wake(&store, &session_id, turn_message_id) {
+                eprintln!("Machine orchestration: could not give a wake back: {cleanup}");
+            }
+        }
+        error
+    };
+    let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
     let config = RunConfig {
         session_id: session_id.clone(),
         provider: session.provider,
@@ -1535,7 +1638,7 @@ fn prepare_task_run_in_project(
         goal: admission.goal,
         codex_settings: session.codex_settings,
     };
-    architect::mark_started(&store, &session_id, admission.team.as_ref())?;
+    architect::mark_started(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
     let agent = RunningAgent::new(tx, stopped.clone());
     let run_id = agent.run_id.clone();
     let pending_approvals = agent.approvals.clone();
@@ -1558,6 +1661,102 @@ fn prepare_task_run_in_project(
         last_event,
         team: admission.team,
     })
+}
+
+/// A run that re-attaches to a cloud task's remote run: the turn it belongs to was saved
+/// before; what came after is rebuilt by replaying the run's whole log.
+fn prepare_cloud_attach(
+    store: &Store,
+    agents: &mut HashMap<String, RunningAgent>,
+    session: Session,
+    tx: UnboundedSender<RunInput>,
+    stopped: Arc<AtomicBool>,
+) -> Result<PreparedRun> {
+    let session_id = session.id.clone();
+    let cloud = cloud_agents::load(store, &session_id)?
+        .filter(|cloud| cloud.active())
+        .ok_or("This cloud run already ended.")?;
+    let cwd = store.workspace_root(&session.project_id, Some(&session_id))?;
+    store.db.execute("DELETE FROM messages WHERE session_id=?1 AND id>?2", rusqlite::params![session_id, cloud.turn_message]).map_err(|e| e.to_string())?;
+    store.db.execute("UPDATE sessions SET status='running',task_stage='in_progress',completed_at=NULL WHERE id=?1", [&session_id]).map_err(|e| e.to_string())?;
+    let config = RunConfig {
+        session_id: session_id.clone(),
+        provider: session.provider,
+        model: session.model,
+        reasoning_effort: session.reasoning_effort,
+        mode: session.mode,
+        cwd,
+        resume_id: session.resume_id,
+        prompt: String::new(),
+        instructions: String::new(),
+        images: Vec::new(),
+        skill: None,
+        goal: None,
+        codex_settings: session.codex_settings,
+    };
+    let agent = RunningAgent::new(tx, stopped);
+    let prepared = PreparedRun {
+        config,
+        restore_stage: None,
+        turn_message_id: cloud.turn_message,
+        turn_started: std::time::Instant::now(),
+        context_handoff: None,
+        run_id: agent.run_id.clone(),
+        pending_approvals: agent.approvals.clone(),
+        pending_requests: agent.pending_requests.clone(),
+        subagents: agent.subagents.clone(),
+        assistant: agent.assistant.clone(),
+        last_event: agent.last_event.clone(),
+        team: None,
+    };
+    agents.insert(session_id, agent);
+    Ok(prepared)
+}
+
+/// Starts a run that re-attaches to a cloud task's remote run (`cloud_agents::resume`).
+pub(crate) async fn attach_cloud_run(app: tauri::AppHandle, session_id: String) -> Result<()> {
+    let state = app.state::<AppState>();
+    launch_operation_admitted(
+        app.clone(),
+        state,
+        session_id,
+        None,
+        None,
+        OperationAdmission {
+            expected_project: None,
+            goal: None,
+            team: None,
+            cloud_attach: true,
+            kind: None,
+        },
+    )
+    .await
+}
+
+/// Starts a turn PandaCode writes itself, saved as a typed app-origin message
+/// (`architect::internal_turns`) so the transcript shows its label, not the prompt. The
+/// prompt is made under the run's admission lock (`MachineThreads`: the settled threads).
+pub(crate) async fn launch_app_turn(
+    app: tauri::AppHandle,
+    session_id: String,
+    kind: architect::internal_turns::CoordinationKind,
+) -> Result<()> {
+    let state = app.state::<AppState>();
+    launch_operation_admitted(
+        app.clone(),
+        state,
+        session_id,
+        None,
+        None,
+        OperationAdmission {
+            expected_project: None,
+            goal: None,
+            team: None,
+            cloud_attach: false,
+            kind: Some(kind),
+        },
+    )
+    .await
 }
 
 async fn launch_task(
@@ -1590,30 +1789,6 @@ async fn launch_task_in_project(
     .await
 }
 
-pub(crate) async fn launch_scheduled_task(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    session_id: String,
-    text: String,
-    project_id: String,
-    scheduled: bots::schedule::Admission,
-) -> Result<()> {
-    launch_operation_admitted(
-        app,
-        state,
-        session_id,
-        Some(text),
-        None,
-        OperationAdmission {
-            expected_project: Some(project_id),
-            goal: None,
-            team: None,
-            scheduled: Some(scheduled),
-        },
-    )
-    .await
-}
-
 async fn launch_operation(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1633,7 +1808,8 @@ async fn launch_operation(
             expected_project,
             goal,
             team: None,
-            scheduled: None,
+            cloud_attach: false,
+            kind: None,
         },
     )
     .await
@@ -1657,7 +1833,8 @@ pub(crate) fn launch_team_task<'a>(
             expected_project: None,
             goal: None,
             team: Some(admission),
-            scheduled: None,
+            cloud_attach: false,
+            kind: None,
         },
     ))
 }
@@ -1666,7 +1843,8 @@ struct OperationAdmission {
     expected_project: Option<String>,
     goal: Option<task_controls::GoalLaunch>,
     team: Option<architect::Admission>,
-    scheduled: Option<bots::schedule::Admission>,
+    cloud_attach: bool,
+    kind: Option<architect::internal_turns::CoordinationKind>,
 }
 
 async fn launch_operation_admitted(
@@ -1681,12 +1859,13 @@ async fn launch_operation_admitted(
         expected_project,
         goal,
         team: team_admission,
-        scheduled,
+        cloud_attach,
+        kind,
     } = admission;
     if state.shutdown.load(Ordering::SeqCst) != 0 {
         return Err("PandaCode is shutting down.".into());
     }
-    let command = if goal.is_none() && team_admission.is_none() {
+    let command = if goal.is_none() && team_admission.is_none() && !cloud_attach && kind.is_none() {
         prepare_command(&state, &session_id, text.as_deref()).await?
     } else {
         None
@@ -1723,7 +1902,6 @@ async fn launch_operation_admitted(
         .collect::<Result<Vec<_>>>()?;
     let (tx, rx) = unbounded_channel();
     let stopped = Arc::new(AtomicBool::new(false));
-    let skill_library = skills::library(&app)?;
     let PreparedRun {
         mut config,
         restore_stage,
@@ -1746,14 +1924,14 @@ async fn launch_operation_admitted(
         stopped.clone(),
         RunAdmission {
             expected_project: expected_project.as_deref(),
-            skills: Some(&skill_library),
             command,
             goal: goal_request,
             team: team_admission,
-            scheduled: scheduled.as_ref(),
+            cloud_attach,
+            kind,
         },
     )?;
-    if turn_message_id > 0 && (!attachment_ids.is_empty() || attachment_text.contains("(moodboard ID: ")) {
+    if !cloud_attach && turn_message_id > 0 && (!attachment_ids.is_empty() || attachment_text.contains("(moodboard ID: ")) {
         match app.path().app_data_dir() {
             Ok(app_data_dir) => {
                 let store = state.store.clone();
@@ -1772,31 +1950,9 @@ async fn launch_operation_admitted(
             Err(error) => eprintln!("PandaCode: could not find attachment storage: {error}"),
         }
     }
-    // Attachment persistence can yield after admission. A peer revoked during
-    // that work must leave a saved, interrupted turn without starting a provider.
-    if let Err(error) = remote::check_current_request(&config.mode) {
-        let mut registry = state.agents.lock().map_err(|error| error.to_string())?;
-        if registry.get(&session_id).is_some_and(|agent| agent.run_id == run_id) {
-            stopped.store(true, Ordering::SeqCst);
-            let saved = (|| -> Result<()> {
-                let store = state.store.lock().map_err(|error| error.to_string())?;
-                if turn_message_id > 0 {
-                    store.finish_turn(&session_id, turn_message_id, turn_started.elapsed().as_millis().min(i64::MAX as u128) as i64)?;
-                }
-                store.finish_task_operation(&session_id, false, true, restore_stage.as_deref())
-            })();
-            registry.remove(&session_id);
-            architect::completed(&app, &session_id, team.as_ref(), false, true, &registry);
-            if let Err(error) = saved {
-                eprintln!("PandaCode: could not persist a revoked remote turn: {error}");
-            }
-        }
-        drop(registry);
-        let _ = app.emit("agent-event", event(&session_id, "status", "interrupted"));
-        let _ = app.emit("sessions-changed", ());
-        tray::refresh(&app);
-        return Err(error);
-    }
+    // A cloud task's agent runs on its machine (cloud_agents::transport). Quitting must
+    // leave that run alone, so this run neither stops it nor records an end while closing.
+    let cloud = cloud_agents::transport::is_cloud(&session_id);
     let _ = app.emit("agent-event", event(&session_id, "status", "running"));
     tray::refresh(&app);
     let store = state.store.clone();
@@ -1816,7 +1972,8 @@ async fn launch_operation_admitted(
         config.prompt.push_str(&title.instruction());
     }
     if restore_stage.is_none() {
-        let instructions = app_instructions(chats::is_chat_folder(&config.cwd));
+        let worker = team.as_ref().is_some_and(|admission| admission.parent != session_id);
+        let instructions = app_instructions(chats::is_chat_folder(&config.cwd), worker);
         if providers::takes_system_instructions(&config.provider) {
             // Cached with the system prompt: paid once, then read at a tenth of the price.
             config.instructions = instructions;
@@ -1859,12 +2016,18 @@ async fn launch_operation_admitted(
         let assistant_sink = assistant.clone();
         let store_sink = store.clone();
         let app_sink = app.clone();
+        let pending_requests_sink = pending_requests.clone();
         let subagents_sink = subagents.clone();
         let goal_reply_sink = goal_reply.clone();
         let goal_agents_sink = agents.clone();
         let native_turn_sink = Mutex::new(String::new());
         let team_sink = team.clone();
+        let coalescer = Arc::new(Mutex::new(providers::Coalescer::default()));
+        let coalescer_sink = coalescer.clone();
         let sink: providers::Sink = Arc::new(move |mut e: AgentEvent| {
+            if cloud && app_sink.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
+                return;
+            }
             last_event.store(storage::now(), Ordering::SeqCst);
             if e.kind == "done" {
                 return;
@@ -1922,7 +2085,7 @@ async fn launch_operation_admitted(
                     e.kind.as_str(),
                     "approval" | "approval_cancelled" | "input_request" | "input_cancelled"
                 ) {
-                    let saved = save_approval_with_pending(&store_sink, &pending_approvals, Some(&pending_requests), &run_id, &mut e);
+                    let saved = save_approval_with_pending(&store_sink, &pending_approvals, Some(&pending_requests_sink), &run_id, &mut e);
                     if saved.is_ok() && e.kind == "approval" {
                         if let Some(request_id) = &e.request_id {
                             bots::approval_requested(&app_sink, &e.session_id, request_id, &e.text);
@@ -1979,10 +2142,9 @@ async fn launch_operation_admitted(
             ) {
                 architect::activity(&app_sink, &e.session_id, team_sink.as_ref());
             }
-            remote::agent_event(&app_sink, &e);
             // Cloned only for the turn boundary below.
             let completed = (e.kind == "turn_complete").then(|| e.session_id.clone());
-            let _ = app_sink.emit("agent-event", e);
+            emit_coalesced(&app_sink, &coalescer_sink, e);
             if let Some(changes_sid) = completed {
                 if let Some(tracker) = &tracker_sink {
                     let capture = blocking_snapshot(|| {
@@ -2006,9 +2168,13 @@ async fn launch_operation_admitted(
         let team_tools_missing = team.is_some() && host.is_none();
         let host = agent_tools::with_jev(host, app.clone(), session_id.clone(), stopped.clone());
         let host = bots::tools::with_bot(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = simulator::tools::with_simulator(host, app.clone(), stopped.clone());
+        let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
+        let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
         let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
+        let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
         let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
+        // A cloud agent's checkout is on its machine, where screenshots cannot be read.
+        let host = if cloud { host } else { progress::with_progress(host, app.clone(), session_id.clone(), stopped.clone()) };
         let host = cloud::deploy::with_deploy(host, app.clone(), session_id.clone(), stopped.clone());
         let host = Some(agent_tools::with_preview(host, app.clone(), session_id.clone(), stopped.clone()));
         let host = Some(turn_changes::with_host(host, tracker.clone(), stopped.clone()));
@@ -2017,10 +2183,13 @@ async fn launch_operation_admitted(
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.
         let managed_worker = team.as_ref().is_some_and(|admission| admission.parent != session_id);
-        let warm_next = (providers::warms(&config) && !managed_worker).then(|| {
+        let warm_next = (providers::warms(&config) && !managed_worker && !cloud).then(|| {
             let tools = host.as_ref().map(|host| (host.tools.clone(), host.approval_tools.clone())).unwrap_or_default();
             (config.clone(), tools)
         });
+        // The harness and model this run used, for model health.
+        let ran = (config.provider.clone(), config.model.clone());
+        let reached_harness = Arc::new(AtomicBool::new(false));
         let result = if stopped.load(Ordering::SeqCst) {
             Ok(())
         } else if team_tools_missing {
@@ -2029,8 +2198,16 @@ async fn launch_operation_admitted(
                     .into(),
             )
         } else {
-            providers::run_with_tools(config, sink, rx, host).await
+            providers::run_with_tools(config, sink, rx, host, reached_harness.clone()).await
         };
+        flush_coalesced(&app, &coalescer);
+        if cloud && app.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
+            // The remote run continues; the next launch re-attaches to it.
+            if let Ok(mut registry) = agents.lock() {
+                registry.remove(&session_id);
+            }
+            return;
+        }
         if let Ok(mut slot) = goal_reply.lock() {
             if let Some(reply) = slot.take() {
                 let _ =
@@ -2060,6 +2237,22 @@ async fn launch_operation_admitted(
                 persist_turn_changes(&app, &store, &session_id, capture);
             }
         }
+        if cloud {
+            // The run's messages are saved; now its changes come back, before the turn ends,
+            // so a queued follow-up starts from them. Until that is done the run stays
+            // re-attachable (its run ID is kept), so a quit or an outage loses nothing.
+            let (cloud_app, cloud_id) = (app.clone(), session_id.clone());
+            if let Err(error) = blocking(move || cloud_agents::tasks::after_run(&cloud_app, &cloud_id)).await {
+                eprintln!("Cloud agents: could not finish a cloud run yet: {error}");
+            }
+            let unfinished = store.lock().ok().and_then(|db| cloud_agents::load(&db, &session_id).ok().flatten()).is_some_and(|cloud| cloud.active());
+            if unfinished && app.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
+                if let Ok(mut registry) = agents.lock() {
+                    registry.remove(&session_id);
+                }
+                return;
+            }
+        }
         // Match the registry -> store lock order used for Start and Stop. Stop
         // cannot arrive between the final stage decision and registry removal.
         let mut registry = agents.lock().ok();
@@ -2068,6 +2261,18 @@ async fn launch_operation_admitted(
         // request must not write into the next run while the team remains active.
         stopped.store(true, Ordering::SeqCst);
         let mut successful = result.is_ok() && !was_stopped;
+        // Only the harness's own outcome counts for model health (Settings → Model routing): a stop
+        // says nothing, and PandaCode's own failures before the harness (validation, attachments,
+        // connections, team tools) are not the model's.
+        let provider_error = match &result {
+            Err(error) if !was_stopped && reached_harness.load(Ordering::SeqCst) => Some(error.to_string()),
+            _ => None,
+        };
+        if let Some(error) = &provider_error {
+            model_health::record_failure(&ran.0, &ran.1, error);
+        } else if successful {
+            model_health::record_success(&ran.0, &ran.1);
+        }
         let mut children = subagents.lock().ok();
         if let Ok(db) = store.lock() {
             let child_status = if was_stopped || successful {
@@ -2177,7 +2382,18 @@ async fn launch_operation_admitted(
             }
         }
         if let Some(registry) = registry.as_mut() {
+            if let Some(agent) = registry.get(&session_id) {
+                if let Ok(mut approvals) = agent.approvals.lock() {
+                    approvals.clear();
+                }
+                if let Ok(mut pending) = agent.pending_requests.lock() {
+                    pending.clear();
+                }
+            }
             registry.remove(&session_id);
+            if registry.is_empty() {
+                memory::release_soon();
+            }
         }
         let done = if was_stopped {
             "Turn stopped"
@@ -2186,12 +2402,36 @@ async fn launch_operation_admitted(
         } else {
             "Turn failed"
         };
+        // Before `done`, so the window's tray_seen for the open task lands after it.
         tray::finished(&app, &session_id, was_stopped, successful);
         let _ = app.emit("agent-event", event(&session_id, "done", done));
         remote::run_finished(&app, &session_id, successful, was_stopped, done);
+        // A wake turn that never reached the agent gives its claim back (at-least-once).
+        let restored = kind.is_some() && turn_message_id != 0 && store.lock().ok().is_some_and(|db| remote::orchestrate::restore_wake(&db, &session_id, turn_message_id).unwrap_or(false));
+        // Settled machine threads wake this task now that it is idle.
+        remote::orchestrate::parent_finished(&app, &session_id, was_stopped, restored);
         // Bot conversations reply on their channel and send their next queued message.
         if !was_stopped {
             bots::run_finished(&app, &session_id, successful);
+            schedules::run_finished(&app, &session_id, successful);
+        }
+        // Serve has no window: link pull requests and send the next queued message natively.
+        if headless::active() {
+            let (pr_app, pr_session) = (app.clone(), session_id.clone());
+            tauri::async_runtime::spawn(async move {
+                if successful {
+                    if let Err(error) =
+                        github_detect_pull_request(pr_app.state::<AppState>(), pr_session).await
+                    {
+                        eprintln!("serve: pull request detection failed: {error}");
+                    }
+                }
+            });
+            // Only a clean run end delivers the next queued message; failed, stopped and
+            // limited runs hold it, as on the desktop.
+            if successful && !was_stopped {
+                headless::drain_queue(app.clone(), session_id.clone());
+            }
         }
         // Keep Start blocked until the old run's final event has been queued.
         // Otherwise its delayed `done` can finish a newly started UI stream.
@@ -2199,7 +2439,7 @@ async fn launch_operation_admitted(
         // Read before the team scheduler can start this task's next turn.
         let launch = providers::warm_epoch(&session_id);
         if let Some(registry) = registry.as_ref() {
-            architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, registry);
+            architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
@@ -2211,20 +2451,22 @@ async fn launch_operation_admitted(
                 [&session_id],
                 |row| row.get::<_, bool>(0),
             ).ok()).unwrap_or(false);
-            let task = store.lock().ok().filter(|_| replied).and_then(|db| db.session(&session_id).ok().map(|task| {
-                let connection = connections::warm_key(&session_id, &task.provider);
-                (task, connection)
-            }));
-            if let Some((task, connection)) = task {
+            // A lead whose workers are still unsettled is woken only after they settle, often
+            // past the spare's idle limit: skip the spare (the wake starts cold, ~1.4 s).
+            let lead = team.as_ref().is_some_and(|admission| admission.parent == session_id);
+            let waiting_on_workers = lead && store.lock().ok().and_then(|db| architect::load(&db, &session_id).ok().flatten()).is_some_and(|snapshot| {
+                snapshot.workers.iter().any(|worker| !worker.abandoned && architect::unsettled(&worker.status))
+            });
+            let task = store.lock().ok().filter(|_| replied && !waiting_on_workers).and_then(|db| db.session(&session_id).ok());
+            if let Some(task) = task {
                 next.resume_id = task.resume_id;
                 next.model = task.model;
                 next.mode = task.mode;
                 next.reasoning_effort = task.reasoning_effort;
                 next.prompt.clear();
                 next.images.clear();
-                let warm_store = store.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = providers::prewarm_agent(next, tools, approvals, launch, warm_store, connection).await;
+                    let _ = providers::prewarm_agent(next, tools, approvals, launch).await;
                 });
             }
         }
@@ -2237,19 +2479,23 @@ async fn stop_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<()> {
-    let routed = remote::mirror::stop(&app, &state, &session_id).await?;
-    remote::check_current_request("ask")?;
-    if routed.is_some() {
+    if remote::mirror::stop(&app, &state, &session_id).await?.is_some() {
         return Ok(());
     }
+    remote::orchestrate::task_stopped(&app, &session_id);
     let is_team = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
+        // Saved before the run hears of it: a quit right after Stop must not leave the
+        // task looking interrupted by the restart (which a machine-thread wake resumes).
+        store.request_stop(&session_id)?;
         architect::load(&store, &session_id)?.is_some()
     };
     if is_team {
-        remote::check_current_request("ask")?;
         architect::architect_control(app, state, session_id, "stop".into()).await?;
         return Ok(());
+    }
+    if cloud_agents::transport::is_cloud(&session_id) {
+        cloud_agents::tasks::stop_run(&app, &session_id);
     }
     if let Some(tx) = state
         .agents
@@ -2257,7 +2503,6 @@ async fn stop_session(
         .map_err(|e| e.to_string())?
         .get(&session_id)
     {
-        remote::check_current_request("ask")?;
         tx.send(RunInput::Stop)
             .map_err(|_| "Agent has stopped.".to_string())?;
     }
@@ -2278,8 +2523,6 @@ async fn respond_approval(
     let tx = agents
         .get(&session_id)
         .ok_or("This agent is no longer running.")?;
-    let mode = state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.mode;
-    remote::check_current_request(if approved { &mode } else { "ask" })?;
     tx.respond_approval(&state.store, &session_id, request_id, approved)
 }
 #[tauri::command]
@@ -2296,6 +2539,8 @@ pub(crate) async fn local_providers(force: bool) -> Vec<providers::ProviderInfo>
         providers::acp_catalog::invalidate("antigravity");
         providers::acp_catalog::invalidate("grok");
         providers::acp_catalog::invalidate("devin");
+        providers::acp_catalog::invalidate("zcode");
+        providers::acp_catalog::invalidate("hermes");
     }
     tauri::async_runtime::spawn_blocking(providers::discover)
         .await
@@ -2333,7 +2578,6 @@ async fn respond_user_input(
         let agent = agents
             .get(&session_id)
             .ok_or("This agent is no longer running.")?;
-        remote::check_current_request(&state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.mode)?;
         let pending = agent.approvals.lock().map_err(|e| e.to_string())?;
         if agent.stopped.load(Ordering::SeqCst) || !pending.contains(&request_id) {
             return Err("This question is no longer pending.".into());
@@ -2354,10 +2598,22 @@ async fn respond_user_input(
     };
     // Keep the form pending until the protocol validates the answer. An enqueue
     // acknowledgement alone could discard a rejected answer during streaming.
-    tokio::time::timeout(std::time::Duration::from_secs(15), reply)
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(15), reply)
         .await
         .map_err(|_| "The agent did not acknowledge the answer. Try again.".to_owned())?
-        .map_err(|_| "The agent stopped before accepting the answer.".to_owned())?
+        .map_err(|_| "The agent stopped before accepting the answer.".to_owned())?;
+    accepted?;
+    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    if let Some(agent) = agents.get(&session_id) {
+        let mut approvals = agent.approvals.lock().map_err(|e| e.to_string())?;
+        let mut pending_requests = agent.pending_requests.lock().map_err(|e| e.to_string())?;
+        remove_pending_request(&mut approvals, Some(&mut pending_requests), &request_id);
+        state.store.lock().map_err(|e| e.to_string())?.status(
+            &session_id,
+            if approvals.is_empty() { "running" } else { "waiting" },
+        )?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2416,6 +2672,54 @@ async fn open_external_url(url: String) -> Result<()> {
     } else {
         Err("Could not open the browser.".into())
     }
+}
+
+/// A sent attachment outside the task's workspace, shown in the file manager. It is only
+/// revealed (selected), never opened, so nothing in it runs.
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<()> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || std::fs::symlink_metadata(&path).is_err() {
+        return Err("This attachment is no longer on this computer.".into());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-R").arg(&path);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("explorer");
+        command.arg(format!("/select,{}", path.display()));
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let folder = if path.is_dir() { path.clone() } else { path.parent().map(PathBuf::from).unwrap_or_else(|| path.clone()) };
+        let mut command = tokio::process::Command::new("xdg-open");
+        child_env::sanitize(&mut command);
+        command.arg(folder);
+        command
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // Explorer reports failure even when it showed the item, so only a launch error counts.
+    tokio::time::timeout(std::time::Duration::from_secs(5), command.status())
+        .await
+        .map_err(|_| "Showing the attachment timed out.")?
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A sent image or screenshot from the shared capture registry, for the transcript's chips.
+#[tauri::command]
+async fn prompt_image(app: tauri::AppHandle, id: String) -> Result<Option<String>> {
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("browser-captures");
+    blocking(move || prompt_attachments::image_data_url(&dir, &id)).await
 }
 
 #[tauri::command]
@@ -2736,16 +3040,8 @@ async fn github_repo_pulls(repo: String) -> Result<Vec<github_hub::HubPull>> {
     blocking(move || github_hub::pulls(&repo)).await
 }
 #[tauri::command]
-async fn github_repo_pull_review_context(repo: String, number: i64) -> Result<github_hub::PullReviewContext> {
-    blocking(move || github_hub::pull_review_context(&repo, number)).await
-}
-#[tauri::command]
 async fn github_repo_issues(repo: String) -> Result<Vec<github_hub::HubIssue>> {
     blocking(move || github_hub::issues(&repo)).await
-}
-#[tauri::command]
-async fn github_repo_issue_context(repo: String, number: i64) -> Result<github_hub::HubIssueContext> {
-    blocking(move || github_hub::issue_context(&repo, number)).await
 }
 #[tauri::command]
 async fn github_repo_runs(repo: String) -> Result<Vec<github_hub::HubRun>> {
@@ -2845,40 +3141,6 @@ async fn github_refresh_links(state: State<'_, AppState>, project_id: String) ->
 }
 
 #[tauri::command]
-async fn github_linked_issue_status(state: State<'_, AppState>, session_id: String, action: String) -> Result<github::LinkedIssueStatus> {
-    let (root, task) = {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
-        let task = store.session(&session_id)?;
-        let root = store.workspace_root(&task.project_id, Some(&session_id))?;
-        (root, task)
-    };
-    blocking(move || github::linked_issue_status(&root, &task, &action)).await
-}
-
-#[tauri::command]
-async fn github_apply_linked_issue_action(state: State<'_, AppState>, session_id: String, action: String) -> Result<Session> {
-    let store = state.store.clone();
-    let root = {
-        let store = store.lock().map_err(|e| e.to_string())?;
-        let task = store.session(&session_id)?;
-        store.workspace_root(&task.project_id, Some(&session_id))?
-    };
-    blocking(move || github::apply_linked_issue_action(&root, &store, &session_id, &action)).await
-}
-
-#[tauri::command]
-async fn github_cancel_linked_issue_action(state: State<'_, AppState>, session_id: String) -> Result<()> {
-    github::cancel_linked_issue_action(&state.store, &session_id)
-}
-
-#[tauri::command]
-async fn github_retry_linked_issue_actions(state: State<'_, AppState>, project_id: String) -> Result<Vec<github::LinkedIssueActionFailure>> {
-    let root = state.root(&project_id, None)?;
-    let store = state.store.clone();
-    blocking(move || github::retry_linked_issue_actions(&root, &store, &project_id)).await
-}
-
-#[tauri::command]
 async fn set_task_link(
     state: State<'_, AppState>,
     session_id: String,
@@ -2968,7 +3230,15 @@ async fn github_detect_pull_request(state: State<'_, AppState>, session_id: Stri
         if task.pull_request.as_ref().is_some_and(|link| ["open", "draft"].contains(&link.state.as_str())) {
             return Ok(None);
         }
-        let github_pull::LatestTurn { text: turn, started_at: started, .. } = github_pull::latest_turn(store.messages(&session_id, None)?);
+        let mut turn = Vec::new();
+        let mut started = 0;
+        for message in store.messages(&session_id, None)? {
+            if message.role == "user" {
+                started = message.created_at;
+                break;
+            }
+            turn.push(message.content);
+        }
         if !turn.iter().any(|text| text.contains("/pull/")) {
             return Ok(None);
         }
@@ -3059,6 +3329,7 @@ async fn read_file(
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::read_file(&root, path)).await
 }
+/// A PDF, Word, spreadsheet or image file for the file viewer, sent as raw bytes rather than JSON.
 #[tauri::command]
 async fn read_document_file(
     state: State<'_, AppState>,
@@ -3070,10 +3341,22 @@ async fn read_document_file(
     blocking(move || workspace::read_document_bytes(&root, &path)).await.map(tauri::ipc::Response::new)
 }
 #[tauri::command]
-async fn workspace_image(state: State<'_, AppState>, session_id: String, path: String) -> Result<String> {
+async fn workspace_image(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    session_id: Option<String>,
+    path: String,
+) -> Result<String> {
     // A question belongs to one task: its images come from that task's checkout only.
-    let project_id = state.store.lock().map_err(|e| e.to_string())?.session(&session_id)?.project_id;
-    let root = state.root(&project_id, Some(&session_id))?;
+    // The file viewer passes the same project and task it read the document with.
+    let project_id = match project_id {
+        Some(id) => id,
+        None => {
+            let session_id = session_id.as_deref().ok_or_else(|| "A task is required to show images".to_string())?;
+            state.store.lock().map_err(|e| e.to_string())?.session(session_id)?.project_id
+        }
+    };
+    let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::image_data_url(&root, &path)).await
 }
 
@@ -3354,16 +3637,134 @@ async fn local_sign_app() -> Result<()> {
         .map_err(|e| e.to_string())?
 }
 
+/// State and services shared by the desktop app and `pandacode serve` (docs/headless.md):
+/// storage, credentials, the cloud-run resume loop, Connect hosting, bots and archiving.
+/// Returns the app data dir. GUI-only startup (overlay, tray, appearance, VM idle watch)
+/// stays with the desktop's `run()`.
+fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
+    if let Ok(cache) = app.path().app_cache_dir() {
+        turn_changes::cleanup_cache(&cache.join("turn-captures"));
+    }
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    secret_store::setup(&dir);
+    provider_settings::setup(&dir)?;
+    connections::setup(&dir)?;
+    model_routing::setup(&dir);
+    model_health::setup(&dir);
+    // Optional integration storage must never prevent the workspace from opening.
+    if jev::setup(&dir).is_err() {
+        eprintln!("Jev settings are unavailable; browser testing remains disabled.");
+    }
+    // Retain the database filename and bundle identifier so upgrades reuse existing data.
+    let store = Store::open(&dir.join("kingcode.sqlite3"))?;
+    if let Err(error) = store.discard_empty_drafts() {
+        eprintln!("Could not clear unsent new tasks: {error}");
+    }
+    app.manage(AppState {
+        store: Arc::new(Mutex::new(store)),
+        agents: Arc::new(Mutex::new(HashMap::new())),
+        terminals: Arc::new(Mutex::new(HashMap::new())),
+        shutdown: AtomicU8::new(0),
+    });
+    cloud_agents::init(app.handle());
+    remote::setup(app.handle(), &dir);
+    app.manage(browser::BrowserState::default());
+    app.manage(simulator::Simulators::default());
+    app.manage(vm::Vms::default());
+    app.manage(file_preview::FilePreviews::default());
+    app.manage(agent_tools::UiRequests::default());
+    app.manage(architect::Runtime::default());
+    architect::watchdog::watch(app.handle().clone());
+    bots::start(app.handle());
+    // Machine threads that settled while PandaCode was closed wake their idle tasks.
+    remote::orchestrate::reconcile(app.handle());
+    schedules::start(app.handle().clone());
+    Ok(dir)
+}
+
+/// Run-loop events shared by the desktop and serve: an exit request stops local agents
+/// (cloud runs keep going on their machines) within a deadline, then the process exits.
+fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+        // A headless host outlives its (immediately closed) window; only an explicit exit stops it.
+        if headless::active() && code.is_none() {
+            api.prevent_exit();
+            return;
+        }
+        let state = app.state::<AppState>();
+        if state.shutdown.load(Ordering::SeqCst) == 2 {
+            return;
+        }
+        api.prevent_exit();
+        if state.shutdown.swap(1, Ordering::SeqCst) == 1 {
+            return;
+        }
+        jev::shutdown();
+        app.state::<file_preview::FilePreviews>().shutdown();
+        // Cloud runs keep going on their machines; their bridges are killed below.
+        let cloud: HashSet<String> = state.store.lock().ok().and_then(|store| cloud_agents::active_runs(&store).ok()).unwrap_or_default().into_iter().collect();
+        if let Ok(agents) = state.agents.lock() {
+            for (_, tx) in agents.iter().filter(|(id, _)| !cloud.contains(*id)) {
+                let _ = tx.send(RunInput::Stop);
+            }
+        }
+        if let Ok(mut terms) = state.terminals.lock() {
+            terms.clear();
+        };
+        let handle = app.clone();
+        let agents = state.agents.clone();
+        tauri::async_runtime::spawn(async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+            while tokio::time::Instant::now() < deadline {
+                if agents.lock().map(|a| a.keys().all(|id| cloud.contains(id))).unwrap_or(true) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            providers::shutdown_all();
+            // Let pending pipe EOFs finish persistence after a forced cleanup.
+            for _ in 0..20 {
+                if agents.lock().map(|a| a.is_empty()).unwrap_or(true) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            handle
+                .state::<AppState>()
+                .shutdown
+                .store(2, Ordering::SeqCst);
+            handle.exit(0);
+        });
+    } else if matches!(event, tauri::RunEvent::Exit) {
+        app.state::<file_preview::FilePreviews>().shutdown();
+        // VMs PandaCode started release their memory when it quits.
+        app.state::<vm::Vms>().shutdown();
+        cloud::aws_screen::close(None);
+        providers::shutdown_all();
+    }
+}
+
+/// The app context, expanded once: each `generate_context!` embeds an Info.plist static,
+/// and a second expansion (serve mode) would define the same symbol twice.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     // The npx installer signs the fresh bundle this way, before any window exists.
     if std::env::args().skip(1).any(|arg| arg == "--local-sign") {
         std::process::exit(local_signing::cli());
     }
     let app = tauri::Builder::default()
-        // Register first: another launch must focus the owner of this database.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| tray::show(app)))
+        // First, as its docs require: a second launch focuses this window instead of opening another.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            tray::show(app)
+        }))
         .plugin(tauri_plugin_dialog::init())
-        // Hardened distribution: no updater plugin or restart-to-install capability.
+        // Updates come only from GitHub Releases, verified against the public key in tauri.conf.json.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Covers DMG installs and earlier failures; only ad hoc bundles change, on disk only.
             std::thread::spawn(|| {
@@ -3371,65 +3772,13 @@ pub fn run() {
                     eprintln!("Local signing failed: {error}");
                 }
             });
-            if let Ok(cache) = app.path().app_cache_dir() {
-                turn_changes::cleanup_cache(&cache.join("turn-captures"));
-            }
-            let dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&dir)?;
-            provider_settings::setup(&dir).map_err(std::io::Error::other)?;
-            connections::setup(&dir).map_err(std::io::Error::other)?;
-            // Optional integration storage must never prevent the workspace from opening.
-            if jev::setup(&dir).is_err() {
-                eprintln!("Jev settings are unavailable; browser testing remains disabled.");
-            }
-            // Retain the database filename and bundle identifier so upgrades reuse existing data.
-            let store =
-                Store::open(&dir.join("kingcode.sqlite3")).map_err(std::io::Error::other)?;
-            if let Err(error) = store.discard_empty_drafts() {
-                eprintln!("Could not clear unsent new tasks: {error}");
-            }
-            app.manage(AppState {
-                store: Arc::new(Mutex::new(store)),
-                agents: Arc::new(Mutex::new(HashMap::new())),
-                terminals: Arc::new(Mutex::new(HashMap::new())),
-                shutdown: AtomicU8::new(0),
-            });
+            let dir = setup_common(app)?;
+            agents_dock::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             overlay::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
-            remote::setup(app.handle(), &dir);
-            app.manage(browser::BrowserState::default());
-            app.manage(simulator::Simulators::default());
-            app.manage(vm::Vms::default());
             vm::watch_idle(app.handle().clone());
-            app.manage(file_preview::FilePreviews::default());
-            app.manage(agent_tools::UiRequests::default());
-            app.manage(architect::Runtime::default());
-            architect::watchdog::watch(app.handle().clone());
-            bots::start(app.handle());
             if let Err(error) = tray::setup(app.handle()) {
-                eprintln!("Native tray is unavailable: {error}");
+                eprintln!("Menu bar item is unavailable: {error}");
             }
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    let state = handle.state::<AppState>();
-                    if state.shutdown.load(Ordering::SeqCst) != 0 {
-                        break;
-                    }
-                    let archived = state
-                        .store
-                        .lock()
-                        .map_err(|e| e.to_string())
-                        .and_then(|store| store.archive_completed(storage::now()));
-                    match archived {
-                        Ok(count) if count > 0 => {
-                            let _ = handle.emit("sessions-changed", ());
-                        }
-                        Err(error) => eprintln!("Completed task archive failed: {error}"),
-                        _ => {}
-                    }
-                }
-            });
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = appearance::setup(&window) {
                     eprintln!("Native appearance setup failed: {error}");
@@ -3456,7 +3805,6 @@ pub fn run() {
                 return handler(invoke);
             }
             if invoke.message.webview_ref().label() == "tray" {
-                // The task popover has no workspace, file, CLI, bot or cloud commands.
                 let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                     tray::tray_snapshot,
                     tray::tray_open,
@@ -3468,6 +3816,15 @@ pub fn run() {
                 ];
                 return handler(invoke);
             }
+            if invoke.message.webview_ref().label() == "agents-dock" {
+                let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                    agents_dock::agents_dock_snapshot,
+                    agents_dock::agents_dock_unpin,
+                    agents_dock::agents_dock_set_expanded,
+                    agents_dock::agents_dock_open_task,
+                ];
+                return handler(invoke);
+            }
             if invoke.message.webview_ref().label() != "main" {
                 invoke
                     .resolver
@@ -3475,9 +3832,25 @@ pub fn run() {
                 return true;
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                agents_dock::agents_dock_snapshot,
+                agents_dock::agents_dock_preferences,
+                agents_dock::agents_dock_save_preferences,
+                agents_dock::agents_dock_pin,
                 support::open_support,
                 support::support_details,
+                model_routing::model_routing_status,
+                model_routing::model_routing_exclusions,
+                model_routing::model_routing_set_exclusions,
+                model_routing::model_routing_configure,
+                model_routing::model_routing_prepare,
+                model_routing::model_routing_route,
+                model_routing::model_routing_tiers,
+                model_routing::model_routing_set_tiers,
+                model_routing::model_routing_tier_models,
+                model_health::model_health_list,
+                model_health::model_health_clear,
                 local_sign_app,
+                app_updates::app_update_install_supported,
                 agent_updates::check_agent_updates,
                 agent_updates::update_agent,
                 moodboards::list_moodboards,
@@ -3507,24 +3880,35 @@ pub fn run() {
                 remote::remote_sign_in_cancel,
                 remote::remote_sign_out,
                 remote::remote_set_host_enabled,
-                remote::remote_set_full_access,
+                remote::remote_set_notify_enabled,
                 remote::remote_devices,
                 remote::remote_revoke_device,
-                remote::remote_set_trusted,
+                remote::remote_targets,
+                remote::mirror::remote_start_task,
+                remote::orchestrate::links::orchestration_status,
+                remote::orchestrate::links::orchestration_set_enabled,
+                remote::orchestrate::links::orchestration_set_link,
+                remote::orchestrate::links::orchestration_pending,
+                remote::orchestrate::links::orchestration_link_respond,
+                remote::orchestrate::orchestration_children,
+                remote::orchestrate::orchestration_threads,
+                remote::mirror::remote_team,
+                remote::mirror::remote_worker_messages,
+                remote::mirror::remote_cancel_start,
+                remote::routes::remote_reconnect,
                 remote::grants::remote_device_grants,
                 remote::grants::remote_set_device_grant,
                 remote::grants::remote_pair_code,
                 remote::grants::remote_pair_code_cancel,
                 remote::grants::remote_pair_redeem,
-                remote::routes::remote_set_direct_routes,
-                remote::routes::remote_reconnect,
                 remote::diagnostics::remote_diagnostics,
                 remote::diagnostics::remote_diagnostics_export,
-                remote::mirror::remote_cancel_start,
                 remote_resubscribe,
                 remote_workspace_image,
-                remote::remote_targets,
-                remote::mirror::remote_start_task,
+                cloud_agents::tasks::cloud_agent_targets,
+                cloud_agents::tasks::cloud_agent_start,
+                cloud_agents::tasks::cloud_agent_action,
+                cloud_agents::tasks::cloud_agent_set_claude_token,
                 remote::mirror::remote_repo_check,
                 provider_settings::provider_configuration,
                 connections::connections_list,
@@ -3553,9 +3937,6 @@ pub fn run() {
                 bots::bot_detail,
                 bots::bot_create,
                 bots::bot_update,
-                bots::bot_set_capabilities,
-                bots::tasks::bot_assign_task,
-                bots::tasks::bot_task_links,
                 bots::bot_set_paused,
                 bots::bot_reset,
                 bots::bot_delete,
@@ -3564,10 +3945,34 @@ pub fn run() {
                 bots::bot_activity,
                 bots::bot_project_ids,
                 bots::bot_message,
+                bots::shared_channels::bot_shared_channels,
+                bots::shared_channels::bot_shared_channel_detail,
+                bots::shared_channels::bot_shared_channel_create,
+                bots::shared_channels::bot_shared_channel_update,
+                bots::shared_channels::bot_shared_channel_archive,
+                bots::shared_channels::bot_shared_channel_post,
+                bots::shared_channels::bot_shared_channel_stop,
+                bots::shared_channels::bot_shared_channel_continue,
+                bots::shared_channels::bot_shared_channel_reassign,
+                bots::shared_channels::bot_message_markers,
+                bots::failover::bot_failover_decide,
+                bots::failover::bot_failover_pending,
+                bots::failover::bot_model_switches,
+                bots::bot_set_capabilities, bots::bot_assign_task, bots::bot_task_links, bots::bot_task_brief,
                 bots::schedule::bot_schedule_create,
                 bots::schedule::bot_schedule_set_enabled,
                 bots::schedule::bot_schedule_delete,
                 bots::schedule::bot_run_schedule_now,
+                schedules::schedules_list,
+                schedules::schedule_create,
+                schedules::schedule_update,
+                schedules::schedule_set_enabled,
+                schedules::schedule_delete,
+                schedules::schedule_run_now,
+                schedules::schedule_snooze,
+                schedules::schedule_runs,
+                schedules::scheduler_settings,
+                schedules::scheduler_set_settings,
                 bots::channels::bot_channel_add,
                 bots::channels::bot_channel_test,
                 bots::channels::bot_channel_configure,
@@ -3581,10 +3986,17 @@ pub fn run() {
                 conversation_import::list_importable_conversations,
                 conversation_import::import_conversations,
                 provider_settings::provider_set_claude_connection_mode,
+                providers::privacy::harness_privacy,
+                providers::privacy::harness_privacy_set,
                 providers::claude_auth::provider_claude_status,
                 provider_settings::list_opencode_models,
                 provider_settings::save_opencode_models,
                 provider_settings::provider_set_executable,
+                provider_settings::provider_set_environment_variable,
+                provider_settings::provider_remove_environment_variable,
+                provider_settings::provider_set_global_environment_variable,
+                provider_settings::provider_remove_global_environment_variable,
+                provider_settings::provider_set_use_global_environment,
                 provider_settings::provider_save_glm_key,
                 provider_settings::provider_remove_glm_key,
                 provider_settings::provider_save_mimo_key,
@@ -3594,7 +4006,6 @@ pub fn run() {
                 provider_settings::provider_save_commandcode_key,
                 provider_settings::provider_remove_commandcode_key,
                 provider_settings::provider_set_mimo_endpoint,
-                review::review_readiness,
                 architect::profiles::architect_profiles,
                 architect::profiles::architect_set_lead_guidance,
                 architect::profiles::architect_save_profile,
@@ -3681,9 +4092,7 @@ pub fn run() {
                 github_repos,
                 project_icon,
                 github_repo_pulls,
-                github_repo_pull_review_context,
                 github_repo_issues,
-                github_repo_issue_context,
                 github_repo_runs,
                 github_run_details,
                 github_project_repos,
@@ -3692,10 +4101,6 @@ pub fn run() {
                 github_issues,
                 github_resolve,
                 github_refresh_links,
-                github_linked_issue_status,
-                github_apply_linked_issue_action,
-                github_cancel_linked_issue_action,
-                github_retry_linked_issue_actions,
                 github_create_pull_request,
                 github_pull_request,
                 github_pull_request_diff,
@@ -3723,10 +4128,10 @@ pub fn run() {
                 cloud::commands::cloud_connections,
                 cloud::commands::cloud_connect,
                 cloud::commands::cloud_disconnect,
+                cloud::commands::cloud_set_inherit_environment,
                 cloud::commands::cloud_setup_sandboxes,
                 cloud::commands::cloud_instabox_images,
                 cloud::commands::cloud_instabox_set_image,
-                cloud::commands::cloud_keep_alive,
                 cloud::commands::cloud_machines,
                 cloud::commands::cloud_create,
                 cloud::commands::cloud_power,
@@ -3738,6 +4143,7 @@ pub fn run() {
                 vsix_themes::theme_remove,
                 token_saver::token_saver_tools,
                 token_saver::token_saver_install,
+                task_usage::task_token_usage,
                 skills::skills_list,
                 skills::skills_import_folder,
                 skills::skills_import_github,
@@ -3751,25 +4157,27 @@ pub fn run() {
                 skills::skills_catalog_refresh,
                 skills::skills_catalog_state,
                 skills::skills_catalog_import,
-                skills::skills_scope_get,
-                skills::skills_scope_set,
-                skills::skills_task_resolve,
+                skills::skills_discover,
                 set_task_link,
                 import_prompt_image,
-                message_attachments::message_attachment_image,
-                message_attachments::reveal_message_attachment,
+                prompt_image,
+                reveal_path,
                 read_document,
                 describe_folder,
                 list_files,
                 search_files,
                 search_text,
                 read_file,
+                read_document_file,
                 design::design_list,
                 design::design_read,
                 design::design_comments,
                 design::design_save_comments,
+                progress::progress_list,
+                progress::progress_media,
+                progress::progress_thumb,
+                progress::progress_clear,
                 workspace_image,
-                read_document_file,
                 resolve_workspace_files,
                 prepare_file_preview,
                 get_run_script,
@@ -3785,8 +4193,8 @@ pub fn run() {
                 get_metrics,
                 list_local_servers,
                 jev::jev_configuration,
-            jev::jev_decision_models,
                 jev::jev_save_configuration,
+                jev::jev_decision_models,
                 jev::jev_doctor,
                 jev::jev_install_runtime,
                 jev::jev_start,
@@ -3799,7 +4207,6 @@ pub fn run() {
                 jev_decisions::jev_assist_list,
                 jev_decisions::jev_assist_save_rules,
                 browser::browser_open,
-                browser::browser_open_external,
                 browser::browser_bounds,
                 browser::browser_action,
                 browser::browser_pick,
@@ -3808,58 +4215,7 @@ pub fn run() {
             ];
             handler(invoke)
         })
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("Failed to launch PandaCode");
-    app.run(|app, event| {
-        if let tauri::RunEvent::ExitRequested { api, .. } = event {
-            let state = app.state::<AppState>();
-            if state.shutdown.load(Ordering::SeqCst) == 2 {
-                return;
-            }
-            api.prevent_exit();
-            if state.shutdown.swap(1, Ordering::SeqCst) == 1 {
-                return;
-            }
-            jev::shutdown();
-            app.state::<file_preview::FilePreviews>().shutdown();
-            if let Ok(agents) = state.agents.lock() {
-                for tx in agents.values() {
-                    let _ = tx.send(RunInput::Stop);
-                }
-            }
-            if let Ok(mut terms) = state.terminals.lock() {
-                terms.clear();
-            };
-            let handle = app.clone();
-            let agents = state.agents.clone();
-            tauri::async_runtime::spawn(async move {
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
-                while tokio::time::Instant::now() < deadline {
-                    if agents.lock().map(|a| a.is_empty()).unwrap_or(true) {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                providers::shutdown_all();
-                // Let pending pipe EOFs finish persistence after a forced cleanup.
-                for _ in 0..20 {
-                    if agents.lock().map(|a| a.is_empty()).unwrap_or(true) {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                handle
-                    .state::<AppState>()
-                    .shutdown
-                    .store(2, Ordering::SeqCst);
-                handle.exit(0);
-            });
-        } else if matches!(event, tauri::RunEvent::Exit) {
-            app.state::<file_preview::FilePreviews>().shutdown();
-            // VMs PandaCode started release their memory when it quits.
-            app.state::<vm::Vms>().shutdown();
-            cloud::aws_screen::close(None);
-            providers::shutdown_all();
-        }
-    });
+    app.run(on_run_event);
 }

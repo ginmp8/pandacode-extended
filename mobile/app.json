@@ -1,19 +1,19 @@
 {
   "expo": {
-    "name": "PandaCode Extended",
-    "slug": "pandacode-extended",
-    "version": "0.6.0",
+    "name": "PandaCode",
+    "slug": "pandacode",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "pandacode-extended",
+    "scheme": "pandacode",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "bundleIdentifier": "ai.pandacode.extended.mobile",
+      "bundleIdentifier": "com.aicodeking.pandacode",
       "buildNumber": "1",
       "supportsTablet": false,
       "icon": "./assets/images/icon.png",
       "infoPlist": {
-        "CFBundleDisplayName": "PandaCode Extended",
+        "CFBundleDisplayName": "PandaCode",
         "NSSupportsLiveActivities": true
       },
       "config": {
@@ -51,7 +51,7 @@
       }
     },
     "android": {
-      "package": "ai.pandacode.extended.mobile",
+      "package": "com.aicodeking.pandacode",
       "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#FFFFFF",
@@ -76,8 +76,8 @@
       [
         "expo-widgets",
         {
-          "bundleIdentifier": "ai.pandacode.extended.mobile.LiveActivity",
-          "groupIdentifier": "group.ai.pandacode.extended.mobile",
+          "bundleIdentifier": "com.aicodeking.pandacode.LiveActivity",
+          "groupIdentifier": "group.com.aicodeking.pandacode",
           "enablePushNotifications": false,
           "frequentUpdates": false
         }
@@ -94,14 +94,15 @@
         "asyncRoutes": {
           "web": true
         }
+      },
+      "eas": {
+        "projectId": "c969a342-41ed-4d9b-98c0-dae744fa0484"
       }
     },
+    "owner": "aicodeking2",
     "platforms": [
       "ios",
       "android"
-    ],
-    "updates": {
-      "enabled": false
-    }
+    ]
   }
 }

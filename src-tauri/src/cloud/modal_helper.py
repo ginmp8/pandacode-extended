@@ -3,10 +3,11 @@
 # MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (and MODAL_ENVIRONMENT) in this process's environment.
 import sys
 
-# The caller also uses Python's isolated mode. Keep the current directory off the
-# module path so a workspace json.py or modal.py never loads.
+# Run with `python3 -c`, which puts the current directory first on the path: drop it so a
+# stray json.py or modal.py there never loads.
 sys.path = [p for p in sys.path if p not in ("", ".")]
 
+import base64
 import json
 import os
 import time
@@ -18,9 +19,9 @@ LIFETIME = 24 * 60 * 60
 WATCH = 'while [ "$(date +%s)" -lt "$(cat /tmp/.pandacode-deadline 2>/dev/null || echo 99999999999)" ]; do sleep 20; done'
 
 
-def app(modal, create=False):
+def app(modal):
     environment = os.environ.get("MODAL_ENVIRONMENT") or None
-    return modal.App.lookup("pandacode", create_if_missing=create, environment_name=environment)
+    return modal.App.lookup("pandacode", create_if_missing=True, environment_name=environment)
 
 
 def run(request):
@@ -30,20 +31,13 @@ def run(request):
         return {"error": "missing-modal"}
     op = request["op"]
     if op == "check":
-        # Authenticate without creating an App or a Sandbox.
-        next(iter(modal.Sandbox.list(tags=TAG)), None)
-        return {"checked": True}
+        return {"app": app(modal).app_id}
     if op == "list":
-        try:
-            existing = app(modal)
-        except modal.exception.NotFoundError:
-            return {"sandboxes": []}
-        found = modal.Sandbox.list(app_id=existing.app_id, tags=TAG)
+        found = modal.Sandbox.list(app_id=app(modal).app_id, tags=TAG)
         return {"sandboxes": [{"id": sb.object_id, "name": sb.get_tags().get("name", "")} for sb in found]}
     if op == "create":
-        # Use a prepared image. Creating a machine never installs guest packages.
-        image = modal.Image.from_registry(request["image"])
-        sb = modal.Sandbox.create("sh", "-c", WATCH, app=app(modal, create=True), image=image, timeout=LIFETIME, cpu=2.0, memory=4096)
+        image = modal.Image.debian_slim().apt_install("git", "curl", "ca-certificates")
+        sb = modal.Sandbox.create("sh", "-c", WATCH, app=app(modal), image=image, timeout=LIFETIME, cpu=2.0, memory=4096)
         # Modal ends the sandbox at its timeout; remember when, so PandaCode knows how long a run may last.
         sb.set_tags(dict(TAG, name=request["name"], expires=str(int(time.time()) + LIFETIME)))
         return {"id": sb.object_id}
@@ -57,11 +51,13 @@ def run(request):
         return {}
     if op == "exec":
         process = sb.exec("sh", "-c", "exec 2>&1\n" + request["command"], timeout=int(request["timeout"]))
-        output = b""
-        for chunk in process.stdout:
-            output = (output + chunk.encode("utf-8"))[-4 * 1024 * 1024:]
+        if "stdin" in request:
+            process.stdin.write(base64.b64decode(request["stdin"]))
+            process.stdin.write_eof()
+            process.stdin.drain()
+        output = process.stdout.read()
         process.wait()
-        return {"code": process.returncode, "output": output.decode("utf-8", errors="replace")}
+        return {"code": process.returncode, "output": output}
     return {"error": "unknown request " + op}
 
 

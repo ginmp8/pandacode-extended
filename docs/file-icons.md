@@ -14,12 +14,6 @@ import so the manifest stays out of the startup bundle; plain glyphs show until
 it arrives, then `main.ts` re-renders once, and again when the theme changes.
 Mention rows with their own icon (GitHub issues and pull requests) keep it.
 
-The development server serves individual SVGs directly from the installed
-package, without a module import for every asset. Production builds copy the
-SVGs into `dist/material-icons/` and resolve local URLs relative to the
-configured base path. This avoids loading the entire icon library when the
-application opens, and does not fetch icons from external services.
-
-`tests/file-icons.test.mjs` covers matching, light variants, names such as
-`constructor` that collide with `Object.prototype`, the local installed
-SVG paths, and the complete packaged production icon set.
+`tests/file-icons.test.mjs` covers the matching, light variants, names such as
+`constructor` that collide with `Object.prototype`, and that every resolved icon
+exists on disk.

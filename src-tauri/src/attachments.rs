@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{Cursor, Read, Write},
+    io::Cursor,
     path::{Component, Path, PathBuf},
 };
 
@@ -58,13 +58,6 @@ pub fn link_message_attachments(
     capture_dir: &Path,
     app_data_dir: &Path,
 ) -> Result<usize, String> {
-    let owns_message: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND session_id=?2)",
-        params![message_id, session_id], |row| row.get(0),
-    ).map_err(|error| error.to_string())?;
-    if !owns_message {
-        return Err("The attachment message does not belong to this task.".into());
-    }
     let project_id: String = store
         .db
         .query_row(
@@ -186,18 +179,26 @@ fn link_capture(
         return Err("invalid attachment id".into());
     }
     let source = capture_dir.join(format!("{id}.png"));
-    let bytes = read_bounded_file(&source, MAX_PROMPT_IMAGE)?;
+    let metadata = fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_PROMPT_IMAGE {
+        return Err("source is not a bounded regular image file".into());
+    }
+    let bytes = fs::read(&source).map_err(|error| error.to_string())?;
     let (width, height) = image_dimensions(&bytes)?;
     let name = name
         .filter(|name| !name.is_empty())
         .unwrap_or("Image attachment");
     let attachment_root = app_data_dir.join("attachments");
     let session_dir = attachment_root.join(session_id);
-    // The application data directory is chosen by Tauri, never by a peer. Create
-    // children one at a time so an existing link is rejected before following it.
-    ensure_private_directory(app_data_dir)?;
-    ensure_private_directory(&attachment_root)?;
-    ensure_private_directory(&session_dir)?;
+    fs::create_dir_all(&session_dir).map_err(|error| error.to_string())?;
+    for directory in [&attachment_root, &session_dir] {
+        let metadata = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("attachment directory is not a regular directory".into());
+        }
+    }
+    set_private_dir(&attachment_root);
+    set_private_dir(&session_dir);
     let destination = session_dir.join(format!("{id}.png"));
     if let Ok(metadata) = fs::symlink_metadata(&destination) {
         if metadata.file_type().is_symlink()
@@ -206,20 +207,12 @@ fn link_capture(
         {
             return Err("destination attachment already exists".into());
         }
-        if read_bounded_file(&destination, MAX_PROMPT_IMAGE)? != bytes {
+        if fs::read(&destination).map_err(|error| error.to_string())? != bytes {
             return Err("destination attachment id collision".into());
         }
     } else {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&destination).map_err(|error| error.to_string())?;
-        file.write_all(&bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
+        fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
+        set_private_file(&destination);
     }
     let file = format!("{session_id}/{id}.png");
     store
@@ -259,78 +252,20 @@ fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     reader.into_dimensions().map_err(|error| error.to_string())
 }
 
-fn ensure_private_directory(path: &Path) -> Result<(), String> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    if let Err(error) = builder.create(path) {
-        if error.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(error.to_string());
-        }
-    }
-    regular_directory(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
-    }
-    Ok(())
+#[cfg(unix)]
+fn set_private_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
 }
-
-fn regular_directory(path: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("attachment directory is not a regular directory".into());
-    }
-    Ok(())
+#[cfg(not(unix))]
+fn set_private_dir(_: &Path) {}
+#[cfg(unix)]
+fn set_private_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
 }
-
-/// Read from the opened regular file, with an explicit cap even if it grows.
-pub(crate) fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    if !fs::symlink_metadata(path).map_err(|error| error.to_string())?.file_type().is_file() {
-        return Err("attachment is not a regular file".into());
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(|error| error.to_string())?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit {
-        return Err("attachment is not a bounded regular file".into());
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(limit + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
-    if bytes.is_empty() || bytes.len() as u64 > limit {
-        return Err("attachment exceeds its size limit".into());
-    }
-    Ok(bytes)
-}
-
-/// Remove only the private directory of an already deleted, UUID-named task.
-pub(crate) fn remove_task_files(app_data_dir: &Path, session_id: &str) -> Result<(), String> {
-    if !canonical_uuid(session_id) {
-        return Err("invalid attachment task id".into());
-    }
-    let root = app_data_dir.join("attachments");
-    if !root.try_exists().map_err(|error| error.to_string())? {
-        return Ok(());
-    }
-    regular_directory(&root)?;
-    let directory = root.join(session_id);
-    match fs::symlink_metadata(&directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.to_string()),
-        Ok(_) => regular_directory(&directory)?,
-    }
-    fs::remove_dir_all(directory).map_err(|error| error.to_string())
-}
+#[cfg(not(unix))]
+fn set_private_file(_: &Path) {}
 
 #[derive(Debug)]
 pub struct ImageBytes {
@@ -351,8 +286,8 @@ pub fn load_attachment(
     let row = db
         .query_row(
             "SELECT id,kind,name,mime,bytes,width,height,file,source,moodboard_id,moodboard_image_id
-         FROM message_attachments a WHERE a.session_id=?1 AND a.id=?2
-           AND EXISTS(SELECT 1 FROM messages m WHERE m.id=a.message_id AND m.session_id=a.session_id)",
+         FROM message_attachments WHERE session_id=?1 AND id=?2
+           AND EXISTS(SELECT 1 FROM messages m WHERE m.id=message_id AND m.session_id=session_id)",
             params![session_id, id],
             |row| {
                 Ok((
@@ -423,7 +358,7 @@ pub fn load_attachment(
             {
                 return Err("Attachment is unavailable.".into());
             }
-            let data = read_bounded_file(&path, MAX_PROMPT_IMAGE).map_err(|_| "Attachment is unavailable.")?;
+            let data = fs::read(path).map_err(|_| "Attachment is unavailable.")?;
             if data.len() as u64 != bytes {
                 return Err("Attachment is unavailable.".into());
             }
@@ -537,6 +472,7 @@ pub fn chunk_reply(bytes: &[u8], mime: &str, offset: u64) -> Result<Value, Strin
 }
 
 /// Metadata rows for one Connect message, in their original attachment order.
+#[cfg(test)]
 pub fn message_attachment_rows(
     db: &rusqlite::Connection,
     session_id: &str,
@@ -667,39 +603,7 @@ mod tests {
         assert!(
             load_attachment(&store.db, &root.join("data"), &session, "../../etc/passwd").is_err()
         );
-        let foreign_message = store.start_turn_message(&foreign, "Other task").unwrap();
-        assert!(link_message_attachments(
-            &store, &session, foreign_message, "", std::slice::from_ref(&id), &captures, &root.join("data"),
-        ).is_err(), "message ownership is checked before copying");
-        store.db.execute(
-            "UPDATE message_attachments SET message_id=?1 WHERE session_id=?2 AND id=?3",
-            params![foreign_message, session, id],
-        ).unwrap();
-        assert!(load_attachment(&store.db, &root.join("data"), &session, &id).is_err(), "a mismatched stored message cannot authorize a read");
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn attachment_storage_refuses_symlink_directories_and_files() {
-        use std::os::unix::fs::symlink;
-        let root = temp_dir("attachment-links");
-        let outside = root.join("outside");
-        let data = root.join("data");
-        fs::create_dir(&outside).unwrap();
-        fs::create_dir(&data).unwrap();
-        symlink(&outside, data.join("attachments")).unwrap();
-        assert!(ensure_private_directory(&data.join("attachments")).is_err());
-        let id = uuid::Uuid::new_v4().to_string();
-        assert!(remove_task_files(&data, &id).is_err());
-        assert!(remove_task_files(&data, "../outside").is_err());
-        let bytes = png(2, 2);
-        fs::write(outside.join("image.png"), &bytes).unwrap();
-        symlink(outside.join("image.png"), data.join("image.png")).unwrap();
-        assert!(read_bounded_file(&data.join("image.png"), MAX_PROMPT_IMAGE).is_err());
-        assert_eq!(read_bounded_file(&outside.join("image.png"), MAX_PROMPT_IMAGE).unwrap(), bytes);
-        assert!(read_bounded_file(&outside.join("image.png"), 1).is_err());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

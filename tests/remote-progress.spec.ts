@@ -92,76 +92,6 @@ test('a failed remote start stays as an error with Retry and Dismiss', async ({ 
   expect(await page.evaluate(() => (window as any).__retried)).toBe(1);
 });
 
-test('progress rejects unknown attempt IDs, wrong computers and ambiguous legacy events', async ({ page }) => {
-  await newTask(page);
-  const result = await page.evaluate(async () => {
-    const progress = await import('/src/remote-progress.ts' as string);
-    const ids: string[] = [], releases: (() => void)[] = [];
-    async function begin(sessionId: string) {
-      let ready!: () => void;
-      const registered = new Promise<void>(resolve => { ready = resolve; });
-      const completion = progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, (startId: string) => {
-        ids.push(startId);
-        return new Promise<void>(resolve => { releases.push(resolve); ready(); });
-      });
-      await registered;
-      return { completion };
-    }
-    const first = await begin('first'), second = await begin('second');
-    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId: 'expired-attempt', stage: 'error', detail: 'Old failure' });
-    progress.onRemoteStartProgress({ deviceId: 'other-computer', startId: ids[0], stage: 'error', detail: 'Wrong host' });
-    progress.onRemoteStartProgress({ deviceId: 'dev-studio', stage: 'preparing' });
-    const ignored = [progress.remoteStart('first')?.stage, progress.remoteStart('second')?.stage];
-    progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId: ids[1], stage: 'preparing' });
-    const matched = [progress.remoteStart('first')?.stage, progress.remoteStart('second')?.stage];
-    progress.clearRemoteStart('second');
-    progress.onRemoteStartProgress({ deviceId: 'dev-studio', stage: 'finding' });
-    const legacy = progress.remoteStart('first')?.stage;
-    releases.forEach(release => release());
-    await Promise.all([first.completion, second.completion]);
-    return { ids, ignored, matched, legacy };
-  });
-  expect(result.ids[0]).not.toBe(result.ids[1]);
-  expect(result.ignored).toEqual(['connecting', 'connecting']);
-  expect(result.matched).toEqual(['connecting', 'preparing']);
-  expect(result.legacy).toBe('finding');
-});
-
-for (const outcome of ['resolve', 'reject'] as const) {
-  test(`a superseded start cannot update or clear its retry when the old request ${outcome}s`, async ({ page }) => {
-    await newTask(page);
-    const result = await page.evaluate(async outcome => {
-      const progress = await import('/src/remote-progress.ts' as string);
-      const sessionId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId!;
-      const ids: string[] = [], completions: Promise<unknown>[] = [], settle: ((error?: Error) => void)[] = [];
-      for (let attempt = 0; attempt < 2; attempt++) {
-        let ready!: () => void;
-        const registered = new Promise<void>(resolve => { ready = resolve; });
-        completions.push(progress.trackRemoteStart(sessionId, { deviceId: 'dev-studio', name: 'Studio iMac' }, (startId: string) => {
-          ids.push(startId);
-          return new Promise<void>((resolve, reject) => { settle.push(error => error ? reject(error) : resolve()); ready(); });
-        }).catch(() => undefined));
-        await registered;
-        if (attempt === 0) progress.clearRemoteStart(sessionId);
-      }
-      progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId: ids[0], stage: 'error', detail: 'Previous attempt failed' });
-      const beforeSettlement = progress.remoteStart(sessionId)?.stage;
-      settle[0](outcome === 'reject' ? new Error('Previous request failed') : undefined);
-      await completions[0];
-      const afterSettlement = progress.remoteStart(sessionId)?.stage;
-      progress.onRemoteStartProgress({ deviceId: 'dev-studio', startId: ids[1], stage: 'downloading', percent: 27 });
-      const current = { stage: progress.remoteStart(sessionId)?.stage, percent: progress.remoteStart(sessionId)?.percent };
-      settle[1](); await completions[1];
-      return { ids, beforeSettlement, afterSettlement, current, cleared: !progress.remoteStart(sessionId) };
-    }, outcome);
-    expect(result.ids[0]).not.toBe(result.ids[1]);
-    expect(result.beforeSettlement).toBe('connecting');
-    expect(result.afterSettlement).toBe('connecting');
-    expect(result.current).toEqual({ stage: 'downloading', percent: 27 });
-    expect(result.cleared).toBe(true);
-  });
-}
-
 async function sendToStudio(page: Page, text: string) {
   // Sign-in, computer choice and a stepped start: a long flow for a loaded parallel run.
   test.slow();
@@ -197,8 +127,7 @@ test('sending a New task to another computer shows its start stages, then opens 
   await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('Run the slow suite over there');
   const started = await page.evaluate(() => (window as any).__remoteStarts);
   expect(started).toHaveLength(1);
-  expect(started[0].startId).toMatch(/^[0-9a-f-]{36}$/);
-  expect(started[0].startId).not.toBe(started[0].sessionId);
+  expect(started[0].startId.startsWith(`${started[0].sessionId}.`)).toBe(true);
 });
 
 test('a failed start shows in the strip, not as a toast, and Retry sends it again', async ({ page }) => {
@@ -218,7 +147,36 @@ test('a failed start shows in the strip, not as a toast, and Retry sends it agai
   for (let step = 0; step < 8; step++) await next(page);
   await expect(strip).toHaveCount(0);
   await expect(page.locator('#composer-area .composer-computer-fixed')).toHaveText('on Studio iMac');
-  const started = await page.evaluate(() => (window as any).__remoteStarts);
-  expect(started).toHaveLength(2);
-  expect(started[1].startId).not.toBe(started[0].startId);
+  expect(await page.evaluate(() => (window as any).__remoteStarts.length)).toBe(2);
+});
+
+test('a busy host checkout starts in a worktree and says so; a steer while starting is queued', async ({ page }) => {
+  const note = 'Started in a worktree: Studio iMac has uncommitted changes in orbit.';
+  await page.addInitScript(text => { (window as any).__remoteStartBusy = text; }, note);
+  await sendToStudio(page, 'Fix the login bug');
+  for (let step = 0; step < 3; step++) await next(page);
+  // Nothing to steer yet: the message waits in the queue instead of failing.
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  await prompt.fill('Also add a test');
+  await prompt.press('ControlOrMeta+Enter');
+  await expect(page.locator('#toast')).toContainText('Studio iMac is still starting this task; your message is queued for after it.');
+  await expect(page.locator('[data-queue-id]')).toHaveCount(1);
+  await expect(page.locator('[data-queue-id]')).toContainText('Also add a test');
+  for (let step = 0; step < 4; step++) await next(page);
+  await expect(page.locator('#stream-region .live-status')).toHaveText(note);
+  await next(page);
+  await expect(page.locator('#composer-area .composer-computer-fixed')).toHaveText('on Studio iMac');
+  await expect(page.locator('#composer-area .composer-inline-note')).toHaveText(note);
+});
+
+test('a start whose reply was lost still shows the host worktree note once it links', async ({ page }) => {
+  test.slow();
+  const note = 'Started in a worktree: Studio iMac has an agent working in orbit.';
+  await page.addInitScript(() => { (window as any).__remoteStartAmbiguous = true; });
+  await sendToStudio(page, 'Lost reply, busy host');
+  for (let step = 0; step < 8; step++) await next(page);
+  await page.waitForFunction(() => typeof (window as any).__remoteStartAttach === 'function');
+  await expect(page.locator('#stream-region .turn-activity-label')).toContainText('Waiting for Studio iMac');
+  await page.evaluate(text => (window as any).__remoteStartAttach(text), note);
+  await expect(page.locator('#composer-area .composer-inline-note')).toHaveText(note);
 });

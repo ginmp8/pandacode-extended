@@ -164,6 +164,8 @@ fn validate_selection(selection: &ModelSelection) -> Result<()> {
         "github-copilot",
         "muse",
         "devin",
+        "zcode",
+        "hermes",
     ]
     .contains(&selection.provider.as_str())
         || selection.model.trim().is_empty()
@@ -1739,8 +1741,8 @@ mod tests {
     }
 
     #[test]
-    fn launcher_defaults_to_ask_but_keeps_saved_permission_choices() {
-        assert_eq!(LaunchContext::default().mode, "ask");
+    fn launcher_defaults_to_full_but_keeps_saved_permission_choices() {
+        assert_eq!(LaunchContext::default().mode, "full");
         let store = storage::Store::open(Path::new(":memory:")).unwrap();
         let project = store.add_project(&std::env::temp_dir()).unwrap();
         for provider in [
@@ -1761,14 +1763,16 @@ mod tests {
             "github-copilot",
             "muse",
             "devin",
+            "zcode",
+            "hermes",
         ] {
-            for mode in [None, Some("ask"), Some("auto"), Some("review"), Some("plan"), Some("full")] {
+            for mode in [None, Some("ask"), Some("auto"), Some("plan"), Some("full")] {
                 let mut saved = serde_json::json!({"provider":provider,"model":"default"});
                 if let Some(mode) = mode {
                     saved["mode"] = serde_json::json!(mode);
                 }
                 let context: LaunchContext = serde_json::from_value(saved).unwrap();
-                assert_eq!(context.mode, mode.unwrap_or("ask"));
+                assert_eq!(context.mode, mode.unwrap_or("full"));
                 let created = create_launch_task(
                     &store,
                     &project.id,
@@ -1778,7 +1782,7 @@ mod tests {
                     "Build a feature",
                 )
                 .unwrap();
-                assert_eq!(created.mode, mode.unwrap_or("ask"));
+                assert_eq!(created.mode, mode.unwrap_or("full"));
             }
         }
     }
@@ -1866,7 +1870,7 @@ mod tests {
             &project.id,
             &LaunchContext {
                 provider: "kimi".into(),
-                reasoning_effort: Some("high".into()),
+                reasoning_effort: Some("high level".into()),
                 ..LaunchContext::default()
             },
             true,
@@ -1907,6 +1911,7 @@ mod tests {
             &state,
             &original.id,
             Some(TeamConfig {
+                catalog: Vec::new(),
                 auto: false,
                 roster_only: false,
                 name: None,

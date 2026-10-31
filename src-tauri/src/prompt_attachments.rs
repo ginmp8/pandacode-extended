@@ -157,49 +157,6 @@ fn thumbnail(image: &DynamicImage) -> Result<String, String> {
     Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
 }
 
-/// Read only a bounded PNG in the application's capture registry. Metadata and
-/// file bytes are checked again after opening; a symlink is never followed.
-pub fn image_data_url(dir: &Path, id: &str, full: bool) -> Result<Option<String>, String> {
-    if uuid::Uuid::parse_str(id).map(|parsed| parsed.to_string()) != Ok(id.to_owned()) {
-        return Err("Invalid image identifier.".into());
-    }
-    let path = dir.join(format!("{id}.png"));
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("Could not read this saved image.".into()),
-    };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_IMAGE_PNG as u64 {
-        return Err("Invalid saved image.".into());
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    let file = options.open(&path).map_err(|_| "Could not open this saved image.")?;
-    let metadata = file.metadata().map_err(|_| "Could not read this saved image.")?;
-    if !metadata.is_file() || metadata.len() > MAX_IMAGE_PNG as u64 {
-        return Err("Invalid saved image.".into());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 { return Err("Invalid saved image.".into()); }
-    }
-    let bytes = read_bounded(file, MAX_IMAGE_PNG)?;
-    let (image, format) = decode(&bytes)?;
-    if format != ImageFormat::Png { return Err("Invalid saved image format.".into()); }
-    Ok(Some(if full { format!("data:image/png;base64,{}", STANDARD.encode(bytes)) } else { thumbnail(&image)? }))
-}
-
 /// Normalize any supported image into a PNG the attachment pipeline accepts and
 /// store it beside browser screenshots, which share their IDs, limits and cleanup.
 pub fn import_image(dir: &Path, source: ImageSource) -> Result<ImportedImage, String> {
@@ -270,6 +227,21 @@ pub fn import_image(dir: &Path, source: ImageSource) -> Result<ImportedImage, St
         height,
         thumbnail: thumbnail(&image)?,
     })
+}
+
+/// A sent image or screenshot as a `data:` URL, so the transcript can show it again.
+/// Only registry IDs are accepted; None when the capture was pruned or never existed.
+pub fn image_data_url(dir: &Path, id: &str) -> Result<Option<String>, String> {
+    if uuid::Uuid::parse_str(id).map(|parsed| parsed.to_string()) != Ok(id.to_owned()) {
+        return Err("Invalid image.".into());
+    }
+    let path = dir.join(format!("{id}.png"));
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else { return Ok(None) };
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_PNG as u64 {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(Some(format!("data:image/png;base64,{}", STANDARD.encode(bytes))))
 }
 
 fn extension(path: &Path) -> String {
@@ -543,36 +515,21 @@ mod tests {
 
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
+    #[test]
+    fn sent_images_are_read_back_by_registry_id_only() {
+        let dir = temp_dir("sent-image");
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(dir.join(format!("{id}.png")), [1, 2, 3]).unwrap();
+        assert_eq!(image_data_url(&dir, &id).unwrap().as_deref(), Some("data:image/png;base64,AQID"));
+        assert_eq!(image_data_url(&dir, &uuid::Uuid::new_v4().to_string()).unwrap(), None);
+        assert!(image_data_url(&dir, "../secret").is_err());
+        assert!(image_data_url(&dir, &id.to_uppercase()).is_err());
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pandacode-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn saved_images_are_bounded_registry_pngs_with_missing_cache_fallback() {
-        let dir = temp_dir("saved-images");
-        let id = uuid::Uuid::new_v4().to_string();
-        assert!(image_data_url(&dir, &id, false).unwrap().is_none());
-        for invalid in ["../secret", "/tmp/secret", "not-an-id"] {
-            assert!(image_data_url(&dir, invalid, false).is_err());
-        }
-        let path = dir.join(format!("{id}.png"));
-        std::fs::write(&path, STANDARD.decode(PNG).unwrap()).unwrap();
-        assert!(image_data_url(&dir, &id, true).unwrap().unwrap().starts_with("data:image/png;base64,"));
-        assert!(image_data_url(&dir, &id, false).unwrap().unwrap().starts_with("data:image/jpeg;base64,"));
-        std::fs::write(&path, b"not a PNG").unwrap();
-        assert!(image_data_url(&dir, &id, true).is_err());
-        std::fs::write(&path, vec![0; MAX_IMAGE_PNG + 1]).unwrap();
-        assert!(image_data_url(&dir, &id, true).is_err());
-        #[cfg(unix)]
-        {
-            std::fs::remove_file(&path).unwrap();
-            std::fs::write(dir.join("original"), STANDARD.decode(PNG).unwrap()).unwrap();
-            std::os::unix::fs::symlink(dir.join("original"), &path).unwrap();
-            assert!(image_data_url(&dir, &id, true).is_err());
-        }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

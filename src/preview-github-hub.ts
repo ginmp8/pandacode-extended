@@ -17,13 +17,13 @@ export const previewRepos: HubRepo[] = [
 
 const pulls: Record<string, HubPull[]> = {
   'orbit-labs/orbit': [
-    { number: 130, title: 'Debounce library search and cache the index', author: 'you', state: 'open', head: 'feat/instant-search', headSha: '130abc1234567890', base: 'main', updatedAt: at(25 * 60_000), url: 'https://github.com/orbit-labs/orbit/pull/130', review: 'review_required', checks: 'passing', checkDetails: [{ name: 'CI / test', state: 'success', url: 'https://github.com/orbit-labs/orbit/actions/runs/9105' }], additions: 86, deletions: 31, labels: ['performance'] },
-    { number: 127, title: 'Offline sync for the reading list', author: 'mara', state: 'draft', head: 'mara/offline-sync', headSha: '127abc1234567890', base: 'main', updatedAt: at(4 * 3600_000), url: 'https://github.com/orbit-labs/orbit/pull/127', review: '', checks: 'pending', checkDetails: [{ name: 'CI / test', state: 'pending', url: 'https://github.com/orbit-labs/orbit/actions/runs/9120' }], additions: 412, deletions: 58, labels: ['sync'] },
-    { number: 124, title: 'Fix dark mode contrast for muted text', author: 'devon', state: 'open', head: 'devon/contrast', headSha: '124abc1234567890', base: 'main', updatedAt: at(day), url: 'https://github.com/orbit-labs/orbit/pull/124', review: 'changes_requested', checks: 'failing', checkDetails: [{ name: 'CI / lint', state: 'success', url: 'https://github.com/orbit-labs/orbit/actions/runs/9087' }, { name: 'CI / test', state: 'failure', url: 'https://github.com/orbit-labs/orbit/actions/runs/9087' }], additions: 14, deletions: 9, labels: ['design', 'a11y'] },
-    { number: 119, title: 'Bump vite from 7.1 to 7.3', author: 'dependabot', state: 'open', head: 'dependabot/npm/vite-7.3', headSha: '119abc1234567890', base: 'main', updatedAt: at(3 * day), url: 'https://github.com/orbit-labs/orbit/pull/119', review: 'approved', checks: 'passing', checkDetails: [{ name: 'CI / test', state: 'success', url: '' }], additions: 22, deletions: 22, labels: ['dependencies'] },
+    { number: 130, title: 'Debounce library search and cache the index', author: 'you', state: 'open', head: 'feat/instant-search', base: 'main', updatedAt: at(25 * 60_000), url: 'https://github.com/orbit-labs/orbit/pull/130', review: 'review_required', checks: 'passing', additions: 86, deletions: 31, labels: ['performance'] },
+    { number: 127, title: 'Offline sync for the reading list', author: 'mara', state: 'draft', head: 'mara/offline-sync', base: 'main', updatedAt: at(4 * 3600_000), url: 'https://github.com/orbit-labs/orbit/pull/127', review: '', checks: 'pending', additions: 412, deletions: 58, labels: ['sync'] },
+    { number: 124, title: 'Fix dark mode contrast for muted text', author: 'devon', state: 'open', head: 'devon/contrast', base: 'main', updatedAt: at(day), url: 'https://github.com/orbit-labs/orbit/pull/124', review: 'changes_requested', checks: 'failing', additions: 14, deletions: 9, labels: ['design', 'a11y'] },
+    { number: 119, title: 'Bump vite from 7.1 to 7.3', author: 'dependabot', state: 'open', head: 'dependabot/npm/vite-7.3', base: 'main', updatedAt: at(3 * day), url: 'https://github.com/orbit-labs/orbit/pull/119', review: 'approved', checks: 'passing', additions: 22, deletions: 22, labels: ['dependencies'] },
   ],
   'orbit-labs/orbit-api': [
-    { number: 52, title: 'Stream search results over SSE', author: 'you', state: 'open', head: 'feat/sse', headSha: '52abc1234567890', base: 'main', updatedAt: at(5 * 3600_000), url: 'https://github.com/orbit-labs/orbit-api/pull/52', review: 'review_required', checks: 'passing', checkDetails: [], additions: 230, deletions: 40, labels: [] },
+    { number: 52, title: 'Stream search results over SSE', author: 'you', state: 'open', head: 'feat/sse', base: 'main', updatedAt: at(5 * 3600_000), url: 'https://github.com/orbit-labs/orbit-api/pull/52', review: 'review_required', checks: 'passing', additions: 230, deletions: 40, labels: [] },
   ],
 };
 
@@ -46,7 +46,7 @@ const issues: Record<string, HubIssue[]> = {
 const minute = 60_000;
 /** `pulls` empty with a pull_request event stands for a fork's run, matched by head branch. */
 const run = (id: number, workflow: string, title: string, branch: string, state: string, ago: number, more: Partial<HubRun> = {}): HubRun =>
-  ({ id, runNumber: id, headSha: `${id.toString(16).padStart(8, '0')}abcdef0123456789`, workflow, title, branch, event: 'pull_request', state, createdAt: at(ago), startedAt: at(ago - 10_000), updatedAt: at(Math.max(0, ago - 4 * minute - 40_000)), url: `https://github.com/orbit-labs/orbit/actions/runs/${id}`, attempt: 1, pulls: [], ...more });
+  ({ id, workflow, title, branch, event: 'pull_request', state, createdAt: at(ago), startedAt: at(ago - 10_000), updatedAt: at(Math.max(0, ago - 4 * minute - 40_000)), url: `https://github.com/orbit-labs/orbit/actions/runs/${id}`, attempt: 1, pulls: [], ...more });
 const runs: Record<string, HubRun[]> = {
   'orbit-labs/orbit': [
     run(9120, 'CI', 'Offline sync for the reading list', 'mara/offline-sync', 'in_progress', 4 * minute, { pulls: [127] }),
@@ -78,10 +78,4 @@ export const previewHub = {
   runDetails: (repo: string, id: number): RunDetails => structuredClone(repo in runs ? runDetails[id] ?? { jobs: [], artifacts: [], attempts: [] } : { jobs: [], artifacts: [], attempts: [] }),
   pulls: (repo: string): HubPull[] => structuredClone(pulls[repo] ?? []),
   issues: (repo: string): HubIssue[] => structuredClone(issues[repo] ?? []),
-  issueContext: (repo: string, number: number) => {
-    const issue = issues[repo]?.find(item => item.number === number);
-    if (!issue) throw new Error('The issue is unavailable. Refresh the repository and try again.');
-    const descriptions: Record<number, string> = { 128: 'Typing in the search box feels sluggish.\n\nSteps:\n1. Open the library view\n2. Type quickly\n\nThe index is recreated per input event.' };
-    return { number, title: issue.title, url: issue.url, body: descriptions[number] ?? '', bodyTruncated: false, labels: issue.labels, comments: number === 128 ? [{ author: 'devon', body: 'Also add a regression test for rapid input.', createdAt: at(2 * 3600_000) }] : [] };
-  },
 };

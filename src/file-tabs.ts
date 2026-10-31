@@ -1,16 +1,16 @@
-// Editor tabs above the conversation: files opened from the Files tree, search, or file links
-// each get a tab beside Conversation, kept per task. The file view covers the conversation
-// (which stays mounted and inert) so switching back keeps the transcript's scroll position.
+// Editor tabs in the inspector: files opened from the Files tree, search, or file links each get
+// a tab in the inspector's Open files view, kept per task, so the conversation stays in sight.
 import './file-tabs.css';
 import { renderDocument } from './document-viewer';
 import { escape, fileIcon, icon } from './dom';
 import { isPreviewableFile } from './file-links';
-import { bindFileLinkContext } from './file-links';
 import type { OfficeKind } from './office-viewer';
 
 type Context = { projectId: string; sessionId?: string };
 /** `source` shows a viewer-handled file (e.g. an SVG) as text. */
-type Tab = { path: string; context: Context; content?: string | ArrayBuffer; reads?: number; source?: boolean };
+type Tab = { path: string; context: Context; content?: string | ArrayBuffer; reads?: number; source?: boolean; used?: number };
+/** Document bytes kept for tabs not on screen, across all tasks; evicted tabs read their file again when shown. */
+const DOCUMENT_CACHE_BYTES = 64 * 1024 * 1024;
 /** PDF, Word, spreadsheet and image files arrive as bytes and draw in their own lazily loaded viewer. */
 const officeKind = (path: string): OfficeKind | undefined =>
   /\.pdf$/i.test(path) ? 'pdf' : /\.docx$/i.test(path) ? 'docx' : /\.(?:xlsx|xlsm|xls|ods)$/i.test(path) ? 'sheet' : /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i.test(path) ? 'image' : undefined;
@@ -32,33 +32,40 @@ type Deps = {
   report(error: unknown): void;
   /** Where focus goes when the last file tab closes from the keyboard. */
   focusConversation(): void;
+  /** The shown task's last tab closed, so the host can leave the Open files view. */
+  emptied(): void;
 };
 
-const MAX_THREADS = 24;
-const MAX_TABS = 12;
-const CACHE_BYTES = 96 * 1024 * 1024;
-
 export function createFileTabs(deps: Deps) {
-  const pane = document.querySelector<HTMLElement>('.conversation-pane')!;
+  const pane = document.querySelector<HTMLElement>('#file-panel')!;
   const strip = pane.querySelector<HTMLElement>('#file-tabs')!;
   const view = pane.querySelector<HTMLElement>('#file-view')!;
   const threads = new Map<string, Thread>();
   let key = '', workspace = '';
   let disposeOffice = () => {};
-
-  const contentSize = (tab: Tab): number => typeof tab.content === 'string' ? tab.content.length * 2 : tab.content?.byteLength ?? 0;
-  function trimCache(keep: Tab): void {
-    const cached = [...threads.values()].flatMap(entry => entry.tabs);
-    let size = cached.reduce((total, tab) => total + contentSize(tab), 0);
-    for (const tab of cached) if (tab !== keep && size > CACHE_BYTES) { size -= contentSize(tab); tab.content = undefined; }
-  }
+  let tick = 0;
 
   const thread = (): Thread | undefined => threads.get(key);
   const current = (): Tab | undefined => thread()?.tabs.find(tab => tab.path === thread()!.active);
   const name = (path: string) => path.split('/').pop() ?? path;
 
+  /** Keeps the shown tab's bytes and the most recently shown background documents that fit the cache. */
+  function trim(): void {
+    const shown = current();
+    let budget = DOCUMENT_CACHE_BYTES;
+    const cached = [...threads.values()].flatMap(entry => entry.tabs)
+      .filter(tab => tab !== shown && typeof tab.content === 'object')
+      .sort((a, b) => (b.used ?? 0) - (a.used ?? 0));
+    for (const tab of cached) {
+      budget -= (tab.content as ArrayBuffer).byteLength;
+      if (budget < 0) tab.content = undefined;
+    }
+  }
+
   /** Redraws the strip and view; focus that was on the strip, or that the file view just made inert, lands on the selected tab. */
   function render(): void {
+    const shown = current(); if (shown) shown.used = ++tick;
+    trim();
     const focused = document.activeElement, onStrip = strip.contains(focused);
     draw();
     const now = document.activeElement;
@@ -74,38 +81,31 @@ export function createFileTabs(deps: Deps) {
     view.dataset.path = active?.path ?? '';
     disposeOffice(); disposeOffice = () => {};
     strip.hidden = !entry?.tabs.length;
-    pane.classList.toggle('showing-file', Boolean(active));
-    for (const child of pane.children) if (child !== strip && child !== view) (child as HTMLElement).inert = Boolean(active);
     view.hidden = !active;
     if (!entry?.tabs.length) { strip.innerHTML = ''; view.innerHTML = ''; return; }
     const tabButton = (path: string, label: string, glyph: string) => {
-      const selected = (entry.active || '') === path;
-      return `<div class="file-tab${selected ? ' selected' : ''}" role="presentation" data-tab="${escape(path)}"><button role="tab" aria-selected="${selected}" aria-controls="${path ? 'file-view' : 'transcript'}" tabindex="${selected ? 0 : -1}" data-file-tab="select" title="${escape(path || label)}">${glyph}<span>${escape(label)}</span></button>${path ? `<button class="icon-button" tabindex="-1" data-file-tab="close" aria-label="Close ${escape(label)}" title="Close (Delete)">${icon('close')}</button>` : ''}</div>`;
+      const selected = entry.active === path;
+      return `<div class="file-tab${selected ? ' selected' : ''}" role="presentation" data-tab="${escape(path)}"><button role="tab" aria-selected="${selected}" aria-controls="file-view" tabindex="${selected ? 0 : -1}" data-file-tab="select" title="${escape(path)}">${glyph}<span>${escape(label)}</span></button><button class="icon-button" tabindex="-1" data-file-tab="close" aria-label="Close ${escape(label)}" title="Close (Delete)">${icon('close')}</button></div>`;
     };
-    strip.innerHTML = tabButton('', 'Conversation', icon('chat')) + entry.tabs.map(tab => tabButton(tab.path, name(tab.path), fileIcon(name(tab.path), false))).join('');
+    strip.innerHTML = entry.tabs.map(tab => tabButton(tab.path, name(tab.path), fileIcon(name(tab.path), false))).join('');
     if (!active) { view.innerHTML = ''; return; }
     const attach = deps.canAttach(active.context) ? `<button data-file-tab="attach">${icon('attach')} Attach</button>` : '';
     const preview = isPreviewableFile(active.path) ? `<button class="icon-button" data-file-tab="preview" aria-label="Preview in browser" title="Preview in browser">${icon('globe')}</button>` : '';
     view.innerHTML = `<div class="file-view-header"><span class="file-view-path" title="${escape(active.path)}">${escape(active.path)}</span><div class="file-preview-actions">${preview}${typeof active.content === 'object' ? '' : `<button class="icon-button" data-file-tab="copy" aria-label="Copy file" title="Copy file">${icon('copy')}</button>`}${attach}</div></div><div class="file-view-body"></div>`;
     const body = view.querySelector<HTMLElement>('.file-view-body')!;
-    bindFileLinkContext(body, active.context);
     if (active.content === undefined) { body.innerHTML = '<div class="inspector-empty" role="status">Loading file…</div>'; return; }
     if (typeof active.content === 'string') {
-      renderDocument(body, active.path, active.content, active.context.sessionId ? path => deps.call<string>('workspace_image', { ...active.context, path }) : undefined, active.context);
+      renderDocument(body, active.path, active.content, path => deps.call<string>('workspace_image', { ...active.context, path }));
       body.scrollTop = scroll;
       return;
     }
     const bytes = active.content, kind = officeKind(active.path)!;
-    const controller = new AbortController();
     let disposed = false;
-    disposeOffice = () => { disposed = true; controller.abort(); };
-    void import('./office-viewer').then(({ renderOffice }) => {
-      if (controller.signal.aborted) return () => {};
-      return renderOffice(body, kind, bytes, active.path, controller.signal);
-    }).then(dispose => {
+    disposeOffice = () => { disposed = true; };
+    void import('./office-viewer').then(({ renderOffice }) => renderOffice(body, kind, bytes, active.path)).then(dispose => {
       // The tab may have been switched or closed while the viewer was drawing.
       if (disposed || !body.isConnected) { dispose(); return; }
-      disposeOffice = () => { controller.abort(); dispose(); }; body.scrollTop = scroll;
+      disposeOffice = dispose; body.scrollTop = scroll;
     }).catch(error => {
       if (!disposed && body.isConnected) body.innerHTML = `<div class="inspector-empty" role="alert">This file could not be opened: ${escape(error instanceof Error ? error.message : String(error))}</div>`;
     });
@@ -119,16 +119,15 @@ export function createFileTabs(deps: Deps) {
         ? await deps.call<ArrayBuffer>('read_document_file', { ...tab.context, path: tab.path })
         : await deps.call<string>('read_file', { ...tab.context, path: tab.path });
       // An older reply arriving after a newer one must not put stale text back.
-      if (read !== tab.reads || ![...threads.values()].some(entry => entry.tabs.includes(tab)) || sameContent(content, tab.content)) return;
+      if (read !== tab.reads || sameContent(content, tab.content)) return;
       tab.content = content;
-      trimCache(tab);
-      if (current() === tab) render();
+      if (current() === tab) render(); else trim();
     } catch (error) {
       if (read !== tab.reads) return;
       const owner = [...threads.values()].find(entry => entry.tabs.includes(tab));
       if (!owner) return;
       close(tab.path, owner);
-      if (owner === thread()) deps.report(error);
+      deps.report(error);
     }
   }
 
@@ -141,10 +140,11 @@ export function createFileTabs(deps: Deps) {
   function close(path: string, entry = thread()): void {
     if (!entry) return;
     const index = entry.tabs.findIndex(tab => tab.path === path); if (index < 0) return;
-    entry.tabs[index].reads = (entry.tabs[index].reads ?? 0) + 1;
     entry.tabs = entry.tabs.filter(tab => tab.path !== path);
     if (entry.active === path) entry.active = (entry.tabs[index] ?? entry.tabs[index - 1])?.path ?? '';
-    if (entry === thread()) { render(); const tab = current(); if (tab) void load(tab); }
+    if (entry !== thread()) return;
+    if (!entry.tabs.length) deps.emptied();
+    render(); const tab = current(); if (tab) void load(tab);
   }
 
   strip.addEventListener('click', event => {
@@ -162,15 +162,15 @@ export function createFileTabs(deps: Deps) {
     if (!entry || !['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Delete'].includes(event.key) || !(event.target as Element).matches('[role="tab"]')) return;
     event.preventDefault();
     if (event.key === 'Delete') { if (entry.active) close(entry.active); return; }
-    const order = ['', ...entry.tabs.map(tab => tab.path)], index = order.indexOf(entry.active);
+    const order = entry.tabs.map(tab => tab.path), index = order.indexOf(entry.active);
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? order.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + order.length) % order.length;
     activate(order[next]);
   });
   view.addEventListener('click', event => {
     const action = (event.target as Element).closest<HTMLElement>('[data-file-tab]')?.dataset.fileTab, tab = current();
     if (!action || !tab) return;
-    // Attaching is the first step of writing about the file, so the conversation comes forward.
-    if (action === 'attach' && deps.canAttach(tab.context)) { deps.attach(tab.path); activate(''); deps.focusConversation(); }
+    // Attaching is the first step of writing about the file, so focus goes to the prompt beside it.
+    if (action === 'attach') { deps.attach(tab.path); deps.focusConversation(); }
     if (action === 'preview') void deps.preview(tab.path, tab.context).catch(deps.report);
     if (action === 'copy' && typeof tab.content === 'string') void navigator.clipboard.writeText(tab.content).then(() => deps.notify('File copied'), deps.report);
   });
@@ -181,23 +181,17 @@ export function createFileTabs(deps: Deps) {
      * and tabs opened with no task open never carry over to the next view without one.
      */
     show(id: string, nextWorkspace: string): void {
-      if (id && id === key && nextWorkspace === workspace) return;
-      // An unbound project view is intentionally ephemeral.
-      if (!key) threads.delete(key);
       key = id; workspace = nextWorkspace;
       const entry = threads.get(key);
       if (!id || (entry && entry.workspace !== workspace)) threads.delete(key);
-      if (id && threads.has(id)) { const recent = threads.get(id)!; threads.delete(id); threads.set(id, recent); }
       render();
       const tab = current(); if (tab) void load(tab);
     },
     open(path: string, context: Context, source = false): void {
       let entry = thread();
       if (!entry) { entry = { workspace, tabs: [], active: '' }; threads.set(key, entry); }
-      while (threads.size > MAX_THREADS) threads.delete(threads.keys().next().value!);
       const fresh: Tab = { path, context: { ...context }, ...(source ? { source } : {}) };
       const existing = entry.tabs.find(tab => tab.path === path);
-      if (!existing && entry.tabs.length >= MAX_TABS) { deps.notify('Close a file tab before opening another (12 per task).'); return; }
       if (!existing) entry.tabs = [...entry.tabs, fresh];
       else if (Boolean(existing.source) !== source) entry.tabs = entry.tabs.map(tab => tab === existing ? fresh : tab);
       activate(path);
@@ -205,8 +199,8 @@ export function createFileTabs(deps: Deps) {
     /** Re-reads the file on screen, e.g. after an agent run may have changed it. */
     // Documents can be tens of megabytes, so they are re-read only when their tab is opened again.
     reload(): void { const tab = current(); if (tab && (tab.source || !officeKind(tab.path))) void load(tab); },
-    showConversation(): void { if (thread()?.active) activate(''); },
     forget(id: string): void { threads.delete(id); if (id === key) render(); },
     get active(): string { return thread()?.active ?? ''; },
+    get count(): number { return thread()?.tabs.length ?? 0; },
   };
 }

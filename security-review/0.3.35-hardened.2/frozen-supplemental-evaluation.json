@@ -1,4 +1,0 @@
-{
-  "harness/browser-regressions.py": "034b445b5018fb8b3e04f92acdeb8a1202bfe09e94edc836e0201b2724d66cf1",
-  "candidate/tests/hardened-handoff-redaction.test.mjs": "df61b0a5bc7d59460786b17b3030f877995b4ca60001b90a634b85c47777b4cf"
-}

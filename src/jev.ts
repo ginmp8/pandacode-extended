@@ -159,7 +159,7 @@ export async function showJevSettings(dialog: HTMLDialogElement): Promise<void> 
           <div class="jev-model-field"><label for="jev-decision-model">Decision model</label><div><select id="jev-decision-model"></select><button type="button" class="jev-text-button" data-jev-models-refresh hidden>Refresh</button></div></div>
         </div>
         ${keyField('typesafe', 'TypeSafe API key')}${keyField('openrouter', 'OpenRouter API key')}${keyField('text', 'Text model API key')}
-        <p class="jev-hint">PandaCode works without Jev or a TypeSafe key. Optional decision assistance only needs the key for the provider you pick. OpenRouter models are listed only when you open the model menu. Keys are saved in your operating system's credential vault. Unlock the vault if setup reports a credential error. Leave a field empty to keep its saved key.</p>
+        <p class="jev-hint">PandaCode works without Jev or a TypeSafe key. Optional decision assistance only needs the key for the provider you pick. OpenRouter models are listed only when you open the model menu. Keys are saved privately on this device, outside the keychain. Leave a field empty to keep its saved key.</p>
       </section>
       <details class="jev-section jev-advanced" data-jev-browser-runtime><summary>Browser runtime <span class="jev-runtime-badge" role="status">Checking setup…</span>${icon('down')}</summary>
         <p class="jev-hint">Only browser tests need Python 3.12+, Chrome, and a text model key. Decision assistance works without the browser runtime. Jev is installed separately and only runs when testing.</p>
@@ -192,7 +192,6 @@ export async function showJevSettings(dialog: HTMLDialogElement): Promise<void> 
   const provider = () => input('decision-provider') as unknown as HTMLSelectElement;
   const modelSelect = () => query<HTMLSelectElement>('#jev-decision-model');
   const modelCache = new Map<string, { id: string; name: string }[]>();
-  const modelRequests = new Map<string, Promise<void>>();
   function renderModels(models: { id: string; name: string }[], selected: string) {
     const select = modelSelect();
     const known = models.some(model => model.id === selected);
@@ -202,32 +201,22 @@ export async function showJevSettings(dialog: HTMLDialogElement): Promise<void> 
     if (provider().value === 'typesafe') select.value = options[0]?.id ?? '';
   }
   // TypeSafe's list is built in; OpenRouter's is fetched when the menu opens (or on Refresh), never before.
-  function loadModels(force = false): Promise<void> {
-    const name = provider().value;
-    const pending = modelRequests.get(name);
-    if (pending) return pending;
-    if (modelCache.has(name) && !force) return Promise.resolve();
-    const request = (async () => {
-      try {
-        if (name === 'openrouter') tell('Loading OpenRouter models…');
-        const models = await call<{ id: string; name: string }[]>('jev_decision_models', { provider: name });
-        if (!view.alive()) return;
-        modelCache.set(name, models);
-        if (provider().value !== name) return;
-        // A response cannot restore a selection the user changed while it loaded.
-        const selected = modelSelect().value || (name === config?.decisionProvider ? config?.decisionModel ?? '' : '');
-        renderModels(models, selected);
-        if (name === 'openrouter') tell(`${models.length} models support JSON output.`);
-      } catch (error) { if (view.alive() && provider().value === name) tell(errorText(error), true); }
-    })().finally(() => { modelRequests.delete(name); });
-    modelRequests.set(name, request);
-    return request;
+  async function loadModels(force = false) {
+    const name = provider().value, selected = modelSelect().value || (name === config?.decisionProvider ? config?.decisionModel ?? '' : '');
+    if (name === 'openrouter' && modelCache.has(name) && !force) return;
+    try {
+      if (name === 'openrouter') tell('Loading OpenRouter models…');
+      const models = await call<{ id: string; name: string }[]>('jev_decision_models', { provider: name });
+      if (!view.alive() || provider().value !== name) return;
+      modelCache.set(name, models); renderModels(models, selected);
+      if (name === 'openrouter') tell(`${models.length} models support JSON output.`);
+    } catch (error) { if (view.alive() && provider().value === name) tell(errorText(error), true); }
   }
   function renderProvider() {
     const openrouter = provider().value === 'openrouter';
     query('[data-jev-models-refresh]').hidden = !openrouter;
     for (const [name, show] of [['typesafe', !openrouter], ['openrouter', openrouter]] as const) query(`#jev-${name}-key`).closest<HTMLElement>('.jev-key-field')!.hidden = !show;
-    renderModels(modelCache.get(provider().value) ?? [], provider().value === config?.decisionProvider ? config?.decisionModel ?? '' : '');
+    renderModels(modelCache.get(provider().value) ?? (provider().value === 'typesafe' ? [] : []), provider().value === config?.decisionProvider ? config?.decisionModel ?? '' : '');
     if (!openrouter) void loadModels();
   }
   function renderKeys() {

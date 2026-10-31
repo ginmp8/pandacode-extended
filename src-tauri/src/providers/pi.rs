@@ -10,9 +10,9 @@ impl Bridge {
         server: Option<&mcp_host::Server>,
     ) -> Result<Self, String> {
         let directory = std::env::temp_dir().join(format!("pandacode-pi-{}", uuid::Uuid::new_v4()));
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = &mut std::fs::DirBuilder::new();
         #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        std::os::unix::fs::DirBuilderExt::mode(builder, 0o700);
         builder.create(&directory).map_err(|e| e.to_string())?;
         let bridge = Self(directory);
         let path = bridge.0.join("bridge.mjs");
@@ -104,36 +104,13 @@ pub(super) fn parse_models(data: &Value) -> Result<Vec<ModelInfo>, String> {
     Ok(models)
 }
 
-/// Aggregate stdout limit: bounds JSON lines and base64-encoded catalog chunks.
+/// Discovery stdout cap. omp's v2 chunks are base64, so a 12 MiB catalog fits.
 const DISCOVERY_OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
-/// At most 12 MiB may be decoded from a 16 MiB base64-capped stream.
-const MAX_REASSEMBLED_BYTES: u64 = 12 * 1024 * 1024;
-const MAX_DISCOVERY_CHUNKS: u64 = 512;
-/// A single rpc_chunk data field must be smaller than ~1.5 MiB encoded.
-const MAX_CHUNK_ENCODED_BYTES: usize = 1_500_000;
+/// omp's advertised reassembled-frame limit (protocol v2).
+const MAX_REASSEMBLED_BYTES: u64 = 64 * 1024 * 1024;
 
 fn models_request() -> Value {
     json!({"type":"get_available_models","id":"pandacode-models"})
-}
-
-/// Map remote diagnostics to an allowlist; error text can contain credentials,
-/// local paths, or arbitrary model output and must not leave the native boundary.
-fn discovery_error_reason(name: &str, error: &Value) -> String {
-    let reason = error.as_str().unwrap_or_default();
-    let lower = reason.chars().take(512).collect::<String>().to_ascii_lowercase();
-    if lower.contains("transport limit") || lower.contains("frame limit") {
-        return format!("{name} model catalog exceeded the RPC transport limit");
-    }
-    if lower.contains("auth") || lower.contains("login") || lower.contains("sign in") || lower.contains("credential") {
-        return format!("{name} requires authentication");
-    }
-    if lower.contains("rate limit") || lower.contains("too many requests") {
-        return format!("{name} was rate limited");
-    }
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return format!("{name} model discovery timed out");
-    }
-    format!("{name} could not load models. Check its login and configuration.")
 }
 
 struct Chunks {
@@ -144,13 +121,12 @@ struct Chunks {
     bytes: Vec<u8>,
 }
 
-/// Model discovery on Pi (v1) and Oh My Pi (v1/v2). Only a successful
-/// protocol-v2 negotiation enables chunked responses.
+/// Model discovery over Pi's RPC. omp first sends a `ready` frame; when it
+/// offers protocol v2 we negotiate it so a catalog over omp's 1 MiB frame
+/// limit arrives as `rpc_chunk` frames (omp `docs/rpc.md`, Transport and Framing).
 struct Discovery {
     name: &'static str,
     asked: bool,
-    negotiating: bool,
-    chunked: bool,
     chunks: Option<Chunks>,
 }
 
@@ -158,39 +134,41 @@ impl Discovery {
     fn new(provider: &str) -> Self {
         Self {
             name: if provider == "omp" { "Oh My Pi" } else { "Pi" },
-            // Pi does not announce ready; send its request immediately.
+            // Pi has no ready frame; its request goes out at start.
             asked: provider != "omp",
-            negotiating: false,
-            chunked: false,
             chunks: None,
         }
     }
 
-    fn receive(&mut self, frame: Value) -> Result<(Vec<Value>, Option<Vec<ModelInfo>>), String> {
-        let Some(value) = self.reassemble(frame)? else {
+    /// Takes one stdout frame; returns frames to write, or the catalog.
+    fn receive(&mut self, value: Value) -> Result<(Vec<Value>, Option<Vec<ModelInfo>>), String> {
+        let Some(value) = self.reassemble(value)? else {
             return Ok((vec![], None));
         };
         match (field(&value, "type"), field(&value, "id")) {
-            ("ready", _) if !self.asked && !self.negotiating => {
+            ("ready", _) if !self.asked => {
                 let v2 = value["supportedProtocolVersions"]
                     .as_array()
                     .is_some_and(|versions| versions.contains(&json!(2)));
                 if v2 {
-                    self.negotiating = true;
                     return Ok((vec![json!({"type":"negotiate_protocol","id":"pandacode-protocol","protocolVersion":2})], None));
                 }
                 self.asked = true;
                 Ok((vec![models_request()], None))
             }
-            ("response", "pandacode-protocol") if self.negotiating => {
-                self.negotiating = false;
-                self.chunked = value["success"] == true && value["data"]["protocolVersion"] == 2;
+            // A refused negotiation stays on v1; the catalog may still fit.
+            ("response", "pandacode-protocol") if !self.asked => {
                 self.asked = true;
                 Ok((vec![models_request()], None))
             }
-            ("response", "pandacode-models") if self.asked => {
+            ("response", "pandacode-models") => {
                 if value["success"] != true {
-                    return Err(discovery_error_reason(self.name, &value["error"]));
+                    let error = field(&value, "error");
+                    return Err(if error.is_empty() {
+                        format!("{} could not load models. Check its login and configuration.", self.name)
+                    } else {
+                        short(error)
+                    });
                 }
                 parse_models(&value["data"]).map(|models| (vec![], Some(models)))
             }
@@ -198,8 +176,7 @@ impl Discovery {
         }
     }
 
-    /// A chunk sequence must be strictly ordered, declared consistently, and
-    /// fully reconstructed before decoding its JSON response.
+    /// Protocol v2 `rpc_chunk` reassembly; any irregular sequence is fatal.
     fn reassemble(&mut self, value: Value) -> Result<Option<Value>, String> {
         if value["type"] != "rpc_chunk" {
             if self.chunks.is_some() {
@@ -208,48 +185,33 @@ impl Discovery {
             return Ok(Some(value));
         }
         let invalid = || format!("{} sent an invalid response chunk", self.name);
-        if !self.chunked || !self.asked {
-            return Err(invalid());
-        }
         let id = field(&value, "chunkId");
-        let (Some(index), Some(count), Some(length), Some(encoded)) = (
+        let (Some(index), Some(count), Some(length)) = (
             value["index"].as_u64(),
             value["count"].as_u64(),
             value["byteLength"].as_u64(),
-            value["data"].as_str(),
         ) else {
             return Err(invalid());
         };
-        if id.is_empty() || id.len() > 128 || count == 0 || count > MAX_DISCOVERY_CHUNKS
-            || index >= count || length == 0 || length > MAX_REASSEMBLED_BYTES
-            || encoded.is_empty() || encoded.len() > MAX_CHUNK_ENCODED_BYTES
-        {
+        if id.is_empty() || index >= count || length > MAX_REASSEMBLED_BYTES {
             return Err(invalid());
         }
         use base64::Engine;
         let data = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
+            .decode(field(&value, "data"))
             .map_err(|_| invalid())?;
-        if data.is_empty() || data.len() as u64 > length {
-            return Err(invalid());
-        }
-        if self.chunks.is_none() {
-            if index != 0 {
-                return Err(invalid());
-            }
-            self.chunks = Some(Chunks {
+        let chunks = match &mut self.chunks {
+            Some(chunks) => chunks,
+            None if index == 0 => self.chunks.insert(Chunks {
                 id: id.to_owned(),
                 count,
                 length,
                 next: 0,
                 bytes: Vec::new(),
-            });
-        }
-        let chunks = self.chunks.as_mut().ok_or_else(invalid)?;
+            }),
+            None => return Err(invalid()),
+        };
         if chunks.id != id || chunks.count != count || chunks.length != length || chunks.next != index {
-            return Err(invalid());
-        }
-        if chunks.bytes.len().checked_add(data.len()).is_none_or(|size| size as u64 > length) {
             return Err(invalid());
         }
         chunks.bytes.extend_from_slice(&data);
@@ -265,7 +227,7 @@ impl Discovery {
             return Err(invalid());
         }
         let frame: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-        if !frame.is_object() || frame["type"] == "rpc_chunk" {
+        if !frame.is_object() {
             return Err(invalid());
         }
         Ok(Some(frame))
@@ -273,7 +235,7 @@ impl Discovery {
 }
 
 pub(super) async fn models(path: &Path, provider: &str) -> Result<Vec<ModelInfo>, String> {
-    let mut command = super::command(path)?;
+    let mut command = super::provider_command(provider, path)?;
     command.args(["--mode", "rpc", "--no-session", "--no-extensions", "--no-skills"]);
     if provider == "omp" {
         command.args(["--no-rules", "--no-lsp", "--no-title"]);
@@ -301,7 +263,7 @@ pub(super) async fn models(path: &Path, provider: &str) -> Result<Vec<ModelInfo>
         let mut stdout =
             tokio::io::BufReader::new(child.stdout.take().ok_or("Pi stdout unavailable")?)
                 .take(DISCOVERY_OUTPUT_LIMIT + 1);
-        let mut total: u64 = 0;
+        let mut total = 0;
         loop {
             let mut line = Vec::new();
             let count = stdout
@@ -342,6 +304,8 @@ pub(super) fn stop_settled(provider: &str, value: &Value) -> bool {
         "omp" => value["type"] == "prompt_result" || value["type"] == "session_settled",
         // Muse ends an interrupted turn with `turn/completed` (terminal `cancelled`).
         "muse" => value["method"] == "turn/completed",
+        // ZCode settles through its `turn.completed` event (a cancelled run included).
+        "zcode" => zcode::stop_settled(value),
         _ => false,
     }
 }
@@ -382,6 +346,8 @@ impl Protocol {
                     self.text_delta(&id, None, field(event, "delta"), &mut step);
                 } else if event["type"] == "thinking_start" {
                     step.events.push(self.event("status", "Reasoning", None));
+                } else if event["type"] == "thinking_delta" {
+                    self.thinking(field(event, "delta"), &mut step);
                 }
             }
             "message_end" if value["message"]["role"] == "assistant" => {
@@ -667,6 +633,13 @@ mod tests {
     }
 
     #[test]
+    fn thinking_deltas_surface_as_thinking_events() {
+        let mut p = ready();
+        let step = p.receive(json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Hmm"}})).unwrap();
+        assert!(step.events.iter().any(|e| e.kind == "thinking" && e.text == "Hmm"));
+    }
+
+    #[test]
     fn bridge_must_be_ready_before_any_prompt() {
         // get_state may answer before the bridge's ready status; it waits for it.
         let mut early = Protocol::new(super::super::tests::config("pi"));
@@ -836,7 +809,9 @@ mod tests {
     #[ignore]
     async fn installed_pi_lists_models_without_prompting() {
         let path = executable("pi").expect("Pi is installed");
-        assert!(!models(&path, "pi").await.unwrap().is_empty());
+        let catalog = models(&path, "pi").await.unwrap();
+        assert!(catalog.len() > 1, "Pi should advertise models beyond Default");
+        println!("Pi advertised {} models beyond Default", catalog.len() - 1);
     }
 
     fn omp_ready() -> Protocol {
@@ -896,60 +871,37 @@ mod tests {
     #[test]
     fn omp_discovery_negotiates_v2_and_reassembles_chunks() {
         use base64::Engine;
-        let mut discovery = Discovery::new("omp");
-        let (frames, _) = discovery.receive(json!({"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2]})).unwrap();
-        assert_eq!(frames, vec![json!({"type":"negotiate_protocol","id":"pandacode-protocol","protocolVersion":2})]);
-        assert!(!discovery.asked);
-        let (frames, _) = discovery.receive(json!({"type":"response","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
-        assert_eq!(frames, vec![models_request()]);
-        assert!(discovery.chunked);
-        let response = json!({"type":"response","id":"pandacode-models","success":true,"data":{"models":[{"provider":"anthropic","id":"sonnet"}]}}).to_string();
-        let (first, second) = response.as_bytes().split_at(40);
-        let chunk = |index: u64, data: &[u8]| json!({"type":"rpc_chunk","chunkId":"rpc-1","index":index,"count":2,"byteLength":response.len(),"data":base64::engine::general_purpose::STANDARD.encode(data)});
-        assert!(discovery.receive(chunk(0, first)).unwrap().1.is_none());
-        let models = discovery.receive(chunk(1, second)).unwrap().1.unwrap();
+        // Ready frame from omp 18.12 (issue #91) and chunk shape from omp `docs/rpc.md`.
+        let mut d = Discovery::new("omp");
+        let (write, _) = d.receive(json!({"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864})).unwrap();
+        assert_eq!(write, [json!({"type":"negotiate_protocol","id":"pandacode-protocol","protocolVersion":2})]);
+        let (write, _) = d.receive(json!({"type":"response","command":"negotiate_protocol","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
+        assert_eq!(write, [models_request()]);
+        let response = json!({"type":"response","command":"get_available_models","id":"pandacode-models","success":true,"data":{"models":[{"provider":"anthropic","id":"sonnet"}]}}).to_string();
+        let (a, b) = response.as_bytes().split_at(40);
+        let chunk = |index: u64, part: &[u8]| json!({"type":"rpc_chunk","chunkId":"rpc-1","index":index,"count":2,"byteLength":response.len(),"data":base64::engine::general_purpose::STANDARD.encode(part)});
+        assert!(d.receive(chunk(0, a)).unwrap().1.is_none());
+        let models = d.receive(chunk(1, b)).unwrap().1.unwrap();
         assert_eq!(models[1].id, "anthropic/sonnet");
+
+        // Interrupted or out-of-order sequences fail instead of parsing a fragment.
+        let mut d = Discovery::new("omp");
+        d.receive(chunk(0, a)).unwrap();
+        assert!(d.receive(json!({"type":"session_settled"})).is_err());
+        assert!(Discovery::new("omp").receive(chunk(1, b)).is_err());
     }
 
     #[test]
-    fn discovery_rejects_untrusted_chunks() {
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(br#"{"type":"response"}"#);
-        let chunk = |index: u64| json!({"type":"rpc_chunk","chunkId":"rpc-1","index":index,"count":2,"byteLength":19,"data":b64});
-        assert!(Discovery::new("omp").receive(chunk(0)).is_err(), "unsolicited chunks must fail");
-        let mut discovery = Discovery::new("omp");
-        discovery.receive(json!({"type":"ready","supportedProtocolVersions":[1,2]})).unwrap();
-        discovery.receive(json!({"type":"response","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
-        assert!(discovery.receive(chunk(1)).is_err(), "out-of-order chunks must fail");
-        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"x","index":0,"count":MAX_DISCOVERY_CHUNKS + 1,"byteLength":10,"data":"YQ=="})).is_err());
-        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"x","index":0,"count":1,"byteLength":MAX_REASSEMBLED_BYTES + 1,"data":"YQ=="})).is_err());
-        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"x","index":0,"count":1,"byteLength":1,"data":"not base64"})).is_err());
-        let mut discovery = Discovery::new("omp");
-        discovery.receive(json!({"type":"ready","supportedProtocolVersions":[1,2]})).unwrap();
-        discovery.receive(json!({"type":"response","id":"pandacode-protocol","success":true,"data":{"protocolVersion":2}})).unwrap();
-        let first = json!({"type":"rpc_chunk","chunkId":"a","index":0,"count":2,"byteLength":10,"data":"YQ=="});
-        discovery.receive(first).unwrap();
-        assert!(discovery.receive(json!({"type":"rpc_chunk","chunkId":"b","index":1,"count":2,"byteLength":10,"data":"YQ=="})).is_err(), "changed ID must fail");
-        assert!(discovery.receive(json!({"type":"ready"})).is_err(), "interrupted chunks must fail");
-    }
-
-    #[test]
-    fn discovery_handles_v1_and_sanitizes_errors() {
-        let mut pi = Discovery::new("pi");
-        assert!(pi.asked);
-        assert!(!pi.chunked);
-        assert!(pi.receive(json!({"type":"response","id":"pandacode-models","success":true,"data":{"models":[]}})).unwrap().1.is_some());
-        let mut omp = Discovery::new("omp");
-        assert_eq!(omp.receive(json!({"type":"ready","protocolVersion":1})).unwrap().0, vec![models_request()]);
-        assert!(!omp.chunked);
-        let secret = "token=redacted-but-secret";
-        let error = omp.receive(json!({"type":"response","id":"pandacode-models","success":false,"error":format!("rpc transport limit {secret}")})).unwrap_err();
-        assert!(error.contains("transport limit"));
-        assert!(!error.contains(secret));
-        let mut refused = Discovery::new("omp");
-        refused.receive(json!({"type":"ready","supportedProtocolVersions":[1,2]})).unwrap();
-        assert_eq!(refused.receive(json!({"type":"response","id":"pandacode-protocol","success":false})).unwrap().0, vec![models_request()]);
-        assert!(!refused.chunked);
+    fn discovery_reports_the_harness_error() {
+        let mut d = Discovery::new("omp");
+        let (write, _) = d.receive(json!({"type":"ready","protocolVersion":1})).unwrap();
+        assert_eq!(write, [models_request()], "v1-only omp is asked directly");
+        let error = d.receive(json!({"id":"pandacode-models","type":"response","command":"get_available_models","success":false,"error":"RPC response exceeded the transport limit"})).err().unwrap();
+        assert_eq!(error, "RPC response exceeded the transport limit");
+        // Pi asks at start and keeps the generic hint when no reason is given.
+        let mut d = Discovery::new("pi");
+        assert!(d.asked);
+        assert!(d.receive(json!({"type":"response","id":"pandacode-models","success":false})).err().unwrap().contains("Check its login"));
     }
 
     #[tokio::test]

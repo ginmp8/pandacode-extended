@@ -10,6 +10,10 @@ pub enum CoordinationKind {
     Continue,
     /// A worker failed while others still run; the architect handles it right away.
     WorkerFailed,
+    /// Threads this task launched on other computers settled (docs/machine-orchestration.md).
+    MachineThreads,
+    /// The user answered a machine link request no tool call was waiting for.
+    MachineLink,
 }
 impl CoordinationKind {
     pub fn label(self) -> &'static str {
@@ -18,6 +22,8 @@ impl CoordinationKind {
             Self::WorkerReview => "Reviewing worker results",
             Self::Continue => "Continuing the plan",
             Self::WorkerFailed => "Handling a failed worker",
+            Self::MachineThreads => "Machine threads finished",
+            Self::MachineLink => "Machine link answered",
         }
     }
 }
@@ -202,21 +208,10 @@ pub fn project_text(
     role: &str,
     content: &str,
 ) -> Result<(String, String, Option<CoordinationKind>)> {
-    project_text_in_db(&store.db, sid, id, role, content)
-}
-
-/// The same presentation contract for paged Connect transcripts.
-pub(crate) fn project_text_in_db(
-    db: &rusqlite::Connection,
-    sid: &str,
-    id: i64,
-    role: &str,
-    content: &str,
-) -> Result<(String, String, Option<CoordinationKind>)> {
     let kind = if role == "coordination" {
         decode(content).map(|(kind, _)| kind)
     } else if role == "user" {
-        legacy_kind_in_db(db, sid, id, content)?
+        legacy_kind(store, sid, id, content)?
     } else {
         None
     };

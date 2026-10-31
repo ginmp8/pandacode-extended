@@ -1,15 +1,15 @@
-//! Tensorlake sandboxes for explicit sandbox management, through the REST API at
+//! Tensorlake sandboxes for cloud agents (docs/cloud-agents.md), through the REST API at
 //! https://api.tensorlake.ai (https://docs.tensorlake.ai/api-reference/v2/introduction):
 //! `/sandboxes` creates, lists, suspends, resumes and deletes; each sandbox's management
 //! URL runs commands (`/api/v1/processes/run`, a server-sent event stream that ends with
-//! the exit code). Sandboxes are named, so stop
+//! the exit code) and writes files (`/api/v1/files`). Sandboxes are named, so stop
 //! suspends and keeps their files. The lifetime is set only at creation (`timeout_secs: 0`
 //! asks for the plan's maximum, 1 h on the free plan and 24 h on demand), so `keep_alive`
 //! has nothing to extend.
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, time::Duration};
 
-use super::{http, http::block, sandbox::{Info, Sandbox}, Machine};
+use super::{http, http::block, sandbox::{checked, Info, Sandbox}, Machine};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -19,7 +19,8 @@ const SERVICE: &str = "Tensorlake";
 const MAX_MINUTES: u32 = 60;
 /// Keep about this much of a command's output (the tail).
 const KEEP: usize = 4 * 1024 * 1024;
-// The provider image is used as prepared; creating a sandbox never installs packages.
+/// The default image is minimal Ubuntu; agents need git and curl.
+const TOOLS: &str = "command -v git >/dev/null && command -v curl >/dev/null || { sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q git curl ca-certificates; }";
 
 pub struct Tensorlake {
     api: String,
@@ -32,7 +33,7 @@ fn machine(sandbox: &Value) -> Machine {
         "pending" => "starting",
         "snapshotting" | "suspending" => "stopping",
         "suspended" => "stopped",
-        // Gone for good: the user can create another sandbox explicitly.
+        // Gone for good: the caller recreates it and restores the checkout.
         "terminated" | "failed" => "error",
         other => other,
     };
@@ -90,10 +91,10 @@ impl Tensorlake {
         let sandbox = self.api(reqwest::Method::GET, &format!("/sandboxes/{id}"), None).await?;
         match sandbox["status"].as_str() {
             Some("running") => {}
-            status => return Err(format!("This Tensorlake sandbox is {}. Start it first.", http::redact(status.unwrap_or("not running"), &[&self.key]).chars().take(100).collect::<String>())),
+            status => return Err(format!("This Tensorlake sandbox is {}. Start it first.", status.unwrap_or("not running"))),
         }
         let url = sandbox["sandbox_url"].as_str().or(sandbox["ingress_endpoint"].as_str()).filter(|u| !u.is_empty()).map(str::to_string);
-        http::endpoint(SERVICE, &url.unwrap_or_else(|| format!("https://{id}.sandbox.tensorlake.ai")), &["sandbox.tensorlake.ai"], &self.api)
+        Ok(url.unwrap_or_else(|| format!("https://{id}.sandbox.tensorlake.ai")).trim_end_matches('/').to_string())
     }
 
     async fn list(&self) -> Result<Vec<Machine>> {
@@ -107,6 +108,7 @@ impl Tensorlake {
         let body = json!({"name": name, "resources": {"cpus": 2, "memory_mb": 4096}, "timeout_secs": 0, "wait": true});
         let created = self.api(reqwest::Method::POST, "/sandboxes", Some(body)).await?;
         let id = created["sandbox_id"].as_str().ok_or("Tensorlake did not report the new sandbox.")?.to_string();
+        checked(self.exec(&id, TOOLS, Duration::from_secs(600)).await?)?;
         Ok(machine(&json!({"id": id, "name": name, "status": created["status"]})))
     }
 
@@ -128,26 +130,39 @@ impl Tensorlake {
             .map_err(|e| if e.is_timeout() { format!("{SERVICE} did not answer in time.") } else { format!("Could not reach {SERVICE}. Check your connection.") })?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(http::error_message(SERVICE, status, ""));
+            let text = response.text().await.unwrap_or_default();
+            return Err(http::error_message(SERVICE, status, &text));
         }
-        let (mut code, mut output, mut pending) = (None, String::new(), Vec::new());
+        let (mut code, mut output, mut pending) = (None, String::new(), String::new());
         while let Some(chunk) = response.chunk().await.map_err(|_| format!("{SERVICE} output was cut off."))? {
-            if pending.len().saturating_add(chunk.len()) > http::LIMIT { return Err("Tensorlake output event exceeded its size limit.".into()); }
-            pending.extend_from_slice(&chunk);
-            if let Some(end) = pending.iter().rposition(|&byte| byte == b'\n') {
-                read_events(&String::from_utf8_lossy(&pending[..end]), &mut code, &mut output);
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            if let Some(end) = pending.rfind('\n') {
+                read_events(&pending[..end], &mut code, &mut output);
                 pending.drain(..=end);
             }
         }
-        read_events(&String::from_utf8_lossy(&pending), &mut code, &mut output);
-        Ok((code, http::redact(&output, &[&self.key])))
+        read_events(&pending, &mut code, &mut output);
+        Ok((code, output))
     }
 
+    async fn upload(&self, id: &str, path: &str, bytes: &[u8], private: bool) -> Result<()> {
+        let quoted = super::shell_quote(path);
+        checked(self.exec(id, &format!("mkdir -p \"$(dirname {quoted})\""), Duration::from_secs(60)).await?)?;
+        let url = self.management(id).await?;
+        let client = http::client(Duration::from_secs(300))?;
+        let mut target = reqwest::Url::parse(&format!("{url}/api/v1/files")).map_err(|_| "Tensorlake sent an unusable sandbox address.")?;
+        target.query_pairs_mut().append_pair("path", path);
+        let request = client.put(target).bearer_auth(&self.key).header("Content-Type", "application/octet-stream").body(bytes.to_vec());
+        http::send(SERVICE, request).await?;
+        // The file API may write as another user; hand the file to the command user.
+        let mode = if private { "600" } else { "644" };
+        checked(self.exec(id, &format!("sudo -n chown \"$(id -u):$(id -g)\" {quoted} 2>/dev/null; chmod {mode} {quoted}"), Duration::from_secs(60)).await?)
+    }
 }
 
 impl Sandbox for Tensorlake {
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: MAX_MINUTES }
+        Info { persistent: true, max_unattended_minutes: MAX_MINUTES }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(Tensorlake::list(self))
@@ -161,9 +176,12 @@ impl Sandbox for Tensorlake {
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(Tensorlake::exec(self, native, command, timeout))
     }
-    /// The lifetime is fixed at creation; manual activity leases are unavailable.
+    /// The lifetime is fixed at creation; cloud agents suspend idle sandboxes themselves.
     fn keep_alive(&self, _native: &str, _minutes: u32) -> Result<()> {
         Ok(())
+    }
+    fn upload(&self, native: &str, path: &str, bytes: &[u8], private: bool) -> Result<()> {
+        block(Tensorlake::upload(self, native, path, bytes, private))
     }
 }
 
@@ -221,19 +239,24 @@ mod tests {
         assert!(log.iter().all(|r| r.authorization.as_deref() == Some("Bearer tl-key")));
         let body: Value = serde_json::from_str(&log[1].body).unwrap();
         assert_eq!((body["timeout_secs"].as_u64(), body["wait"].as_bool()), (Some(0), Some(true)));
-        assert!(log.iter().all(|request| !request.path.ends_with("/processes/run")), "create never installs packages or executes setup commands");
+        let install: Value = serde_json::from_str(&log[3].body).unwrap();
+        assert_eq!(install["args"][1], TOOLS);
     }
 
     #[tokio::test]
-    async fn runs_commands_from_the_event_stream() {
+    async fn runs_commands_from_the_event_stream_and_writes_files() {
         let (api, seen) = tensorlake();
         assert_eq!(api.exec("s1", "echo 42", Duration::from_secs(9)).await.unwrap(), (Some(3), "42\noops\n".to_string()));
         assert!(api.exec("s2", "ls", Duration::from_secs(5)).await.unwrap_err().contains("suspended. Start it first"));
         assert_eq!(api.exec("gone", "ls", Duration::from_secs(5)).await.unwrap_err(), "Tensorlake: not found");
+        api.upload("s1", "/home/tl-user/a b", b"secret", true).await.unwrap();
         let log = seen.lock().unwrap();
         let run: Value = serde_json::from_str(&log[1].body).unwrap();
         assert_eq!(run, json!({"command":"sh","args":["-c","echo 42"],"timeout":9}));
-
+        let put = log.iter().find(|r| r.method == "PUT").unwrap();
+        assert_eq!(put.body, "secret");
+        let last: Value = serde_json::from_str(&log.last().unwrap().body).unwrap();
+        assert!(last["args"][1].as_str().unwrap().ends_with("chmod 600 '/home/tl-user/a b'"));
     }
 
     #[test]
@@ -246,12 +269,10 @@ mod tests {
         assert!(code.is_none());
     }
 
-    #[tokio::test]
-    async fn rejects_untrusted_management_urls_without_executing_a_command() {
-        let (base, seen) = mock::serve(|_, _| (200, r#"{"status":"running","sandbox_url":"https://attacker.invalid"}"#));
-        let error = Tensorlake::new(&base, "fixture-api").exec("box-1", "true", Duration::from_secs(2)).await.unwrap_err();
-        assert!(error.contains("untrusted sandbox address"), "{error}");
-        assert_eq!(seen.lock().unwrap().len(), 1);
+    #[test]
+    #[ignore = "needs TENSORLAKE_API_KEY"]
+    fn live_tensorlake_list() {
+        let Ok(key) = std::env::var("TENSORLAKE_API_KEY") else { return };
+        block(Tensorlake::new(DEFAULT_API, &key).list()).unwrap();
     }
-
 }

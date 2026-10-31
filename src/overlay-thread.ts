@@ -224,24 +224,25 @@ export class OverlayThreadView {
       coordination.innerHTML = renderCoordination(turn.coordination); coordination.dataset.kind = kind;
     }
     const details = node.querySelector<HTMLDetailsElement>('.launcher-thread-activity')!; details.hidden = !turn.activity.length;
-    const live = last && ['running','waiting','coordinating'].includes(this.latest?.subagent?.status || this.latest?.status || this.task!.status);
     if (turn.activity.length && !details.dataset.initialized) {
-      details.open = live;
+      details.open = last && ['running','waiting','coordinating'].includes(this.latest?.subagent?.status || this.latest?.status || this.task!.status);
       details.dataset.initialized = 'true';
     }
     const toolCount = turn.activity.filter(message => message.role === 'tool' && message.content !== 'Tool finished').length;
     details.querySelector('summary')!.textContent = `${turnLabel(turn.durationMs,turn.estimated)}${toolCount ? ` · ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}` : ''}`;
     const activity = details.querySelector('div')!;
     const previous = this.activityMessages.get(activity);
-    if (!previous || activity.dataset.live !== String(live) || previous.length !== turn.activity.length || turn.activity.some((message,index) => message.id !== previous[index].id || message.content !== previous[index].content)) {
+    if (!previous || previous.length !== turn.activity.length || turn.activity.some((message,index) => message.id !== previous[index].id || message.content !== previous[index].content)) {
       const opened = new Set([...activity.querySelectorAll<HTMLDetailsElement>('details[open]')].map(detail => detail.dataset.toolGroupKey ?? detail.dataset.toolKey));
       const toolKey = (message: Message) => {
         if (message.role !== 'tool' || message.content === 'Tool finished') return;
         const tool = decodeToolActivity(message.content);
         return tool ? `tool:${tool.id}` : `message:${message.id}`;
       };
-      activity.innerHTML = groupToolRuns(turn.activity,toolKey).map(run => {
-        if (run.kind === 'tools') return renderToolGroup(run.items.map(message => ({key:toolKey(message)!,content:message.content})), false, live);
+      const running = last && ['running','waiting','coordinating'].includes(this.latest?.subagent?.status || this.latest?.status || this.task!.status);
+      const runs = groupToolRuns(turn.activity,toolKey);
+      activity.innerHTML = runs.map((run,index) => {
+        if (run.kind === 'tools') return renderToolGroup(run.items.map(message => ({key:toolKey(message)!,content:message.content})), false, running && index === runs.length - 1);
         const message = run.item;
         if (message.role === 'tool') return renderToolStatus(message.content);
         return `<article class="launcher-thread-message"${message.role === 'assistant' ? ` data-commentary="${message.id}" data-message-id="${message.id}"` : ''}><div></div>${message.role === 'assistant' || message.role === 'user' ? messageActionsHtml(message.sessionId, message.id, this.canFork(message)) : ''}</article>`;
@@ -249,12 +250,11 @@ export class OverlayThreadView {
       const narratives = activity.querySelectorAll<HTMLElement>(':scope > .launcher-thread-message');
       turn.activity.filter(message => message.role !== 'tool').forEach((message,index) => streamMarkdown(narratives[index].querySelector('div')!,message.content,this.scroll));
       activity.querySelectorAll<HTMLDetailsElement>('details').forEach(detail => { detail.open = opened.has(detail.dataset.toolGroupKey ?? detail.dataset.toolKey); });
-      activity.dataset.live = String(live);
       this.activityMessages.set(activity,turn.activity);
     }
     const response = node.querySelector<HTMLElement>('.launcher-thread-response')!; response.hidden = !turn.final;
     response.classList.toggle('launcher-thread-live', last);
-    const names: Record<string,string> = {codex:'Codex',claude:'Claude Code',kimi:'Kimi Code',opencode:'OpenCode',glm:'GLM',antigravity:'Antigravity',grok:'Grok Build',mimo:'MiMo Token Plan',pi:'Pi',deepseek:'DeepSeek',commandcode:'Command Code',cline:'Cline',kilo:'Kilo Code',omp:'Oh My Pi','github-copilot':'GitHub Copilot CLI',muse:'Muse Code',devin:'Devin CLI'};
+    const names: Record<string,string> = {codex:'Codex',claude:'Claude Code',kimi:'Kimi Code',opencode:'OpenCode',glm:'GLM',antigravity:'Antigravity',grok:'Grok Build',mimo:'MiMo Token Plan',pi:'Pi',deepseek:'DeepSeek',commandcode:'Command Code',cline:'Cline',kilo:'Kilo Code',omp:'Oh My Pi','github-copilot':'GitHub Copilot CLI',muse:'Muse Code',devin:'Devin CLI',zcode:'ZCode',hermes:'Hermes Agent'};
     const heading = response.querySelector('header')!;
     const author = turn.final ? historicalProvider(turn.final, messages, this.task!.provider as ProviderId) : this.task!.provider;
     if (heading.dataset.provider !== author) {

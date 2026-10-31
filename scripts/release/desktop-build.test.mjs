@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPlan, builtArtifact, checkVersions, checksumLine, macosSigning, releaseAssetName } from './build.mjs';
+import { buildPlan, builtArtifact, checksumLine, macosSigning } from './build.mjs';
 import { appImageBundleOptions } from './common.mjs';
 
 const env = { PANDACODE_LICENSE_PUBLIC_KEY: 'stale', PANDACODE_UPDATE_PUBLIC_KEY: 'stale', TAURI_SIGNING_PRIVATE_KEY: 'stale', APPLE_ID: 'someone', APPLE_SIGNING_IDENTITY: 'Developer ID Application: Someone', PATH: 'test-path' };
-const config = plan => JSON.parse(plan.args[plan.args.indexOf('--config') + 1]);
+const config = plan => JSON.parse(plan.args.at(-1));
 
 test('builds require the native host and never forward old license keys or Apple variables to Windows and Linux', () => {
   for (const [target, platform] of [['windows-x86_64', 'win32'], ['windows-aarch64', 'win32'], ['linux-x86_64', 'linux']]) {
@@ -13,9 +13,9 @@ test('builds require the native host and never forward old license keys or Apple
     for (const name of ['APPLE_ID', 'APPLE_SIGNING_IDENTITY', 'PANDACODE_LICENSE_PUBLIC_KEY', 'PANDACODE_UPDATE_PUBLIC_KEY']) assert.equal(plan.env[name], undefined, name);
     assert.equal(plan.env.PATH, 'test-path');
     assert.equal(plan.signing.mode, 'unsigned');
-    // Local-only builds neither inherit updater signing secrets nor produce update artifacts.
-    assert.equal(plan.env.TAURI_SIGNING_PRIVATE_KEY, undefined);
-    assert.equal(config(plan).bundle.createUpdaterArtifacts, false);
+    // The update signing key is the one secret a build needs: it signs the in-app update file.
+    assert.equal(plan.env.TAURI_SIGNING_PRIVATE_KEY, 'stale');
+    assert.equal(config(plan).bundle.createUpdaterArtifacts, true);
     assert.equal(config(buildPlan(target, { PATH: 'p' }, platform, arch)).bundle.createUpdaterArtifacts, false);
     assert.equal(config(plan).plugins, undefined);
     assert.throws(() => buildPlan(target, env, 'darwin', 'arm64'), /native/);
@@ -26,10 +26,10 @@ test('builds require the native host and never forward old license keys or Apple
   assert.equal(env.APPLE_ID, 'someone', 'the caller environment is unchanged');
 });
 
-test('Windows installs per user without downloading WebView2 and links the C++ runtime statically', () => {
+test('Windows installs per user, bootstraps WebView2 and links the C++ runtime statically', () => {
   const plan = buildPlan('windows-x86_64', { ...env, STATIC_VCRUNTIME: 'false' }, 'win32', 'x64');
   assert.equal(plan.env.STATIC_VCRUNTIME, 'true');
-  assert.deepEqual(config(plan).bundle.windows.webviewInstallMode, { type: 'skip' });
+  assert.deepEqual(config(plan).bundle.windows.webviewInstallMode, { type: 'downloadBootstrapper', silent: true });
   assert.equal(config(plan).bundle.windows.nsis.installMode, 'currentUser');
   assert.equal(buildPlan('linux-x86_64', { STATIC_VCRUNTIME: 'false' }, 'linux', 'x64').env.STATIC_VCRUNTIME, 'false');
 });
@@ -62,38 +62,11 @@ test('Developer ID signing requires a real identity and notarization credentials
   assert.equal(plan.env.APPLE_ID, 'a');
 });
 
-test('Extended 0.6.0 packaging only accepts matching Extended-named Tauri bundles', () => {
-  for (const [target, suffix] of [
-    ['windows-x86_64', '_x64-setup.exe'],
-    ['windows-aarch64', '_arm64-setup.exe'],
-    ['linux-x86_64', '_amd64.AppImage'],
-    ['linux-aarch64', '_aarch64.AppImage'],
-    ['darwin-aarch64', '_aarch64.dmg'],
-    ['darwin-x86_64', '_x64.dmg'],
-  ]) {
-    const spaced = `PandaCode Extended_0.6.0${suffix}`;
-    const underscored = `PandaCode_Extended_0.6.0${suffix}`;
-    assert.equal(builtArtifact([spaced, underscored], '0.6.0', target), spaced);
-    assert.equal(builtArtifact([underscored], '0.6.0', target), underscored);
-    assert.throws(() => builtArtifact([spaced], '0.3.42', target), /did not produce/);
-    assert.throws(() => builtArtifact([`PandaCode_0.6.0${suffix}`], '0.6.0', target), /did not produce/);
+test('the build selects the exact versioned bundle Tauri produced', () => {
+  for (const [target, file] of [['windows-x86_64', 'PandaCode_1.2.3_x64-setup.exe'], ['linux-x86_64', 'PandaCode_1.2.3_amd64.AppImage'], ['darwin-aarch64', 'PandaCode_1.2.3_aarch64.dmg'], ['darwin-x86_64', 'PandaCode_1.2.3_x64.dmg']]) {
+    assert.equal(builtArtifact([file, file.replace('1.2.3', '1.2.2')], '1.2.3', target), file);
+    assert.throws(() => builtArtifact([file], '1.2.4', target), /did not produce/);
   }
-});
-
-test('release builds require one matching three-component Extended SemVer', async () => {
-  await assert.doesNotReject(checkVersions('0.6.0'));
-  await assert.rejects(checkVersions('0.4.0'), /disagree on the version/);
-  await assert.rejects(checkVersions('0.3.42'), /disagree on the version/);
-  await assert.rejects(checkVersions('0.4.0.1'), /SemVer core/);
-  await assert.rejects(checkVersions('0.4.0+pc.0.3.42'), /SemVer core/);
-});
-
-test('legacy release asset names stay reproducible and new Extended assets use their own identity', () => {
-  assert.equal(releaseAssetName('0.3.34-hardened', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-0.3.34.hardened-Windows-x64-setup.exe');
-  assert.equal(releaseAssetName('0.3.35-hardened.4', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-0.3.35.hardened.4-Windows-x64-setup.exe');
-  assert.equal(releaseAssetName('1.2.3', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-Extended-1.2.3-Windows-x64-setup.exe');
-  assert.equal(releaseAssetName('0.4.0', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-Extended-0.4.0-Windows-x64-setup.exe');
-  assert.equal(releaseAssetName('0.5.1', 'PandaCode-Windows-x64-setup.exe'), 'PandaCode-Extended-0.5.1-Windows-x64-setup.exe');
 });
 
 test('checksum sidecars use the sha256sum format', () => {

@@ -1,7 +1,7 @@
-//! E2B sandboxes for explicit sandbox management. The control plane is E2B's REST API
+//! E2B sandboxes for cloud agents (docs/cloud-agents.md). The control plane is E2B's REST API
 //! (https://e2b.dev/docs/api-reference); commands run through the sandbox's `envd` daemon at
 //! `https://49983-<id>.<domain>` using its Connect protocol (`process.Process/Start`, JSON
-//! envelopes). A paused sandbox keeps its files and memory.
+//! envelopes) and files through envd's `/files`. A paused sandbox keeps its files and memory.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, time::Duration};
@@ -85,6 +85,9 @@ impl E2b {
             result => result.map(|_| ()),
         }
     }
+    async fn state(&self, id: &str) -> Result<String> {
+        Ok(state_of(&self.api(reqwest::Method::GET, &format!("/sandboxes/{id}"), None).await?).into())
+    }
     async fn set_timeout(&self, id: &str, seconds: u32) -> Result<()> {
         self.api(reqwest::Method::POST, &format!("/sandboxes/{id}/timeout"), Some(json!({"timeout": seconds}))).await.map(|_| ())
     }
@@ -105,7 +108,6 @@ impl E2b {
         }
         let domain = sandbox["domain"].as_str().filter(|d| !d.is_empty()).unwrap_or("e2b.app");
         let base = self.envd.clone().unwrap_or_else(|| format!("https://49983-{id}.{domain}"));
-        let base = http::endpoint(SERVICE, &base, &["e2b.app"], &self.api)?;
         Ok((base, sandbox["envdAccessToken"].as_str().map(str::to_string)))
     }
 
@@ -122,19 +124,40 @@ impl E2b {
             .header("Connect-Timeout-Ms", (timeout.as_millis() + 10_000).to_string())
             .header("Authorization", format!("Basic {}", STANDARD.encode("user:")))
             .body(body);
-        if let Some(token) = &token {
+        if let Some(token) = token {
             call = call.header("X-Access-Token", token);
         }
         let response = call.send().await.map_err(|e| if e.is_timeout() { "E2B did not answer in time.".to_string() } else { "Could not reach the E2B sandbox. Check your connection.".to_string() })?;
         let status = response.status().as_u16();
-        let bytes = http::read_bytes(SERVICE, response, http::LIMIT).await?;
+        let bytes = response.bytes().await.map_err(|_| "E2B response was cut off.".to_string())?;
         if !(200..300).contains(&status) {
-            return Err(http::error_message(SERVICE, status, ""));
+            return Err(http::error_message(SERVICE, status, &String::from_utf8_lossy(&bytes)));
         }
-        parse_stream(&bytes).map(|(code, output)| (code, http::redact(&output, &[&self.key, token.as_deref().unwrap_or_default()])))
-            .map_err(|error| http::redact(&error, &[&self.key, token.as_deref().unwrap_or_default()]))
+        parse_stream(&bytes)
     }
 
+    pub async fn upload(&self, id: &str, path: &str, bytes: &[u8], private: bool) -> Result<()> {
+        let (base, token) = self.envd(id).await?;
+        let url = reqwest::Url::parse_with_params(&format!("{base}/files"), [("path", path), ("username", "user")]).map_err(|_| "That file path is not valid.".to_string())?;
+        // Multipart works on every envd version; the raw octet-stream upload needs a newer one.
+        let boundary = format!("pandacode{}", uuid::Uuid::new_v4().simple());
+        let filename: String = path.rsplit('/').next().unwrap_or("file").chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' }).collect();
+        let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
+        body.extend(bytes);
+        body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let mut call = http::client(Duration::from_secs(120))?
+            .post(url)
+            .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+            .body(body);
+        if let Some(token) = token {
+            call = call.header("X-Access-Token", token);
+        }
+        http::send(SERVICE, call).await?;
+        if private {
+            super::sandbox::checked(self.exec(id, &format!("chmod 600 {}", super::shell_quote(path)), Duration::from_secs(30)).await?)?;
+        }
+        Ok(())
+    }
 }
 
 /// Decode a Connect response: 5-byte envelopes (flags, big-endian length) holding JSON events.
@@ -147,7 +170,7 @@ fn parse_stream(mut bytes: &[u8]) -> Result<(Option<i32>, String)> {
         if bytes[0] & 2 != 0 {
             // End of stream; a failure carries {"error": {"message": …}}.
             if let Some(error) = message["error"]["message"].as_str() {
-                return Err(format!("E2B: {}", error.chars().take(400).collect::<String>()));
+                return Err(format!("E2B: {error}"));
             }
         } else {
             let event = &message["event"];
@@ -170,7 +193,7 @@ fn parse_stream(mut bytes: &[u8]) -> Result<(Option<i32>, String)> {
 impl Sandbox for E2b {
     /// Pause keeps files and memory; sessions last 24 h on Pro and 1 h on Hobby.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: MAX_MINUTES }
+        Info { persistent: true, max_unattended_minutes: MAX_MINUTES }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(E2b::list(self))
@@ -181,11 +204,17 @@ impl Sandbox for E2b {
     fn power(&self, native: &str, action: &str) -> Result<()> {
         block(E2b::power(self, native, action))
     }
+    fn state(&self, native: &str) -> Result<String> {
+        block(E2b::state(self, native))
+    }
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(E2b::exec(self, native, command, timeout))
     }
     fn keep_alive(&self, native: &str, minutes: u32) -> Result<()> {
         block(E2b::keep_alive(self, native, minutes))
+    }
+    fn upload(&self, native: &str, path: &str, bytes: &[u8], private: bool) -> Result<()> {
+        block(E2b::upload(self, native, path, bytes, private))
     }
 }
 
@@ -261,7 +290,7 @@ mod tests {
         api.power("s2", "start").await.unwrap();
         api.power("s1", "delete").await.unwrap();
         assert!(api.power("s1", "suspend").await.is_err());
-        assert_eq!(state_of(&json!({"sandboxID": "s2", "state": "paused"})), "stopped");
+        assert_eq!(api.state("s2").await.unwrap(), "stopped");
         let log = seen.lock().unwrap();
         assert!(log.iter().all(|r| r.headers.iter().any(|(n, v)| n == "x-api-key" && v == "key-1")));
         let body: Value = serde_json::from_str(&log[1].body).unwrap();
@@ -273,11 +302,13 @@ mod tests {
         let (api, seen) = e2b();
         assert_eq!(api.exec("s1", "echo hi", Duration::from_secs(5)).await.unwrap(), (Some(3), "hi\noops\n".to_string()));
         assert!(api.exec("s2", "ls", Duration::from_secs(5)).await.unwrap_err().contains("paused"));
+        api.upload("s1", "/home/user/a.txt", b"abc", false).await.unwrap();
         let log = seen.lock().unwrap();
         let start = log.iter().find(|r| r.path == "/envd/process.Process/Start").unwrap();
         assert!(start.headers.iter().any(|(n, v)| n == "x-access-token" && v == "tok"));
         assert!(start.headers.iter().any(|(n, v)| n == "content-type" && v == "application/connect+json"));
         assert!(start.body.contains(r#""args":["-c","echo hi"]"#));
+        assert!(log.iter().any(|r| r.path.starts_with("/envd/files?path=%2Fhome%2Fuser%2Fa.txt") && r.body.contains("name=\"file\"; filename=\"a.txt\"") && r.body.contains("\r\n\r\nabc\r\n--") && r.headers.iter().any(|(n, v)| n == "content-type" && v.starts_with("multipart/form-data; boundary="))));
     }
 
     #[tokio::test]
@@ -301,13 +332,26 @@ mod tests {
         assert!(connect(" ", &Value::Null).is_err());
     }
 
-    #[tokio::test]
-    async fn never_sends_envd_credentials_to_an_untrusted_domain() {
-        let (base, seen) = mock::serve(|_, _| (200, r#"{"state":"running","domain":"attacker.invalid","envdAccessToken":"fixture-envd"}"#));
-        let error = E2b::new(Some(base), None, "fixture-api".into()).exec("box-1", "true", Duration::from_secs(2)).await.unwrap_err();
-        assert!(error.contains("untrusted sandbox address"), "{error}");
-        assert!(!error.contains("fixture-envd"));
-        assert_eq!(seen.lock().unwrap().len(), 1);
+    /// Needs E2B_API_KEY; run with `cargo test e2b_live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn e2b_live() {
+        let key = std::env::var("E2B_API_KEY").expect("E2B_API_KEY");
+        let api = E2b::new(None, None, key);
+        let made = Sandbox::create(&api, "pandacode-smoke").unwrap();
+        let id = made.id.trim_start_matches("e2b:").to_string();
+        let run = || -> Result<()> {
+            assert_eq!(Sandbox::exec(&api, &id, "echo hi", Duration::from_secs(30))?, (Some(0), "hi\n".into()));
+            Sandbox::spawn(&api, &id, "sleep 120")?;
+            let (_, ps) = Sandbox::exec(&api, &id, "ps -eo args | grep '[s]leep 120'", Duration::from_secs(30))?;
+            assert!(ps.contains("sleep 120"));
+            Sandbox::keep_alive(&api, &id, 30)?;
+            Sandbox::upload(&api, &id, "/tmp/p.txt", b"x", true)?;
+            assert_eq!(Sandbox::download(&api, &id, "/tmp/p.txt", 0, 10)?, b"x");
+            Ok(())
+        };
+        let result = run();
+        Sandbox::power(&api, &id, "delete").unwrap();
+        result.unwrap();
     }
-
 }

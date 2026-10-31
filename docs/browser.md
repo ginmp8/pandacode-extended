@@ -41,12 +41,3 @@ References: [Tauri child webviews](https://docs.rs/tauri/latest/tauri/webview/st
 [WKWebView snapshots](https://developer.apple.com/documentation/webkit/wkwebview/takesnapshot(with:completionhandler:)),
 [Claude image input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
 [ACP image content](https://agentclientprotocol.com/protocol/v1/content).
-
-## Static project previews in hardened.1
-
-Opening an HTML/SVG file from a project uses a dedicated loopback origin and a
-script-free CSP sandbox. Local CSS/images remain visible; scripts, workers, fetch,
-forms, frames and external navigation are denied. The generated authentication
-bootstrap is the sole small script allowed and only redirects within that origin.
-Use the address bar explicitly to open a development server when interactive
-application behavior is intended. This is separate from the safe static preview.

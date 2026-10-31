@@ -1,4 +1,4 @@
-//! CodeSandbox sandboxes (SDK VMs) for explicit sandbox management. The control
+//! CodeSandbox sandboxes (SDK VMs) for cloud agents (docs/cloud-agents.md). The control
 //! plane is the REST API at api.codesandbox.io (`openapi.json` in codesandbox/codesandbox-sdk):
 //! fork the universal template, start, hibernate and delete VMs. Commands run through the
 //! VM's "Pint" HTTP server (`pint-openapi-bundled.json`: `/api/v1/execs`), whose address
@@ -8,7 +8,7 @@
 //! version-negotiated messages), which PandaCode doesn't speak. A VM whose start response
 //! has no Pint address therefore can't run commands, and says so.
 use serde_json::{json, Value};
-use std::time::{Duration, Instant};
+use std::{collections::HashMap, sync::Mutex, time::{Duration, Instant}};
 
 use super::{
     http::{self, block},
@@ -29,6 +29,10 @@ const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 pub struct CodeSandbox {
     api: String,
     key: String,
+    /// Pint address and token per VM, so a command doesn't have to wake the VM each time.
+    pints: Mutex<HashMap<String, (String, String)>>,
+    /// The latest hibernation timeout `keep_alive` asked for, per VM, so a re-start doesn't undo it.
+    timeouts: Mutex<HashMap<String, u64>>,
 }
 
 pub fn connect(key: &str, _options: &Value) -> Result<()> {
@@ -57,7 +61,7 @@ fn sse_events(text: &str) -> impl Iterator<Item = Value> + '_ {
 
 impl CodeSandbox {
     pub fn new(api: Option<String>, key: String) -> Self {
-        CodeSandbox { api: api.filter(|a| !a.trim().is_empty()).unwrap_or_else(|| DEFAULT_API.into()).trim_end_matches('/').to_string(), key }
+        CodeSandbox { api: api.filter(|a| !a.trim().is_empty()).unwrap_or_else(|| DEFAULT_API.into()).trim_end_matches('/').to_string(), key, pints: Mutex::default(), timeouts: Mutex::default() }
     }
 
     /// `{success, data}` envelope → `data`.
@@ -97,46 +101,45 @@ impl CodeSandbox {
 
     pub async fn sandboxes(&self) -> Result<Vec<Machine>> {
         let running = self.running_ids().await?;
-        let mut machines = Vec::new();
-        // The official API caps page_size at 50. Bound traversal as well as each response.
-        for page in 1..=20 {
-            let reply = self.api(reqwest::Method::GET, &format!("/sandbox?tags=pandacode&page_size=50&page={page}"), None).await?;
-            let items = reply["sandboxes"].as_array().cloned().unwrap_or_default();
-            machines.extend(items.iter().filter_map(|s| s["id"].as_str().map(|id| Self::machine(id, s["title"].as_str().unwrap_or_default(), running.iter().any(|r| r == id)))));
-            if items.len() < 50 { return Ok(machines); }
-        }
-        Err("CodeSandbox returned too many pages of machines.".into())
+        let page = self.api(reqwest::Method::GET, "/sandbox?tags=pandacode&page_size=100", None).await?;
+        Ok(page["sandboxes"].as_array().map(|all| all.iter().filter_map(|s| s["id"].as_str().map(|id| Self::machine(id, s["title"].as_str().unwrap_or_default(), running.iter().any(|r| r == id)))).collect()).unwrap_or_default())
     }
     /// Fork the template into a private sandbox and boot it, so we know commands will work.
     pub async fn launch(&self, name: &str) -> Result<Machine> {
         let body = json!({"title": name, "privacy": 2, "tags": ["pandacode"]});
         let forked = self.api(reqwest::Method::POST, &format!("/sandbox/{TEMPLATE}/fork"), Some(body)).await?;
         let id = forked["id"].as_str().ok_or("CodeSandbox did not return a sandbox ID.")?.to_string();
-        super::sandbox::validate_id(&id)?;
-        if let Err(error) = self.pint(&id, Some(HIBERNATE_SECONDS)).await {
+        if let Err(error) = self.pint(&id).await {
             let _ = self.api(reqwest::Method::DELETE, &format!("/vm/{id}"), None).await;
             return Err(error);
         }
         Ok(Self::machine(&id, name, true))
     }
+    pub async fn status(&self, id: &str) -> Result<String> {
+        Ok(if self.running_ids().await?.iter().any(|r| r == id) { "running" } else { "stopped" }.into())
+    }
     pub async fn power(&self, id: &str, action: &str) -> Result<()> {
+        // A wake, hibernation or delete invalidates the cached address.
+        self.pints.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         let (method, path, body) = match action {
-            "start" => (reqwest::Method::POST, format!("/vm/{id}/start"), Some(json!({}))),
+            "start" => (reqwest::Method::POST, format!("/vm/{id}/start"), Some(json!({"hibernation_timeout_seconds": self.timeout(id)}))),
             "stop" => (reqwest::Method::POST, format!("/vm/{id}/hibernate"), Some(json!({}))),
             "delete" => (reqwest::Method::DELETE, format!("/vm/{id}"), None),
             _ => return Err(format!("CodeSandbox VMs can start, stop or be deleted, not {action}.")),
         };
         self.api(method, &path, body).await.map(|_| ())
     }
-    /// Authenticate/wake once. Existing-machine connections do not explicitly reset
-    /// a previously requested lease; only a new machine sets the initial timeout.
-    async fn pint(&self, id: &str, initial_timeout: Option<u64>) -> Result<(String, String)> {
-        let body = initial_timeout.map_or_else(|| json!({}), |seconds| json!({"hibernation_timeout_seconds": seconds}));
-        let started = self.api(reqwest::Method::POST, &format!("/vm/{id}/start"), Some(body)).await?;
+    fn timeout(&self, id: &str) -> u64 {
+        self.timeouts.lock().unwrap_or_else(|e| e.into_inner()).get(id).copied().unwrap_or(HIBERNATE_SECONDS)
+    }
+    /// Start (or wake) the VM, remember its Pint address and token, and return them.
+    async fn pint(&self, id: &str) -> Result<(String, String)> {
+        let started = self.api(reqwest::Method::POST, &format!("/vm/{id}/start"), Some(json!({"hibernation_timeout_seconds": self.timeout(id)}))).await?;
         match (started["use_pint"].as_bool(), started["pint_url"].as_str().filter(|u| !u.is_empty()), started["pint_token"].as_str()) {
             (Some(true), Some(url), Some(token)) => {
-                let address = http::endpoint(SERVICE, url, &["csb.dev", "codesandbox.io"], &self.api)?;
-                Ok((address, token.to_string()))
+                let pint = (url.to_string(), token.to_string());
+                self.pints.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), pint.clone());
+                Ok(pint)
             }
             _ => Err("This CodeSandbox VM only offers the Pitcher WebSocket protocol, which PandaCode can't run commands through yet.".into()),
         }
@@ -147,15 +150,24 @@ impl CodeSandbox {
     async fn begin(&self, pint: &(String, String), command: &str) -> Result<String> {
         let body = json!({"command": "sh", "args": ["-c", command], "autorun": true, "interactive": false});
         let exec = self.pint_call(pint, reqwest::Method::POST, "/api/v1/execs", Some(body)).await?;
-        let id = exec["id"].as_str().ok_or("CodeSandbox did not start the command.")?;
-        super::sandbox::validate_id(id)?;
-        Ok(id.to_string())
+        Ok(exec["id"].as_str().ok_or("CodeSandbox did not start the command.")?.to_string())
     }
 
     pub async fn run(&self, id: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
-        let pint = self.pint(id, None).await?;
-        // Never retry an ambiguous failed command submission: it may already be running.
-        let exec_id = self.begin(&pint, command).await?;
+        let cached = self.pints.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+        let begun = match cached {
+            Some(pint) => self.begin(&pint, command).await.map(|exec| (pint, exec)).ok(),
+            None => None,
+        };
+        // No cached address, or it went stale (the VM hibernated, the token expired): wake it once.
+        let (pint, exec_id) = match begun {
+            Some(begun) => begun,
+            None => {
+                let pint = self.pint(id).await?;
+                let exec = self.begin(&pint, command).await?;
+                (pint, exec)
+            }
+        };
         let started = Instant::now();
         let code = loop {
             let state = self.pint_call(&pint, reqwest::Method::GET, &format!("/api/v1/execs/{exec_id}"), None).await?;
@@ -168,8 +180,7 @@ impl CodeSandbox {
             }
             tokio::time::sleep(Duration::from_millis(400)).await;
         };
-        let output = self.output(&pint.0, &pint.1, &exec_id).await?;
-        Ok((code, http::redact(&output, &[&self.key, &pint.1])))
+        Ok((code, self.output(&pint.0, &pint.1, &exec_id).await?))
     }
     /// The exec's buffered output (SSE events), read until the server closes or goes quiet.
     async fn output(&self, url: &str, token: &str, exec_id: &str) -> Result<String> {
@@ -182,14 +193,17 @@ impl CodeSandbox {
         let mut raw = Vec::new();
         // ponytail: a stream that never closes ends after 3 s of silence; fine for finished execs.
         while let Ok(Ok(Some(chunk))) = tokio::time::timeout(Duration::from_secs(3), response.chunk()).await {
-            if raw.len().saturating_add(chunk.len()) > OUTPUT_LIMIT { return Err("CodeSandbox output exceeded its size limit.".into()); }
             raw.extend_from_slice(&chunk);
+            if raw.len() > OUTPUT_LIMIT {
+                break;
+            }
         }
         let text = String::from_utf8_lossy(&raw);
         Ok(sse_events(&text).filter(|e| matches!(e["type"].as_str(), Some("stdout" | "stderr"))).filter_map(|e| e["output"].as_str().map(str::to_string)).collect())
     }
     pub async fn keep(&self, id: &str, minutes: u32) -> Result<()> {
         let seconds = (u64::from(minutes) * 60).clamp(60, MAX_HIBERNATE_SECONDS);
+        self.timeouts.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), seconds);
         self.api(reqwest::Method::PUT, &format!("/vm/{id}/hibernation_timeout"), Some(json!({"hibernation_timeout_seconds": seconds}))).await.map(|_| ())
     }
 }
@@ -197,7 +211,7 @@ impl CodeSandbox {
 impl Sandbox for CodeSandbox {
     /// Hibernation snapshots the whole VM, so files and running processes come back.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: 24 * 60 }
+        Info { persistent: true, max_unattended_minutes: 24 * 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(self.sandboxes())
@@ -207,6 +221,9 @@ impl Sandbox for CodeSandbox {
     }
     fn power(&self, native: &str, action: &str) -> Result<()> {
         block(CodeSandbox::power(self, native, action))
+    }
+    fn state(&self, native: &str) -> Result<String> {
+        block(self.status(native))
     }
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(self.run(native, command, timeout))
@@ -225,7 +242,7 @@ mod tests {
     fn codesandbox(use_pint: bool) -> (CodeSandbox, mock::Seen) {
         let (base, seen) = mock::serve(move |request, base| match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/vm/running") => (200, r#"{"success":true,"data":{"concurrent_vm_count":1,"concurrent_vm_limit":10,"vms":[{"id":"vm1"}]}}"#.to_string()),
-            ("GET", "/sandbox?tags=pandacode&page_size=50&page=1") => (200, r#"{"data":{"sandboxes":[{"id":"vm1","title":"agent"},{"id":"vm2","title":""}],"pagination":{}}}"#.to_string()),
+            ("GET", "/sandbox?tags=pandacode&page_size=100") => (200, r#"{"data":{"sandboxes":[{"id":"vm1","title":"agent"},{"id":"vm2","title":""}],"pagination":{}}}"#.to_string()),
             ("POST", "/sandbox/pcz35m/fork") => (200, r#"{"data":{"id":"vm3","alias":"a"}}"#.to_string()),
             ("POST", "/vm/vm1/start") | ("POST", "/vm/vm3/start") => (200, format!(r#"{{"data":{{"use_pint":{use_pint},"pint_url":"{base}/pint/","pint_token":"pt-1"}}}}"#)),
             ("DELETE", "/vm/vm3") | ("POST", "/vm/vm1/hibernate") | ("PUT", "/vm/vm1/hibernation_timeout") => (200, r#"{"success":true}"#.to_string()),
@@ -262,22 +279,22 @@ mod tests {
         api.run("vm1", "ls", Duration::from_secs(9)).await.unwrap();
         // The VM is woken once; later commands reuse the address, so the 24 h timeout stays.
         let log = seen.lock().unwrap();
-        assert_eq!(log.iter().filter(|r| r.path == "/vm/vm1/start").count(), 2);
+        assert_eq!(log.iter().filter(|r| r.path == "/vm/vm1/start").count(), 1);
         let exec = log.iter().find(|r| r.path == "/pint/api/v1/execs").unwrap();
         assert_eq!(exec.authorization.as_deref(), Some("Bearer pt-1"));
         assert_eq!(serde_json::from_str::<Value>(&exec.body).unwrap(), json!({"command":"sh","args":["-c","echo $((6*7))"],"autorun":true,"interactive":false}));
     }
 
     #[tokio::test]
-    async fn a_fresh_adapter_does_not_explicitly_reset_a_requested_lease() {
+    async fn a_stale_address_wakes_the_vm_again_with_the_latest_timeout() {
         let (api, seen) = codesandbox(true);
         api.keep("vm1", 24 * 60).await.unwrap();
-        let fresh = CodeSandbox::new(Some(api.api.clone()), api.key.clone());
-        assert_eq!(fresh.run("vm1", "ls", Duration::from_secs(9)).await.unwrap().0, Some(3));
+        api.pints.lock().unwrap().insert("vm1".into(), ("http://127.0.0.1:1".into(), "old".into()));
+        assert_eq!(api.run("vm1", "ls", Duration::from_secs(9)).await.unwrap().0, Some(3));
         let log = seen.lock().unwrap();
-        assert!(log.iter().any(|r| r.path.ends_with("/hibernation_timeout") && r.body.contains("86400")));
         let start = log.iter().find(|r| r.path == "/vm/vm1/start").unwrap();
-        assert_eq!(start.body, "{}");
+        assert_eq!(start.body, r#"{"hibernation_timeout_seconds":86400}"#);
+        assert_eq!(api.pints.lock().unwrap()["vm1"].1, "pt-1");
     }
 
     #[tokio::test]
@@ -293,45 +310,22 @@ mod tests {
         assert!(CodeSandbox::new(None, String::new()).check().await.unwrap_err().contains("API key"));
     }
 
+    /// `CSB_API_KEY=… cargo test codesandbox_live -- --ignored`
     #[tokio::test]
-    async fn never_forwards_pint_credentials_to_preview_or_foreign_hosts() {
-        for host in ["https://attacker.invalid", "https://preview.csb.app", "https://csb.dev.attacker.invalid"] {
-            let address = host.to_string();
-            let (base, seen) = mock::serve(move |_, _| (200, json!({"data":{"use_pint":true,"pint_url":address,"pint_token":"fixture-pint"}}).to_string()));
-            let api = CodeSandbox::new(Some(base), "fixture-api".into());
-            let error = api.run("box-1", "true", Duration::from_secs(2)).await.unwrap_err();
-            assert!(error.contains("untrusted sandbox address"), "{error}");
-            assert!(!error.contains("fixture-pint"));
-            assert_eq!(seen.lock().unwrap().len(), 1);
+    #[ignore]
+    async fn codesandbox_live_smoke() {
+        let Ok(key) = std::env::var("CSB_API_KEY") else { return };
+        let api = CodeSandbox::new(None, key);
+        let id = api.launch("pandacode-smoke").await.unwrap().id.trim_start_matches("codesandbox:").to_string();
+        let t = Duration::from_secs(60);
+        let result = async {
+            assert_eq!(api.run(&id, "echo hi", t).await?, (Some(0), "hi\n".to_string()));
+            api.run(&id, "setsid nohup sh -c 'sleep 120' >/dev/null 2>&1 </dev/null &", t).await?;
+            assert_eq!(api.run(&id, "pgrep -x sleep", t).await?.0, Some(0));
+            Ok::<_, String>(())
         }
+        .await;
+        api.power(&id, "delete").await.unwrap();
+        result.unwrap();
     }
-
-    #[tokio::test]
-    async fn lists_bounded_pages_and_merges_running_state() {
-        let (base, seen) = mock::serve(|request, _| {
-            if request.path == "/vm/running" { return (200, json!({"data":{"vms":[{"id":"vm50"}]}}).to_string()); }
-            let items = match request.path.as_str() {
-                "/sandbox?tags=pandacode&page_size=50&page=1" => (0..50).map(|n| json!({"id":format!("vm{n}")})).collect::<Vec<_>>(),
-                "/sandbox?tags=pandacode&page_size=50&page=2" => vec![json!({"id":"vm50"})],
-                _ => return (400, r#"{"message":"page_size must not exceed 50"}"#.to_string()),
-            };
-            (200, json!({"data":{"sandboxes":items}}).to_string())
-        });
-        let machines = CodeSandbox::new(Some(base), "fixture-key".into()).sandboxes().await.unwrap();
-        assert_eq!(machines.len(), 51);
-        assert_eq!(machines[0].state, "stopped");
-        assert_eq!((machines[50].id.as_str(), machines[50].state.as_str()), ("codesandbox:vm50", "running"));
-        assert_eq!(seen.lock().unwrap().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn an_ambiguous_command_submission_is_never_retried() {
-        let (base, seen) = mock::serve(|request, base| {
-            if request.path == "/vm/box/start" { return (200, json!({"data":{"use_pint":true,"pint_url":base,"pint_token":"fixture-pint"}}).to_string()); }
-            (500, r#"{"message":"The reply was lost"}"#.to_string())
-        });
-        assert!(CodeSandbox::new(Some(base), "fixture-key".into()).run("box", "launch-task", Duration::from_secs(2)).await.is_err());
-        assert_eq!(seen.lock().unwrap().iter().filter(|r| r.path == "/api/v1/execs").count(), 1);
-    }
-
 }

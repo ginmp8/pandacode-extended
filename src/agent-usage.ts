@@ -18,7 +18,6 @@ export interface UsageWindow {
 }
 export interface AgentUsage {
   provider: ProviderId;
-  connectionId?: string | null;
   status: 'ready' | 'unavailable' | 'signedOut' | 'error' | 'unsupported';
   windows: UsageWindow[];
   plan?: string | null;
@@ -32,7 +31,7 @@ export interface AgentUsage {
 const help = 'Reads account limits from your locally configured agent accounts. Requests go directly to the provider or its CLI, never through PandaCode servers. No prompts are sent. Results are cached for one minute; Refresh is limited to once every ten seconds per provider. Some providers do not expose their limits. Usage is shared with other apps using the same account.';
 const STATUS: Record<AgentUsage['status'], string> = { ready: '', unavailable: 'Unavailable', signedOut: 'Sign-in needed', error: 'Unavailable', unsupported: 'Not exposed' };
 const RANGES: [Range, string][] = [['week', 'Week'], ['month', 'Month'], ['year', 'Year']];
-const shortNames: Partial<Record<ProviderId, string>> = { claude: 'Claude', glm: 'GLM', mimo: 'MiMo', kimi: 'Kimi', grok: 'Grok', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo Code', omp: 'omp', 'github-copilot': 'Copilot', muse: 'Muse', devin: 'Devin' };
+const shortNames: Partial<Record<ProviderId, string>> = { claude: 'Claude', glm: 'GLM', mimo: 'MiMo', kimi: 'Kimi', grok: 'Grok', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo', omp: 'omp', 'github-copilot': 'Copilot', muse: 'Muse', devin: 'Devin', zcode: 'ZCode', hermes: 'Hermes' };
 type Tab = 'overview' | ProviderId;
 
 function validWindows(result: AgentUsage | undefined): UsageWindow[] {
@@ -44,7 +43,7 @@ function peak(result: AgentUsage | undefined): number | null {
 }
 function pricingNote(ledger: Ledger): string {
   const when = ledger.pricing.fetchedAt ? new Date(ledger.pricing.fetchedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
-  return { saved: `Prices: saved LiteLLM price list from ${when}.`, bundled: 'Prices: the list bundled with PandaCode (offline).' }[ledger.pricing.source];
+  return { live: `Prices: LiteLLM public price list, updated ${when}.`, saved: `Prices: saved LiteLLM price list from ${when}.`, bundled: 'Prices: the list bundled with PandaCode (offline).' }[ledger.pricing.source];
 }
 
 /** Keeps keyboard focus on the same control when a section re-renders. */
@@ -184,9 +183,9 @@ export function mountAgentUsage(host: HTMLElement, providers: Provider[]): () =>
       let result: AgentUsage;
       try {
         result = await call<AgentUsage>('agent_usage', { provider: provider.id, refresh: force, connection: connection.id });
-        if (!result || result.provider !== provider.id || result.connectionId !== connection.id || !Array.isArray(result.windows)) throw new Error('Invalid usage result');
+        if (!result || !Array.isArray(result.windows)) throw new Error('Invalid usage result');
       } catch (cause) {
-        result = { provider: provider.id, status: 'error', windows: [], checkedAt: Date.now(), stale: false, message: 'Could not read limits for this connection. Try Refresh.' };
+        result = { provider: provider.id, status: 'error', windows: [], checkedAt: Date.now(), stale: false, message: cause instanceof Error && cause.message ? cause.message : 'Could not read limits. Try Refresh.' };
       }
       if (!disposed) renderCard(section, { ...provider, name: connection.name }, result);
     }

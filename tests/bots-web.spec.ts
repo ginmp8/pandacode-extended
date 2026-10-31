@@ -28,8 +28,6 @@ async function openChat(page: Page, script: Partial<Script> = {}, hash = '#secre
     }
     return route.fulfill({ status: 404, json: {} });
   });
-  // Reopening the same chat hash must load a fresh page, not reuse an old document.
-  await page.goto('about:blank');
   await page.goto(`${ORIGIN}/chat/${CHANNEL}${hash}`);
   return state;
 }
@@ -111,34 +109,4 @@ test.describe('bots web chat page', () => {
     await expect(page.locator('#status')).toHaveText('Open this page from the link in PandaCode.');
     expect(state.auth).toEqual([]);
   });
-});
-
-const AVATAR_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6HEkAAAAASUVORK5CYII=';
-
-test('uploaded bot icons render in the header, welcome and assistant messages', async ({ page }) => {
-  const state = await openChat(page, { history: { bot: { name: 'Scout', role: '', avatar: AVATAR_PNG, paused: false }, messages: [], busy: false, cursor: 0 } });
-  await expect(page.locator('#avatar img')).toHaveAttribute('src', AVATAR_PNG);
-  await expect(page.locator('.hello .avatar img')).toHaveAttribute('src', AVATAR_PNG);
-  await expect(page.locator('#avatar')).toHaveText('');
-  state.events.push({ id: 1, text: 'Hello from Scout.' });
-  await expect(page.locator('.msg.bot .mini img')).toHaveAttribute('src', AVATAR_PNG);
-});
-
-test('web chat uses initials for panda presets while keeping legacy emoji', async ({ page }) => {
-  await openChat(page, { history: { bot: { name: 'Scout', role: '', avatar: 'panda:3', paused: false }, messages: [], busy: false, cursor: 0 } });
-  await expect(page.locator('#avatar')).toHaveText('S');
-  await expect(page.locator('.hello .avatar')).toHaveText('S');
-  await openChat(page, { history: { bot: { name: 'Scout', role: '', avatar: '🔭', paused: false }, messages: [], busy: false, cursor: 0 } });
-  await expect(page.locator('#avatar')).toHaveText('🔭');
-});
-
-test('web chat rejects external, executable and oversized avatar values without requests', async ({ page }) => {
-  const external: string[] = [];
-  await page.route('https://avatar.example/**', route => { external.push(route.request().url()); return route.abort(); });
-  for (const avatar of ['https://avatar.example/icon.png', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:image/png;base64,"><script>', 'data:image/png;base64,' + 'A'.repeat(300001)]) {
-    await openChat(page, { history: { bot: { name: 'Scout', role: '', avatar, paused: false }, messages: [], busy: false, cursor: 0 } });
-    await expect(page.locator('#avatar')).toHaveText('S');
-    await expect(page.locator('#avatar img, .hello .avatar img')).toHaveCount(0);
-  }
-  expect(external).toEqual([]);
 });

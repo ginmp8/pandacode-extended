@@ -1,7 +1,9 @@
-//! Explicit desktop installation for console-only Linux VMs. Starting a VM never
-//! downloads packages or changes its login configuration. The user or an approved
-//! agent action must request install_desktop first.
+//! Linux VMs get a desktop on their own: the Cirrus Labs images are console-only, so
+//! whenever PandaCode starts a Linux VM without one, it installs a light Xfce desktop
+//! with automatic login in the background. The panel streams the console meanwhile and
+//! shows the progress; agents can use commands right away.
 use std::{thread, time::{Duration, Instant}};
+use tauri::{Emitter, Manager};
 
 use super::{tart, Vms};
 
@@ -34,23 +36,28 @@ pub fn install(vms: &Vms, name: &str) -> Result<String, String> {
     if vms.is_macos(name)? {
         return Err("macOS VMs already have a desktop.".into());
     }
-    if !vms.begin_desktop(name) {
-        return Err("A desktop installation is already running for this VM.".into());
+    vms.mark_used(name);
+    let out = tart::exec(name, false, SCRIPT, Duration::from_secs(30 * 60))?;
+    vms.mark_used(name);
+    if out.code != Some(0) {
+        return Err(format!("Installing the desktop failed: {}", out.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")));
     }
-    let result = (|| {
-        vms.mark_used(name);
-        if has_desktop(name)? {
-            return Ok(format!("{name} already has a desktop. No packages were installed."));
-        }
-        let out = tart::exec(name, false, SCRIPT, Duration::from_secs(30 * 60))?;
-        vms.mark_used(name);
-        if out.code != Some(0) {
-            return Err(format!("Installing the desktop failed: {}", out.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")));
-        }
-        Ok(format!("{name} now has an Xfce desktop with automatic login. Take a screenshot in a few seconds."))
-    })();
-    vms.end_desktop(name, result.as_ref().err().cloned());
-    result
+    Ok(format!("{name} now has an Xfce desktop with automatic login. Take a screenshot in a few seconds."))
+}
+
+/// After a Linux VM starts: install a desktop if it has none. Runs once per VM at a time.
+pub fn ensure_in_background(app: tauri::AppHandle, name: String) {
+    let vms = app.state::<Vms>();
+    if vms.is_macos(&name).unwrap_or(true) || !vms.begin_desktop(&name) {
+        return;
+    }
+    let _ = app.emit("vm-changed", serde_json::json!({}));
+    thread::spawn(move || {
+        let vms = app.state::<Vms>();
+        let result = has_desktop(&name).and_then(|present| if present { Ok(String::new()) } else { install(&vms, &name) });
+        vms.end_desktop(&name, result.err());
+        let _ = app.emit("vm-changed", serde_json::json!({}));
+    });
 }
 
 #[cfg(test)]

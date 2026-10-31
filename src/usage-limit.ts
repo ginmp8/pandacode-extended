@@ -1,13 +1,6 @@
 /** Usage limits hit by a task's run: the composer banner and when a limit counts as current. */
 import { escape, icon } from './dom';
 import type { Session } from './types';
-import type { ConnectionSnapshot } from './connections';
-
-/** Suggestions stay on the same local harness and never imply that an account has quota. */
-export function limitConnections(task: Session, snapshot: ConnectionSnapshot): { id: string; name: string }[] {
-  if (task.remoteDevice || task.archived) return [];
-  return snapshot.connections.filter(connection => connection.provider === task.provider && connection.id !== snapshot.tasks[task.id]);
-}
 
 const time = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 const day = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });

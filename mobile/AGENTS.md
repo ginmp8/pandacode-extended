@@ -10,16 +10,15 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
 
 ## Commands
 
-The checked-in npm lockfile is authoritative. Preserve the reviewed upstream
-versions and Extended's `ignore-scripts` policy. Use the installed local package
-scripts; do not bootstrap tools from the network.
+Use `bunx` instead of `npx` if the project uses bun (`bun.lock` present).
 
 ```bash
-npm ci --ignore-scripts
-npm run start
-npm test
-npm run typecheck
-EXPO_NO_TELEMETRY=1 npm run lint
+npx expo install <package>  # ALWAYS use instead of npm/yarn/pnpm/bun add — resolves SDK-compatible versions
+npx expo start              # start the dev server
+npx expo lint               # lint
+npx tsc --noEmit            # typecheck
+npx expo-doctor             # diagnose dependency and config issues
+npx expo install --fix      # fix incompatible package versions
 ```
 
 Run lint and typecheck before declaring any task done.
@@ -30,17 +29,13 @@ Run lint and typecheck before declaring any task done.
 - Import `Link`, `router`, and `useLocalSearchParams` from `expo-router`.
 - Docs: https://docs.expo.dev/router/introduction.md
 
-## Native builds and publication
+## Building with EAS
 
-Use `npm run ios` or `npm run android` with a reviewed local SDK/toolchain for
-native validation. The Extended package intentionally has no EAS owner/project,
-cloud submission profile or hosted release destination. Automatic app updates
-are disabled. Do not register a cloud project, build in a publisher's account,
-submit to a store or deploy updates as part of development/CI. A maintainer must
-explicitly configure and authorize publication separately.
+Use EAS to build, sign, and submit the app in the cloud (`eas build`, `eas submit`) and to ship over-the-air updates (`eas update`) — no local Xcode or Android Studio required. Run EAS CLI as `bunx eas-cli <command>` in Bun projects, or `npx eas-cli@latest <command>` otherwise; substitute that for bare `eas` in docs examples.
+Docs: https://docs.expo.dev/eas/index.md
 
 ## Rules
 
 - If `ios/` and `android/` directories do not exist, they are generated (Continuous Native Generation). Never create or edit them by hand — configure native behavior in `app.json` and config plugins.
-- Expo Go only includes its bundled native modules. Native code needs a local development build through `npm run ios` or `npm run android`.
+- Expo Go only includes its bundled native modules. After adding a library with native code, the app needs a development build: `npx expo run:ios|android` locally, or `eas build --profile development`.
 - Prefer recommended Expo modules over third-party libraries, and check your available skills before adding dependencies. Docs: https://docs.expo.dev/versions/latest/index.md

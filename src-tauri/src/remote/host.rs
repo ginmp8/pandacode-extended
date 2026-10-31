@@ -2,7 +2,7 @@
 //! "Allow remote control" is on,
 //! and pushes the agent events of the tasks they mirror. Remote prompts run under the
 //! same approval policy as local ones.
-use super::{images, permissions, remote, socket, start, Subscriber};
+use super::{images, remote, socket, start, Subscriber};
 use crate::{message_queue, providers::AgentEvent, AppState, Result};
 use rusqlite::OptionalExtension;
 use base64::Engine;
@@ -29,11 +29,15 @@ pub(crate) const BURST_FRAMES: u32 = 5;
 /// Events kept per task for viewers that come back (`afterSeq`), and in all.
 const JOURNAL_EVENTS: usize = 2000;
 const JOURNAL_BYTES: usize = 2 * 1024 * 1024;
-const JOURNAL_TOTAL: usize = 32 * 1024 * 1024;
+const JOURNAL_TOTAL: usize = 8 * 1024 * 1024;
 const JOURNAL_TASKS: usize = 2048;
+/// A finished task's events are dropped once no viewer has followed it for this long.
+const JOURNAL_IDLE: Duration = Duration::from_secs(10 * 60);
 /// The part of a subscribe reply that replayed events may fill; the rest comes in later
 /// pages (`more`), each another subscribe from where the viewer now is.
 const REPLAY_BUDGET: usize = PAGE_BUDGET / 3;
+/// The replay a viewer that opens packed frames gets, while the packed reply fits [`PAGE_BUDGET`].
+const PACKED_REPLAY_BUDGET: usize = PAGE_BUDGET;
 const MISSING_BUDGET: usize = 24 * 1024;
 /// A finished start is remembered this long for a repeated `task.start` or `task.startStatus`.
 const START_MEMORY: Duration = Duration::from_secs(3600);
@@ -46,6 +50,8 @@ const WORKER_MESSAGE_PAGE_DEFAULT: i64 = 100;
 const WORKER_MESSAGE_PAGE_MAX: i64 = 100;
 const TEAM_MESSAGE_COUNT: usize = 30;
 const TEAM_MESSAGE_TEXT: usize = 2048;
+const WINDOW_MS: i64 = 60_000;
+const MAX_SEEN: usize = 20_000;
 /// A reply's or event frame's JSON budget: sealing adds a third (base64) plus a small
 /// envelope, so this stays under the relay's 256 KB frame.
 pub(crate) const PAGE_BUDGET: usize = 180 * 1024;
@@ -61,6 +67,10 @@ const PULL_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_PULL_CACHE_ENTRIES: usize = 64;
 /// A single message or event larger than this is cut, with [`CUT`] marking the cut.
 const MAX_MESSAGE: usize = 120 * 1024;
+/// The smallest `budget` a `task.messages` page may ask for, and the largest a viewer that opens
+/// packed frames (`"z": 1`) may: such a page is cut until it packs into [`PAGE_BUDGET`].
+const MIN_PAGE_BUDGET: usize = 4 * 1024;
+pub(crate) const PACKED_PAGE_MAX: usize = 1024 * 1024;
 /// Messages read per legacy `afterId` `task.messages` page before the budget trims it.
 const PAGE_ROWS: i64 = 400;
 /// Buffered events per subscriber; past it the buffer ends in a [`LAGGED`] marker and the
@@ -69,164 +79,17 @@ const MAX_BUFFER: usize = 4096;
 const LAGGED: &str = "lagged";
 const CUT: &str = "\n…[cut on the host to fit a remote page]";
 /// Harness ids `providers.models` accepts (the same list `storage` allows).
-pub(crate) const PROVIDERS: [&str; 17] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin"];
+pub(crate) const PROVIDERS: [&str; 19] = ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "zcode", "hermes"];
 
-pub(crate) fn untrusted(host_name: &str) -> String {
-    format!("This computer isn't trusted on {host_name}. Trust it in Settings → Remote access on that computer.")
-}
-
-/// Hosting must be on, and the frame must have been sealed with the caller's pinned key.
-pub(crate) fn gate(host_enabled: bool, trusted: bool, host_name: &str) -> Result<()> {
+/// Hosting must be on. The socket already limits frames to devices in presence.
+pub(crate) fn gate(host_enabled: bool) -> Result<()> {
     if !host_enabled {
         return Err(OFF.into());
     }
-    if !trusted {
-        return Err(untrusted(host_name));
-    }
     Ok(())
 }
 
-/// Revalidate the complete authority for this effect, including the method's
-/// scope. This also works in a blocking task, where task-local provenance is not
-/// inherited automatically.
-pub(crate) fn require_method(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str) -> Result<()> {
-    let state = remote(app);
-    let inner = state.lock();
-    super::grants::authorize(&state.dir, &inner, from, authenticated_key, method)
-}
-
-/// Authenticated request provenance survives asynchronous provider discovery but
-/// is never supplied by a webview parameter. Local commands have no such scope.
-struct RequestOrigin {
-    app: tauri::AppHandle,
-    device: String,
-    key: String,
-    method: String,
-    full_configure: bool,
-}
-
-tokio::task_local! {
-    static REQUEST_ORIGIN: RequestOrigin;
-}
-
-pub(super) struct RequestAuthorization<'a> {
-    dir: &'a Path,
-    inner: &'a super::Inner,
-    from: &'a str,
-    authenticated_key: &'a str,
-    method: &'a str,
-}
-
-impl<'a> RequestAuthorization<'a> {
-    pub(super) fn new(
-        dir: &'a Path,
-        inner: &'a super::Inner,
-        from: &'a str,
-        authenticated_key: &'a str,
-        method: &'a str,
-    ) -> Self {
-        Self { dir, inner, from, authenticated_key, method }
-    }
-}
-
-fn authorize_request_mode(request: &RequestAuthorization<'_>, mode: &str, require_full: bool) -> Result<()> {
-    super::grants::authorize(request.dir, request.inner, request.from, request.authenticated_key, request.method)?;
-    authorize_mode(request.inner, request.from, request.authenticated_key, mode)?;
-    if require_full {
-        super::grants::authorize_full(request.dir, request.inner, request.from, request.authenticated_key)?;
-    }
-    Ok(())
-}
-
-/// Authorization plus a synchronous effect. Remote mutations must keep the
-/// Remote lock across this call so revocation cannot pass it before the effect.
-pub(super) fn with_authorized_request_effect<T>(
-    request: RequestAuthorization<'_>,
-    mode: &str,
-    require_full: bool,
-    effect: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    authorize_request_mode(&request, mode, require_full)?;
-    effect()
-}
-
-fn require_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, method: &str, mode: &str, require_full: bool) -> Result<()> {
-    let state = remote(app);
-    let inner = state.lock();
-    let request = RequestAuthorization::new(&state.dir, &inner, from, authenticated_key, method);
-    authorize_request_mode(&request, mode, require_full)
-}
-
-fn authorize_mode(inner: &super::Inner, from: &str, authenticated_key: &str, mode: &str) -> Result<()> {
-    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
-    permissions::allow_mode(inner.settings.allow_full_access, mode)
-}
-
-/// Remote requests must not enter a background queue that loses their provenance.
-pub(crate) fn is_remote_request() -> bool {
-    REQUEST_ORIGIN.try_with(|_| ()).is_ok()
-}
-
-/// Rechecked by native mutation/launch paths after their awaits, using the task's
-/// current mode under the ordinary agents/store admission locks.
-pub(crate) fn check_current_request(mode: &str) -> Result<()> {
-    REQUEST_ORIGIN.try_with(|origin| {
-        require_mode(&origin.app, &origin.device, &origin.key, &origin.method, mode, origin.full_configure)
-    }).unwrap_or(Ok(()))
-}
-
-/// Rechecks a Full-only authorization independently of the request's ordinary
-/// method scope. Local commands have no remote origin and remain unchanged.
-pub(super) fn check_current_full_request() -> Result<()> {
-    REQUEST_ORIGIN.try_with(|origin| {
-        let state = remote(&origin.app);
-        let inner = state.lock();
-        super::grants::authorize_full(&state.dir, &inner, &origin.device, &origin.key)
-    }).unwrap_or(Ok(()))
-}
-
-/// Hold the authorization lock through a Full-only synchronous effect so a
-/// concurrent grant demotion cannot slip between recheck and the side effect.
-pub(super) fn with_current_full_request<T>(mode: &str, effect: impl FnOnce() -> Result<T>) -> Result<T> {
-    let mut effect = Some(effect);
-    match REQUEST_ORIGIN.try_with(|origin| {
-        let state = remote(&origin.app);
-        let inner = state.lock();
-        with_authorized_request_effect(
-            RequestAuthorization::new(&state.dir, &inner, &origin.device, &origin.key, &origin.method),
-            mode,
-            true,
-            || effect.take().ok_or_else(|| "The authorization effect was already used.".to_owned())?(),
-        )
-    }) {
-        Ok(result) => result,
-        Err(_) => effect.take().ok_or_else(|| "The authorization effect was already used.".to_owned())?(),
-    }
-}
-
-fn requires_full_configure_mode(mode: Option<&str>) -> bool {
-    matches!(mode, Some("full" | "review"))
-}
-
-fn preflight_bot_steer(bot_thread: bool, require_full: impl FnOnce() -> Result<()>) -> Result<()> {
-    if bot_thread {
-        require_full()?;
-    }
-    Ok(())
-}
-
-pub(crate) fn check_start_mode(app: &tauri::AppHandle, from: &str, authenticated_key: &str, mode: Option<&str>) -> Result<()> {
-    let state = remote(app);
-    let inner = state.lock();
-    super::grants::authorize(&state.dir, &inner, from, authenticated_key, "task.start")?;
-    permissions::start_mode(mode, inner.settings.allow_full_access).map(|_| ())?;
-    Ok(())
-}
-
-const WINDOW_MS: i64 = 60_000;
-const MAX_SEEN: usize = 20_000;
-/// Handshake nonces seen in the last minute. Privileged RPCs use the durable
-/// SQLite receipt ledger in `remote::replay`, never this memory-only guard. Requests outside ±60 s or seen before are refused.
+/// Request nonces seen in the last minute. Requests outside ±60 s or seen before are refused.
 #[derive(Default)]
 pub(crate) struct Replay {
     seen: HashMap<String, i64>,
@@ -262,7 +125,8 @@ pub(crate) fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Call {
-    Subscribe { session_ids: Vec<String>, after: HashMap<String, u64>, epoch: Option<String> },
+    /// `replay`: the JSON the replayed events may fill ([`REPLAY_BUDGET`], more for a packing viewer).
+    Subscribe { session_ids: Vec<String>, after: HashMap<String, u64>, epoch: Option<String>, replay: usize },
     TasksList { limit: usize },
     ProjectIcons { project_ids: Vec<String> },
     Providers { force: bool },
@@ -270,9 +134,11 @@ pub(crate) enum Call {
     Start(start::Start),
     StartStatus { start_id: String },
     CancelStart { start_id: String },
-    Messages { session_id: String, page: MessagePaging },
+    /// `budget`: the page's JSON bytes ([`page_budget`]).
+    Messages { session_id: String, page: MessagePaging, budget: usize },
     Team { session_id: String },
-    WorkerMessages { session_id: String, worker_id: String, after_id: i64, limit: i64 },
+    /// `before_id`: a page ending before it (`tail` is before the newest), else after `after_id`.
+    WorkerMessages { session_id: String, worker_id: String, after_id: i64, before_id: Option<i64>, limit: i64 },
     Attachment { session_id: String, id: String, variant: crate::attachments::Variant, offset: u64 },
     WorkspaceImage { session_id: String, path: String, variant: crate::attachments::Variant, offset: u64 },
     Send { session_id: String, text: String, image_ids: Vec<String> },
@@ -334,7 +200,7 @@ impl Call {
 }
 
 /// These methods may be run concurrently because they do not change task state.
-/// PR detection and merging stay ordered because they change the task's linked PR.
+/// `task.pullMerge` intentionally stays ordered because it changes the linked PR.
 pub(crate) fn is_read_only_method(method: &str) -> bool {
     matches!(
         method,
@@ -351,6 +217,7 @@ pub(crate) fn is_read_only_method(method: &str) -> bool {
             | "task.workspaceImage"
             | "task.pull"
             | "task.pullDiff"
+            | "task.pullDetect"
             | "task.changes"
             | "task.diff"
             | "bots.list"
@@ -461,6 +328,26 @@ fn message_paging(params: &Value) -> Result<MessagePaging> {
     })
 }
 
+/// A `task.messages` page's JSON budget: [`PAGE_BUDGET`] unless asked, clamped to
+/// [`MIN_PAGE_BUDGET`]..[`PACKED_PAGE_MAX`]; [`plain_budget`] holds plain viewers to [`PAGE_BUDGET`].
+pub(crate) fn page_budget(params: &Value) -> Result<usize> {
+    match params.get("budget").filter(|value| !value.is_null()) {
+        None => Ok(PAGE_BUDGET),
+        Some(value) => Ok(value.as_u64().ok_or("Invalid budget.")?.clamp(MIN_PAGE_BUDGET as u64, PACKED_PAGE_MAX as u64) as usize),
+    }
+}
+
+/// A viewer that does not open packed frames gets pages of at most [`PAGE_BUDGET`]; one that
+/// does gets a bigger replay. A batch's calls stay plain-sized: its reply is measured plain.
+fn plain_budget(call: Call, packs: bool) -> Call {
+    match call {
+        Call::Messages { session_id, page, budget } if !packs => Call::Messages { session_id, page, budget: budget.min(PAGE_BUDGET) },
+        Call::Subscribe { session_ids, after, epoch, .. } => Call::Subscribe { session_ids, after, epoch, replay: if packs { PACKED_REPLAY_BUDGET } else { REPLAY_BUDGET } },
+        Call::Batch(calls) => Call::Batch(calls.into_iter().map(|call| call.map(|call| plain_budget(call, false))).collect()),
+        other => other,
+    }
+}
+
 fn path_param(params: &Value, key: &str) -> Result<Option<String>> {
     match params.get(key).filter(|value| !value.is_null()) {
         None => Ok(None),
@@ -539,7 +426,7 @@ pub(crate) fn parse(host_enabled: bool, method: &str, params: &Value) -> Result<
             // Newer viewers say where they left off; anything malformed is ignored (no replay).
             let after = params["afterSeq"].as_object().map(|after| after.iter().filter(|(id, _)| session_ids.contains(id)).filter_map(|(id, seq)| Some((id.clone(), seq.as_u64()?))).collect()).unwrap_or_default();
             let epoch = params["epoch"].as_str().filter(|epoch| valid_id(epoch).is_ok() && epoch.len() <= 64).map(str::to_owned);
-            Call::Subscribe { session_ids, after, epoch }
+            Call::Subscribe { session_ids, after, epoch, replay: REPLAY_BUDGET }
         }
         "tasks.list" => Call::TasksList { limit: task_limit(params)? },
         "projects.icons" => Call::ProjectIcons { project_ids: project_icon_ids(params)? },
@@ -554,7 +441,7 @@ pub(crate) fn parse(host_enabled: bool, method: &str, params: &Value) -> Result<
         "task.start" => Call::Start(start::parse(params)?),
         "task.startStatus" => Call::StartStatus { start_id: id_param(params, "startId")? },
         "task.cancelStart" => Call::CancelStart { start_id: id_param(params, "startId")? },
-        "task.messages" => Call::Messages { session_id: id_param(params, "sessionId")?, page: message_paging(params)? },
+        "task.messages" => Call::Messages { session_id: id_param(params, "sessionId")?, page: message_paging(params)?, budget: page_budget(params)? },
         "task.team" => Call::Team { session_id: id_param(params, "sessionId")? },
         "task.workerMessages" => {
             let after_id = match params.get("afterId").filter(|value| !value.is_null()) {
@@ -565,7 +452,15 @@ pub(crate) fn parse(host_enabled: bool, method: &str, params: &Value) -> Result<
                 None => WORKER_MESSAGE_PAGE_DEFAULT,
                 Some(value) => value.as_u64().and_then(|limit| i64::try_from(limit).ok()).filter(|limit| (1..=WORKER_MESSAGE_PAGE_MAX).contains(limit)).ok_or_else(|| format!("Limit must be between 1 and {WORKER_MESSAGE_PAGE_MAX}."))?,
             };
-            Call::WorkerMessages { session_id: id_param(params, "sessionId")?, worker_id: id_param(params, "workerId")?, after_id, limit }
+            let before_id = if params["tail"] == true {
+                Some(i64::MAX)
+            } else {
+                match params.get("beforeId").filter(|value| !value.is_null()) {
+                    None => None,
+                    Some(value) => Some(value.as_i64().filter(|id| *id > 0).ok_or("Invalid beforeId.")?),
+                }
+            };
+            Call::WorkerMessages { session_id: id_param(params, "sessionId")?, worker_id: id_param(params, "workerId")?, after_id, before_id, limit }
         }
         "task.attachment" => {
             let (variant, offset) = variant_offset(params)?;
@@ -640,9 +535,10 @@ pub(crate) fn fresh_request(inner: &mut super::Inner, message: &Value, now_ms: i
 /// Checked when a queued request is about to run, not when it arrived: remote control is
 /// still on and the sender is still in presence. Returns whether remote tasks may use
 /// Full access.
-fn admit(inner: &super::Inner, from: &str, authenticated_key: &str) -> Result<bool> {
-    gate(inner.settings.host_enabled, inner.authenticated(from, authenticated_key), &super::config::device_name())?;
-    Ok(inner.settings.allow_full_access)
+fn admit(inner: &super::Inner, from: &str) -> Result<bool> {
+    gate(inner.settings.host_enabled)?;
+    inner.callable(from)?;
+    Ok(inner.settings.remote_full_access)
 }
 
 /// The methods a `batch` request's calls name (each is checked against the device's grant
@@ -675,7 +571,6 @@ fn full_access_off() -> String {
 /// Without "Full access for remote tasks", a prompt, steer or configure that would run a
 /// task stored in `full` is refused, unless it switches the task to another mode. The
 /// task's own mode is the user's and is never changed here.
-#[cfg(test)]
 fn allow_task_mode(stored: &str, requested: Option<&str>, full_access: bool) -> Result<()> {
     if !full_access && stored == "full" && requested.is_none_or(|mode| mode == "full") {
         return Err(full_access_off());
@@ -684,26 +579,24 @@ fn allow_task_mode(stored: &str, requested: Option<&str>, full_access: bool) -> 
 }
 
 /// The response to one request frame, or None when it has no usable id.
-/// Recheck the key that opened the frame when its queued request is dispatched.
-pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value, authenticated_key: &str) -> Option<Value> {
+pub(crate) async fn handle(app: &tauri::AppHandle, from: &str, message: &Value) -> Option<Value> {
     let id = message["id"].as_str().filter(|id| valid_id(id).is_ok())?;
     let method = message["method"].as_str().unwrap_or_default();
     // The Inner lock is released before the grant check (and redeem), which take it themselves.
-    // Pair redemption is the only permitted RPC from an unapproved device.  Its
-    // current presence key must still match the key that opened this ciphertext.
-    if method == super::grants::REDEEM {
-        return Some(response(id, super::grants::redeem(app, from, authenticated_key, &message["params"])));
+    let admitted = admit(&remote(app).lock(), from);
+    // A device waiting for approval redeems the pairing code shown here (grants.rs).
+    if method == "pair.redeem" {
+        return Some(response(id, admitted.and_then(|_| super::grants::redeem(app, from, &message["params"]))));
     }
-    let admitted = admit(&remote(app).lock(), from, authenticated_key);
     let admitted = admitted.and_then(|full_access| {
         for method in std::iter::once(method).chain(batch_methods(method, &message["params"])) {
-            super::grants::check(app, from, authenticated_key, method)?;
+            super::grants::check(app, from, method)?;
         }
         Ok(full_access)
     });
-    let call = admitted.and_then(|full_access| parse(true, method, &message["params"]).and_then(|call| cap_mode(call, full_access)));
+    let call = admitted.and_then(|full_access| parse(true, method, &message["params"]).map(|call| plain_budget(call, message["z"] == 1)).and_then(|call| cap_mode(call, full_access)).map(|call| (call, full_access)));
     let result = match call {
-        Ok(call) => run(app, from, authenticated_key, call).await,
+        Ok((call, full_access)) => run(app, from, call, full_access).await,
         Err(error) => Err(error),
     };
     Some(response(id, result))
@@ -723,44 +616,6 @@ async fn local_task(state: &AppState, session_id: &str) -> Result<crate::storage
     crate::blocking(move || {
         let store = store.lock().map_err(|e| e.to_string())?;
         local_session_from(&store, &session_id)
-    })
-    .await
-}
-
-const BOT_PROMPT_REFUSAL: &str = "This is a bot conversation. Use the bot message action with Full access so the bot's context and memory are applied.";
-
-/// Whether this session is an explicit bot conversation, whose prompts need
-/// the bot-aware messaging policy.
-fn is_bot_thread(db: &rusqlite::Connection, session_id: &str) -> Result<bool> {
-    db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM bot_threads WHERE session_id=?1)",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())
-}
-
-fn reject_generic_bot_prompt(bot_thread: bool) -> Result<()> {
-    if bot_thread {
-        return Err(BOT_PROMPT_REFUSAL.into());
-    }
-    Ok(())
-}
-
-fn preflight_generic_send(bot_thread: bool, continue_send: impl FnOnce() -> Result<()>) -> Result<()> {
-    reject_generic_bot_prompt(bot_thread)?;
-    continue_send()
-}
-
-async fn local_prompt_task(state: &AppState, session_id: &str) -> Result<(crate::storage::Session, bool)> {
-    let store = state.store.clone();
-    let lookup_id = session_id.to_owned();
-    crate::blocking(move || {
-        let store = store.lock().map_err(|e| e.to_string())?;
-        let task = local_session_from(&store, &lookup_id)?;
-        let bot_thread = is_bot_thread(&store.db, &lookup_id)?;
-        Ok((task, bot_thread))
     })
     .await
 }
@@ -810,11 +665,7 @@ async fn optional_pull(state: &AppState, session_id: &str) -> Result<Option<(Pat
     .await
 }
 
-async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
-    require_method(app, from, authenticated_key, call.method_name())?;
-    let full_configure = matches!(&call, Call::Configure { mode: Some(mode), .. } if requires_full_configure_mode(Some(mode.as_str())));
-    let origin = RequestOrigin { app: app.clone(), device: from.to_owned(), key: authenticated_key.to_owned(), method: call.method_name().to_owned(), full_configure };
-    REQUEST_ORIGIN.scope(origin, async {
+async fn run(app: &tauri::AppHandle, from: &str, call: Call, full_access: bool) -> Result<Value> {
     match call {
         Call::Batch(calls) => {
             let mut results = Vec::with_capacity(calls.len());
@@ -822,7 +673,7 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
                 let method = call.as_ref().map(Call::method_name).unwrap_or("invalid");
                 let handling = Instant::now();
                 match call {
-                    Ok(call) => results.push(run_one(app, from, authenticated_key, call).await),
+                    Ok(call) => results.push(run_one(app, from, call, full_access).await),
                     Err(error) => results.push(Err(error)),
                 }
                 if std::env::var_os("PANDACODE_CONNECT_TIMING").is_some() {
@@ -831,15 +682,14 @@ async fn run(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: 
             }
             Ok(fit_batch_results(results))
         }
-        call => run_one(app, from, authenticated_key, call).await,
+        call => run_one(app, from, call, full_access).await,
     }
-    }).await
 }
 
 fn remote_worker_status(status: &str) -> &str {
     match status {
         "waiting" => "running",
-        "queued" | "running" | "completed" | "failed" | "stopped" => status,
+        "queued" | "running" | "parked" | "completed" | "failed" | "stopped" => status,
         _ => "stopped",
     }
 }
@@ -887,6 +737,7 @@ fn remote_worker(worker: &crate::architect::Worker) -> Value {
         "readOnly": worker.read_only,
         "abandoned": worker.abandoned,
         "filesTruncated": false,
+        "parentWorker": worker.parent_worker,
     })
 }
 
@@ -1044,6 +895,7 @@ fn worker_messages(
     session_id: &str,
     worker_id: &str,
     after_id: i64,
+    before_id: Option<i64>,
     limit: i64,
 ) -> Result<Value> {
     local_session_from(store, session_id)?;
@@ -1063,10 +915,12 @@ fn worker_messages(
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    let mut query = store.db.prepare("SELECT m.id,m.session_id,m.role,CASE WHEN m.role='assistant' THEN COALESCE(substr(CAST(m.content AS BLOB),1,131076),X'') ELSE m.content END,m.created_at,m.turn_duration_ms,t.summary FROM messages m LEFT JOIN turn_changes t ON t.message_id=m.id WHERE m.session_id=?1 AND m.id>?2 ORDER BY m.id LIMIT ?3").map_err(|error| error.to_string())?;
+    // Backward pages read newest first and are put back in order below.
+    let (window, order) = if before_id.is_some() { ("<", "DESC") } else { (">", "") };
+    let mut query = store.db.prepare(&format!("SELECT m.id,m.session_id,m.role,CASE WHEN m.role='assistant' THEN COALESCE(substr(CAST(m.content AS BLOB),1,131076),X'') ELSE m.content END,m.created_at,m.turn_duration_ms,t.summary FROM messages m LEFT JOIN turn_changes t ON t.message_id=m.id WHERE m.session_id=?1 AND m.id{window}?2 ORDER BY m.id {order} LIMIT ?3")).map_err(|error| error.to_string())?;
     let rows = query
         .query_map(
-            rusqlite::params![worker_session, after_id, limit + 1],
+            rusqlite::params![worker_session, before_id.unwrap_or(after_id), limit + 1],
             |row| {
                 let role: String = row.get(2)?;
                 let content = match row.get_ref(3)? {
@@ -1104,8 +958,12 @@ fn worker_messages(
     let mut messages = rows
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| error.to_string())?;
-    let fetched_more = messages.len() > limit as usize;
+    // Backward, the extra row is an older one: `hasOlder` reports it.
+    let fetched_more = messages.len() > limit as usize && before_id.is_none();
     messages.truncate(limit as usize);
+    if before_id.is_some() {
+        messages.reverse();
+    }
     for message in &mut messages {
         crate::architect::internal_turns::project_message(store, message)?;
         const NOTICE: &str = "\n\n[Message preview truncated at 128 KiB. The provider retains the complete conversation.]";
@@ -1150,6 +1008,7 @@ fn worker_messages(
         message_values,
         has_older,
         fetched_more,
+        before_id.is_some(),
     );
     if let Some(id) = reply["messages"]
         .as_array()
@@ -1158,6 +1017,10 @@ fn worker_messages(
     {
         reply["hasMore"] =
             json!(fetched_more || message_exists(&store.db, worker_session, id, false)?);
+    }
+    if before_id.is_some() {
+        // Tells viewers this host pages backward; older ones ignore `tail` and `beforeId`.
+        reply["tail"] = json!(true);
     }
     Ok(reply)
 }
@@ -1168,36 +1031,49 @@ fn fit_worker_message_page(
     values: Vec<Value>,
     has_older: bool,
     fetched_more: bool,
+    backward: bool,
 ) -> Value {
-    let mut kept = Vec::new();
-    let mut has_more = fetched_more;
-    for mut message in values {
+    // Measured once each; `false` is the longer flag, so the sum never undercounts.
+    let envelope = json!({"messages": [], "hasMore": false, "hasOlder": false, "title": title, "lastId": last_id}).to_string().len();
+    let (mut kept, mut size, mut cut) = (Vec::new(), envelope, false);
+    // A backward page keeps the rows next to its cursor (the newest) and drops older ones,
+    // so a cut page continues backward (`hasOlder`), never forward.
+    let ordered: Box<dyn Iterator<Item = Value>> = if backward { Box::new(values.into_iter().rev()) } else { Box::new(values.into_iter()) };
+    for mut message in ordered {
         shrink(&mut message, MAX_MESSAGE);
-        let mut candidate = json!({"messages": &kept, "hasMore": has_more, "hasOlder": has_older, "title": title, "lastId": last_id});
-        candidate["messages"]
-            .as_array_mut()
-            .unwrap()
-            .push(message.clone());
-        if candidate.to_string().len() > PAGE_BUDGET {
+        let length = message.to_string().len() + 1;
+        if size + length > PAGE_BUDGET {
             if kept.is_empty() {
-                let envelope = json!({"messages": [], "hasMore": true, "hasOlder": has_older, "title": title, "lastId": last_id}).to_string().len();
                 shrink(&mut message, PAGE_BUDGET.saturating_sub(envelope + 8));
-                let candidate = json!({"messages": [message], "hasMore": true, "hasOlder": has_older, "title": title, "lastId": last_id});
-                if candidate.to_string().len() <= PAGE_BUDGET {
-                    kept = candidate["messages"].as_array().unwrap().clone();
+                if envelope + message.to_string().len() <= PAGE_BUDGET {
+                    kept.push(message);
                 }
             }
-            has_more = true;
+            cut = true;
             break;
         }
+        size += length;
         kept.push(message);
     }
+    if backward {
+        kept.reverse();
+    }
+    let (has_more, has_older) = if backward { (fetched_more, has_older || cut) } else { (fetched_more || cut, has_older) };
     json!({"messages": kept, "hasMore": has_more, "hasOlder": has_older, "title": title, "lastId": last_id})
 }
 
 fn team_event_cache() -> &'static StdMutex<HashMap<String, HashMap<String, Value>>> {
     static CACHE: OnceLock<StdMutex<HashMap<String, HashMap<String, Value>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
+}
+
+/// Forgets the team rows of tasks no subscriber follows any more, so a phone that comes back
+/// gets every row again.
+fn forget_unfollowed_teams(inner: &super::Inner) {
+    team_event_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|session, _| inner.subscribers.values().any(|s| s.sessions.contains(session)));
 }
 
 fn queue_team_event(app: &tauri::AppHandle, session_id: &str, data: Value) {
@@ -1386,12 +1262,22 @@ fn watch_team_events(app: &tauri::AppHandle) {
             let Ok(team) = serde_json::from_value::<crate::architect::TeamSnapshot>(value) else {
                 return;
             };
+            // Rows are remembered only while hosting and a phone follows the task; a phone
+            // that starts following gets every row once, then only changes.
+            let following = listener_app
+                .try_state::<super::Remote>()
+                .is_some_and(|state| followed(&state.lock(), &team.session_id) == Some(true));
             let changed = {
                 let mut cache = team_event_cache()
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                let previous = cache.entry(team.session_id.clone()).or_default();
-                changed_worker_rows(&team, previous)
+                if following {
+                    let previous = cache.entry(team.session_id.clone()).or_default();
+                    changed_worker_rows(&team, previous)
+                } else {
+                    cache.remove(&team.session_id);
+                    Vec::new()
+                }
             };
             for worker in changed {
                 queue_team_event(&listener_app, &team.session_id, worker);
@@ -1410,11 +1296,10 @@ fn watch_team_events(app: &tauri::AppHandle) {
     });
 }
 
-async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, call: Call) -> Result<Value> {
-    require_method(app, from, authenticated_key, call.method_name())?;
+async fn run_one(app: &tauri::AppHandle, from: &str, call: Call, full_access: bool) -> Result<Value> {
     let state = app.state::<AppState>();
     match call {
-        Call::Subscribe { session_ids, after, epoch } => {
+        Call::Subscribe { session_ids, after, epoch, replay: budget } => {
             watch_team_events(app);
             let handle = app.clone();
             let requested = session_ids.clone();
@@ -1423,25 +1308,47 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 subscribed_tasks(&state, &requested)
             })
             .await?;
-            let state = remote(app);
-            let mut inner = state.lock();
-            super::grants::authorize(&state.dir, &inner, from, authenticated_key, "subscribe")?;
-            let subscriber = inner.subscribers.entry(from.to_owned()).or_default();
-            // Added to, not replaced: a task started a moment ago may not be in the list yet.
-            // An expired (or overgrown) subscription starts over.
-            if subscriber.until.is_none_or(|until| until <= Instant::now()) || subscriber.sessions.len() > 4 * MAX_IDS {
-                subscriber.sessions.clear();
-            }
-            subscriber.until = Some(Instant::now() + SUBSCRIPTION);
-            subscriber.sessions.extend(session_ids);
-            let replay = inner.journal.resume(&mut tasks, &after, epoch.as_deref());
-            drop(inner);
+            // In a block, so the lock is gone before the await below.
+            let (fallback, replay) = {
+                let state = remote(app);
+                let mut inner = state.lock();
+                let subscriber = inner.subscribers.entry(from.to_owned()).or_default();
+                // Added to, not replaced: a task started a moment ago may not be in the list yet.
+                // An expired (or overgrown) subscription starts over.
+                if subscriber.until.is_none_or(|until| until <= Instant::now()) || subscriber.sessions.len() > 4 * MAX_IDS {
+                    subscriber.sessions.clear();
+                    forget_unfollowed_teams(&inner);
+                }
+                let subscriber = inner.subscribers.entry(from.to_owned()).or_default();
+                subscriber.until = Some(Instant::now() + SUBSCRIPTION);
+                subscriber.sessions.extend(session_ids);
+                // The plain-sized replay, read at the same journal position, is the fallback for
+                // events that pack poorly; it always fits. Measured after the lock is released.
+                let fallback = (budget > REPLAY_BUDGET).then(|| tasks.clone()).map(|mut tasks| {
+                    let replay = inner.journal.resume(&mut tasks, &after, epoch.as_deref(), REPLAY_BUDGET);
+                    (subscribe_reply(tasks, &missing, &replay), replay)
+                });
+                let replay = inner.journal.resume(&mut tasks, &after, epoch.as_deref(), budget);
+                (fallback, replay)
+            };
+            let reply = subscribe_reply(tasks, &missing, &replay);
+            let (reply, replay) = match fallback {
+                Some(plain) if packed_len(&reply) > PAGE_BUDGET => plain,
+                _ => (reply, replay),
+            };
+            let reply = if replay.gaps > 0 {
+                let handle = app.clone();
+                crate::blocking(move || {
+                    let state = handle.state::<AppState>();
+                    let store = state.store.lock().map_err(|e| e.to_string())?;
+                    Ok(add_gap_subagents(reply, |id| store.subagents(id)))
+                })
+                .await?
+            } else {
+                reply
+            };
             if replay.gaps > 0 {
                 super::diagnostics::record("replay.gap", format!("{} of {} tasks for {from}", replay.gaps, after.len()));
-            }
-            let mut reply = json!({"tasks": tasks, "missing": missing, "epoch": replay.epoch});
-            if replay.more {
-                reply["more"] = json!(true);
             }
             Ok(reply)
         }
@@ -1474,7 +1381,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             }
             Ok(models)
         }
-        Call::Start(request) => start_once(app, from, authenticated_key, request).await,
+        Call::Start(request) => start_once(app, from, request).await,
         Call::StartStatus { start_id } => Ok(start_status(host_starts().lock().unwrap_or_else(|e| e.into_inner()).get(&start_id).filter(|start| start.from == from).map(Arc::as_ref))),
         Call::CancelStart { start_id } => {
             let mut starts = host_starts().lock().unwrap_or_else(|e| e.into_inner());
@@ -1488,16 +1395,16 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 }
             })
         }
-        Call::Messages { session_id, page } => {
+        Call::Messages { session_id, page, budget } => {
             let handle = app.clone();
             crate::blocking(move || {
                 let state = handle.state::<AppState>();
-                let store = state.store.lock().map_err(|e| e.to_string())?;
-                local_session_from(&store, &session_id)?;
-                match page {
-                    MessagePaging::After { after_id, limit } if limit == PAGE_ROWS => messages_page(&store.db, &session_id, after_id),
-                    page => messages_page_with(&store.db, &session_id, page),
-                }
+                let rows = {
+                    let store = state.store.lock().map_err(|e| e.to_string())?;
+                    local_session_from(&store, &session_id)?;
+                    read_page(&store.db, &session_id, page)?
+                };
+                Ok(fit_page(rows, budget))
             })
             .await
         }
@@ -1514,12 +1421,12 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             })
             .await
         }
-        Call::WorkerMessages { session_id, worker_id, after_id, limit } => {
+        Call::WorkerMessages { session_id, worker_id, after_id, before_id, limit } => {
             let handle = app.clone();
             crate::blocking(move || {
                 let state = handle.state::<AppState>();
                 let store = state.store.lock().map_err(|e| e.to_string())?;
-                worker_messages(&store, &session_id, &worker_id, after_id, limit)
+                worker_messages(&store, &session_id, &worker_id, after_id, before_id, limit)
             })
             .await
         }
@@ -1545,18 +1452,23 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 crate::attachments::chunk_reply(&bytes, &mime, offset)
             }).await
         }
-        Call::PutImage(chunk) => images::put(app, from, authenticated_key, chunk).await,
+        Call::PutImage(chunk) => images::put(app, from, chunk).await,
         Call::Send { session_id, text, image_ids } => {
-            let (task, bot_thread) = local_prompt_task(&state, &session_id).await?;
-            preflight_generic_send(bot_thread, || {
-                check_current_request(&task.mode)?;
-                // Keep deferred prompts on the viewer: an anonymous host queue would lose
-                // the authenticated origin and could run after this grant was revoked.
-                if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
-                    return Err("This remote task is running. Keep the message queued on this computer, or use Steer.".into());
+            allow_task_mode(&local_task(&state, &session_id).await?.mode, None, full_access)?;
+            // Only images this caller just sent; they are now this task's.
+            images::claim(app, from, &image_ids)?;
+            // Like Enter in the composer: a running task queues the message.
+            let busy = || state.agents.lock().map(|agents| agents.contains_key(&session_id)).map_err(|e| e.to_string());
+            if busy()? {
+                let queued: Vec<Value> = image_ids.iter().map(|id| json!({"kind": "image", "id": id, "name": "Image", "width": 0, "height": 0, "thumbnail": "", "source": "file"})).collect();
+                let entry = message_queue::add(&*state.store.lock().map_err(|e| e.to_string())?, &session_id, &text, &json!(queued))?;
+                // If the run ended between the check and the add, nothing would deliver the
+                // entry: take it back (unless a run end already did) and send it now.
+                if busy()? || message_queue::take(&*state.store.lock().map_err(|e| e.to_string())?, &entry.id).is_err() {
+                    let _ = app.emit("queue-changed", json!({"sessionId": session_id}));
+                    return Ok(json!({"queued": true}));
                 }
-                images::claim(app, from, authenticated_key, &image_ids)
-            })?;
+            }
             crate::send_message(app.clone(), state, session_id, text, Some(image_ids), None).await?;
             let _ = app.emit("sessions-changed", ());
             Ok(json!({"queued": false}))
@@ -1572,7 +1484,6 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
                 Ok(team_states(&store.db, &[id.as_str()])?.get(&id).is_some_and(TeamState::active))
             })
             .await?;
-            require_method(app, from, authenticated_key, "task.stop")?;
             if team_active {
                 crate::architect::architect_control(app.clone(), state, session_id, "stop".into()).await?;
             } else {
@@ -1581,27 +1492,14 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({}))
         }
         Call::Steer { session_id, text } => {
-            let (task, bot_thread) = local_prompt_task(&state, &session_id).await?;
-            preflight_bot_steer(bot_thread, check_current_full_request)?;
-            check_current_request(&task.mode)?;
+            allow_task_mode(&local_task(&state, &session_id).await?.mode, None, full_access)?;
             message_queue::steer_task(app.clone(), state, session_id, text).await
         }
         Call::Configure { session_id, model, effort, mode } => {
-            let task = local_task(&state, &session_id).await?;
-            {
-                let remote = remote(app);
-                let inner = remote.lock();
-                let effective = permissions::configure_mode(&task.mode, mode.as_deref(), inner.settings.allow_full_access)?;
-                if requires_full_configure_mode(mode.as_deref()) {
-                    super::grants::authorize_full(&remote.dir, &inner, from, authenticated_key)?;
-                }
-                authorize_mode(&inner, from, authenticated_key, effective)?;
-                crate::providers::review_supported(model.as_ref().map_or(task.provider.as_str(), |(provider, _)| provider.as_str()), effective)?;
-            }
+            allow_task_mode(&local_task(&state, &session_id).await?.mode, mode.as_deref(), full_access)?;
             if let Some((provider, _)) = &model {
                 start::require_installed(provider).await?;
             }
-            require_method(app, from, authenticated_key, "task.configure")?;
             if let Some(mode) = mode {
                 crate::update_session(app.clone(), state.clone(), session_id.clone(), None, None, None, Some(mode)).await?;
             }
@@ -1615,16 +1513,13 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({}))
         }
         Call::Approve { session_id, request_id, approve } => {
-            let task = local_task(&state, &session_id).await?;
-            if approve { check_current_request(&task.mode)?; }
-            else { require_method(app, from, authenticated_key, "approval.respond")?; }
+            local_task(&state, &session_id).await?;
             crate::respond_approval(app.clone(), state, session_id.clone(), request_id.clone(), approve).await?;
             answered(app, session_id, "approval_cancelled", request_id);
             Ok(json!({}))
         }
         Call::Answer { session_id, request_id, response } => {
             local_task(&state, &session_id).await?;
-            require_method(app, from, authenticated_key, "input.respond")?;
             crate::respond_user_input(app.clone(), state, session_id.clone(), request_id.clone(), response).await?;
             answered(app, session_id, "input_cancelled", request_id);
             Ok(json!({}))
@@ -1648,9 +1543,8 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             crate::github_pull::merge_flag(&method)?;
             let store = state.store.clone();
             let cache_session_id = session_id.clone();
-            let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
             crate::blocking(move || {
-                let link = crate::github_pull::merge_checked(&root, number, &method, || require_method(&handle, &device, &key, "task.pullMerge"))?;
+                let link = crate::github_pull::merge(&root, number, &method)?;
                 store.lock().map_err(|e| e.to_string())?.set_task_link(&session_id, "pull", Some(&link)).map(|_| ())
             })
             .await?;
@@ -1658,7 +1552,7 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             let _ = app.emit("sessions-changed", ());
             Ok(json!({}))
         }
-        Call::PullDetect { session_id } => detect_pull(app, &state, from, authenticated_key, &session_id).await,
+        Call::PullDetect { session_id } => detect_pull(app, &state, &session_id).await,
         Call::Changes { session_id } => {
             let root = task_root(&state, &session_id).await?;
             crate::blocking(move || {
@@ -1688,12 +1582,10 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             .map_err(|e| e.to_string())?
         }
         Call::BotThread { bot_id } => {
-            let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
             let store = state.store.clone();
             let (session_id, created) = tauri::async_runtime::spawn_blocking(move || {
                 let store = store.lock().map_err(|e| e.to_string())?;
                 let bot = crate::bots::get(&store, &bot_id)?;
-                require_method(&handle, &device, &key, "bot.thread")?;
                 crate::bots::thread_session(&store, &bot, crate::bots::DESKTOP, crate::bots::DESKTOP, &format!("{} · You", bot.name))
             })
             .await
@@ -1705,12 +1597,19 @@ async fn run_one(app: &tauri::AppHandle, from: &str, authenticated_key: &str, ca
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotMessage { bot_id, text } => {
-            let session_id = crate::bots::bot_message(app.clone(), bot_id, text).await?;
+            let session_id = crate::bots::bot_message(app.clone(), bot_id, text, None, None, None).await?;
             Ok(json!({"sessionId": session_id}))
         }
         Call::BotPause { bot_id, paused } => {
-            require_method(app, from, authenticated_key, "bot.pause")?;
-            crate::bots::set_paused_checked(app, &bot_id, paused).await?;
+            if paused {
+                crate::bots::gateway::stop_bot(app, &bot_id).await;
+            }
+            let store = state.store.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::bots::set_paused(&*store.lock().map_err(|e| e.to_string())?, &bot_id, paused).map(|_| ())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
             let _ = app.emit("bots-changed", ());
             Ok(json!({}))
         }
@@ -1731,7 +1630,7 @@ fn answered(app: &tauri::AppHandle, session_id: String, kind: &str, request_id: 
 struct HostStart {
     from: String,
     /// Set by `task.cancelStart`; `start::run_cancellable` checks it between steps and stops the clone.
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancel: Arc<start::Cancel>,
     result: tokio::sync::watch::Sender<Option<Result<Value>>>,
     at: Instant,
 }
@@ -1757,23 +1656,17 @@ fn claim_start(starts: &mut HashMap<String, Arc<HostStart>>, id: &str, from: &st
 
 /// Runs a start once per `startId`. The start runs on its own, so a lost reply or a
 /// cancelled caller never stops it halfway; every caller waits for its one result.
-async fn start_once(app: &tauri::AppHandle, from: &str, authenticated_key: &str, request: start::Start) -> Result<Value> {
-    let Some(id) = request.start_id.clone() else { return start::run(app, from, authenticated_key, request).await };
+async fn start_once(app: &tauri::AppHandle, from: &str, request: start::Start) -> Result<Value> {
+    let Some(id) = request.start_id.clone() else { return start::run(app, from, request).await };
     let (entry, fresh) = claim_start(&mut host_starts().lock().unwrap_or_else(|e| e.into_inner()), &id, from, Instant::now())?;
     let mut done = entry.result.subscribe();
     if fresh {
-        let (app, from, key, entry) = (app.clone(), from.to_owned(), authenticated_key.to_owned(), entry.clone());
+        let (app, from, entry) = (app.clone(), from.to_owned(), entry.clone());
         tauri::async_runtime::spawn(async move {
             // A panic (or the task being dropped) below still settles the start.
             let settle = Settle(entry.clone());
-            let origin = RequestOrigin { app: app.clone(), device: from.clone(), key: key.clone(), method: "task.start".into(), full_configure: false };
-            let result = REQUEST_ORIGIN.scope(origin, start::run_cancellable(&app, &from, &key, request, entry.cancel.clone())).await;
-            // Cancelled after the task was made: it must not run unseen.
-            if let (true, Ok(reply)) = (entry.cancel.load(Ordering::SeqCst), &result) {
-                if let Some(session) = reply["sessionId"].as_str() {
-                    let _ = crate::stop_session(app.clone(), app.state::<AppState>(), session.to_owned()).await;
-                }
-            }
+            // A cancel is refused once the task is being made, so a made task is never unseen.
+            let result = start::run_cancellable(&app, &from, request, entry.cancel.clone()).await;
             if let Err(error) = &result {
                 super::diagnostics::record("start.failed", error.chars().take(200).collect::<String>());
             }
@@ -1810,20 +1703,31 @@ fn start_status(start: Option<&HostStart>) -> Value {
     let Some(start) = start else { return json!({"state": "unknown"}) };
     match &*start.result.borrow() {
         None => json!({"state": "running"}),
-        Some(Ok(reply)) => json!({"state": "done", "sessionId": reply["sessionId"]}),
+        // With the worktree note too, for a viewer whose `task.start` reply was lost.
+        Some(Ok(reply)) => {
+            let mut done = json!({"state": "done", "sessionId": reply["sessionId"]});
+            for key in ["worktree", "note"].into_iter().filter(|key| !reply[key].is_null()) {
+                done[key] = reply[key].clone();
+            }
+            done
+        }
         Some(Err(error)) => json!({"state": "failed", "error": error}),
     }
 }
 
 /// `task.cancelStart`: a running start is told to stop and its callers get `CANCELLED`
-/// at once; a start that already made its task says so (`cancelled: false`).
+/// at once; a start that already made its task says so (`cancelled: false`), and one making
+/// it now answers `cancelled: false, pending: true` (the viewer links and stops it once made).
 fn cancel_start(start: &HostStart) -> Value {
     let mut answer = json!({"cancelled": true});
     start.result.send_if_modified(|slot| match slot {
-        None => {
-            start.cancel.store(true, Ordering::SeqCst);
+        None if start.cancel.cancel() => {
             *slot = Some(Err(start::CANCELLED.into()));
             true
+        }
+        None => {
+            answer = json!({"cancelled": false, "pending": true});
+            false
         }
         Some(Ok(reply)) => {
             answer = json!({"cancelled": false, "sessionId": reply["sessionId"]});
@@ -1842,22 +1746,28 @@ pub(crate) struct Journal {
     seq: u64,
     bytes: usize,
     rings: HashMap<String, Ring>,
+    /// A delayed sweep ([`sweep_later`]) is scheduled.
+    sweeping: bool,
 }
 
 impl Default for Journal {
     fn default() -> Self {
-        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new() }
+        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new(), sweeping: false }
     }
 }
 
-#[derive(Default)]
 struct Ring {
     /// `seq` when recording began: anything before it may be missing.
     since: u64,
     /// The newest `seq` dropped to stay in bounds.
     dropped: u64,
     bytes: usize,
-    events: std::collections::VecDeque<(u64, usize, Value)>,
+    /// When a viewer last followed the task or its run last ended.
+    touched: Instant,
+    /// The newest entry is a run end.
+    finished: bool,
+    /// Kept as sent (JSON text, far smaller than a parsed Value), parsed only for a replay.
+    events: std::collections::VecDeque<(u64, String)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -1878,21 +1788,61 @@ pub(crate) struct Resumed {
 impl Journal {
     /// Starts recording a task's events, unless it already is.
     fn watch(&mut self, session: &str) {
-        if self.rings.contains_key(session) {
+        let now = Instant::now();
+        if let Some(ring) = self.rings.get_mut(session) {
+            ring.touched = now;
             return;
         }
+        self.sweep(now);
         if self.rings.len() >= JOURNAL_TASKS {
             let quiet = self.rings.iter().min_by_key(|(_, ring)| ring.events.back().map_or(ring.since, |(seq, ..)| *seq)).map(|(id, _)| id.clone());
             if let Some(ring) = quiet.and_then(|id| self.rings.remove(&id)) {
                 self.bytes -= ring.bytes;
             }
         }
-        self.rings.insert(session.to_owned(), Ring { since: self.seq, ..Default::default() });
+        self.rings.insert(session.to_owned(), Ring { since: self.seq, dropped: 0, bytes: 0, touched: now, finished: false, events: Default::default() });
+    }
+
+    /// How long until the first finished ring goes idle, when no sweep is scheduled yet;
+    /// the caller schedules one ([`sweep_later`]) for then.
+    fn arm(&mut self, now: Instant) -> Option<Duration> {
+        if self.sweeping {
+            return None;
+        }
+        let due = self.rings.values().filter(|ring| ring.finished).map(|ring| ring.touched + JOURNAL_IDLE).min()?;
+        self.sweeping = true;
+        Some(due.saturating_duration_since(now))
+    }
+
+    /// The scheduled sweep: drops what went idle and says when to run again, if anything is
+    /// still waiting (a ring followed again meanwhile is due later, never polled).
+    fn fire(&mut self, now: Instant) -> Option<Duration> {
+        self.sweeping = false;
+        self.sweep(now);
+        self.arm(now)
+    }
+
+    /// Drops the rings of finished tasks nobody has followed for [`JOURNAL_IDLE`]. Run on
+    /// a new ring, a subscribe and a run end, and by [`sweep_later`] once a run end idles.
+    fn sweep(&mut self, now: Instant) {
+        let bytes = &mut self.bytes;
+        self.rings.retain(|_, ring| {
+            let keep = !ring.finished || now.saturating_duration_since(ring.touched) < JOURNAL_IDLE;
+            if !keep {
+                *bytes -= ring.bytes;
+            }
+            keep
+        });
     }
 
     /// Numbers and keeps an event of a recorded (or, with `subscribed`, newly recorded)
     /// task; the event as sent, with its `seq`, or None when nobody follows the task.
     fn record(&mut self, session: &str, mut event: Value, subscribed: bool) -> Option<Value> {
+        let now = Instant::now();
+        let finished = event["kind"] == "run.finished";
+        if finished {
+            self.sweep(now);
+        }
         if !self.rings.contains_key(session) {
             if !subscribed {
                 return None;
@@ -1901,19 +1851,25 @@ impl Journal {
         }
         self.seq += 1;
         event["seq"] = json!(self.seq);
-        let size = event.to_string().len();
+        let text = event.to_string();
+        let size = text.len();
         let ring = self.rings.get_mut(session)?;
-        ring.events.push_back((self.seq, size, event.clone()));
+        if subscribed || finished {
+            ring.touched = now;
+        }
+        ring.finished = finished;
+        ring.events.push_back((self.seq, text));
         ring.bytes += size;
         self.bytes += size;
         while ring.events.len() > JOURNAL_EVENTS || ring.bytes > JOURNAL_BYTES {
-            let Some((seq, size, _)) = ring.events.pop_front() else { break };
-            (ring.dropped, ring.bytes, self.bytes) = (seq, ring.bytes - size, self.bytes - size);
+            let Some((seq, text)) = ring.events.pop_front() else { break };
+            (ring.dropped, ring.bytes, self.bytes) = (seq, ring.bytes - text.len(), self.bytes - text.len());
         }
         while self.bytes > JOURNAL_TOTAL {
-            let Some(ring) = self.rings.values_mut().max_by_key(|ring| ring.bytes) else { break };
-            let Some((seq, size, _)) = ring.events.pop_front() else { break };
-            (ring.dropped, ring.bytes, self.bytes) = (seq, ring.bytes - size, self.bytes - size);
+            // The oldest event anywhere goes first, so the one just recorded stays.
+            let Some(ring) = self.rings.values_mut().filter(|ring| !ring.events.is_empty()).min_by_key(|ring| ring.events.front().map_or(0, |(seq, _)| *seq)) else { break };
+            let Some((seq, text)) = ring.events.pop_front() else { break };
+            (ring.dropped, ring.bytes, self.bytes) = (seq, ring.bytes - text.len(), self.bytes - text.len());
         }
         Some(event)
     }
@@ -1922,10 +1878,10 @@ impl Journal {
     /// says what the live frame said.
     fn amend(&mut self, session: &str, seq: u64, event: Value) {
         let Some(ring) = self.rings.get_mut(session) else { return };
-        let Some(slot) = ring.events.iter_mut().find(|(at, ..)| *at == seq) else { return };
-        let size = event.to_string().len();
-        (ring.bytes, self.bytes) = (ring.bytes - slot.1 + size, self.bytes - slot.1 + size);
-        (slot.1, slot.2) = (size, event);
+        let Some(slot) = ring.events.iter_mut().find(|(at, _)| *at == seq) else { return };
+        let text = event.to_string();
+        (ring.bytes, self.bytes) = (ring.bytes - slot.1.len() + text.len(), self.bytes - slot.1.len() + text.len());
+        slot.1 = text;
     }
 
     /// The events after `after` in order, as many as fit `budget`, or a gap when some are
@@ -1934,11 +1890,14 @@ impl Journal {
     fn missed(&self, session: &str, after: u64, budget: usize, first: bool) -> Missed {
         let Some(ring) = self.rings.get(session).filter(|ring| after >= ring.since && after >= ring.dropped && after <= self.seq) else { return Missed::Gap };
         let (mut events, mut size, mut last) = (Vec::new(), 2, after);
-        let mut pending = ring.events.iter().filter(|(seq, ..)| *seq > after).peekable();
-        while let Some(&(seq, length, event)) = pending.peek() {
+        let mut pending = ring.events.iter().filter(|(seq, _)| *seq > after).peekable();
+        while let Some(&(seq, text)) = pending.peek() {
             // Sizes are summed before deltas are joined, so the page only comes out smaller.
-            let mut event = event.clone();
-            let mut length = *length;
+            let Ok(mut event) = serde_json::from_str::<Value>(text) else {
+                pending.next();
+                continue;
+            };
+            let mut length = text.len();
             if size + length + 1 > budget {
                 if !first || !events.is_empty() {
                     break;
@@ -1958,16 +1917,16 @@ impl Journal {
     /// left off (same `epoch`), the events it missed or `gap: true`. The replay fills at most
     /// [`REPLAY_BUDGET`]: a task whose replay goes on is marked `more` and its `seq` is the
     /// last one replayed, so the viewer's next subscribe continues from there.
-    fn resume(&mut self, tasks: &mut [Value], after: &HashMap<String, u64>, epoch: Option<&str>) -> Resumed {
+    fn resume(&mut self, tasks: &mut [Value], after: &HashMap<String, u64>, epoch: Option<&str>, budget: usize) -> Resumed {
         let same = epoch == Some(self.epoch.as_str());
-        let (mut room, mut more, mut gaps) = (REPLAY_BUDGET, false, 0);
+        let (mut room, mut more, mut gaps) = (budget, false, 0);
         for task in tasks {
             let Some(id) = task["sessionId"].as_str().map(str::to_owned) else { continue };
             self.watch(&id);
             task["seq"] = json!(self.seq);
             let Some(&after) = after.get(&id) else { continue };
             // Past the room, a task's replay starts in the next page.
-            match if same { self.missed(&id, after, room, room == REPLAY_BUDGET) } else { Missed::Gap } {
+            match if same { self.missed(&id, after, room, room == budget) } else { Missed::Gap } {
                 Missed::Events { events, more: rest, last } => {
                     if !events.is_empty() {
                         room = room.saturating_sub(json!(events).to_string().len());
@@ -1983,6 +1942,8 @@ impl Journal {
                 }
             }
         }
+        // After the loop, which touched every subscribed task, so none of those is dropped.
+        self.sweep(Instant::now());
         Resumed { epoch: self.epoch.clone(), more, gaps }
     }
 }
@@ -2101,7 +2062,7 @@ fn invalidate_pull_cache(session_id: &str) {
     });
 }
 
-async fn detect_pull(app: &tauri::AppHandle, state: &AppState, from: &str, authenticated_key: &str, session_id: &str) -> Result<Value> {
+async fn detect_pull(app: &tauri::AppHandle, state: &AppState, session_id: &str) -> Result<Value> {
     let store = state.store.clone();
     let session_id_owned = session_id.to_owned();
     let context = crate::blocking(move || {
@@ -2110,7 +2071,17 @@ async fn detect_pull(app: &tauri::AppHandle, state: &AppState, from: &str, authe
         if task.pull_request.as_ref().is_some_and(|link| ["open", "draft"].contains(&link.state.as_str())) {
             return Ok(None);
         }
-        let crate::github_pull::LatestTurn { text: turn, started_at: started, last_message_id: latest_message_id } = crate::github_pull::latest_turn(store.messages(&session_id_owned, None)?);
+        let messages = store.messages(&session_id_owned, None)?;
+        let latest_message_id = messages.first().map(|message| message.id).unwrap_or_default();
+        let mut turn = Vec::new();
+        let mut started = 0;
+        for message in messages {
+            if message.role == "user" {
+                started = message.created_at;
+                break;
+            }
+            turn.push(message.content);
+        }
         if !turn.iter().any(|text| text.contains("/pull/")) {
             return Ok(None);
         }
@@ -2152,10 +2123,8 @@ async fn detect_pull(app: &tauri::AppHandle, state: &AppState, from: &str, authe
     let store = state.store.clone();
     let session_id_owned = session_id.to_owned();
     let saved_link = link.clone();
-    let (handle, device, key) = (app.clone(), from.to_owned(), authenticated_key.to_owned());
     let saved = crate::blocking(move || {
         let store = store.lock().map_err(|e| e.to_string())?;
-        require_method(&handle, &device, &key, "task.pullDetect")?;
         if store.session(&session_id_owned)?.pull_request.is_some_and(|current| current.number == saved_link.number) {
             return Ok(false);
         }
@@ -2642,6 +2611,40 @@ fn subscribed_tasks(state: &AppState, ids: &[String]) -> Result<(Vec<Value>, Vec
     Ok((tasks, missing))
 }
 
+/// A task whose replay has a gap may have lost its last `subagent` events (a run that ended
+/// while the viewer was away has no live snapshot): its saved children go with it, as many
+/// tasks as keep the reply within [`PAGE_BUDGET`]. Live runs already carry theirs.
+fn add_gap_subagents(mut reply: Value, saved: impl Fn(&str) -> Result<Vec<crate::providers::SubagentActivity>>) -> Value {
+    let ids: Vec<String> = reply["tasks"].as_array().map(|tasks| tasks.iter().filter(|task| task["gap"] == true && task.get("subagents").is_none()).filter_map(|task| task["sessionId"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
+    let mut size = reply.to_string().len();
+    for id in ids {
+        let Ok((children, truncated)) = saved(&id).and_then(|children| bounded_subagents(&children, SUBAGENT_SNAPSHOT_BUDGET)) else { continue };
+        if children.is_empty() {
+            continue;
+        }
+        let mut extra = json!({"subagents": children});
+        if truncated {
+            extra["subagentsTruncated"] = json!(true);
+        }
+        let added = extra.to_string().len();
+        if size + added > PAGE_BUDGET {
+            break;
+        }
+        let Some(task) = reply["tasks"].as_array_mut().and_then(|tasks| tasks.iter_mut().find(|task| task["sessionId"] == id.as_str())) else { continue };
+        task.as_object_mut().into_iter().for_each(|task| task.extend(extra.as_object().cloned().unwrap_or_default()));
+        size += added;
+    }
+    reply
+}
+
+fn subscribe_reply(tasks: Vec<Value>, missing: &[Value], replay: &Resumed) -> Value {
+    let mut reply = json!({"tasks": tasks, "missing": missing, "epoch": replay.epoch});
+    if replay.more {
+        reply["more"] = json!(true);
+    }
+    reply
+}
+
 /// Clones the currently answerable events into a small JSON shape for late subscribers.
 fn pending_items(requests: &HashMap<String, AgentEvent>) -> Vec<Value> {
     let mut items: Vec<Value> = requests
@@ -2717,18 +2720,42 @@ fn message_exists(db: &rusqlite::Connection, session_id: &str, id: i64, older: b
 }
 
 /// Legacy `afterId` page entrypoint used by mirror copies and tests.
+#[cfg(test)]
 pub(crate) fn messages_page(db: &rusqlite::Connection, session_id: &str, after_id: i64) -> Result<Value> {
     messages_page_with(db, session_id, MessagePaging::After { after_id, limit: PAGE_ROWS })
 }
 
 /// Reads a message page oldest first, cutting individual messages and the page to fit one frame.
 /// `hasMore` means newer rows follow the page; `hasOlder` means older rows precede its first id.
+#[cfg(test)]
 pub(crate) fn messages_page_with(db: &rusqlite::Connection, session_id: &str, page: MessagePaging) -> Result<Value> {
+    messages_page_fit(db, session_id, page, PAGE_BUDGET)
+}
+
+/// [`messages_page_with`] in `budget` JSON bytes (the newest that fit, for newest-first pages;
+/// always at least one message). Over [`PAGE_BUDGET`] the page is for a viewer that opens packed
+/// frames, and is cut until it packs into [`PAGE_BUDGET`], so the sealed frame fits the relay.
+#[cfg(test)]
+pub(crate) fn messages_page_fit(db: &rusqlite::Connection, session_id: &str, page: MessagePaging, budget: usize) -> Result<Value> {
+    Ok(fit_page(read_page(db, session_id, page)?, budget))
+}
+
+/// A message page's rows and bounds, read in one pass under the store lock; [`fit_page`]
+/// fits them to a budget without it.
+pub(crate) struct PageRows {
+    page: MessagePaging,
+    title: String,
+    /// The session's lowest and highest message ids.
+    first_id: Option<i64>,
+    last_id: Option<i64>,
+    rows: Vec<Value>,
+}
+
+pub(crate) fn read_page(db: &rusqlite::Connection, session_id: &str, page: MessagePaging) -> Result<PageRows> {
     let title: String = db.query_row("SELECT title FROM sessions WHERE id=?1", [session_id], |r| r.get(0)).optional().map_err(|e| e.to_string())?.ok_or("Conversation not found.")?;
-    let last_id: Option<i64> = db
-        .query_row("SELECT MAX(id) FROM messages WHERE session_id=?1", [session_id], |row| row.get(0))
+    let (first_id, last_id): (Option<i64>, Option<i64>) = db
+        .query_row("SELECT MIN(id),MAX(id) FROM messages WHERE session_id=?1", [session_id], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|e| e.to_string())?;
-    let newest_first = matches!(page, MessagePaging::Tail { .. } | MessagePaging::Before { .. });
     let mut statement = match page {
         MessagePaging::After { .. } => db.prepare("SELECT id,role,content,created_at,turn_duration_ms FROM messages WHERE session_id=?1 AND id>?2 ORDER BY id LIMIT ?3"),
         MessagePaging::Tail { .. } => db.prepare("SELECT id,role,content,created_at,turn_duration_ms FROM messages WHERE session_id=?1 ORDER BY id DESC LIMIT ?2"),
@@ -2742,59 +2769,124 @@ pub(crate) fn messages_page_with(db: &rusqlite::Connection, session_id: &str, pa
     }
     .map_err(|e| e.to_string())?;
     let mut rows: Vec<Value> = mapped.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())?;
-    let fetched = rows.len();
-    let has_attachment_table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_attachments')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    let mut attachments = page_attachments(db, session_id, &rows)?;
     for message in &mut rows {
         let message_id = message["id"].as_i64().unwrap_or_default();
-        let (role, content, kind) = crate::architect::internal_turns::project_text_in_db(
-            db, session_id, message_id, message["role"].as_str().unwrap_or_default(), message["content"].as_str().unwrap_or_default(),
-        )?;
-        message["role"] = json!(role);
-        message["content"] = json!(content);
-        if let Some(kind) = kind {
-            message["coordinationKind"] = json!(kind);
-        }
-        let mut attachments = if has_attachment_table {
-            crate::attachments::message_attachment_rows(db, session_id, message_id)?
-        } else { Vec::new() };
+        let mut list = attachments.remove(&message_id).unwrap_or_default();
         if message["role"] == "user" {
-            let content = message["content"].as_str().unwrap_or_default();
-            attachments.extend(context_attachments(message_id, content));
+            list.extend(context_attachments(message_id, message["content"].as_str().unwrap_or_default()));
         }
-        message["attachments"] = json!(attachments);
+        message["attachments"] = json!(list);
     }
-    let mut room = PAGE_BUDGET.saturating_sub(json!({"messages": [], "hasMore": false, "hasOlder": false, "title": &title, "lastId": last_id}).to_string().len());
-    let mut kept = Vec::new();
-    for mut message in rows {
-        if message.to_string().len() > MAX_MESSAGE {
-            fit_message(&mut message);
+    Ok(PageRows { page, title, first_id, last_id, rows })
+}
+
+/// The page's image attachments by message id, in one query over the page's id range.
+fn page_attachments(db: &rusqlite::Connection, session_id: &str, rows: &[Value]) -> Result<HashMap<i64, Vec<Value>>> {
+    let ids = rows.iter().filter_map(|row| row["id"].as_i64());
+    let (Some(low), Some(high)) = (ids.clone().min(), ids.max()) else { return Ok(HashMap::new()) };
+    let table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_attachments')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    let mut by_message: HashMap<i64, Vec<Value>> = HashMap::new();
+    if !table {
+        return Ok(by_message);
+    }
+    // The same rows and shape as attachments::message_attachment_rows, for every message at once.
+    let mut statement = db
+        .prepare("SELECT message_id,id,kind,name,mime,bytes,width,height FROM message_attachments WHERE session_id=?1 AND message_id BETWEEN ?2 AND ?3 ORDER BY message_id,rowid")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params![session_id, low, high], |row| {
+            Ok((row.get::<_, i64>(0)?, json!({
+                "id": row.get::<_, String>(1)?, "kind": row.get::<_, String>(2)?, "name": row.get::<_, String>(3)?,
+                "mime": row.get::<_, String>(4)?, "bytes": row.get::<_, i64>(5)?,
+                "width": row.get::<_, Option<u32>>(6)?, "height": row.get::<_, Option<u32>>(7)?
+            })))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (message, attachment) = row.map_err(|e| e.to_string())?;
+        by_message.entry(message).or_default().push(attachment);
+    }
+    Ok(by_message)
+}
+
+/// Fits read rows to `budget`. Each message is cut and measured once; a packed page is packed at
+/// the socket's level and, when too big, refitted once by the ratio seen, else held to
+/// [`PAGE_BUDGET`] plain, which always fits a frame.
+pub(crate) fn fit_page(rows: PageRows, budget: usize) -> Value {
+    let messages: Vec<(Value, usize)> = rows
+        .rows
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if message.to_string().len() > MAX_MESSAGE {
+                fit_message(&mut message);
+            }
+            let size = message.to_string().len();
+            (message, size)
+        })
+        .collect();
+    let page = fit_page_in(&rows, &messages, budget);
+    if budget <= PAGE_BUDGET {
+        return page;
+    }
+    let plain = page.to_string().len();
+    let packed = packed_len(&page);
+    if packed <= PAGE_BUDGET {
+        return page;
+    }
+    let scaled = (plain as u128 * PAGE_BUDGET as u128 * 9 / (10 * packed as u128)) as usize;
+    if scaled > PAGE_BUDGET {
+        let page = fit_page_in(&rows, &messages, scaled);
+        if packed_len(&page) <= PAGE_BUDGET {
+            return page;
         }
-        let size = message.to_string().len() + 1;
-        // The first message always fits: once cut it is under the budget.
-        if size > room && !kept.is_empty() {
+    }
+    fit_page_in(&rows, &messages, PAGE_BUDGET)
+}
+
+/// The packed size of `value` as the socket sends it (`crypto::pack`, level 6), without keeping
+/// the output. Fast deflate packs worse, so sizing by it left pages near 60 % of a frame.
+fn packed_len(value: &Value) -> usize {
+    use std::io::Write;
+    let mut out = flate2::write::DeflateEncoder::new(std::io::sink(), flate2::Compression::new(6));
+    let _ = serde_json::to_writer(&mut out, value);
+    let _ = out.flush();
+    out.total_out() as usize + 1
+}
+
+fn fit_page_in(rows: &PageRows, messages: &[(Value, usize)], budget: usize) -> Value {
+    let PageRows { page, title, first_id, last_id, .. } = rows;
+    let mut room = budget.saturating_sub(json!({"messages": [], "hasMore": false, "hasOlder": false, "title": title, "lastId": last_id}).to_string().len());
+    let mut kept = Vec::new();
+    for (message, size) in messages {
+        if size + 1 > room {
+            if kept.is_empty() {
+                // A small page stays small: its one message is cut to the budget and marked, and
+                // viewers fetch it whole later (afterId id-1). Full pages never get here.
+                let mut message = message.clone();
+                cut_to(&mut message, room.saturating_sub(r#","cut":true"#.len() + 1));
+                message["cut"] = json!(true);
+                kept.push(message);
+            }
             break;
         }
-        room = room.saturating_sub(size);
-        kept.push(message);
+        room -= size + 1;
+        kept.push(message.clone());
     }
-    if newest_first {
+    if matches!(page, MessagePaging::Tail { .. } | MessagePaging::Before { .. }) {
         kept.reverse();
     }
-    let first_id = kept.first().and_then(|message| message["id"].as_i64());
-    let last_page_id = kept.last().and_then(|message| message["id"].as_i64());
-    let has_older = match first_id {
-        Some(id) => message_exists(db, session_id, id, true)?,
-        None => false,
-    };
-    let has_more = match page {
-        MessagePaging::After { limit, .. } => kept.len() < fetched || fetched as i64 == limit,
+    let page_first = kept.first().and_then(|message| message["id"].as_i64());
+    let page_last = kept.last().and_then(|message| message["id"].as_i64());
+    // Ids only grow, so older (newer) rows exist exactly when the session's lowest (highest) id is past the page's.
+    let has_older = matches!((first_id, page_first), (Some(low), Some(id)) if *low < id);
+    let has_more = match *page {
+        MessagePaging::After { limit, .. } => kept.len() < rows.rows.len() || rows.rows.len() as i64 == limit,
         MessagePaging::Tail { .. } => false,
-        MessagePaging::Before { .. } => match last_page_id {
-            Some(id) => message_exists(db, session_id, id, false)?,
-            None => false,
-        },
+        MessagePaging::Before { .. } => matches!((last_id, page_last), (Some(high), Some(id)) if *high > id),
     };
-    Ok(json!({"messages": kept, "hasMore": has_more, "hasOlder": has_older, "title": title, "lastId": last_id}))
+    json!({"messages": kept, "hasMore": has_more, "hasOlder": has_older, "title": title, "lastId": last_id})
 }
 
 /// Drops the tail of a list until its JSON fits `budget`.
@@ -2864,24 +2956,26 @@ pub(crate) fn frames(events: Vec<Value>) -> Vec<Vec<Value>> {
 }
 
 /// Adds a task to a device's subscription, starting one if it has none.
-pub(crate) fn follow(app: &tauri::AppHandle, device: &str, authenticated_key: &str, session_id: &str) -> Result<()> {
+pub(crate) fn follow(app: &tauri::AppHandle, device: &str, session_id: &str) {
     let state = remote(app);
     let mut inner = state.lock();
-    super::grants::authorize(&state.dir, &inner, device, authenticated_key, "subscribe")?;
     let subscriber = inner.subscribers.entry(device.to_owned()).or_default();
     if subscriber.until.is_none_or(|until| until <= Instant::now()) {
         subscriber.until = Some(Instant::now() + SUBSCRIPTION);
     }
     subscriber.sessions.insert(session_id.to_owned());
     inner.journal.watch(session_id);
-    Ok(())
 }
 
-/// Drops subscribers that expired, left the account or lost trust; true if any remain.
+/// Drops expired subscribers and devices no longer in presence; true if any remain.
 fn prune_subscribers(inner: &mut super::Inner, now: Instant) -> bool {
-    let super::Inner { subscribers, devices, settings, .. } = inner;
-    subscribers.retain(|id, subscriber| subscriber.until.is_some_and(|until| until > now) && devices.iter().any(|d| &d.id == id && settings.is_trusted(id, &d.public_key)));
-    !subscribers.is_empty()
+    let super::Inner { subscribers, devices, .. } = inner;
+    let before = subscribers.len();
+    subscribers.retain(|id, subscriber| subscriber.until.is_some_and(|until| until > now) && devices.iter().any(|d| &d.id == id));
+    if inner.subscribers.len() < before {
+        forget_unfollowed_teams(inner);
+    }
+    !inner.subscribers.is_empty()
 }
 
 /// Numbers an event, keeps it for viewers that come back, and queues it for every device
@@ -2900,11 +2994,32 @@ pub(crate) fn agent_event(app: &tauri::AppHandle, event: &AgentEvent) {
     if let Some(delay) = delay {
         tauri::async_runtime::spawn(flush(app.clone(), delay));
     }
+    if matches!(event.kind.as_str(), "approval" | "input_request") && wants_notify(app) {
+        let _ = super::socket::relay(app, notify_frame("waiting", 1));
+    }
 }
 
 /// Queues `run.finished` for every device mirroring the task.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool, stopped: bool, text: &str) {
     journaled(app, session_id, json!({"sessionId": session_id, "successful": successful, "stopped": stopped, "text": text}), Queue::Finished);
+    if wants_notify(app) {
+        let _ = super::socket::relay(app, notify_frame("finished", 1));
+    }
+}
+
+/// The relay frame that becomes a phone push; the relay's bridge coalesces bursts and keeps
+/// payloads generic (counts only, no session ids or text).
+pub(crate) fn notify_frame(kind: &str, count: u32) -> String {
+    json!({"kind": "notify", "body": {"kind": kind, "count": count}}).to_string()
+}
+
+/// Whether this computer should push about the notice just emitted: the setting is on and the
+/// relay socket is up. Checked before the frame is queued; the relay does the rest.
+fn wants_notify(app: &tauri::AppHandle) -> bool {
+    app.try_state::<super::Remote>().is_some_and(|state| {
+        let inner = state.lock();
+        inner.settings.notify_enabled && inner.connected
+    })
 }
 
 /// How a numbered entry is queued: as an agent event, as a run end, or as the run end of a
@@ -2926,9 +3041,27 @@ fn followed(inner: &super::Inner, session_id: &str) -> Option<bool> {
 /// that comes back gets it in its replay too.
 fn journaled(app: &tauri::AppHandle, session_id: &str, value: Value, queue: Queue) {
     let Some(state) = app.try_state::<super::Remote>() else { return };
-    let delay = journal_and_enqueue(&mut state.lock(), session_id, value, queue);
+    let (delay, sweep) = {
+        let mut inner = state.lock();
+        let delay = journal_and_enqueue(&mut inner, session_id, value, queue);
+        (delay, inner.journal.arm(Instant::now()))
+    };
     if let Some(delay) = delay {
         tauri::async_runtime::spawn(flush(app.clone(), delay));
+    }
+    if let Some(sweep) = sweep {
+        tauri::async_runtime::spawn(sweep_later(app.clone(), sweep));
+    }
+}
+
+/// Sweeps the journal when its first finished ring goes idle, so an idle host does not keep
+/// rings after the last run ends; one task, re-armed only while finished rings remain.
+async fn sweep_later(app: tauri::AppHandle, mut delay: Duration) {
+    loop {
+        tokio::time::sleep(delay).await;
+        let Some(state) = app.try_state::<super::Remote>() else { return };
+        let Some(next) = state.lock().journal.fire(Instant::now()) else { return };
+        delay = next;
     }
 }
 
@@ -2971,13 +3104,20 @@ fn enqueue(inner: &mut super::Inner, session_id: &str, mut add: impl FnMut(&mut 
 }
 
 /// The first event after a quiet spell goes at once (a turn's first delta shows without
-/// waiting); events right behind it are gathered for [`FLUSH`], and once a burst has sent
-/// `frames` frames, for [`SUSTAINED`].
+/// waiting); events right behind it wait out the rest of [`FLUSH`] since `last`, and once a
+/// burst has sent `frames` frames, of [`SUSTAINED`]. `last` is when the last flush's frames
+/// are paid for ([`paid_until`]), so several viewers share the relay's frames/s.
 pub(crate) fn flush_delay(last: Option<Instant>, frames: u32, now: Instant) -> Duration {
     match last {
-        Some(at) if now.saturating_duration_since(at) < SUSTAINED => if frames < BURST_FRAMES { FLUSH } else { SUSTAINED },
+        Some(at) if now < at + SUSTAINED => (at + if frames < BURST_FRAMES { FLUSH } else { SUSTAINED }).saturating_duration_since(now),
         _ => Duration::ZERO,
     }
+}
+
+/// When a flush that sent `sent` frames at `now` is paid for: past the burst every frame
+/// after the first takes [`SUSTAINED`] of the socket's budget.
+pub(crate) fn paid_until(now: Instant, frames: u32, sent: u32) -> Instant {
+    if frames < BURST_FRAMES { now } else { now + SUSTAINED * sent.saturating_sub(1) }
 }
 
 /// Sends each subscriber one `agent.events` frame (more only past the frame budget),
@@ -2986,17 +3126,22 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
-    type SubscriberBatch = (String, Vec<Value>, Vec<Value>);
-    let (epoch, batches): (String, Vec<SubscriberBatch>) = {
+    #[allow(clippy::type_complexity)]
+    let (epoch, batches, started, counted): (String, Vec<(String, Vec<Value>, Vec<Value>)>, Instant, u32) = {
         let state = remote(&app);
         let mut inner = state.lock();
         inner.flushing = false;
-        inner.flushed_at = Some(Instant::now());
-        inner.flush_frames = inner.flush_frames.saturating_add(1);
         let hosting = inner.settings.host_enabled;
-        let batches = inner.subscribers.iter_mut().filter(|_| hosting).map(|(id, s)| (id.clone(), std::mem::take(&mut s.events), std::mem::take(&mut s.finished))).filter(|(_, events, finished)| !events.is_empty() || !finished.is_empty()).collect();
-        (inner.journal.epoch.clone(), batches)
+        let batches: Vec<_> = inner.subscribers.iter_mut().filter(|_| hosting).map(|(id, s)| (id.clone(), std::mem::take(&mut s.events), std::mem::take(&mut s.finished))).filter(|(_, events, finished)| !events.is_empty() || !finished.is_empty()).collect();
+        // Paced by the frames this flush sends (one per viewer at least), not by flushes;
+        // a frame split for size is added once sent.
+        let counted = batches.iter().map(|(_, events, finished)| u32::from(!events.is_empty()) + finished.len() as u32).sum::<u32>().max(1);
+        let now = Instant::now();
+        inner.flush_frames = inner.flush_frames.saturating_add(counted);
+        inner.flushed_at = Some(paid_until(now, inner.flush_frames, counted));
+        (inner.journal.epoch.clone(), batches, now, counted)
     };
+    let mut sent = 0u32;
     // Read after the run end has settled its team (architect::completed follows it), so a
     // team whose workers carry on reports the run's task as still running.
     let ids: Vec<String> = batches.iter().flat_map(|(_, _, finished)| finished.iter().filter(|data| data.get("team").is_none()).filter_map(|data| data["sessionId"].as_str().map(str::to_owned))).collect::<HashSet<_>>().into_iter().collect();
@@ -3027,15 +3172,22 @@ async fn flush(app: tauri::AppHandle, delay: Duration) {
             super::diagnostics::record("subscriber.lagged", format!("{device}: over {MAX_BUFFER} buffered events"));
         }
         for frame in lagged_frames(frames(events), behind, &epoch) {
-            let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
+            sent += 1;
+            let _ = socket::send_to_device(&app, &device, &json!({"type": "event", "name": "agent.events", "data": frame}));
         }
         for data in finished {
-            let _ = socket::send_trusted(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
+            sent += 1;
+            let _ = socket::send_to_device(&app, &device, &json!({"type": "event", "name": "run.finished", "data": data}));
         }
     }
-    if !amended.is_empty() {
+    if sent > counted || !amended.is_empty() {
         let state = remote(&app);
         let mut inner = state.lock();
+        if sent > counted {
+            inner.flush_frames = inner.flush_frames.saturating_add(sent - counted);
+            let paid = paid_until(started, inner.flush_frames, sent);
+            inner.flushed_at = inner.flushed_at.max(Some(paid));
+        }
         for (seq, (id, data)) in amended {
             inner.journal.amend(&id, seq, data);
         }
@@ -3082,12 +3234,19 @@ fn shrink(value: &mut Value, max: usize) {
 
 /// Cuts one oversized message. JSON content (tool calls) is cut inside, so it still parses.
 fn cut(message: &mut Value) {
+    cut_to(message, MAX_MESSAGE);
+}
+
+fn cut_to(message: &mut Value, max: usize) {
+    if message.to_string().len() <= max {
+        return;
+    }
     let parsed = message["content"].as_str().and_then(|content| serde_json::from_str::<Value>(content).ok()).filter(Value::is_object);
     if let Some(mut content) = parsed {
-        shrink(&mut content, MAX_MESSAGE * 3 / 4);
+        shrink(&mut content, max * 3 / 4);
         message["content"] = json!(content.to_string());
     }
-    shrink(message, MAX_MESSAGE);
+    shrink(message, max);
 }
 
 #[cfg(test)]
@@ -3123,6 +3282,10 @@ mod tests {
                 updated_at: 150,
             }),
             timed_out: false,
+            failovers: 0,
+            parent_worker: None,
+            resume_prompt: None,
+            tool_catalog_version: 0,
         }
     }
 
@@ -3135,6 +3298,7 @@ mod tests {
                 roster_only: false,
                 name: None,
                 workers: vec![],
+                catalog: vec![],
                 max_parallel: 0,
                 max_rounds: 8,
                 max_assignments: 50,
@@ -3184,8 +3348,12 @@ mod tests {
     fn team_snapshot_and_worker_event_keep_the_phone_shape() {
         let team = team_fixture(vec![worker_fixture("w1", "waiting")]);
         let worker = remote_worker(&team.workers[0]);
+        let mut parked = worker_fixture("s1", "parked");
+        parked.parent_worker = Some("w1".into());
+        let parked = remote_worker(&parked);
+        assert_eq!((parked["status"].as_str(), parked["parentWorker"].as_str()), (Some("parked"), Some("w1")));
         let mut previous = HashMap::new();
-        assert_eq!(changed_worker_rows(&team, &mut previous).as_slice(), std::slice::from_ref(&worker));
+        assert_eq!(changed_worker_rows(&team, &mut previous), std::slice::from_ref(&worker));
         assert!(
             changed_worker_rows(&team, &mut previous).is_empty(),
             "unchanged rows are not resent"
@@ -3211,6 +3379,97 @@ mod tests {
         assert_eq!(event["kind"], "team");
         assert_eq!(event["data"]["id"], "w1");
         assert_eq!(event["data"]["sessionId"], "session-w1");
+    }
+
+    #[test]
+    fn gap_tasks_get_their_saved_subagents_within_budget() {
+        let reply = json!({"tasks": [
+            {"sessionId": "ended", "gap": true},
+            {"sessionId": "live", "gap": true, "subagents": []},
+            {"sessionId": "caught-up"},
+            {"sessionId": "none", "gap": true},
+        ]});
+        let saved = |id: &str| Ok(if id == "none" { vec![] } else { vec![subagent(&format!("{id}:a"), "done")] });
+        let out = add_gap_subagents(reply.clone(), saved);
+        assert_eq!(out["tasks"][0]["subagents"][0]["id"], "ended:a", "an ended run's children come back");
+        assert_eq!(out["tasks"][1]["subagents"], json!([]), "a live snapshot is kept");
+        assert!(out["tasks"][2].get("subagents").is_none() && out["tasks"][3].get("subagents").is_none());
+        let full = json!({"tasks": [{"sessionId": "ended", "gap": true, "title": "x".repeat(PAGE_BUDGET)}]});
+        assert!(add_gap_subagents(full, saved)["tasks"][0].get("subagents").is_none(), "never past the budget");
+    }
+
+    #[test]
+    fn worker_transcripts_page_from_the_tail_and_back() {
+        let store = crate::storage::Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let parent = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
+        let child = store.create_session(&project.id, "codex", "gpt", "full").unwrap();
+        let mut team = team_fixture(vec![worker_fixture("w1", "running")]);
+        team.session_id = parent.id.clone();
+        team.workers[0].session_id = child.id.clone();
+        store.db.execute("INSERT INTO architect_teams(session_id,content) VALUES(?1,?2)", rusqlite::params![parent.id, serde_json::to_string(&team).unwrap()]).unwrap();
+        for index in 0..5 {
+            store.message(&child.id, if index % 2 == 0 { "user" } else { "assistant" }, &format!("m{index}")).unwrap();
+        }
+        let texts = |page: &Value| page["messages"].as_array().unwrap().iter().map(|m| m["content"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let tail = worker_messages(&store, &parent.id, "w1", 0, Some(i64::MAX), 2).unwrap();
+        assert_eq!(texts(&tail), ["m3", "m4"], "the newest, in order");
+        assert_eq!((tail["hasOlder"].as_bool(), tail["hasMore"].as_bool(), tail["tail"].as_bool()), (Some(true), Some(false), Some(true)));
+        let first = tail["messages"][0]["id"].as_i64().unwrap();
+        let older = worker_messages(&store, &parent.id, "w1", 0, Some(first), 2).unwrap();
+        assert_eq!(texts(&older), ["m1", "m2"]);
+        assert_eq!((older["hasOlder"].as_bool(), older["hasMore"].as_bool()), (Some(true), Some(true)));
+        let forward = worker_messages(&store, &parent.id, "w1", 0, None, 2).unwrap();
+        assert_eq!(texts(&forward), ["m0", "m1"]);
+        assert!(forward.get("tail").is_none(), "forward pages read as before");
+    }
+
+    /// Host and viewer together: a worker transcript too big for one page loads from the
+    /// tail back to its first message, each message once and in order, never merging newer
+    /// history into an older page.
+    #[test]
+    fn a_long_worker_transcript_pages_back_to_its_first_message() {
+        let store = crate::storage::Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let parent = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
+        let child = store.create_session(&project.id, "codex", "gpt", "full").unwrap();
+        let mut team = team_fixture(vec![worker_fixture("w1", "completed")]);
+        team.session_id = parent.id.clone();
+        team.workers[0].session_id = child.id.clone();
+        store.db.execute("INSERT INTO architect_teams(session_id,content) VALUES(?1,?2)", rusqlite::params![parent.id, serde_json::to_string(&team).unwrap()]).unwrap();
+        // 30 messages of 20 KiB: about three host pages each way.
+        let written: Vec<String> = (0..30).map(|index| format!("m{index:02} {}", "x".repeat(20 * 1024))).collect();
+        for (index, text) in written.iter().enumerate() {
+            store.message(&child.id, if index % 2 == 0 { "user" } else { "assistant" }, text).unwrap();
+        }
+        let store = StdMutex::new(store);
+        let ask = |key: &str, value: Value| {
+            let mut params = json!({"sessionId": parent.id, "workerId": "w1"});
+            params[key] = value;
+            let reply = match parse(true, "task.workerMessages", &params).unwrap() {
+                Call::WorkerMessages { session_id, worker_id, after_id, before_id, limit } => worker_messages(&store.lock().unwrap(), &session_id, &worker_id, after_id, before_id, limit),
+                _ => unreachable!(),
+            };
+            std::future::ready(reply)
+        };
+        let page = |before: Option<i64>| tauri::async_runtime::block_on(super::super::mirror::worker_pages(ask, before)).unwrap();
+        let ids = |page: &Value| page["messages"].as_array().unwrap().iter().map(|m| m["id"].as_i64().unwrap()).collect::<Vec<_>>();
+        let mut loaded = page(None);
+        assert!(loaded["hasOlder"] == true && ids(&loaded).len() < 30, "the tail page was cut: {}", ids(&loaded).len());
+        let mut seen = loaded["messages"].as_array().unwrap().clone();
+        let mut pages = 1;
+        while loaded["hasOlder"] == true {
+            let first = seen[0]["id"].as_i64().unwrap();
+            loaded = page(Some(first));
+            let older = ids(&loaded);
+            assert!(!older.is_empty() && older.iter().all(|id| *id < first), "an older page holds only older rows: {older:?} before {first}");
+            seen = [loaded["messages"].as_array().unwrap().clone(), seen].concat();
+            pages += 1;
+            assert!(pages < 30);
+        }
+        assert!(pages >= 3, "{pages}");
+        let texts: Vec<&str> = seen.iter().map(|m| m["content"].as_str().unwrap()).collect();
+        assert_eq!(texts, written.iter().map(String::as_str).collect::<Vec<_>>());
     }
 
     fn team_state(status: &str, active_workers: i64, revision: u64) -> TeamState {
@@ -3262,6 +3521,12 @@ mod tests {
         let mut row = json!({"status": "waiting"});
         shape_task_status(&mut row, true, None);
         assert_eq!(row["status"], "waiting");
+    }
+
+    #[test]
+    fn notify_frames_carry_only_the_kind_and_count() {
+        let frame: Value = serde_json::from_str(&notify_frame("waiting", 2)).unwrap();
+        assert_eq!(frame, json!({"kind": "notify", "body": {"kind": "waiting", "count": 2}}));
     }
 
     #[test]
@@ -3330,7 +3595,7 @@ mod tests {
             "id": id, "sessionId": "session-w1", "role": "assistant", "content": "response ".repeat(320),
             "createdAt": id, "turnDurationMs": null, "authorProvider": "codex", "turnChanges": null, "coordinationKind": null,
         })).collect();
-        let page = fit_worker_message_page("Worker w1", Some(100), values, false, true);
+        let page = fit_worker_message_page("Worker w1", Some(100), values, false, true, false);
         assert!(page.to_string().len() <= PAGE_BUDGET);
         assert_eq!(page["title"], "Worker w1");
         assert_eq!(page["lastId"], 100);
@@ -3338,6 +3603,18 @@ mod tests {
         assert_eq!(page["messages"][0]["sessionId"], "session-w1");
         assert_eq!(page["messages"][0]["authorProvider"], "codex");
         assert!(page["messages"].as_array().unwrap().len() < 100);
+        // Linear: thousands of small messages fit at once, filling the budget closely.
+        let values = (1..=5000).map(|id| json!({"id": id, "role": "assistant", "content": "ok ".repeat(10)})).collect();
+        let started = Instant::now();
+        let page = fit_worker_message_page("Worker w1", Some(5000), values, false, false, false);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let size = page.to_string().len();
+        assert!(size <= PAGE_BUDGET && size > PAGE_BUDGET - 200, "{size}");
+        assert_eq!(page["hasMore"], true);
+        // One oversized message is cut to fit, never dropped.
+        let page = fit_worker_message_page("Worker w1", Some(1), vec![json!({"id": 1, "content": "x".repeat(400 * 1024)})], false, false, false);
+        assert_eq!(page["messages"][0]["id"], 1);
+        assert!(page.to_string().len() <= PAGE_BUDGET);
     }
 
     #[test]
@@ -3391,10 +3668,10 @@ mod tests {
 
     #[test]
     fn requests_are_validated() {
-        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None }));
+        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None, replay: REPLAY_BUDGET }));
         // Where a viewer left off: only for requested tasks, and only valid positions.
         let resume = parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"], "epoch": "e1", "afterSeq": {"s1": 7, "s2": -1, "other": 3}}));
-        assert_eq!(resume, Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::from([("s1".to_string(), 7)]), epoch: Some("e1".into()) }));
+        assert_eq!(resume, Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::from([("s1".to_string(), 7)]), epoch: Some("e1".into()), replay: REPLAY_BUDGET }));
         assert_eq!(parse(true, "task.startStatus", &json!({"startId": "st1"})), Ok(Call::StartStatus { start_id: "st1".into() }));
         assert_eq!(parse(true, "task.cancelStart", &json!({"startId": "st1"})), Ok(Call::CancelStart { start_id: "st1".into() }));
         assert!(parse(true, "task.cancelStart", &json!({})).is_err());
@@ -3408,8 +3685,8 @@ mod tests {
         assert!(parse(true, "task.send", &json!({"sessionId": "s1", "text": "hi", "imageIds": vec![image; 5]})).is_err());
         assert!(parse(true, "image.put", &json!({"uploadId": "u1", "index": 0, "size": 3, "data": "iVBO"})).is_ok());
         assert!(parse(true, "image.put", &json!({"uploadId": "u1", "index": 0, "size": 6 * 1024 * 1024, "data": "iVBO"})).is_err());
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": 7})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 7, limit: PAGE_ROWS } }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": -3})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 0, limit: PAGE_ROWS } }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": 7})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 7, limit: PAGE_ROWS }, budget: PAGE_BUDGET }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": -3})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 0, limit: PAGE_ROWS }, budget: PAGE_BUDGET }));
         assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "effort": null})), Ok(Call::Configure { session_id: "s1".into(), model: None, effort: Some(None), mode: None }));
         assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "mode": "ask"})), Ok(Call::Configure { session_id: "s1".into(), model: None, effort: None, mode: Some("ask".into()) }));
         assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "provider": "codex", "model": "gpt"})), Ok(Call::Configure { session_id: "s1".into(), model: Some(("codex".into(), "gpt".into())), effort: None, mode: None }));
@@ -3457,8 +3734,17 @@ mod tests {
                 session_id: "s1".into(),
                 worker_id: "w1".into(),
                 after_id: 0,
+                before_id: None,
                 limit: WORKER_MESSAGE_PAGE_DEFAULT
             })
+        );
+        assert_eq!(
+            parse(true, "task.workerMessages", &json!({"sessionId": "s1", "workerId": "w1", "tail": true})),
+            Ok(Call::WorkerMessages { session_id: "s1".into(), worker_id: "w1".into(), after_id: 0, before_id: Some(i64::MAX), limit: WORKER_MESSAGE_PAGE_DEFAULT })
+        );
+        assert_eq!(
+            parse(true, "task.workerMessages", &json!({"sessionId": "s1", "workerId": "w1", "beforeId": 40, "limit": 10})),
+            Ok(Call::WorkerMessages { session_id: "s1".into(), worker_id: "w1".into(), after_id: 0, before_id: Some(40), limit: 10 })
         );
         assert_eq!(
             parse(
@@ -3470,6 +3756,7 @@ mod tests {
                 session_id: "s1".into(),
                 worker_id: "w1".into(),
                 after_id: 7,
+                before_id: None,
                 limit: 25
             })
         );
@@ -3479,6 +3766,8 @@ mod tests {
             json!({"sessionId": "s1", "workerId": "w1", "afterId": -1}),
             json!({"sessionId": "s1", "workerId": "w1", "afterId": "7"}),
             json!({"sessionId": "s1", "workerId": "w1", "limit": 0}),
+            json!({"sessionId": "s1", "workerId": "w1", "beforeId": 0}),
+            json!({"sessionId": "s1", "workerId": "w1", "beforeId": "9"}),
             json!({"sessionId": "s1", "workerId": "w1", "limit": WORKER_MESSAGE_PAGE_MAX + 1}),
         ] {
             assert!(
@@ -3529,13 +3818,13 @@ mod tests {
     #[test]
     fn message_paging_options_are_parsed_and_validated() {
         let tail = parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true})).unwrap();
-        assert_eq!(tail, Call::Messages { session_id: "s1".into(), page: MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT } });
+        assert_eq!(tail, Call::Messages { session_id: "s1".into(), page: MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT }, budget: PAGE_BUDGET });
 
         let before = parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19, "limit": 25})).unwrap();
-        assert_eq!(before, Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: 25 } });
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: MESSAGE_PAGE_DEFAULT } }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "limit": 1})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Tail { limit: 1 } }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19, "limit": 400})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: 400 } }));
+        assert_eq!(before, Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: 25 }, budget: PAGE_BUDGET });
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: MESSAGE_PAGE_DEFAULT }, budget: PAGE_BUDGET }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "limit": 1})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Tail { limit: 1 }, budget: PAGE_BUDGET }));
+        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 19, "limit": 400})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::Before { before_id: 19, limit: 400 }, budget: PAGE_BUDGET }));
 
         assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "tail": true, "afterId": 1})).is_err());
         assert!(parse(true, "task.messages", &json!({"sessionId": "s1", "beforeId": 1, "afterId": 2})).is_err());
@@ -3614,14 +3903,14 @@ mod tests {
     fn read_only_request_classification_is_explicit() {
         for method in [
             "tasks.list", "task.messages", "task.changes", "task.diff", "task.pull", "task.pullDiff",
-            "task.attachment", "task.workspaceImage", "projects.icons", "providers.list",
+            "task.pullDetect", "task.attachment", "task.workspaceImage", "projects.icons", "providers.list",
             "providers.models", "bots.list", "subscribe",
         ] {
             assert!(is_read_only_method(method), "{method}");
         }
         for method in [
             "task.send", "task.steer", "task.stop", "task.configure", "approval.respond", "input.respond",
-            "bot.thread", "bot.message", "bot.pause", "task.pullMerge", "task.pullDetect", "task.start", "unknown",
+            "bot.thread", "bot.message", "bot.pause", "task.pullMerge", "task.start", "unknown",
         ] {
             assert!(!is_read_only_method(method), "{method}");
         }
@@ -3641,17 +3930,16 @@ mod tests {
         assert_eq!(
             parsed,
             Call::Batch(vec![
-                Ok(Call::Messages { session_id: "s".into(), page: MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT } }),
+                Ok(Call::Messages { session_id: "s".into(), page: MessagePaging::Tail { limit: MESSAGE_PAGE_DEFAULT }, budget: PAGE_BUDGET }),
                 Err("Missing sessionId.".into()),
             ])
         );
         assert!(parse(true, "batch", &json!({"calls": []})).is_err());
-        let eight = vec![json!({"method": "tasks.list", "params": {}}); 8];
+        let eight = std::iter::repeat_n(json!({"method": "tasks.list", "params": {}}), 8).collect::<Vec<_>>();
         assert!(parse(true, "batch", &json!({"calls": eight})).is_ok());
-        let too_many = vec![json!({"method": "tasks.list", "params": {}}); 9];
+        let too_many = std::iter::repeat_n(json!({"method": "tasks.list", "params": {}}), 9).collect::<Vec<_>>();
         assert!(parse(true, "batch", &json!({"calls": too_many})).is_err());
         assert!(parse(true, "batch", &json!({"calls": [{"method": "task.send", "params": {"sessionId": "s", "text": "x"}}]})).is_err());
-        assert!(parse(true, "batch", &json!({"calls": [{"method": "task.pullDetect", "params": {"sessionId": "s"}}]})).is_err());
         assert!(parse(true, "batch", &json!({"calls": [{"method": "batch", "params": {"calls": []}}]})).is_err());
     }
 
@@ -3775,12 +4063,12 @@ mod tests {
 
     #[test]
     fn host_gate_only_checks_remote_control() {
-        assert_eq!(gate(false, true, "Test host"), Err(OFF.to_string()));
-        assert_eq!(gate(true, true, "Test host"), Ok(()));
+        assert_eq!(gate(false), Err(OFF.to_string()));
+        assert_eq!(gate(true), Ok(()));
     }
 
     #[test]
-    fn a_present_device_cannot_keep_its_subscription_without_a_pin() {
+    fn a_present_device_keeps_its_subscription_without_a_pin() {
         let now = Instant::now();
         let subscriber = Subscriber {
             until: Some(now + Duration::from_secs(60)),
@@ -3794,32 +4082,26 @@ mod tests {
             ..Default::default()
         };
         inner.subscribers.insert("viewer".into(), subscriber);
-        assert!(!prune_subscribers(&mut inner, now));
-        assert!(!inner.subscribers.contains_key("viewer"), "presence must never bypass the pinned-key trust gate");
-        inner.settings.trusted.insert("viewer".into(), "current-key".into());
-        inner.subscribers.insert("viewer".into(), Subscriber { until: Some(now + Duration::from_secs(60)), ..Default::default() });
-        assert!(prune_subscribers(&mut inner, now), "a previously approved peer may remain subscribed");
+        assert!(prune_subscribers(&mut inner, now));
+        assert!(inner.subscribers.contains_key("viewer"));
     }
 
     #[test]
     fn access_is_checked_when_a_request_runs() {
         let mut inner = super::super::Inner {
             devices: vec![super::super::Device { id: "viewer".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
-            replay: super::super::replay::Replay::memory(),
             ..Default::default()
         };
         let now = 1_000_000_000;
         let request = |nonce: &str| json!({"ts": now, "nonce": nonce});
-        assert_eq!(admit(&inner, "viewer", "k"), Err(OFF.to_string()));
+        assert_eq!(admit(&inner, "viewer"), Err(OFF.to_string()));
         inner.settings.host_enabled = true;
-        assert!(admit(&inner, "viewer", "k").is_err(), "present is not the same as trusted");
-        inner.settings.trusted.insert("viewer".into(), "k".into());
-        assert_eq!(admit(&inner, "viewer", "k"), Ok(false));
-        inner.settings.allow_full_access = true;
-        assert_eq!(admit(&inner, "viewer", "k"), Ok(true));
+        assert_eq!(admit(&inner, "viewer"), Ok(false));
+        inner.settings.remote_full_access = true;
+        assert_eq!(admit(&inner, "viewer"), Ok(true));
         // Revoked (gone from presence) after the request was queued.
         inner.devices.clear();
-        assert!(admit(&inner, "viewer", "k").is_err(), "a vanished key cannot authenticate a remote request");
+        assert_eq!(admit(&inner, "viewer"), Err(super::super::UNKNOWN_DEVICE.to_string()));
         // Freshness is checked on arrival: a request that then waits a minute in the
         // queue still runs, and a replay of it is refused when it arrives.
         assert_eq!(fresh_request(&mut inner, &request("nonce-0000000000000003"), now), Ok(()));
@@ -3937,7 +4219,7 @@ mod tests {
         let mut journal = Journal::default();
         let epoch = journal.epoch.clone();
         let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
-        journal.resume(&mut tasks, &HashMap::new(), None);
+        journal.resume(&mut tasks, &HashMap::new(), None, REPLAY_BUDGET);
         // a's missed tool output is several pages; b missed one event after it.
         let chunk = "o".repeat(20 * 1024);
         for i in 0..12 {
@@ -3949,7 +4231,7 @@ mod tests {
         loop {
             pages += 1;
             let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
-            let resumed = journal.resume(&mut tasks, &after, Some(&epoch));
+            let resumed = journal.resume(&mut tasks, &after, Some(&epoch), REPLAY_BUDGET);
             assert_eq!(resumed.gaps, 0, "nothing turns into a gap");
             assert!(json!(tasks).to_string().len() <= REPLAY_BUDGET + 512, "each page fits");
             for (task, seen) in tasks.iter().zip([&mut seen_a, &mut seen_b]) {
@@ -3976,7 +4258,6 @@ mod tests {
             ..Default::default()
         };
         inner.settings.host_enabled = true;
-        inner.settings.trusted.insert("viewer".into(), "k".into());
         inner.subscribers.insert("viewer".into(), Subscriber { until: Some(Instant::now() + SUBSCRIPTION), sessions: HashSet::from(["h1".to_string()]), ..Default::default() });
         let epoch = inner.journal.epoch.clone();
         journal_and_enqueue(&mut inner, "h1", event("h1", "text", "Hi"), Queue::Event);
@@ -3990,7 +4271,7 @@ mod tests {
         // The run end is shaped with its team when sent; the replay says the same.
         inner.journal.amend("h1", 3, json!({"sessionId": "h1", "kind": "run.finished", "status": "running", "seq": 3}));
         let mut tasks = vec![json!({"sessionId": "h1"})];
-        inner.journal.resume(&mut tasks, &HashMap::from([("h1".to_string(), 0)]), Some(&epoch));
+        inner.journal.resume(&mut tasks, &HashMap::from([("h1".to_string(), 0)]), Some(&epoch), REPLAY_BUDGET);
         assert_eq!(tasks[0]["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "team", "run.finished"]);
         assert_eq!(tasks[0]["events"][2]["status"], "running");
         assert_eq!(inner.journal.bytes, inner.journal.rings.values().map(|ring| ring.bytes).sum::<usize>());
@@ -4057,21 +4338,97 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_journal_sweeps_once_its_last_run_end_idles() {
+        let mut journal = Journal::default();
+        let now = Instant::now();
+        assert_eq!(journal.arm(now), None, "nothing finished, nothing to schedule");
+        journal.record("done", json!({"sessionId": "done", "kind": "run.finished", "successful": true}), true).unwrap();
+        let delay = journal.arm(now).expect("a sweep at the idle deadline");
+        assert!(delay >= JOURNAL_IDLE && delay < JOURNAL_IDLE + Duration::from_secs(5));
+        assert_eq!(journal.arm(now), None, "one sweep at a time");
+        // Followed again meanwhile: the sweep keeps it and re-arms for its new deadline.
+        let touched = now + Duration::from_secs(60);
+        journal.rings.get_mut("done").unwrap().touched = touched;
+        assert_eq!(journal.fire(now + JOURNAL_IDLE), Some(Duration::from_secs(60)));
+        assert!(journal.rings.contains_key("done"));
+        assert_eq!(journal.fire(touched + JOURNAL_IDLE), None, "nothing left to wait for");
+        assert!(journal.rings.is_empty() && journal.bytes == 0);
+        assert_eq!(journal.missed("done", 0, REPLAY_BUDGET, true), Missed::Gap, "the phone refetches");
+    }
+
+    #[test]
+    fn unfollowed_tasks_forget_their_team_rows() {
+        let now = Instant::now();
+        let mut inner = super::super::Inner {
+            devices: vec![super::super::Device { id: "phone".into(), name: String::new(), platform: String::new(), public_key: "k".into(), host: false, online: true, last_seen: Value::Null }],
+            ..Default::default()
+        };
+        inner.settings.host_enabled = true;
+        inner.subscribers.insert("phone".into(), Subscriber { until: Some(now + Duration::from_secs(60)), sessions: HashSet::from(["team-kept".to_string()]), ..Default::default() });
+        inner.subscribers.insert("gone".into(), Subscriber { until: Some(now + Duration::from_secs(60)), sessions: HashSet::from(["team-left".to_string()]), ..Default::default() });
+        inner.journal.watch("team-left");
+        for id in ["team-kept", "team-left"] {
+            team_event_cache().lock().unwrap().insert(id.into(), HashMap::from([("w1".to_string(), json!({}))]));
+        }
+        // "gone" left presence: its subscription ends, its ring stays for a replay.
+        assert!(prune_subscribers(&mut inner, now));
+        assert_eq!(followed(&inner, "team-left"), Some(false), "a ring but no subscriber is not following");
+        let cache = team_event_cache().lock().unwrap();
+        assert!(cache.contains_key("team-kept") && !cache.contains_key("team-left"));
+    }
+
+    #[test]
+    fn finished_rings_nobody_follows_are_dropped() {
+        let mut journal = Journal::default();
+        journal.record("done", event("done", "text", "Hi"), true).unwrap();
+        journal.record("done", json!({"sessionId": "done", "kind": "run.finished", "successful": true}), false).unwrap();
+        journal.record("busy", event("busy", "text", "Hi"), true).unwrap();
+        journal.record("back", json!({"sessionId": "back", "kind": "run.finished", "successful": true}), true).unwrap();
+        let later = Instant::now() + JOURNAL_IDLE;
+        journal.sweep(later - Duration::from_secs(1));
+        assert_eq!(journal.rings.len(), 3, "a run that ended a moment ago keeps its events");
+        // A viewer came back to "back" just before the sweep.
+        journal.rings.get_mut("back").unwrap().touched = later;
+        journal.sweep(later + Duration::from_secs(1));
+        assert!(!journal.rings.contains_key("done"), "finished and unfollowed for ten minutes");
+        assert!(journal.rings.contains_key("busy") && journal.rings.contains_key("back"));
+        assert_eq!(journal.bytes, journal.rings.values().map(|ring| ring.bytes).sum::<usize>());
+        assert_eq!(journal.missed("done", 0, REPLAY_BUDGET, true), Missed::Gap);
+        // A new run clears the mark.
+        journal.record("back", event("back", "text", "again"), false).unwrap();
+        assert!(!journal.rings["back"].finished);
+    }
+
+    #[test]
+    fn the_journal_total_stays_under_its_cap() {
+        let mut journal = Journal::default();
+        let big = "x".repeat(512 * 1024);
+        for task in 0..40 {
+            let id = format!("t{task}");
+            journal.record(&id, event(&id, "tool", &big), true).unwrap();
+            assert!(journal.bytes <= JOURNAL_TOTAL);
+        }
+        assert_eq!(journal.bytes, journal.rings.values().map(|ring| ring.bytes).sum::<usize>());
+        let newest = journal.missed("t39", journal.rings["t39"].since, usize::MAX, true);
+        assert!(matches!(newest, Missed::Events { events, .. } if events[0]["text"].as_str().is_some_and(|text| text.len() == big.len())), "replays parse the stored text");
+    }
+
+    #[test]
     fn subscribe_replies_carry_seq_replay_or_a_gap() {
         let mut journal = Journal::default();
         let epoch = journal.epoch.clone();
         let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
-        journal.resume(&mut tasks, &HashMap::new(), None);
+        journal.resume(&mut tasks, &HashMap::new(), None, REPLAY_BUDGET);
         assert_eq!((tasks[0]["seq"].as_u64(), tasks[0].get("gap")), (Some(0), None), "a new viewer gets only the position");
         journal.record("a", event("a", "tool", "ls"), false).unwrap();
         journal.record("b", event("b", "tool", "pwd"), false).unwrap();
         let mut tasks = vec![json!({"sessionId": "a"}), json!({"sessionId": "b"})];
-        journal.resume(&mut tasks, &HashMap::from([("a".to_string(), 0), ("b".to_string(), 2)]), Some(&epoch));
+        journal.resume(&mut tasks, &HashMap::from([("a".to_string(), 0), ("b".to_string(), 2)]), Some(&epoch), REPLAY_BUDGET);
         assert_eq!(tasks[0]["events"][0]["text"], "ls");
         assert_eq!((tasks[1].get("events"), tasks[1].get("gap"), tasks[1]["seq"].as_u64()), (None, None, Some(2)), "nothing missed");
         // Another epoch: this host restarted, so every position is a gap.
         let mut tasks = vec![json!({"sessionId": "a"})];
-        journal.resume(&mut tasks, &HashMap::from([("a".to_string(), 0)]), Some("old"));
+        journal.resume(&mut tasks, &HashMap::from([("a".to_string(), 0)]), Some("old"), REPLAY_BUDGET);
         assert_eq!((tasks[0]["gap"].as_bool(), tasks[0].get("events")), (Some(true), None));
     }
 
@@ -4080,8 +4437,23 @@ mod tests {
         let now = Instant::now();
         assert_eq!(flush_delay(None, 0, now), Duration::ZERO);
         assert_eq!(flush_delay(Some(now - Duration::from_secs(1)), 9, now), Duration::ZERO, "after a quiet spell");
-        assert_eq!(flush_delay(Some(now - Duration::from_millis(5)), 1, now), FLUSH, "right behind the last frame");
-        assert_eq!(flush_delay(Some(now - Duration::from_millis(60)), BURST_FRAMES, now), SUSTAINED, "a long stream");
+        assert_eq!(flush_delay(Some(now - Duration::from_millis(5)), 1, now), FLUSH - Duration::from_millis(5), "only the rest of FLUSH");
+        assert_eq!(flush_delay(Some(now - Duration::from_millis(60)), BURST_FRAMES, now), SUSTAINED - Duration::from_millis(60), "a long stream");
+        // Three viewers past the burst: one flush is three frames, paid for over 300 ms.
+        let paid = paid_until(now, BURST_FRAMES + 3, 3);
+        assert_eq!(flush_delay(Some(paid), BURST_FRAMES + 3, now), 3 * SUSTAINED);
+        assert_eq!(paid_until(now, 3, 3), now, "inside the burst");
+        // Any number of viewers in a sustained stream stays at 1000 / SUSTAINED frames/s.
+        for viewers in 1..=8u32 {
+            let (mut at, mut frames, mut sent, mut clock) = (None, 0u32, 0u32, now);
+            while clock < now + Duration::from_secs(10) {
+                clock += flush_delay(at, frames, clock).max(Duration::from_millis(1));
+                frames = frames.saturating_add(viewers);
+                at = Some(paid_until(clock, frames, viewers));
+                sent += viewers;
+            }
+            assert!(sent <= 10 * 1000 / SUSTAINED.as_millis() as u32 + BURST_FRAMES + 2 * viewers, "{viewers} viewers sent {sent} frames in 10 s");
+        }
         assert_eq!(FLUSH, Duration::from_millis(40));
         // Worst case, a burst repeated after each quiet spell, stays under the relay's 20 frames/s.
         let cycle = FLUSH * (BURST_FRAMES - 1) + SUSTAINED;
@@ -4101,25 +4473,36 @@ mod tests {
         assert_eq!(start_status(Some(&first)), json!({"state": "running"}));
         // Cancelled while running: callers get CANCELLED at once and the start is told to stop.
         assert_eq!(cancel_start(&first), json!({"cancelled": true}));
-        assert!(first.cancel.load(Ordering::SeqCst));
+        assert!(first.cancel.is_set());
         assert_eq!(*first.result.borrow(), Some(Err(start::CANCELLED.to_string())));
         assert_eq!(start_status(Some(&first)), json!({"state": "failed", "error": start::CANCELLED}));
         // A start that already made its task says so and is left alone.
         let (done, _) = claim_start(&mut starts, "st2", "viewer", now).unwrap();
         done.result.send_replace(Some(Ok(json!({"sessionId": "h1"}))));
         assert_eq!(cancel_start(&done), json!({"cancelled": false, "sessionId": "h1"}));
-        assert!(!done.cancel.load(Ordering::SeqCst));
+        assert!(!done.cancel.is_set());
         assert_eq!(start_status(Some(&done)), json!({"state": "done", "sessionId": "h1"}));
+        // A worktree fallback's note survives a lost `task.start` reply.
+        done.result.send_replace(Some(Ok(json!({"sessionId": "h1", "worktree": true, "note": "Started in a worktree: busy."}))));
+        assert_eq!(start_status(Some(&done)), json!({"state": "done", "sessionId": "h1", "worktree": true, "note": "Started in a worktree: busy."}));
+        // Cancelled while its task is being made: too late, the start goes on and is not failed.
+        let (making, _) = claim_start(&mut starts, "st6", "viewer", now).unwrap();
+        assert!(!making.cancel.is_set());
+        // What `start::run_cancellable` does before it creates the task.
+        making.cancel.commit().unwrap();
+        assert_eq!(cancel_start(&making), json!({"cancelled": false, "pending": true}));
+        assert!(!making.cancel.is_set());
+        assert_eq!(start_status(Some(&making)), json!({"state": "running"}));
         // A cancel that arrives before its start was claimed leaves it cancelled, so it never runs.
         let (early, _) = claim_start(&mut starts, "st5", "viewer", now).unwrap();
         cancel_start(&early);
         let (late, fresh) = claim_start(&mut starts, "st5", "viewer", now).unwrap();
-        assert!(!fresh && late.cancel.load(Ordering::SeqCst));
+        assert!(!fresh && late.cancel.is_set());
         assert_eq!(*late.result.borrow(), Some(Err(start::CANCELLED.to_string())));
         // Finished starts are forgotten after an hour; running ones never are.
         let (_running, _) = claim_start(&mut starts, "st3", "viewer", now).unwrap();
         claim_start(&mut starts, "st4", "viewer", now + START_MEMORY + Duration::from_secs(1)).unwrap();
-        assert_eq!(starts.keys().map(String::as_str).collect::<HashSet<_>>(), HashSet::from(["st3", "st4"]));
+        assert_eq!(starts.keys().map(String::as_str).collect::<HashSet<_>>(), HashSet::from(["st3", "st4", "st6"]));
     }
 
     #[test]
@@ -4194,6 +4577,111 @@ mod tests {
     }
 
     #[test]
+    fn a_packed_page_fills_most_of_its_frame() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        // Transcript-like text: prose and paths that pack well, ids that don't.
+        let words = ["the", "test", "passes", "src/remote/host.rs", "fn", "page", "budget", "let", "mirror", "ok", "error", "frame", "packed", "viewer", "cargo", "message", "=>", "{", "}", "Value"];
+        let mut seed = 7u64;
+        for index in 1..=400 {
+            let content: String = (0..600).map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                if seed >> 60 == 0 { format!("{:x} ", seed) } else { format!("{} ", words[(seed >> 33) as usize % words.len()]) }
+            }).collect();
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','tool',?1,?2)", rusqlite::params![content, index]).unwrap();
+        }
+        let page = messages_page_fit(&db, "s", MessagePaging::Before { before_id: 401, limit: PAGE_ROWS }, PACKED_PAGE_MAX).unwrap();
+        let packed = super::super::crypto::pack(page.to_string().as_bytes()).len();
+        assert!(page.to_string().len() > PAGE_BUDGET && packed <= PAGE_BUDGET);
+        assert!(packed > PAGE_BUDGET * 4 / 5, "a packed page of {packed} bytes ({} plain) leaves much of its frame empty", page.to_string().len());
+    }
+
+    #[test]
+    fn page_budgets_are_asked_clamped_and_held_for_plain_viewers() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        for index in 1..=40 {
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','assistant',?1,?2)", rusqlite::params![format!("{index} {}", "the build passes ".repeat(500)), index]).unwrap();
+        }
+        let ids = |page: &Value| page["messages"].as_array().unwrap().iter().map(|message| message["id"].as_i64().unwrap()).collect::<Vec<_>>();
+
+        // A small tail budget keeps the newest messages that fit, oldest first.
+        let tail = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 60 }, 32 * 1024).unwrap();
+        assert!(tail.to_string().len() <= 32 * 1024);
+        assert_eq!(ids(&tail).last(), Some(&40));
+        assert!(ids(&tail).len() >= 2 && ids(&tail).windows(2).all(|pair| pair[0] + 1 == pair[1]));
+        assert_eq!((tail["hasOlder"].as_bool(), tail["hasMore"].as_bool()), (Some(true), Some(false)));
+        // Below one message there is still one.
+        let one = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 60 }, MIN_PAGE_BUDGET).unwrap();
+        assert_eq!((ids(&one), one["hasOlder"].as_bool()), (vec![40], Some(true)));
+        // A big budget for a packing viewer takes the whole thread in one page that packs small.
+        let all = messages_page_fit(&db, "s", MessagePaging::After { after_id: 0, limit: PAGE_ROWS }, PACKED_PAGE_MAX).unwrap();
+        assert_eq!((ids(&all).len(), all["hasMore"].as_bool(), all["hasOlder"].as_bool()), (40, Some(false), Some(false)));
+        assert!(all.to_string().len() > PAGE_BUDGET && super::super::crypto::pack(all.to_string().as_bytes()).len() <= PAGE_BUDGET);
+
+        // Text that packs poorly is cut until the packed page fits a frame.
+        for index in 41..=200 {
+            let noise: String = (0..200).map(|_| uuid::Uuid::new_v4().simple().to_string()).collect();
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','tool',?1,?2)", rusqlite::params![noise, index]).unwrap();
+        }
+        let cut = messages_page_fit(&db, "s", MessagePaging::Before { before_id: 201, limit: PAGE_ROWS }, PACKED_PAGE_MAX).unwrap();
+        assert!(super::super::crypto::pack(cut.to_string().as_bytes()).len() <= PAGE_BUDGET);
+        assert_eq!((ids(&cut).last(), cut["hasOlder"].as_bool(), cut["hasMore"].as_bool()), (Some(&200), Some(true), Some(false)));
+
+        // Params: default, clamped, refused; a viewer without "z" is held to PAGE_BUDGET, in batches too.
+        let budget = |params: Value| match parse(true, "task.messages", &params) { Ok(Call::Messages { budget, .. }) => Ok(budget), Ok(_) => unreachable!(), Err(error) => Err(error) };
+        assert_eq!(budget(json!({"sessionId": "s", "tail": true})), Ok(PAGE_BUDGET));
+        assert_eq!(budget(json!({"sessionId": "s", "tail": true, "budget": 1})), Ok(MIN_PAGE_BUDGET));
+        assert_eq!(budget(json!({"sessionId": "s", "budget": u64::MAX})), Ok(PACKED_PAGE_MAX));
+        assert_eq!(budget(json!({"sessionId": "s", "budget": "big"})), Err("Invalid budget.".into()));
+        let big = || Call::Messages { session_id: "s".into(), page: MessagePaging::Tail { limit: 1 }, budget: PACKED_PAGE_MAX };
+        assert_eq!(plain_budget(big(), true), big());
+        assert!(matches!(plain_budget(big(), false), Call::Messages { budget: PAGE_BUDGET, .. }));
+        assert!(matches!(plain_budget(Call::Batch(vec![Ok(big())]), false), Call::Batch(calls) if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))));
+        // A batch reply is measured plain, so its pages stay plain-sized for packing viewers too.
+        assert!(matches!(plain_budget(Call::Batch(vec![Ok(big())]), true), Call::Batch(calls) if matches!(calls[0], Ok(Call::Messages { budget: PAGE_BUDGET, .. }))));
+        // A packing viewer gets a bigger replay, except inside a batch.
+        let subscribe = || Call::Subscribe { session_ids: vec!["s".into()], after: HashMap::new(), epoch: None, replay: REPLAY_BUDGET };
+        assert!(matches!(plain_budget(subscribe(), true), Call::Subscribe { replay: PACKED_REPLAY_BUDGET, .. }));
+        assert!(matches!(plain_budget(subscribe(), false), Call::Subscribe { replay: REPLAY_BUDGET, .. }));
+        assert!(matches!(plain_budget(Call::Batch(vec![Ok(subscribe())]), true), Call::Batch(calls) if matches!(calls[0], Ok(Call::Subscribe { replay: REPLAY_BUDGET, .. }))));
+    }
+
+    #[test]
+    fn pages_read_attachments_in_one_pass_and_fit_without_the_database() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER);
+            CREATE TABLE message_attachments(message_id INTEGER, session_id TEXT, id TEXT, kind TEXT, name TEXT, mime TEXT, width INTEGER, height INTEGER, bytes INTEGER);
+            INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        for index in 1..=6 {
+            db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','user',?1,?2)", rusqlite::params![format!("prompt {index}"), index]).unwrap();
+        }
+        for (message, id) in [(2, "a"), (2, "b"), (5, "c")] {
+            db.execute("INSERT INTO message_attachments VALUES (?1,'s',?2,'image','x.png','image/png',1,2,3)", rusqlite::params![message, id]).unwrap();
+        }
+        let rows = read_page(&db, "s", MessagePaging::Before { before_id: 6, limit: 3 }).unwrap();
+        drop(db);
+        let page = fit_page(rows, PAGE_BUDGET);
+        let messages = page["messages"].as_array().unwrap();
+        assert_eq!(messages.iter().map(|m| m["id"].as_i64().unwrap()).collect::<Vec<_>>(), [3, 4, 5]);
+        assert_eq!(messages[2]["attachments"], json!([{"id": "c", "kind": "image", "name": "x.png", "mime": "image/png", "bytes": 3, "width": 1, "height": 2}]));
+        assert_eq!((page["hasOlder"].as_bool(), page["hasMore"].as_bool(), page["lastId"].as_i64()), (Some(true), Some(true), Some(6)));
+    }
+
+    #[test]
+    fn a_small_page_cuts_its_one_oversized_message_and_marks_it() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
+        db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','assistant',?1,1)", [r#"{"tool":"x"} "#.to_string() + &"y".repeat(100 * 1024)]).unwrap();
+        let small = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 30 }, 32 * 1024).unwrap();
+        assert!(small.to_string().len() <= 32 * 1024);
+        assert_eq!((small["messages"][0]["id"].as_i64(), small["messages"][0]["cut"].as_bool()), (Some(1), Some(true)));
+        // A normal page keeps it whole (under the 120 KB cap) and unmarked.
+        let full = messages_page_fit(&db, "s", MessagePaging::Tail { limit: 30 }, PAGE_BUDGET).unwrap();
+        assert!(full["messages"][0].get("cut").is_none() && full["messages"][0]["content"].as_str().unwrap().len() > 100 * 1024);
+    }
+
+    #[test]
     fn newest_first_pages_keep_the_newest_messages_that_fit_the_budget() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task');").unwrap();
@@ -4214,287 +4702,5 @@ mod tests {
         assert!(before.to_string().len() <= PAGE_BUDGET);
         assert_eq!(before["hasOlder"], true);
         assert_eq!(before["hasMore"], true);
-    }
-}
-
-#[cfg(test)]
-mod extended_security_tests {
-    use super::*;
-
-    #[test]
-    fn everything_is_refused_while_hosting_is_off() {
-        for method in METHODS {
-            assert_eq!(parse(false, method, &json!({"sessionId": "s", "text": "hi", "requestId": "r", "approve": true})), Err(OFF.to_string()));
-        }
-        assert_eq!(parse(false, "nope", &json!({})), Err(OFF.to_string()));
-    }
-
-    #[test]
-    fn execution_rechecks_trust_hosting_and_full_access_after_admission() {
-        let mut inner = super::super::Inner::default();
-        inner.devices.push(super::super::Device {
-            id: "peer".into(), name: "Peer".into(), platform: "test".into(),
-            public_key: "pinned-key".into(), host: true, online: true, last_seen: Value::Null,
-        });
-        inner.settings.trusted.insert("peer".into(), "pinned-key".into());
-        inner.settings.host_enabled = true;
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_ok());
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_err());
-        inner.settings.allow_full_access = true;
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_ok());
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_ok());
-        // No cached grant survives revocation while a request awaits discovery.
-        inner.settings.allow_full_access = false;
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_err());
-        inner.settings.allow_full_access = true;
-        inner.settings.host_enabled = false;
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "full").is_err());
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "review").is_err());
-        inner.settings.host_enabled = true;
-        inner.settings.trusted.remove("peer");
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_err());
-        inner.settings.trusted.insert("peer".into(), "new-key".into());
-        inner.devices[0].public_key = "new-key".into();
-        assert!(authorize_mode(&inner, "peer", "pinned-key", "ask").is_err());
-        assert!(authorize_mode(&inner, "peer", "new-key", "ask").is_ok());
-        inner.devices.clear();
-        assert!(authorize_mode(&inner, "peer", "new-key", "ask").is_err());
-    }
-
-    #[test]
-    fn bot_thread_generic_send_stays_blocked_and_steer_requires_full() {
-        let dir = std::env::temp_dir().join(format!("pandacode-host-bot-send-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let key = super::super::crypto::public_key(&super::super::crypto::generate());
-        let mut inner = super::super::Inner::default();
-        inner.devices.push(super::super::Device {
-            id: "peer".into(), name: "Peer".into(), platform: "test".into(),
-            public_key: key.clone(), host: true, online: true, last_seen: Value::Null,
-        });
-        inner.settings.trusted.insert("peer".into(), key.clone());
-        inner.settings.host_enabled = true;
-        // With Full off, task.send is still authorized by the Control grant,
-        // as is task.steer, while bot.message remains reserved for Full.
-        assert!(super::super::grants::seed_trusted(&dir, &inner.settings).is_ok());
-        assert!(super::super::grants::authorize(&dir, &inner, "peer", &key, "task.send").is_ok());
-        assert!(super::super::grants::authorize(&dir, &inner, "peer", &key, "task.steer").is_ok());
-        assert!(super::super::grants::authorize(&dir, &inner, "peer", &key, "bot.message").is_err());
-
-        let image_id = uuid::Uuid::new_v4().to_string();
-        let call = parse(true, "task.send", &json!({"sessionId": "bot-desktop-thread", "text": "hi", "imageIds": [image_id]})).unwrap();
-        assert_eq!(call.method_name(), "task.send");
-        let Call::Send { session_id, image_ids, .. } = call else { unreachable!() };
-        assert_eq!(image_ids.len(), 1, "exercise the image-bearing generic send path");
-        let steer = parse(true, "task.steer", &json!({"sessionId": "bot-desktop-thread", "text": "also steer"})).unwrap();
-        assert_eq!(steer.method_name(), "task.steer");
-        let Call::Steer { session_id: steer_session, .. } = steer else { unreachable!() };
-
-        let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE bot_threads(session_id TEXT PRIMARY KEY); INSERT INTO bot_threads VALUES ('bot-desktop-thread');").unwrap();
-        let bot_send = is_bot_thread(&db, &session_id).unwrap();
-        let mut image_claimed = false;
-        assert_eq!(
-            preflight_generic_send(bot_send, || {
-                image_claimed = true;
-                Ok(())
-            }),
-            Err(BOT_PROMPT_REFUSAL.into()),
-            "an image-bearing bot send is rejected before images::claim and send_message"
-        );
-        assert!(!image_claimed, "the denied bot send leaves its uploaded image unclaimed");
-        let bot_steer = is_bot_thread(&db, &steer_session).unwrap();
-        let control_steer = || super::super::grants::authorize_full(&dir, &inner, "peer", &key);
-        assert!(preflight_bot_steer(bot_steer, control_steer).is_err(), "Control cannot steer a bot thread");
-        assert!(preflight_bot_steer(false, || Err("must not run".into())).is_ok(), "ordinary task steering remains unchanged");
-        let mut ordinary_image_claimed = false;
-        assert!(
-            preflight_generic_send(false, || {
-                ordinary_image_claimed = true;
-                Ok(())
-            })
-            .is_ok(),
-            "ordinary sends may still claim their images"
-        );
-        assert!(ordinary_image_claimed);
-
-        let full_dir = std::env::temp_dir().join(format!("pandacode-host-bot-steer-full-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&full_dir).unwrap();
-        let mut full_inner = super::super::Inner::default();
-        full_inner.devices.push(super::super::Device {
-            id: "peer".into(), name: "Peer".into(), platform: "test".into(),
-            public_key: key.clone(), host: true, online: true, last_seen: Value::Null,
-        });
-        full_inner.settings.trusted.insert("peer".into(), key.clone());
-        full_inner.settings.host_enabled = true;
-        full_inner.settings.allow_full_access = true;
-        assert!(super::super::grants::seed_trusted(&full_dir, &full_inner.settings).is_ok());
-        assert!(preflight_generic_send(bot_send, || Ok(())).is_err(), "Full bot-message scope still cannot use generic send_message");
-        assert!(
-            super::super::grants::authorize(&full_dir, &full_inner, "peer", &key, "bot.message").is_ok(),
-            "Full can use the dedicated bot gateway"
-        );
-        assert!(preflight_bot_steer(bot_steer, || super::super::grants::authorize_full(&full_dir, &full_inner, "peer", &key)).is_ok(), "Full can steer a bot thread");
-
-        assert!(requires_full_configure_mode(Some("full")));
-        assert!(requires_full_configure_mode(Some("review")));
-        assert!(!requires_full_configure_mode(Some("ask")));
-        assert!(!requires_full_configure_mode(None), "model and effort changes do not request Full mode");
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&full_dir);
-    }
-
-    #[test]
-    fn remote_callers_cannot_change_the_full_access_grant_or_other_settings() {
-        for method in ["remote_set_full_access", "remote_set_host_enabled", "remote_set_trusted", "settings.update"] {
-            assert!(!METHODS.contains(&method));
-            assert!(parse(true, method, &json!({"enabled": true})).is_err());
-        }
-        assert!(check_current_request("full").is_ok(), "local execution has no remote policy scope");
-    }
-
-    #[test]
-    fn requests_are_validated() {
-        assert_eq!(parse(true, "subscribe", &json!({"sessionIds": ["s1", "s2"]})), Ok(Call::Subscribe { session_ids: vec!["s1".into(), "s2".into()], after: HashMap::new(), epoch: None }));
-        assert!(parse(true, "subscribe", &json!({})).is_err());
-        assert!(parse(true, "subscribe", &json!({"sessionIds": ["a b"]})).is_err());
-        assert!(parse(true, "subscribe", &json!({"sessionIds": vec!["s"; MAX_IDS + 1]})).is_err());
-        assert_eq!(parse(true, "task.send", &json!({"sessionId": "s1", "text": " hi "})), Ok(Call::Send { session_id: "s1".into(), text: "hi".into(), image_ids: Vec::new() }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": 7})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 7, limit: PAGE_ROWS } }));
-        assert_eq!(parse(true, "task.messages", &json!({"sessionId": "s1", "afterId": -3})), Ok(Call::Messages { session_id: "s1".into(), page: MessagePaging::After { after_id: 0, limit: PAGE_ROWS } }));
-        assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "effort": null})), Ok(Call::Configure { session_id: "s1".into(), model: None, effort: Some(None), mode: None }));
-        assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "mode": "ask"})), Ok(Call::Configure { session_id: "s1".into(), model: None, effort: None, mode: Some("ask".into()) }));
-        assert_eq!(parse(true, "task.configure", &json!({"sessionId": "s1", "provider": "codex", "model": "gpt"})), Ok(Call::Configure { session_id: "s1".into(), model: Some(("codex".into(), "gpt".into())), effort: None, mode: None }));
-        assert!(parse(true, "task.configure", &json!({"sessionId": "s1", "model": "gpt"})).is_err());
-        assert!(parse(true, "task.send", &json!({"sessionId": "s1", "text": "x".repeat(MAX_TEXT + 1)})).is_err());
-        assert!(parse(true, "task.send", &json!({"sessionId": "s1", "text": "  "})).is_err());
-        assert!(parse(true, "task.messages", &json!({"sessionId": "a\nb"})).is_err());
-        assert!(parse(true, "task.stop", &json!({})).is_err());
-        assert!(parse(true, "approval.respond", &json!({"sessionId": "s", "requestId": "r"})).is_err());
-        assert!(parse(true, "input.respond", &json!({"sessionId": "s", "requestId": "r"})).is_err());
-        for gone in ["task.get", "shell.exec"] {
-            assert!(parse(true, gone, &json!({})).is_err(), "{gone}");
-        }
-        assert!(valid_id(&"a".repeat(201)).is_err());
-    }
-
-    #[test]
-    fn provider_requests_are_validated() {
-        assert_eq!(parse(true, "providers.list", &json!({})), Ok(Call::Providers { force: false }));
-        assert_eq!(parse(true, "providers.list", &json!({"force": true})), Ok(Call::Providers { force: true }));
-        assert!(parse(true, "providers.list", &json!({"force": "yes"})).is_err());
-        assert_eq!(parse(true, "providers.models", &json!({"provider": "codex", "force": null})), Ok(Call::Models { provider: "codex".into(), force: false }));
-        assert_eq!(parse(true, "providers.models", &json!({"provider": "omp", "force": true})), Ok(Call::Models { provider: "omp".into(), force: true }));
-        for bad in [json!({}), json!({"provider": "../bin/sh"}), json!({"provider": "gemini"}), json!({"provider": 3})] {
-            assert!(parse(true, "providers.models", &bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn provider_lists_are_trimmed_to_one_reply() {
-        let model = json!({"id": "m", "name": "x".repeat(1000)});
-        let mut list = vec![model.clone(); 400];
-        fit_list(&mut list, PAGE_BUDGET);
-        assert!(!list.is_empty() && list.len() < 400 && json!(list).to_string().len() <= PAGE_BUDGET);
-        let mut small = vec![model.clone(); 3];
-        fit_list(&mut small, PAGE_BUDGET);
-        assert_eq!(small.len(), 3);
-        let mut providers = json!([{"id": "opencode", "models": vec![model.clone(); 400]}, {"id": "claude", "models": [model]}]);
-        fit_providers(&mut providers);
-        assert!(providers.to_string().len() <= PAGE_BUDGET);
-        assert_eq!(providers[1]["models"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn untrusted_callers_are_refused_by_name() {
-        assert_eq!(gate(false, true, "Mac"), Err(OFF.to_string()));
-        assert_eq!(gate(true, false, "Mac"), Err("This computer isn't trusted on Mac. Trust it in Settings → Remote access on that computer.".to_string()));
-        assert_eq!(gate(true, true, "Mac"), Ok(()));
-    }
-
-    #[test]
-    fn replays_and_stale_requests_are_refused() {
-        let mut replay = super::super::replay::Replay::memory();
-        let now = 1_000_000_000;
-        let nonce = "0123456789abcdef0123";
-        assert!(replay.check(Some(now - 1000), Some(nonce), now).is_ok());
-        assert!(replay.check(Some(now - 1000), Some(nonce), now + 10).is_err(), "same nonce twice");
-        assert!(replay.check(Some(now - 60_001), Some("fresh-nonce-000001"), now).is_err(), "too old");
-        assert!(replay.check(Some(now + 60_001), Some("fresh-nonce-000002"), now).is_err(), "too new");
-        assert!(replay.check(None, Some("fresh-nonce-000003"), now).is_err());
-        assert!(replay.check(Some(now), Some("short"), now).is_err());
-        assert!(replay.check(Some(now), None, now).is_err());
-        // Seen nonces are pruned once their ts leaves the window.
-        assert!(replay.check(Some(now + 61_500), Some("fresh-nonce-000004"), now + 61_500).is_ok());
-        assert!(replay.check(Some(now + 61_500), Some(nonce), now + 61_500).is_ok());
-    }
-
-    #[test]
-    fn extreme_timestamps_cannot_overflow_the_replay_window() {
-        let mut replay = super::super::replay::Replay::memory();
-        let nonce = "0123456789abcdef0123";
-        let now = 1_000_000_000_i64;
-        for timestamp in [i64::MIN, i64::MAX, now.wrapping_add(i64::MIN)] {
-            assert!(replay.check(Some(timestamp), Some(nonce), now).is_err());
-        }
-        assert!(replay.check(Some(i64::MIN), Some(nonce), i64::MIN).is_ok());
-        assert!(replay.check(Some(i64::MAX), Some("0123456789abcdef4567"), i64::MAX).is_ok());
-    }
-
-    fn event(session: &str, kind: &str, text: &str) -> Value {
-        serde_json::to_value(AgentEvent { session_id: session.into(), kind: kind.into(), text: text.into(), request_id: None, data: None, tool: None }).unwrap()
-    }
-
-    #[test]
-    fn consecutive_text_deltas_are_merged() {
-        let mut events = Vec::new();
-        for (session, kind, text) in [("a", "text", "Hel"), ("a", "text", "lo"), ("b", "text", "other"), ("a", "text", " there"), ("a", "tool", "ls"), ("a", "text", "!"), ("a", "text", "?")] {
-            push_event(&mut events, event(session, kind, text));
-        }
-        let texts: Vec<(&str, &str)> = events.iter().map(|e| (e["sessionId"].as_str().unwrap(), e["text"].as_str().unwrap())).collect();
-        assert_eq!(texts, [("a", "Hello"), ("b", "other"), ("a", " there"), ("a", "ls"), ("a", "!?")]);
-        // A delta of another message (its data differs) starts a new event.
-        let mut tagged = event("a", "text", "new");
-        tagged["data"] = json!({"messageId": "m2"});
-        push_event(&mut events, tagged);
-        assert_eq!(events.len(), 6);
-        // A viewer that falls far behind stops buffering; it catches up at the run end.
-        let mut full: Vec<Value> = (0..MAX_BUFFER).map(|i| event("a", "tool", &i.to_string())).collect();
-        push_event(&mut full, event("a", "tool", "late"));
-        assert_eq!(full.len(), MAX_BUFFER + 1, "the overflow marker is retained for recovery");
-        assert!(lagged(full.last().unwrap()));
-    }
-
-    #[test]
-    fn events_are_framed_under_the_budget() {
-        let events: Vec<Value> = (0..30).map(|i| event("a", "tool", &format!("{i}{}", "o".repeat(20 * 1024)))).chain([event("a", "text", &"é".repeat(300 * 1024))]).collect();
-        let framed = frames(events);
-        assert!(framed.len() > 1);
-        assert_eq!(framed.iter().map(Vec::len).sum::<usize>(), 31, "nothing is dropped");
-        let key = [7u8; 32];
-        for frame in &framed {
-            let body = super::super::crypto::seal(&key, "a", "b", json!({"type": "event", "name": "agent.events", "data": {"events": frame}}).to_string().as_bytes()).unwrap();
-            assert!(json!({"to": "b", "body": body}).to_string().len() < 256 * 1024);
-        }
-        assert!(framed.last().unwrap()[0]["text"].as_str().unwrap().ends_with(CUT));
-        assert!(frames(Vec::new()).is_empty());
-    }
-
-    #[test]
-    fn huge_messages_are_cut_and_tool_json_still_parses() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL); CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, turn_duration_ms INTEGER); INSERT INTO sessions VALUES ('s','Task'),('t','Other');").unwrap();
-        let tool = json!({"status": "completed", "output": "o".repeat(300 * 1024)}).to_string();
-        db.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES ('s','tool',?1,1),('t','user','elsewhere',2),('s','assistant','done',3)", [&tool]).unwrap();
-        let page = messages_page(&db, "s", 0).unwrap();
-        let messages = page["messages"].as_array().unwrap();
-        assert_eq!((messages.len(), page["hasMore"].as_bool(), page["title"].as_str()), (2, Some(false), Some("Task")), "only this task's messages");
-        assert!(messages[0].to_string().len() <= MAX_MESSAGE);
-        let parsed = serde_json::from_str::<Value>(messages[0]["content"].as_str().unwrap()).expect("tool content still parses");
-        assert!(parsed["output"].as_str().unwrap().ends_with(CUT) && parsed["status"] == "completed");
-        assert_eq!(messages[1]["content"], "done");
-        assert!(messages_page(&db, "missing", 0).is_err());
     }
 }

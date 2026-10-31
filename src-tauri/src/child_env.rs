@@ -2,8 +2,7 @@
 //! (`LD_LIBRARY_PATH`, `PYTHONHOME`, `GIO_*`, `GTK_*`, `XDG_DATA_DIRS`, `PATH`…), all pointing
 //! into the mounted image. External tools must not inherit them: the system `/usr/bin/env`,
 //! `curl` or `python3` then load the bundled copies and fail. Every spawn of an external
-//! process applies `sanitize`, which drops those entries. The hardened build also
-//! disables supported harness auto-updaters and nonessential telemetry on every OS.
+//! process applies `sanitize`, which drops those entries and is a no-op outside an AppImage.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -74,74 +73,18 @@ impl EnvTarget for portable_pty::CommandBuilder {
     }
 }
 
-/// Documented opt-outs, applied to child processes only. These do not change the
-/// user's global environment, authentication, proxy, model endpoint or tool PATH.
-/// External CLIs may load settings after startup, so this is not an egress sandbox.
-const HARNESS_PRIVACY: &[(&str, &str)] = &[
-    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
-    ("DISABLE_AUTOUPDATER", "1"),
-    ("DISABLE_TELEMETRY", "1"),
-    ("DISABLE_ERROR_REPORTING", "1"),
-    ("DO_NOT_TRACK", "1"),
-    ("KIMI_CODE_NO_AUTO_UPDATE", "1"),
-    ("KIMI_CLI_NO_AUTO_UPDATE", "1"),
-    ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
-    ("KILO_DISABLE_AUTOUPDATE", "true"),
-];
-
-/// Disable supported background updates/telemetry, then remove AppImage runtime
-/// paths on Linux. Does not remove credentials needed by user-selected agents.
+/// Removes this process's AppImage environment from a command about to start an external
+/// tool. Does nothing on macOS and Windows, or on Linux outside an AppImage.
 pub(crate) fn sanitize(command: &mut impl EnvTarget) {
-    if cfg!(target_os = "linux") {
-        let vars: Vec<_> = std::env::vars_os().collect();
-        for (key, value) in appimage_overrides(&vars) {
-            match value {
-                Some(value) => command.set_var(&key, &value),
-                None => command.remove_var(&key),
-            }
-        }
+    if !cfg!(target_os = "linux") {
+        return;
     }
-    for &(key, value) in HARNESS_PRIVACY {
-        command.set_var(OsStr::new(key), OsStr::new(value));
-    }
-    // This Claude option would otherwise override the updater opt-out.
-    command.remove_var(OsStr::new("FORCE_AUTOUPDATE_PLUGINS"));
-}
-
-#[cfg(test)]
-mod hardened_tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    #[derive(Default)]
-    struct Environment(BTreeMap<OsString, Option<OsString>>);
-    impl EnvTarget for Environment {
-        fn set_var(&mut self, key: &OsStr, value: &OsStr) {
-            self.0.insert(key.into(), Some(value.into()));
+    let vars: Vec<_> = std::env::vars_os().collect();
+    for (key, value) in appimage_overrides(&vars) {
+        match value {
+            Some(value) => command.set_var(&key, &value),
+            None => command.remove_var(&key),
         }
-        fn remove_var(&mut self, key: &OsStr) {
-            self.0.insert(key.into(), None);
-        }
-    }
-
-    #[test]
-    fn suppresses_harness_auto_updates_without_removing_auth_or_changing_endpoints() {
-        let mut env = Environment::default();
-        for (key, value) in [
-            ("DISABLE_AUTOUPDATER", "0"),
-            ("FORCE_AUTOUPDATE_PLUGINS", "1"),
-            ("ANTHROPIC_API_KEY", "synthetic-fixture"),
-            ("ANTHROPIC_BASE_URL", "http://127.0.0.1:9999"),
-        ] {
-            env.set_var(OsStr::new(key), OsStr::new(value));
-        }
-        sanitize(&mut env);
-        for &(key, value) in HARNESS_PRIVACY {
-            assert_eq!(env.0.get(OsStr::new(key)), Some(&Some(OsString::from(value))));
-        }
-        assert_eq!(env.0.get(OsStr::new("FORCE_AUTOUPDATE_PLUGINS")), Some(&None));
-        assert_eq!(env.0.get(OsStr::new("ANTHROPIC_API_KEY")), Some(&Some("synthetic-fixture".into())));
-        assert_eq!(env.0.get(OsStr::new("ANTHROPIC_BASE_URL")), Some(&Some("http://127.0.0.1:9999".into())));
     }
 }
 

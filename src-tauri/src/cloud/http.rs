@@ -3,7 +3,7 @@
 use serde_json::Value;
 use std::time::Duration;
 
-pub const LIMIT: usize = 16 * 1024 * 1024;
+const LIMIT: usize = 16 * 1024 * 1024;
 
 pub fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
@@ -27,63 +27,31 @@ pub fn error_message(service: &str, status: u16, body: &str) -> String {
         .or_else(|| Some(body.trim().chars().take(300).collect::<String>()).filter(|s| !s.is_empty() && !s.starts_with('<')));
     match (status, message) {
         (401 | 403, _) => format!("{service} refused the credentials (HTTP {status}). Check them in Settings → Cloud."),
-        (_, Some(message)) => format!("{service}: {}", message.chars().take(400).collect::<String>()),
+        (_, Some(message)) => format!("{service}: {message}"),
         _ => format!("{service} returned HTTP {status}."),
     }
 }
 
 pub async fn send(service: &str, request: reqwest::RequestBuilder) -> Result<Value, String> {
-    let (client, request) = request.build_split();
-    let request = request.map_err(|_| format!("Could not prepare the {service} request."))?;
-    let secrets: Vec<String> = request.headers().iter().filter(|(name, _)| {
-        let name = name.as_str();
-        name.contains("authorization") || name.contains("api-key") || name.contains("access-token")
-    }).filter_map(|(_, value)| value.to_str().ok()).flat_map(|value| [value.to_string(), value.split_whitespace().last().unwrap_or(value).to_string()]).collect();
-    let response = client.execute(request).await.map_err(|e| {
+    let response = request.send().await.map_err(|e| {
         if e.is_timeout() { format!("{service} did not answer in time.") } else if e.is_connect() { format!("Could not reach {service}. Check your connection.") } else { format!("{service} request failed.") }
     })?;
     let status = response.status().as_u16();
-    let bytes = read_bytes(service, response, LIMIT).await?;
-    let text = String::from_utf8_lossy(&bytes);
-    if !(200..300).contains(&status) {
-        let clean = redact(&text, &secrets.iter().map(String::as_str).collect::<Vec<_>>());
-        return Err(error_message(service, status, &clean));
-    }
-    if text.trim().is_empty() { return Ok(Value::Null); }
-    serde_json::from_str(&text).map_err(|_| format!("{service} returned an unreadable response."))
-}
-
-pub fn redact(text: &str, secrets: &[&str]) -> String {
-    secrets.iter().filter(|secret| !secret.is_empty()).fold(text.to_string(), |clean, secret| clean.replace(secret, "[redacted]"))
-}
-
-/// Bound streamed bodies before allocation, including providers' raw command responses.
-pub async fn read_bytes(service: &str, mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
-    if response.content_length().is_some_and(|n| n > limit as u64) {
+    if response.content_length().is_some_and(|n| n > LIMIT as u64) {
         return Err(format!("{service} sent a response that is too large."));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| format!("{service} response was cut off."))? {
-        if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(format!("{service} sent a response that is too large."));
-        }
-        bytes.extend_from_slice(&chunk);
+    let bytes = response.bytes().await.map_err(|_| format!("{service} response was cut off."))?;
+    if bytes.len() > LIMIT {
+        return Err(format!("{service} sent a response that is too large."));
     }
-    Ok(bytes)
-}
-
-/// A provider-returned command endpoint may receive credentials only on that
-/// provider's service domain. Preview/custom origins and redirects are not trusted.
-pub fn endpoint(service: &str, address: &str, domains: &[&str], test_api: &str) -> Result<String, String> {
-    let url = reqwest::Url::parse(address).map_err(|_| format!("{service} sent an invalid sandbox address."))?;
-    let host = url.host_str().unwrap_or_default();
-    let valid_host = domains.iter().any(|domain| host == *domain || host.strip_suffix(domain).is_some_and(|prefix| prefix.ends_with('.')));
-    let test_origin = cfg!(test) && reqwest::Url::parse(test_api).is_ok_and(|api| api.scheme() == "http" && api.host_str() == Some("127.0.0.1") && api.origin() == url.origin());
-    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() ||
-        !(test_origin || (url.scheme() == "https" && url.port_or_known_default() == Some(443) && valid_host)) {
-        return Err(format!("{service} sent an untrusted sandbox address. Credentials were not forwarded."));
+    let text = String::from_utf8_lossy(&bytes);
+    if !(200..300).contains(&status) {
+        return Err(error_message(service, status, &text));
     }
-    Ok(url.as_str().trim_end_matches('/').to_string())
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&text).map_err(|_| format!("{service} returned an unreadable response."))
 }
 
 /// Run an async request from a blocking worker thread.
@@ -164,84 +132,5 @@ mod tests {
         assert!(error_message("AWS", 403, "denied").contains("refused the credentials"));
         assert_eq!(error_message("Cloudflare", 502, "<html>bad gateway</html>"), "Cloudflare returned HTTP 502.");
         assert_eq!(error_message("Cloudflare", 400, r#"{"errors":[{"message":"Bad token"}]}"#), "Cloudflare: Bad token");
-    }
-
-    #[test]
-    fn sandbox_endpoints_reject_untrusted_origins_before_forwarding_credentials() {
-        for url in ["https://run.blaxel.ai", "https://us.run.blaxel.ai/sandbox"] {
-            assert!(endpoint("Fixture", url, &["run.blaxel.ai"], "https://api.blaxel.ai").is_ok());
-        }
-        for url in ["http://run.blaxel.ai", "https://run.blaxel.ai.evil.invalid", "https://evilrun.blaxel.ai", "https://run.blaxel.ai:8443", "https://user:password@run.blaxel.ai", "https://run.blaxel.ai?token=x", "https://run.blaxel.ai/#token", "https://127.0.0.1", "file:///tmp/socket"] {
-            assert!(endpoint("Fixture", url, &["run.blaxel.ai"], "https://api.blaxel.ai").is_err(), "{url}");
-        }
-        assert!(endpoint("Fixture", "http://127.0.0.1:2345/command", &[], "http://127.0.0.1:2345/api").is_ok());
-        assert!(endpoint("Fixture", "http://127.0.0.1:2346/command", &[], "http://127.0.0.1:2345/api").is_err());
-    }
-
-    #[tokio::test]
-    async fn echoed_credentials_are_redacted_from_provider_errors() {
-        let (base, _) = mock::serve(|_, _| (400, r#"{"message":"Rejected Bearer fixture-auth and fixture-api"}"#));
-        let error = send("Fixture", client(Duration::from_secs(3)).unwrap().get(base).bearer_auth("fixture-auth").header("X-API-Key", "fixture-api")).await.unwrap_err();
-        assert!(!error.contains("fixture-auth") && !error.contains("fixture-api"), "{error}");
-        assert!(error.contains("[redacted]"));
-    }
-
-    #[tokio::test]
-    async fn authenticated_redirects_are_not_followed() {
-        use std::io::{Read, Write};
-        let (target, seen) = mock::serve(|_, _| (200, "{}"));
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let source = format!("http://{}", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            let mut request = [0; 4096];
-            let mut received = 0;
-            loop {
-                let count = socket.read(&mut request[received..]).unwrap();
-                assert_ne!(count, 0, "Fixture client disconnected before request headers");
-                received += count;
-                if request[..received].windows(4).any(|window| window == b"\r\n\r\n") { break; }
-                assert!(received < request.len(), "Fixture request headers are too large");
-            }
-            write!(socket, "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-        });
-        let error = send("Fixture", client(Duration::from_secs(3)).unwrap().get(source).bearer_auth("fixture-auth")).await.unwrap_err();
-        assert!(error.contains("302"), "{error}");
-        server.join().unwrap();
-        assert!(seen.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn rejects_oversized_chunked_responses_without_content_length() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let sender = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
-            let mut request = [0; 4096];
-            let mut received = 0;
-            loop {
-                let count = socket.read(&mut request[received..]).unwrap();
-                assert_ne!(count, 0, "Fixture client disconnected before request headers");
-                received += count;
-                if request[..received]
-                    .windows(4)
-                    .any(|window| window == b"\r\n\r\n")
-                {
-                    break;
-                }
-                assert!(received < request.len(), "Fixture request headers are too large");
-            }
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
-            let chunk = vec![b' '; 32 * 1024];
-            for _ in 0..(LIMIT / chunk.len() + 2) {
-                if write!(socket, "{:x}\r\n", chunk.len()).and_then(|_| socket.write_all(&chunk)).and_then(|_| socket.write_all(b"\r\n")).is_err() { return; }
-            }
-            let _ = socket.write_all(b"0\r\n\r\n");
-        });
-        let error = send("Fixture", client(Duration::from_secs(10)).unwrap().get(url)).await.unwrap_err();
-        assert!(error.contains("too large"), "{error}");
-        sender.join().unwrap();
     }
 }

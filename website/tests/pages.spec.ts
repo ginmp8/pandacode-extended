@@ -1,8 +1,7 @@
 import { test as base, expect, type Page } from '@playwright/test';
 import { readdir, readFile } from 'node:fs/promises';
 
-const repo = 'https://github.com/ginmp8/pandacode-extended';
-const originalRepo = 'https://github.com/aicodeking/pandacode';
+const repo = 'https://github.com/aicodeking/pandacode';
 
 /* The reading pages: /changelog lists every releases/X.Y.Z.md, /privacy states that
  * PandaCode collects nothing, /license carries the LICENSE text word for word, and all three work without scripts. */
@@ -114,8 +113,9 @@ test('reading pages are complete without JavaScript', async ({ browser, baseURL 
     const footer = page.locator('footer');
     await expect(footer.getByRole('link', { name: 'License', exact: true })).toHaveAttribute('href', '/license/');
     await expect(footer.getByRole('link', { name: 'GitHub', exact: true })).toHaveAttribute('href', repo);
-    await expect(footer.getByRole('link', { name: 'Support', exact: true })).toHaveAttribute('href', `${repo}/issues`);
-    await expect(page.locator('.navigation .button')).toHaveAttribute('href', `${originalRepo}/releases/latest`);
+    await expect(footer.getByRole('link', { name: 'Support', exact: true })).toHaveAttribute('href', '/support/');
+    await expect(footer.getByRole('link', { name: 'Issues', exact: true })).toHaveAttribute('href', `${repo}/issues`);
+    await expect(page.locator('.navigation .button')).toHaveAttribute('href', `${repo}/releases/latest`);
     await expectNoOverflow(page);
   }
   await context.close();

@@ -90,17 +90,11 @@ async fn request(build: &Build, token: Option<&str>, method: reqwest::Method, pa
     if let Some(body) = body {
         request = request.header("Content-Type", "application/json").body(body.to_string());
     }
-    let mut response = request.send().await.map_err(|e| if e.is_timeout() { "The relay did not answer in time.".to_string() } else { "Could not reach the relay. Check your connection.".to_string() })?;
+    let response = request.send().await.map_err(|e| if e.is_timeout() { "The relay did not answer in time.".to_string() } else { "Could not reach the relay. Check your connection.".to_string() })?;
     let status = response.status().as_u16();
-    if response.content_length().is_some_and(|length| length > LIMIT as u64) {
+    let bytes = response.bytes().await.map_err(|_| "The relay's response was cut off.")?;
+    if bytes.len() > LIMIT {
         return Err("The relay sent a response that is too large.".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "The relay's response was cut off.")? {
-        if chunk.len() > LIMIT.saturating_sub(bytes.len()) {
-            return Err("The relay sent a response that is too large.".into());
-        }
-        bytes.extend_from_slice(&chunk);
     }
     let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     match status {

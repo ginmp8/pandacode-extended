@@ -13,7 +13,7 @@ import type { ProviderId } from './types';
 interface TrayTask { id: string; title: string; project: string; provider: ProviderId; at: number; failed?: boolean }
 interface TraySnapshot { running: TrayTask[]; waiting: TrayTask[]; finished: TrayTask[]; usage: AgentUsage[]; checking: boolean }
 
-const NAMES: Partial<Record<ProviderId, string>> = { claude: 'Claude', codex: 'Codex', kimi: 'Kimi', glm: 'GLM', opencode: 'OpenCode', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', deepseek: 'DeepSeek', pi: 'Pi', cline: 'Cline', kilo: 'Kilo Code', muse: 'Muse', commandcode: 'Command Code', omp: 'Oh My Pi', 'github-copilot': 'Copilot', devin: 'Devin' };
+const NAMES: Partial<Record<ProviderId, string>> = { claude: 'Claude', codex: 'Codex', kimi: 'Kimi', glm: 'GLM', opencode: 'OpenCode', kilo: 'Kilo', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', deepseek: 'DeepSeek', pi: 'Pi', cline: 'Cline', muse: 'Muse', commandcode: 'Command Code', omp: 'Oh My Pi', 'github-copilot': 'Copilot', devin: 'Devin', zcode: 'ZCode', hermes: 'Hermes' };
 const root = document.documentElement;
 
 function refreshTheme(): void {
@@ -28,7 +28,7 @@ refreshTheme();
 window.addEventListener('storage', event => { if (event.key === 'pandacode.theme' || event.key === 'pandacode.palette') location.reload(); });
 
 const host = document.querySelector<HTMLDivElement>('#app')!;
-host.innerHTML = `<main class="tray" aria-label="PandaCode Extended"><header class="tray-header"><img class="tray-mark" src="/icon.svg" alt=""><strong>PandaCode Extended</strong><span class="tray-summary"></span><button type="button" class="tray-icon-button tray-open-app" aria-label="Open PandaCode Extended" title="Open PandaCode Extended">${icon('external')}</button></header><div class="tray-body"></div><footer class="tray-footer"><button type="button" class="tray-open-app">Open PandaCode Extended</button><button type="button" class="tray-quit">Quit</button></footer></main>`;
+host.innerHTML = `<main class="tray" aria-label="PandaCode"><header class="tray-header"><img class="tray-mark" src="/icon.svg" alt=""><strong>PandaCode</strong><span class="tray-summary"></span><button type="button" class="tray-icon-button tray-open-app" aria-label="Open PandaCode" title="Open PandaCode">${icon('external')}</button></header><div class="tray-body"></div><footer class="tray-footer"><button type="button" class="tray-open-app">Open PandaCode</button><button type="button" class="tray-quit">Quit</button></footer></main>`;
 const body = host.querySelector<HTMLDivElement>('.tray-body')!;
 const summary = host.querySelector<HTMLSpanElement>('.tray-summary')!;
 let snapshot: TraySnapshot | null = null;
@@ -60,7 +60,7 @@ function row(task: TrayTask, kind: 'running' | 'waiting' | 'finished'): string {
 
 function usageBlock(usage: AgentUsage): string {
   const windows = usage.windows.map(window => {
-    const value = Math.min(100, Math.max(0, Number.isFinite(window.usedPercent) ? window.usedPercent : 0));
+    const value = Math.min(100, Math.max(0, window.usedPercent));
     const reset = resetLabel(window.resetsAt);
     return `<div class="tray-window" data-tone="${tone(value)}"><span class="tray-window-label">${escape(window.label)}</span><span class="tray-bar" role="progressbar" aria-label="${escape(`${name(usage.provider)} ${window.label}`)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(value)}"><span style="width:${value}%"></span></span><span class="tray-percent">${Math.round(value)}%</span>${reset ? `<span class="tray-reset">${escape(reset)}</span>` : ''}</div>`;
   }).join('');

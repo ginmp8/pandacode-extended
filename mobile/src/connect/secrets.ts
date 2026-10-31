@@ -2,42 +2,28 @@
 // X25519 private key, device id, and the account shown while signed in.
 import * as SecureStore from 'expo-secure-store';
 import { decodeSecret, generateSecret, uuid } from './crypto.ts';
-import { build } from './config.ts';
-import { parsePins, type Pins } from './trust.ts';
 import type { Account } from './types.ts';
 
-const KEYS = { token: 'connect.token', key: 'connect.key', device: 'connect.device', account: 'connect.account', pins: 'connect.pins', replay: 'connect.replay' } as const;
+const KEYS = { token: 'connect.token', key: 'connect.key', device: 'connect.device', account: 'connect.account' } as const;
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY };
 
-export const get = (name: string) => SecureStore.getItemAsync(name, OPTIONS);
+export const get = (name: string) => SecureStore.getItemAsync(name, OPTIONS).catch(() => null);
 export const set = (name: string, value: string) => SecureStore.setItemAsync(name, value, OPTIONS);
-export const remove = (name: string) => SecureStore.deleteItemAsync(name, OPTIONS);
+export const remove = (name: string) => SecureStore.deleteItemAsync(name, OPTIONS).catch(() => undefined);
 
-export const getPins = async (): Promise<Pins> => parsePins(await get(KEYS.pins));
-export const setPins = (pins: Pins) => set(KEYS.pins, JSON.stringify(parsePins(JSON.stringify(pins))));
-export const replayStore = { read: () => get(KEYS.replay), write: (value: string) => set(KEYS.replay, value) };
+/** Key pins from before trust was dropped (same GitHub account is enough); deleted at start. */
+export const forgetPins = () => remove('connect.pins');
 
-/** Bind credentials to their configured relay; rebuilding for another relay cannot leak an old token. */
-export async function getToken(): Promise<string | null> {
-  const raw = await get(KEYS.token);
-  if (raw === null) return null;
-  let value: { relay?: unknown; token?: unknown };
-  try { value = JSON.parse(raw); } catch { throw new Error('Saved sign-in is unreadable. Sign out before signing in again.'); }
-  if (!value || typeof value.token !== 'string' || value.relay !== build?.relay) throw new Error('Saved sign-in belongs to a different relay. Sign out before signing in again.');
-  return value.token;
-}
-export const setToken = (token: string) => {
-  if (!build) throw new Error('Configure Connect before saving a sign-in.');
-  return set(KEYS.token, JSON.stringify({ relay: build.relay, token }));
-};
+export const getToken = () => get(KEYS.token);
+export const setToken = (token: string) => set(KEYS.token, token);
 
 export async function getAccount(): Promise<Account | null> {
-  const raw = await get(KEYS.account);
-  if (raw === null) return null;
-  let value: Account;
-  try { value = JSON.parse(raw); } catch { throw new Error('Saved account data is unreadable.'); }
-  if (!value || typeof value.id !== 'string' || typeof value.login !== 'string') throw new Error('Saved account data is invalid.');
-  return value;
+  try {
+    const value = JSON.parse((await get(KEYS.account)) ?? 'null');
+    return value && typeof value.login === 'string' ? value : null;
+  } catch {
+    return null;
+  }
 }
 export const setAccount = (account: Account) => set(KEYS.account, JSON.stringify(account));
 
@@ -46,11 +32,10 @@ export const clearSession = () => Promise.all([remove(KEYS.token), remove(KEYS.a
 
 export async function getDeviceId(): Promise<string> {
   const id = await get(KEYS.device);
-  if (id !== null && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) throw new Error('The saved device identity is invalid. It has not been replaced.');
   return id ?? newDeviceId();
 }
 
-/** A fresh device id only when none exists, or following explicit account deletion. */
+/** A fresh device id (also after the relay's 409: that id has another key). */
 export async function newDeviceId(): Promise<string> {
   const id = uuid();
   await set(KEYS.device, id);
@@ -65,16 +50,11 @@ export async function wipe(): Promise<void> {
   keyLock = null;
 }
 
-/** A malformed/unreadable existing key fails closed; only a genuinely missing key is generated. */
+/** The device's private key. Only a missing or undecodable key is ever generated, behind a lock. */
 export function getSecret(): Promise<Uint8Array> {
   keyLock ??= (async () => {
-    const raw = await get(KEYS.key);
-    if (raw !== null) {
-      const existing = decodeSecret(raw);
-      if (!existing) throw new Error('The saved device key is invalid. It has not been replaced.');
-      return existing;
-    }
-    if (await get(KEYS.device) !== null) throw new Error('This phone has a saved identity but its private key is missing. It has not been replaced.');
+    const existing = decodeSecret((await get(KEYS.key)) ?? '');
+    if (existing) return existing;
     const fresh = generateSecret();
     await set(KEYS.key, fresh);
     return decodeSecret(fresh)!;

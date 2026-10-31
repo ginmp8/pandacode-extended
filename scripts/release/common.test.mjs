@@ -1,17 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { version, cargoVersion, required, targetConfig, targets, hostTarget, releaseDirectory, cargoLockVersion } from './common.mjs';
+import { version, required, targetConfig, targets, hostTarget, releaseDirectory, cargoLockVersion } from './common.mjs';
 
-test('release versions cannot become paths, arbitrary prereleases, or shell commands', () => {
+test('release versions cannot become paths, prereleases, or shell commands', () => {
   for (const input of ['../secret', '1.0.0;echo x', 'v1.0.0', '01.0.0', '1.0.0-beta', undefined]) assert.throws(() => version(input));
   assert.equal(version('0.3.0'), '0.3.0');
-  assert.equal(version('0.3.30-hardened'), '0.3.30-hardened');
-  assert.equal(version('0.3.34-hardened'), '0.3.34-hardened');
-  assert.equal(version('0.3.35-hardened.2'), '0.3.35-hardened.2');
-  assert.equal(version('0.3.35-hardened.3'), '0.3.35-hardened.3');
-  assert.equal(version('0.3.35.3'), '0.3.35.3');
-  assert.equal(cargoVersion('0.4.0'), '0.4.0');
-  for (const input of ['0.3.30.0', '0.3.30.01', '0.3.30.9007199254740992', '0.3.30-hardened.0', '0.3.30-hardened.01', '0.3.30-hardened.9007199254740992', '0.3.30-hardened/../etc', '0.3.30-beta', '0.3.30-hardened+other']) assert.throws(() => version(input));
   assert.match(releaseDirectory('1.2.3'), /release[\\/]1\.2\.3$/);
 });
 
@@ -45,7 +38,6 @@ test('the Cargo.lock version is set with either line ending', () => {
   for (const eol of ['\n', '\r\n']) {
     assert.equal(cargoLockVersion(lock.join(eol), '0.3.1'), lock.join(eol).replace('version = "0.3.0"', 'version = "0.3.1"'));
   }
-  assert.match(cargoLockVersion(lock.join('\n'), '0.4.0'), /version = "0\.4\.0"/);
   assert.throws(() => cargoLockVersion('[[package]]\r\nname = "other"\r\nversion = "1.0.0"\r\n', '0.3.1'), /No pandacode package/);
   assert.throws(() => cargoLockVersion(lock.join('\n'), '0.3.1;x'));
 });

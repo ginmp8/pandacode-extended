@@ -1,4 +1,4 @@
-//! InstaBox (instabox.sh) machines for explicit sandbox management, over the v1 REST
+//! InstaBox (instabox.sh) machines for cloud agents (docs/cloud-agents.md), over the v1 REST
 //! API with an `X-API-Key`. Lifecycle calls return operations, polled at `/operations/{id}`;
 //! every mutation carries a fresh `Idempotency-Key`. Machines suspend with their memory, so
 //! processes freeze rather than die.
@@ -18,17 +18,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{http, sandbox::{download_command, Info, Sandbox}, Machine};
+use super::{http, sandbox::{checked, download_command, Info, Sandbox}, Machine};
 use crate::Result;
 
 const SERVICE: &str = "InstaBox";
 const DEFAULT_API: &str = "https://api.instabox.sh/v1";
 const KEY: &str = "instabox_key";
-static CONNECTION_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Called while holding the shared settings lock, including reconnects with the same key.
-pub(super) fn connection_changed() {
-    CONNECTION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
 /// The default template, and the only one the free plan creates from.
 const TEMPLATE: &str = "agent-browser";
 /// Metadata on every machine PandaCode creates; `list` shows only these.
@@ -45,9 +40,29 @@ const PIECE: usize = 128 * 1024;
 const LEASE_MAX: u64 = 3600;
 /// PandaCode's lease on each machine (`PUT /machines/{id}/activity-leases/{lease}`).
 const LEASE: &str = "pandacode";
-/// Snapshot-backed creation can take several minutes; keep operation polling bounded.
+/// A create from a snapshot with storage took 93–560 s live (from a template: seconds).
 const OPERATION_MAX: Duration = Duration::from_secs(20 * 60);
 const POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(3) };
+
+/// A pause freezes every process, and after a resume clients still reuse keep-alive sockets
+/// whose connections are gone: a harness alive across the pause sends its next model request
+/// into a dead socket and hangs. This watcher (started once per boot) notices the wall clock
+/// jumping ahead of the frozen uptime and closes outbound HTTP(S) connections so clients
+/// reconnect. `ss -K` needs passwordless sudo, which agent-browser has; without it the
+/// watcher runs but closes nothing.
+const RECONNECT: &str = r#"d="$HOME/.pandacode"; mkdir -p "$d" || exit 1
+[ -f "$d/reconnect.pid" ] && kill -0 "$(cat "$d/reconnect.pid")" 2>/dev/null && exit 0
+cat > "$d/reconnect.sh" <<'EOF'
+echo $$ > "$HOME/.pandacode/reconnect.pid"
+gap() { echo $(( $(date +%s) - $(cut -d. -f1 /proc/uptime) )); }
+last=$(gap)
+while sleep 5; do
+  now=$(gap)
+  [ $((now - last)) -gt 20 ] && sudo -n ss -K state established '( dport = :443 or dport = :80 )' > /dev/null 2>&1
+  last=$now
+done
+EOF
+setsid nohup sh "$d/reconnect.sh" > /dev/null 2>&1 < /dev/null &"#;
 
 pub struct InstaBox {
     api: String,
@@ -137,15 +152,13 @@ impl InstaBox {
     /// Wait for an operation to succeed and return its final state.
     async fn settle(&self, operation: Value) -> Result<Value> {
         let id = operation["id"].as_str().ok_or("InstaBox did not return an operation.")?.to_string();
-        valid_id(&id)?;
         let (deadline, mut current) = (Instant::now() + OPERATION_MAX, operation);
         loop {
             match current["state"].as_str() {
                 Some("succeeded") => return Ok(current),
                 Some("failed" | "canceled" | "cancelled") => {
-                    let what = http::redact(current["type"].as_str().unwrap_or("operation"), &[&self.key]);
-                    let message = http::redact(current["error"]["message"].as_str().unwrap_or("no reason given"), &[&self.key]);
-                    return Err(format!("InstaBox could not finish the {}: {}", what.chars().take(80).collect::<String>(), message.chars().take(400).collect::<String>()));
+                    let what = current["type"].as_str().unwrap_or("operation");
+                    return Err(format!("InstaBox could not finish the {what}: {}", current["error"]["message"].as_str().unwrap_or("no reason given")));
                 }
                 _ if Instant::now() >= deadline => return Err("InstaBox is still working on it; try again in a minute.".into()),
                 _ => {}
@@ -160,7 +173,7 @@ impl InstaBox {
     }
     async fn list(&self) -> Result<Vec<Machine>> {
         let (mut machines, mut cursor) = (Vec::new(), None::<String>);
-        for _ in 0..100 {
+        loop {
             let mut query = reqwest::Url::parse("https://x/").map_err(|e| e.to_string())?;
             query.query_pairs_mut().append_pair("metadata", &format!("{}:{}", LABEL.0, LABEL.1)).extend_pairs(cursor.iter().map(|c| ("cursor", c)));
             let page = self.call(reqwest::Method::GET, &format!("/machines?{}", query.query().unwrap_or_default()), None, Duration::from_secs(30)).await?;
@@ -171,7 +184,6 @@ impl InstaBox {
                 return Ok(machines);
             }
         }
-        Err("InstaBox returned too many pages of machines. Refine the account's resources and try again.".into())
     }
     async fn create(&self, name: &str) -> Result<Machine> {
         let mut body = json!({"name": name, "metadata": {LABEL.0: LABEL.1}});
@@ -208,7 +220,7 @@ impl InstaBox {
     /// An activity lease (at most an hour; it wakes a paused machine first) holds off the idle
     /// pause, and a full idle period starts when it expires. The idle pause itself changes
     /// only for accounts with manual lifecycle: every other plan answers the PATCH with its
-    /// fixed 30 minutes, so the lease is always taken. No background process or socket-reset watcher is installed.
+    /// fixed 30 minutes, so the lease is always taken. Then the reconnect watcher starts.
     async fn keep_alive(&self, id: &str, minutes: u32) -> Result<()> {
         self.owned(id).await?;
         let seconds = u64::from(minutes.max(1)) * 60;
@@ -216,7 +228,7 @@ impl InstaBox {
         self.call(reqwest::Method::PUT, &format!("/machines/{id}/activity-leases/{LEASE}"), Some(lease), Duration::from_secs(30)).await?;
         // A key with only `machines:exec` may lease but not PATCH; the lease is what counts.
         let _ = self.call(reqwest::Method::PATCH, &format!("/machines/{id}"), Some(json!({"autoSuspendAfterSeconds": seconds.clamp(120, 86_400)})), Duration::from_secs(30)).await;
-        Ok(())
+        checked(self.exec(id, RECONNECT, Duration::from_secs(30)).await?)
     }
     /// What new machines can start from: agent-browser, the account's ready snapshots, and
     /// other templates when the org new machines go to (the key's workspace, else the
@@ -308,9 +320,6 @@ impl InstaBox {
             if piece.is_empty() {
                 break;
             }
-            if piece.len() > PIECE || bytes.len().saturating_add(piece.len()) > KEEP as usize {
-                return Err("InstaBox output exceeded its size limit.".into());
-            }
             offset += piece.len() as u64;
             bytes.extend(piece);
         }
@@ -323,7 +332,7 @@ impl Sandbox for InstaBox {
     /// Suspended machines keep disk and memory. The activity lease keeps one awake for up to
     /// an hour; after it, InstaBox's idle pause applies.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: 60 }
+        Info { persistent: true, max_unattended_minutes: 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         http::block(InstaBox::list(self))
@@ -369,36 +378,14 @@ fn connected() -> Result<InstaBox> {
 pub fn sandbox() -> Result<Box<dyn Sandbox>> {
     Ok(Box::new(connected()?))
 }
-
-fn image_connection() -> Result<(InstaBox, u64)> {
-    let _guard = super::settings_guard()?;
-    Ok((connected()?, CONNECTION_GENERATION.load(std::sync::atomic::Ordering::SeqCst)))
-}
-/// Check while holding settings_guard so a connection cannot change before the commit.
-fn check_image_connection(instabox: &InstaBox, generation: u64) -> Result<()> {
-    if generation != CONNECTION_GENERATION.load(std::sync::atomic::Ordering::SeqCst) || super::secret(KEY).as_deref() != Some(instabox.key.as_str()) {
-        return Err("The InstaBox connection changed. Reload its images and try again.".into());
-    }
-    Ok(())
-}
 /// The machine images for Settings → Cloud, with the saved one.
 pub fn images() -> Result<Images> {
-    let (instabox, generation) = image_connection()?;
-    let images = http::block(instabox.images())?;
-    let _guard = super::settings_guard()?;
-    check_image_connection(&instabox, generation)?;
-    let selected = image_value(&saved_image(super::settings().providers.get("instabox")));
-    Ok(Images { images, selected })
+    let instabox = connected()?;
+    Ok(Images { images: http::block(instabox.images())?, selected: image_value(&instabox.image) })
 }
 /// Save the image new machines start from, once InstaBox shows the account can use it.
 pub fn set_image(value: &str) -> Result<Images> {
-    let (instabox, generation) = image_connection()?;
-    set_image_for(&instabox, generation, value)
-}
-fn set_image_for(instabox: &InstaBox, generation: u64, value: &str) -> Result<Images> {
-    let images = http::block(instabox.check_image(value))?;
-    let _guard = super::settings_guard()?;
-    check_image_connection(instabox, generation)?;
+    let images = http::block(connected()?.check_image(value))?;
     let mut settings = super::settings();
     let options = settings.providers.entry("instabox".into()).or_default();
     options.remove("snapshotId");
@@ -514,12 +501,34 @@ mod tests {
             assert_eq!(r.path, "/v1/machines/m_1/activity-leases/pandacode");
             serde_json::from_str(&r.body).unwrap()
         }).collect();
-        assert!(log.iter().all(|request| !request.path.ends_with("/exec")), "activity leases never install a watcher or execute guest commands");
         assert_eq!(leases, vec![json!({"ttlSeconds": 3600}), json!({"ttlSeconds": 900}), json!({"ttlSeconds": 3600})]);
         let idle: Vec<Value> = log.iter().filter(|r| r.method == "PATCH").map(|r| serde_json::from_str(&r.body).unwrap()).collect();
         assert_eq!(idle, vec![json!({"autoSuspendAfterSeconds": 3600}), json!({"autoSuspendAfterSeconds": 900}), json!({"autoSuspendAfterSeconds": 86400})]);
     }
 
+    #[tokio::test]
+    async fn keep_alive_starts_the_reconnect_watcher_and_fails_when_it_cannot() {
+        let (instabox, seen) = instabox();
+        instabox.keep_alive("m_1", 60).await.unwrap();
+        {
+            let log = seen.lock().unwrap();
+            let watcher: Vec<Value> = log.iter().filter(|r| r.path == "/v1/machines/m_1/exec").map(|r| serde_json::from_str(&r.body).unwrap()).collect();
+            assert_eq!(watcher.len(), 1);
+            let script = watcher[0]["stdin"].as_str().unwrap();
+            assert!(script.contains("sudo -n ss -K state established '( dport = :443 or dport = :80 )'"), "{script}");
+            assert!(script.contains("kill -0") && script.contains("/proc/uptime") && script.contains("setsid nohup"), "{script}");
+        }
+        // A machine where the watcher can't start (here: no writable HOME) fails the keep-alive.
+        let (base, _) = mock::serve(|request, _| -> (u16, Vec<u8>) {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/v1/machines/m_1") => (200, br#"{"id":"m_1","state":"running","metadata":{"created-by":"pandacode"}}"#.to_vec()),
+                ("POST", "/v1/machines/m_1/exec") => exec_reply("1 9\nread-only"),
+                _ => (200, b"{}".to_vec()),
+            }
+        });
+        let error = InstaBox::new(Some(format!("{base}/v1")), "test-key".into()).keep_alive("m_1", 60).await.unwrap_err();
+        assert!(error.contains("read-only"), "{error}");
+    }
 
     #[tokio::test]
     async fn offers_agent_browser_ready_snapshots_and_templates_only_on_a_paid_plan() {
@@ -571,7 +580,7 @@ mod tests {
         let (code, output) = instabox.exec("m_1", "big", Duration::from_secs(30)).await.unwrap();
         assert_eq!((code, output.len()), (Some(1), big().len()));
         assert!(output.ends_with("error: boom\n"));
-        assert_eq!(checked((code, output)).unwrap_err(), "The cloud management command failed.");
+        assert!(checked((code, output)).unwrap_err().contains("error: boom"));
         assert_eq!(instabox.exec("m_1", "sleep", Duration::from_secs(5)).await.unwrap().0, None);
         let log = seen.lock().unwrap();
         let bodies: Vec<Value> = log.iter().filter(|r| r.method == "POST").map(|r| serde_json::from_str(&r.body).unwrap()).collect();
@@ -607,55 +616,67 @@ mod tests {
         assert!(log.iter().all(|r| r.method == "GET" && r.path == "/v1/machines/m_9"), "nothing else was sent");
     }
 
+    /// `INSTABOX_API_KEY=… cargo test --lib instabox_live -- --ignored --nocapture`. Creates
+    /// one agent-browser machine and always deletes it.
+    #[test]
+    #[ignore = "needs INSTABOX_API_KEY"]
+    fn instabox_live() {
+        let api = InstaBox::new(None, std::env::var("INSTABOX_API_KEY").expect("INSTABOX_API_KEY"));
+        let started = Instant::now();
+        let made = Sandbox::create(&api, &format!("pc-live-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])).unwrap();
+        let id = made.id.trim_start_matches("instabox:").to_string();
+        eprintln!("instabox_live: created {id} ({}) in {} s", made.detail, started.elapsed().as_secs());
+        let run = || -> Result<()> {
+            let wait_running = || -> Result<()> {
+                let started = Instant::now();
+                while Sandbox::state(&api, &id)? != "running" {
+                    assert!(started.elapsed() < Duration::from_secs(600), "never ran");
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+                Ok(())
+            };
+            wait_running()?;
+            // The lease (the old /activity-leases path answered 404) and one watcher, however
+            // often keep_alive runs.
+            Sandbox::keep_alive(&api, &id, 60)?;
+            Sandbox::keep_alive(&api, &id, 60)?;
+            assert_eq!(Sandbox::exec(&api, &id, "pgrep -fc reconnect.sh", Duration::from_secs(30))?.1.trim(), "1", "one watcher only");
+            // Pause with an open HTTPS connection: after the resume it is closed, processes kept.
+            Sandbox::spawn(&api, &id, "exec sleep 3000")?;
+            let sleeper = "pgrep -x sleep -a | grep ' 3000$' | cut -d' ' -f1";
+            let (_, pid) = Sandbox::exec(&api, &id, sleeper, Duration::from_secs(30))?;
+            assert!(!pid.trim().is_empty(), "background process died");
+            Sandbox::spawn(&api, &id, "exec python3 -c 'import socket,ssl,time; s=ssl.create_default_context().wrap_socket(socket.create_connection((\"api.github.com\",443)),server_hostname=\"api.github.com\"); time.sleep(3600)'")?;
+            std::thread::sleep(Duration::from_secs(3));
+            let open = "ss -Htnp state established '( dport = :443 )' | grep -c python3";
+            assert_eq!(Sandbox::exec(&api, &id, open, Duration::from_secs(30))?.1.trim(), "1");
+            Sandbox::power(&api, &id, "stop")?;
+            assert_eq!(Sandbox::state(&api, &id)?, "stopped");
+            std::thread::sleep(Duration::from_secs(30));
+            Sandbox::power(&api, &id, "start")?;
+            wait_running()?;
+            std::thread::sleep(Duration::from_secs(12));
+            assert_eq!(Sandbox::exec(&api, &id, open, Duration::from_secs(30))?.1.trim(), "0", "stale connection left open");
+            assert_eq!(Sandbox::exec(&api, &id, sleeper, Duration::from_secs(30))?.1, pid, "processes were not kept across the pause");
+            eprintln!("instabox_live: all steps passed");
+            Ok(())
+        };
+        // Delete even when a step panics, and wait until InstaBox answers 404.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        Sandbox::power(&api, &id, "delete").unwrap();
+        let deleted = Instant::now();
+        loop {
+            match http::block(api.get(&id)) {
+                Err(error) if error.contains("not found") => break eprintln!("instabox_live: {id} deleted, GET answers 404 ({error})"),
+                _ => assert!(deleted.elapsed() < Duration::from_secs(180), "{id} still exists"),
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        result.unwrap().unwrap();
+    }
 
     #[test]
     fn connect_refuses_empty_keys() {
         assert!(connect(" ", &json!({})).is_err());
     }
-    #[test]
-    fn image_validation_cannot_cross_a_connection_change() {
-        use std::sync::mpsc;
-        let _serial = super::super::settings_test_guard();
-        let original_settings = super::super::settings();
-        let original_key = super::super::secret(KEY);
-        {
-            let _guard = super::super::settings_guard().unwrap();
-            connection_changed();
-            super::super::set_secret(KEY, "fixture-account-a").unwrap();
-        }
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let (base, _) = mock::serve(move |request, _| match request.path.as_str() {
-            "/me" => (200, r#"{"orgId":"account-a"}"#.to_string()),
-            "/orgs" => (200, r#"{"orgs":[{"id":"account-a","tier":"free"}]}"#.to_string()),
-            "/snapshots" => {
-                ready_tx.send(()).unwrap();
-                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                (200, r#"{"snapshots":[{"id":"image-a","status":"ready"}]}"#.to_string())
-            }
-            _ => (404, "{}".to_string()),
-        });
-        let (mut account_a, generation) = image_connection().unwrap();
-        account_a.api = base;
-        let pending = std::thread::spawn(move || set_image_for(&account_a, generation, "snapshot:image-a"));
-        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        {
-            let _guard = super::super::settings_guard().unwrap();
-            connection_changed();
-            super::super::remove_secret(KEY);
-            connection_changed();
-            super::super::set_secret(KEY, "fixture-account-b").unwrap();
-            let mut settings = super::super::settings();
-            settings.providers.insert("instabox".into(), BTreeMap::from([("snapshotId".into(), "image-b".into())]));
-            super::super::save_settings(&settings).unwrap();
-        }
-        release_tx.send(()).unwrap();
-        let error = pending.join().unwrap().unwrap_err();
-        assert!(error.contains("connection changed"));
-        assert_eq!(super::super::settings().providers["instabox"]["snapshotId"], "image-b");
-        let _guard = super::super::settings_guard().unwrap();
-        super::super::save_settings(&original_settings).unwrap();
-        match original_key { Some(key) => super::super::set_secret(KEY, &key).unwrap(), None => super::super::remove_secret(KEY) }
-    }
-
 }

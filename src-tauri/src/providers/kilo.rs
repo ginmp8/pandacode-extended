@@ -8,7 +8,7 @@ pub(super) fn mode_id(mode: &str) -> &'static str {
     if mode == "plan" { "plan" } else { "code" }
 }
 
-pub(super) fn configuration(mode: &str, inherited: Option<&str>) -> String {
+fn configuration(mode: &str, inherited: Option<&str>) -> String {
     let mut inline = inherited
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .filter(Value::is_object)
@@ -61,7 +61,7 @@ pub(super) async fn models(path: &Path) -> Result<Vec<ModelInfo>, String> {
     let _refresh = acp_catalog::refresh_lock("kilo", path).await;
     if let Some(models) = acp_catalog::get("kilo", path) { return Ok(models); }
     let discovery = acp_catalog::begin("kilo", path);
-    let mut command = super::command(path)?;
+    let mut command = super::provider_command("kilo", path)?;
     command.arg("acp").env("KILO_DISABLE_AUTOUPDATE", "true");
     let (metadata, _) = acp::inspect(command, &std::env::temp_dir(), false).await?;
     acp_catalog::store(discovery, &metadata);

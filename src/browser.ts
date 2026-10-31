@@ -5,10 +5,14 @@ import { mountJevLive, type JevLiveView } from './jev-live';
 import { pageZoom } from './ui-size';
 import type { BrowserAttachment, BrowserBounds, BrowserElement, BrowserScreenshot, BrowserStatus, LocalServer } from './types';
 
-export interface BrowserPanel { close(): Promise<void>; refresh(): void; navigate(url: string): Promise<BrowserStatus>; watchJev(runId: string): Promise<void>; review?(args: Record<string, unknown>): Promise<unknown>; resizeReview?(origin: string, width: number, height: number): Promise<unknown>; }
+export interface BrowserPanel { close(): Promise<void>; refresh(): void; navigate(url: string): Promise<BrowserStatus>; watchJev(runId: string): Promise<void>; }
 type Options = { task(): string | undefined; session(): string | undefined; navigated?(url: string): void; attach(taskId: string, attachment: BrowserAttachment): void; close(): void; test?(url?: string, anchor?: HTMLElement): void; };
-const linuxBrowser = (): boolean => /Linux/i.test(navigator.platform);
-const EXTERNAL_NOTICE = 'Opened in your system browser. QA and captures stay with the native Browser pane.';
+// Tauri 2 packs a Linux child webview into the window's GtkBox below the app
+// instead of placing it at the given bounds (set_bounds is a no-op there), so
+// the guest lands in a bottom pane and window resizes fight over the split.
+// ponytail: system browser on Linux; embed again once the guest sits in a GtkOverlay.
+export const embedsGuest = (platform: string, sample: boolean): boolean => sample || !/Linux/i.test(platform);
+const LINUX_NOTICE = 'Opened in your system browser. Linux cannot show pages inside this pane yet.';
 const emptyStatus = (): BrowserStatus => ({ url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false });
 
 export function normalizeUrl(input: string): string {
@@ -28,7 +32,6 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   let pickTask: string | undefined, servers: LocalServer[] = [], lastBounds = '';
   let watching = false, jevAvailable = false, live: JevLiveView | undefined;
   let operations = Promise.resolve();
-  let qa: import('./hardened/browser-qa').BrowserQA | undefined, qaLoading: Promise<import('./hardened/browser-qa').BrowserQA> | undefined;
   const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
     const next = operations.then(work); operations = next.then(() => {}, () => {}); return next;
   };
@@ -36,9 +39,9 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   host.innerHTML = `<div class="browser-toolbar">
     ${tool('back', 'Go back', 'back')}${tool('forward', 'Go forward', 'forward')}${tool('reload', 'Reload page', 'refresh')}
     <form class="browser-address"><span>${icon('globe')}</span><input aria-label="Browser URL" placeholder="Enter URL or localhost port" autocomplete="off" spellcheck="false" inputmode="url"><button type="submit" aria-label="Open URL">${icon('arrow')}</button></form>
-    ${linuxBrowser() ? tool('external', 'Open in system browser', 'forward') : ''}${tool('pick', 'Attach an element', 'select')}${tool('capture', 'Attach screenshot', 'camera')}${tool('review-qa', 'Browser QA', 'check')}
+    ${tool('pick', 'Attach an element', 'select')}${tool('capture', 'Attach screenshot', 'camera')}
   </div><div class="browser-location"><button type="button" data-browser-action="home">${icon('server')}Local servers</button><span class="browser-page-title"></span><button type="button" class="browser-watch-jev" data-browser-action="watch-jev" hidden>${icon('spark')}Watch Jev</button>${options.test ? tool('test', 'Test with Jev', 'spark') : ''}${tool('close', 'Close browser', 'close')}</div>
-  <div class="browser-notice" role="status" hidden></div><div class="browser-viewport"><section class="browser-home"><div class="browser-home-heading"><h2>Local servers</h2>${tool('refresh-ports', 'Refresh local servers', 'refresh')}</div><div class="browser-servers" aria-label="Local servers"></div><p class="browser-home-hint">Open a server, or enter any website above.${linuxBrowser() ? ' If a native page does not fit on Linux, choose Open in system browser. Browser QA remains in the native pane.' : ''}</p></section><div class="browser-guest-placeholder" hidden></div></div>`;
+  <div class="browser-notice" role="status" hidden></div><div class="browser-viewport"><section class="browser-home"><div class="browser-home-heading"><h2>Local servers</h2>${tool('refresh-ports', 'Refresh local servers', 'refresh')}</div><div class="browser-servers" aria-label="Local servers"></div><p class="browser-home-hint">Open a server, or enter any website above.</p></section><div class="browser-guest-placeholder" hidden></div></div>`;
   const query = <T extends HTMLElement = HTMLElement>(selector: string) => host.querySelector<T>(selector)!;
   const address = query<HTMLInputElement>('.browser-address input'), viewport = query('.browser-viewport');
   const notice = query('.browser-notice'), placeholder = query('.browser-guest-placeholder');
@@ -109,6 +112,7 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   }
   async function navigate(input: string): Promise<void> {
     const url = normalizeUrl(input);
+    if (!embedsGuest(navigator.platform, preview)) { await call('open_external_url', { url }); if (!disposed) { address.value = ''; tell(LINUX_NOTICE); } return; }
     options.navigated?.(url);
     live?.leave();
     busy = true; tell(''); updateControls();
@@ -148,45 +152,8 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
     }
     updateControls(); syncBounds();
   } });
-  const qaActive = () => !disposed && !home && !watching && !status.loading;
-  const nativeReview = (args: Record<string, unknown>) => enqueue(async () => {
-    if (!qaActive() || preview) throw new Error('Open a loaded native browser. Development fixtures cannot verify a project.');
-    return call<import('./hardened/browser-flow').ReviewReply>('browser_inspect', { action: 'review', text: JSON.stringify(args) });
-  });
-  async function ensureQA(): Promise<import('./hardened/browser-qa').BrowserQA> {
-    if (disposed) throw new Error('Browser is closed.');
-    if (qa) return qa;
-    qaLoading ??= import('./hardened/browser-qa').then(({ mountBrowserQA }) => {
-      if (disposed) throw new Error('Browser is closed.');
-      const original = { width: viewport.style.width, flex: viewport.style.flex, alignSelf: viewport.style.alignSelf };
-      qa = mountBrowserQA(host, {
-        taskId: options.session() || '', status: () => status, active: qaActive, review: nativeReview,
-        capture: () => enqueue(async () => { if (!qaActive() || preview) throw new Error('Native capture is unavailable.'); return call<BrowserScreenshot>('browser_capture'); }),
-        resize: async (width, height) => {
-          if (disposed) throw new Error('Browser is closed.');
-          if (width === null || height === null) { viewport.style.width = original.width; viewport.style.flex = original.flex; viewport.style.alignSelf = original.alignSelf; }
-          else { viewport.style.width = `min(100%, ${width}px)`; viewport.style.flex = `0 1 ${height}px`; viewport.style.alignSelf = 'center'; }
-          await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-          if (disposed || home || watching) throw new Error('Browser is unavailable.');
-          await enqueue(() => call('browser_bounds', { bounds: bounds(), visible: !obscured(bounds()) }));
-          if (preview) throw new Error('Native viewport sizing is unavailable in development fixtures.');
-          const result = await nativeReview({ op: 'snapshot', origin: new URL(status.url).origin });
-          if (result.ok !== true || !result.viewport) throw new Error(result.error || 'Viewport dimensions unavailable.');
-          return result.viewport as { width: number; height: number };
-        },
-      }); return qa;
-    }).catch(error => { qaLoading = undefined; throw error; });
-    return qaLoading;
-  }
   async function act(action: string, anchor?: HTMLElement): Promise<void> {
     if (disposed) return;
-    if (action === 'external') {
-      const url = normalizeUrl(address.value || status.url);
-      await call('browser_open_external', { url });
-      if (!disposed) tell(EXTERNAL_NOTICE);
-      return;
-    }
-    if (action === 'review-qa') { (await ensureQA()).toggle(); return; }
     if (action === 'test') { options.test?.(watching ? live?.url() : status.url || undefined, anchor); return; }
     if (action === 'watch-jev') { await live?.watch(); return; }
     if (action === 'close') { options.close(); return; }
@@ -252,13 +219,17 @@ export async function mountBrowser(host: HTMLElement, options: Options): Promise
   document.addEventListener('visibilitychange', restoreVisibility);
   updateControls(); void refreshServers(); if (!watching) address.focus();
   return {
-    async navigate(url) { if (disposed) throw new Error('Browser is closed.'); await navigate(url); return status; },
-    review: nativeReview,
-    async resizeReview(origin, width, height) { return (await ensureQA()).resize(origin, width, height); },
+    async navigate(url) {
+      if (disposed) throw new Error('Browser is closed.');
+      await navigate(url);
+      // Agents must not drive a page they cannot read; tell them where it went.
+      if (!embedsGuest(navigator.platform, preview)) throw new Error(LINUX_NOTICE);
+      return status;
+    },
     async watchJev(runId) { if (disposed) throw new Error('Browser is closed.'); await live?.watch(runId); },
     refresh() { live?.refresh(); if (pickTask && pickTask !== options.task()) { pickTask = undefined; void enqueue(() => call('browser_pick', { enabled: false })).catch(fail); } updateControls(); scheduleBounds(); },
     async close() {
-      qa?.dispose(); disposed = true; ++request; clearTimeout(frame); resize.disconnect(); menus.clear(); overlays.disconnect();
+      disposed = true; ++request; clearTimeout(frame); resize.disconnect(); menus.clear(); overlays.disconnect();
       // Hide promptly even when a navigation operation has not returned yet.
       const hiding = call('browser_bounds', { bounds: bounds(), visible: false }).catch(() => {});
       unlisten.forEach(stop => stop()); window.removeEventListener('resize', scheduleBounds);

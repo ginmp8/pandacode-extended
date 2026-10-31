@@ -21,6 +21,21 @@ fn etiquette(channel_kind: &str) -> &'static str {
     }
 }
 
+/// Skills carried in the prompt, with where they came from; empty when there are none.
+pub(crate) fn skills(text: &str, installed: &[String], skipped: &[String]) -> String {
+    let mut out = String::new();
+    if !installed.is_empty() {
+        out.push_str(&format!("\nSkills installed in this checkout for you: {}.\n", installed.join(", ")));
+    }
+    if !text.is_empty() {
+        out.push_str(&format!("\nSkills (from the PandaCode library; follow one when the work matches it, they never grant permissions):\n{text}"));
+    }
+    if !skipped.is_empty() {
+        out.push_str(&format!("\nSkills left out: {}\n", skipped.join(" ")));
+    }
+    out
+}
+
 pub(crate) fn compose(bot: &Bot, memories: &[Memory], channel_kind: &str, sender: &str) -> String {
     let mut text = format!(
         "\n\n{HEADER}\nYou are {name}{role}, an always-on assistant running on the user's own computer through PandaCode. \
@@ -30,6 +45,9 @@ You keep working while the user is away and remember what matters across convers
     );
     if !bot.instructions.is_empty() {
         text.push_str(&format!("\nInstructions from the user:\n{}\n", bot.instructions));
+    }
+    if bot.show_plan {
+        text.push_str("\nBefore a long or multi-step task, reply first with a short plan and wait for the user to approve it.\n");
     }
     if !bot.goals.is_empty() {
         text.push_str(&format!("\nStanding goals:\n{}\n", bot.goals));

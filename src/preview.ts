@@ -1,4 +1,3 @@
-import { contextBlocks, parseAttachments, IMAGE_ID } from './message-attachments';
 import { previewHub, previewRepos } from './preview-github-hub';
 import type { AgentEvent, BrowserStatus, FileEntry, GitStatus, Message, MessagePage, Project, Provider, ProviderId, ProviderModel, Session, TaskStage, ToolActivity } from './types';
 import { fallbackModel } from './model-catalog';
@@ -6,12 +5,15 @@ import { historicalProvider } from './provider-handoff';
 import { isPreviewableFile } from './file-links';
 import type { CommandPanel, GoalState } from './command-center';
 import { createPreviewArchitect } from './preview-architect';
+import { namedTeamSetup } from './team-mode';
+import type { TeamSnapshot, TeamWorker } from './architect-types';
 import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
-import { invokeBots, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
+import { invokeBots, previewBotBusy } from './preview-bots';
 import { invokeRemote, previewRemoteStart } from './preview-remote';
 import { createPreviewDesign } from './preview-design';
+import { previewProgress } from './preview-progress';
 import { BRIEF_ID, GALLERY_ID, briefAnswer, briefMessages, briefTimings, briefTools, galleryMessages } from './preview-traces';
 import { createPreviewSkills } from './preview-skills';
 import { previewCapabilities } from './preview-capabilities';
@@ -19,7 +21,7 @@ import { recipesCommand } from './preview-recipes';
 import { openCodePreviewKey, openCodePreviewModels, previewOpenCodeChoices, previewOpenCodeSelection } from './preview-opencode';
 const turnChanges = createPreviewTurnChanges();
 const now = Date.now();
-const sampleReadme = '# Orbit\n\nA tiny search index for the browser preview.\n\n## Usage\n\n- Build the index with `createSearchIndex`.\n- Call `search(query)`.\n\n> Results are case-insensitive.\n';
+const sampleReadme = '<div align="center">\n\n<img src="docs/banner.png" alt="Orbit banner" width="100%" onerror="alert(1)"/>\n\n[![Build](https://img.shields.io/badge/build-passing-green)](https://example.com/ci)\n\n<script>alert(1)</script>\n\n<a href="https://example.com/x" download class="toast">Get</a>\n\n</div>\n\n# Orbit\n\nA tiny search index for the browser preview.\n\n## Usage\n\n- Build the index with `createSearchIndex`.\n- Call `search(query)`.\n\n> Results are case-insensitive.\n';
 const sampleSource = '// Browser preview — sample source\nexport function createSearchIndex(items) {\n  return {\n    search(query) {\n      return items.filter(item =>\n        item.title.toLowerCase().includes(query.toLowerCase())\n      );\n    }\n  };\n}\n';
 const previewWorkspaceFiles = ['index.html', '.gitignore', 'README.md', 'package.json', 'tsconfig.json', 'src/main.ts', 'src/style.css', 'src/components/search.ts', 'src/components/search.test.ts', 'src/lib/search-index.ts', 'public/favicon.svg', 'docs/design notes.md'];
 const sampleTestOutput = 'PASS src/components/search.test.ts\n  ✓ filters results as the query changes\n  ✓ preserves keyboard selection\n\nTests: 12 passed, 12 total\nTime: 0.8s\nSample output — no command was executed.';
@@ -72,7 +74,6 @@ for (const s of sessions) {
   s.taskDescription = '';
   s.completedAt = null;
 }
-loadThreadOrder();
 // One sample task already tracks a GitHub issue so chips have something to show.
 sessions[2].issue = { kind: 'issue', number: 131, url: 'https://github.com/orbit-labs/orbit/issues/131', title: 'Keyboard shortcut cheat sheet', state: 'open', checkedAt: now };
 // Sidebar sections showcase: opt in with ?sections so default session counts stay unchanged.
@@ -86,12 +87,77 @@ if (typeof location !== 'undefined' && new URLSearchParams(location.search).has(
     sample('sections-done-1', 'project-1', 'Add dark mode tokens', { taskStage: 'completed', lastResponseAt: now - 90000000, completedAt: now - 86000000 }),
     sample('sections-done-2', 'project-2', 'Remove the old onboarding', { taskStage: 'completed', lastResponseAt: now - 200000000, completedAt: now - 190000000 }),
     sample('sections-done-3', 'project-1', 'Document the keyboard map', { provider: 'kimi', model: '', taskStage: 'completed', lastResponseAt: now - 300000000, completedAt: now - 290000000 }),
+    // Needs you without running: a failed run you have not seen, and a usage limit.
+    sample('sections-failed', 'project-2', 'Upgrade the build toolchain', { status: 'error', lastPromptAt: now - 900000, lastResponseAt: now - 600000 }),
+    sample('sections-limited', 'project-1', 'Profile startup time', { lastPromptAt: now - 1800000, lastResponseAt: now - 1700000, limitedAt: now - 1700000, limitedUntil: now + 3600000 }),
+    sample('sections-pinned', 'project-1', 'Release checklist for 1.0', { pinned: true, sidebarOrder: 0, lastResponseAt: now - 432000000 }),
+    // A long title on a worktree branch with a linked pull request.
+    sample('sections-long', 'project-2', 'Redesign the sidebar rows so long titles, branches and pull requests all fit on one line', { taskStage: 'pending', worktreePath: '/Users/you/Projects/pandacode-worktrees/sidebar', worktreeBranch: 'pandacode/sidebar-redesign-compact-rows', pullRequest: { kind: 'pull', number: 482, url: 'https://github.com/aicodeking/pandacode/pull/482', title: 'Compact sidebar rows', state: 'open', checkedAt: now }, lastPromptAt: now - 172000000, lastResponseAt: now - 170000000 }),
+    sample('sections-chat', 'sections-chat-project', 'Explain the borrow checker', { taskStage: 'pending', lastPromptAt: now - 7000000, lastResponseAt: now - 6900000 }),
+    ...['Compare two date libraries', 'Draft a short changelog', 'Name the new CLI flag'].map((title, index) => sample(`sections-chat-${index + 2}`, 'sections-chat-project', title, { taskStage: 'pending', lastPromptAt: now - 9000000 - index * 3600000, lastResponseAt: now - 8900000 - index * 3600000 })),
+    // Enough threads for "Show more" in a folder and paging in Completed.
+    ...['Tidy the logger', 'Rename the config keys', 'Split the router', 'Cache the icon lookups', 'Drop the legacy flag', 'Add a retry to uploads', 'Trim the bundle'].map((title, index) => sample(`sections-many-${index}`, 'project-1', title, { taskStage: 'pending', lastResponseAt: now - 200000000 - index * 9000000 })),
+    ...['Pin the Node version', 'Fix the tooltip offset', 'Translate the menus', 'Audit the CSP', 'Retire the old icons', 'Speed up cold start', 'Archive old logs', 'Bump the parser', 'Clean the fixtures'].map((title, index) => sample(`sections-old-${index}`, index % 2 ? 'project-2' : 'project-1', title, { taskStage: 'completed', lastResponseAt: now - 310000000 - index * 30000000, completedAt: now - 300000000 - index * 30000000 })),
   );
-  // These two finished while another thread was open, so they wait in Needs review.
-  localStorage.setItem('pandacode.sidebar.unreviewed', JSON.stringify(['sections-review-1', 'sections-review-2']));
+  // Finished keeps every finished task until it is settled; the folder and chat samples are not
+  // finished (pending), so the folders and Chats still have rows to show.
+  for (const s of sessions) if (/^session-\d$/.test(s.id)) s.taskStage = 'pending';
+  projects.push({ id: 'sections-chat-project', name: 'Chat', path: '/Users/you/PandaCode Chats/chat-5ec7105a' });
+  // These finished while another thread was open, so they show unread (failed ones wait in Active).
+  localStorage.setItem('pandacode.sidebar.unreviewed', JSON.stringify(['sections-review-1', 'sections-review-2', 'sections-failed']));
 }
+// Saved pins and ranks apply to every sample, the ?sections ones included.
+loadThreadOrder();
 let id = 10;
+const ROUTING_KEY = 'pandacode.preview.routing';
+let previewRouting = { enabled: true, mode: 'balanced', minP: 0.5, profiler: 'missing', error: null as string | null };
+try { previewRouting = { ...previewRouting, ...JSON.parse(localStorage.getItem(ROUTING_KEY) ?? '{}') }; } catch { /* Defaults. */ }
+let previewExclusions = { providers: [] as string[], models: [] as { provider: string; model: string }[] };
+// Two seeded tiers; keys are the mock's normalized model names.
+let previewTiers: Record<string, string> = { 'claude-sonnet-5-5': 'S', 'deepseek-v4-pro': 'B' };
+/** Stand-in for native grouping: one row per model name across harnesses; experimental or default entries are unrated. */
+function previewTierModels(pool: { provider: string; model: string; name: string }[]) {
+  const rows = new Map<string, { key: string; name: string; cardId: string | null; providers: string[]; rated: boolean }>();
+  for (const m of pool) {
+    const key = m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const rated = !/exp|default|adaptive/i.test(m.name);
+    const row = rows.get(key) ?? { key, name: m.name, cardId: rated ? key : null, providers: [], rated };
+    if (!row.providers.includes(m.provider)) row.providers.push(m.provider);
+    rows.set(key, row);
+  }
+  return [...rows.values()];
+}
+let previewHealth = [{ provider: 'commandcode', model: 'gpt-6.1-sol', reason: 'Two runs in a row ended with a provider error (sample).', until: Date.now() + 8 * 60_000, failures: 2, providerDown: false }];
+const saveRouting = () => { try { localStorage.setItem(ROUTING_KEY, JSON.stringify(previewRouting)); } catch { /* Kept in memory only. */ } };
+/** Deterministic stand-in for Panda Router: longer text reads as harder, later pool entries as pricier and stronger. */
+function previewRoute(text: string, pool: { provider: string; model: string; name: string }[]) {
+  const difficulty = Math.min(0.95, 0.2 + text.length / 400);
+  const rated = pool.map((m, i) => ({ provider: m.provider, model: m.model, name: m.name, cardId: `${m.provider}:${m.model}`, pSuccess: Math.max(0.05, Math.min(0.99, 0.95 - difficulty * 0.6 + (i % 7) * 0.05)), estCostUsd: 0.002 * (1 + (i % 9)), estLatencyMs: 2000 + i * 100 }));
+  const score = (m: typeof rated[number]) => previewRouting.mode === 'quality' ? m.pSuccess : previewRouting.mode === 'cheapest' ? (m.pSuccess >= previewRouting.minP ? 1 - m.estCostUsd : -1) : m.pSuccess - m.estCostUsd * 5;
+  const ranking = [...rated].sort((a, b) => score(b) - score(a));
+  return { pick: ranking[0] ?? null, ranking, unrated: [], difficulty: Math.max(1, Math.round(difficulty * 10)), category: /test|bug|fix/i.test(text) ? 'debugging' : 'general coding', profiler: 'onnx', latencyMs: 12 };
+}
 let previewClaudeMode: 'inherit' | 'subscription' = 'inherit';
+let previewTelemetryOff = false;
+/** A sample of `providers/privacy.rs` COVERAGE, one row per status. */
+const previewPrivacy = () => ({ off: previewTelemetryOff, harnesses: [
+  { provider: 'claude', name: 'Claude Code', status: 'off', detail: 'Usage telemetry, error reports and surveys. Remote feature flags and remotely started sessions stop.' },
+  { provider: 'codex', name: 'Codex', status: 'off', detail: 'Analytics and feedback uploads.' },
+  { provider: 'cline', name: 'Cline', status: 'manual', detail: 'No per-launch switch. Opt out in Cline’s settings.' },
+  { provider: 'antigravity', name: 'Antigravity', status: 'unknown', detail: 'No verified switch.' },
+] });
+// Provider environment in the preview lives in memory so the Settings UI can be tested in a browser.
+const previewEnvState = { global: [] as [string, string][], providers: {} as Record<string, [string, string][]>, useGlobal: {} as Record<string, boolean> };
+const previewEnvNames = (vars: [string, string][]) => vars.map(([name]) => name);
+function previewProviderConfiguration(): Record<string, unknown> {
+  return {
+    executablePaths: {}, claudeConnectionMode: previewClaudeMode,
+    globalEnvironment: previewEnvNames(previewEnvState.global),
+    environment: Object.fromEntries(Object.entries(previewEnvState.providers).map(([provider, vars]) => [provider, previewEnvNames(vars)])),
+    useGlobalEnvironment: previewEnvState.useGlobal,
+    glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false,
+  };
+}
 const traceRoot = '/Users/you/Projects/orbit';
 const traceIndex = `${traceRoot}/src/lib/search-index.ts`;
 const traceJson = (value: unknown) => JSON.stringify(value, null, 2);
@@ -138,12 +204,14 @@ const providers: Provider[] = [
   { id: 'pi', name: 'Pi', installed: true, path: '/sample/bin/pi', version: 'Sample provider', models: [] },
   { id: 'deepseek', name: 'DeepSeek', installed: true, path: '/sample/bin/dsh', version: 'Sample provider', models: [] },
   { id: 'commandcode', name: 'Command Code', installed: true, path: '/sample/bin/command-code', version: '1.87.1 (sample)', models: [] },
-  { id: 'kilo', name: 'Kilo Code', installed: true, path: '/sample/bin/kilo', version: '7.3.41 (sample)', models: [] },
   { id: 'cline', name: 'Cline', installed: true, path: '/sample/bin/cline', version: '3.0.73 (sample)', models: [] },
+  { id: 'kilo', name: 'Kilo Code', installed: true, path: '/sample/bin/kilo', version: '7.3.41 (sample)', models: [] },
   { id: 'omp', name: 'Oh My Pi', installed: false, path: null, version: '', models: [] },
   { id: 'github-copilot', name: 'GitHub Copilot CLI', installed: true, path: '/sample/bin/copilot', version: 'GitHub Copilot CLI 1.0.82 (sample)', models: [] },
   { id: 'muse', name: 'Muse Code', installed: true, path: '/sample/bin/muse', version: 'Muse Code 1.4.7 (sample)', models: [] },
   { id: 'devin', name: 'Devin CLI', installed: true, path: '/sample/bin/devin', version: 'devin 3000.11.216 (sample)', models: [] },
+  { id: 'zcode', name: 'ZCode', installed: true, path: '/sample/bin/zcode', version: '3.16.3', models: [] },
+  { id: 'hermes', name: 'Hermes Agent', installed: true, path: '/sample/bin/hermes', version: 'hermes 0.5.0 (sample)', models: [] },
 ];
 // Mirrors providers::mimo::ENDPOINTS; the native side is the authority.
 const previewMimoEndpoints = [
@@ -153,6 +221,14 @@ const previewMimoEndpoints = [
   { id: 'api', url: 'https://api.xiaomimimo.com/anthropic', label: 'Pay-as-you-go API' },
 ];
 let previewMimoEndpoint: string | null = null;
+let previewAgentsDockPreferences = { enabled: true, keepOnScreen: true, pinned: false };
+const previewAgentsDockSnapshot = {
+  agents: [
+    { id: 'preview-active', title: 'Polish the new onboarding', projectName: 'PandaCode', provider: 'codex', model: 'gpt-5.6-sol', status: 'running', elapsedSeconds: 94 },
+    { id: 'preview-approval', title: 'Build a responsive gallery', projectName: 'Gallery', provider: 'claude', model: 'sonnet', status: 'waiting-for-approval', elapsedSeconds: 327 },
+    { id: 'preview-input', title: 'Prepare the release notes', projectName: 'Website', provider: 'pi', model: 'anthropic/sonnet', status: 'waiting-for-input', elapsedSeconds: 41 },
+  ],
+};
 /** Named connections; secret values are dropped, only their names are kept, as on the native side. */
 let previewConnections: import('./connections').ConnectionSnapshot = { connections: [], tasks: {} };
 function previewSaveConnection(input: { id?: string | null; provider: ProviderId; name: string; executable?: string | null; args?: string[]; env?: { name: string; value: string | null; secret: boolean }[]; configDir?: string | null }): import('./connections').ConnectionSnapshot {
@@ -175,6 +251,11 @@ function remoteCatalog(id: ProviderId): ProviderModel[] {
   return id === 'codex' ? ['gpt-5-codex', 'gpt-5'].map(model => fallbackModel('codex', model)) : [];
 }
 const catalogs: Record<ProviderId, ProviderModel[]> = {
+  // Recorded from `kilo acp` 7.3.41; efforts belong to its current model only.
+  kilo: [
+    { id: 'kilo/stealth/claude-sonnet-4.6', name: 'Kilo Gateway/Stealth: Claude Sonnet 4.6 (20% off)', description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'].map(id => ({ id, name: id, description: '' })), defaultReasoningEffort: 'none' },
+    { id: 'kilo/anthropic/claude-sonnet-4.6', name: 'Kilo Gateway/Anthropic: Claude Sonnet 4.6', description: '' },
+  ],
   pi: [{ id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Sample Pi model.', reasoningEfforts: [{ id: 'low', name: 'Low', description: '' }, { id: 'high', name: 'High', description: '' }], contextWindow: 200000 }],
   omp: [{ id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Sample omp model.', reasoningEfforts: [{ id: 'low', name: 'Low', description: '' }, { id: 'high', name: 'High', description: '' }], contextWindow: 200000 }],
   deepseek: [
@@ -189,11 +270,6 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
     { id: 'gpt-6-luna', name: 'GPT-6 Luna', description: 'most efficient OpenAI model for focused, high-volume tasks' },
     { id: 'moonshotai/Kimi-K3', name: 'Kimi K3', description: 'long-horizon coding & knowledge work with 1M context' },
   ],
-  // Recorded from `kilo acp` 7.3.41; efforts belong to its current model only.
-  kilo: [
-    { id: 'kilo/stealth/claude-sonnet-4.6', name: 'Kilo Gateway/Stealth: Claude Sonnet 4.6 (20% off)', description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'].map(id => ({ id, name: id, description: '' })), defaultReasoningEffort: 'none' },
-    { id: 'kilo/anthropic/claude-sonnet-4.6', name: 'Kilo Gateway/Anthropic: Claude Sonnet 4.6', description: '' },
-  ],
   // Recorded from `cline --acp` 3.0.73; efforts are its --thinking levels.
   cline: ['anthropic/claude-sonnet-5.5', 'anthropic/claude-opus-5.5', 'openai/gpt-6-sol'].map((id, index) => ({ id, name: ['Claude Sonnet 5.5', 'Claude Opus 5.5', 'GPT-6 Sol'][index], description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'].map(effort => ({ id: effort, name: effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1), description: '' })) })),
   'github-copilot': [{ id: 'default', name: 'Default', description: 'Use the model configured in GitHub Copilot CLI.' }],
@@ -203,8 +279,15 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
     ['claude-opus-5-5-medium', 'Claude Opus 5.5', ['low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
     ['gpt-6-sol-medium', 'GPT-6 Sol', ['none', 'low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
     ['glm-5-2', 'GLM-5.2 High', ['none', 'high', 'max'], 'high'],
-    ['fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'Fusion (Claude Opus 5.5 Medium + SWE-2 Medium)', [], ''],
+    ['fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'Fusion (Claude Opus 5.5 Medium + SWE-2 Medium)', ['low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
   ] as [string, string, string[], string][]).map(([id, name, efforts, effort]) => ({ id, name, description: id === 'glm-5-2' ? 'Text only' : '', reasoningEfforts: efforts.map(value => ({ id: value, name: value === 'xhigh' ? 'Extra high' : value[0].toUpperCase() + value.slice(1), description: '' })), ...(effort ? { defaultReasoningEffort: effort } : {}) })),
+  hermes: [
+    { id: 'default', name: 'Default model', description: 'Uses the model configured in Hermes (~/.hermes/config.yaml).' },
+    { id: 'nous/hermes-3-llama-3.1-405b', name: 'Hermes 3 Llama 3.1 405B', description: 'Flagship open-weights model fine-tuned by Nous Research.' },
+    { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', description: 'Sample Hermes provider model.' },
+    // A long catalog (over the team limit of 10) for Settings → Model routing.
+    ...Array.from({ length: 12 }, (_, i) => ({ id: `nous/sample-${i + 1}`, name: `Nous Sample ${i + 1}`, description: 'Sample Hermes provider model.' })),
+  ],
   muse: ['muse-wonder-1.0', 'muse-spark-1.3'].map(id => ({ id, name: id, description: '', reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(effort => ({ id: effort, name: effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1), description: '' })), defaultReasoningEffort: 'high', contextWindow: 1007997 })),
   opencode: openCodePreviewModels,
   glm: [
@@ -235,8 +318,59 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
     { id: 'grok-4.7', name: 'Grok 4.7', description: 'Frontier model for agentic coding.', reasoningEfforts: [{ id: 'low', name: 'Low', description: 'Fastest responses. Best for simple tasks.' }, { id: 'medium', name: 'Medium', description: 'Strong quality with a faster turnaround.' }, { id: 'high', name: 'High', description: 'Thorough reasoning and quality. Recommended.' }, { id: 'xhigh', name: 'Extra High', description: 'Maximum reasoning for the hardest tasks.' }], defaultReasoningEffort: 'high', contextWindow: 500000 },
     { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Fast', description: 'Fast variant. 2x the price.', reasoningEfforts: [{ id: 'low', name: 'Low', description: 'Fastest responses.' }, { id: 'high', name: 'High', description: 'Thorough reasoning and quality.' }], defaultReasoningEffort: 'high', contextWindow: 500000 },
   ],
+  // Mirrors the session/create settings snapshot recorded from zcode app-server 3.16.3.
+  zcode: [
+    { id: 'zcproxy/GLM-5.3', name: 'zcproxy/GLM-5.3', description: 'OmniRouter', reasoningEfforts: ['low', 'high', 'max'].map(effort => ({ id: effort, name: effort[0].toUpperCase() + effort.slice(1), description: '' })), defaultReasoningEffort: 'max', contextWindow: 200000 },
+  ],
 };
-let git: GitStatus = { branch: 'feat/instant-search', isRepo: true, files: [{ path: 'src/components/search.ts', index: ' ', working: 'M' }, { path: 'src/lib/search-index.ts', index: '?', working: '?' }, { path: 'src/components/search.test.ts', index: ' ', working: 'M' }] };
+// `?bench=diff` (or localStorage `pandacode.bench` = `diff`) adds synthetic, deterministic
+// patches of known size for tests/diff-perf.spec.ts; other runs never see them.
+const benchDiffs = typeof location !== 'undefined' && (new URLSearchParams(location.search).get('bench') === 'diff' || localStorage.getItem('pandacode.bench') === 'diff');
+const BENCH_LINES: Record<string, (n: number, word: string) => string> = {
+  ts: (n, w) => [`export function ${w}${n}(input: ${w[0].toUpperCase()}${w.slice(1)}Options): number {`, `  const ${w} = input.items.filter(item => item.weight > ${n % 17});`, `  if (!${w}.length) return ${n};`, `  return ${w}.reduce((total, item) => total + item.weight * ${n % 9 + 1}, 0);`, `}`, `// ${w} keeps the index warm between keystrokes (${n})`, `const ${w}Cache = new Map<string, ${w[0].toUpperCase()}${w.slice(1)}Entry>();`][n % 7],
+  rs: (n, w) => [`pub fn ${w}_${n}(input: &[u32]) -> u64 {`, `    let ${w}: u64 = input.iter().map(|v| *v as u64 * ${n % 9 + 1}).sum();`, `    if ${w} > ${n} { return ${w}; }`, `    ${w}.saturating_sub(${n % 13})`, `}`, `// ${w} runs on the background pool (${n})`][n % 6],
+  css: (n, w) => [`.${w}-${n} {`, `  padding: ${n % 12}px ${n % 7}px;`, `  color: rgb(var(--accent-rgb) / 0.${n % 9 + 1});`, `  border-radius: ${n % 5}px;`, `}`][n % 5],
+  json: (n, w) => `  "${w}${n}": { "weight": ${n % 97}, "enabled": ${n % 2 === 0}, "label": "${w} ${n}" },`,
+  md: (n, w) => [`## ${w[0].toUpperCase()}${w.slice(1)} ${n}`, ``, `The ${w} step runs after indexing and takes about ${n % 40} ms on a warm cache.`, `- Keep ${w} under ${n % 9 + 1} passes`, `- See \`${w}${n}()\` for details`][n % 5],
+};
+const BENCH_WORDS = ['search', 'index', 'render', 'token', 'cache', 'query', 'layout', 'stream', 'parse', 'merge'];
+/** One file of `changed` added+removed lines in hunks of ~40, from a fixed seed so every run gets the same bytes. */
+function benchPatch(path: string, lang: string, changed: number, seed: number): string {
+  let state = seed >>> 0;
+  const random = () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 2 ** 32; };
+  const line = () => BENCH_LINES[lang](Math.floor(random() * 10_000), BENCH_WORDS[Math.floor(random() * BENCH_WORDS.length)]);
+  const out = [`diff --git a/${path} b/${path}`, 'index 64d221a..0e6c9ef 100644', `--- a/${path}`, `+++ b/${path}`];
+  let oldLine = 1, newLine = 1, left = changed;
+  while (left > 0) {
+    const size = Math.min(left, 40), body: string[] = [];
+    let oldCount = 0, newCount = 0;
+    for (let i = 0; i < 3; i++, oldCount++, newCount++) body.push(' ' + line());
+    for (let done = 0; done < size;) {
+      const run = Math.min(size - done, 1 + Math.floor(random() * 6)), kind = random();
+      for (let i = 0; i < run; i++) {
+        if (kind < 0.4) { body.push('-' + line()); oldCount++; } else if (kind < 0.8) { body.push('+' + line()); newCount++; } else { body.push(' ' + line()); oldCount++; newCount++; }
+      }
+      if (kind < 0.8) done += run;
+    }
+    for (let i = 0; i < 3; i++, oldCount++, newCount++) body.push(' ' + line());
+    out.push(`@@ -${oldLine},${oldCount} +${newLine},${newCount} @@`, ...body);
+    oldLine += oldCount + 20; newLine += newCount + 20; left -= size;
+  }
+  return out.join('\n') + '\n';
+}
+// Sizes are changed lines; with context the patches are ~47, ~1.1k, ~4k, ~30k and ~3k lines.
+const BENCH_DIFFS: Record<string, () => string> = {
+  'bench/small.ts': () => benchPatch('bench/small.ts', 'ts', 30, 1),
+  'bench/medium.ts': () => benchPatch('bench/medium.ts', 'ts', 800, 2),
+  'bench/large.ts': () => benchPatch('bench/large.ts', 'ts', 2800, 3),
+  'bench/huge.ts': () => benchPatch('bench/huge.ts', 'ts', 21_200, 4),
+  'bench/multi': () => Array.from({ length: 10 }, (_, i) => { const lang = ['ts', 'rs', 'css', 'json', 'md'][i % 5]; return benchPatch(`bench/multi/file-${i}.${lang}`, lang, 200, 10 + i); }).join(''),
+};
+// Production builds have no /src/preview.ts to import, so the benchmark reads patches here.
+if (benchDiffs) (window as any).__benchDiffs = BENCH_DIFFS;
+// `&benchFiles=bench/large.ts,bench/small.ts` lists only those bench files in git status.
+const benchListed = new URLSearchParams(typeof location !== 'undefined' ? location.search : '').get('benchFiles')?.split(',') ?? Object.keys(BENCH_DIFFS);
+let git: GitStatus = { branch: 'feat/instant-search', isRepo: true, files: [{ path: 'src/components/search.ts', index: ' ', working: 'M' }, { path: 'src/lib/search-index.ts', index: '?', working: '?' }, { path: 'src/components/search.test.ts', index: ' ', working: 'M' }, ...(benchDiffs ? benchListed.filter(path => BENCH_DIFFS[path]).map(path => ({ path, index: ' ', working: 'M' })) : [])] };
 const worktreeGit = new Map<string, GitStatus>();
 const previewBranches = new Set<string>(), pushedBranches = new Set<string>(['feat/instant-search']), mergedBranches = new Set<string>();
 function checkoutGit(sessionId: unknown): GitStatus {
@@ -271,32 +405,12 @@ const previewGithub = (() => {
     { projectId: 'project-1', number: 131, title: 'Keyboard shortcut cheat sheet', body: 'Add a `?` overlay listing shortcuts.', state: 'open', labels: ['enhancement'], assignees: [], updatedAt: new Date(now - 86400_000).toISOString(), author: 'devon' },
     { projectId: 'project-1', number: 97, title: 'Dark mode contrast for muted text', body: 'Muted text fails WCAG AA on the charcoal surfaces.', state: 'open', labels: ['design'], assignees: ['you'], updatedAt: new Date(now - 2 * 86400_000).toISOString(), author: 'you' },
   ];
-  const pulls: { projectId: string; number: number; title: string; body: string; base: string; head: string }[] = [{ projectId: 'project-1', number: 130, title: 'Debounce library search and cache the index', body: '', base: 'main', head: 'feat/instant-search' }];
+  const pulls: { projectId: string; number: number; title: string; body: string; base: string; head: string }[] = [{ projectId: 'project-1', number: 130, title: 'Debounce library search', body: '', base: 'main', head: 'feat/debounce' }];
   let next = 200;
-  type ApprovedIssueAction = { action: 'close' | 'reopen'; number: number; repository: string; targetStage: TaskStage };
-  const approvedKey = 'pandacode.preview.githubIssueActions';
-  const approvedIssueActions = new Map<string, ApprovedIssueAction>();
-  try {
-    const saved = JSON.parse(localStorage.getItem(approvedKey) ?? '[]') as [string, ApprovedIssueAction][];
-    for (const [sessionId, intent] of saved) if (typeof sessionId === 'string' && intent && ['close', 'reopen'].includes(intent.action)) approvedIssueActions.set(sessionId, intent);
-  } catch { /* Invalid preview intent data is ignored. */ }
-  const persistApprovedActions = () => localStorage.setItem(approvedKey, JSON.stringify([...approvedIssueActions]));
-  for (const [sessionId, intent] of approvedIssueActions) {
-    const task = sessions.find(item => item.id === sessionId);
-    if (!task || !task.issue || task.issue.kind !== 'issue' || task.issue.number !== intent.number
-      || intent.action === 'close' && intent.targetStage !== 'completed'
-      || intent.action === 'reopen' && !['review', 'pending'].includes(intent.targetStage)) {
-      approvedIssueActions.delete(sessionId);
-      continue;
-    }
-    task.taskStage = intent.targetStage;
-    task.completedAt = intent.targetStage === 'completed' ? task.completedAt ?? now : null;
-  }
-  persistApprovedActions();
   const url = (projectId: string, kind: 'issue' | 'pull', number: number) => `${repos[projectId]?.url}/${kind === 'pull' ? 'pull' : 'issues'}/${number}`;
   return {
     pulls,
-    status(projectId: string) { const connected = !(window as any).__previewGithubDisconnected; return { installed: true, version: '2.62.0', authenticated: connected, login: connected ? 'you' : null, repo: connected ? repos[projectId] ?? null : null, error: repos[projectId] ? null : null }; },
+    status(projectId: string) { return { installed: true, version: '2.62.0', authenticated: true, login: 'you', repo: repos[projectId] ?? null, error: repos[projectId] ? null : null }; },
     nextNumber(_projectId: string) { return ++next; },
     search(projectId: string, query: string) {
       const q = query.trim().replace(/^#/, '').toLocaleLowerCase();
@@ -340,44 +454,6 @@ const previewGithub = (() => {
       const issue = issues.find(i => i.projectId === projectId && i.number === link.number);
       return { ...link, title: issue?.title ?? link.title, state: issue?.state ?? link.state, checkedAt: Date.now() };
     },
-    linkedIssueStatus(s: Session, action: 'close' | 'reopen') {
-      if (!s.issue || s.issue.kind !== 'issue') throw new Error('This task has no linked GitHub issue.');
-      const repo = repos[s.projectId], issue = issues.find(item => item.projectId === s.projectId && item.number === s.issue!.number);
-      if (!repo || !issue) throw new Error('The linked GitHub issue is unavailable.');
-      const remoteState = (window as any).__previewGithubIssueStates?.[`${s.projectId}:${issue.number}`] ?? issue.state;
-      issue.state = remoteState;
-      const link = { ...s.issue, title: issue.title, state: remoteState, checkedAt: Date.now() };
-      return { sessionId: s.id, link, repository: repo.nameWithOwner, remoteState, needsAction: remoteState !== (action === 'close' ? 'closed' : 'open') ? action : null };
-    },
-    applyLinkedIssueAction(s: Session, action: 'close' | 'reopen') {
-      const status = this.linkedIssueStatus(s, action);
-      if (status.needsAction !== action) { s.issue = status.link; approvedIssueActions.delete(s.id); persistApprovedActions(); return s; }
-      const validStage = action === 'close' ? s.taskStage === 'completed' : s.taskStage === 'review' || s.taskStage === 'pending';
-      if (!validStage) throw new Error('The task stage changed; this approved issue action is no longer valid.');
-      approvedIssueActions.set(s.id, { action, number: status.link.number, repository: status.repository, targetStage: s.taskStage ?? 'pending' });
-      persistApprovedActions();
-      if ((window as any).__failLinkedIssueAction) { (window as any).__failLinkedIssueAction = false; throw new Error('GitHub is temporarily unavailable.'); }
-      const issue = issues.find(item => item.projectId === s.projectId && item.number === status.link.number)!;
-      issue.state = action === 'close' ? 'closed' : 'open';
-      s.issue = { ...status.link, state: issue.state, checkedAt: Date.now() };
-      approvedIssueActions.delete(s.id);
-      persistApprovedActions();
-      return s;
-    },
-    cancelLinkedIssueAction(sessionId: string) { approvedIssueActions.delete(sessionId); persistApprovedActions(); },
-    retryLinkedIssueActions(projectId: string) {
-      const failures: { sessionId: string; action: 'close' | 'reopen'; repository: string; number: number; error: string }[] = [];
-      for (const [sessionId, intent] of [...approvedIssueActions]) {
-        const s = sessions.find(task => task.id === sessionId && task.projectId === projectId);
-        const validStage = s && (intent.action === 'close' ? s.taskStage === 'completed' : s.taskStage === 'review' || s.taskStage === 'pending');
-        const validLink = s?.issue?.kind === 'issue' && s.issue.number === intent.number && repos[projectId]?.nameWithOwner === intent.repository;
-        if (!s || !validStage || !validLink) { approvedIssueActions.delete(sessionId); continue; }
-        try { this.applyLinkedIssueAction(s, intent.action); }
-        catch (error) { failures.push({ sessionId, action: intent.action, repository: intent.repository, number: intent.number, error: error instanceof Error ? error.message : String(error) }); }
-      }
-      persistApprovedActions();
-      return failures;
-    },
   };
 })();
 /** A pretend iOS Simulator: two devices and a drawn home screen that answers taps. */
@@ -385,6 +461,14 @@ const previewVm = createPreviewVm();
 const previewDesign = createPreviewDesign();
 const previewSkills = createPreviewSkills();
 const previewCloud = createPreviewCloud();
+/** Each preview cloud preparation step takes this long; tests can watch the stages go by. */
+const CLOUD_STEP_MS = 400;
+function cloudStage(s: Session, stage: NonNullable<Session['cloud']>['stage'], detail: string | null = null): void {
+  if (!s.cloud) return;
+  s.cloud = { ...s.cloud, stage, detail };
+  emit('cloud-agent://progress', { sessionId: s.id, stage, detail });
+  emit('sessions-changed', {});
+}
 const previewSimulator = (() => {
   const devices: { udid: string; name: string; runtime: string; state: string; family: string; deviceType: string; platform?: string; duo?: boolean }[] = [
     { udid: '3720D4A0-B8C5-4DAC-9425-6A4685BC533E', name: 'iPhone 17 Pro', runtime: 'iOS 26.2', state: 'Booted', family: 'phone', deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro' },
@@ -488,12 +572,17 @@ let browserHistory: string[] = [], browserIndex = -1;
 let browserState: BrowserStatus = { url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false };
 function browserChanged(): void { browserState.canGoBack = browserIndex > 0; browserState.canGoForward = browserIndex < browserHistory.length - 1; emit('browser-state', { ...browserState }); }
 function emit(name: string, event: unknown) { listeners.get(name)?.forEach(fn => fn(event)); }
+previewProgress.onChange = sessionId => emit('progress-changed', { sessionId });
+// Tests: deliver a native event, e.g. a background refresh of the open channel.
+(window as any).__previewEmit = emit;
 export function listen(name: string, callback: (event: any) => void): () => void { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback); return () => listeners.get(name)?.delete(callback); }
 /** What the native picker "returns" in the browser preview, so attach flows can be exercised. */
 export function samplePick(kind: 'files' | 'folder'): string[] {
   return kind === 'folder' ? ['/Users/you/Projects/orbit-design'] : ['/Users/you/Pictures/dashboard-mockup.png', '/Users/you/Documents/Product brief.pdf'];
 }
 function agent(event: AgentEvent) { emit('agent-event', event); }
+/** tests: a live `subagent` event for any task (`__previewSubagent('session-1', { id, name, status, … })`). */
+(window as any).__previewSubagent = (sessionId: string, data: Record<string, unknown>) => agent({ sessionId, kind: 'subagent', text: '', data: { parentId: null, prompt: '', response: '', tools: [], startedAt: now, updatedAt: Date.now(), ...data } } as unknown as AgentEvent);
 function session(value: unknown): Session { const result = sessions.find(s => s.id === value); if (!result) throw new Error('Task not found'); return result; }
 function assertIdle(s: Session): void {
   if (s.status === 'running' || s.status === 'waiting' || timers.has(s.id)) throw new Error('Stop the agent before changing this task.');
@@ -510,12 +599,6 @@ function taskSummary(s: Session): Session {
     taskDescription += character;
   }
   return { ...s, taskDescription };
-}
-function archiveCompletedTasks(): void {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const s of sessions) {
-    if (!s.archived && s.taskStage === 'completed' && s.completedAt != null && s.completedAt <= cutoff && s.status !== 'running' && s.status !== 'waiting') s.archived = true;
-  }
 }
 for (const [sessionId, history] of Object.entries(messages)) {
   if (history.some(message => message.role === 'user') && history.some(message => message.role === 'assistant')) {
@@ -537,6 +620,46 @@ function finishTiming(sessionId: string): void {
  * from the host, which happens when a run ends (just before its `done`). */
 const mirrorSynced = new Map<string, number>();
 function syncMirror(sessionId: string): void { if (mirrorSynced.has(sessionId)) mirrorSynced.set(sessionId, id); }
+/* tests: a long mirror thread copied newest page first; older pages land below it with lower
+ * ids (`remote_backfill_base + host id` natively) and announce themselves by `mirror-messages`. */
+(window as any).__previewMirrorThread = (total: number, tail: number) => {
+  const sessionId = 'mirror-long', at = (i: number): Message => ({ id: 100000 + i, sessionId, role: i % 2 ? 'assistant' : 'user', content: `Message ${String(i).padStart(3, '0')}`, createdAt: now - (total - i) * 1000 });
+  sessions.unshift({ ...sessions[0], id: sessionId, title: 'Long remote thread', resumeId: null, remoteDevice: { id: 'dev-studio', name: 'Studio iMac' }, lastResponseAt: now });
+  messages[sessionId] = Array.from({ length: tail }, (_, k) => at(total - tail + k));
+  let oldest = total - tail;
+  (window as any).__previewMirrorBackfill = (count: number) => {
+    const from = Math.max(0, oldest - count);
+    messages[sessionId] = [...Array.from({ length: oldest - from }, (_, k) => at(from + k)), ...messages[sessionId]];
+    oldest = from; emit('mirror-messages', { sessionId, older: true });
+  };
+  emit('sessions-changed', {});
+};
+/* tests: a mirror whose host runs subagents and an architect team. `list_subagents` answers
+ * with what native code would have saved from the host's events; `remote_team` and
+ * `remote_worker_messages` answer like remote/mirror.rs from the host's `task.team`. */
+const mirrorSubagents = new Map<string, Map<string, unknown>>();
+const mirrorTeams = new Map<string, TeamSnapshot>();
+const mirrorWorkerMessages = new Map<string, Message[]>();
+(window as any).__previewMirrorTeam = (sessionId = 'mirror-team') => {
+  sessions.unshift({ ...sessions[0], id: sessionId, title: 'Remote team task', resumeId: null, status: 'running', remoteDevice: { id: 'dev-studio', name: 'Studio iMac' }, lastResponseAt: now });
+  messages[sessionId] = [{ id: ++id, sessionId, role: 'user', content: 'Split the docs work', createdAt: now }];
+  const worker = (n: number, status: TeamWorker['status'], summary: string): TeamWorker => ({ id: `w${n}`, sessionId: `host-worker-${n}`, profileId: 'auto', name: `Worker ${n}`, provider: 'codex', model: 'gpt-5.5', status, assignment: `Part ${n}`, summary, error: null, dependsOn: [], files: [], readOnly: false, attempt: 1, abandoned: false, checkpoint: null, createdAt: now, updatedAt: now });
+  mirrorTeams.set(sessionId, { sessionId, config: { auto: true, workers: [], maxParallel: 0, maxRounds: 6, maxAssignments: 0, workspace: 'shared', summaryLimit: 0 }, status: 'running', round: 1, revision: 1, workers: [worker(1, 'completed', 'Wrote the intro'), worker(2, 'running', '')], error: null, summary: null, updatedAt: now });
+  // `__previewMirrorLongWorker(n)`: worker 1's transcript becomes n messages, several pages long.
+  (window as any).__previewMirrorLongWorker = (count: number) => mirrorWorkerMessages.set('w1', Array.from({ length: count }, (_, index) => ({ id: index + 1, sessionId: 'host-worker-1', role: index % 2 ? 'assistant' : 'user', content: `Worker line ${index + 1}`, createdAt: now }) as Message));
+  mirrorWorkerMessages.set('w1', [{ id: 1, sessionId: 'host-worker-1', role: 'user', content: 'Part 1', createdAt: now }, { id: 2, sessionId: 'host-worker-1', role: 'assistant', content: 'Intro written on the host.', createdAt: now }]);
+  emit('sessions-changed', {});
+  const w = window as any;
+  // The host's `subagent` events, re-emitted under the local id (and saved, as natively).
+  w.__mirrorSubagent = (data: { id: string }) => { mirrorSubagents.set(sessionId, new Map(mirrorSubagents.get(sessionId)).set(data.id, data)); agent({ sessionId, kind: 'subagent', text: '', data } as unknown as AgentEvent); };
+  // A `team` event: the host changed a worker row.
+  w.__mirrorTeamWorker = (row: Partial<TeamWorker> & { id: string }) => {
+    const team = mirrorTeams.get(sessionId)!;
+    const workers = team.workers.some(item => item.id === row.id) ? team.workers.map(item => item.id === row.id ? { ...item, ...row } : item) : [...team.workers, { ...team.workers[0], ...row }];
+    mirrorTeams.set(sessionId, { ...team, workers, revision: team.revision + 1 });
+    agent({ sessionId, kind: 'team', text: '', data: row } as unknown as AgentEvent);
+  };
+};
 function finish(sessionId: string, content: string) { const time = Date.now(); messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time }); finishTiming(sessionId); const s = session(sessionId); if (content.trim()) s.lastResponseAt = time; s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time; timers.delete(sessionId); activeTools.delete(sessionId); syncMirror(sessionId); agent({ sessionId, kind: 'done', text: '' }); }
 /** Replays the Morning brief reference: five MCP tools (running, then completed), then the answer in chunks. `?replay=N` scales the pace. */
 function replayBrief(s: Session): void {
@@ -697,6 +820,7 @@ function slashCatalog(provider: ProviderId) {
     ['mcp', 'Show configured integrations', 'integrations'],
     ['resume', 'Choose a conversation to continue', provider === 'codex' ? 'conversations' : 'resume'],
     ['rename', 'Rename this task', 'rename'],
+    ['btw', 'Ask on the side while this task keeps working', 'btw'],
     ['copy', 'Copy the latest agent response', 'copy'],
     ['pwd', 'Show the working directory', 'pwd'],
     ['console', 'Open the harness console', 'console'],
@@ -705,7 +829,7 @@ function slashCatalog(provider: ProviderId) {
     ['goal', 'Manage the task goal and token budget', 'goal'], ['usage', 'Inspect Codex account usage', 'usage'],
     ['hooks', 'Inspect lifecycle hooks', 'hooks'], ['import', 'Choose setup to import', 'imports'],
     ['plugins', 'Inspect installed plugins', 'plugins'], ['fork', 'Continue in a separate task', 'fork'],
-    ['side', 'Continue in a separate task', 'fork'], ['btw', 'Continue in a separate task', 'fork'],
+    ['side', 'Continue in a separate task', 'fork'],
     ['archive', 'Archive this task', 'archive'], ['delete', 'Delete this task', 'delete'],
     ['export', 'Export this conversation', 'export'], ['worktree', 'Create a worktree task', 'worktree'],
     ['plan', 'Choose collaboration mode', 'plan'], ['fast', 'Choose service tier', 'fast'],
@@ -716,10 +840,10 @@ function slashCatalog(provider: ProviderId) {
     ['memories', 'Configure memory preferences', 'preferences'], ['ps', 'Inspect background jobs', 'jobs'],
     ['stop', 'Choose jobs to stop', 'jobs'], ['clean', 'Choose jobs to stop', 'jobs'],
   ];
-  const accepts = new Set(['rename', 'goal', 'usage', 'conversations', 'fork', 'export', 'worktree', 'plan', 'fast', 'mention', 'cd', 'init', 'recap', 'console']);
+  const accepts = new Set(['rename', 'btw', 'goal', 'usage', 'conversations', 'fork', 'export', 'worktree', 'plan', 'fast', 'mention', 'cd', 'init', 'recap', 'console']);
   const commands = [...local, ...(provider === 'codex' ? codex : [])].map(([name, description, action]) => ({ id: `pandacode:${name}`, name: `/${name}`, description, kind: 'action', source: 'PandaCode', action, argumentHint: accepts.has(action) ? '[arguments]' : undefined }));
   const native = provider === 'codex' ? ['review', 'compact', 'project-guide'] : provider === 'claude' ? ['compact', 'review', 'project-guide'] : ['compact', 'usage', 'tasks', 'skill:project-guide'];
-  const terminal = provider === 'codex' ? ['exit', 'quit', 'keymap', 'vim', 'raw', 'title', 'statusline', 'pets', 'pet', 'clear', 'app', 'ide', 'logout', 'feedback', 'approve'] : provider === 'claude' ? ['exit', 'quit', 'login', 'logout', 'doctor'] : ["yolo", "yes", "auto", "permission", "config", "plan", "swarm", "effort", "thinking", "provider", "providers", "btw", "h", "?", "clear", "sessions", "task", "plugins", "add-dir", "experiments", "experimental", "reload", "reload-tui", "goal", "init", "fork", "title", "feedback", "undo", "editor", "logout", "disconnect", "login", "export-md", "export", "export-debug-zip", "web", "exit", "quit", "q", "version"];
+  const terminal = provider === 'codex' ? ['exit', 'quit', 'keymap', 'vim', 'raw', 'title', 'statusline', 'pets', 'pet', 'clear', 'app', 'ide', 'logout', 'feedback', 'approve'] : provider === 'claude' ? ['exit', 'quit', 'login', 'logout', 'doctor'] : ["yolo", "yes", "auto", "permission", "config", "plan", "swarm", "effort", "thinking", "provider", "providers", "h", "?", "clear", "sessions", "task", "plugins", "add-dir", "experiments", "experimental", "reload", "reload-tui", "goal", "init", "fork", "title", "feedback", "undo", "editor", "logout", "disconnect", "login", "export-md", "export", "export-debug-zip", "web", "exit", "quit", "q", "version"];
   return { commands: [...commands, ...native.map(name => ({ id: `${provider}:${name}`, name: `/${name}`, description: `Sample ${provider} command`, kind: 'prompt', source: provider, action: undefined, argumentHint: '[arguments]' })), ...terminal.map(name => ({ id: `${provider}:${name}`, name: `/${name}`, description: `Open /${name} in the harness console`, kind: 'action', source: `${provider} console`, action: `console:${name}`, argumentHint: '[arguments]' }))], warnings: [] };
 }
 function resolveSlash(provider: ProviderId, text: string): { action: string | null; arguments: string } {
@@ -731,6 +855,14 @@ function resolveSlash(provider: ProviderId, text: string): { action: string | nu
   return { action: command.action ?? null, arguments: match[2] ?? '' };
 }
 
+// `?teams` seeds two named agent teams for the model picker.
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('teams') && !localStorage.getItem('pandacode.preview.architect-library')) {
+  const team = (id: string, name: string, models: [ProviderId, string, string, string][]) => ({ id, name, updatedAt: now, setup: namedTeamSetup(name, { provider: models[0][0], harness: models[0][1], model: models[0][2], name: models[0][3] }, models.map(([provider, harness, model, label]) => ({ provider, harness, model, name: label }))) });
+  localStorage.setItem('pandacode.preview.architect-library', JSON.stringify({ enabled: false, lastSetup: null, activeProfileId: null, profiles: [
+    team('preview-ship-crew', 'Ship crew', [['claude', 'Claude Code', 'opus', 'Claude Opus 5'], ['codex', 'Codex', 'gpt-6-astra', 'GPT-6-Astra'], ['kimi', 'Kimi Code', 'kimi-code/k3', 'K3']]),
+    team('preview-budget-trio', 'Budget trio', [['deepseek', 'DeepSeek', 'deepseek-v4-pro', 'DeepSeek V4 Pro'], ['glm', 'GLM Coding Plan', 'default', 'GLM-5.3'], ['mimo', 'MiMo Token Plan', 'default', 'MiMo-V2.6-Pro']]),
+  ] }));
+}
 const architect = createPreviewArchitect({
   parent: session,
   assertIdle,
@@ -748,6 +880,43 @@ const architect = createPreviewArchitect({
   agent,
 });
 
+/* Threads an agent launched on other machines (docs/machine-orchestration.md): ordinary mirror
+ * sessions here, each recorded with its parent. Tests add them with `__machineChild`. */
+const machineParents = new Map<string, string>(), machineStopped = new Set<string>();
+/** Like the native command: every live thread (running/waiting) plus the 24 newest settled ones, oldest first. */
+const SETTLED_SHOWN = 24;
+function machineRows(parentId: string) {
+  return [...machineParents].filter(([, parent]) => parent === parentId).map(([id]) => session(id)).map(child => ({
+    sessionId: child.id, title: child.title, provider: child.provider, model: child.model,
+    status: machineStopped.has(child.id) && child.status === 'idle' ? 'interrupted' : child.status,
+    machine: child.remoteDevice ?? { id: 'dev-studio', name: 'Studio iMac' }, createdAt: child.createdAt,
+  }));
+}
+function machineChildren(parentId: string) {
+  const all = machineRows(parentId);
+  const live = (status: string) => status === 'running' || status === 'waiting';
+  const settled = all.filter(child => !live(child.status)).sort((a, b) => b.createdAt - a.createdAt).slice(0, SETTLED_SHOWN);
+  return [...all.filter(child => live(child.status)), ...settled].sort((a, b) => a.createdAt - b.createdAt);
+}
+function installMachineChildren(): void {
+  const w = window as any;
+  // `launch` also records the parent's pandacode_machine_launch call, as the native tool does.
+  w.__machineChild ??= (parentId: string, child: { title: string; provider?: ProviderId; status?: string; machine?: { id: string; name: string }; launch?: boolean }) => {
+    const parent = session(parentId), at = Date.now() + machineParents.size;
+    const created = { ...parent, id: crypto.randomUUID(), title: child.title, provider: child.provider ?? 'claude', model: '', status: child.status ?? 'running', remoteDevice: child.machine ?? { id: 'dev-studio', name: 'Studio iMac' }, pinned: false, sidebarOrder: null, resumeId: null, createdAt: at, updatedAt: at, lastResponseAt: null } as Session;
+    sessions.unshift(created); messages[created.id] = []; machineParents.set(created.id, parentId);
+    if (child.launch) (messages[parentId] ??= []).push({ id: ++id, sessionId: parentId, role: 'tool', createdAt: at, content: encodeTool({ id: `launch-${created.id}`, name: 'pandacode_machine_launch', status: 'completed', input: JSON.stringify({ machine: created.remoteDevice!.name, prompt: child.title, provider: created.provider, model: 'default', title: child.title }), output: JSON.stringify({ thread: created.id, machine: created.remoteDevice, mode: 'ask', status: 'starting' }) }) });
+    emit('sessions-changed', {});
+    return created.id;
+  };
+  // A saved tool call or app-origin turn on a task, for transcript labels.
+  w.__machineToolMessage ??= (sessionId: string, name: string, input: unknown, output: unknown) => { (messages[sessionId] ??= []).push({ id: ++id, sessionId, role: 'tool', createdAt: Date.now(), content: encodeTool({ id: `tool-${id}`, name, status: 'completed', input: JSON.stringify(input), output: JSON.stringify(output) }) }); };
+  w.__machineWake ??= (sessionId: string) => {
+    const at = Date.now();
+    (messages[sessionId] ??= []).push({ id: ++id, sessionId, role: 'coordination', coordinationKind: 'machine_threads', content: 'Machine threads finished', createdAt: at }, { id: ++id, sessionId, role: 'assistant', content: 'Both threads finished; here is the combined report.', createdAt: at + 1 });
+  };
+  w.__machineChildStatus ??= (id: string, status: string) => { session(id).status = status; agent({ sessionId: id, kind: 'status', text: status }); emit('sessions-changed', {}); };
+}
 /** Menu bar popover data; `window.__trayCalls` records what it asked for. */
 function trayCommand(command: string, args: Record<string, any>): unknown {
   ((window as any).__trayCalls ??= []).push({ command, args });
@@ -770,12 +939,57 @@ function trayCommand(command: string, args: Record<string, any>): unknown {
     checking: false,
   };
 }
+/** The Running agents widget's commands (header and pinned window). */
+function previewAgentsDock<T>(command: string, args: Record<string, any>): T {
+  if (command === 'agents_dock_snapshot') {
+    // Tests push a native change event with this, as the app does when a run's state changes.
+    (window as any).__agentsDockPush = () => emit('agents-dock-changed', structuredClone(previewAgentsDockSnapshot));
+    return structuredClone(previewAgentsDockSnapshot) as T;
+  }
+  if (command === 'agents_dock_preferences') return structuredClone(previewAgentsDockPreferences) as T;
+  if (command === 'agents_dock_save_preferences') {
+    previewAgentsDockPreferences = {
+      enabled: Boolean(args.enabled),
+      keepOnScreen: Boolean(args.keepOnScreen),
+      pinned: args.enabled ? previewAgentsDockPreferences.pinned : false,
+    };
+    emit('agents-dock-preferences-changed', structuredClone(previewAgentsDockPreferences));
+    return structuredClone(previewAgentsDockPreferences) as T;
+  }
+  if (command === 'agents_dock_pin') {
+    if (!previewAgentsDockPreferences.enabled) throw new Error('Enable the Running agents widget first.');
+    previewAgentsDockPreferences = { ...previewAgentsDockPreferences, pinned: true };
+    emit('agents-dock-preferences-changed', structuredClone(previewAgentsDockPreferences));
+    return null as T;
+  }
+  if (command === 'agents_dock_unpin') {
+    previewAgentsDockPreferences = { ...previewAgentsDockPreferences, pinned: false };
+    emit('agents-dock-preferences-changed', structuredClone(previewAgentsDockPreferences));
+    return null as T;
+  }
+  if (command === 'agents_dock_set_expanded') { (window as any).__agentsDockExpanded = Boolean(args.expanded); return null as T; }
+  if (command === 'agents_dock_open_task') {
+    (window as any).__agentsDockOpened = args.sessionId;
+    emit('overlay-open-task', { sessionId: args.sessionId });
+    return null as T;
+  }
+  throw new Error(`Unknown running-agents command: ${command}`);
+}
+
 export async function invoke<T>(command: string, args: Record<string, any>): Promise<T> {
+  if (/^schedules?_|^scheduler_/.test(command)) return (await import('./preview-schedules')).invokeSchedules<T>(command, args, {
+    sessions: () => sessions.map(s => ({ id: s.id, title: s.title, projectId: s.projectId })),
+    projects: () => projects,
+    emit,
+    send: async (sessionId, text) => { await invoke('send_message', { sessionId, text }); },
+  });
   if (command.startsWith('tray_')) return trayCommand(command, args) as T;
+  // An if chain, not a switch: specs patch the first command switch in this file to record calls.
+  if (command.startsWith('agents_dock_')) return previewAgentsDock<T>(command, args);
   if (command.startsWith('jj_')) return (await import('./preview-jj')).invokeJj<T>(command, args);
   if (command.includes('moodboard')) return (await import('./preview-moodboards')).invokeMoodboards<T>(command, args);
   if (command === 'bots_list' || command.startsWith('bot_')) return invokeBots<T>(command, args, {
-    invoke, emit, task: session, started: id => Boolean(messages[id]?.length), isTeam: id => Boolean(architect.get(id)), project: id => projects.find(project => project.id === id),
+    invoke, emit,
     addProject: name => { const p = { id: crypto.randomUUID(), name, path: `/Users/you/PandaCode Bots/${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` }; projects.push(p); return p; },
   });
   if (command === 'remote_device_grants' || command === 'remote_set_device_grant' || command.startsWith('remote_pair_')) return (await import('./preview-grants')).previewGrants(command, args) as T;
@@ -785,13 +999,6 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     const w = window as any; w.__remoteReconnects = (w.__remoteReconnects ?? 0) + 1;
     if (w.__remoteReconnectHold) await new Promise<void>(resolve => { w.__remoteReconnectRelease = () => { w.__remoteReconnectHold = false; resolve(); }; });
     if (w.__remoteReconnectFail) { const failure = w.__remoteReconnectFail; w.__remoteReconnectFail = undefined; throw new Error(failure); }
-    return undefined as T;
-  }
-  if (command === 'remote_resubscribe') {
-    const w = window as any;
-    (w.__remoteResubscribes ??= []).push(args);
-    if (w.__remoteResubscribeHold) await new Promise<void>(resolve => { w.__remoteResubscribeRelease = () => { w.__remoteResubscribeHold = false; resolve(); }; });
-    if (w.__remoteResubscribeFail) { const failure = w.__remoteResubscribeFail; w.__remoteResubscribeFail = undefined; throw new Error(failure); }
     return undefined as T;
   }
   if (command === 'remote_repo_check') {
@@ -823,7 +1030,6 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     return invoke<T>('workspace_image', args);
   }
   if (command === 'remote_start_task') {
-    if (args.sessionId && taskBotId(args.sessionId)) throw new Error('Choose No bot before running this task on another computer.');
     // The task runs on the other computer; here it is an ordinary session that names it.
     const targets = await invokeRemote<{ deviceId: string; name: string; online: boolean }[]>('remote_targets', {}, emit);
     const target = targets.find(item => item.deviceId === args.deviceId && item.online);
@@ -842,15 +1048,57 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       emit('remote://start-progress', { deviceId: args.deviceId, startId: args.startId ?? null, repo: null, stage: 'starting', percent: null, detail: `Waiting for ${target.name}…` });
       const { holdPreviewRemoteStart } = await import('./preview-remote');
       holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), () => { Object.assign(session(s.id), { remoteDevice: null, status: 'idle', draft: true }); emit('sessions-changed', {}); });
-      w.__remoteStartAttach = async () => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); };
+      // `note`: the worktree note `task.startStatus` carries for the resumed start (remote/mirror.rs `resume_start`).
+      w.__remoteStartAttach = async (note?: string) => { holdPreviewRemoteStart(String(args.sessionId ?? args.startId ?? ''), undefined); session(s.id).status = 'idle'; await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] }); emit('sessions-changed', {}); if (note) emit('remote://start-note', { sessionId: s.id, note }); };
       emit('sessions-changed', {});
       return { sessionId: s.id } as T;
     }
     await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] });
     emit('sessions-changed', {});
-    return { sessionId: s.id } as T;
+    return (w.__remoteStartBusy ? { sessionId: s.id, note: w.__remoteStartBusy } : { sessionId: s.id }) as T;
   }
-  if (command.startsWith('remote_')) return invokeRemote<T>(command, args, emit);
+  if (command.startsWith('remote_') && command !== 'remote_team' && command !== 'remote_worker_messages') return invokeRemote<T>(command, args, emit);
+  if (command.startsWith('orchestration_')) installMachineChildren();
+  if (command === 'orchestration_threads') {
+    // The named threads of this task only, whatever their age (at most 64 per call).
+    const ids: unknown = args.ids;
+    if (!Array.isArray(ids) || ids.length > 64 || ids.some(item => typeof item !== 'string')) throw new Error('Pass at most 64 thread ids.');
+    ((window as any).__orchestrationThreadsCalls ??= []).push(ids);
+    return machineRows(args.sessionId).filter(row => ids.includes(row.sessionId)) as T;
+  }
+  if (command === 'orchestration_children') { (window as any).__orchestrationChildrenCalls = ((window as any).__orchestrationChildrenCalls ?? 0) + 1; return machineChildren(args.sessionId) as T; }
+  if (command.startsWith('orchestration_')) return invokeRemote<T>(command, args, emit);
+  if (command === 'stop_session' && machineParents.has(args.sessionId)) machineStopped.add(args.sessionId);
+  if (command === 'cloud_agent_targets') return previewCloud.agentTargets() as T;
+  if (command === 'cloud_agent_set_claude_token') { if (!String(args.token ?? '').trim()) throw new Error('Paste the token from claude setup-token.'); return null as T; }
+  if (command === 'cloud_agent_start') {
+    // The agent runs on a cloud machine; here the machine is prepared on a timer, then the prompt is sent.
+    const target = previewCloud.agentTargets().find(item => item.provider === args.provider && item.ready);
+    if (!target) throw new Error('Connect this provider in Settings → Cloud first.');
+    ((window as any).__cloudStarts ??= []).push(args);
+    const s = args.sessionId ? session(args.sessionId) : await invoke<Session>('create_session', { projectId: args.projectId, provider: args.harness, model: args.model, mode: args.mode });
+    Object.assign(s, { provider: args.harness, model: args.model, mode: args.mode, reasoningEffort: args.effort, draft: false, worktreeBranch: `pandacode/cloud-${s.id.slice(0, 8)}`, cloud: { provider: target.provider, label: target.label, machine: `${target.provider}:pc-${s.id.slice(0, 8)}`, stage: 'creating', detail: null } });
+    const stages = ['installing', 'credentials', 'uploading', 'running'] as const;
+    stages.forEach((stage, index) => setTimeout(async () => {
+      cloudStage(s, stage);
+      if (stage === 'running') { await invoke('send_message', { sessionId: s.id, text: args.prompt }); cloudStage(s, 'ready'); }
+    }, (index + 1) * CLOUD_STEP_MS));
+    emit('sessions-changed', {});
+    return structuredClone(s) as T;
+  }
+  if (command === 'cloud_agent_action') {
+    const s = session(args.sessionId);
+    if (!s.cloud) throw new Error('This task does not run on a cloud machine.');
+    ((window as any).__cloudActions ??= []).push(args.action);
+    // `window.__cloudActionFail` lets tests make one action fail like the provider would.
+    if ((window as any).__cloudActionFail === args.action) throw new Error(`${s.cloud.label} could not ${args.action} the machine (HTTP 503).`);
+    if (args.action === 'sync') { cloudStage(s, 'syncing'); setTimeout(() => cloudStage(s, 'ready'), CLOUD_STEP_MS); }
+    else if (args.action === 'retry') cloudStage(s, 'ready');
+    else if (args.action === 'stop') cloudStage(s, 'stopped');
+    else if (args.action === 'delete') { s.cloud = { ...s.cloud, machine: null }; cloudStage(s, 'stopped', 'Machine deleted'); }
+    else if (args.action !== 'open') throw new Error('Unknown cloud action.');
+    return null as T;
+  }
   if (command === 'capabilities_inventory' || command === 'cache_alignment') return previewCapabilities(command) as T;
   if (command.startsWith('recipes_')) { const r = recipesCommand(command, args); if (r.handled) return r.result as T; }
   let result: unknown;
@@ -861,8 +1109,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }); break;
     case 'update_agent': throw new Error('Agent updates are available in the desktop app.');
     case 'jev_configuration': result = { enabled: false, decisionsEnabled: false, decisionProvider: 'typesafe', decisionModel: '', openrouterKeySaved: false, pythonPath: '', chromePath: '', textModel: 'inception/mercury-2.5', textBaseUrl: 'https://openrouter.ai/api/v1', typesafeKeySaved: false, textKeySaved: false }; break;
-    case 'jev_decision_models': result = args?.provider === 'openrouter' ? [{ id: 'openai/gpt-4o-mini', name: 'OpenAI: GPT-4o mini' }, { id: 'anthropic/claude-haiku-4.5', name: 'Anthropic: Claude Haiku 4.5' }] : [{ id: 'jev-1.13.0', name: 'jev-1.13.0' }]; break;
     case 'jev_doctor': result = { ready: false, pythonVersion: '', jevVersion: '', chromePath: '', issues: ['Jev runs in the desktop app. This browser preview does not launch browsers or contact model APIs.'] }; break;
+    case 'jev_decision_models': result = args?.provider === 'openrouter' ? [{ id: 'openai/gpt-4o-mini', name: 'OpenAI: GPT-4o mini' }, { id: 'anthropic/claude-haiku-4.5', name: 'Anthropic: Claude Haiku 4.5' }] : [{ id: 'jev-1.13.0', name: 'jev-1.13.0' }]; break;
     case 'jev_list_runs': case 'jev_assist_list': result = []; break;
     case 'jev_watch_run': break; // Preview never starts Chrome or contacts model providers.
     case 'jev_assist_prepare': {
@@ -873,6 +1121,11 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'jev_assist_run': case 'jev_assist_save_rules': throw new Error('Jev assistance is an optional desktop add-on. This preview does not call model APIs.');
     case 'jev_save_configuration': case 'jev_install_runtime': case 'jev_start': case 'jev_cancel': case 'jev_read_run': throw new Error('Jev browser testing is available in the desktop app.');
+    case 'harness_privacy': result = previewPrivacy(); break;
+    case 'harness_privacy_set': {
+      if (typeof args.off !== 'boolean') throw new Error('Choose on or off.');
+      previewTelemetryOff = args.off; result = previewPrivacy(); break;
+    }
     case 'provider_set_claude_connection_mode': {
       if (!['inherit', 'subscription'].includes(args.mode)) throw new Error('Choose a Claude connection mode.');
       previewClaudeMode = args.mode; return invoke<T>('provider_configuration', {});
@@ -893,23 +1146,47 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'prompt_activity': result = sampleUsageLedger().rows.filter((_, i) => i % 3 === 0).map(row => [row[0], i2p(row[1]), 1 + (row[0] % 7)]); break;
     case 'agent_usage': {
       const provider = String(args.provider);
-      const connection = args.connection ? previewConnections.connections.find(c => c.id === args.connection && c.provider === provider) : null;
-      if (args.connection && !connection) throw new Error('This connection no longer exists.');
-      const supported = connection ? ['claude', 'codex'].includes(provider) && !connection.executable && !connection.args.length : ['claude', 'codex', 'kimi', 'glm', 'opencode'].includes(provider);
-      result = { provider, ...(connection ? { connectionId: connection.id } : {}), status: supported ? 'ready' : 'unsupported', checkedAt: Date.now(), stale: false,
+      if (provider === 'deepseek') {
+        result = { provider, status: 'ready', checkedAt: Date.now(), stale: false, plan: null, windows: [],
+          source: 'Sample limits for the browser preview. No provider request was made.',
+          message: 'Balance CNY 110.00 (granted 10.00, topped up 100.00).' };
+        break;
+      }
+      const supported = ['claude', 'codex', 'kimi', 'glm', 'opencode'].includes(provider);
+      result = { provider, status: supported ? 'ready' : 'unsupported', checkedAt: Date.now(), stale: false,
         plan: provider === 'codex' ? 'Pro' : provider === 'opencode' ? 'Go' : null,
         windows: supported ? [
-          { label: provider === 'opencode' ? 'Go rolling window' : '5-hour window', usedPercent: provider === 'codex' ? 38 : 22, resetsAt: new Date(Date.now() + 7200000).toISOString() },
+          { label: provider === 'opencode' ? 'Go rolling window' : '5-hour window', usedPercent: args.connection ? 91 : provider === 'codex' ? 38 : 22, resetsAt: new Date(Date.now() + 7200000).toISOString() },
           { label: provider === 'opencode' ? 'Go weekly' : 'Weekly', usedPercent: 64, resetsAt: new Date(Date.now() + 3 * 86400000).toISOString() },
         ] : [], source: 'Sample limits for the browser preview. No provider request was made.',
         message: supported ? null : 'This harness does not expose account limits. Check its account dashboard.' };
       break;
     }
-    case 'provider_configuration': result = { executablePaths: {}, claudeConnectionMode: previewClaudeMode, glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false }; break;
+    case 'provider_configuration': result = previewProviderConfiguration(); break;
+    case 'provider_set_environment_variable': case 'provider_set_global_environment_variable': {
+      const name = String(args.name ?? ''), value = String(args.value ?? '');
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.length > 128) throw new Error('Environment variable names use letters, digits and underscores, and do not start with a digit.');
+      if (value.includes('\0') || value.length > 4096) throw new Error(`The value of ${name} is too long or contains NUL.`);
+      const vars = args.provider ? previewEnvState.providers[String(args.provider)] ??= [] : previewEnvState.global;
+      const existing = vars.find(entry => entry[0] === name);
+      if (existing) existing[1] = value; else vars.push([name, value]);
+      return invoke<T>('provider_configuration', {});
+    }
+    case 'provider_remove_environment_variable': case 'provider_remove_global_environment_variable': {
+      const name = String(args.name ?? '');
+      const vars = args.provider ? previewEnvState.providers[String(args.provider)] : previewEnvState.global;
+      const index = vars?.findIndex(entry => entry[0] === name) ?? -1;
+      if (index >= 0) vars!.splice(index, 1);
+      return invoke<T>('provider_configuration', {});
+    }
+    case 'provider_set_use_global_environment':
+      if (args.useGlobal) delete previewEnvState.useGlobal[String(args.provider)];
+      else previewEnvState.useGlobal[String(args.provider)] = false;
+      return invoke<T>('provider_configuration', {});
     case 'provider_set_mimo_endpoint':
       if (!previewMimoEndpoints.some(entry => entry.id === args.endpoint)) throw new Error('Choose one of the MiMo endpoints listed in Settings.');
       previewMimoEndpoint = args.endpoint;
-      result = { executablePaths: {}, claudeConnectionMode: previewClaudeMode, glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false }; break;
+      result = previewProviderConfiguration(); break;
     case 'provider_save_glm_key': case 'provider_remove_glm_key': case 'provider_save_deepseek_key': case 'provider_remove_deepseek_key': case 'provider_save_commandcode_key': case 'provider_remove_commandcode_key': case 'provider_save_mimo_key': case 'provider_remove_mimo_key': case 'provider_set_executable': throw new Error('Provider connections can only be changed in the desktop app.');
     case 'turn_change_summary': {
       session(args.sessionId);
@@ -918,8 +1195,18 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = structuredClone(summary); break;
     }
     case 'turn_change_diff': result = turnChanges.diff(args.sessionId, args.changeId, args.path); break;
+    case 'model_routing_status': result = { ...previewRouting }; break;
+    case 'model_routing_configure': previewRouting = { ...previewRouting, ...(args.enabled != null ? { enabled: Boolean(args.enabled) } : {}), ...(args.mode ? { mode: args.mode } : {}), ...(args.minP != null ? { minP: Math.min(0.9, Math.max(0.3, Number(args.minP))) } : {}) }; saveRouting(); result = { ...previewRouting }; break;
+    case 'model_routing_prepare': previewRouting = { ...previewRouting, profiler: 'ready', error: null }; saveRouting(); result = { ...previewRouting }; break;
+    case 'model_routing_exclusions': result = structuredClone(previewExclusions); break;
+    case 'model_routing_set_exclusions': previewExclusions = { providers: [...(args.providers as string[] ?? [])], models: [...(args.models as any[] ?? [])] }; result = structuredClone(previewExclusions); break;
+    case 'model_routing_tier_models': result = previewTierModels(args.pool as any[] ?? []); break;
+    case 'model_routing_tiers': result = { ...previewTiers }; break;
+    case 'model_routing_set_tiers': previewTiers = Object.fromEntries(Object.entries(args.tiers as Record<string, string> ?? {}).filter(([, tier]) => /^[SABCD]$/.test(tier))); result = { ...previewTiers }; break;
+    case 'model_health_list': result = previewHealth.map(entry => ({ ...entry })); break;
+    case 'model_health_clear': previewHealth = previewHealth.filter(entry => (args.provider != null && entry.provider !== args.provider) || (args.model != null && entry.model !== args.model)); result = previewHealth.map(entry => ({ ...entry })); break;
+    case 'model_routing_route': result = previewRoute(String(args.text), args.pool as any[]); break;
     case 'architect_get': result = architect.get(args.sessionId); break;
-    case 'review_readiness': result = { ready: false, status: 'containment_unproven', provenProviders: [], note: 'No verified filesystem, network and credential confinement for the CLI process tree.' }; break;
     case 'architect_configure': result = architect.configure(args.sessionId, args.config, args.architect, args.profileId); break;
     case 'architect_profiles': result = architect.profiles(); break;
     case 'architect_set_lead_guidance': result = architect.setLeadGuidance(args.guidance); break;
@@ -974,9 +1261,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'fork_session_at_message': {
       const source = session(args.sessionId), history = messages[source.id] ?? [];
       const boundary = history.findIndex(message => message.id === args.messageId);
-      if (args.exclusive) { assertIdle(source); if (source.remoteDevice) throw new Error('This task runs on another computer.'); }
       if (!Number.isSafeInteger(args.messageId) || args.messageId <= 0 || boundary < 0 || !['user', 'assistant'].includes(history[boundary].role)) throw new Error('Choose a saved user message or assistant response to fork.');
-      if (args.exclusive && history[boundary].role !== 'user') throw new Error('Only saved user messages can be edited.');
       const boundaryProvider = historicalProvider(history[boundary], history, source.provider);
       const created: Session = { ...structuredClone(source), id: crypto.randomUUID(), pinned: false, sidebarOrder: null, title: [...source.title].slice(0, 193).join('') + ' (fork)', resumeId: null, status: 'idle', archived: false, goalState: null, contextUsage: null, taskStage: 'in_progress', completedAt: null, lastResponseAt: null, lastPromptAt: null, createdAt: Date.now(), updatedAt: Date.now() };
       const copied: Message[] = history.slice(0, boundary + (args.exclusive ? 0 : 1)).filter(message => !['internal', 'changes'].includes(message.role)).map(message => {
@@ -1009,15 +1294,15 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'archive_codex_task': { const task = codexTask(args.sessionId); assertIdle(task); task.archived = true; task.updatedAt = Date.now(); break; }
     case 'export_task': { const task = session(args.sessionId); result = `# ${task.title}\n\n` + (messages[task.id] ?? []).map(message => `## ${message.role}\n\n${message.content}\n\n`).join(''); break; }
-    case 'list_subagents': return [] as T;
-    case 'list_local_servers': result = [{ port: 3000, process: 'node', url: 'http://localhost:3000' }, { port: 5173, process: 'vite', url: 'http://localhost:5173' }]; break;
-    case 'browser_open_external': {
-      const url = new URL(args.url);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Use an HTTP or HTTPS address without embedded credentials.');
-      if (url.origin === 'http://127.0.0.1:4179') throw new Error('Workspace file previews stay in the native Browser pane.');
-      // This fixture does not open an external page or establish native QA evidence.
-      break;
+    case 'list_subagents': return [...(mirrorSubagents.get(String(args.sessionId))?.values() ?? [])] as T;
+    case 'remote_team': return structuredClone(mirrorTeams.get(String(args.sessionId)) ?? null) as T;
+    case 'remote_worker_messages': {
+      // Pages of 40 back from the tail, as `worker_pages` in remote/mirror.rs joins the host's.
+      const all = mirrorWorkerMessages.get(String(args.workerId)) ?? [], before = all.filter(message => !args.beforeId || message.id < args.beforeId);
+      ((window as any).__remoteWorkerPages ??= []).push(args.beforeId ?? null);
+      return { messages: structuredClone(before.slice(-40)), hasOlder: before.length > 40 } as T;
     }
+    case 'list_local_servers': result = [{ port: 3000, process: 'node', url: 'http://localhost:3000' }, { port: 5173, process: 'vite', url: 'http://localhost:5173' }]; break;
     case 'browser_open': {
       const url = new URL(args.url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Use an HTTP or HTTPS address.');
       browserHistory = browserHistory.slice(0, browserIndex + 1); browserHistory.push(url.href); browserIndex++;
@@ -1028,13 +1313,15 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'browser_bounds': break;
     case 'browser_close': browserHistory = []; browserIndex = -1; browserState = { url: '', title: '', loading: false, canGoBack: false, canGoForward: false, picking: false }; browserChanged(); break;
     case 'browser_capture': result = { id: crypto.randomUUID(), name: 'Sample screenshot', path: '/sample/browser-capture.png', mimeType: 'image/png', url: browserState.url, title: browserState.title, width: 1280, height: 800, dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' }; break;
-    case 'list_projects': result = projects; break;
-    case 'list_sessions': archiveCompletedTasks(); sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
+    // Like the native rowid: projects are pushed in the order they were added.
+    case 'list_projects': result = projects.map((project, index) => ({ ...project, addedOrder: index + 1 })); break;
+    case 'list_sessions': sessions.forEach(settleDraft); result = [...sessions].filter(task => !task.draft).sort(compareThreadOrder).map(taskSummary); break;
     case 'set_resume_at_reset': {
       const s = session(args.sessionId);
       if (args.enabled && !(s.limitedAt && s.limitedUntil)) throw new Error('This task has no usage limit with a known reset time.');
       s.resumeAtReset = Boolean(args.enabled) && Boolean(s.limitedAt); result = s; break;
     }
+    case 'tray_seen': result = null; break;
     case 'clear_usage_limit': { const s = session(args.sessionId); s.limitedAt = null; s.limitedUntil = null; s.resumeAtReset = false; result = null; break; }
     case 'queue_list': result = previewQueue().filter(entry => !args.sessionId || entry.sessionId === args.sessionId); break;
     case 'queue_add': {
@@ -1072,7 +1359,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'steer_task': {
       const s = session(args.sessionId), w = window as any;
-      if (!timers.has(s.id) && s.status !== 'running') throw new Error('The agent is not running; the message stays queued.');
+      if (!timers.has(s.id) && s.status !== 'running' && !previewBotBusy(s.id)) throw new Error('The agent is not running; the message stays queued.');
       if (w.__remoteRefuse && s.remoteDevice) throw new Error(w.__remoteRefuse);
       if (w.__remoteSteerHold && s.remoteDevice) await new Promise<void>(resolve => { w.__remoteSteerRelease = () => { w.__remoteSteerHold = false; resolve(); }; });
       // Claude-family, Codex, Pi, Muse and Devin take it live; others hold it for the next turn of the same run.
@@ -1085,6 +1372,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         if (text.includes('[steer-fails]')) return report('failed');
         (messages[s.id] ??= []).push({ id: ++id, sessionId: s.id, role: 'user', content: text, createdAt: Date.now() });
         report('delivered');
+        // A sample bot shown as working has no preview run to answer it, so it answers here.
+        if (previewBotBusy(s.id)) agent({ sessionId: s.id, kind: 'text', text: 'Got it, I will fold that in. (browser preview)' });
       }, mode === 'live' ? 900 : 1500);
       result = { steered: true, id: steerId, mode }; break;
     }
@@ -1106,7 +1395,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         if (!found || found.folder.startsWith('/missing')) { failed.push({ id: conversationId, message: 'Its folder no longer exists on this computer.' }); continue; }
         let project = projects.find(p => p.path === found.folder);
         if (!project) { project = { id: crypto.randomUUID(), name: found.folder.split('/').pop()!, path: found.folder }; projects.push(project); }
-        const created = await invoke<Session>('create_session', { projectId: project.id, provider: source, model: found.model ?? args.model, mode: 'ask' });
+        const created = await invoke<Session>('create_session', { projectId: project.id, provider: source, model: found.model ?? args.model, mode: 'full' });
         const task = session(created.id);
         Object.assign(task, { resumeId: conversationId, title: found.title, taskStage: 'in_progress', createdAt: found.updatedAt - 600000, updatedAt: found.updatedAt, lastPromptAt: found.updatedAt - 600000, lastResponseAt: found.updatedAt });
         messages[task.id] = [{ id: ++id, sessionId: task.id, role: 'user', content: `Imported: ${found.title}`, createdAt: found.updatedAt - 600000 }, { id: ++id, sessionId: task.id, role: 'assistant', content: 'This conversation was imported into PandaCode.', createdAt: found.updatedAt }];
@@ -1120,7 +1409,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       if (!task) { result = false; break; }
       settleDraft(task);
       if (!task.draft || (messages[task.id] ?? []).length) { result = false; break; }
-      sessions = sessions.filter(item => item.id !== task.id); delete messages[task.id]; architect.remove([task.id]); forgetBotTask(task.id);
+      sessions = sessions.filter(item => item.id !== task.id); delete messages[task.id]; architect.remove([task.id]);
       result = true; break;
     }
     case 'pin_session': {
@@ -1155,6 +1444,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'open_external_url': { const url = new URL(args.url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Use an HTTP or HTTPS URL.'); window.open(url.href, '_blank', 'noopener,noreferrer'); break; }
     case 'open_support': window.open('https://github.com/aicodeking/pandacode/issues', '_blank', 'noopener,noreferrer'); break;
     case 'local_sign_app': break;
+    case 'app_update_install_supported': result = true; break;
     case 'support_details': result = { version: 'Preview', platform: 'Browser preview', architecture: 'Not reported' }; break;
     case 'browser_inspect': result = args.action === 'read' ? { url: browserState.url, title: browserState.title, text: 'Browser preview sample page', elements: [] } : { dispatched: true }; break;
     case 'list_provider_models': result = args.deviceId ? remoteCatalog(args.provider as ProviderId) : args.provider === 'opencode' ? previewOpenCodeChoices() : catalogs[args.provider as ProviderId] ?? []; break;
@@ -1179,11 +1469,11 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       turnChanges.remove(deletedSessionIds);
       sessions = sessions.filter(task => !deletedSessionIds.includes(task.id));
       saveThreadOrder(sessions.map(threadOrder));
-      for (const id of deletedSessionIds) { delete messages[id]; forgetBotTask(id); }
+      for (const id of deletedSessionIds) delete messages[id];
       emit('sessions-deleted', { sessionIds: deletedSessionIds }); emit('sessions-changed', undefined);
       result = { deletedSessionIds }; break;
     }
-    case 'create_session': { const s: Session = { id: crypto.randomUUID(), ...args, pinned: false, sidebarOrder: null, draft: Boolean(args.draft), mode: args.mode ?? 'ask', title: 'New conversation', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), archived: false, worktreePath: null, resumeId: null, lastResponseAt: null, lastPromptAt: null, reasoningEffort: null, contextUsage: null, taskStage: 'pending', taskDescription: '', completedAt: null } as Session; sessions.unshift(s); messages[s.id] = []; architect.inherit(s.id); result = s; break; }
+    case 'create_session': { const s: Session = { id: crypto.randomUUID(), ...args, pinned: false, sidebarOrder: null, draft: Boolean(args.draft), mode: args.mode ?? 'full', title: 'New conversation', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), archived: false, worktreePath: null, resumeId: null, lastResponseAt: null, lastPromptAt: null, reasoningEffort: null, contextUsage: null, taskStage: 'pending', taskDescription: '', completedAt: null } as Session; sessions.unshift(s); messages[s.id] = []; architect.inherit(s.id); result = s; break; }
     case 'chat_create': {
       const project = { id: crypto.randomUUID(), name: 'Chat', path: `/Users/you/PandaCode Chats/chat-${crypto.randomUUID().slice(0, 8)}` }; projects.push(project);
       result = await invoke<Session>('create_session', { projectId: project.id, provider: args.provider, model: args.model, mode: args.mode }); break;
@@ -1197,7 +1487,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const details = taskDetails(args.title, args.description);
       if (!projects.some(p => p.id === args.projectId)) throw new Error('Project not found.');
       if (!providers.some(p => p.id === args.provider) || typeof args.model !== 'string' || args.model.length > 200) throw new Error('Invalid harness or model.');
-      if (!['ask', 'auto', 'review', 'plan', 'full'].includes(args.mode)) throw new Error('Unknown permission mode.');
+      if (!['ask', 'auto', 'plan', 'full'].includes(args.mode)) throw new Error('Unknown permission mode.');
       const s = await invoke<Session>('create_session', { projectId: args.projectId, provider: args.provider, model: args.model, mode: args.mode });
       Object.assign(session(s.id), details);
       result = session(s.id); break;
@@ -1211,7 +1501,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const s = session(args.sessionId); assertIdle(s);
       if (s.archived) throw new Error('Restore this task before changing its stage.');
       const stage = args.stage as TaskStage;
-      if (!['pending', 'review', 'completed'].includes(stage)) throw new Error('Start the task to move it to work in progress.');
+      // Like the native store: work in progress only by undoing the completion of a stopped run.
+      const undoing = s.taskStage === 'completed' && ['error', 'interrupted'].includes(s.status);
+      if (!['pending', 'review', 'completed'].includes(stage) && !(stage === 'in_progress' && undoing)) throw new Error('Start the task to move it to work in progress.');
       s.completedAt = stage === 'completed' ? s.completedAt ?? Date.now() : null;
       s.taskStage = stage; s.updatedAt = Date.now(); result = s; break;
     }
@@ -1262,12 +1554,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'send_message': {
       if (resolveSlash(session(args.sessionId).provider, String(args.text)).action) throw new Error('This command opens a PandaCode control.');
-      const s = session(args.sessionId); assertIdle(s);
-      const w = window as any;
-      if (s.remoteDevice && w.__remoteSendHold) await new Promise<void>(resolve => { w.__remoteSendRelease = () => { w.__remoteSendHold = false; resolve(); }; });
-      if (s.remoteDevice && w.__remoteRefuse) throw new Error(w.__remoteRefuse);
-      assertIdle(s);
-      if (s.mode === 'review' && !['claude', 'glm', 'mimo'].includes(s.provider)) throw new Error('Approve for me needs Claude Code’s auto mode; this harness has no agent-reviewed approvals. Choose another permission mode.');
+      const s = session(args.sessionId), w = window as any; assertIdle(s);
+      if (w.__remoteRefuse && s.remoteDevice) throw new Error(w.__remoteRefuse);
+      if (w.__remoteSendHold && s.remoteDevice) await new Promise<void>(resolve => { w.__remoteSendRelease = () => { w.__remoteSendHold = false; resolve(); }; });
       let moodboardContext = '';
       for (const boardId of args.moodboardIds ?? []) {
         const board = await invoke<import('./moodboards').MoodboardDetail>('read_moodboard', { projectId: s.projectId, boardId });
@@ -1279,9 +1568,6 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const text = typeof args.text === 'string' ? args.text.trim() + moodboardContext : '';
       if (!text) throw new Error('Write a message first.');
       if (new TextEncoder().encode(text).length > 128 * 1024) throw new Error('Message and attached context must be under 128 KiB.');
-      const botContext = prepareBotTask(s);
-      botContext?.commit();
-      if (botContext) ((window as any).__botTaskPrompts ??= []).push({ sessionId: s.id, text: text + botContext.text });
       s.status = 'running'; s.taskStage = 'in_progress'; s.completedAt = null; s.updatedAt = Date.now(); s.lastPromptAt = s.updatedAt; s.limitedAt = null; s.limitedUntil = null; s.resumeAtReset = false; if (s.title === 'New conversation') s.title = text.slice(0, 48); messages[s.id] ??= []; messages[s.id].push({ id: ++id, sessionId: s.id, role: 'user', content: text, createdAt: Date.now() });
       if (s.id === BRIEF_ID) { replayBrief(s); break; }
       agent({ sessionId: s.id, kind: 'status', text: 'Previewing response' });
@@ -1302,19 +1588,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
           agent({ sessionId: s.id, kind: 'tool', text: 'Bash completed', tool: { ...tool } });
           activeTools.delete(s.id);
         }
-        if (cursor < output.length) {
-          timers.set(s.id, window.setTimeout(tick, 24));
-        } else if ((window as any).__holdPreviewCompletion) {
-          // Preview-only test latch: leave the finished text visible until the test
-          // confirms it was streamed, rather than racing the transcript redraw.
-          (window as any).__holdPreviewCompletion = false;
-          (window as any).__releasePreviewCompletion = () => {
-            (window as any).__releasePreviewCompletion = undefined;
-            finish(s.id, output);
-          };
-        } else {
-          finish(s.id, output);
-        }
+        if (cursor < output.length) timers.set(s.id, window.setTimeout(tick, 24)); else finish(s.id, output);
       };
       timers.set(s.id, window.setTimeout(tick, 200)); break;
     }
@@ -1331,12 +1605,11 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
         agent({ sessionId: args.sessionId, kind: 'tool', text: 'Bash canceled', tool: { ...pending.activity } });
         activeTools.delete(args.sessionId);
       }
-      retryBotTask(args.sessionId);
       const stopped = session(args.sessionId); stopped.status = 'idle'; if (stopped.goalState?.status === 'active') { stopped.goalState.status = 'paused'; emitGoal(stopped); } syncMirror(args.sessionId); agent({ sessionId: args.sessionId, kind: 'done', text: 'Stopped' }); break;
     }
     case 'respond_approval': case 'respond_user_input': break;
     case 'git_status': result = checkoutGit(args.sessionId); break;
-    case 'git_diff': result = `diff --git a/${args.path ?? 'src/components/search.ts'} b/${args.path ?? 'src/components/search.ts'}\nindex 64d221a..0e6c9ef 100644\n--- a/${args.path ?? 'src/components/search.ts'}\n+++ b/${args.path ?? 'src/components/search.ts'}\n@@ -12,5 +12,6 @@ export function mountSearch(items) {\n+  const index = createSearchIndex(items);\n+\n   input.addEventListener("input", () => {\n-    const index = createSearchIndex(items);\n-    renderAll(index.search(input.value));\n+    renderResults(index.search(input.value));\n   });\n }`; break;
+    case 'git_diff': if (benchDiffs && BENCH_DIFFS[args.path]) { result = BENCH_DIFFS[args.path](); break; } result = `diff --git a/${args.path ?? 'src/components/search.ts'} b/${args.path ?? 'src/components/search.ts'}\nindex 64d221a..0e6c9ef 100644\n--- a/${args.path ?? 'src/components/search.ts'}\n+++ b/${args.path ?? 'src/components/search.ts'}\n@@ -12,5 +12,6 @@ export function mountSearch(items) {\n+  const index = createSearchIndex(items);\n+\n   input.addEventListener("input", () => {\n-    const index = createSearchIndex(items);\n-    renderAll(index.search(input.value));\n+    renderResults(index.search(input.value));\n   });\n }`; break;
     case 'git_stage': checkoutGit(args.sessionId).files.forEach(file => { if (args.paths.includes(file.path)) { file.index = args.staged ? 'M' : ' '; file.working = args.staged ? ' ' : 'M'; } }); break;
     case 'git_commit': {
       const checkout = checkoutGit(args.sessionId);
@@ -1346,7 +1619,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'create_worktree': {
       const source = session(args.sessionId);
       const worktree = previewWorktree(source, args);
-      const created: Session = { ...source, id: crypto.randomUUID(), pinned: false, sidebarOrder: null, worktreePath: worktree.path, worktreeBranch: worktree.branch, title: 'New conversation', mode: 'ask', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), archived: false, resumeId: null, lastResponseAt: null, lastPromptAt: null, contextUsage: null, taskStage: 'pending', taskDescription: '', completedAt: null, issue: null, pullRequest: null };
+      const created: Session = { ...source, id: crypto.randomUUID(), pinned: false, sidebarOrder: null, worktreePath: worktree.path, worktreeBranch: worktree.branch, title: 'New conversation', mode: 'full', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), archived: false, resumeId: null, lastResponseAt: null, lastPromptAt: null, contextUsage: null, taskStage: 'pending', taskDescription: '', completedAt: null, issue: null, pullRequest: null };
       sessions.unshift(created); messages[created.id] = []; architect.inherit(created.id); result = created; break;
     }
     case 'attach_worktree': {
@@ -1400,15 +1673,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     // The sample orbit project has an app icon; others show the sidebar's default.
     case 'project_icon': result = args.projectId === 'project-1' ? 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAzMiAzMic+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSdnJyB4MT0nMCcgeTE9JzAnIHgyPScxJyB5Mj0nMSc+PHN0b3Agb2Zmc2V0PScwJyBzdG9wLWNvbG9yPScjN2M5Y2ZmJy8+PHN0b3Agb2Zmc2V0PScxJyBzdG9wLWNvbG9yPScjNWI1YmQ2Jy8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9JzMyJyBoZWlnaHQ9JzMyJyByeD0nOCcgZmlsbD0ndXJsKCNnKScvPjxjaXJjbGUgY3g9JzE2JyBjeT0nMTYnIHI9JzcnIGZpbGw9J25vbmUnIHN0cm9rZT0nd2hpdGUnIHN0cm9rZS13aWR0aD0nMycvPjxjaXJjbGUgY3g9JzIzJyBjeT0nOScgcj0nMi41JyBmaWxsPSd3aGl0ZScvPjwvc3ZnPg==' : null; break;
     case 'github_repo_pulls': result = previewHub.pulls(String(args.repo)); break;
-    case 'github_repo_pull_review_context': {
-      const pull = previewHub.pulls(String(args.repo)).find(item => item.number === Number(args.number));
-      if (!pull) throw new Error('The pull request is unavailable. Refresh the repository and try again.');
-      result = { number: pull.number, title: pull.title, url: pull.url, state: pull.state, head: pull.head, base: pull.base, updatedAt: pull.updatedAt,
-        files: pull.number === 130 ? ['src/components/search.ts', 'tests/search.test.ts'] : ['src/main.ts'] };
-      break;
-    }
     case 'github_repo_issues': result = previewHub.issues(String(args.repo)); break;
-    case 'github_repo_issue_context': result = previewHub.issueContext(String(args.repo), Number(args.number)); break;
     case 'github_repo_runs': result = previewHub.runs(String(args.repo)); break;
     case 'github_run_details': result = previewHub.runDetails(String(args.repo), Number(args.id)); break;
     case 'github_project_repos': result = projects.filter(p => p.id === 'project-1' || previewClones.has(p.id)).map(p => ({ projectId: p.id, repo: previewClones.get(p.id) ?? 'orbit-labs/orbit' })); break;
@@ -1422,10 +1687,6 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'github_issues': result = previewGithub.issues(args.projectId, args.filter ?? {}); break;
     case 'github_resolve': result = previewGithub.resolve(args.projectId, (args.numbers ?? []) as number[]); break;
     case 'github_refresh_links': result = sessions.filter(s => s.projectId === args.projectId).flatMap(s => [s.issue, s.pullRequest].filter(Boolean).map(link => ({ sessionId: s.id, link: previewGithub.refresh(s.projectId, link!) }))); break;
-    case 'github_linked_issue_status': result = previewGithub.linkedIssueStatus(session(args.sessionId), args.action); break;
-    case 'github_apply_linked_issue_action': result = previewGithub.applyLinkedIssueAction(session(args.sessionId), args.action); break;
-    case 'github_cancel_linked_issue_action': previewGithub.cancelLinkedIssueAction(String(args.sessionId)); result = undefined; break;
-    case 'github_retry_linked_issue_actions': result = previewGithub.retryLinkedIssueActions(String(args.projectId)); break;
     case 'set_task_link': {
       const s = session(args.sessionId);
       if (!['issue', 'pull'].includes(args.kind)) throw new Error('Unknown link kind.');
@@ -1475,6 +1736,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       s.pullRequest = { kind: 'pull', number, url: `${repo.url}/pull/${number}`, title: pull.title, state: 'open', checkedAt: Date.now() };
       result = s; break;
     }
+    case 'task_token_usage': result = { input: 91234, cacheRead: 1000000, cacheWrite: 45000, output: 152340, firstUsed: Date.now() - 86400000, lastUsed: Date.now() - 300000 }; break;
     case 'token_saver_tools': result = { rtk: previewRtk, rtkVersion: previewRtk ? '1.0.1' : '', rtkInstall: 'brew install rtk' }; break;
     case 'token_saver_install': {
       if (args.tool !== 'rtk') throw new Error('Unknown tool.');
@@ -1497,13 +1759,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'cloud_connections': result = previewCloud.connections(); break;
     case 'cloud_connect': result = previewCloud.connect(args.provider, args.key, args.options ?? {}); emit('vm-changed', {}); break;
     case 'cloud_disconnect': result = previewCloud.disconnect(args.provider); emit('vm-changed', {}); break;
+    case 'cloud_set_inherit_environment': result = previewCloud.setInheritEnvironment(args.provider, args.inherit); break;
     case 'cloud_setup_sandboxes': result = previewCloud.setupSandboxes(); emit('vm-changed', {}); break;
+    case 'cloud_instabox_images': result = previewCloud.instaboxImages(); break;
+    case 'cloud_instabox_set_image': result = previewCloud.setInstaboxImage(args.image); break;
     case 'cloud_machines': result = previewCloud.list(); break;
     case 'cloud_create': result = previewCloud.create(args.provider, args.name); break;
     case 'cloud_power': result = previewCloud.power(args.id, args.action); break;
-    case 'cloud_keep_alive': result = previewCloud.keepAlive(args.id, args.minutes); break;
-    case 'cloud_instabox_images': result = previewCloud.images(); break;
-    case 'cloud_instabox_set_image': result = previewCloud.setImage(args.image); break;
     case 'cloud_frame': result = await previewCloud.frame(args.id); break;
     case 'cloud_input': result = previewCloud.input(args.id, args.input); break;
     case 'vm_status': result = previewVm.status(); break;
@@ -1514,16 +1776,18 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'vm_frame': result = await previewVm.frame(args.name); break;
     case 'vm_input': result = previewVm.input(args.name, args.input); break;
     case 'vm_desktop': result = previewVm.desktop(args.name); break;
+    case 'progress_list': result = previewProgress.list(args.sessionId); break;
+    case 'progress_media': result = previewProgress.media(args.sessionId, args.id); break;
+    case 'progress_thumb': result = previewProgress.thumb(args.sessionId, args.id); break;
+    case 'progress_clear': result = previewProgress.clear(args.sessionId); break;
     case 'design_list': result = previewDesign.list(); break;
     case 'design_read': result = previewDesign.read(args.name); break;
     case 'design_comments': result = previewDesign.comments(); break;
     case 'design_save_comments': result = previewDesign.saveComments(args.comments); break;
     case 'skills_list': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
     case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
-    case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import':
-    case 'skills_scope_get': case 'skills_scope_set':
+    case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import': case 'skills_discover':
       result = previewSkills.call(command, args); break;
-    case 'skills_task_resolve': { const task = session(args.sessionId); result = previewSkills.call(command, { ...args, projectId: task.projectId, botId: taskBotId(task.id) }); break; }
     case 'simulator_status': result = previewSimulator.status(); break;
     case 'simulator_pose': result = await previewSimulator.pose(args.udid, args.pose); break;
     case 'simulator_create_duo': result = previewSimulator.createDuo(); break;
@@ -1565,17 +1829,6 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = { files, truncated: false };
       break;
     }
-    case 'message_attachment_image': {
-      const task = session(args.sessionId), message = (messages[task.id] ?? []).find(message => message.id === args.messageId && message.role === 'user');
-      if (task.remoteDevice || !message || !IMAGE_ID.test(String(args.id)) || !parseAttachments(contextBlocks(message.content).blocks).some(item => item.kind === 'image' && item.imageId === args.id)) throw new Error('This image does not belong to the selected message.');
-      result = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='; break;
-    }
-    case 'reveal_message_attachment': {
-      const task = session(args.sessionId), message = (messages[task.id] ?? []).find(message => message.id === args.messageId && message.role === 'user');
-      const path = String(args.path ?? '');
-      if (task.remoteDevice || !message || !/^(?:\/|[A-Za-z]:[\\/])/.test(path) || /[\u0000-\u001f\u007f]/.test(path) || /^(?:\\\\|\/\/)/.test(path) || path.split(/[\\/]/).includes('..') || !parseAttachments(contextBlocks(message.content).blocks).some(item => item.path === path)) throw new Error('This path does not belong to the selected message.');
-      break;
-    }
     case 'import_prompt_image': {
       // Any picked or pasted image becomes a small PNG id; the thumbnail is a yellow swatch.
       if (!args.path && !args.dataUrl) throw new Error('Choose an image to attach.');
@@ -1584,6 +1837,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = { id: crypto.randomUUID(), name, width: 1280, height: 800, thumbnail: String(args.dataUrl ?? '').startsWith('data:image/png') ? args.dataUrl : 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' };
       break;
     }
+    // Any registry ID shows the yellow swatch; native reads browser-captures/<id>.png.
+    case 'prompt_image': result = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(args.id)) ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' : null; break;
+    case 'reveal_path': if (!String(args.path ?? '').startsWith('/')) throw new Error('This attachment is no longer on this computer.'); break;
     case 'read_document': {
       const path = String(args.path ?? ''), name = path.split('/').pop() || 'Document';
       if (!path.startsWith('/')) throw new Error('Choose the document with the picker or drop it onto the message.');
@@ -1620,14 +1876,15 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#2e513b"/><stop offset="1" stop-color="#ffd43b"/></linearGradient></defs><rect width="320" height="180" rx="12" fill="url(#g)"/><text x="160" y="96" fill="#fffcef" font-family="sans-serif" font-size="18" text-anchor="middle">${String(args.path).split('/').pop()}</text></svg>`;
       result = `data:image/svg+xml;base64,${btoa(svg)}`; break;
     }
-    // Like `Store::workspace_root`: a task on another computer has no checkout here.
-    // Development-only documents; the native reader enforces workspace/archive bounds.
+    // Sample documents are the test fixtures, served by the dev server.
     case 'read_document_file': {
       const sample = ({ pdf: 'sample.pdf', docx: 'sample.docx', xlsx: 'sample.xlsx', png: 'sample.png', svg: 'sample.svg' } as Record<string, string>)[String(args.path).split('.').pop()!.toLowerCase()];
       const response = sample && await fetch(`/tests/fixtures/${sample}`);
-      if (!response || !response.ok) throw new Error('Unsupported document preview');
-      result = await response.arrayBuffer(); break;
+      if (!response || !response.ok) throw new Error('Only PDF, Word (.docx) and spreadsheet files can be shown');
+      result = await response.arrayBuffer();
+      break;
     }
+    // Like `Store::workspace_root`: a task on another computer has no checkout here.
     case 'read_file': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) throw new Error(`This task runs on ${mirror.name}.`); }
       result = /\.(md|markdown)$/i.test(args.path) ? sampleReadme : args.path.endsWith('.json') ? '{\n  "name": "orbit",\n  "private": true,\n  "type": "module"\n}' : args.path.endsWith('.html') ? '<!doctype html>\n<html><head><title>Orbit</title></head><body><h1>Orbit</h1></body></html>' : args.path.endsWith('.svg') ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>' : sampleSource; break;
     case 'get_metrics': result = { coreRssBytes: 0, activeAgents: timers.size, activeTerminals: 0, databaseBytes: 0 }; break;

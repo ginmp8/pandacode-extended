@@ -7,12 +7,12 @@ export const keyChanged = (existingPublicKey: string | undefined, publicKey: str
 /** Tokens issued before the device (re)registered stay dead after a revoke and fresh sign-in. */
 export const issuedAfterRegistration = (iat: number, registeredAt: number): boolean => iat >= registeredAt;
 
-/** Legacy tokens are valid only for legacy rows. After deletion/revocation, even
- * same-second re-registration cannot revive a previous token. */
-export const tokenCurrent = (claim: { gen?: string; iat: number }, row: { gen: string; registered_at: number }): boolean =>
-  Number.isSafeInteger(claim.iat) && claim.iat >= 0 && (claim.gen === undefined
-    ? row.gen === "" && issuedAfterRegistration(claim.iat, row.registered_at)
-    : claim.gen !== "" && claim.gen === row.gen);
+/**
+ * Tokens carry the device row's `gen` (random, set on a fresh insert, so a revoke + re-register in the same second still kills old tokens).
+ * Tokens without one (issued before gen existed) fall back to the iat check.
+ */
+export const tokenCurrent = (claim: { gen?: number; iat: number }, row: { gen: number; registered_at: number }): boolean =>
+  claim.gen === undefined ? issuedAfterRegistration(claim.iat, row.registered_at) : claim.gen === row.gen;
 
 /** A socket is stale when its last ping (or its join, before the first ping) is STALE_MS old or more. */
 export const isStale = (lastActivityMs: number, nowMs: number): boolean => nowMs - lastActivityMs >= STALE_MS;

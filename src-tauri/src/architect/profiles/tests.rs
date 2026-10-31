@@ -30,6 +30,7 @@ fn setup() -> TeamSetup {
             reasoning_effort: Some("high".into()),
         },
         config: TeamConfig {
+            catalog: Vec::new(),
             auto: false,
             roster_only: false,
             name: None,
@@ -129,7 +130,7 @@ fn saved_profiles_and_applied_defaults_survive_reopen_without_rewriting_existing
     );
 }
 #[test]
-fn new_user_tasks_default_to_ask_without_overriding_requested_modes_or_saved_tasks() {
+fn new_user_tasks_default_to_full_without_overriding_requested_modes_or_saved_tasks() {
     for enabled in [false, true] {
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let source = task(&store);
@@ -150,8 +151,10 @@ fn new_user_tasks_default_to_ask_without_overriding_requested_modes_or_saved_tas
             "pi",
             "deepseek",
             "cline",
+            "kilo",
             "github-copilot",
             "devin",
+            "hermes",
         ] {
             let existing = store
                 .create_session(&source.project_id, provider, "default", "plan")
@@ -167,7 +170,7 @@ fn new_user_tasks_default_to_ask_without_overriding_requested_modes_or_saved_tas
                         details,
                     )
                     .unwrap();
-                    assert_eq!(created.mode, mode.unwrap_or("ask"));
+                    assert_eq!(created.mode, mode.unwrap_or("full"));
                 }
             }
             assert_eq!(store.session(&existing.id).unwrap().mode, "plan");
@@ -288,7 +291,7 @@ fn user_worktrees_inherit_defaults_and_agent_worktrees_preserve_source_selection
     )
     .unwrap();
     assert_eq!(ModelSelection::from_session(&user), setup.architect);
-    assert_eq!(user.mode, "ask");
+    assert_eq!(user.mode, "full");
     assert_eq!(user.project_id, source.project_id);
     assert!(user.worktree_path.is_some());
     let agent = crate::create_worktree_task(&state.store, &source.id, "agent-task".into()).unwrap();

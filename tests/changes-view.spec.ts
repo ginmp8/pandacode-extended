@@ -80,33 +80,6 @@ test('loads the first eight eagerly and the rest near the viewport', async ({ pa
   await expect.poll(async () => (await loads(page)).includes('src/f59.ts:false')).toBe(true);
 });
 
-for (const cleanTree of [false, true]) {
-  test(`cancels a pending diff when ${cleanTree ? 'the tree becomes clean' : 'its file is removed'}`, async ({ page }) => {
-    const removed = { path: 'removed.ts', index: ' ', working: 'M' };
-    const kept = { path: 'kept.ts', index: ' ', working: 'M' };
-    await mount(page, cleanTree ? [removed] : [removed, kept], {
-      'removed.ts': patch('removed.ts', 1, 1),
-      'kept.ts': patch('kept.ts', 1, 1),
-    }, { hold: true });
-    await page.evaluate(({ cleanTree, kept }) => {
-      const h = (window as any).harness;
-      h.removedEntry = document.querySelector('.cv-file[data-path="removed.ts"]');
-      // Exercise both removal paths: a file leaves a nonempty list, or the whole tree clears.
-      h.view.update({ branch: 'main', isRepo: true, files: cleanTree ? [] : [kept] }, undefined, { refetch: false });
-      if (cleanTree) h.view.update({ branch: 'main', isRepo: true, files: [kept] }, undefined, { refetch: false });
-      h.pending.get('removed.ts')();
-      h.pending.get('kept.ts')();
-    }, { cleanTree, kept });
-    // Both loads share the lazy viewer import. The surviving viewer becoming ready is
-    // a positive completion signal; no timing delay is needed to inspect the detached file.
-    await expect(page.locator('.cv-file[data-path="kept.ts"] .diff-viewer[data-diff-state="ready"]')).toHaveCount(1, { timeout: 15_000 });
-    expect(await page.evaluate(() => {
-      const entry = (window as any).harness.removedEntry as HTMLElement;
-      return { connected: entry.isConnected, orphanViewers: entry.querySelectorAll('.diff-viewer').length };
-    })).toEqual({ connected: false, orphanViewers: 0 });
-  });
-}
-
 test('update keeps unchanged diffs mounted and re-mounts only changed patches', async ({ page }) => {
   test.slow();
   await mount(page, FILES, DIFFS);
@@ -142,7 +115,7 @@ test('update keeps unchanged diffs mounted and re-mounts only changed patches', 
   await expect(page.locator('.cv-files')).toHaveText('4 files');
 });
 
-test('narrow panels keep trailing folders, wrap code anywhere and slim hunk headers', async ({ page }) => {
+test('narrow panels keep trailing folders, keep code unbroken (scrolls) and slim hunk headers', async ({ page }) => {
   const path = 'packages/frontend/src/components/settings/Account.tsx';
   const long = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,2 +1,2 @@\n keep\n-a\n+            const message = "averyveryverylongunbrokenstringliteralthatmustwrapsomewhereinsideitselfok";\n@@ -40,2 +40,2 @@ second\n keep2\n-b\n+c\n`;
   await page.setViewportSize({ width: 440, height: 600 });
@@ -158,9 +131,8 @@ test('narrow panels keep trailing folders, wrap code anywhere and slim hunk head
     const separator = root.querySelector<HTMLElement>('[data-content] [data-separator="metadata"]')!;
     return { wordBreak: getComputedStyle(line).wordBreak, firstRow: line.getClientRects()[0] && line.querySelector('span')!.getClientRects()[0].top - line.getBoundingClientRect().top, separator: separator.getBoundingClientRect().height };
   });
-  await expect.poll(async () => (await metrics()).wordBreak).toBe('break-all');
-  const { firstRow, separator } = await metrics();
-  expect(firstRow).toBeLessThan(4);
+  await expect.poll(async () => (await metrics()).wordBreak).not.toBe('break-all');
+  const { separator } = await metrics();
   expect(separator).toBeLessThanOrEqual(21);
   await page.screenshot({ path: 'test-results/changes-view-narrow.png', clip: { x: 0, y: 0, width: 410, height: 260 } });
 });

@@ -79,14 +79,26 @@ impl Cloudflare {
         };
         self.call(method, &path, None, Duration::from_secs(120)).await.map(|_| ())
     }
+    /// Keep the container awake for `minutes` without requests (the Worker's `/keepalive`).
+    pub async fn keep_alive(&self, name: &str, minutes: u32) -> Result<(), String> {
+        self.call(reqwest::Method::POST, &format!("/sandboxes/{name}/keepalive"), Some(json!({"minutes": minutes})), Duration::from_secs(30)).await.map(|_| ())
+    }
+    async fn run(&self, name: &str, command: &str, timeout: Duration) -> Result<Value, String> {
+        self.call(reqwest::Method::POST, &format!("/sandboxes/{name}/exec"), Some(json!({"command": command, "timeoutMs": timeout.as_millis() as u64})), timeout + Duration::from_secs(30)).await
+    }
+    /// Exit code and stdout alone, for callers that parse the output (base64 file reads).
+    pub async fn exec_stdout(&self, name: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String), String> {
+        let result = self.run(name, command, timeout).await?;
+        Ok((result["exitCode"].as_i64().map(|c| c as i32), result["stdout"].as_str().unwrap_or_default().to_string()))
+    }
     pub async fn exec(&self, name: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String), String> {
-        let result = self.call(reqwest::Method::POST, &format!("/sandboxes/{name}/exec"), Some(json!({"command": command, "timeoutMs": timeout.as_millis() as u64})), timeout + Duration::from_secs(30)).await?;
+        let result = self.run(name, command, timeout).await?;
         let mut output = result["stdout"].as_str().unwrap_or_default().to_string();
         if let Some(stderr) = result["stderr"].as_str().filter(|s| !s.is_empty()) {
             output.push_str(&format!("{}[stderr]\n{stderr}", if output.is_empty() || output.ends_with('\n') { "" } else { "\n" }));
         }
         if result["truncated"].as_bool() == Some(true) {
-            output.push_str("\n[output truncated to the last 256 KB]");
+            output.push_str("\n[output truncated to the last 4 MB]");
         }
         Ok((result["exitCode"].as_i64().map(|c| c as i32), output))
     }
@@ -122,28 +134,24 @@ pub fn deploy(api_token: &str, account: &str, progress: &dyn Fn(&str)) -> Result
             std::fs::create_dir_all(target.parent().unwrap_or(&work)).map_err(|e| e.to_string())?;
             std::fs::write(&target, contents).map_err(|e| e.to_string())?;
         }
-        // Wrangler must be installed and reviewed outside PandaCode. No npm
-        // install, package hooks, npx fallback or ambient package download.
-        let cli = tool("wrangler")?;
-        let mut version = Command::new(&cli);
-        version.arg("--version");
-        let version = checked(run_process(version, "Wrangler version", 4096, Duration::from_secs(15))?)?;
-        if !String::from_utf8_lossy(&version.bytes).split_whitespace().any(|word| word == "4.151.0") {
-            return Err("Install the reviewed Wrangler 4.151.0 CLI manually before deploying; no automatic installation is permitted.".into());
-        }
-        progress("Building the sandbox image and deploying with preinstalled Wrangler…");
-        let output = wrangler(&work, &cli, api_token, account, &["deploy"], None, Duration::from_secs(1800))?;
+        progress("Installing the Worker's packages…");
+        let mut install = Command::new(tool("npm")?);
+        install.args(["install", "--no-audit", "--no-fund", "--silent"]).current_dir(&work);
+        checked(run_process(install, "npm", 1 << 20, Duration::from_secs(600))?)?;
+        progress("Building the sandbox image and deploying (a few minutes)…");
+        let output = wrangler(&work, api_token, account, &["deploy"], None, Duration::from_secs(1800))?;
         let url = deployed_url(&output).ok_or("The Worker deployed but its address was not reported. Check workers.dev is enabled for your account.")?;
         progress("Securing the Worker…");
         let secret = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        wrangler(&work, &cli, api_token, account, &["secret", "put", "PANDACODE_TOKEN"], Some(&secret), Duration::from_secs(300))?;
+        wrangler(&work, api_token, account, &["secret", "put", "PANDACODE_TOKEN"], Some(&secret), Duration::from_secs(300))?;
         Ok((url, secret))
     })();
     let _ = std::fs::remove_dir_all(&work);
     result
 }
-fn wrangler(work: &Path, wrangler: &Path, api_token: &str, account: &str, args: &[&str], input: Option<&str>, timeout: Duration) -> Result<String, String> {
-    let mut command = Command::new(wrangler);
+fn wrangler(work: &Path, api_token: &str, account: &str, args: &[&str], input: Option<&str>, timeout: Duration) -> Result<String, String> {
+    let wrangler = work.join(if cfg!(windows) { "node_modules/.bin/wrangler.cmd" } else { "node_modules/.bin/wrangler" });
+    let mut command = Command::new(&wrangler);
     command.args(args).current_dir(work)
         .env("CLOUDFLARE_API_TOKEN", api_token).env("CLOUDFLARE_ACCOUNT_ID", account)
         .env("WRANGLER_SEND_METRICS", "false").env("CI", "true");
@@ -177,6 +185,7 @@ mod tests {
     fn the_worker_ships_with_auth_and_an_idle_timeout() {
         let worker = FILES.iter().find(|(path, _)| *path == "src/index.ts").unwrap().1;
         assert!(worker.contains("timingSafeEqual") && worker.contains("IDLE_MS = 10 * 60 * 1000"));
+        assert!(worker.contains("/keepalive") && worker.contains("keepAlive(minutes: number)") && worker.contains("setInactivityTimeout"));
         assert!(FILES.iter().any(|(path, contents)| *path == "Dockerfile" && contents.contains("cloudflare/sandbox:1.0.1")));
         let package: Value = serde_json::from_str(FILES.iter().find(|(path, _)| *path == "package.json").unwrap().1).unwrap();
         assert_eq!(package["dependencies"]["@cloudflare/sandbox"], "1.0.1");
@@ -189,6 +198,7 @@ mod tests {
             ("GET", "/sandboxes/b") => (200, r#"{"running":false}"#.into()),
             ("POST", "/sandboxes/c/start") => (200, r#"{"running":true}"#.into()),
             ("POST", "/sandboxes/a/exec") => (200, r#"{"exitCode":1,"stdout":"out","stderr":"err","truncated":false}"#.into()),
+            ("POST", "/sandboxes/a/keepalive") => (200, r#"{"keepAliveMs":900000}"#.into()),
             ("DELETE", "/sandboxes/b") => (200, r#"{"deleted":true}"#.into()),
             ("GET", "/health") => (401, "Unauthorized".into()),
             _ => (404, r#"{"message":"Not found"}"#.into()),
@@ -199,11 +209,15 @@ mod tests {
         assert_eq!(cf.create("c").await.unwrap().state, "running");
         assert!(cf.create("Bad Name").await.is_err());
         assert_eq!(cf.exec("a", "ls", Duration::from_secs(5)).await.unwrap(), (Some(1), "out\n[stderr]\nerr".into()));
+        assert_eq!(cf.exec_stdout("a", "ls", Duration::from_secs(5)).await.unwrap(), (Some(1), "out".into()));
         cf.power("b", "delete").await.unwrap();
+        cf.keep_alive("a", 15).await.unwrap();
         assert!(cf.health().await.unwrap_err().contains("refused the credentials"));
         let log = seen.lock().unwrap();
         assert!(log.iter().all(|r| r.authorization.as_deref() == Some("Bearer tok")));
         let exec: Value = serde_json::from_str(&log.iter().find(|r| r.path.ends_with("/exec")).unwrap().body).unwrap();
         assert_eq!(exec, json!({"command":"ls","timeoutMs":5000}));
+        let keep: Value = serde_json::from_str(&log.iter().find(|r| r.path.ends_with("/keepalive")).unwrap().body).unwrap();
+        assert_eq!(keep, json!({"minutes":15}));
     }
 }

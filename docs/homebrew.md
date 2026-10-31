@@ -1,7 +1,5 @@
 # Homebrew
 
-> **Upstream reference only.** This document describes the original release infrastructure. It does not publish or install hardened.1. This revision removes the updater plugin and disables its included npx installer. Build the reviewed local source with the lockfiles; see [README](../README.md) and [SECURITY-HARDENING.md](../SECURITY-HARDENING.md). Do not use upstream distribution commands to install this revision.
-
 PandaCode has an official tap,
 [aicodeking/homebrew-pandacode](https://github.com/aicodeking/homebrew-pandacode).
 

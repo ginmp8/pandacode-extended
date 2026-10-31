@@ -14,7 +14,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub(crate) const PREFERRED_PORT: u16 = 47_321;
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 256 * 1024;
-const MAX_CONNECTIONS: usize = 64;
 
 static PORT: AtomicU16 = AtomicU16::new(0);
 
@@ -77,7 +76,6 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
-        503 => "Service Unavailable",
         _ => "Error",
     }
 }
@@ -105,17 +103,11 @@ fn decode(component: &str) -> String {
 
 /// Parses a request head; `None` when it is malformed.
 pub(crate) fn parse_head(head: &str) -> Option<Request> {
-    if head.len() > MAX_HEAD {
-        return None;
-    }
     let mut lines = head.split("\r\n");
     let mut first = lines.next()?.split(' ');
     let method = first.next()?.to_owned();
     let target = first.next()?;
-    if !matches!(first.next()?, "HTTP/1.0" | "HTTP/1.1") || first.next().is_some()
-        || method.is_empty() || !method.bytes().all(|byte| byte.is_ascii_uppercase())
-        || !target.starts_with('/') || target.starts_with("//") || target.chars().any(char::is_control)
-    {
+    if !first.next()?.starts_with("HTTP/1.") {
         return None;
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -123,19 +115,7 @@ pub(crate) fn parse_head(head: &str) -> Option<Request> {
     let mut headers = HashMap::new();
     for line in lines.filter(|line| !line.is_empty()) {
         let (name, value) = line.split_once(':')?;
-        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || value.chars().any(|character| character.is_control() && character != '\t')
-            || headers.insert(name.to_ascii_lowercase(), value.trim().to_owned()).is_some()
-        {
-            return None;
-        }
-    }
-    // Only explicit Content-Length framing is supported by this small server.
-    if !headers.contains_key("host") || headers.contains_key("transfer-encoding") || headers.contains_key("expect") {
-        return None;
-    }
-    if headers.get("content-length").is_some_and(|value| value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())) {
-        return None;
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
     }
     Some(Request { method, path: path.to_owned(), query, headers, body: Vec::new() })
 }
@@ -150,9 +130,6 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<Request, u16
         }
         buffer.extend_from_slice(&chunk[..read]);
         if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
-            if end > MAX_HEAD {
-                return Err(413);
-            }
             break end;
         }
         if buffer.len() > MAX_HEAD {
@@ -165,15 +142,9 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<Request, u16
         return Err(413);
     }
     let mut body = buffer[head_end + 4..].to_vec();
-    if body.len() > length {
-        return Err(400);
-    }
     while body.len() < length {
         let read = stream.read(&mut chunk).await.map_err(|_| 400u16)?;
         if read == 0 {
-            return Err(400);
-        }
-        if read > length - body.len() {
             return Err(400);
         }
         body.extend_from_slice(&chunk[..read]);
@@ -209,15 +180,10 @@ async fn route(app: &tauri::AppHandle, request: Request) -> Response {
 }
 
 async fn serve(app: tauri::AppHandle, listener: tokio::net::TcpListener) {
-    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         let Ok((mut stream, _)) = listener.accept().await else { continue };
-        // Unauthenticated callers cannot create an unbounded number of 40 s
-        // request tasks, including through an explicitly configured tunnel.
-        let Ok(permit) = slots.clone().try_acquire_owned() else { continue };
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _permit = permit;
             // Long polls wait up to 25 seconds, so allow a little longer overall.
             let work = async {
                 let response = match read_request(&mut stream).await {
@@ -261,31 +227,4 @@ pub(crate) fn port() -> u16 {
 /// Compares secrets without leaking where they differ.
 pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ambiguous_http_framing_and_duplicate_authorization_are_rejected() {
-        for headers in [
-            "Host: localhost\r\nHost: attacker.example",
-            "Host: localhost\r\nAuthorization: Bearer first\r\nauthorization: Bearer second",
-            "Host: localhost\r\nContent-Length: 1\r\nContent-Length: 2",
-            "Host: localhost\r\nTransfer-Encoding: chunked",
-            "Host: localhost\r\nExpect: 100-continue",
-            "Host : localhost",
-            "Host: localhost\r\nX-Test: line\nInjected: value",
-        ] {
-            assert!(parse_head(&format!("POST /api/chat/id/messages HTTP/1.1\r\n{headers}")).is_none(), "{headers}");
-        }
-        assert!(parse_head("GET / HTTP/1.1 extra\r\nHost: localhost").is_none());
-        assert!(parse_head("GET https://attacker.example/ HTTP/1.1\r\nHost: localhost").is_none());
-        assert!(parse_head("GET / HTTP/1.2\r\nHost: localhost").is_none());
-        assert!(parse_head(&format!("GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}", "a".repeat(MAX_HEAD))).is_none());
-        let request = parse_head("POST /api/chat/id/messages HTTP/1.1\r\nHost: 127.0.0.1:47321\r\nAuthorization: Bearer test\r\nContent-Type: application/json\r\nContent-Length: 2").unwrap();
-        assert!(request.loopback_host());
-        assert_eq!(request.bearer(), Some("test"));
-    }
 }

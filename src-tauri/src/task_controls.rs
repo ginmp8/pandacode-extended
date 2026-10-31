@@ -10,28 +10,18 @@ pub(super) struct GoalLaunch {
     pub reply: oneshot::Sender<Result<Option<GoalState>>>,
 }
 
-fn context(state: &AppState, sid: &str) -> Result<(Session, PathBuf, bool)> {
+fn context(state: &AppState, sid: &str) -> Result<(Session, PathBuf)> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let task = store.session(sid)?;
     if task.provider != "codex" {
         return Err("Use the Codex harness for this command.".into());
     }
     let cwd = store.workspace_root(&task.project_id, Some(sid))?;
-    // Capture identity with the saved native ID, while connection mutations are
-    // excluded by store. Reading it later could pair an old ID with a new account.
-    let named = crate::connections::for_task(sid, &task.provider).is_some();
-    Ok((task, cwd, named))
-}
-
-fn require_default_control_connection(named: bool) -> Result<()> {
-    if named {
-        return Err("This native Codex control does not support named connections yet. Continue in this conversation, use its running agent, or use Edit/Fork in the message menu for a fresh context.".into());
-    }
-    Ok(())
+    Ok((task, cwd))
 }
 
 async fn live_request(state: &AppState, sid: &str, method: &str, params: Value) -> Result<Value> {
-    let (task, _, _) = context(state, sid)?;
+    let (task, _) = context(state, sid)?;
     task.resume_id
         .ok_or("The agent has not opened its Codex task yet.")?;
     let (tx, rx) = oneshot::channel();
@@ -85,7 +75,7 @@ pub(super) async fn task_goal(
             );
         }
     }
-    let (task, cwd, named) = context(&state, &session_id)?;
+    let (task, cwd) = context(&state, &session_id)?;
     if let GoalRequest::Set {
         objective,
         token_budget,
@@ -111,7 +101,6 @@ pub(super) async fn task_goal(
         let Some(remote) = task.resume_id.as_deref() else {
             return Ok(None);
         };
-        require_default_control_connection(named)?;
         let goal = command_operations::read_goal(&cwd, remote).await?;
         // An agent may have started or the selected harness may have changed
         // while the independent metadata process was reading its snapshot.
@@ -174,8 +163,7 @@ pub(super) async fn codex_command(
     session_id: String,
     request: command_operations::Request,
 ) -> Result<Value> {
-    let (_, cwd, named) = context(&state, &session_id)?;
-    require_default_control_connection(named)?;
+    let (_, cwd) = context(&state, &session_id)?;
     if matches!(request, command_operations::Request::Logout)
         && !state.agents.lock().map_err(|e| e.to_string())?.is_empty()
     {
@@ -272,8 +260,7 @@ pub(super) async fn set_task_preference(
     } else {
         Some(TaskLease::acquire(&state, &session_id)?)
     };
-    let (task, cwd, named) = context(&state, &session_id)?;
-    require_default_control_connection(named)?;
+    let (task, cwd) = context(&state, &session_id)?;
     let delta = match request {
         TaskPreference::Plan { enabled } => {
             let model = command_operations::resolved_model(&cwd, &task.model).await?;
@@ -398,13 +385,6 @@ pub(super) async fn fork_session_at_message(
     message_id: i64,
     exclusive: Option<bool>,
 ) -> Result<Session> {
-    // Keep the source reserved until the database snapshot commits, so a run
-    // cannot begin after the UI's idle check. Inclusive Fork remains available.
-    let _lease = if exclusive == Some(true) {
-        Some(TaskLease::acquire(&state, &session_id)?)
-    } else {
-        None
-    };
     let store = state.store.clone();
     let task = blocking(move || {
         let store = store.lock().map_err(|e| e.to_string())?;
@@ -440,8 +420,7 @@ pub(super) async fn fork_codex_task(
     remote_id: Option<String>,
 ) -> Result<Session> {
     let _lease = TaskLease::acquire(&state, &session_id)?;
-    let (source, cwd, named) = context(&state, &session_id)?;
-    require_default_control_connection(named)?;
+    let (source, cwd) = context(&state, &session_id)?;
     let adopting = remote_id.is_some();
     if !adopting {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -541,9 +520,8 @@ pub(super) async fn archive_codex_task(
     session_id: String,
 ) -> Result<()> {
     let _lease = TaskLease::acquire(&state, &session_id)?;
-    let (task, cwd, named) = context(&state, &session_id)?;
+    let (task, cwd) = context(&state, &session_id)?;
     if let Some(remote) = task.resume_id {
-        require_default_control_connection(named)?;
         command_operations::mutate_thread(
             &cwd,
             &remote,
@@ -620,9 +598,8 @@ pub(super) async fn rename_task(state: &AppState, sid: &str, title: &str) -> Res
         return Err("Choose a task name of 1–200 characters.".into());
     }
     let _lease = TaskLease::acquire(state, sid)?;
-    let (task, cwd, named) = context(state, sid)?;
+    let (task, cwd) = context(state, sid)?;
     if let Some(remote) = task.resume_id {
-        require_default_control_connection(named)?;
         command_operations::mutate_thread(
             &cwd,
             &remote,
@@ -648,21 +625,17 @@ pub(super) async fn start_harness_terminal(
     let lease = TaskLease::acquire(&state, &session_id)?;
     let store = state.store.clone();
     let terms = state.terminals.clone();
-    let (task, cwd, named) = {
+    let (task, cwd) = {
         let db = store.lock().map_err(|error| error.to_string())?;
         let task = db.session(&session_id)?;
         if crate::context_recovery::pending(&db, &task)? {
             return Err(crate::context_recovery::RECOVERY_REQUIRED.into());
         }
         let cwd = db.workspace_root(&task.project_id, Some(&session_id))?;
-        crate::skills::scoped::check_console_context(&crate::skills::library(&app)?, &db, &task, &cwd)?;
-        crate::bots::tasks::check_console_context(&db, &task)?;
-        let named = crate::connections::for_task(&session_id, &task.provider).is_some();
-        (task, cwd, named)
+        (task, cwd)
     };
     if task.provider == "codex" {
         if let Some(remote) = task.resume_id.as_deref() {
-            require_default_control_connection(named)?;
             // A native CLI can change the persisted goal while PandaCode is idle.
             // Read it without loading the thread: opening /vim must not restart
             // a goal whose active state was absent from the local UI cache.
@@ -689,10 +662,7 @@ pub(super) async fn start_harness_terminal(
         }
         let current = {
             let db = store.lock().map_err(|error| error.to_string())?;
-            let current = verify_console_task(&db, &task)?;
-            crate::skills::scoped::check_console_context(&crate::skills::library(&app)?, &db, &current, &cwd)?;
-            crate::bots::tasks::check_console_context(&db, &current)?;
-            current
+            verify_console_task(&db, &task)?
         };
         ensure_console_goal_inactive(current.goal_state.as_ref())?;
         // Keep the reservation until the terminal is in the registry. The new
@@ -740,13 +710,6 @@ fn ensure_console_goal_inactive(goal: Option<&GoalState>) -> Result<()> {
 #[cfg(test)]
 mod command_tests {
     use super::*;
-
-    #[test]
-    fn legacy_native_controls_never_fall_back_to_the_default_account() {
-        assert!(require_default_control_connection(false).is_ok());
-        let refusal = require_default_control_connection(true).unwrap_err();
-        assert!(refusal.contains("named connections") && refusal.contains("fresh context"));
-    }
     use std::path::Path;
 
     fn state() -> AppState {

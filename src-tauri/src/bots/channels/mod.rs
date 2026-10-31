@@ -313,7 +313,7 @@ pub(crate) async fn handle_inbound(app: &tauri::AppHandle, channel_id: &str, sen
     };
     match decision {
         Ok(channel) => {
-            let inbound = gateway::Inbound { bot_id: channel.bot_id, channel_id: channel_id.into(), thread: thread.into(), sender_id: sender_id.into(), sender_name: sender_name.into(), text: text.into(), trusted: false };
+            let inbound = gateway::Inbound { bot_id: channel.bot_id, channel_id: channel_id.into(), thread: thread.into(), sender_id: sender_id.into(), sender_name: sender_name.into(), text: text.into(), trusted: false, image_ids: None, moodboard_ids: None };
             if let Err(error) = gateway::deliver(app, inbound).await {
                 let _ = send(app, channel_id, thread, &format!("I couldn't start on that: {error}")).await;
             }
@@ -330,11 +330,6 @@ pub(crate) async fn handle_inbound(app: &tauri::AppHandle, channel_id: &str, sen
 pub(crate) async fn send(app: &tauri::AppHandle, channel_id: &str, thread: &str, text: &str) -> Result<()> {
     let channel = get(&*app.state::<AppState>().store.lock().map_err(|e| e.to_string())?, channel_id)?;
     for part in chunks(text, limit(&channel.kind)) {
-        // A reply may finish after the user disables/removes a channel, and
-        // multi-part sends yield between chunks. Recheck before every delivery.
-        if !get(&*app.state::<AppState>().store.lock().map_err(|e| e.to_string())?, channel_id)?.enabled {
-            return Err("This channel is disabled.".into());
-        }
         match channel.kind.as_str() {
             "web" => web::send(&channel, thread, &part),
             "telegram" => telegram::send(&channel, thread, &part).await,

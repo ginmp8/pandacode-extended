@@ -1,4 +1,4 @@
-//! boat (boat.dev) sandboxes for explicit sandbox management: persistent Ubuntu VMs
+//! boat (boat.dev) sandboxes for cloud agents (docs/cloud-agents.md): persistent Ubuntu VMs
 //! behind a bearer-token REST API (https://docs.boat.dev/api/v1.md). Sandboxes stop by
 //! themselves after `ttlSeconds` (`keep_alive` sets it), snapshot their disk on stop and
 //! come back with `resume`. Commands that wait are capped at 600 s by boat, so longer
@@ -21,8 +21,6 @@ const WAIT_MAX: u64 = 600;
 const TTL_MAX: u64 = 2_592_000;
 /// Idle minutes a new machine gets before boat stops it.
 const IDLE_MINUTES: u32 = 15;
-/// Keep a bounded UTF-8 tail across all output pages of one command.
-const OUTPUT_KEEP: usize = 4 * 1024 * 1024;
 
 pub struct Boat {
     api: String,
@@ -78,7 +76,6 @@ impl Boat {
     async fn create(&self, name: &str) -> Result<Machine> {
         let created = self.call(reqwest::Method::POST, "/sandboxes", Some(json!({"ttlSeconds": IDLE_MINUTES * 60})), Duration::from_secs(60)).await?;
         let id = created["sandbox"]["id"].as_str().ok_or("boat did not return a sandbox ID.")?;
-        super::sandbox::validate_id(id)?;
         // boat names sandboxes itself; rename so the machine reads as the cloud task's.
         let renamed = self.call(reqwest::Method::PATCH, &format!("/sandboxes/{id}"), Some(json!({"name": name})), Duration::from_secs(30)).await;
         Ok(machine(renamed.as_ref().ok().map(|r| &r["sandbox"]).filter(|s| s["id"].is_string()).unwrap_or(&created["sandbox"])))
@@ -107,9 +104,7 @@ impl Boat {
             if result["timedOut"].as_bool() == Some(true) {
                 return Ok((None, format!("Timed out after {} s.", timeout.as_secs())));
             }
-            let mut output = String::new();
-            append_output(&mut output, &combined(&result));
-            return Ok((result["exitCode"].as_i64().map(|c| c as i32), output));
+            return Ok((result["exitCode"].as_i64().map(|c| c as i32), combined(&result)));
         }
         let started = self.call(reqwest::Method::POST, &path, Some(json!({"command": command, "detached": true})), Duration::from_secs(90)).await?;
         let process = started["processId"].as_u64().ok_or("boat did not start the command.")?;
@@ -117,7 +112,7 @@ impl Boat {
         loop {
             let url = format!("{path}/{process}?stdoutOffset={}&stderrOffset={}", offsets.0, offsets.1);
             let status = self.call(reqwest::Method::GET, &url, None, Duration::from_secs(60)).await?;
-            append_output(&mut output, &combined(&status));
+            output.push_str(&combined(&status));
             offsets = (status["stdoutNextOffset"].as_u64().unwrap_or(offsets.0), status["stderrNextOffset"].as_u64().unwrap_or(offsets.1));
             if status["running"].as_bool() == Some(false) && status["more"].as_bool() != Some(true) {
                 return Ok((status["exitCode"].as_i64().map(|c| c as i32), output));
@@ -136,20 +131,10 @@ fn combined(result: &Value) -> String {
     format!("{}{}", result["stdout"].as_str().unwrap_or_default(), result["stderr"].as_str().unwrap_or_default())
 }
 
-fn append_output(output: &mut String, next: &str) {
-    let mut cut = next.len().saturating_sub(OUTPUT_KEEP);
-    while !next.is_char_boundary(cut) { cut += 1; }
-    let next = &next[cut..];
-    let mut remove = output.len().saturating_add(next.len()).saturating_sub(OUTPUT_KEEP);
-    while !output.is_char_boundary(remove) { remove += 1; }
-    output.drain(..remove);
-    output.push_str(next);
-}
-
 impl Sandbox for Boat {
     /// Snapshots keep the disk for 14 days after a stop; auto-stop reaches 30 days.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: 24 * 60 }
+        Info { persistent: true, max_unattended_minutes: 24 * 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         http::block(Boat::list(self))
@@ -175,8 +160,8 @@ pub fn connect(key: &str, options: &Value) -> Result<()> {
         return Err("Enter a boat API key (`boat api-key create pandacode --preset ci`).".into());
     }
     let api = options["apiUrl"].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
-    if api.as_deref().is_some_and(|address| reqwest::Url::parse(address).map_or(true, |url| url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some())) {
-        return Err("The boat API URL must use HTTPS with no embedded credentials, query or fragment.".into());
+    if api.as_deref().is_some_and(|url| !url.starts_with("https://")) {
+        return Err("The boat API URL must start with https://.".into());
     }
     let login = http::block(Boat::new(api.clone(), key.to_string()).login())?;
     super::set_secret(KEY, key)?;
@@ -250,34 +235,9 @@ mod tests {
         assert_eq!(sync, json!({"command": "ls", "timeoutSeconds": 30}));
     }
 
-    #[tokio::test]
-    async fn paged_output_retains_a_bounded_utf8_tail_across_responses() {
-        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
-        let pages = Arc::new(AtomicUsize::new(0));
-        let count = pages.clone();
-        let (base, _) = mock::serve(move |request, _| {
-            if request.method == "POST" { return (200, r#"{"processId":1}"#.to_string()); }
-            let page = count.fetch_add(1, Ordering::SeqCst);
-            assert!(page < 3);
-            let text = ["α", "β", "γ"][page].repeat(1024 * 1024);
-            (200, json!({"stdout":text,"stdoutNextOffset":(page + 1) * 2 * 1024 * 1024,"running":false,"more":page < 2,"exitCode":0}).to_string())
-        });
-        let (code, output) = Boat::new(Some(base), "fixture-key".into()).exec("box-1", "generate-output", Duration::from_secs(601)).await.unwrap();
-        assert_eq!(code, Some(0));
-        assert_eq!(pages.load(Ordering::SeqCst), 3);
-        assert_eq!(output.len(), OUTPUT_KEEP);
-        assert_eq!(output, format!("{}{}", "β".repeat(1024 * 1024), "γ".repeat(1024 * 1024)));
-        let mut output = output;
-        append_output(&mut output, "a");
-        assert_eq!(output.len(), OUTPUT_KEEP - 1);
-        assert!(output.ends_with("γa"));
-    }
-
     #[test]
     fn connect_refuses_plain_http_and_empty_keys() {
         assert!(connect("", &json!({})).is_err());
-        for url in ["http://boat.example", "https://user:pass@boat.example", "https://boat.example?key=value", "https://boat.example/#token"] {
-            assert!(connect("k", &json!({"apiUrl": url})).unwrap_err().contains("HTTPS"));
-        }
+        assert!(connect("k", &json!({"apiUrl": "http://boat.example"})).unwrap_err().contains("https://"));
     }
 }

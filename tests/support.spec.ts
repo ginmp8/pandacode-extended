@@ -50,10 +50,10 @@ test('one Help button follows the sidebar and board without losing its DOM ident
   const original = await support(page).elementHandle();
   await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
   await expect(page.locator('.header-leading > [data-action="support"]')).toBeVisible();
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
   await expect(support(page)).toBeVisible();
   await expect(support(page)).toHaveCount(1);
-  await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+  await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Conversation', exact: true }).click();
   await page.getByRole('button', { name: 'Show sidebar', exact: true }).click();
   await expect(page.locator('.sidebar-bottom > [data-action="support"]')).toBeVisible();
   expect(await original!.evaluate(node => node === document.querySelector('[data-action="support"]'))).toBe(true);
@@ -68,7 +68,7 @@ test('opening support gives immediate feedback and prevents duplicate opens acro
   await expect(support(page)).toHaveAttribute('aria-busy', 'true');
   await expect(support(page)).toHaveAccessibleName('Opening support…');
   await expect(support(page).locator('.support-spinner')).toBeVisible();
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
   await expect(support(page)).toBeVisible();
   await support(page).dispatchEvent('click');
   expect(await calls(page)).toBe(1);
@@ -104,7 +104,7 @@ test('Help stays visible in narrow windows with large interface text', async ({ 
   await open(page);
   for (const mode of ['sidebar', 'collapsed', 'board']) {
     if (mode === 'collapsed') await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
-    if (mode === 'board') await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    if (mode === 'board') { await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click(); }
     await expect(support(page)).toBeVisible();
     const rect = await support(page).boundingBox();
     expect(rect!.width).toBeGreaterThanOrEqual(28);
@@ -123,22 +123,17 @@ test('Settings shows an About section with the version and GitHub links', async 
   await settings.getByRole('tab', { name: 'About & updates', exact: true }).click();
   const about = settings.locator('.settings-about');
   await expect(about).toBeVisible();
-  await expect(about.locator('#settings-about-heading')).toHaveText('About PandaCode Extended');
   await expect(about.locator('.settings-about-version')).toHaveText('Version Preview');
   const urls = await about.locator('[data-action="open-url"]').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.url));
   expect(urls).toEqual(expect.arrayContaining([
-    'https://github.com/ginmp8/pandacode-extended',
-    'https://github.com/ginmp8/pandacode-extended/issues',
     'https://github.com/aicodeking/pandacode',
     'https://github.com/aicodeking/pandacode/issues',
     'https://github.com/aicodeking/pandacode/releases',
   ]));
-  await expect(about.getByRole('button', { name: 'Extended repository', exact: true })).toHaveAttribute('data-url', 'https://github.com/ginmp8/pandacode-extended');
-  await expect(about.getByRole('button', { name: 'Extended issues', exact: true })).toHaveAttribute('data-url', 'https://github.com/ginmp8/pandacode-extended/issues');
-  await expect(about.getByRole('button', { name: 'Upstream releases', exact: true })).toBeVisible();
+  await expect(about.getByRole('button', { name: 'Releases', exact: true })).toBeVisible();
   await expect(about.getByRole('button', { name: 'PandaCode License' })).toBeVisible();
   await expect(settings).not.toContainText('License & updates');
-  await about.getByRole('button', { name: 'Upstream releases', exact: true }).click();
+  await about.getByRole('button', { name: 'Releases', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__supportFixture.opened)).toEqual([
     ['https://github.com/aicodeking/pandacode/releases', '_blank', 'noopener,noreferrer'],
   ]);

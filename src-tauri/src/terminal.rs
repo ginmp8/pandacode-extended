@@ -236,12 +236,13 @@ pub fn start_harness(
 
 fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, String> {
     let args = harness_arguments(context)?;
-    let connection = crate::connections::for_task(context.session_id, context.provider)
-        .map(|connection| crate::connections::launch(&connection)).transpose()?;
-    let executable = connection.as_ref().and_then(|connection| connection.executable.clone())
-        .or_else(|| crate::providers::executable(context.provider))
+    let executable = crate::providers::executable(context.provider)
         .ok_or("Install this harness before opening its console.")?;
+    if context.provider == "hermes" && executable.file_stem().is_some_and(|s| s == "hermes-acp") {
+        return Err("Hermes ACP server does not have an interactive console. Install the `hermes` CLI for terminal chat, or continue in PandaCode.".into());
+    }
     let mut cmd = crate::providers::pty_command(&executable)?;
+    crate::provider_settings::apply_environment(context.provider, &mut cmd);
     for name in crate::providers::claude_auth::removed_environment(context.provider) { cmd.env_remove(name); }
     cmd.args(args);
     if matches!(context.provider, "claude" | "glm" | "mimo") {
@@ -280,38 +281,7 @@ fn harness_command(context: &HarnessContext<'_>) -> Result<CommandBuilder, Strin
             crate::providers::opencode_configuration(context.mode),
         );
     }
-    if let Some(connection) = &connection {
-        check_console_connection(context.provider, &connection.args)?;
-        crate::providers::review_connection_args(context.mode, &connection.args)?;
-        apply_connection(&mut cmd, connection);
-    }
-    if context.provider == "kilo" {
-        // Named account/model configuration survives; permission and update
-        // policy is authoritative after its environment and extra arguments.
-        let inherited = cmd.get_env("KILO_CONFIG_CONTENT").and_then(|value| value.to_str()).map(str::to_owned);
-        cmd.env("KILO_CONFIG_CONTENT", crate::providers::kilo_configuration(context.mode, inherited.as_deref()));
-        cmd.env_remove("KILO_PERMISSION");
-        cmd.env("KILO_DISABLE_AUTOUPDATE", "true");
-        cmd.arg("--auto=false");
-    }
     Ok(cmd)
-}
-
-fn check_console_connection(provider: &str, args: &[String]) -> Result<(), String> {
-    let reserved: &[&str] = match provider {
-        "cline" => &["--auto-approve", "--plan", "--act"],
-        "kilo" => &["--auto", "--agent"],
-        _ => &[],
-    };
-    if args.iter().any(|arg| reserved.contains(&arg.split('=').next().unwrap_or_default())) {
-        return Err("Remove permission or agent-mode arguments from this named connection; choose the console's mode on the task.".into());
-    }
-    Ok(())
-}
-
-fn apply_connection(command: &mut CommandBuilder, connection: &crate::connections::Launch) {
-    command.args(&connection.args);
-    for (name, value) in &connection.env { command.env(name, value); }
 }
 
 fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String> {
@@ -320,7 +290,14 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
     if provider == "antigravity" {
         return Err("Antigravity's ACP server does not have an interactive console. Use its synced commands in the composer, or open the agy CLI separately.".into());
     }
-    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "pi" | "omp" | "github-copilot" | "muse" | "devin" | "cline" | "kilo") {
+    if provider == "hermes" {
+        if let Some(exe) = crate::providers::executable("hermes") {
+            if exe.file_stem().is_some_and(|s| s == "hermes-acp") {
+                return Err("Hermes ACP server does not have an interactive console. Install the `hermes` CLI for terminal chat, or continue in PandaCode.".into());
+            }
+        }
+    }
+    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "pi" | "omp" | "github-copilot" | "muse" | "cline" | "devin" | "hermes") {
         return Err("Choose a supported coding harness.".into());
     }
     if provider == "github-copilot" {
@@ -360,7 +337,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
         args.push(
             match provider {
                 "codex" | "muse" => "resume",
-                "claude" | "glm" | "mimo" | "grok" | "devin" => "--resume",
+                "claude" | "glm" | "mimo" | "grok" | "devin" | "hermes" => "--resume",
                 "cline" => "--id",
                 _ => "--session",
             }
@@ -371,7 +348,6 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
     if !crate::storage::valid_permission_mode(context.mode) {
         return Err("Choose a supported permission mode.".into());
     }
-    crate::providers::review_supported(provider, context.mode)?;
     match provider {
         "pi" | "omp" => {
             if context.mode != "full" { return Err("Pi console requires Full access. Use task chat for approval modes.".into()); }
@@ -417,6 +393,8 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
                 args.push("--disable-approval".into());
             }
             args.extend(crate::providers::muse_sandbox_args(context.mode).iter().map(|arg| (*arg).into()));
+            // After `resume <id>` too: Muse takes options only after its subcommand.
+            args.extend(crate::providers::privacy::muse_arguments().iter().map(|arg| (*arg).into()));
         }
         "opencode" => {
             args.extend([
@@ -447,19 +425,22 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
             };
             args.extend(["--permission-mode".into(), mode.into()]);
         }
+        "hermes" => {
+            if context.mode == "full" {
+                args.push("--yolo".into());
+            }
+        }
         "cline" => {
             args.push("-i".into());
-            if context.mode == "plan" { args.push("--plan".into()); }
-            args.extend(["--auto-approve".into(), if context.mode == "full" { "true" } else { "false" }.into()]);
-        }
-        "kilo" => {
-            if !matches!(context.mode, "ask" | "full") {
-                return Err("Kilo's console cannot enforce this task's approval mode. Use task chat for Plan or Accept edits.".into());
+            if context.mode == "plan" {
+                args.push("--plan".into());
+            } else if context.mode == "full" {
+                args.extend(["--auto-approve".into(), "true".into()]);
+            } else {
+                // Cline CLI defaults --auto-approve to true unless explicitly turned off.
+                // For approval modes (ask, review, auto), enforce manual tool confirmation.
+                args.extend(["--auto-approve".into(), "false".into()]);
             }
-            if context.reasoning_effort.is_some() {
-                return Err("Kilo's interactive console cannot apply this reasoning override. Use task chat instead.".into());
-            }
-            args.extend(["--agent".into(), "code".into()]);
         }
         _ => {
             match context.mode {
@@ -958,58 +939,10 @@ pub fn close(terms: &Terminals, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Close only harnesses belonging to the supplied owned conversations. Removing
-/// them denies new input immediately; process termination and PTY destruction
-/// happen outside the registry lock, just like an individual terminal close.
-pub(crate) fn close_harness_sessions(
-    terms: &Terminals,
-    sessions: &[String],
-) -> Result<usize, String> {
-    let removed: Vec<Terminal> = {
-        let mut registry = terms.lock().map_err(|error| error.to_string())?;
-        crate::remote::check_current_request("ask")?;
-        let sessions: HashSet<&str> = sessions.iter().map(String::as_str).collect();
-        let ids: Vec<String> = registry
-            .iter()
-            .filter_map(|(id, terminal)| {
-                terminal
-                    .harness_session
-                    .as_deref()
-                    .filter(|session| sessions.contains(session))
-                    .map(|_| id.clone())
-            })
-            .collect();
-        ids.into_iter()
-            .filter_map(|id| registry.remove(&id))
-            .collect()
-    };
-    let count = removed.len();
-    drop(removed);
-    Ok(count)
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
-
-    #[test]
-    fn a_harness_console_uses_the_named_connections_config_and_environment() {
-        let connection = crate::connections::Launch {
-            executable: None,
-            args: vec!["--verbose".into()],
-            env: vec![("CODEX_HOME".into(), "/fixture/second-account".into()), ("FIXTURE_VALUE".into(), "named-profile".into())],
-            secrets: vec![],
-        };
-        let mut command = CommandBuilder::new("fixture-harness");
-        command.arg("resume");
-        command.arg("native-session");
-        command.env("CODEX_HOME", "/fixture/default-account");
-        apply_connection(&mut command, &connection);
-        assert_eq!(command.get_env("CODEX_HOME").unwrap(), std::ffi::OsStr::new("/fixture/second-account"));
-        assert_eq!(command.get_env("FIXTURE_VALUE").unwrap(), std::ffi::OsStr::new("named-profile"));
-        assert_eq!(command.get_argv(), &["fixture-harness", "resume", "native-session", "--verbose"]);
-    }
 
     #[test]
     fn harness_console_uses_literal_resume_arguments_and_never_a_prompt() {
@@ -1019,6 +952,7 @@ mod tests {
             ("kimi", "--session"),
             ("glm", "--resume"),
             ("opencode", "--session"),
+            ("cline", "--id"),
         ] {
             let context = HarnessContext {
                 session_id: "task",
@@ -1086,55 +1020,79 @@ mod tests {
             assert!(args.windows(2).any(|args| args == pair), "{args:?}");
         }
         assert!(args.contains(&"--disable-write".to_owned()) && args.contains(&"--disable-shell".to_owned()));
+        // The telemetry opt-out follows `resume <id>`: Muse takes options only after it.
+        crate::providers::privacy::FORCE.with(|force| force.set(Some(true)));
+        let private = harness_arguments(&context).unwrap();
+        crate::providers::privacy::FORCE.with(|force| force.set(None));
+        assert_eq!(&private[..2], &["resume", "01a16681-4036-7383-ab96-9dd8865524d8"]);
+        let at = private.windows(2).position(|pair| pair == ["-c", "telemetry.enabled=false"]).expect("opt-out");
+        assert!(at >= 2);
+        assert_eq!([&private[..at], &private[at + 2..]].concat(), args);
         let full = harness_arguments(&HarnessContext { mode: "full", resume_id: None, ..context }).unwrap();
         assert!(full.contains(&"--disable-approval".to_owned()) && full.contains(&"--disable-sandbox".to_owned()));
     }
 
     #[test]
-    fn cline_console_uses_manual_confirmation_including_plan_and_preserves_resume() {
-        let context = HarnessContext { session_id: "task", provider: "cline", resume_id: Some("1792719287191_NBdt7_cli"), model: Some("anthropic/claude-sonnet-5.5"), reasoning_effort: Some("high"), mode: "ask" };
-        for mode in ["ask", "auto", "plan", "full"] {
-            let args = harness_arguments(&HarnessContext { mode, ..context }).unwrap();
-            for pair in [["--id", "1792719287191_NBdt7_cli"], ["--model", "anthropic/claude-sonnet-5.5"], ["--thinking", "high"], ["--auto-approve", if mode == "full" { "true" } else { "false" }]] {
-                assert!(args.windows(2).any(|args| args == pair), "{mode}: {args:?}");
-            }
-            assert!(args.contains(&"-i".into()));
-            assert_eq!(args.contains(&"--plan".into()), mode == "plan");
-            assert!(!args.contains(&"--acp".into()));
-        }
-    }
-
-    #[test]
-    fn kilo_console_preserves_literal_session_and_refuses_unsupported_policy_or_effort() {
-        let context = HarnessContext { session_id: "task", provider: "kilo", resume_id: Some("ses_fixture"), model: Some("provider/model"), reasoning_effort: None, mode: "ask" };
-        for mode in ["ask", "full"] {
-            let args = harness_arguments(&HarnessContext { mode, ..context }).unwrap();
-            assert_eq!(args, ["--session", "ses_fixture", "--agent", "code", "--model", "provider/model"]);
-        }
-        for mode in ["plan", "auto"] {
-            assert!(harness_arguments(&HarnessContext { mode, ..context }).unwrap_err().contains("Use task chat"));
-        }
-        assert!(harness_arguments(&HarnessContext { reasoning_effort: Some("max"), ..context }).is_err());
-        for (provider, flag) in [("kilo", "--auto"), ("kilo", "--auto=true"), ("kilo", "--agent=plan"), ("cline", "--auto-approve"), ("cline", "--auto-approve=true"), ("cline", "--act")] {
-            assert!(check_console_connection(provider, &[flag.into()]).is_err());
-        }
-        assert!(check_console_connection("kilo", &["--verbose".into()]).is_ok());
-    }
-
-    #[test]
-    fn devin_console_preserves_the_session_and_never_substitutes_a_wider_plan_mode() {
+    fn cline_console_sets_tui_mode_effort_and_resume() {
         let context = HarnessContext {
-            session_id: "task", provider: "devin", resume_id: Some("garnet-sweater"),
-            model: Some("swe-2-high"), reasoning_effort: None, mode: "ask",
+            session_id: "task",
+            provider: "cline",
+            resume_id: None,
+            model: Some("anthropic/claude-sonnet-5.5"),
+            reasoning_effort: Some("high"),
+            mode: "plan",
         };
         let args = harness_arguments(&context).unwrap();
-        for pair in [["--resume", "garnet-sweater"], ["--model", "swe-2-high"], ["--permission-mode", "accept-edits"]] {
-            assert!(args.windows(2).any(|args| args == pair), "{args:?}");
-        }
-        assert!(!args.iter().any(|arg| arg == "dangerous" || arg == "--always-approve"));
-        assert!(harness_arguments(&HarnessContext { mode: "plan", ..context }).unwrap_err().contains("Plan mode"));
-        let full = harness_arguments(&HarnessContext { mode: "full", ..context }).unwrap();
-        assert!(full.windows(2).any(|args| args == ["--permission-mode", "dangerous"]));
+        assert_eq!(
+            args,
+            [
+                "-i",
+                "--plan",
+                "--model",
+                "anthropic/claude-sonnet-5.5",
+                "--thinking",
+                "high"
+            ]
+        );
+
+        let full_context = HarnessContext {
+            session_id: "task",
+            provider: "cline",
+            resume_id: Some("1792719287191_NBdt7_cli"),
+            model: None,
+            reasoning_effort: None,
+            mode: "full",
+        };
+        let full_args = harness_arguments(&full_context).unwrap();
+        assert_eq!(
+            full_args,
+            ["--id", "1792719287191_NBdt7_cli", "-i", "--auto-approve", "true"]
+        );
+
+        let ask_context = HarnessContext {
+            session_id: "task",
+            provider: "cline",
+            resume_id: None,
+            model: None,
+            reasoning_effort: None,
+            mode: "ask",
+        };
+        let ask_args = harness_arguments(&ask_context).unwrap();
+        assert_eq!(ask_args, ["-i", "--auto-approve", "false"]);
+    }
+
+    #[test]
+    fn hermes_console_uses_resume_and_yolo_and_model() {
+        let context = HarnessContext {
+            session_id: "task",
+            provider: "hermes",
+            resume_id: Some("session-123"),
+            model: Some("nous/hermes-3-llama-3.1-405b"),
+            reasoning_effort: None,
+            mode: "full",
+        };
+        let args = harness_arguments(&context).unwrap();
+        assert_eq!(args, ["--resume", "session-123", "--yolo", "--model", "nous/hermes-3-llama-3.1-405b"]);
     }
 
     #[test]
@@ -1196,24 +1154,6 @@ mod tests {
             .windows(2)
             .any(|args| args == ["--permission-mode", "default"]));
         assert!(!args.iter().any(|arg| arg.contains("danger")));
-    }
-
-    #[test]
-    fn console_review_mode_never_falls_back_to_standard_or_full_access() {
-        let context = HarnessContext {
-            session_id: "task", provider: "claude", resume_id: None,
-            model: None, reasoning_effort: None, mode: "review",
-        };
-        for (provider, _) in crate::providers::PROVIDERS {
-            let result = harness_arguments(&HarnessContext { provider, ..context });
-            if matches!(provider, "claude" | "glm" | "mimo") {
-                let args = result.unwrap();
-                assert!(args.windows(2).any(|pair| pair == ["--permission-mode", "auto"]));
-                assert!(!args.iter().any(|arg| arg.contains("danger") || arg == "bypassPermissions"));
-            } else {
-                assert!(result.is_err(), "{provider}");
-            }
-        }
     }
 
     #[test]
@@ -1279,6 +1219,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(mimo, ["--permission-mode", "acceptEdits", "--model", "mimo-v2.6-pro"]);
+        // Approve for me is Claude Code's auto mode, as in task runs.
+        for provider in ["claude", "glm", "mimo"] {
+            let review = harness_arguments(&HarnessContext { provider, mode: "review", ..context }).unwrap();
+            assert!(review.windows(2).any(|args| args == ["--permission-mode", "auto"]), "{provider}");
+        }
     }
 
     struct TestShell {
@@ -1435,131 +1380,6 @@ mod tests {
             shell.exited.recv_timeout(Duration::from_secs(2)).is_ok(),
             "Shell ignoring SIGHUP survived terminal close"
         );
-    }
-
-    #[test]
-    fn bot_pause_closes_only_owned_harnesses_and_drops_them_outside_registry_lock() {
-        let (state, project) = crate::concurrent_task_tests::test_state();
-        let root =
-            std::env::temp_dir().join(format!("pandacode-bot-console-{}", crate::storage::id()));
-        let (owned, linked, other) = {
-            let store = state.store.lock().unwrap();
-            let bot = crate::bots::create(
-                &store,
-                &crate::bots::BotInput {
-                    name: "Console owner".into(),
-                    provider: "codex".into(),
-                    model: "default".into(),
-                    mode: "ask".into(),
-                    ..Default::default()
-                },
-                &root,
-            )
-            .unwrap();
-            crate::bots::thread_session(&store, &bot, "desktop", "desktop", "Desktop").unwrap();
-            crate::bots::thread_session(&store, &bot, "schedule", "schedule", "Scheduled").unwrap();
-            let linked = store
-                .create_session(&project, "codex", "default", "ask")
-                .unwrap();
-            crate::bots::tasks::assign(&store, &linked.id, Some(&bot.id)).unwrap();
-            let other = store
-                .create_session(&project, "codex", "default", "ask")
-                .unwrap();
-            // Use exactly the ownership query used by stop_bot, not project or
-            // profile membership: an ordinary linked task remains independent.
-            let owned: Vec<String> = crate::bots::threads(&store, &bot.id)
-                .unwrap()
-                .into_iter()
-                .map(|thread| thread.session_id)
-                .collect();
-            (owned, linked.id, other.id)
-        };
-        assert_eq!(owned.len(), 2);
-        let terms: Terminals = Arc::new(Mutex::new(HashMap::new()));
-        let mut fixtures = Vec::new();
-        for (id, session) in [
-            ("owned-desktop", Some(owned[0].clone())),
-            ("owned-scheduled", Some(owned[1].clone())),
-            ("ordinary-shell", None),
-            ("linked-task", Some(linked.clone())),
-            ("other-task", Some(other.clone())),
-        ] {
-            let mut fixture = shell("trap '' HUP; printf ready; while read line; do :; done");
-            let mut terminal = fixture.terms.lock().unwrap().remove(&fixture.id).unwrap();
-            terminal.harness_session = session;
-            terms.lock().unwrap().insert(id.to_owned(), terminal);
-            fixture.terms = terms.clone();
-            fixture.id = id.to_owned();
-            fixtures.push(fixture);
-        }
-
-        struct DropProbe {
-            writer: Box<dyn Write + Send>,
-            terms: std::sync::Weak<Mutex<HashMap<String, Terminal>>>,
-            report: mpsc::Sender<bool>,
-        }
-        impl Write for DropProbe {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.writer.write(bytes)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.writer.flush()
-            }
-        }
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                let unlocked = self
-                    .terms
-                    .upgrade()
-                    .is_some_and(|terms| terms.try_lock().is_ok());
-                let _ = self.report.send(unlocked);
-            }
-        }
-        let (drop_tx, drop_rx) = mpsc::channel();
-        {
-            let registry = terms.lock().unwrap();
-            let mut writer = registry["owned-desktop"].writer.lock().unwrap();
-            let inner = std::mem::replace(&mut *writer, Box::new(std::io::sink()));
-            *writer = Box::new(DropProbe {
-                writer: inner,
-                terms: Arc::downgrade(&terms),
-                report: drop_tx,
-            });
-        }
-        assert_eq!(close_harness_sessions(&terms, &owned).unwrap(), 2);
-        assert!(
-            drop_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
-            "terminal destruction must not hold the registry lock"
-        );
-        for fixture in &fixtures[..2] {
-            assert!(write(&terms, &fixture.id, "more input\n").is_err());
-            fixture
-                .exited
-                .recv_timeout(Duration::from_secs(3))
-                .expect("owned harness survived Pause");
-        }
-        assert!(!harness_running(&terms, &owned[0]).unwrap());
-        assert!(!harness_running(&terms, &owned[1]).unwrap());
-        for fixture in &fixtures[2..] {
-            assert!(terms.lock().unwrap().contains_key(&fixture.id));
-            assert!(write(&terms, &fixture.id, "still available\n").is_ok());
-            assert!(matches!(
-                fixture.exited.try_recv(),
-                Err(mpsc::TryRecvError::Empty)
-            ));
-        }
-        assert!(harness_running(&terms, &linked).unwrap());
-        assert!(harness_running(&terms, &other).unwrap());
-        assert_eq!(
-            close_harness_sessions(&terms, &owned).unwrap(),
-            0,
-            "repeated stop is idempotent"
-        );
-        for fixture in &fixtures[2..] {
-            close(&terms, &fixture.id).unwrap();
-            fixture.exited.recv_timeout(Duration::from_secs(3)).unwrap();
-        }
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

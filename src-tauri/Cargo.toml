@@ -22,7 +22,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "=0.9.12", default-features = false, features = ["parse", "serde"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 portable-pty = "0.9"
@@ -40,12 +40,14 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
 des = "0.8"
 shell-words = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-tauri-plugin-updater = ">=2, <2.10"
+zip = { version = "=9.0.4", default-features = false, features = ["deflate"] }
+# Disable the updater\u0027s optional legacy Windows ZIP extraction (zip ^4); keep TLS transport.
+# Signed direct-update paths remain available. Revalidate .nsis.zip/.msi.zip if shipping Windows bundles.
+tauri-plugin-updater = { version = ">=2, <2.10", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-process = ">=2, <2.4"
 if-addrs = "=0.15.0"
 # Panda Router (src/panda_router): deterministic matcher; the ONNX profiler is target-gated below.

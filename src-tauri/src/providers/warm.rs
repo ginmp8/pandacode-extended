@@ -55,6 +55,7 @@ fn key_with(config: &RunConfig, tools: &[Value], connection: &str) -> String {
         "environment": crate::provider_settings::environment_fingerprint(&config.provider),
         // So do the telemetry opt-outs (`privacy.rs`).
         "telemetryOff": super::privacy::telemetry_off(),
+        "externalMcpServers": crate::feature_controls::get().external_mcp_servers,
     })
     .to_string()
 }
@@ -146,6 +147,12 @@ async fn start(mut config: RunConfig, tools: Vec<Value>, approval_tools: HashSet
         command.args(["--mcp-config", &server.claude_config().to_string()]);
         Some(server)
     };
+    if !crate::feature_controls::get().external_mcp_servers {
+        command.arg("--strict-mcp-config");
+        if server.is_none() {
+            command.args(["--mcp-config", r#"{"mcpServers":{}}"#]);
+        }
+    }
     command
         .current_dir(&config.cwd)
         .stdin(Stdio::piped())

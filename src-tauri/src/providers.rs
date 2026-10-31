@@ -2807,6 +2807,11 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
         "codex" => {
             // Process-local override: never alter the user's Codex config.
             command.args(["app-server", "--enable", "goals"]);
+            // The launcher overrides only this process, not the user's Codex files.
+            // PandaCode's authenticated per-run MCP server can still be injected.
+            if !crate::feature_controls::get().external_mcp_servers {
+                command.args(["-c", "mcp_servers={}"]);
+            }
         }
         "pi" | "omp" => pi::configure(command, config),
         "zcode" => zcode::configure(command),
@@ -3107,8 +3112,14 @@ async fn run_process_with_tools(
         (spare.child, spare.group)
     } else {
         if matches!(config.provider.as_str(), "claude" | "glm" | "mimo") {
+            let external = crate::feature_controls::get().external_mcp_servers;
+            if !external {
+                command.arg("--strict-mcp-config");
+            }
             if let Some(server) = &mcp {
                 command.args(["--mcp-config", &server.claude_config().to_string()]);
+            } else if !external {
+                command.args(["--mcp-config", r#"{"mcpServers":{}}"#]);
             }
         }
         command

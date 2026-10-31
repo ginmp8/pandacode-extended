@@ -299,6 +299,7 @@ pub(crate) fn decide_pairing(store: &Store, channel_id: &str, sender_id: &str, d
 
 /// Entry point for every chat channel: pairing first, then the gateway.
 pub(crate) async fn handle_inbound(app: &tauri::AppHandle, channel_id: &str, sender_id: &str, sender_name: &str, thread: &str, text: &str) {
+    if crate::feature_controls::get().bots_paused { return; }
     let state = app.state::<AppState>();
     let decision = {
         let Ok(store) = state.store.lock() else { return };
@@ -328,6 +329,9 @@ pub(crate) async fn handle_inbound(app: &tauri::AppHandle, channel_id: &str, sen
 }
 
 pub(crate) async fn send(app: &tauri::AppHandle, channel_id: &str, thread: &str, text: &str) -> Result<()> {
+    if crate::feature_controls::get().bots_paused {
+        return Err("External bot channels are paused in Settings > Feature controls.".into());
+    }
     let channel = get(&*app.state::<AppState>().store.lock().map_err(|e| e.to_string())?, channel_id)?;
     for part in chunks(text, limit(&channel.kind)) {
         match channel.kind.as_str() {
@@ -378,6 +382,10 @@ pub(crate) fn start(app: &tauri::AppHandle, channel: Channel) {
         update_status(app, &channel.id, "Off");
         return;
     }
+    if crate::feature_controls::get().bots_paused {
+        update_status(app, &channel.id, "Paused globally");
+        return;
+    }
     if channel.kind == "web" || channel.kind == "whatsapp" {
         http::ensure_server(app.clone());
         update_status(app, &channel.id, if channel.kind == "web" { "Ready on this computer" } else { "Waiting for webhook calls" });
@@ -425,6 +433,18 @@ pub(crate) fn start(app: &tauri::AppHandle, channel: Channel) {
 pub(crate) fn stop(channel_id: &str) {
     if let Some(tx) = running().lock().ok().and_then(|mut map| map.remove(channel_id)) {
         let _ = tx.send(true);
+    }
+}
+
+/// Close outbound bot connections; webhooks are additionally refused by the gateway.
+pub(crate) fn stop_all(app: &tauri::AppHandle) {
+    let ids: Vec<String> = app.state::<AppState>().store.lock().ok()
+        .and_then(|store| super::list(&store).ok().map(|bots| {
+            bots.iter().flat_map(|bot| list(&store, &bot.id).unwrap_or_default()).map(|channel| channel.id).collect()
+        })).unwrap_or_default();
+    for id in ids {
+        stop(&id);
+        update_status(app, &id, "Paused globally");
     }
 }
 

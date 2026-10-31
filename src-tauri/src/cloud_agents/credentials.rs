@@ -16,6 +16,9 @@ pub(crate) fn push(
     native: &str,
     harness: &str,
 ) -> Result<Vec<(String, String)>> {
+    if !crate::feature_controls::get().cloud_credential_transfer {
+        return Err("Cloud credential transfer is disabled. Enable it in Settings > Feature controls before starting a cloud agent.".into());
+    }
     if !["claude", "glm", "mimo", "codex", "opencode"].contains(&harness) {
         return Err(format!("Unsupported cloud agent harness '{harness}'."));
     }

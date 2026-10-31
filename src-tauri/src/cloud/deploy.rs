@@ -370,6 +370,9 @@ fn checkout(app: &tauri::AppHandle, session_id: &str) -> Option<PathBuf> {
 
 /// Offer the tool only when at least one deploy account is connected; every call asks.
 pub fn with_deploy(base: Option<ToolHost>, app: tauri::AppHandle, session_id: String, stopped: Arc<AtomicBool>) -> Option<ToolHost> {
+    if !crate::feature_controls::get().agent_cloud_management {
+        return base;
+    }
     let settings = super::settings();
     let any = super::secret("vercel_token").is_some() || super::secret("cloudflare_token").is_some() || super::secret("railway_token").is_some() || super::secret("netlify_token").is_some() || settings.aws_region.is_some() || settings.gcloud_project.is_some();
     if !any {
@@ -394,6 +397,9 @@ pub fn with_deploy(base: Option<ToolHost>, app: tauri::AppHandle, session_id: St
                         Some(base) => (base.handler)(name, args).await,
                         None => Err("Unknown PandaCode tool.".into()),
                     };
+                }
+                if !crate::feature_controls::get().agent_cloud_management {
+                    return Err("Agent cloud management is disabled in Settings > Feature controls.".into());
                 }
                 validate_spec(&catalog(), &name, &args)?;
                 crate::blocking(move || run(&checkout(&app, &session_id).ok_or("This task's folder is unknown.")?, &args)).await

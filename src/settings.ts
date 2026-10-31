@@ -17,6 +17,7 @@ import { mountSkillsLibrary, type SkillsLibraryHost } from './skills-library';
 import { call, subscribe } from './bridge';
 import { mount as mountCapabilities } from './capabilities-panel';
 import { mountRemoteSettings } from './remote-settings';
+import { mountFeatureControls } from './feature-controls';
 import { mountSchedulesSettings } from './schedules-settings';
 import type { RemoteHost } from './remote-types';
 import type { AgentsDockPreferences } from './agents-dock';
@@ -24,7 +25,7 @@ import type { AgentsDockPreferences } from './agents-dock';
 /** Panels that live elsewhere and are embedded here: each mounts into a host and returns its cleanup. */
 type Embed = (host: HTMLElement) => Promise<() => void>;
 
-export type SettingsSection = 'general' | 'appearance' | 'agents' | 'providers' | 'teams' | 'schedules' | 'tools' | 'skills' | 'cloud' | 'remote' | 'github' | 'about';
+export type SettingsSection = 'general' | 'appearance' | 'agents' | 'providers' | 'teams' | 'schedules' | 'tools' | 'features' | 'skills' | 'cloud' | 'remote' | 'github' | 'about';
 
 interface SettingsOptions {
   providers: Provider[];
@@ -68,6 +69,7 @@ export const SECTIONS: { id: SettingsSection; label: string; icon: string; descr
   { id: 'teams', label: 'Agent teams', icon: 'grid', description: 'Named teams of models, and the classic team setup.' },
   { id: 'schedules', label: 'Schedules', icon: 'clock', description: 'Wake-ups and timed messages from you and your agents.' },
   { id: 'tools', label: 'Tools & add-ons', icon: 'terminal', description: 'App tools, MCP servers, skills and Jev.' },
+  { id: 'features', label: 'Feature controls', icon: 'sliders', description: 'Choose which background, cloud and remote capabilities PandaCode may use.' },
   { id: 'skills', label: 'Skills & rules', icon: 'widget', description: 'Import skills and rules once, turn them on per harness, and check for drift.' },
   { id: 'cloud', label: 'Cloud sandboxes', icon: 'server', description: 'Daytona, Cloudflare and AWS machines for your agents.' },
   { id: 'remote', label: 'Remote access', icon: 'globe', description: 'Reach your other computers with PandaCode Connect, end-to-end encrypted.' },
@@ -162,6 +164,7 @@ function sectionHtml(id: SettingsSection, options: SettingsOptions): string {
       </div>
       <div id="capabilities-settings"></div>`;
     case 'schedules': return '<div id="schedules-settings"></div>';
+    case 'features': return '<div id="feature-controls-settings"></div>';
     case 'skills': return '<div id="skills-library"></div>';
     case 'cloud': return '<div id="cloud-settings"></div>';
     case 'remote': return '<div id="remote-settings"></div>';
@@ -277,6 +280,7 @@ export function mountSettings(host: HTMLElement, options: SettingsOptions): Sett
     if (id === 'teams' && options.teams) cleanups.push(mountAgentTeams(panel.querySelector<HTMLElement>('#agent-teams-settings')!, { ...options.teams, providers: options.providers }));
     if (id === 'schedules') cleanups.push(mountSchedulesSettings(panel.querySelector<HTMLElement>('#schedules-settings')!, options.schedules ?? { openThread: () => {} }));
     if (id === 'tools') cleanups.push(mountCapabilities(panel.querySelector<HTMLElement>('#capabilities-settings')!, call));
+    if (id === 'features') cleanups.push(mountFeatureControls(panel.querySelector<HTMLElement>('#feature-controls-settings')!));
     if (id === 'skills' && options.skills) cleanups.push(mountSkillsLibrary(panel.querySelector<HTMLElement>('#skills-library')!, options.skills));
     if (id === 'cloud' && options.cloud) cleanups.push(mountCloudSettings(panel.querySelector<HTMLElement>('#cloud-settings')!, options.cloud));
     if (id === 'about') {

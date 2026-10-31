@@ -1055,6 +1055,18 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     channels::start_all(app.clone());
 }
 
+/// Stop current bot work and close channel loops without modifying each bot's pause status.
+pub(crate) async fn pause_all(app: &tauri::AppHandle) {
+    channels::stop_all(app);
+    let ids: Vec<String> = app.state::<AppState>().store.lock().ok()
+        .and_then(|store| list(&store).ok())
+        .unwrap_or_default()
+        .into_iter().map(|bot| bot.id).collect();
+    for id in ids {
+        gateway::stop_bot(app, &id).await;
+    }
+}
+
 /// Called when any task's run ends; replies for bot conversations go back to their channel.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) {
     let app = app.clone();

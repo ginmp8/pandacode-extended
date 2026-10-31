@@ -130,7 +130,7 @@ const state = {
   queues: new Map<string, QueuedMessage[]>(), queueHolds: new Map<string, HoldReason>(), queueEditing: '', queueBusy: new Set<string>(),
   git: null as GitStatus | null, jj: null as JjStatus | null, files: [] as FileEntry[], openFolders: new Set<string>(), folderFiles: new Map<string, FileEntry[]>(), gitError: '', filesError: '', inspectorLoading: false,
   selectedFile: '', selectedContent: '', selectedKind: '' as '' | 'diff', selectedStaged: false, filePreviewLoading: false,
-  browserUrl: '',
+  browserUrl: '', filePath: '',
   attachments: [] as string[], drafts: new Map<string, string>(), defaultProvider: (localStorage.getItem('pandacode.defaultProvider') ?? localStorage.getItem('pandacode.provider') ?? 'claude') as ProviderId,
   browserAttachments: new Map<string, BrowserAttachment[]>(),
   moodboardAttachments: new Map<string, { id: string; projectId: string; name: string }[]>(),
@@ -140,8 +140,6 @@ const state = {
 };
 let renderFrame = 0;
 let navigationFrame = 0;
-let settledDock: HTMLElement | null = null;
-const settledResize = new ResizeObserver(() => { if (settledDock) $('#navigation').style.setProperty('--settled-height', `${settledDock.offsetHeight}px`); });
 type FinishingStream = { stream: Stream; finishedAt: number; error?: string };
 const finishingStreams = new Map<string, FinishingStream>();
 // Ignore late snapshots/events for IDs removed during this window's lifetime.
@@ -186,7 +184,7 @@ let browserLifecycle = Promise.resolve();
 let browserOwner = '', browserRevision = 0, inspectorSuppressed = false;
 /** Last explicit inspector preference for tasks without saved panel state (session-only). */
 let inspectorChosen = true;
-type ThreadPanel = { workspace: string; open: boolean; tab: typeof state.inspectorTab; folder: string; file: string; kind: typeof state.selectedKind; staged: boolean; context?: FileLinkContext; browserUrl: string };
+type ThreadPanel = { workspace: string; open: boolean; tab: typeof state.inspectorTab; folder: string; folders?: string[]; file: string; kind: typeof state.selectedKind; staged: boolean; context?: FileLinkContext; browserUrl: string };
 const threadPanels = new Map<string, ThreadPanel>();
 const teams = new Map<string, TeamSnapshot | null>();
 let architectView: ArchitectView | undefined;
@@ -912,7 +910,7 @@ configureFileLinks({
 });
 function saveThreadPanel(): void {
   if (!state.sessionId || deletedSessions.has(state.sessionId)) return;
-  threadPanels.set(state.sessionId, { workspace: workspaceKey(), open: state.inspector, tab: state.inspectorTab, folders: [...state.openFolders], file: state.selectedFile, kind: state.selectedKind, staged: state.selectedStaged, context: selectedFileContext && { ...selectedFileContext }, browserUrl: state.browserUrl });
+  threadPanels.set(state.sessionId, { workspace: workspaceKey(), open: state.inspector, tab: state.inspectorTab, folder: state.filePath, folders: [...state.openFolders], file: state.selectedFile, kind: state.selectedKind, staged: state.selectedStaged, context: selectedFileContext && { ...selectedFileContext }, browserUrl: state.browserUrl });
 }
 function restoreThreadPanel(task?: Session): void {
   clearWorkspaceInspector(false);
@@ -920,12 +918,13 @@ function restoreThreadPanel(task?: Session): void {
   const sameWorkspace = saved?.workspace === workspaceKey();
   // Without saved state the conversation opens the panel on the selected tab, unless the user closed it or it would cover the chat.
   state.inspector = saved?.open ?? (state.view === 'conversation' && inspectorChosen && !matchMedia('(max-width: 920px)').matches);
-  state.inspectorTab = saved?.tab && inspectorTabs.open.includes(saved.tab) ? saved.tab : threadDefault(inspectorTabs); state.filePath = sameWorkspace ? saved?.folder ?? '' : '';
+  state.inspectorTab = saved?.tab && inspectorTabs.open.includes(saved.tab) ? saved.tab : threadDefault(inspectorTabs);
+  state.filePath = sameWorkspace ? saved?.folder ?? '' : '';
+  state.openFolders = new Set(sameWorkspace ? saved?.folders ?? [] : []);
   state.selectedFile = sameWorkspace ? saved?.file ?? '' : ''; state.selectedKind = sameWorkspace ? saved?.kind ?? '' : ''; state.selectedStaged = saved?.staged ?? false;
   state.browserUrl = sameWorkspace ? saved?.browserUrl ?? '' : ''; selectedFileContext = sameWorkspace && saved?.context ? { ...saved.context } : undefined;
   fileTabs.show(state.sessionId, workspaceKey());
   state.filePreviewLoading = Boolean(state.selectedKind);
-  fileTabs.show(state.sessionId, workspaceKey());
 }
 async function restoreSelectedFile(): Promise<void> {
   if (!state.selectedKind || !state.selectedFile) return;
@@ -1023,7 +1022,7 @@ function finishLiveMessage(current: Stream, sessionId: string): void {
   current.tools.push({ key: current.retainedMessageKey, content: current.text.length > 16384 ? current.text.slice(0, 16384) + '\n[Activity preview truncated]' : current.text, commentary: true });
   trimLiveActivity(current, sessionId); current.revision++;
 }
- function shortProvider(id: ProviderId): string { return ({ claude: 'Claude', codex: 'Codex', kimi: 'Kimi', opencode: 'OpenCode', glm: 'GLM', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo Code', omp: 'omp', 'github-copilot': 'GitHub Copilot CLI', muse: 'Muse Code', devin: 'Devin' })[id]; }
+ function shortProvider(id: ProviderId): string { return ({ claude: 'Claude', codex: 'Codex', kimi: 'Kimi', opencode: 'OpenCode', glm: 'GLM', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo Code', omp: 'omp', 'github-copilot': 'GitHub Copilot CLI', muse: 'Muse Code', devin: 'Devin', hermes: 'Hermes Agent', zcode: 'ZCode' })[id]; }
 function selectedModel(s: Session): ProviderModel { return provider(s.provider)?.models.find(model => model.id === (s.model || 'default')) ?? fallbackModel(s.provider, s.model); }
 function modelLabel(s?: Session, withEffort = true): string {
   if (!s) return 'Default model';
@@ -2526,7 +2525,7 @@ async function saveBoardTaskForm(form: HTMLFormElement, data: FormData): Promise
 async function archiveTask(s: Session, offerCleanup: boolean): Promise<void> {
   const generation = state.generation, archived = !s.archived;
   if (archived && offerCleanup && s.worktreePath && !isRunning(s.id)) {
-    const decision = await worktrees.cleanupOffer(s, 'archive');
+    const decision = await worktrees.cleanupOffer(s, 'remove');
     if (!decision.proceed) return;
     if (decision.remove) await worktrees.remove(s);
   }
@@ -2874,13 +2873,6 @@ async function forkAtMessage(sessionId: string, messageId: number, edit?: { draf
       : stillSelected ? 'Conversation forked. Both tasks use the same checkout.' : 'Conversation forked. Your new task is in the task list.');
   } finally { pendingMessageForks.delete(key); }
 }
-async function editAtMessage(sessionId: string, messageId: number): Promise<void> {
-  if (isRunning(sessionId)) throw new Error('Stop the agent before editing a message.');
-  const content = await call<string>('get_message_content', { sessionId, messageId });
-  // Attached context (files, images) is not re-attached; only what you typed returns.
-  await forkAtMessage(sessionId, messageId, contextBlocks(content).typed);
-}
-
 /* Each thread's last page. Switching back draws it in the same frame as the click; the
  * saved history then refreshes behind it and redraws only if something changed. Bounded by
  * size too: a thread scrolled far back keeps only its newest messages (older ones reload on
@@ -4624,7 +4616,7 @@ async function forgetChat(projectId: string, strict = false): Promise<boolean> {
     return false;
   }
 }
-type ChoiceOptions = Omit<Parameters<typeof import('./choice-menu').openChoiceMenu>[0], 'anchor' | 'onClose'>;
+type ChoiceOptions = Omit<Parameters<typeof import('./choice-menu').openChoiceMenu>[0], 'anchor' | 'onClose'> & { afterClose?: () => void };
 async function showChoices(anchor: HTMLElement, options: ChoiceOptions, guardGeneration = true): Promise<void> {
   if (pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
   if (choiceMenuCleanup && choiceMenuAnchor === anchor) { closeChoiceMenu(); return; }
@@ -5209,6 +5201,12 @@ let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
 let botReloadGeneration = 0;
 let taskBots = new Map<string, string>();
+const botSwitches = new Map<string, BotActivity[]>();
+const botMessages = new Map<string, botThread.BotMessageMarker[]>();
+const botFailovers = new Map<string, FailoverAsk>();
+const botFailoverErrors = new Map<string, string>();
+const botThreadMetaLoaded = new Set<string>();
+const botThreadMetaRequests = new Map<string, number>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
   const generation = ++botReloadGeneration;

@@ -3880,6 +3880,7 @@ pub fn run() {
                 remote::remote_sign_in_cancel,
                 remote::remote_sign_out,
                 remote::remote_set_host_enabled,
+                remote::remote_set_connection_enabled,
                 remote::remote_set_notify_enabled,
                 remote::remote_devices,
                 remote::remote_revoke_device,

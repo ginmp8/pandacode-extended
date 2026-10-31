@@ -663,7 +663,7 @@ async fn listen(app: &tauri::AppHandle, generation: u64) {
     let want = {
         let state = remote(app);
         let inner = state.lock();
-        inner.token.is_some() && inner.settings.host_enabled
+        inner.token.is_some() && inner.settings.connection_enabled && inner.settings.host_enabled
     };
     let (addrs, wanted) = {
         let routes = routes();
@@ -896,6 +896,9 @@ pub async fn remote_reconnect(app: tauri::AppHandle) -> Result<()> {
         let mut inner = state.lock();
         if inner.token.is_none() {
             return Err(SIGNED_OUT.into());
+        }
+        if !inner.settings.connection_enabled {
+            return Err("Enable PandaCode Connect in Settings first.".into());
         }
         inner.connected = false;
     }

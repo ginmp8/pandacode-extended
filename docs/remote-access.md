@@ -1,10 +1,10 @@
 # Remote access (PandaCode Connect)
 
-Opt-in. Off by default. Signing in lets a task *run on another computer*: one of the user's
+Opt-in. Off by default. Turn on **Settings → Remote access → Enable PandaCode Connect**, then sign in to let a task *run on another computer*: one of the user's
 computers signed in to the same GitHub account, with **Allow remote control of this computer**
 turned on. The task stays an ordinary task in the local sidebar and conversation pane, with the
 same streaming, composer, approvals and model picker as a local one; there is no separate remote
-view. Nothing is sent anywhere until the user signs in. A computer can also be an always-on
+view. The desktop does not open relay or direct connections until Connect is explicitly enabled and the user is signed in. A computer can also be an always-on
 server with no screen or desktop app: `pandacode serve` ([headless](headless.md)).
 
 ## Pieces
@@ -97,8 +97,9 @@ device, later expiry) in the secrets file and in memory. A failure is left for t
 `401` follows the sign-out rule above.
 
 **Startup.** Only a computer with an account in `remote.json` reads the secrets file. A
-missing (or expired) token means signed out. Nothing prompts and nothing touches the network
-unless signed in.
+missing (or expired) token means signed out. The persisted `connectionEnabled` switch is
+false by default, including existing profiles that have not opted in since upgrading. No
+relay or direct connections start unless the switch is on and sign-in is valid.
 
 Build config is `option_env!("PANDACODE_RELAY_URL")` and `option_env!("PANDACODE_GITHUB_CLIENT_ID")`.
 Environment variables of the same names override them at run time. If either is missing, remote

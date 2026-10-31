@@ -19,9 +19,9 @@ export const CHECK_EVERY = 6 * 60 * 60 * 1000;
 /** A downloaded update installs after this long without input, when no agent is working. */
 export const IDLE_BEFORE_RESTART = 2 * 60 * 1000;
 
-/** The saved preference; the old boolean saved 'on'/'off', and unset meant automatic. */
+/** Unset/unknown preferences default to Off; an explicitly saved legacy 'on' still means Automatic. */
 export function parseUpdateMode(saved: string | null): UpdateMode {
-  return saved === 'off' || saved === 'notify' ? saved : 'automatic';
+  return saved === 'automatic' || saved === 'on' ? 'automatic' : saved === 'notify' ? 'notify' : 'off';
 }
 
 /** Whether a found update downloads by itself. A copy that can't install in place (a

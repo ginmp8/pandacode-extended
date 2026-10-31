@@ -101,6 +101,7 @@ async function sendToStudio(page: Page, text: string) {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Remote access' }).click();
   const panel = page.getByRole('tabpanel', { name: 'Remote access' });
+  await panel.getByRole('checkbox', { name: 'Enable PandaCode Connect' }).check();
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.getByRole('button', { name: /^back/i }).click();

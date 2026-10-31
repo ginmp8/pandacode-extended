@@ -1,6 +1,6 @@
 //! PandaCode Connect (docs/remote-access.md): sign-in, one end-to-end encrypted relay
 //! socket, host RPC for this computer's tasks, and mirrors: local tasks that run on
-//! another of the user's computers. Nothing touches the network until the user signs in.
+//! another of the user's computers. The desktop connects only after explicit opt-in.
 mod auth;
 mod bench;
 pub(crate) mod catalog;
@@ -135,6 +135,9 @@ impl Inner {
 
     /// Calls and task content go only to a device in the latest account presence list.
     fn callable(&self, device_id: &str) -> Result<()> {
+        if !self.settings.connection_enabled {
+            return Err("PandaCode Connect is disabled. Enable it in Settings.".into());
+        }
         self.devices.iter().find(|d| d.id == device_id).ok_or(UNKNOWN_DEVICE)?;
         Ok(())
     }
@@ -225,6 +228,7 @@ impl Remote {
             "configured": config::build().is_some(),
             "signedIn": inner.token.is_some(),
             "device": {"id": inner.settings.device_id, "name": config::device_name(), "fingerprint": fingerprint},
+            "connectionEnabled": inner.settings.connection_enabled,
             "hostEnabled": inner.settings.host_enabled,
             "notifyEnabled": inner.settings.notify_enabled,
             "remoteFullAccess": inner.settings.remote_full_access,
@@ -262,9 +266,10 @@ pub(crate) fn setup(app: &tauri::AppHandle, dir: &std::path::Path) {
     let now = chrono::Utc::now().timestamp();
     let token = if settings.account.is_some() { secrets::read(dir).token.filter(|token| config::token_valid(token, now)) } else { None };
     let signed_in = token.is_some();
+    let connection_enabled = settings.connection_enabled;
     orchestrate::remember_enabled(settings.orchestration);
     app.manage(Remote { dir: dir.to_owned(), inner: Mutex::new(Inner { settings, token, ..Default::default() }), key: Mutex::new(None), saving: Mutex::new(()) });
-    if signed_in && config::build().is_some() {
+    if signed_in && connection_enabled && config::build().is_some() {
         socket::start(app);
     }
 }
@@ -339,6 +344,9 @@ fn cancel_sign_in(app: &tauri::AppHandle) {
 
 #[tauri::command]
 pub async fn remote_sign_in_start(app: tauri::AppHandle) -> Result<Value> {
+    if !remote(&app).lock().settings.connection_enabled {
+        return Err("Enable PandaCode Connect in Settings first.".into());
+    }
     let build = config::build().ok_or("Remote access is not configured in this build.")?;
     cancel_sign_in(&app);
     let (flow, view) = auth::start(&build).await?;
@@ -354,6 +362,9 @@ pub async fn remote_sign_in_cancel(app: tauri::AppHandle) -> Value {
 
 #[tauri::command]
 pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
+    if !remote(&app).lock().settings.connection_enabled {
+        return Err("Enable PandaCode Connect in Settings first.".into());
+    }
     let build = config::build().ok_or("Remote access is not configured in this build.")?;
     let state = remote(&app);
     let (flow, cancelled) = {
@@ -381,6 +392,9 @@ pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
     };
     if config::parse_token(&token).is_none_or(|claims| claims.dev != state.device_id()) {
         return Err("The relay returned an unexpected sign-in token.".into());
+    }
+    if !state.lock().settings.connection_enabled {
+        return Err("PandaCode Connect was disabled during sign-in.".into());
     }
     secrets::set_token(&state.dir, &token)?;
     {
@@ -435,6 +449,42 @@ pub async fn remote_set_host_enabled(app: tauri::AppHandle, enabled: Option<bool
     Ok(state.status())
 }
 
+/// Enables or pauses desktop Connect networking, independently of hosting permissions.
+#[tauri::command]
+pub async fn remote_set_connection_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
+    let state = remote(&app);
+    let changed = {
+        // Use the same lock order as save() so concurrent settings writes remain ordered.
+        let _turn = state.saving.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = state.lock();
+        if inner.settings.connection_enabled == enabled {
+            false
+        } else {
+            let mut settings = inner.settings.clone();
+            settings.connection_enabled = enabled;
+            config::save(&state.dir, &settings)?;
+            inner.settings = settings;
+            if !enabled {
+                inner.generation += 1;
+                inner.outbox = None;
+                inner.connected = false;
+                inner.presence = false;
+                inner.fail_pending(None, "PandaCode Connect is disabled.");
+                inner.devices.clear();
+                inner.subscribers.clear();
+                inner.uploads = Default::default();
+                inner.flow = None;
+                inner.cancel = None;
+            }
+            true
+        }
+    };
+    if changed {
+        if enabled { socket::start(&app); } else { emit_presence(&app); }
+        emit_status(&app);
+    }
+    Ok(state.status())
+}
 #[tauri::command]
 pub async fn remote_set_notify_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
     let state = remote(&app);
@@ -446,6 +496,7 @@ pub async fn remote_set_notify_enabled(app: tauri::AppHandle, enabled: bool) -> 
 
 #[tauri::command]
 pub async fn remote_devices(app: tauri::AppHandle) -> Result<Vec<Value>> {
+    if !remote(&app).lock().settings.connection_enabled { return Ok(Vec::new()); }
     // Presence carries the list; the relay is asked only before the first presence frame.
     if !remote(&app).lock().presence {
         socket::refresh_devices(&app).await?;
@@ -496,6 +547,7 @@ pub async fn remote_targets(app: tauri::AppHandle) -> Vec<Value> {
 }
 
 fn targets(inner: &Inner) -> Vec<Value> {
+    if !inner.settings.connection_enabled { return Vec::new(); }
     inner
         .devices
         .iter()
@@ -551,6 +603,7 @@ async fn headless_register(build: &config::Build, github_token: &str, dir: &Path
     }
     secrets::set_token(dir, &token)?;
     settings.host_enabled = true;
+    settings.connection_enabled = true;
     settings.account = Some(account);
     config::save(dir, &settings)?;
     Ok(settings)
@@ -588,6 +641,11 @@ pub(crate) fn configured() -> bool {
     config::build().is_some()
 }
 
+/// Whether the saved settings allow Connect networking.
+pub(crate) fn connection_enabled(dir: &Path) -> bool {
+    config::load(dir).connection_enabled
+}
+
 /// Whether the saved settings turn hosting on.
 pub(crate) fn host_enabled(dir: &Path) -> bool {
     config::load(dir).host_enabled
@@ -596,6 +654,7 @@ pub(crate) fn host_enabled(dir: &Path) -> bool {
 /// Persists "Allow remote control" (headless settings command).
 pub(crate) fn headless_set_host_enabled(dir: &Path, enabled: bool) -> Result<()> {
     let mut settings = config::load(dir);
+    settings.connection_enabled = enabled;
     settings.host_enabled = enabled;
     config::save(dir, &settings)
 }
@@ -658,7 +717,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = config::load(&dir).device_id;
         let settings = crate::cloud::http::block(async { headless_register(&build, "gh-token", &dir, Some("Build server".into())).await }).unwrap();
-        assert!(settings.host_enabled && !settings.remote_full_access);
+        assert!(settings.connection_enabled && settings.host_enabled && !settings.remote_full_access);
         assert_eq!(settings.account.as_ref().unwrap().login, "octocat");
         assert_ne!(settings.device_id, first, "a 409 made this a new device");
         assert_eq!(secrets::read(&dir).token.as_deref(), Some(relay_token(&settings.device_id).as_str()));

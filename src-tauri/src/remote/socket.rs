@@ -95,7 +95,7 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     let generation = {
         let state = remote(app);
         let mut inner = state.lock();
-        if inner.token.is_none() {
+        if inner.token.is_none() || !inner.settings.connection_enabled {
             return;
         }
         inner.generation += 1;
@@ -107,7 +107,9 @@ pub(crate) fn start(app: &tauri::AppHandle) {
 }
 
 pub(super) fn current(app: &tauri::AppHandle, generation: u64) -> bool {
-    remote(app).lock().generation == generation
+    let state = remote(app);
+    let inner = state.lock();
+    inner.generation == generation && inner.settings.connection_enabled
 }
 
 /// The relay is gone: its calls fail, except those to a device with a direct link up, which
@@ -805,6 +807,9 @@ fn parse_devices(list: &[Value]) -> Vec<Device> {
 
 /// Fetches the account's devices; used only before the socket's first presence frame.
 pub(crate) async fn refresh_devices(app: &tauri::AppHandle) -> Result<()> {
+    if !remote(app).lock().settings.connection_enabled {
+        return Err("PandaCode Connect is disabled.".into());
+    }
     let build = config::build().ok_or("Remote access is not configured in this build.")?;
     let token = remote(app).lock().token.clone().ok_or("Sign in to PandaCode Connect first.")?;
     let reply = match auth::relay(&build, &token, reqwest::Method::GET, "/v1/devices").await {
@@ -818,6 +823,8 @@ pub(crate) async fn refresh_devices(app: &tauri::AppHandle) -> Result<()> {
     {
         let state = remote(app);
         let mut inner = state.lock();
+        // An in-flight HTTP request may finish after Connect was disabled.
+        if !inner.settings.connection_enabled { return Ok(()); }
         // Presence that arrived meanwhile is newer.
         if !inner.presence {
             inner.subscribers.retain(|id, _| devices.iter().any(|d| &d.id == id));

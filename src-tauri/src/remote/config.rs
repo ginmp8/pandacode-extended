@@ -50,6 +50,9 @@ pub(crate) struct Account {
 pub(crate) struct Settings {
     #[serde(default)]
     pub device_id: String,
+    /// Explicit opt-in for the relay socket and direct peer connections (off by default).
+    #[serde(default)]
+    pub connection_enabled: bool,
     #[serde(default)]
     pub host_enabled: bool,
     /// Sends a generic push when a hosted task needs attention or finishes; the relay's bridge
@@ -279,14 +282,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandacode-remote-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = load(&dir);
-        assert!(!first.host_enabled && !first.remote_full_access);
+        assert!(!first.connection_enabled && !first.host_enabled && !first.remote_full_access);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(dir.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        save(&dir, &Settings { remote_full_access: true, ..first.clone() }).unwrap();
-        assert!(load(&dir).remote_full_access);
+        save(&dir, &Settings { connection_enabled: true, remote_full_access: true, ..first.clone() }).unwrap();
+        assert!(load(&dir).connection_enabled && load(&dir).remote_full_access);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp files left behind");
         assert!(first.account.is_none());
         assert_eq!(load(&dir).device_id, first.device_id);

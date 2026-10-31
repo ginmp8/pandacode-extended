@@ -11,13 +11,13 @@ test('a downloaded update restarts only when no agent works and the user stepped
   assert.equal(readyToRestart(true, now - 60 * 60_000, now), false);
 });
 
-test('the old boolean preference keeps its behavior', () => {
-  assert.equal(parseUpdateMode(null), 'automatic');
+test('updates default to Off while explicit and legacy opt-ins are retained', () => {
+  assert.equal(parseUpdateMode(null), 'off');
   assert.equal(parseUpdateMode('on'), 'automatic');
   assert.equal(parseUpdateMode('off'), 'off');
   assert.equal(parseUpdateMode('notify'), 'notify');
   assert.equal(parseUpdateMode('automatic'), 'automatic');
-  assert.equal(parseUpdateMode('junk'), 'automatic');
+  assert.equal(parseUpdateMode('junk'), 'off');
 });
 
 test('only Automatic on an installable copy downloads by itself', () => {

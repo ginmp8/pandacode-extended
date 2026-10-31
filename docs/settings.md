@@ -46,11 +46,13 @@ master **PandaCode Connect** switch.
   screenshots available, but removes agent-facing VM mutation and cloud deployment
   tools from newly started runs. Previously registered callbacks also check the flag
   at execution time. Manual VM/cloud panels are independent.
-- **Allow external MCP servers in Claude and Codex:** off starts those two harnesses
-  with an isolated MCP configuration, retaining the authenticated local PandaCode
-  tool server for the current run. Enabling restores their own configured MCP servers.
+- **Allow external MCP servers in Claude and Codex:** off requests an isolated
+  MCP configuration for newly launched Claude and Codex processes, while retaining
+  PandaCode's authenticated local tool bridge. **Codex effective isolation is
+  not yet verified**; see [KI-01](known-issues-extended-0.7.0.md#ext-070-ki-01--codex-mcp-isolation-may-not-be-enforced).
   Other harnesses maintain their native MCP configurations; this is **not** a
-  system-wide MCP kill switch. Running agent processes retain their launch-time policy.
+  system-wide MCP kill switch. Already-running agent processes retain their
+  launch-time policy until restarted ([KI-05](known-issues-extended-0.7.0.md#ext-070-ki-05--running-agents-retain-launch-time-mcp-configuration)).
 - **Pause all bots and external channels:** on stops running bot threads, closes
   supported messaging listeners and prevents new gateway messages and bot schedules.
   Due schedules are retained for the next unpaused scheduler tick. Individual bot

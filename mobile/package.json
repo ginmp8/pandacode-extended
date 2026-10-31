@@ -69,5 +69,12 @@
         ]
       }
     }
+  },
+  "overrides": {
+    "deepmerge": "4.1.1",
+    "glob": "14.0.3",
+    "minimatch": "11.0.3",
+    "node-forge": "1.4.2",
+    "zod": "4.6.7"
   }
 }

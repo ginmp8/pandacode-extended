@@ -109,6 +109,15 @@ const CLOCK = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="current
 const ROLE_TAG = 16;
 const SKELETON_ROWS = 3;
 
+export function botStatus(signals: BotSignals): BotStatus | undefined {
+  if (signals.waiting) return { kind: 'waiting', reason: signals.waiting };
+  if (signals.failed) return { kind: 'failed' };
+  if (signals.limited) return { kind: 'limited', until: signals.limited.until };
+  if (signals.working) return { kind: 'working' };
+  if (signals.unread > 0) return { kind: 'unread', count: signals.unread };
+  return signals.responded ? { kind: 'responded' } : undefined;
+}
+
 function statusLabel(status: BotStatus): string {
   switch (status.kind) {
     case 'waiting': return status.reason === 'question' ? 'Needs your answer' : 'Needs approval';

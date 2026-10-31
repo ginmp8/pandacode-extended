@@ -1,6 +1,7 @@
 import type { Mode, ProviderId } from './types';
 
 export interface ApprovalMode { id: Mode; label: string; description: string; icon: string; disabled?: boolean; }
+const CLAUDE_FAMILY: ProviderId[] = ['claude', 'glm', 'mimo'];
 
 /** Labels describe the native policy for each harness, not a simulated approval layer. */
 export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMode[] {

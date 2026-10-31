@@ -1,5 +1,6 @@
 import { escape, icon } from './dom';
 import type { RemoteRepoCheck, RemoteTarget } from './remote-types';
+import type { CloudTarget } from './cloud-agents';
 import type { Session } from './types';
 // Start progress for a New task sent to another computer; importing it here loads its strip actions.
 export { cancelledRemoteStart, clearRemoteStart, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-progress';
@@ -43,6 +44,7 @@ export function computerItems(targets: RemoteTarget[], chosen: string, clouds: C
   return [
     { id: LOCAL, label: 'This computer', icon: 'monitor', selected: chosen === LOCAL },
     ...targets.map(target => ({ id: target.deviceId, label: target.name, description: target.online ? target.platform : offlineText(target), icon: 'monitor', selected: target.deviceId === chosen, disabled: !target.online })),
+    ...clouds.map(target => ({ id: `cloud:${target.provider}`, label: target.label, description: 'Cloud agent machine', icon: 'cloud', selected: chosen === `cloud:${target.provider}`, disabled: !target.ready })),
   ];
 }
 

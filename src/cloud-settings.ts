@@ -6,7 +6,7 @@ import './cloud-settings.css';
 import { escape } from './dom';
 import { infoMark } from './tooltip';
 
-export type CloudConnection = { provider: 'daytona' | 'cloudflare' | 'aws' | 'vercel' | 'railway' | 'gcloud' | KeyedProvider; connected: boolean; detail: string | null; sandboxes?: boolean };
+export type CloudConnection = { provider: 'daytona' | 'cloudflare' | 'aws' | 'vercel' | 'railway' | 'netlify' | 'gcloud' | KeyedProvider; connected: boolean; detail: string | null; sandboxes?: boolean };
 export type CloudSettingsHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen(name: 'cloud-setup', callback: (event: { provider: string; label: string }) => void): Promise<() => void>;
@@ -77,6 +77,7 @@ const PROVIDERS: Record<CloudConnection['provider'], { name: string; summary: st
 /** `cloud_instabox_images`: what new InstaBox machines can start from, and the saved choice. */
 type InstaboxImages = { images: { value: string; label: string }[]; selected: string };
 const IMAGE_HELP = 'New InstaBox machines start from this image. Only ready snapshots and templates available to your account are listed. Existing machines keep their original image.';
+const CLAUDE_TOKEN_HELP = 'Run `claude setup-token` and paste its long-lived token. Without one, PandaCode uses the explicit Claude login transport configured for cloud runs.';
 
 export function mountCloudSettings(host: HTMLElement, options: CloudSettingsHost): () => void {
   host.innerHTML = `<div class="settings-group cloud-settings" aria-label="Cloud sandboxes"><div class="cloud-provider cloud-claude">

@@ -73,6 +73,7 @@ export const SECTIONS: { id: SettingsSection; label: string; icon: string; descr
 
 /** Plans use an installed Claude Code harness and are configured under Providers. */
 const PLANS = new Set<ProviderId>(['glm', 'mimo']);
+const LONG_DETAIL = 120;
 
 const switchRow = (id: string, title: string, detail: string, checked: boolean) =>
   `<div class="setting-row"><div><strong>${title}${detail.length > LONG_DETAIL ? ` ${infoMark(detail)}` : ''}</strong>${detail.length > LONG_DETAIL ? '' : `<small>${detail}</small>`}</div><input type="checkbox" class="settings-switch" id="${id}" aria-label="${title}" ${checked ? 'checked' : ''}></div>`;

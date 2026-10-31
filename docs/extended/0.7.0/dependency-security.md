@@ -46,9 +46,9 @@ The unit regression [`mobile/tests/dependency-security.test.ts`](../../../mobile
 
 ## Policies and ownership
 
-Security audit checks remain mandatory and failing by default; no `--force` installation, npm audit allowlist, skipped advisory or CI threshold relaxation was used. The Extended documentation lives under `docs/extended/`, its release notes under `release/extended/`, and its local dependency patch under `mobile/vendor/extended/`. Neither the upstream PandaCode documentation nor its GitHub fork is modified by this Extended-only remediation.
+Security audit checks remain mandatory and failing by default; no `--force` installation, npm audit allowlist, skipped advisory or CI threshold relaxation was used. The Extended documentation lives under `docs/extended/`, its release notes under `releases/extended/`, and its local dependency patch under `mobile/vendor/extended/`. Neither the upstream PandaCode documentation nor its GitHub fork is modified by this Extended-only remediation.
 
-For non-dependency application findings, see [Known issues](known-issues.md). For publication identity and release status, see [Extended 0.7.0 release notes](../../../release/extended/0.7.0.md).
+For non-dependency application findings, see [Known issues](known-issues.md). For publication identity and release status, see [Extended 0.7.0 release notes](../../../releases/extended/0.7.0.md).
 
 ## Rust dependency security follow-up for Extended 0.7.0
 

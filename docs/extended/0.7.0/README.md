@@ -3,7 +3,7 @@
 **Status:** Unreleased source candidate, pending final acceptance, not merged or tagged.  
 **Upstream source:** PandaCode 0.3.85, with Extended-only security and behavior changes.
 
-- [Planned Extended 0.7.0 release notes](../../../release/extended/0.7.0.md)
+- [Planned Extended 0.7.0 release notes](../../../releases/extended/0.7.0.md)
 - [Resolved dependency security findings and evidence](dependency-security.md)
 - [Known issues and resolution status](known-issues.md)
 - [Extended-only Settings feature controls](feature-controls.md)

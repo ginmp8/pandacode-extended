@@ -298,7 +298,7 @@ async fn refresh_token(app: tauri::AppHandle, old: String) {
         }
         inner.token = Some(fresh.to_owned());
     }
-    if let Err(error) = super::secrets::set_token(&state.dir, fresh) {
+    if let Err(error) = crate::secret_store::set(config::SERVICE, &state.accounts.token, fresh) {
         eprintln!("Could not save the refreshed PandaCode Connect token: {error}");
     }
 }

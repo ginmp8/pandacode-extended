@@ -1149,7 +1149,7 @@ def emit(value):
     print(json.dumps(value),flush=True)
 receive()
 if provider == 'claude':
-    assert '--strict-mcp-config' not in sys.argv
+    assert '--strict-mcp-config' in sys.argv
     server=json.loads(sys.argv[sys.argv.index('--mcp-config')+1])['mcpServers']['pandacode_architect']
     headers=server['headers']
     emit({'type':'control_response','response':{'request_id':'pandacode-init','subtype':'success','response':{}}})

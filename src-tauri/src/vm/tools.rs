@@ -224,6 +224,9 @@ pub fn with_vm(base: Option<ToolHost>, app: tauri::AppHandle, session_id: String
     if !full {
         own.retain(|tool| FIRST_VM_TOOLS.contains(&tool["name"].as_str().unwrap_or_default()));
     }
+    if !crate::feature_controls::get().agent_cloud_management {
+        own.retain(|tool| READ_ONLY.contains(&tool["name"].as_str().unwrap_or_default()));
+    }
     let mut tools = base.as_ref().map_or_else(Vec::new, |host| host.tools.clone());
     let mut approval_tools = base.as_ref().map_or_else(Default::default, |host| host.approval_tools.clone());
     for tool in &own {
@@ -247,6 +250,9 @@ pub fn with_vm(base: Option<ToolHost>, app: tauri::AppHandle, session_id: String
                         Some(base) => (base.handler)(name, args).await,
                         None => Err("Unknown PandaCode tool.".into()),
                     };
+                }
+                if !crate::feature_controls::get().agent_cloud_management && !READ_ONLY.contains(&name.as_str()) {
+                    return Err("Agent VM and cloud management is disabled in Settings > Feature controls.".into());
                 }
                 validate_spec(&catalog(), &name, &args)?;
                 dispatch(app, session_id, name, args).await

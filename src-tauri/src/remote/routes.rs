@@ -106,6 +106,32 @@ fn load(dir: &Path) -> Settings {
     std::fs::read_to_string(dir.join(FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
 
+/// Write the route preference atomically. A reconnect applies it to listeners and probes.
+fn save(dir: &Path, settings: &Settings) -> Result<()> {
+    let text = serde_json::to_vec(settings).map_err(|error| error.to_string())?;
+    let temporary = dir.join(format!("{FILE}.{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, text).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, dir.join(FILE)) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remote_direct_routes_status(app: tauri::AppHandle) -> Result<Value> {
+    Ok(json!({"directRoutes": load(&remote(&app).dir).direct_routes}))
+}
+
+#[tauri::command]
+pub async fn remote_set_direct_routes(app: tauri::AppHandle, enabled: bool) -> Result<Value> {
+    let dir = remote(&app).dir.clone();
+    save(&dir, &Settings { direct_routes: enabled })?;
+    // Invalidates all direct links and listeners before the next connection.
+    socket::start(&app);
+    Ok(json!({"directRoutes": enabled}))
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -961,6 +987,10 @@ mod tests {
         assert!(parse_announce(&json!({"addrs": [], "port": 0, "routeKey": ""})).unwrap().addrs.is_empty(), "a withdrawal");
         let dir = std::env::temp_dir().join(format!("pandacode-routes-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        assert!(load(&dir).direct_routes);
+        save(&dir, &Settings { direct_routes: false }).unwrap();
+        assert!(!load(&dir).direct_routes);
+        save(&dir, &Settings { direct_routes: true }).unwrap();
         assert!(load(&dir).direct_routes);
         std::fs::write(dir.join(FILE), r#"{"directRoutes": false}"#).unwrap();
         assert!(!load(&dir).direct_routes);

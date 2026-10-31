@@ -33,12 +33,13 @@ const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 const DISMISS_KEY = 'pandacode.agent-updates.dismissed';
 const errorText = (error: unknown): string => error instanceof Error ? error.message : typeof error === 'string' ? error : 'Could not complete the request. Try again.';
 
-/** Checks are automatic; installers run only after an explicit Update click. */
+/** Background checks are opt-in; installers still require an explicit Update click. */
 export function initializeAgentUpdates(host: AgentUpdatesHost): AgentUpdatesController {
   let disposed = false, lastCheck = 0, checking: Promise<void> | undefined, checkError = '';
   let updates: AgentUpdate[] = [], popup: HTMLElement | undefined, dialogBody: HTMLElement | undefined;
   let allowPopup = false, manualRevision = 0, popupFocus: HTMLElement | undefined;
-  let timer = 0, unlisten: (() => void) | undefined;
+  let timer = 0, unlisten: (() => void) | undefined, flagsUnlisten: (() => void) | undefined;
+  let backgroundEnabled = false;
   const initialCheckAt = Date.now() + 8000;
   const pending = new Map<ProviderId, AgentUpdateProgress>();
   const failures = new Map<ProviderId, string>();
@@ -151,10 +152,11 @@ export function initializeAgentUpdates(host: AgentUpdatesHost): AgentUpdatesCont
   }
   function schedule(): void {
     clearTimeout(timer);
+    if (!backgroundEnabled) return;
     timer = window.setTimeout(backgroundCheck, Math.max(0, (lastCheck ? lastCheck + CHECK_INTERVAL : initialCheckAt) - Date.now()));
   }
   function backgroundCheck(): void {
-    if (disposed || document.hidden) return;
+    if (disposed || !backgroundEnabled || document.hidden) return;
     const next = lastCheck ? lastCheck + CHECK_INTERVAL : initialCheckAt;
     if (Date.now() < next) { schedule(); syncPopup(); return; }
     if (pending.size) return;
@@ -220,9 +222,17 @@ export function initializeAgentUpdates(host: AgentUpdatesHost): AgentUpdatesCont
     if (disposed || !pending.has(value.provider)) return;
     pending.set(value.provider, value); render();
   }).then(off => { if (disposed) off(); else unlisten = off; }).catch(() => { /* The IPC result still reports success or failure. */ });
-  schedule();
+  void call<{ agentUpdateChecks: boolean }>('feature_controls_get')
+    .then(flags => { if (!disposed) { backgroundEnabled = flags.agentUpdateChecks; schedule(); } })
+    .catch(() => { /* If unavailable, do not start background requests. */ });
+  void subscribe<{ agentUpdateChecks: boolean }>('feature-controls-changed', flags => {
+    if (disposed) return;
+    backgroundEnabled = flags.agentUpdateChecks;
+    if (!backgroundEnabled) { allowPopup = false; hidePopup(); }
+    schedule();
+  }).then(off => { if (disposed) off(); else flagsUnlisten = off; }).catch(() => undefined);
   return { show, dispose() {
-    disposed = true; clearTimeout(timer); unlisten?.(); overlayObserver.disconnect();
+    disposed = true; clearTimeout(timer); unlisten?.(); flagsUnlisten?.(); overlayObserver.disconnect();
     document.removeEventListener('visibilitychange', visibility); window.removeEventListener('focus', backgroundCheck);
     hidePopup(); dialogBody?.removeEventListener('click', onClick); dialogBody = undefined;
   } };

@@ -219,6 +219,10 @@ pub(crate) fn start(app: tauri::AppHandle) {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             tick.tick().await;
+            // Do not advance due times while paused: run once after resuming.
+            if crate::feature_controls::get().bots_paused {
+                continue;
+            }
             let now = crate::storage::now();
             let due = {
                 let state = app.state::<AppState>();

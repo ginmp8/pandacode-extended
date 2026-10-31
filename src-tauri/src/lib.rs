@@ -31,6 +31,7 @@ mod vm;
 mod secret_store;
 mod cloud;
 mod cloud_agents;
+mod feature_controls;
 mod capabilities;
 mod vsix_themes;
 mod token_saver;
@@ -3648,6 +3649,7 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     secret_store::setup(&dir);
+    feature_controls::setup();
     provider_settings::setup(&dir)?;
     connections::setup(&dir)?;
     model_routing::setup(&dir);
@@ -3853,6 +3855,8 @@ pub fn run() {
                 app_updates::app_update_install_supported,
                 agent_updates::check_agent_updates,
                 agent_updates::update_agent,
+                feature_controls::feature_controls_get,
+                feature_controls::feature_controls_set,
                 moodboards::list_moodboards,
                 moodboards::create_moodboard,
                 moodboards::read_moodboard,
@@ -3897,6 +3901,8 @@ pub fn run() {
                 remote::mirror::remote_worker_messages,
                 remote::mirror::remote_cancel_start,
                 remote::routes::remote_reconnect,
+                remote::routes::remote_direct_routes_status,
+                remote::routes::remote_set_direct_routes,
                 remote::grants::remote_device_grants,
                 remote::grants::remote_set_device_grant,
                 remote::grants::remote_pair_code,

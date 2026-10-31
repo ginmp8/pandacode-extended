@@ -24,3 +24,42 @@ The Settings module and styles load when opened. General uses local state immedi
 ## Verification
 
 The update passed 23 Node checks, the production build, 55 Chrome browser cases, and 41 WebKit cases. These cover blur dragging and persistence, wallpaper schedules, tab keyboard navigation, delayed discovery, default-agent menus, and layout at enlarged text sizes. One existing WebKit inspector-resize timing case passed when rerun in isolation. General, Agents, and wallpaper controls were visually checked in dark and light themes and in a narrow window, with no page errors.
+
+## Feature controls
+
+**Settings → Feature controls** stores opt-in switches in the app's secure store. Newly
+installed builds default to off for background agent update checks, credential transfer
+to cloud agents, agent-driven cloud/VM management, and external MCP servers in
+PandaCode-launched Claude and Codex. The global bot pause defaults to off. An existing
+user's other settings (including individual bots and connected cloud accounts) are not
+reset. The controls work independently of the application's own update mode and the
+master **PandaCode Connect** switch.
+
+- **Check agent updates automatically:** off suppresses the initial eight-second
+  check and subsequent six-hour checks; **Check updates** still works manually.
+  Updating an installed CLI remains an explicit action.
+- **Transfer local credentials to cloud agents:** off refuses cloud-agent starts that
+  require copying this computer's login files, API keys and GitHub token. It does not
+  disconnect the provider, stop a machine, or revoke credentials already copied during
+  an earlier run. Turn on before a new cloud run if that flow is required.
+- **Allow agent VM and cloud management:** off leaves read-only machine inventory and
+  screenshots available, but removes agent-facing VM mutation and cloud deployment
+  tools from newly started runs. Previously registered callbacks also check the flag
+  at execution time. Manual VM/cloud panels are independent.
+- **Allow external MCP servers in Claude and Codex:** off starts those two harnesses
+  with an isolated MCP configuration, retaining the authenticated local PandaCode
+  tool server for the current run. Enabling restores their own configured MCP servers.
+  Other harnesses maintain their native MCP configurations; this is **not** a
+  system-wide MCP kill switch. Running agent processes retain their launch-time policy.
+- **Pause all bots and external channels:** on stops running bot threads, closes
+  supported messaging listeners and prevents new gateway messages and bot schedules.
+  Due schedules are retained for the next unpaused scheduler tick. Individual bot
+  pause/channel preferences are unchanged, and re-enabling only starts channels that
+  were independently enabled.
+- **Use direct LAN / Tailscale routes:** on (the existing Connect default) allows
+  authenticated direct connections when Connect itself is on. Off selects the relay
+  and drops existing direct routes by restarting the Connect socket. This setting
+  does not independently enable Connect.
+
+Disable actions are enforced in Rust as well as reflected in the Settings UI; the
+frontend switch alone is not treated as an authorization boundary.

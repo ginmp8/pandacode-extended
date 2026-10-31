@@ -111,6 +111,9 @@ fn image_attachments(image_ids: &[String]) -> Value {
 }
 
 async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, text: String, image_ids: Option<Vec<String>>, sender_id: &str, force_queue: bool) -> Result<()> {
+    if crate::feature_controls::get().bots_paused {
+        return Err("All bots are paused in Settings > Feature controls.".into());
+    }
     let state = app.state::<AppState>();
     let image_ids = image_ids.unwrap_or_default();
     if image_ids.len() > 4 {
@@ -152,6 +155,9 @@ pub(crate) async fn deliver(app: &tauri::AppHandle, inbound: Inbound) -> Result<
 }
 
 pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound, force_queue: bool) -> Result<String> {
+    if crate::feature_controls::get().bots_paused {
+        return Err("All bots and external channels are paused in Settings > Feature controls.".into());
+    }
     let text = inbound.text.trim().chars().take(MAX_INBOUND).collect::<String>();
     if text.is_empty() && inbound.image_ids.as_ref().is_none_or(Vec::is_empty) && inbound.moodboard_ids.as_ref().is_none_or(Vec::is_empty) {
         return Err("Send some text.".into());
@@ -217,6 +223,9 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
 
 /// A schedule or check-in: one ongoing scheduled conversation per bot.
 pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &str, prompt: &str) -> Result<()> {
+    if crate::feature_controls::get().bots_paused {
+        return Err("All bots are paused in Settings > Feature controls.".into());
+    }
     let state = app.state::<AppState>();
     let (bot, session_id, turn) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;

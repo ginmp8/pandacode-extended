@@ -29,3 +29,4 @@ export function useAttachment(image: ViewerImage, variant: Variant, enabled = tr
   }, [key, enabled, done, deviceId, sessionId, id, path, variant]);
   return current;
 }
+

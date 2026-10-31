@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ./scripts/wrangler.mjs dev",
-    "deploy": "node ./scripts/wrangler.mjs deploy",
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "node --test test/*.test.ts"
   },

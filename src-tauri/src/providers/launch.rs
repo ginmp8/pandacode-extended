@@ -90,6 +90,8 @@ fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
             "copilot" => "@github/copilot",
             "cline" => "cline",
             "kilo" | "kilocode" => "@kilocode/cli",
+            "netlify" => "netlify-cli",
+            "npx" => "npm",
             _ => return Err(
                 "This batch launcher is unsupported. Select the native harness executable instead."
                     .into(),
@@ -203,7 +205,7 @@ fn sibling_launcher(shim: &Path, directory: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The double-quoted words of a batch shim.
+/// The quoted words of a batch shim, retaining a literal unquoted Node command.
 fn shim_tokens(shim: &Path) -> Option<Vec<String>> {
     let mut text = String::new();
     std::fs::File::open(shim)
@@ -211,7 +213,12 @@ fn shim_tokens(shim: &Path) -> Option<Vec<String>> {
         .take(64 * 1024)
         .read_to_string(&mut text)
         .ok()?;
-    Some(text.split('"').skip(1).step_by(2).map(str::to_owned).collect())
+    Some(text.lines().flat_map(|line| {
+        let head = line.split('"').next().unwrap_or_default().trim().trim_start_matches('@');
+        let node = matches!(head.to_ascii_lowercase().as_str(), "node" | "node.exe")
+            .then(|| head.to_owned());
+        node.into_iter().chain(line.split('"').skip(1).step_by(2).map(str::to_owned))
+    }).collect())
 }
 
 /// A `%~dp0`-relative shim word as a real path, refusing other variables.
@@ -233,11 +240,24 @@ fn find_native_node(directories: Vec<PathBuf>) -> Option<PathBuf> {
         .map(|dir| dir.join("node.exe"))
         .find(|path| path.is_file())
 }
+/// Which harness `path` starts, for per-harness switches: `codex` for `codex.cmd`, or for any
+/// path chosen as Codex's executable in Settings.
+fn harness_name(path: &Path) -> String {
+    if crate::provider_settings::executable_override("codex").is_some_and(|codex| codex == path) {
+        return "codex".into();
+    }
+    path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 pub(crate) fn command(path: &Path) -> Result<tokio::process::Command, String> {
     let launch = resolve(path, cfg!(windows))?;
     let mut command = tokio::process::Command::new(launch.program);
     command.args(launch.args);
     crate::child_env::sanitize(&mut command);
+    command.args(super::privacy::arguments(&harness_name(path)));
+    for (name, value) in super::privacy::environment() {
+        command.env(name, value);
+    }
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW: stdio adapters have no console UI.
     Ok(command)
@@ -248,6 +268,10 @@ pub(super) fn std_command(path: &Path) -> Result<std::process::Command, String> 
     let mut command = std::process::Command::new(launch.program);
     command.args(launch.args);
     crate::child_env::sanitize(&mut command);
+    command.args(super::privacy::arguments(&harness_name(path)));
+    for (name, value) in super::privacy::environment() {
+        command.env(name, value);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -261,6 +285,10 @@ pub(crate) fn pty_command(path: &Path) -> Result<portable_pty::CommandBuilder, S
     let mut command = portable_pty::CommandBuilder::new(launch.program);
     command.args(launch.args);
     crate::child_env::sanitize(&mut command);
+    command.args(super::privacy::arguments(&harness_name(path)));
+    for (name, value) in super::privacy::environment() {
+        command.env(name, value);
+    }
     Ok(command)
 }
 
@@ -322,7 +350,6 @@ fn search_directories(windows: bool, env: &impl Fn(&str) -> Option<OsString>) ->
             .or_else(|| home.as_ref().map(|home| home.join("AppData/Local")))
         {
             dirs.push(local.join("Microsoft/WinGet/Links"));
-            dirs.push(local.join("Programs/OpenAI/Codex/bin"));
             // The standalone Node the pi.dev installer can add.
             dirs.push(local.join("pi-node/current"));
         }
@@ -623,6 +650,21 @@ mod tests {
     }
 
     #[test]
+    fn windows_netlify_and_npx_shims_use_node_without_a_batch_shell() {
+        for (name, package) in [("netlify", "netlify-cli"), ("npx", "npm")] {
+            let f = Fixture::new();
+            let node = f.file("npm/node.exe", "");
+            let shim = f.file(&format!("npm/{name}.cmd"), "@echo off\r\n");
+            f.file(&format!("npm/node_modules/{package}/package.json"),
+                &serde_json::json!({"bin": {name: format!("bin/{name}.js")}}).to_string());
+            let script = f.file(&format!("npm/node_modules/{package}/bin/{name}.js"), "");
+            let launch = resolve(&shim, true).unwrap();
+            assert_eq!(launch.program, external_path_for(&node, true));
+            assert_eq!(launch.args, [external_path_for(&script, true).into_os_string()]);
+        }
+    }
+
+    #[test]
     fn windows_pnpm_shims_run_only_the_entry_their_package_declares() {
         let f = Fixture::new();
         let package = "pnpm/global/v11/hash/node_modules/opencode-ai";
@@ -672,6 +714,16 @@ mod tests {
         let launch = resolve(&shim, true).unwrap();
         assert_eq!(launch.program, external_path_for(&node, true));
         assert_eq!(launch.args, [external_path_for(&launcher, true).into_os_string()]);
+        // Managed launchers may leave the Node command unquoted.
+        for body in [
+            "@ECHO off\r\nnode \"%~dp0pi-launcher.js\" %*\r\n",
+            "@node.exe \"%~dp0pi-launcher.js\" %*\r\n",
+        ] {
+            fs::write(&shim, body).unwrap();
+            let launch = resolve(&shim, true).unwrap();
+            assert_eq!(launch.program, external_path_for(&node, true));
+            assert_eq!(launch.args, [external_path_for(&launcher, true).into_os_string()]);
+        }
         // Not node, not beside the shim, or not a script: refused, with the npm hint.
         f.file("pi/agent/elsewhere.js", "");
         f.file("pi/agent/bin/pi-launcher.exe", "");
@@ -680,6 +732,11 @@ mod tests {
             "\"%node%\" \"%~dp0..\\elsewhere.js\" %*",
             "\"%node%\" \"%~dp0pi-launcher.exe\" %*",
             "\"%node%\" \"%~dp0missing.js\" %*",
+            "echo node \"%~dp0pi-launcher.js\" %*",
+            "node --require other.js \"%~dp0pi-launcher.js\" %*",
+            "node \"%~dp0..\\elsewhere.js\" %*",
+            "node \"%~dp0pi-launcher.exe\" %*",
+            "node \"%~dp0missing.js\" %*",
         ] {
             f.file("pi/agent/bin/pi.cmd", body);
             let error = resolve(&shim, true).err().unwrap();
@@ -751,23 +808,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_standalone_install_is_found_without_path_entry() {
-        let f = Fixture::new();
-        let codex = f.file("local/Programs/OpenAI/Codex/bin/codex.exe", "");
-        let local = f.0.join("local").into_os_string();
-        let home = f.0.join("home").into_os_string();
-        let env = |key: &str| match key {
-            "LOCALAPPDATA" => Some(local.clone()),
-            "USERPROFILE" => Some(home.clone()),
-            _ => None,
-        };
-        assert_eq!(
-            find_in_directories("codex", search_directories(true, &env), true),
-            Some(codex)
-        );
-    }
-
-    #[test]
     fn windows_shims_never_launch_a_shell_host() {
         let f = Fixture::new();
         f.file("npm/node_modules/opencode-ai/package.json", r#"{"bin":{"opencode":"CMD.exe"}}"#);
@@ -800,6 +840,37 @@ mod tests {
             assert_eq!(launch.program, Path::new(path));
             assert!(launch.args.is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn telemetry_opt_outs_reach_every_launch_kind_only_while_on() {
+        let f = Fixture::new();
+        let codex = executable(&f, "codex");
+        let claude = executable(&f, "claude");
+        let flags = |command: &std::process::Command| -> Vec<String> {
+            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
+        };
+        let tracked = |command: &std::process::Command| {
+            command.get_envs().any(|(name, value)| name == "DO_NOT_TRACK" && value == Some("1".as_ref()))
+        };
+        for on in [false, true] {
+            super::super::privacy::FORCE.with(|force| force.set(Some(on)));
+            let codex_args = if on { vec!["-c", "analytics.enabled=false", "-c", "feedback.enabled=false"] } else { vec![] };
+            for command in [command(&codex).unwrap().as_std(), &std_command(&codex).unwrap()] {
+                assert_eq!(flags(command), codex_args);
+                assert_eq!(tracked(command), on);
+            }
+            let claude_command = std_command(&claude).unwrap();
+            assert!(flags(&claude_command).is_empty(), "only Codex and Muse take -c");
+            assert_eq!(tracked(&claude_command), on);
+            let pty = pty_command(&codex).unwrap();
+            assert_eq!(pty.get_argv().len(), 1 + codex_args.len());
+            assert_eq!(pty.get_env("DO_NOT_TRACK").is_some(), on);
+        }
+        super::super::privacy::FORCE.with(|force| force.set(None));
+        assert_eq!(harness_name(Path::new("C:/tools/codex.cmd")), "codex");
+        assert_eq!(harness_name(Path::new("/opt/bin/codex-nightly")), "codex-nightly");
     }
 
     #[test]

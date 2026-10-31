@@ -5,9 +5,9 @@ use serde::Serialize;
 use std::{path::Path, time::Duration};
 
 use crate::github::{excerpt, json, names, run_gh, state_of, text, view, Repository, TIMEOUT};
-use crate::storage::{Message, TaskLink};
+use crate::storage::TaskLink;
 
-const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,createdAt,updatedAt,mergedAt,mergeable,reviewDecision,labels,statusCheckRollup,files,commits,comments,reviews";
+const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,additions,deletions,changedFiles,createdAt,updatedAt,mergedAt,mergeable,reviewDecision,labels,statusCheckRollup,files,commits,comments,reviews";
 const LINK_FIELDS: &str = "number,title,state,url,isDraft,headRefName,createdAt";
 const BODY_LIMIT: usize = 64 * 1024;
 const COMMENT_LIMIT: usize = 16 * 1024;
@@ -16,28 +16,6 @@ const MAX_COMMITS: usize = 100;
 /// A PR created this long before the turn's prompt still counts as the turn's.
 const TURN_SLACK_MS: i64 = 60_000;
 const MAX_CANDIDATES: usize = 3;
-
-pub(crate) struct LatestTurn {
-    pub text: Vec<String>,
-    pub started_at: i64,
-    pub last_message_id: i64,
-}
-
-/// Store pages are chronological. Detect only links in the newest turn, visiting
-/// its latest response first; the newest row also identifies the detection cache.
-pub(crate) fn latest_turn(messages: Vec<Message>) -> LatestTurn {
-    let last_message_id = messages.last().map(|message| message.id).unwrap_or_default();
-    let mut text = Vec::new();
-    let mut started_at = 0;
-    for message in messages.into_iter().rev() {
-        if message.role == "user" {
-            started_at = message.created_at;
-            break;
-        }
-        text.push(message.content);
-    }
-    LatestTurn { text, started_at, last_message_id }
-}
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -85,7 +63,6 @@ pub struct PullDetail {
     pub author: String,
     pub base: String,
     pub head: String,
-    pub head_sha: String,
     pub additions: i64,
     pub deletions: i64,
     pub changed_files: i64,
@@ -182,7 +159,6 @@ pub fn parse_detail(value: &serde_json::Value) -> Result<PullDetail, String> {
         author: login(value),
         base: text(value, "baseRefName"),
         head: text(value, "headRefName"),
-        head_sha: text(value, "headRefOid"),
         additions: self::number(value, "additions"),
         deletions: self::number(value, "deletions"),
         changed_files: self::number(value, "changedFiles"),
@@ -324,72 +300,14 @@ pub fn merge_flag(method: &str) -> Result<&'static str, String> {
 /// Merge the pull request on GitHub, then read it back so the task's link shows it merged.
 /// Local branches and worktrees are left alone; GitHub's branch settings decide the rest.
 pub fn merge(root: &Path, number: i64, method: &str) -> Result<TaskLink, String> {
-    merge_checked(root, number, method, || Ok(()))
-}
-
-/// Remote callers supply their current authorization check. Looking up the PR
-/// can block on the network, so check after it and immediately before the merge
-/// command, rather than relying on authorization at request admission.
-pub(crate) fn merge_checked(root: &Path, number: i64, method: &str, authorize: impl FnOnce() -> Result<(), String>) -> Result<TaskLink, String> {
-    merge_after_lookup(number, method, || detail(root, number), authorize, |flag, head| {
-        run_gh(root, &["pr", "merge", &number.to_string(), flag, "--match-head-commit", head], Duration::from_secs(60)).map(|_| ())
-    })?;
-    lookup(root, number)
-}
-
-pub(crate) fn merge_after_lookup(
-    number: i64,
-    method: &str,
-    lookup: impl FnOnce() -> Result<PullDetail, String>,
-    authorize: impl FnOnce() -> Result<(), String>,
-    execute: impl FnOnce(&str, &str) -> Result<(), String>,
-) -> Result<(), String> {
     let flag = merge_flag(method)?;
-    let current = lookup()?;
-    if current.state != "open" {
-        return Err(format!("Pull request #{number} is {}.", current.state));
-    }
-    if current.mergeable != "mergeable" {
-        return Err(if current.mergeable == "conflicting" {
-            "Resolve the pull request conflicts before merging.".into()
-        } else {
-            "GitHub has not confirmed that this pull request is mergeable. Refresh and try again.".into()
-        });
-    }
-    if current.head_sha.is_empty() {
-        return Err("GitHub did not return the pull request head SHA. Refresh and try again.".into());
-    }
-    authorize()?;
-    execute(flag, &current.head_sha)
+    run_gh(root, &["pr", "merge", &number.to_string(), flag], Duration::from_secs(60))?;
+    lookup(root, number)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pull_detection_uses_only_the_latest_turn_from_chronological_store_pages() {
-        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
-        let project = store.add_project(&std::env::temp_dir()).unwrap();
-        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
-        store.message(&task.id, "user", "First task").unwrap();
-        store.message(&task.id, "assistant", "https://github.com/owner/project/pull/1").unwrap();
-        store.message(&task.id, "user", "New task").unwrap();
-        let prompt_id = store.db.last_insert_rowid();
-        store.db.execute("UPDATE messages SET created_at=1234 WHERE id=?1", [prompt_id]).unwrap();
-        store.message(&task.id, "assistant", "https://github.com/owner/project/pull/2").unwrap();
-        store.message(&task.id, "assistant", "Latest response").unwrap();
-        let last_id = store.db.last_insert_rowid();
-        let turn = latest_turn(store.messages(&task.id, None).unwrap());
-        assert_eq!(turn.last_message_id, last_id);
-        assert_eq!(turn.started_at, 1234);
-        assert_eq!(turn.text, vec!["Latest response", "https://github.com/owner/project/pull/2"]);
-        store.message(&task.id, "user", "Next task has no response").unwrap();
-        let turn = latest_turn(store.messages(&task.id, None).unwrap());
-        assert!(turn.text.is_empty(), "an earlier turn's pull request must not leak into the current turn");
-        assert_eq!(turn.last_message_id, store.db.last_insert_rowid());
-        assert_eq!(latest_turn(Vec::new()).last_message_id, 0);
-    }
 
     #[test]
     fn merge_accepts_only_known_methods() {

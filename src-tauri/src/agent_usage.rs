@@ -18,8 +18,6 @@ use tokio::sync::{Mutex, Semaphore};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Usage {
     pub provider: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
     pub status: String,
     pub windows: Vec<UsageWindow>,
     pub plan: Option<String>,
@@ -34,7 +32,6 @@ impl Usage {
     pub(crate) fn empty(provider: &str, status: &str, message: &str) -> Self {
         Self {
             provider: provider.into(),
-            connection_id: None,
             status: status.into(),
             windows: Vec::new(),
             plan: None,
@@ -327,13 +324,6 @@ struct CacheSlot {
     generation: AtomicU64,
 }
 
-type ConnectionSlots = std::sync::Mutex<HashMap<String, (u64, Arc<CacheSlot>)>>;
-
-fn connection_slots() -> &'static ConnectionSlots {
-    static SLOTS: OnceLock<ConnectionSlots> = OnceLock::new();
-    SLOTS.get_or_init(Default::default)
-}
-
 fn cache() -> &'static HashMap<&'static str, CacheSlot> {
     static CACHE: OnceLock<HashMap<&'static str, CacheSlot>> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -355,6 +345,8 @@ fn cache() -> &'static HashMap<&'static str, CacheSlot> {
             "github-copilot",
             "muse",
             "devin",
+            "zcode",
+            "hermes",
         ]
         .into_iter()
         .map(|id| (id, CacheSlot::default()))
@@ -364,11 +356,6 @@ fn cache() -> &'static HashMap<&'static str, CacheSlot> {
 
 pub(crate) fn invalidate(provider: &str) {
     if let Some(slot) = cache().get(provider) {
-        slot.generation.fetch_add(1, Ordering::SeqCst);
-    }
-    // Named configurations may inherit global account settings. Invalidate all
-    // their snapshots without acquiring the connection configuration lock.
-    for (_, slot) in connection_slots().lock().unwrap_or_else(PoisonError::into_inner).values() {
         slot.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -564,48 +551,24 @@ async fn connection_usage(provider: String, id: &str, refresh: bool) -> crate::R
     let connection = crate::connections::get(id)
         .filter(|c| c.provider == provider)
         .ok_or("This connection no longer exists.")?;
-    if let Some(reason) = connection_usage_unsupported(&connection) {
-        let mut result = Usage::empty(&provider, "unsupported", reason);
-        result.connection_id = Some(id.into());
-        return Ok(result);
-    }
-    // Keep one slot per connection, replacing its revision instead of retaining
-    // every historical account. Bound cached/deleted identities to the library cap.
-    let slot = {
-        let mut slots = connection_slots()
+    // Keyed by revision, so an edited connection never shows the old account.
+    // ponytail: slots of deleted or edited connections stay until restart; tiny.
+    static SLOTS: OnceLock<std::sync::Mutex<HashMap<String, Arc<CacheSlot>>>> = OnceLock::new();
+    let slot = SLOTS
+        .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-        if slots.len() >= 50 && !slots.contains_key(&connection.id) {
-            if let Some(oldest) = slots.keys().next().cloned() { slots.remove(&oldest); }
-        }
-        let entry = slots.entry(connection.id.clone()).or_insert_with(|| (connection.revision, Arc::default()));
-        if entry.0 != connection.revision { *entry = (connection.revision, Arc::default()); }
-        entry.1.clone()
-    };
-    let revision = connection.revision;
-    let mut result = cached(&slot, refresh, || async {
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(format!("{}#{}", connection.id, connection.revision))
+        .or_default()
+        .clone();
+    Ok(cached(&slot, refresh, || async move {
         let name = connection.name.clone();
         match tokio::task::spawn_blocking(move || crate::connections::launch(&connection)).await {
             Ok(Ok(launch)) => bounded(&provider, &launch.env).await,
             _ => Usage::empty(&provider, "unavailable", &format!("The saved values of “{name}” could not be read. Check the connection in Settings.")),
         }
     })
-    .await;
-    if !crate::connections::get(id).is_some_and(|current| current.provider == provider && current.revision == revision) {
-        return Err("The connection changed while reading usage. Refresh to check the current account.".into());
-    }
-    result.connection_id = Some(id.into());
-    Ok(result)
-}
-
-fn connection_usage_unsupported(connection: &crate::connections::Connection) -> Option<&'static str> {
-    if !matches!(connection.provider.as_str(), "claude" | "codex") {
-        return Some("This harness does not expose limits per connection. Its default setup's limits are not attributed to this connection.");
-    }
-    if connection.executable.is_some() || !connection.args.is_empty() {
-        return Some("Usage is not available for connections with a custom executable or arguments. Check that connection's account dashboard.");
-    }
-    None
+    .await)
 }
 
 async fn bounded(provider: &str, env: &[(String, String)]) -> Usage {
@@ -641,18 +604,21 @@ async fn fetch_provider(provider: &str, env: &[(String, String)]) -> Usage {
         "codex" => fetch_codex(env).await,
         "claude" => fetch_claude(env).await,
         _ if !env.is_empty() => Usage::empty(provider, "unsupported", "Limits are read for each Claude Code and Codex connection. This harness's limits are shown for its global setup only."),
-        "kimi" | "glm" | "opencode" | "antigravity" => crate::agent_usage_providers::fetch(provider).await,
+        "kimi" | "glm" | "opencode" | "antigravity" | "deepseek" => {
+            crate::agent_usage_providers::fetch(provider).await
+        }
         "grok" => Usage::empty(provider, "unsupported", "Grok does not expose subscription usage through this agent. Check your account dashboard."),
         "mimo" => Usage::empty(provider, "unsupported", "MiMo does not expose account limits through this agent. View your Token Plan dashboard."),
         "omp" => Usage::empty(provider, "unsupported", "omp uses the model provider you configured for it. Check that provider's dashboard for limits."),
         "pi" => Usage::empty(provider, "unsupported", "Pi uses the model provider you configured for it. Check that provider's dashboard for limits."),
-        "deepseek" => Usage::empty(provider, "unsupported", "DeepSeek does not expose balance or limits through this agent. Check the DeepSeek platform."),
         "commandcode" => Usage::empty(provider, "unsupported", "Command Code does not expose credits or limits through this agent. Check Command Code Studio."),
-        "kilo" => Usage::empty(provider, "unsupported", "Kilo Code does not expose credits or limits through this agent. Check your Kilo account or model provider dashboard."),
         "cline" => Usage::empty(provider, "unsupported", "Cline does not expose credits or limits through this agent. Check your Cline account."),
+        "kilo" => Usage::empty(provider, "unsupported", "Kilo Code does not expose credits or limits through this agent. Check your Kilo account or the model provider's dashboard."),
         "github-copilot" => Usage::empty(provider, "unsupported", "GitHub Copilot CLI does not expose usage limits through this agent. Check your GitHub Copilot settings."),
         "muse" => Usage::empty(provider, "unsupported", "Muse Code reports its usage windows only inside a running session. Check them with /usage in Muse Code."),
         "devin" => Usage::empty(provider, "unsupported", "Devin does not expose plan limits through its ACP server. Check usage in your Devin account settings."),
+        "zcode" => Usage::empty(provider, "unsupported", "ZCode does not expose plan usage. Check usage in ZCode itself."),
+        "hermes" => Usage::empty(provider, "unsupported", "Hermes Agent does not expose usage limits through its ACP server. Check your LLM provider's dashboard."),
         _ => Usage::empty(provider, "unsupported", "Usage limits are not available for this agent."),
     };
     if result.dashboard_url.is_none() {
@@ -732,8 +698,15 @@ async fn fetch_claude(env: &[(String, String)]) -> Usage {
         crate::provider_settings::claude_connection_mode().is_inherit(),
         |name| std::env::var(name).ok(),
         &settings,
-    ) || claude_override(true, |name| env.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone()), &Value::Null)
-    {
+    ) || claude_override(
+        true,
+        |name| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        },
+        &Value::Null,
+    ) {
         return Usage::empty("claude", "unavailable", "Claude is configured with an API key, custom endpoint, or environment credentials. Saved Claude subscription limits do not describe that connection.");
     }
     let (credential, source) = match read_claude_credential(&config, env).await {
@@ -993,36 +966,30 @@ mod tests {
     #[test]
     fn connection_environment_selects_its_own_config_folder_and_login() {
         let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-        let absolute = std::env::temp_dir().join("pandacode-test-claude-work");
-        let path = absolute.to_string_lossy();
-        let work = [pair("CLAUDE_CONFIG_DIR", "old"), pair("CLAUDE_CONFIG_DIR", &path)];
+        let work = [
+            pair("CLAUDE_CONFIG_DIR", "/tmp/old"),
+            pair("CLAUDE_CONFIG_DIR", "/Users/me/.claude-work"),
+        ];
         // The connection's last value wins; anything it doesn't set comes from PandaCode's environment.
-        assert_eq!(var(&work, "CLAUDE_CONFIG_DIR").as_deref(), Some(path.as_ref()));
+        assert_eq!(
+            var(&work, "CLAUDE_CONFIG_DIR").as_deref(),
+            Some("/Users/me/.claude-work")
+        );
         assert_eq!(var(&work, "PATH"), std::env::var("PATH").ok());
-        assert_eq!(claude_config_dir_in(&work), Some(absolute.clone()));
-        assert_eq!(claude_config_dir_in(&[pair("CLAUDE_CONFIG_DIR", "relative")]), None);
+        assert_eq!(
+            claude_config_dir_in(&work),
+            Some(PathBuf::from("/Users/me/.claude-work"))
+        );
+        assert_eq!(
+            claude_config_dir_in(&[pair("CLAUDE_CONFIG_DIR", "relative")]),
+            None
+        );
         assert_eq!(claude_config_dir_in(&[]), claude_config_dir());
         #[cfg(target_os = "macos")]
         assert_eq!(
             claude_service(var(&work, "CLAUDE_CONFIG_DIR").as_deref(), None),
-            claude_service(Some(&path), None)
+            claude_service(Some("/Users/me/.claude-work"), None)
         );
-    }
-
-    #[test]
-    fn named_usage_never_attributes_default_limits_to_custom_or_unsupported_connections() {
-        let mut connection = crate::connections::Connection { provider: "kimi".into(), ..Default::default() };
-        assert!(connection_usage_unsupported(&connection).is_some(), "even an empty named environment is not the global account");
-        connection.provider = "codex".into();
-        assert!(connection_usage_unsupported(&connection).is_none());
-        connection.executable = Some("custom-wrapper".into());
-        assert!(connection_usage_unsupported(&connection).is_some());
-        connection.executable = None;
-        connection.args.push("--profile=work".into());
-        assert!(connection_usage_unsupported(&connection).is_some());
-        connection.args.clear();
-        connection.provider = "claude".into();
-        assert!(connection_usage_unsupported(&connection).is_none());
     }
 
     #[tokio::test]
@@ -1035,10 +1002,14 @@ mod tests {
 
     #[tokio::test]
     async fn claude_connection_with_its_own_api_key_is_not_a_subscription() {
-        let dir = std::env::temp_dir().join(format!("pandacode-usage-conn-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("pandacode-usage-conn-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let env = [
-            ("CLAUDE_CONFIG_DIR".to_owned(), dir.to_string_lossy().into_owned()),
+            (
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                dir.to_string_lossy().into_owned(),
+            ),
             ("ANTHROPIC_API_KEY".to_owned(), "synthetic-key".to_owned()),
         ];
         let usage = fetch_claude(&env).await;

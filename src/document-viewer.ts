@@ -1,7 +1,6 @@
 import { escape, markdown } from './dom';
-import { bindFileLinkContext, captureFileLinkContext, decorateFileLinks, workspaceImagePath, type FileLinkContext } from './file-links';
+import { captureFileLinkContext, decorateFileLinks, workspaceImagePath } from './file-links';
 import { trackSegment } from './motion';
-import { inlineRaster } from './office-safety';
 
 export type DocumentView = 'rendered' | 'raw';
 /** Reads a workspace image (path from the workspace root) as a data: URL. */
@@ -75,15 +74,13 @@ async function renderHtmlDocument(reader: HTMLElement, path: string, content: st
   if (!reader.isConnected) return;
   captureFileLinkContext(reader);
   reader.innerHTML = html;
-  let images = 0;
   for (const img of reader.querySelectorAll<HTMLImageElement>('img[data-src]')) {
     const src = img.dataset.src ?? '';
     img.removeAttribute('data-src');
     const local = workspaceImagePath(src, path), label = img.alt || 'Image';
-    // Inline document data has not passed the native byte/dimension checks.
-    // Keep it as alt text; only bounded workspace images may be decoded here.
-    if (local && image && ++images <= 32) image(local).then(url => { if (img.isConnected && inlineRaster(url)) img.src = url; }, () => { if (img.isConnected) img.replaceWith(label); });
-    else if (!/^https?:\/\//i.test(src) || img.closest('a')) img.replaceWith(label);
+    if (/^data:image\//i.test(src)) img.src = src;
+    else if (local && image) image(local).then(url => { img.src = url; }, () => img.replaceWith(label));
+    else if (!src || img.closest('a')) img.replaceWith(label);
     // Remote images link to their address instead, as in the transcript.
     else img.replaceWith(Object.assign(document.createElement('a'), { className: 'md-media', href: src, textContent: img.alt || 'Image' }));
   }
@@ -99,7 +96,7 @@ function toolbar(kind: Kind, view: DocumentView, wrap: boolean, content: string)
 }
 
 /** Renders a file into the inspector: prose as a reading column (Rendered | Raw), code with line numbers. */
-export function renderDocument(host: HTMLElement, path: string, content: string, image?: ImageLoader, context?: FileLinkContext): void {
+export function renderDocument(host: HTMLElement, path: string, content: string, image?: ImageLoader): void {
   const kind = kindOf(path);
   const view = kind === 'code' ? 'raw' : views.get(kind) ?? 'rendered';
   const wrap = wraps.get(kind) ?? kind !== 'code';
@@ -110,8 +107,7 @@ export function renderDocument(host: HTMLElement, path: string, content: string,
   host.innerHTML = `<div class="document-viewer" data-kind="${kind}" data-view="${view}"${wrap ? ' data-wrap' : ''}>${toolbar(kind, view, wrap, content)}${body}</div>`;
   const viewer = host.firstElementChild as HTMLElement;
   const reader = viewer.querySelector<HTMLElement>('.doc-reader.markdown');
-  if (reader && context) bindFileLinkContext(reader, context);
-  if (reader && (RAW_HTML.test(withoutCode(content)) || /!\[[^\]]*\]\(/.test(withoutCode(content)))) void renderHtmlDocument(reader, path, content, image).catch(() => markdown(reader, content));
+  if (reader && RAW_HTML.test(withoutCode(content))) void renderHtmlDocument(reader, path, content, image).catch(() => markdown(reader, content));
   else if (reader) void markdown(reader, content);
   const group = viewer.querySelector<HTMLElement>('.doc-view-switch');
   if (group) trackSegment(group, group.querySelector('[aria-pressed="true"]'));
@@ -120,6 +116,6 @@ export function renderDocument(host: HTMLElement, path: string, content: string,
     if (!target) return;
     if (target.dataset.docView) views.set(kind, target.dataset.docView as DocumentView);
     else wraps.set(kind, !wrap);
-    renderDocument(host, path, content, image, context);
+    renderDocument(host, path, content, image);
   });
 }

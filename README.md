@@ -1,35 +1,32 @@
-# PandaCode Extended
-
-**PandaCode Extended** is a separately maintained distribution of [PandaCode](https://github.com/aicodeking/pandacode), with added features and reviewed security controls. The current Extended source candidate is [`0.6.0+pc.0.3.50`](releases/extended/0.6.0.md) (technical version `0.6.0`, tracked upstream reference `0.3.50`). It adds Connect and agent traces from upstream `0.3.49`–`0.3.50` to the previous integrations and historical feature reviews; see the [current integration map](docs/upstream-integration-0.6.0.md), [0.3.28–0.3.42 coverage](docs/upstream-parity-0.3.28-0.3.42.md), [coverage before 0.3.28](docs/upstream-parity-before-0.3.28.md), and [versioning policy](docs/VERSIONING.md). The canonical repository is [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended).
-
-Historical security work: [release notes](releases/extended/0.3.42-hardened.md), [upstream history](docs/UPSTREAM-RELEASE-HISTORY.md), and [security review](security-review/0.3.42-hardened/REPORT.md).
-
-The [0.3.48 incremental review](docs/upstream-integration-0.5.1.md) adds a centered harness handoff disclosure and responsive regression tests. The earlier integration adds Devin CLI, sidebar sections, persistent inspector tabs with inline diffs, remote task progress and images, and richer desktop/mobile Connect behavior while retaining Extended's review tools, Browser QA, workflow library, connection isolation and security controls. Historical ancestry remains `0.3.28`; this is a reviewed integration of the mapped release range, not a claim that every earlier upstream feature or platform has been verified. Automatic updates and network installers remain disabled. The [read-only upstream release monitor](.github/workflows/upstream-version-watch.yml) detects newer official tags; it never downloads code or merges an upstream release automatically.
-
-The historical supplement adds Kilo, Cline console support, explicit Claude-family approval review, Jev OpenRouter, bot personality and project-task bindings, local document tabs, compact mobile filters, relay guards and manual management for eleven additional cloud providers. It preserves protected secret storage and pinned-device trust. Automatic cloud-agent credential/checkout transport remains excluded; the [feature map](docs/upstream-parity-0.3.28-0.3.42.md) gives each inclusion and policy difference explicitly.
-
-The earlier review maps 77 source notes from `0.2.0` through `0.3.27` and corrects optional Jev credential loading that could block workspace initialization. Saved configuration arrives asynchronously, and a delayed startup response cannot overwrite newer saved availability. OS-vault storage, atomic migration and recovery protection remain in place. The [earlier feature map](docs/upstream-parity-before-0.3.28.md) distinguishes inherited features, later replacements, security exclusions and platform-validation limits.
-
-This is a fork of [PandaCode](https://github.com/aicodeking/pandacode). The license and upstream author attribution are preserved. Internal package names, the Tauri identifier (`ai.pandacode.desktop`), and user-data directories are deliberately unchanged. This preserves existing installations, but does **not** support installing Extended alongside original PandaCode without conflicts.
+# PandaCode
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding
 Plan and Xiaomi MiMo** (through Claude Code), **GitHub Copilot CLI, Antigravity,
-xAI's Grok Build, DeepSeek, Command Code, Cline and Devin CLI** (through ACP), **Pi** and its
+xAI's Grok Build, DeepSeek, Command Code, Cline, Kilo Code, Devin CLI and Hermes Agent** (through ACP), **ZCode** (through its app-server protocol), **Pi** and its
 fork **omp** (through Pi's RPC mode), and Meta's **Muse Code** (through its MSP
 protocol) — side by side, with your projects, Git, a
 terminal and a browser in one window.
 
 PandaCode is free and open source under the [PandaCode License](LICENSE), the MIT
 License with one addition: forks that are used commercially or released publicly
-must say "This is a fork of PandaCode" and link to the [original PandaCode repository](https://github.com/aicodeking/pandacode). There is no
+must say "This is a fork of PandaCode" and link to this repository. There is no
 account, no license key and no telemetry.
 
 Built with Tauri 2, Rust, SQLite and plain TypeScript. It uses the operating
 system's webview: no bundled Chromium, resident Node server, React runtime or
 embedded editor engine.
 
-
+<p align="center">
+  <b>Download:</b>
+  <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-macOS-arm64.dmg">macOS (Apple silicon)</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-macOS-x64.dmg">macOS (Intel)</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Windows-x64-setup.exe">Windows x64</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Windows-arm64-setup.exe">Windows arm64</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-x86_64.AppImage">Linux x64</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-aarch64.AppImage">Linux arm64</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases">All releases</a>
+</p>
 
 <p align="center">
   <img src="docs/screenshots/conversation.webp" alt="PandaCode with a finished Claude Code task: the reply explains the change, with the project's tasks in the sidebar and the composer below" width="100%">
@@ -41,19 +38,29 @@ embedded editor engine.
   per task; switch between them from the composer. See [providers](docs/providers.md).
 - **Tasks and a task board.** Parallel tasks across projects, a Pending → In
   progress → Review → Completed [board](docs/task-board.md), message queueing
-  and steering while an agent runs. The sidebar groups Active, Needs review and Completed tasks, with row actions for completion, archive and deletion.
+  and steering while an agent runs.
 - **Agent teams.** An [architect and up to three workers](docs/architect-workers.md),
   mixing harnesses and models, or named team profiles. Each spawned worker is one
   line in the turn that started it; click it to open the worker.
+- **Model routing.** In automatic teams (Cheap, Balanced or Best, from the Team
+  button) the lead can let a local router pick each worker's model, in about 10–25 ms
+  and without sending the task anywhere; a failed worker's replacement escalates to a
+  stronger model. See
+  [model routing](docs/model-routing.md).
 - **Bots.** Put an agent behind Telegram, Slack, Discord, WhatsApp or a local web
   chat; each conversation is an ordinary task. The sidebar's **Bots** view lists
-  every bot with its latest message. This fork adds ten built-in panda icons, local image uploads cropped to 128px PNG, and reorganized bot settings. See [bots](docs/bots.md).
-- **Native system tray.** Optional OS tray menu lists running, waiting and recently finished tasks; plan usage is refreshed only when the menu is opened or its refresh action is used.
+  every bot with its latest message. See [bots](docs/bots.md).
 - **Local VMs and cloud sandboxes.** Headless macOS/Linux VMs on Apple silicon
   (Tart), and Daytona, Cloudflare and AWS sandboxes that agents can drive.
+- **Cloud agents.** Pick a cloud provider in a New task's **Run on** menu and the
+  agent runs on a machine in your own account (Daytona, Cloudflare, AWS, Google Cloud,
+  E2B, Modal, Vercel Sandbox, CodeSandbox, Runloop, Blaxel, Tensorlake, Freestyle,
+  boat). PandaCode installs the harness there, copies your login, and keeps the run
+  going while your laptop sleeps; changes come back to a local worktree. See
+  [cloud agents](docs/cloud-agents.md).
 - **Simulators.** iOS Simulator and Android emulator tools for agents.
-- **Deploys.** Start a deploy task for Vercel, Cloudflare, Railway, AWS or Google
-  Cloud from the header, with approval-gated CLI runs (AWS and Google Cloud use
+- **Deploys.** Start a deploy task for Vercel, Cloudflare, Railway, Netlify, AWS or Google
+  Cloud from the header ([Netlify setup](docs/netlify.md)), with approval-gated CLI runs (AWS and Google Cloud use
   your installed CLI and its login).
 - **GitHub view.** Your repositories with their threads, pull requests and issues;
   review, fix checks, merge or solve an issue in one click. Each opens as a linked
@@ -67,13 +74,12 @@ embedded editor engine.
 - **Find in thread.** `⌘/Ctrl F` searches your messages and the agent's, with
   every match highlighted.
 - **Review every turn.** Saved [turn changes](docs/turn-changes.md) with
-  unified/split diffs, an embedded [browser](docs/browser.md), and file previews. The inspector remembers its open tabs and Changes shows file diffs together with staging controls.
-- **Extended review tools.** [Review & coordination](docs/HARDENED-REVIEW-TOOLS.md), [Browser QA](docs/HARDENED-BROWSER-QA.md), and workflow templates remain available through their existing controls.
+  unified/split diffs, an embedded [browser](docs/browser.md), and file previews.
 - **Token saver.** Per-task response-style packs that cut output tokens.
 - **Quick overlay.** A global shortcut (default ⌘/Ctrl + Shift + Space) opens a
   launcher for new and running tasks from anywhere.
 - **Agent usage.** Account limits and cost estimates for each installed harness
-  ([agent usage](docs/agent-usage.md)); updates are manual in this revision
+  ([agent usage](docs/agent-usage.md)), and one-click CLI updates
   ([agent updates](docs/agent-updates.md)).
 - **Attachments.** Images, PDFs, documents, folders and a built-in mockup
   sketcher ([attachments](docs/attachments.md)).
@@ -118,54 +124,88 @@ Discord, WhatsApp or a browser too.
 <sub>Screenshots come from the browser preview with sample data. Regenerate them with
 `npm run screenshots` (see [`scripts/screenshots`](scripts/screenshots/capture.spec.ts)).</sub>
 
-## Privacy and security policy
+## Privacy
 
-Projects and conversations are stored locally. Prompts, attached code and tool
-results can go to the AI provider or CLI you choose; this application is an AI
-orchestrator, not an operating-system network sandbox. Explicit browser,
-GitHub, cloud and bot integrations also communicate with their selected services.
-The review found no hidden instruction deliberately exporting secrets to a
-separate collection service. This is a bounded source review, not a guarantee
-about every provider binary, external plugin or future dependency.
+- **No telemetry, no analytics, no accounts.** PandaCode does not phone home.
+- **Your code stays on your machine.** Projects, conversations and settings are
+  stored locally in SQLite. Prompts go only to the coding CLI or service you
+  pick, under that provider's own terms.
+- **It only talks to services you choose.** Provider keys (GLM, MiMo, DeepSeek, Command Code, cloud
+  sandboxes, bot channels, connection secrets) are sent only to that provider.
+  On macOS they live in `secrets.json` in PandaCode's app data folder, readable
+  only by your user (0600), never the Keychain, so updates never ask for your
+  login password; keys saved in the Keychain by older versions move there on
+  first use. Linux keeps them in the Secret Service and Windows in Credential
+  Manager.
+- **Agent telemetry can be turned off in one place.** Settings → Agents →
+  Privacy → **Turn off agent telemetry** starts every agent with its vendor's
+  own opt-outs (Claude Code, Codex, Kimi, Grok, DeepSeek, Command Code, Pi,
+  Muse, and OpenCode sharing) plus `DO_NOT_TRACK=1`. Your agent config files
+  are not changed. Each agent's row shows what the switch covers. Cline has no
+  per-launch switch, so turn it off in Cline's own settings. With the switch on,
+  Claude Code also stops fetching remote feature flags (it uses its defaults)
+  and can't take sessions started remotely on this computer.
 
-| Feature | Policy in this revision |
-| --- | --- |
-| Windows installer | No WebView2 download; existing runtime required; per-user installation. |
-| Release packaging | Cargo lockfile enforced; no updater artifacts, update signing credentials or automatic publication workflow. |
-| Application updater | Removed from native plugins, capabilities and dependencies; the UI cannot enable it. |
-| Agent update checks/installers | Disabled in frontend and native commands; update a reviewed version manually outside PandaCode. |
-| Cost estimates | Use the saved or bundled price list without downloading a refresh; estimates may be stale. |
-| Jev credentials | Saved in the OS credential vault; an unavailable vault blocks migration/use instead of silently writing plaintext. |
-| Bot notifications | Explicit outbound notify tool always requests approval, including Full access; scheduled summaries remain on the desktop. Replies to an active channel conversation still go to that channel. |
-| Project file previews | HTML/CSS/images display with scripts, fetch, forms and external navigation blocked. The ordinary browser remains available for a site you explicitly open. |
-| Connect | Optional GitHub/relay sign-in; hardened peers required at both ends. Sign out to disconnect fully. |
-| Deploy CLIs | Must be installed manually first; credential-bearing tool invocations reject endpoint/TLS redirection flags. |
-| Local VM desktop | Install only through the explicit Add a desktop action; no background installation on VM start. |
+A few automatic checks send no personal data — just plain requests for public
+information:
 
-## Install this revision
+| What | Where | How often |
+| --- | --- | --- |
+| Latest versions of installed coding CLIs | `formulae.brew.sh`, `downloads.claude.ai`, `api.github.com`, `cdn.kimi.com`, `registry.npmjs.org` (Cline) | About every 6 hours |
+| Plan usage checks for your signed-in agents | That agent's provider | When you open the menu bar item or the Usage dialog |
+| Public model price list (for cost estimates) | `raw.githubusercontent.com` | Daily |
+| PandaCode's own updates (`latest.json` on this repository's latest release) | `github.com` | At launch and about every 6 hours unless Settings → About → Updates is Off |
+| Jev decision model list (optional) | `openrouter.ai` | Only when you choose OpenRouter for Jev decisions and open the model menu or press Refresh; no key is sent |
+| Jev decisions on OpenRouter (optional) | `openrouter.ai` | Only when you choose OpenRouter in Settings → Agents → Jev and run a decision check; sends the selected evidence with your key |
+| Cloud agents (optional): the task's checkout, prompt and harness login go to the machine you chose; PandaCode checks on its active runs | The cloud provider you connected | Only for tasks you start on a cloud provider; while a run is active and at launch to re-attach |
+| Model routing profiler (optional): `model.int8.onnx` and `tokenizer.json`, from a pinned commit, verified by SHA-256 | `raw.githubusercontent.com` | Once, the first time you turn on a team (with routing on) or click Download or Route in Settings → Agents → Model routing; never at launch |
+| PandaCode Connect (optional): GitHub sign-in, then the relay that forwards your devices' end-to-end encrypted messages | `github.com`, the PandaCode relay | Only after you sign in under Settings → Remote access; nothing before |
+| Push notifications (optional, mobile app): the relay sends a generic alert ("A task finished") with a `pandacode://inbox` link to your phone's device token, never task content | Apple Push Notification service, Firebase Cloud Messaging (sent by the PandaCode relay) | Only after you allow notifications in the mobile app while signed in to Connect |
+| Netlify token check (optional): verifies the token and project you enter | `api.netlify.com` | Only when you save a Netlify token in Settings → Agents → Cloud sandboxes |
 
-Read [the installation security review](SECURITY-INSTALLATION-REVIEW.md) and
-[Windows build/install instructions](docs/install-windows-hardened.md). The
-installer never downloads WebView2; install the Microsoft runtime separately
-if it is missing. The Avast alert has not been reproduced or attributed.
+## Install
 
+Download the latest build from
+[GitHub Releases](https://github.com/aicodeking/pandacode/releases/latest):
 
-This archive contains source code, not a prebuilt Windows/macOS installer.
-Use the local build instructions below, on the target operating system. Keep the
-included lockfiles. Installing an upstream release or running the public
-`npx pandacode` package replaces these protections with upstream behavior.
-The copy of the npx installer included here refuses downloads and installation.
+| Platform | File | Requirements |
+| --- | --- | --- |
+| macOS (Apple silicon) | [`PandaCode-macOS-arm64.dmg`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-macOS-arm64.dmg) | macOS 12+ |
+| macOS (Intel) | [`PandaCode-macOS-x64.dmg`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-macOS-x64.dmg) | macOS 12+ |
+| Windows x64 | [`PandaCode-Windows-x64-setup.exe`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Windows-x64-setup.exe) | Windows 10 1809+ or Windows 11 |
+| Windows arm64 | [`PandaCode-Windows-arm64-setup.exe`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Windows-arm64-setup.exe) | Windows 11 on ARM (Snapdragon X and similar) |
+| Linux x64 | [`PandaCode-Linux-x86_64.AppImage`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-x86_64.AppImage) | Ubuntu 22.04+ or compatible, X11 or XWayland |
+| Linux arm64 | [`PandaCode-Linux-aarch64.AppImage`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-aarch64.AppImage) | Ubuntu 24.04+ aarch64 or compatible, X11 or XWayland |
 
-Dependency lifecycle scripts are off by default through the repository `.npmrc`.
-Keep using `npm ci --ignore-scripts`; this is not a sandbox for explicit build
-commands or Rust build scripts. Dependency acquisition and build tooling can
-still require network access.
+Or from a terminal: `npx pandacode` downloads the latest build, verifies its
+signature and installs it (on macOS it is signed locally for you, so no
+Gatekeeper prompt). `npx pandacode --dry-run` only downloads and verifies.
 
-Updates are a deliberate manual operation: review the new source, reproduce
-these protections, build it, and then replace the installed application. The
-package version is `0.5.1` (displayed as `0.5.1+pc.0.3.48`); this is
-an independently labeled fork distribution, not an official upstream release.
-Back up application data before replacing a previous installation.
+With [Homebrew](https://brew.sh): `brew install --cask aicodeking/pandacode/pandacode`
+on macOS, or `brew install aicodeking/pandacode/pandacode` on Linux
+([details](docs/homebrew.md)).
+
+Release builds are not code-signed, so your OS will warn the first time:
+
+- **macOS:** the build carries an ad-hoc signature and is not notarized, so macOS
+  refuses to open it, and **Open Anyway** in **System Settings → Privacy &
+  Security** does not always clear it. Run `xattr -dr com.apple.quarantine
+  /Applications/PandaCode.app` once instead; `npx pandacode` signs the app locally
+  and needs no such step.
+- **Windows:** if SmartScreen appears, click **More info → Run anyway**.
+- **Linux:** `chmod +x PandaCode-Linux-x86_64.AppImage` (or `-aarch64`), then run it. Some
+  distributions need FUSE 2 (`libfuse2`), or set `APPIMAGE_EXTRACT_AND_RUN=1`.
+  The AppImage runs through X11 (XWayland on Wayland) by default; if the window
+  stays blank there, try GTK's native Wayland backend with
+  `GDK_BACKEND=wayland ./PandaCode-Linux-x86_64.AppImage`.
+
+Each file has a `.sha256` checksum beside it. Once installed, PandaCode updates
+itself: it checks the latest release, downloads a newer version in the background,
+verifies its signature, and restarts to install it when no agent is working and
+you've stepped away (or when you click **Restart to update**). In Settings → About,
+**Notify me** checks but asks first (**Install and restart** / **Later**), and **Off**
+stops checking. On Linux only the AppImage updates itself; an unpacked AppImage or a
+package just reports new versions. See [platform support](docs/platform-support.md) for details.
 
 Then install Git and at least one coding CLI and sign in with its normal login.
 PandaCode does not include provider plans or usage.
@@ -174,33 +214,38 @@ PandaCode does not include provider plans or usage.
 
 [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi), a Pi fork that runs on Bun, installs with `bun install -g @oh-my-pi/pi-coding-agent`; sign in through `omp` itself. PandaCode drives it with the same RPC bridge as Pi and passes `--approval-mode yolo` so the bridge stays the only approval gate.
 
-[DeepSeek](https://platform.deepseek.com/api_keys) installs with `npm i -g @deepseek-ai/dsh`; PandaCode launches `dsh --profile acp`. An API key is optional (Settings → Providers, or `DEEPSEEK_API_KEY`); dsh can use its own stored credentials. Usage limits are not shown in PandaCode; check platform.deepseek.com.
+[DeepSeek](https://platform.deepseek.com/api_keys) installs with `npm i -g @deepseek-ai/dsh`; PandaCode launches `dsh --profile acp`. An API key is optional (Settings → Providers, or `DEEPSEEK_API_KEY`); dsh can use its own stored credentials. With a saved key (or `DEEPSEEK_API_KEY`), the Usage dialog shows the account balance from `api.deepseek.com`.
 
 [Command Code](https://commandcode.ai/docs/acp) installs with `npm i -g command-code` (Node 22 or newer); PandaCode launches `command-code acp`. Sign in once with `command-code login`, or save an API key in Settings → Providers (or set `COMMAND_CODE_API_KEY`); either one authenticates the same account. Usage limits are not shown in PandaCode; check Command Code Studio.
-[Cline](https://docs.cline.bot/cline-cli/overview) installs with `npm i -g cline`; PandaCode launches `cline --acp`. Sign in once with `cline auth` (or set `CLINE_API_KEY`); the provider and models chosen in Cline apply. See [provider details](docs/providers.md#cline).
+[Cline](https://docs.cline.bot/usage/cli-overview) installs with `npm i -g cline`; PandaCode launches `cline --acp`. Sign in once with `cline auth` (or set `CLINE_API_KEY`); the provider and models chosen in Cline apply. See [provider details](docs/providers.md#cline).
+
+[Kilo Code](https://kilo.ai/docs/code-with-ai/platforms/cli) installs with `npm i -g @kilocode/cli`; sign in with `kilo auth login`, then select **Kilo Code** in PandaCode. PandaCode launches `kilo acp` and uses Kilo's configured providers and models. See [provider details](docs/providers.md#kilo-code).
 
 Muse Code installs with Meta's launcher into `~/.local/bin/muse`; run `muse login` once in a terminal. PandaCode launches `muse serve` and speaks MSP, Muse's JSON-RPC session protocol, with its sandbox and approval modes; see [docs/providers.md](docs/providers.md#muse-code) for what each mode does and what Muse cannot express.
 
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli) installs with `npm install -g @github/copilot`; run `copilot login` in a terminal, then select **GitHub Copilot CLI** in PandaCode. PandaCode launches the local `copilot` executable over ACP. The CLI manages its own sign-in. See [provider details](docs/providers.md#github-copilot-cli).
 
+[Devin CLI](https://docs.devin.ai/cli) installs with `curl -fsSL https://cli.devin.ai/install.sh | bash` (or `brew install --cask devin-cli`, or the copy bundled with Devin Desktop); run `devin auth login` once in a terminal, then select **Devin CLI** in PandaCode. PandaCode launches `devin acp` with the CLI's own sign-in and lists every Devin model with its own thinking levels. See [provider details](docs/providers.md#devin-cli).
+
+[ZCode](https://github.com/zai-org/ZCode) installs with its install script (`~/.local/bin/zcode`, Node 24); run `zcode` once in a terminal and sign in, then select **ZCode** in PandaCode. PandaCode talks to `zcode app-server` directly — the CLI's own protocol, since it exposes no ACP mode — listing every model the account can reach with its own reasoning levels. See [provider details](docs/providers.md#zcode).
+
+[Hermes Agent](https://hermes-agent.org) installs with `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`; run `hermes acp --setup` or configure `~/.hermes/config.yaml`, then select **Hermes Agent** in PandaCode. PandaCode launches `hermes acp` and uses Hermes' configured provider and models. See [provider details](docs/providers.md#hermes-agent).
+
 ## Build from source
 
-You need Node.js 22 or newer, stable Rust 1.88 or newer, and the
+You need Node.js 22, stable Rust, and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```sh
-cd pandacode-extended
-npm ci --ignore-scripts
-npm run build
-npm run package
-# For a Windows x64 installer with a distinct Extended 0.5.1 asset name:
-# npm run release:build -- windows-x86_64
-# For local development: npm run desktop
+git clone https://github.com/aicodeking/pandacode.git
+cd pandacode
+npm ci
+npm run desktop        # same as: npm run tauri dev
 ```
 
 `npm run dev` serves only the frontend. In a regular browser it runs a labeled,
 device-local sample workspace for UI work; files, Git and terminals are
-simulated there. `npm run package` makes a local platform bundle, and
+simulated there. `npm run tauri build` makes a local installer, and
 `npm run release:build` builds the release asset for your OS (see
 [releasing](docs/releasing.md)).
 
@@ -220,12 +265,11 @@ turns.
 
 In **Files**, click an HTML, SVG, image or PDF to open it in the sidebar browser.
 Filenames mentioned in responses become clickable and resolve against the task's
-own project or worktree. Local file previews are static in this revision: project
-JavaScript and outbound connections do not run inside the preview.
+own project or worktree.
 
 The bar above the prompt shows the project, checkout and branch. Its branch chip
 is the one place for [worktrees](docs/worktrees.md): an unstarted task moves into
-a new worktree in place, a started one spawns a sibling task, and archiving a
+a new worktree in place, a started one spawns a sibling task, and settling a
 clean worktree task offers to remove its checkout and merged branch.
 
 Choose **Board** in the header to manage tasks by status. Choose **Team** in the
@@ -296,8 +340,8 @@ see [providers](docs/providers.md).
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and
 the pull request process, and [AGENTS.md](AGENTS.md) for code conventions. Please
 follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues
-privately as described in [SECURITY.md](SECURITY.md). Bugs and ideas for Extended go in
-[Extended GitHub issues](https://github.com/ginmp8/pandacode-extended/issues). For issues specific to the original PandaCode, use [upstream issues](https://github.com/aicodeking/pandacode/issues).
+privately as described in [SECURITY.md](SECURITY.md). Bugs and ideas go in
+[GitHub issues](https://github.com/aicodeking/pandacode/issues).
 
 Architecture notes: [design](docs/design.md), [native IPC](docs/ipc.md),
 [research](docs/research.md). Provider protocols live in

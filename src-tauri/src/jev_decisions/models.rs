@@ -48,7 +48,7 @@ fn parse(bytes: &[u8]) -> Result<Vec<DecisionModel>, String> {
                     }))
         })
         .map(|entry| DecisionModel {
-            name: entry.name.filter(|n| !n.is_empty() && n.len() <= 200 && !n.chars().any(char::is_control)).unwrap_or_else(|| entry.id.clone()),
+            name: entry.name.filter(|n| !n.is_empty() && n.len() <= 200).unwrap_or_else(|| entry.id.clone()),
             id: entry.id,
         })
         .collect();
@@ -66,9 +66,6 @@ async fn fetch(url: &str) -> Result<Vec<DecisionModel>, String> {
         .map_err(|_| "Could not reach OpenRouter. Try Refresh.".to_string())?;
     if !response.status().is_success() {
         return Err("OpenRouter could not list models. Try Refresh.".into());
-    }
-    if response.content_length().is_some_and(|length| length > MAX_CATALOG as u64) {
-        return Err("OpenRouter's model list was too large.".into());
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
@@ -128,27 +125,5 @@ mod tests {
         assert_eq!(fetch(&url).await.unwrap().len(), 2);
         assert!(!server.await.unwrap().contains("authorization"));
         assert!(list("other").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn catalog_rejects_redirects_errors_and_oversize_without_exposing_bodies() {
-        for response in [
-            "HTTP/1.1 302 Found\r\nLocation: https://example.invalid/private\r\nContent-Length: 0\r\n\r\n".to_owned(),
-            "HTTP/1.1 500 Error\r\nContent-Length: 12\r\n\r\nprivate-body".to_owned(),
-            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", MAX_CATALOG + 1),
-        ] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}/models", listener.local_addr().unwrap());
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0_u8; 4096];
-                let _ = stream.read(&mut request).await.unwrap();
-                stream.write_all(response.as_bytes()).await.unwrap();
-            });
-            let error = fetch(&url).await.unwrap_err();
-            assert!(!error.contains("private-body"));
-            assert!(!error.contains("example.invalid"));
-            server.await.unwrap();
-        }
     }
 }

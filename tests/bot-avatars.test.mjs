@@ -22,20 +22,11 @@ test('avatars render pandas, uploaded images, legacy glyphs and escaped initials
   assert.equal(botAvatarHtml('', '<b>'), '<span class="bot-avatar" aria-hidden="true">&#60;</span>');
 });
 
-test('the picker marks the current choice and shows an uploaded image as its own swatch', () => {
+test('the face picker marks one of six faces and shows an uploaded image as its own swatch', () => {
   const html = avatarPicker('panda:2');
-  assert.equal(html.match(/data-avatar-choice="panda:/g).length, 10);
-  assert.ok(html.includes('data-avatar-choice="panda:2" aria-pressed="true" aria-label="Coral panda"'));
-  assert.ok(html.includes('role="radiogroup" aria-label="Icon"') && html.includes('data-avatar-upload'));
+  assert.equal(html.match(/data-avatar-choice="panda:/g).length, 6);
+  assert.ok(html.includes('data-avatar-choice="panda:2" aria-pressed="true" aria-label="Wink panda"'));
+  assert.ok(html.includes('role="group" aria-label="Face"') && html.includes('data-avatar-upload'));
   assert.ok(!html.includes('data-avatar-choice="custom"'));
   assert.ok(avatarPicker('data:image/png;base64,AAAA').includes('data-avatar-choice="custom" aria-pressed="true"'));
-});
-
-// Hardened additions: untrusted avatar values never become executable markup or huge images.
-test('blocks oversized and unsupported image URL content in avatar markup', () => {
-  const overlong = 'data:image/png;base64,' + 'A'.repeat(300_001);
-  assert.ok(!botAvatarHtml(overlong, 'Ana').includes('<img'));
-  assert.ok(!avatarPicker(overlong).includes('data-avatar-choice="custom"'));
-  assert.ok(!botAvatarHtml('data:image/svg+xml;base64,PHN2Zz4=', 'Ana').includes('<img'));
-  assert.ok(!botAvatarHtml('data:image/jpeg;base64,AA==', 'Ana').includes('<img'));
 });

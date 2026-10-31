@@ -32,115 +32,6 @@ jobs:
       - run: npm run test:release
       - run: npm run site:build
 
-  chat-smoke:
-    name: Chat and thread repeat regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: '22', cache: npm }
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - name: Repeat sensitive chat and ordering tests
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /private/tmp
-          sudo chmod 1777 /private/tmp
-          export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
-          test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test tests/chats.spec.ts tests/thread-order.spec.ts --workers=1 --repeat-each=2
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: chat-smoke-failure-${{ github.run_attempt }}
-          path: test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
-  chat-ui:
-    name: Desktop integration browser (shard ${{ matrix.shard }}/2)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: '22', cache: npm }
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - name: Run desktop integration regression shard
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /private/tmp
-          sudo chmod 1777 /private/tmp
-          export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
-          test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test tests/changes-view.spec.ts tests/inspector-tabs.spec.ts tests/sidebar-sections.spec.ts tests/remote-progress.spec.ts tests/remote-security.spec.ts tests/remote-pairing.spec.ts tests/remote-diagnostics.spec.ts tests/remote-connect-ux.spec.ts tests/remote-first-message.spec.ts tests/remote-images.spec.ts tests/provider-settings.spec.ts tests/provider-handoff.spec.ts tests/board.spec.ts tests/github-hub.spec.ts tests/github.spec.ts --shard="${{ matrix.shard }}/2" --workers=4
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: desktop-playwright-failure-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
-          path: test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
-  historical-ui:
-    name: Historical browser (shard ${{ matrix.shard }}/3)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: '22', cache: npm }
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - name: Run historical parity regression shard
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /private/tmp
-          sudo chmod 1777 /private/tmp
-          export PANDACODE_TEST_CHROME="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' -print -quit)"
-          test -x "$PANDACODE_TEST_CHROME"
-          npx playwright test 'historical-.*.spec.ts' tests/office-viewer.spec.ts tests/document-viewer.spec.ts tests/bots.spec.ts tests/bots-web.spec.ts tests/bots-profile.spec.ts tests/approval-modes.spec.ts tests/tray-popover.spec.ts tests/inspector-new-task.spec.ts tests/jev.spec.ts tests/jev-assist.spec.ts tests/jev-live.spec.ts tests/agent-usage.spec.ts tests/browser.spec.ts tests/history-upgrade.spec.ts tests/overlay.spec.ts tests/vm.spec.ts tests/deploy.spec.ts tests/streaming.spec.ts tests/agent-traces.spec.ts tests/markdown.spec.ts tests/ui.spec.ts tests/support.spec.ts --shard="${{ matrix.shard }}/3" --workers=2
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: historical-playwright-failure-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
-          path: test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
-  connect:
-    name: Connect (${{ matrix.package }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [mobile, relay]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: ${{ matrix.package }}/package-lock.json
-      - run: npm ci --ignore-scripts --prefix ${{ matrix.package }}
-      - run: npm test --prefix ${{ matrix.package }}
-      - run: npm run typecheck --prefix ${{ matrix.package }}
-      - if: matrix.package == 'mobile'
-        run: npm run lint --prefix mobile
-        env:
-          EXPO_NO_TELEMETRY: '1'
-
   rust:
     name: Rust check and tests (Linux)
     runs-on: ubuntu-22.04
@@ -165,3 +56,39 @@ jobs:
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
       - if: ${{ !cancelled() }}
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  router:
+    # x86_64 Linux builds without ONNX Runtime (see `panda_onnx` in src-tauri/build.rs), so Panda Router's
+    # ONNX parity tests run here, on a target that links it.
+    name: Panda Router ONNX parity (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run build
+      # Panda Router's ONNX profiler for the parity tests, pinned like panda_router::ASSETS.
+      # The tests fail rather than skip when CI is set and these are missing.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .panda-router
+          key: panda-router-v4-b52d463905808efd892c91917e3010985359e259fe7a514ae083967c98fa2216-ca870c678352403d107496dc78899fa666ed0f56fef63e88ae398fafe5d78c45
+      - name: Fetch Panda Router profiler
+        run: |
+          base=https://raw.githubusercontent.com/aicodeking/PandaOrchestrator/83e408c794ef1d09b6d13b6ad8734e984f552402/artifacts/panda-router-v4
+          mkdir -p .panda-router
+          while read -r sha file; do
+            [ -f ".panda-router/$file" ] || curl -fsSL --retry 3 -o ".panda-router/$file" "$base/$file"
+            echo "$sha  .panda-router/$file" | shasum -a 256 -c -
+          done <<'EOF'
+          b52d463905808efd892c91917e3010985359e259fe7a514ae083967c98fa2216 model.int8.onnx
+          ca870c678352403d107496dc78899fa666ed0f56fef63e88ae398fafe5d78c45 tokenizer.json
+          EOF
+          echo "PANDA_ROUTER_ASSETS=$PWD/.panda-router" >> "$GITHUB_ENV"
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- panda_router model_routing

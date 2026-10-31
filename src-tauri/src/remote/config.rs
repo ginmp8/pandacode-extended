@@ -3,74 +3,6 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Keychain service for the relay token and the device's X25519 private key.
-pub(crate) const SERVICE: &str = "app.pandacode.remote";
-
-/// Keychain account names for one install, scoped by its data folder. A dev build and the
-/// installed app (each its own device) must not share one item: macOS ties an item to the
-/// signature that made it, so the other build was refused access (errSecAuthFailed, -25293),
-/// and one build's sign-in overwrote the other's token.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Accounts {
-    pub token: String,
-    pub key: String,
-}
-
-pub(crate) fn accounts(dir: &Path) -> Accounts {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(dir.to_string_lossy().as_bytes());
-    let id: String = digest[..6].iter().map(|byte| format!("{byte:02x}")).collect();
-    Accounts { token: format!("relay-token:{id}"), key: format!("device-key:{id}") }
-}
-
-/// The unscoped account names used before 0.3.20, adopted once by the installed app.
-pub(crate) fn legacy_accounts() -> Accounts {
-    Accounts { token: "relay-token".into(), key: "device-key".into() }
-}
-
-/// Only the installed app (data folder named after its identifier) ever owned the legacy
-/// items; a dev build must never take them.
-pub(crate) fn default_install(dir: &Path) -> bool {
-    dir.file_name().is_some_and(|name| name == "ai.pandacode.desktop")
-}
-
-/// Legacy values to copy to the scoped names: the token, and the key when it differs
-/// from the scoped one (the legacy key is the one the relay registered for this device).
-#[derive(Debug, PartialEq)]
-pub(crate) struct Adoption {
-    pub token: String,
-    pub key: Option<String>,
-}
-
-/// Whether to adopt the legacy items. `legacy` is read only when a scoped item is missing
-/// on the installed app, so other installs never touch (or get prompted for) them.
-pub(crate) fn adoption(dir: &Path, device_id: &str, now: i64, token: &crate::Result<Option<String>>, key: &crate::Result<Option<String>>, legacy: impl FnOnce() -> (Option<String>, Option<String>)) -> Option<Adoption> {
-    if !default_install(dir) || !(matches!(token, Ok(None)) || matches!(key, Ok(None))) {
-        return None;
-    }
-    let (legacy_token, legacy_key) = legacy();
-    let legacy_token = legacy_token.filter(|t| token_valid(t, now) && parse_token(t).is_some_and(|claims| claims.dev == device_id))?;
-    let legacy_key = legacy_key.filter(|k| super::crypto::decode_secret(k).is_some() && key.as_ref().ok().and_then(Option::as_deref) != Some(k.as_str()));
-    Some(Adoption { token: legacy_token, key: legacy_key })
-}
-
-/// How a signed-in computer starts: only a real not-found (or an unusable token) signs out;
-/// a keychain error keeps the account and is retried.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Startup {
-    SignedIn(String),
-    SignedOut,
-    Unreadable,
-}
-
-pub(crate) fn startup(read: crate::Result<Option<String>>, now: i64) -> Startup {
-    match read {
-        Ok(Some(token)) if token_valid(&token, now) => Startup::SignedIn(token),
-        Ok(_) => Startup::SignedOut,
-        Err(_) => Startup::Unreadable,
-    }
-}
-
 /// Refresh once fewer than 7 days are left of the token's 30.
 pub(crate) fn needs_refresh(token: &str, now: i64) -> bool {
     parse_token(token).is_some_and(|claims| claims.exp - now < 7 * 24 * 3600)
@@ -112,7 +44,7 @@ pub(crate) struct Account {
     pub avatar_url: String,
 }
 
-/// Non-secret state in the app data dir. The token and private key stay in the keychain.
+/// Non-secret state in the app data dir. The token and private key are in `secrets.rs`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
@@ -120,29 +52,69 @@ pub(crate) struct Settings {
     pub device_id: String,
     #[serde(default)]
     pub host_enabled: bool,
-    /// Independent local-only grant. Old settings and new installs both default off.
+    /// Sends a generic push when a hosted task needs attention or finishes; the relay's bridge
+    /// delivers it to the account's phones. Payloads carry counts, never task content.
     #[serde(default)]
-    pub allow_full_access: bool,
-    /// Recorded only after previously pinned peers have been imported into scoped grants.
+    pub notify_enabled: bool,
+    /// Lets remote devices pick Full access (no approvals). Off: they get approving modes only.
     #[serde(default)]
-    pub grants_scoped: bool,
+    pub remote_full_access: bool,
     #[serde(default)]
     pub account: Option<Account>,
-    /// Devices allowed to drive this one: device id → the public key pinned when trusted.
+    /// Set once scoped pairing (`grants.rs`) has been set up for this install.
     #[serde(default)]
-    pub trusted: std::collections::BTreeMap<String, String>,
+    pub grants_scoped: bool,
+    /// Agents here may use linked computers (docs/machine-orchestration.md).
+    #[serde(default)]
+    pub orchestration: bool,
+    /// Device id → what agents here may do there. Counts only while the device is a target
+    /// with the key it was linked under.
+    #[serde(default)]
+    pub links: std::collections::BTreeMap<String, Link>,
 }
 
-impl Settings {
-    /// Trusted only while the pinned key is still the device's current key.
-    pub(crate) fn is_trusted(&self, device_id: &str, current_key: &str) -> bool {
-        self.trusted.get(device_id).is_some_and(|pinned| !pinned.is_empty() && pinned == current_key)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Access {
+    Read,
+    Ask,
+    Full,
+}
+
+impl Access {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text {
+            "read" => Some(Self::Read),
+            "ask" => Some(Self::Ask),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
     }
 }
 
-/// Reads settings and creates a device id once. Existing, explicitly pinned devices
-/// migrate to scoped grants without any presence-based auto-approval. Full requires
-/// the independent local opt-in; any newly observed device must be approved by its host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Link {
+    pub access: Access,
+    /// When the user linked it, in milliseconds.
+    #[serde(default)]
+    pub at: i64,
+    /// The device's public key when it was linked: a link belongs to the computer behind that
+    /// key, so a changed (or missing) key makes it count for nothing.
+    #[serde(default)]
+    pub key: String,
+}
+
+impl Link {
+    pub(crate) fn counts_for(&self, current_key: &str) -> bool {
+        !self.key.is_empty() && self.key == current_key
+    }
+}
+
+/// Reads the settings, creating the device id once. The first load after scoped pairing
+/// shipped keeps the devices of a computer that already allowed remote control at full
+/// access (`grants::seed_adopt`; only those in the first presence frame after it), so an
+/// upgrade locks nobody out; anything newer waits for approval.
 pub(crate) fn load(dir: &Path) -> Settings {
     let path = dir.join(FILE);
     let text = std::fs::read_to_string(&path).ok();
@@ -152,16 +124,9 @@ pub(crate) fn load(dir: &Path) -> Settings {
         settings.device_id = uuid::Uuid::new_v4().to_string();
         changed = true;
     }
-    // An interrupted permission update always fails closed on restart, even when
-    // remote.json still contains previously trusted devices.
-    if locked_down(dir) {
-        settings.host_enabled = false;
-        settings.allow_full_access = false;
-        settings.trusted.clear();
-    }
     if !settings.grants_scoped {
-        let upgraded = text.is_some() && settings.host_enabled;
-        let seeded = if upgraded { super::grants::seed_trusted(dir, &settings) } else { Ok(()) };
+        let upgraded = text.is_some() && settings.account.is_some() && settings.host_enabled;
+        let seeded = if upgraded { super::grants::seed_adopt(dir) } else { Ok(()) };
         changed |= seeded.is_ok();
         settings.grants_scoped = seeded.is_ok();
         if let Err(error) = seeded {
@@ -176,124 +141,37 @@ pub(crate) fn load(dir: &Path) -> Settings {
     settings
 }
 
-const LOCKDOWN: &str = "connect-access-lockdown";
-pub(crate) const ACCESS_LOCKED: &str = "Connect permissions remain locked after an interrupted permission update. Sign out locally before enabling access or approving another device.";
-
-/// Durable denial fence, written before any revocation. If a later settings
-/// write fails or the process crashes, boot cannot trust an older remote.json.
-pub(crate) fn begin_lockdown(dir: &Path) -> crate::Result<()> {
-    use std::io::Write;
-    let path = dir.join(LOCKDOWN);
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&path)
-        .map_err(|e| format!("Could not record the Connect permission revocation: {e}"))?;
-    file.write_all(b"deny\n").and_then(|_| file.sync_all())
-        .map_err(|e| format!("Could not persist the Connect permission revocation: {e}"))?;
-    sync_parent(dir)
-}
-
-pub(crate) fn locked_down(dir: &Path) -> bool {
-    match std::fs::symlink_metadata(dir.join(LOCKDOWN)) {
-        Ok(_) => true,
-        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-    }
-}
-
-pub(crate) fn end_lockdown(dir: &Path) -> crate::Result<()> {
-    match std::fs::remove_file(dir.join(LOCKDOWN)) {
-        Ok(()) => sync_parent(dir),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not clear the Connect permission revocation: {error}")),
-    }
-}
-
-fn sync_parent(dir: &Path) -> crate::Result<()> {
-    #[cfg(unix)]
-    std::fs::File::open(dir).and_then(|file| file.sync_all())
-        .map_err(|e| format!("Could not sync Connect settings directory: {e}"))?;
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
-}
-
-/// Store complete settings before publishing any permission increase in memory.
 pub(crate) fn save(dir: &Path, settings: &Settings) -> crate::Result<()> {
+    let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    write_atomic(dir, text.as_bytes()).map_err(|e| format!("Could not save remote access settings: {e}"))
+}
+
+/// A unique 0600 temp file beside `remote.json`, fsynced, then renamed over it.
+// ponytail: same steps as secret_store's private write_atomic; share it if that one is made pub(crate).
+fn write_atomic(dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let text = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
-    let temp = dir.join(format!("{FILE}.tmp"));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(&text)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, dir.join(FILE))?;
-        Ok(())
-    })();
-    if let Err(error) = result {
+    let temp = dir.join(format!("{FILE}.{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let renamed = options
+        .open(&temp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|_| std::fs::rename(&temp, dir.join(FILE)));
+    if renamed.is_err() {
         let _ = std::fs::remove_file(&temp);
-        return Err(format!("Could not save remote access settings: {error}"));
     }
-    sync_parent(dir)
+    renamed
 }
 
-/// Serialize a permission mutation under the caller's Remote lock. Revocations
-/// take effect in memory immediately and remain denied across an interrupted save.
-pub(crate) fn update_access(dir: &Path, current: &mut Settings, next: Settings, revoke: bool) -> crate::Result<()> {
-    let earlier_lockdown = locked_down(dir);
-    if !revoke && earlier_lockdown {
-        return Err(ACCESS_LOCKED.into());
-    }
-    if revoke {
-        *current = next.clone();
-    }
-    // Elevations also need a fence: a rename can succeed before directory sync
-    // reports failure. Such an error must not activate the new grant on restart.
-    begin_lockdown(dir)?;
-    save(dir, &next)?;
-    if !earlier_lockdown { end_lockdown(dir)?; }
-    *current = next;
-    Ok(())
-}
-
-/// The device key as stored: `Ok(None)` only when there is none. A keychain failure (a denied
-/// or dismissed prompt, a locked keychain) is an error, so the key is never replaced over it.
-pub(crate) fn read_key(account: &str) -> crate::Result<Option<String>> {
-    #[cfg(test)]
-    {
-        Ok(crate::secret_store::get(SERVICE, account))
-    }
-    #[cfg(all(not(test), target_os = "macos"))]
-    {
-        match security_framework::passwords::get_generic_password(SERVICE, account) {
-            Ok(bytes) => decode_stored_key(bytes).map(Some),
-            Err(error) if error.code() == -25300 => Ok(None),
-            // -25293 (auth failed) and -128 (cancelled): the access prompt was denied or dismissed.
-            Err(error) if matches!(error.code(), -25293 | -128) => Err("macOS did not let PandaCode read its Connect key. Choose Always Allow when Keychain asks, or sign out and sign in again.".into()),
-            Err(error) => Err(format!("Could not read this computer's PandaCode Connect key from Keychain ({}).", error.code())),
-        }
-    }
-    #[cfg(all(not(test), any(target_os = "linux", target_os = "windows")))]
-    {
-        match keyring::Entry::new(SERVICE, account).and_then(|entry| entry.get_password()) {
-            Ok(text) => Ok(Some(text)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err("Could not read this computer's PandaCode Connect key from secure storage.".into()),
-        }
-    }
-    #[cfg(all(not(test), not(any(target_os = "macos", target_os = "linux", target_os = "windows"))))]
-    {
-        Err("Secure storage is not available on this platform.".into())
-    }
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn decode_stored_key(bytes: Vec<u8>) -> crate::Result<String> {
-    String::from_utf8(bytes).map_err(|_| "This computer's PandaCode Connect key is invalid. Sign out and sign in again to create a new identity.".into())
-}
-
-/// Create a key only when secure storage confirms that none exists. Malformed or
-/// unreadable existing keys must never silently replace a pinned device identity.
-pub(crate) fn load_or_create_key(stored: crate::Result<Option<String>>, write: impl FnOnce(&str) -> crate::Result<()>) -> crate::Result<x25519_dalek::StaticSecret> {
-    if let Some(text) = stored? {
-        return super::crypto::decode_secret(&text).ok_or_else(|| "This computer's PandaCode Connect key is invalid. Sign out and sign in again to create a new identity.".into());
+/// The stored key, or a new one written once when none (or an unreadable value) is stored.
+pub(crate) fn load_or_create_key(stored: Option<String>, write: impl FnOnce(&str) -> crate::Result<()>) -> crate::Result<x25519_dalek::StaticSecret> {
+    if let Some(secret) = stored.and_then(|text| super::crypto::decode_secret(&text)) {
+        return Ok(secret);
     }
     let secret = super::crypto::generate();
     write(&super::crypto::encode_secret(&secret))?;
@@ -362,39 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_items_are_adopted_only_when_they_belong_here() {
-        let installed = Path::new("/Users/me/Library/Application Support/ai.pandacode.desktop");
-        let good = token(r#"{"acct":"gh:1","dev":"d1","iat":100,"exp":200}"#);
-        let legacy_key = super::super::crypto::encode_secret(&super::super::crypto::generate());
-        let scoped_key = super::super::crypto::encode_secret(&super::super::crypto::generate());
-        let legacy = |t: &String, k: &String| {
-            let pair = (Some(t.clone()), Some(k.clone()));
-            move || pair
-        };
-        // Missing scoped token: adopt both, the legacy key replacing a different scoped key.
-        assert_eq!(adoption(installed, "d1", 150, &Ok(None), &Ok(Some(scoped_key.clone())), legacy(&good, &legacy_key)), Some(Adoption { token: good.clone(), key: Some(legacy_key.clone()) }));
-        // The same key is not written again.
-        assert_eq!(adoption(installed, "d1", 150, &Ok(None), &Ok(Some(legacy_key.clone())), legacy(&good, &legacy_key)), Some(Adoption { token: good.clone(), key: None }));
-        // Another device's token, an expired one, or a dev build: nothing.
-        assert_eq!(adoption(installed, "d2", 150, &Ok(None), &Ok(None), legacy(&good, &legacy_key)), None);
-        assert_eq!(adoption(installed, "d1", 200, &Ok(None), &Ok(None), legacy(&good, &legacy_key)), None);
-        assert_eq!(adoption(Path::new("/Users/me/Library/Application Support/ai.pandacode.dev"), "d1", 150, &Ok(None), &Ok(None), || panic!("a dev build read the legacy items")), None);
-        // Both scoped items present, or the token unreadable: the legacy items are never read.
-        assert_eq!(adoption(installed, "d1", 150, &Ok(Some(good.clone())), &Ok(Some(scoped_key)), || panic!("read")), None);
-        assert_eq!(adoption(installed, "d1", 150, &Err("locked".into()), &Err("locked".into()), || panic!("read")), None);
-        assert_eq!(adoption(installed, "d1", 150, &Ok(None), &Ok(None), || (None, None)), None);
-    }
-
-    #[test]
-    fn only_a_missing_token_signs_out_at_startup() {
-        let good = token(r#"{"acct":"gh:1","dev":"d1","iat":100,"exp":200}"#);
-        assert_eq!(startup(Ok(Some(good.clone())), 150), Startup::SignedIn(good.clone()));
-        assert_eq!(startup(Ok(Some(good)), 250), Startup::SignedOut);
-        assert_eq!(startup(Ok(None), 150), Startup::SignedOut);
-        assert_eq!(startup(Err("Keychain locked (-25308)".into()), 150), Startup::Unreadable);
-    }
-
-    #[test]
     fn tokens_refresh_in_their_last_week() {
         let day = 24 * 3600;
         let t = token(&format!(r#"{{"acct":"gh:1","dev":"d1","iat":0,"exp":{}}}"#, 30 * day));
@@ -405,40 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn a_keychain_error_never_replaces_the_key() {
+    fn an_existing_key_is_never_replaced() {
         let written = std::cell::Cell::new(false);
         let write = |_: &str| {
             written.set(true);
             Ok(())
         };
-        assert!(load_or_create_key(Err("Keychain locked".into()), write).is_err());
-        assert!(!written.get());
         let existing = super::super::crypto::generate();
-        let kept = load_or_create_key(Ok(Some(super::super::crypto::encode_secret(&existing))), write).unwrap();
+        let kept = load_or_create_key(Some(super::super::crypto::encode_secret(&existing)), write).unwrap();
         assert_eq!(kept.to_bytes(), existing.to_bytes());
         assert!(!written.get());
-        load_or_create_key(Ok(None), write).unwrap();
+        load_or_create_key(None, write).unwrap();
         assert!(written.get());
-    }
-
-    #[test]
-    fn a_malformed_existing_key_is_never_overwritten() {
-        let writes = std::cell::Cell::new(0);
-        let write = |_: &str| { writes.set(writes.get() + 1); Ok(()) };
-        for value in ["", "not a key", "YQ==", "A".repeat(100).as_str()] {
-            assert!(load_or_create_key(Ok(Some(value.to_owned())), write).is_err());
-        }
-        assert!(load_or_create_key(decode_stored_key(vec![0xff]).map(Some), write).is_err());
-        assert_eq!(writes.get(), 0);
-    }
-
-    #[test]
-    fn keychain_accounts_are_scoped_per_install() {
-        let installed = accounts(Path::new("/Users/me/Library/Application Support/ai.pandacode.desktop"));
-        let dev = accounts(Path::new("/Users/me/Library/Application Support/ai.pandacode.dev"));
-        assert_ne!(installed, dev);
-        assert_eq!(installed, accounts(Path::new("/Users/me/Library/Application Support/ai.pandacode.desktop")));
-        assert!(installed.key.starts_with("device-key:") && installed.token.starts_with("relay-token:"));
     }
 
     #[test]
@@ -456,67 +279,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandacode-remote-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = load(&dir);
-        assert!(!first.host_enabled);
-        assert!(!first.allow_full_access);
+        assert!(!first.host_enabled && !first.remote_full_access);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(dir.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        save(&dir, &Settings { remote_full_access: true, ..first.clone() }).unwrap();
+        assert!(load(&dir).remote_full_access);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp files left behind");
         assert!(first.account.is_none());
         assert_eq!(load(&dir).device_id, first.device_id);
-        let parsed: Settings = serde_json::from_str(r#"{"deviceId":"x","hostEnabled":true,"account":{"id":"gh:1","login":"a","avatarUrl":"u"}}"#).unwrap();
+        let parsed: Settings = serde_json::from_str(r#"{"deviceId":"x","hostEnabled":true,"account":{"id":"gh:1","login":"a","avatarUrl":"u"},"trusted":{"old-device":"old-key"}}"#).unwrap();
         assert!(parsed.host_enabled);
-        assert!(!parsed.allow_full_access, "legacy remote control does not grant Full access");
-        assert_eq!(parsed.account.unwrap().avatar_url, "u");
-        assert!(parsed.trusted.is_empty());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn an_interrupted_revocation_never_restores_persisted_permissions() {
-        let dir = std::env::temp_dir().join(format!("pandacode-deny-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut saved = Settings { host_enabled: true, allow_full_access: true, grants_scoped: true, ..Default::default() };
-        saved.device_id = uuid::Uuid::new_v4().to_string();
-        saved.trusted.insert("old-device".into(), "old-pinned-key".into());
-        save(&dir, &saved).unwrap();
-        begin_lockdown(&dir).unwrap();
-        // Fail the main settings rename while leaving the independent denial marker.
-        std::fs::create_dir(dir.join(format!("{FILE}.tmp"))).unwrap();
-        let mut denied = saved.clone();
-        denied.host_enabled = false;
-        denied.allow_full_access = false;
-        denied.trusted.clear();
-        assert!(update_access(&dir, &mut saved, denied.clone(), true).is_err());
-        assert_eq!(saved, denied, "revocation is immediate even if persistence fails");
-        let restarted = load(&dir);
-        assert!(!restarted.host_enabled && !restarted.allow_full_access);
-        assert!(restarted.trusted.is_empty());
-        std::fs::remove_dir(dir.join(format!("{FILE}.tmp"))).unwrap();
-        save(&dir, &saved).unwrap();
-        end_lockdown(&dir).unwrap();
-        assert_eq!(load(&dir), denied);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn a_persisted_denial_fence_cannot_be_undone_by_enabling_access() {
-        let dir = std::env::temp_dir().join(format!("pandacode-fence-enable-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        begin_lockdown(&dir).unwrap();
-        let mut state = Settings::default();
-        let next = Settings { host_enabled: true, allow_full_access: true, ..Default::default() };
-        assert!(update_access(&dir, &mut state, next, false).is_err());
-        assert!(!state.host_enabled && !state.allow_full_access);
-        assert!(locked_down(&dir));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn failed_permission_grants_do_not_change_live_state() {
-        let dir = std::env::temp_dir().join(format!("pandacode-grant-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir(dir.join(format!("{FILE}.tmp"))).unwrap();
-        let mut current = Settings::default();
-        let next = Settings { host_enabled: true, allow_full_access: true, ..Default::default() };
-        assert!(update_access(&dir, &mut current, next, false).is_err());
-        assert!(!current.host_enabled && !current.allow_full_access);
+        assert_eq!(parsed.account.as_ref().unwrap().avatar_url, "u");
+        assert!(serde_json::to_value(&parsed).unwrap().get("trusted").is_none());
+        assert!(!parsed.orchestration && parsed.links.is_empty(), "orchestration is off by default");
+        let linked: Settings = serde_json::from_str(r#"{"orchestration":true,"links":{"d1":{"access":"full","at":5,"key":"k1"}}}"#).unwrap();
+        assert_eq!(linked.links["d1"], Link { access: Access::Full, at: 5, key: "k1".into() });
+        assert!(serde_json::to_string(&linked).unwrap().contains(r#""links":{"d1":{"access":"full","at":5,"key":"k1"}}"#));
+        assert!(serde_json::from_str::<Settings>(r#"{"links":{"d1":{"access":"root"}}}"#).is_err());
+        assert_eq!((Access::parse("ask"), Access::parse("admin")), (Some(Access::Ask), None));
+        assert!(linked.links["d1"].counts_for("k1") && !linked.links["d1"].counts_for("k2"), "a changed key drops the link");
+        let keyless: Settings = serde_json::from_str(r#"{"links":{"d1":{"access":"ask"}}}"#).unwrap();
+        assert!(!keyless.links["d1"].counts_for(""), "a link saved without a key counts for nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -535,12 +321,8 @@ mod tests {
         assert!(load(&fresh).grants_scoped && !grants(&fresh));
         let signed_in_off = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&signed_in_off).grants_scoped && !grants(&signed_in_off));
-        let pinned_key = super::super::crypto::public_key(&super::super::crypto::generate());
-        let upgraded_text = format!(r#"{{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{{"id":"gh:1","login":"a"}},"trusted":{{"existing-device":"{pinned_key}"}}}}"#);
-        let upgraded = dir(Some(&upgraded_text));
+        let upgraded = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&upgraded).grants_scoped && grants(&upgraded));
-        let migrated = super::super::grants::test_scope_from_file(&upgraded, "existing-device", &pinned_key);
-        assert_eq!(migrated, "control");
         let later = dir(Some(r#"{"deviceId":"9b4f6f0e-6a53-4a38-9d6a-2f5a6b1b6a10","hostEnabled":true,"grantsScoped":true,"account":{"id":"gh:1","login":"a"}}"#));
         assert!(load(&later).grants_scoped && !grants(&later));
         for dir in [fresh, signed_in_off, upgraded, later] {

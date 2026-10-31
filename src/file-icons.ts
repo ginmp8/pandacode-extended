@@ -1,4 +1,3 @@
-/// <reference types="vite/client" />
 // File and folder icons from Material Icon Theme (the VS Code extension), matched the way
 // VS Code does: exact file name, then the longest extension, then the default icon.
 import manifest from 'material-icon-theme/dist/material-icons.json' with { type: 'json' };
@@ -27,18 +26,7 @@ export function fileIconId(name: string, isDir: boolean, isLight = false): strin
 
 export function fileIconUrl(name: string, isDir: boolean, isLight = false): string {
   const file = iconDefinitions[fileIconId(name, isDir, isLight)].iconPath.split('/').pop();
-  // Node-based tests resolve the exact installed asset. Keep the directory as a
-  // variable so Vite does not turn all 1,251 icons into eager URL imports.
-  if (typeof window === 'undefined') {
-    const installedIcons = '../node_modules/material-icon-theme/icons/';
-    return new URL(file!, new URL(installedIcons, import.meta.url)).href;
-  }
-  // Development serves only requested icons. Production ships the same local
-  // SVGs under material-icons/, without runtime network/CDN dependencies.
-  const directory = import.meta.env.DEV
-    ? '/node_modules/material-icon-theme/icons/'
-    : `${import.meta.env.BASE_URL}material-icons/`;
-  return `${directory}${file}`;
+  return new URL(`../node_modules/material-icon-theme/icons/${file}`, import.meta.url).href;
 }
 
 export function fileIcon(name: string, isDir: boolean, isLight = false): string {

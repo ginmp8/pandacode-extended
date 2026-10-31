@@ -1,9 +1,9 @@
-//! Vercel Sandbox machines for explicit sandbox management, over the REST API the
+//! Vercel Sandbox machines for cloud agents (docs/cloud-agents.md), over the REST API the
 //! `@vercel/sandbox` SDK uses (github.com/vercel/sandbox, `api-client.ts`). The connection
 //! is the deploy token from Settings → Cloud plus a project (and team) ID for Sandbox.
 //!
-//! Sandboxes are ephemeral microVMs. Delete terminates the session permanently;
-//! stop/restart are not exposed. A machine ID is the *session* ID used by commands.
+//! Sandboxes are ephemeral microVMs: a stopped one is gone, so cloud agents recreate and
+//! rehydrate. A machine ID is the *session* ID, which is what the command and file routes take.
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -116,13 +116,13 @@ impl Vercel {
             if e.is_timeout() { format!("{SERVICE} did not answer in time.") } else { format!("Could not reach {SERVICE}. Check your connection.") }
         })?;
         let status = response.status().as_u16();
-        let bytes = http::read_bytes(SERVICE, response, LIMIT).await?;
+        let bytes = response.bytes().await.map_err(|_| format!("{SERVICE} response was cut off."))?;
         if bytes.len() > LIMIT {
             return Err(format!("{SERVICE} sent a response that is too large."));
         }
         let text = String::from_utf8_lossy(&bytes).into_owned();
         if !(200..300).contains(&status) {
-            return Err(http::error_message(SERVICE, status, &http::redact(&text, &[&self.token])));
+            return Err(http::error_message(SERVICE, status, &text));
         }
         Ok(text)
     }
@@ -136,29 +136,31 @@ impl Vercel {
         let body = json!({"projectId": self.project, "runtime": RUNTIME, "timeout": START_TIMEOUT_MS});
         Ok(machine(&self.api(reqwest::Method::POST, "/v2/sandboxes", Some(body)).await?["session"]))
     }
+    pub async fn status(&self, id: &str) -> Result<String> {
+        Ok(machine(&self.api(reqwest::Method::GET, &format!("/v2/sandboxes/sessions/{id}"), None).await?["session"]).state)
+    }
     /// Sandboxes cannot be paused or restarted, only stopped for good.
     pub async fn halt(&self, id: &str, action: &str) -> Result<()> {
         match action {
-            "delete" => match self.api(reqwest::Method::POST, &format!("/v2/sandboxes/sessions/{id}/stop"), None).await {
+            "stop" | "delete" => match self.api(reqwest::Method::POST, &format!("/v2/sandboxes/sessions/{id}/stop"), None).await {
                 // Already gone is the state the caller wanted.
                 Err(e) if action == "delete" && e.contains("not found") => Ok(()),
                 other => other.map(|_| ()),
             },
             "start" => Err("A stopped Vercel sandbox can't be restarted. Create a new one.".into()),
-            _ => Err("Vercel sandboxes support permanent deletion, not pause or resume.".into()),
+            _ => Err(format!("Vercel sandboxes can be stopped or deleted, not {action}.")),
         }
     }
     pub async fn run(&self, id: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         let body = json!({"command": "sh", "args": ["-c", command], "sudo": false, "wait": true, "logs": true});
         let path = format!("/v2/sandboxes/sessions/{id}/cmd");
         let text = self.text(reqwest::Method::POST, &path, &[], body, timeout + Duration::from_secs(15)).await?;
-        let (mut code, output, command_id) = parse_stream(&text).map_err(|error| http::redact(&error, &[&self.token]))?;
+        let (mut code, output, command_id) = parse_stream(&text)?;
         if let (None, Some(command_id)) = (code, command_id) {
-            super::sandbox::validate_id(&command_id)?;
             let finished = self.call(reqwest::Method::GET, &format!("{path}/{command_id}"), &[("wait", "true")], None, timeout + Duration::from_secs(15)).await?;
             code = finished["command"]["exitCode"].as_i64().map(|c| c as i32);
         }
-        Ok((code, http::redact(&output, &[&self.token])))
+        Ok((code, output))
     }
     /// Add `minutes` to the sandbox's remaining time. Plans cap the total, so a refusal
     /// falls back to a smaller extension instead of failing the run.
@@ -175,7 +177,7 @@ impl Vercel {
 
 impl Sandbox for Vercel {
     fn info(&self) -> Info {
-        Info { persistent: false, max_lease_minutes: MAX_MINUTES }
+        Info { persistent: false, max_unattended_minutes: MAX_MINUTES }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(self.sessions())
@@ -185,6 +187,9 @@ impl Sandbox for Vercel {
     }
     fn power(&self, native: &str, action: &str) -> Result<()> {
         block(self.halt(native, action))
+    }
+    fn state(&self, native: &str) -> Result<String> {
+        block(self.status(native))
     }
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(self.run(native, command, timeout))
@@ -219,14 +224,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lists_creates_and_deletes_with_token_project_and_team() {
+    async fn lists_creates_and_stops_with_token_project_and_team() {
         let (api, seen) = vercel();
         let machines = api.sessions().await.unwrap();
         assert_eq!(machines.len(), 1);
         assert_eq!((machines[0].id.as_str(), machines[0].state.as_str(), machines[0].detail.as_str()), ("vercel:sbx_1", "running", "Vercel Sandbox · 2 vCPU · 4 GB"));
         assert_eq!(api.launch().await.unwrap().state, "starting");
-        assert!(api.halt("sbx_1", "stop").await.is_err());
-        api.halt("sbx_1", "delete").await.unwrap();
+        assert_eq!(api.status("sbx_1").await.unwrap(), "running");
+        api.halt("sbx_1", "stop").await.unwrap();
         api.halt("gone", "delete").await.unwrap();
         assert!(api.halt("sbx_1", "start").await.unwrap_err().contains("can't be restarted"));
         let log = seen.lock().unwrap();
@@ -270,4 +275,23 @@ mod tests {
         assert!(parse_stream("{\"stream\":\"error\",\"data\":{\"code\":\"x\",\"message\":\"boom\"}}").unwrap_err().contains("boom"));
     }
 
+    /// `VERCEL_TOKEN=… VERCEL_PROJECT_ID=… [VERCEL_TEAM_ID=…] cargo test vercel_live -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn vercel_live_smoke() {
+        let (Ok(token), Ok(project)) = (std::env::var("VERCEL_TOKEN"), std::env::var("VERCEL_PROJECT_ID")) else { return };
+        let api = Vercel::new(None, token, project, std::env::var("VERCEL_TEAM_ID").ok());
+        let id = api.launch().await.unwrap().id.trim_start_matches("vercel:").to_string();
+        let t = Duration::from_secs(60);
+        let result = async {
+            assert_eq!(api.run(&id, "echo hi", t).await?, (Some(0), "hi\n".to_string()));
+            api.run(&id, "setsid nohup sh -c 'sleep 120' >/dev/null 2>&1 </dev/null &", t).await?;
+            let (code, _) = api.run(&id, "pgrep -x sleep", t).await?;
+            assert_eq!(code, Some(0));
+            Ok::<_, String>(())
+        }
+        .await;
+        api.halt(&id, "delete").await.unwrap();
+        result.unwrap();
+    }
 }

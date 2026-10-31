@@ -8,9 +8,10 @@ import { useShallow } from 'zustand/react/shallow';
 import { get, remove, set } from '../connect/secrets.ts';
 import { activeSnoozes, type OutboxEntry } from './inbox.ts';
 import { useConnect } from './index.ts';
-import { applyFlush, flush, isUnsent } from './outbox.ts';
-import { LocalPersistence } from './local-persistence.ts';
-import { trusted } from '../connect/trust.ts';
+import { applyFlush, flush, isUnsent, parseOutbox } from './outbox.ts';
+
+const KEY = 'inbox.local';
+const OUTBOX_KEY = 'inbox.outbox';
 
 interface LocalState {
   loaded: boolean;
@@ -27,35 +28,26 @@ export const useLocal = create<LocalState>(empty);
 
 /** Demo mode's seeded snoozes and outbox are never saved or sent. */
 const demo = () => useConnect.getState().demo;
-const persistence = new LocalPersistence({ get, set, remove });
-const owner = () => { const state = useConnect.getState(); return state.signedIn && !state.demo ? state.account?.id ?? null : null; };
-const syncOwner = () => persistence.account(owner());
-syncOwner();
-useConnect.subscribe((state, previous) => {
-  if (state.account?.id === previous.account?.id && state.signedIn === previous.signedIn && state.demo === previous.demo) return;
-  syncOwner();
-  useLocal.setState(empty());
-});
-const persistenceError = (error: unknown) => useConnect.setState({ error: error instanceof Error ? `Could not save local inbox data: ${error.message}` : 'Could not save local inbox data.' });
 
 const save = () => {
-  if (demo()) return Promise.resolve();
-  syncOwner();
+  if (demo()) return;
   const { snoozed, pins, outbox } = useLocal.getState();
-  return persistence.save({ snoozed, pins, outbox });
+  set(KEY, JSON.stringify({ snoozed, pins })).catch(() => undefined);
+  set(OUTBOX_KEY, JSON.stringify(outbox)).catch(() => undefined);
 };
-const patch = (update: (s: LocalState) => Partial<LocalState>) => { useLocal.setState(update); void save().catch(persistenceError); };
+const patch = (update: (s: LocalState) => Partial<LocalState>) => { useLocal.setState(update); save(); };
 
 export async function loadLocal() {
-  syncOwner();
-  const version = persistence.version;
-  const stored = await persistence.load();
-  if (demo() || !persistence.current(version)) return;
+  const [raw, outbox] = await Promise.all([get(KEY), get(OUTBOX_KEY)]);
+  if (demo()) return; // demo mode started while reading
+  let stored: Partial<LocalState> = {};
+  try { stored = JSON.parse(raw ?? '{}') ?? {}; } catch { /* unreadable: start empty */ }
+  const record = (v: unknown) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
   useLocal.setState(s => ({
     loaded: true,
-    snoozed: { ...stored?.snoozed, ...s.snoozed },
-    pins: { ...stored?.pins, ...s.pins },
-    outbox: [...new Map([...(stored?.outbox ?? []), ...s.outbox].map(entry => [entry.id, entry])).values()],
+    snoozed: { ...activeSnoozes(record(stored.snoozed) as Record<string, number>, Date.now()), ...s.snoozed },
+    pins: { ...(record(stored.pins) as Record<string, boolean>), ...s.pins },
+    outbox: [...parseOutbox(outbox), ...s.outbox],
   }));
 }
 
@@ -78,7 +70,6 @@ async function deliver(deviceId: string, sessionId: string, text: string): Promi
 
 /** Sends a message; if the computer can't be reached it waits in the outbox instead. */
 export async function sendOrQueue(deviceId: string, sessionId: string, text: string): Promise<{ queued: boolean; outbox: boolean }> {
-  const version = persistence.version;
   // Earlier unsent messages for this task go first, so this one waits behind them.
   if (useLocal.getState().outbox.some(e => e.deviceId === deviceId && e.sessionId === sessionId)) {
     enqueue(deviceId, sessionId, text);
@@ -87,7 +78,6 @@ export async function sendOrQueue(deviceId: string, sessionId: string, text: str
   try {
     return { ...(await deliver(deviceId, sessionId, text)), outbox: false };
   } catch (error) {
-    if (!persistence.current(version)) throw new Error('The account changed before this message could be queued.');
     if (!isUnsent(error)) throw error;
     enqueue(deviceId, sessionId, text);
     return { queued: false, outbox: true };
@@ -101,42 +91,21 @@ function enqueue(deviceId: string, sessionId: string, text: string) {
 /** Account deletion: snoozes, pins and the outbox, in memory and stored. */
 export async function clearLocal(): Promise<void> {
   useLocal.setState({ ...empty(), loaded: true });
-  await persistence.clear();
+  await Promise.all([remove(KEY), remove(OUTBOX_KEY)]);
 }
 
 let flushing = false;
 export async function flushOutbox() {
   if (flushing || demo()) return;
-  const version = persistence.version;
   flushing = true;
   try {
-    const { connected } = useConnect.getState();
+    const { connected, devices } = useConnect.getState();
     const entries = useLocal.getState().outbox;
     if (!connected || !entries.length) return;
     const result = await flush(entries, {
-      online: id => {
-        const current = useConnect.getState();
-        const device = current.devices.find(d => d.id === id);
-        return persistence.current(version) && current.connected && !!device?.online && trusted(device, current.pins);
-      },
-      send: async entry => {
-        if (!persistence.current(version)) throw new Error('The account changed before delivery.');
-        // Persist an uncertain-delivery marker BEFORE sending. A crash or failed
-        // acknowledgement write must not automatically resend a delivered prompt.
-        useLocal.setState(s => ({ outbox: s.outbox.map(e => e.id === entry.id ? { ...e, error: 'Delivery was started. Check the task before retrying.' } : e) }));
-        await save();
-        if (!persistence.current(version)) throw new Error('The account changed before delivery.');
-        try { return await deliver(entry.deviceId, entry.sessionId, entry.text); }
-        catch (error) {
-          if (persistence.current(version) && isUnsent(error)) {
-            useLocal.setState(s => ({ outbox: s.outbox.map(e => e.id === entry.id ? { ...e, error: undefined } : e) }));
-            await save();
-          }
-          throw error;
-        }
-      },
+      online: id => !!devices.find(d => d.id === id)?.online,
+      send: entry => deliver(entry.deviceId, entry.sessionId, entry.text),
     });
-    if (!persistence.current(version)) return;
     if (result.sent.length || Object.keys(result.failed).length) {
       patch(s => ({ outbox: applyFlush(s.outbox, result) }));
       for (const key of new Set(entries.filter(e => result.sent.includes(e.id)).map(e => `${e.deviceId}\n${e.sessionId}`))) {
@@ -158,12 +127,12 @@ export function retryOutbox(id: string) {
 /** Loads local state (again after leaving demo mode), then flushes whenever the relay reconnects or a computer comes online. */
 export function useOutboxFlusher() {
   const loaded = useLocal(s => s.loaded);
-  const { ready, demoOn, accountId } = useConnect(useShallow(s => ({ ready: s.ready, demoOn: s.demo, accountId: s.account?.id })));
-  const signal = useConnect(s => (s.connected ? s.devices.filter(d => d.online && trusted(d, s.pins)).map(d => d.id).sort().join(',') : ''));
+  const { ready, demoOn } = useConnect(useShallow(s => ({ ready: s.ready, demoOn: s.demo })));
+  const signal = useConnect(s => (s.connected ? s.devices.filter(d => d.online).map(d => d.id).sort().join(',') : ''));
   useEffect(() => {
     if (!ready || demoOn) return;
     useLocal.setState(empty());
-    void loadLocal().catch(persistenceError);
-  }, [ready, demoOn, accountId]);
+    void loadLocal();
+  }, [ready, demoOn]);
   useEffect(() => { if (loaded && signal) void flushOutbox(); }, [loaded, signal]);
 }

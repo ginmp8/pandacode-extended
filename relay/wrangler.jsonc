@@ -3,7 +3,8 @@
   "name": "pandacode-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-02",
-  // Configure your own account/domain explicitly before deployment. No upstream route is inherited.
+  // The bambooed.ai zone must be on the same Cloudflare account. Forks: use your own domain or remove this.
+  "routes": [{ "pattern": "relay.bambooed.ai", "custom_domain": true }],
   "durable_objects": { "bindings": [{ "name": "ACCOUNT", "class_name": "Account" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Account"] }],
   "ratelimits": [
@@ -11,5 +12,5 @@
     { "name": "ACCOUNT_LIMITER", "namespace_id": "1002", "simple": { "limit": 30, "period": 60 } },
     { "name": "GLOBAL_AUTH_LIMITER", "namespace_id": "1003", "simple": { "limit": 300, "period": 60 } }
   ],
-  "observability": { "enabled": false }
+  "observability": { "enabled": true }
 }

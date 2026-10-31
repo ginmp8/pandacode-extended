@@ -1,7 +1,9 @@
-//! Freestyle VMs for explicit sandbox management, over the v5 REST API
+//! Freestyle VMs for cloud agents (docs/cloud-agents.md), over the v5 REST API
 //! (api.freestyle.sh/openapi.json; docs.freestyle.sh/docs/vms). Freestyle VMs are full Linux
 //! machines with `exec-await` (wait for the command), pause/start and idle timeouts.
-//! Commands run as the image's `ubuntu` user. No local file upload is exposed.
+//!
+//! Uploads use the default exec-based writer on purpose: the files API writes as root,
+//! while commands run as the image's `ubuntu` user and must be able to edit what we upload.
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -42,6 +44,17 @@ pub fn disconnect() -> Result<()> {
 pub fn sandbox() -> Result<Box<dyn Sandbox>> {
     let key = super::secret("freestyle_key").ok_or("Connect Freestyle in Settings → Cloud first.")?;
     Ok(Box::new(Freestyle::new(None, key)))
+}
+
+/// `url` with percent-encoded query pairs appended.
+fn with_query(url: String, pairs: &[(&str, &str)]) -> String {
+    match tauri::Url::parse(&url) {
+        Ok(mut parsed) if !pairs.is_empty() => {
+            parsed.query_pairs_mut().extend_pairs(pairs);
+            parsed.into()
+        }
+        _ => url,
+    }
 }
 
 fn machine(vm: &Value) -> Machine {
@@ -144,6 +157,23 @@ impl Freestyle {
         // The API returns the two streams separately, so their interleaving is lost.
         Ok((reply["statusCode"].as_i64().map(|c| c as i32), format!("{}{}", text("stdout"), text("stderr"))))
     }
+    pub async fn read(&self, id: &str, path: &str, offset: u64, max: usize) -> Result<Vec<u8>> {
+        let client = http::client(Duration::from_secs(120))?;
+        let range = format!("bytes={offset}-{}", offset + max as u64 - 1);
+        let response = client.get(with_query(format!("{}/v5/vms/{id}/fs/read", self.api), &[("path", path)])).bearer_auth(&self.key).header("Range", range).send().await
+            .map_err(|_| format!("Could not reach {SERVICE}. Check your connection."))?;
+        let status = response.status().as_u16();
+        match status {
+            200 | 206 => {
+                let bytes = response.bytes().await.map_err(|_| format!("{SERVICE} response was cut off."))?;
+                // A server that ignores Range sends the whole file.
+                Ok(if status == 200 { bytes.iter().skip(offset as usize).take(max).copied().collect() } else { bytes.to_vec() })
+            }
+            // Missing file, or an offset past the end.
+            400 | 404 | 409 | 416 => Ok(Vec::new()),
+            _ => Err(http::error_message(SERVICE, status, &response.text().await.unwrap_or_default())),
+        }
+    }
     /// Seconds of network silence before Freestyle pauses the VM (up to 24 h).
     pub async fn keep(&self, id: &str, minutes: u32) -> Result<()> {
         let seconds = (u64::from(minutes) * 60).clamp(60, MAX_IDLE_SECONDS);
@@ -154,7 +184,7 @@ impl Freestyle {
 impl Sandbox for Freestyle {
     /// Paused VMs keep their disk.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: 24 * 60 }
+        Info { persistent: true, max_unattended_minutes: 24 * 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(self.vms())
@@ -165,11 +195,17 @@ impl Sandbox for Freestyle {
     fn power(&self, native: &str, action: &str) -> Result<()> {
         block(Freestyle::power(self, native, action))
     }
+    fn state(&self, native: &str) -> Result<String> {
+        block(self.status(native))
+    }
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(self.run(native, command, timeout))
     }
     fn keep_alive(&self, native: &str, minutes: u32) -> Result<()> {
         block(self.keep(native, minutes))
+    }
+    fn download(&self, native: &str, path: &str, offset: u64, max: usize) -> Result<Vec<u8>> {
+        block(self.read(native, path, offset, max))
     }
 }
 
@@ -233,10 +269,35 @@ mod tests {
         assert_eq!(api.run("nope", "ls", Duration::from_secs(5)).await.unwrap_err(), "That cloud machine no longer exists.");
     }
 
+    #[tokio::test]
+    async fn downloads_a_byte_range_and_treats_missing_files_as_empty() {
+        let (api, _) = freestyle();
+        assert_eq!(api.read("vm1", "/f", 2, 4).await.unwrap(), b"cdef");
+        assert!(api.read("vm1", "/f", 100, 4).await.unwrap().is_empty());
+        assert!(api.read("vm1", "/missing", 0, 4).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn an_empty_key_is_refused_before_any_request() {
         assert!(Freestyle::new(None, String::new()).check().await.unwrap_err().contains("API key"));
     }
 
+    /// `FREESTYLE_API_KEY=… cargo test freestyle_live -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn freestyle_live_smoke() {
+        let Ok(key) = std::env::var("FREESTYLE_API_KEY") else { return };
+        let api = Freestyle::new(None, key);
+        let id = api.launch("pandacode-smoke").await.unwrap().id.trim_start_matches("freestyle:").to_string();
+        let t = Duration::from_secs(60);
+        let result = async {
+            assert_eq!(api.run(&id, "echo hi", t).await?, (Some(0), "hi\n".to_string()));
+            api.run(&id, "setsid nohup sh -c 'sleep 120' >/dev/null 2>&1 </dev/null &", t).await?;
+            assert_eq!(api.run(&id, "pgrep -x sleep", t).await?.0, Some(0));
+            Ok::<_, String>(())
+        }
+        .await;
+        api.power(&id, "delete").await.unwrap();
+        result.unwrap();
+    }
 }

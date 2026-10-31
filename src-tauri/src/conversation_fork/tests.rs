@@ -31,42 +31,6 @@ fn all_messages(store: &Store, sid: &str) -> Vec<Message> {
 }
 
 #[test]
-fn edit_forks_strictly_before_the_user_message_and_preserves_the_source() {
-    let (store, source) = fixture("codex");
-    append(&store, &source.id, "user", "Earlier prompt");
-    append(&store, &source.id, "assistant", "Earlier answer");
-    let selected = append(&store, &source.id, "user", "Wrong prompt\n\nFile context: README.md\n```\nOriginal attachment\n```");
-    append(&store, &source.id, "assistant", "Answer that must stay behind");
-    store.resume(&source.id, "old-provider-conversation").unwrap();
-    let before = serde_json::to_value(store.session(&source.id).unwrap()).unwrap();
-    let original = all_messages(&store, &source.id);
-    let fork = before_message(&store, &source.id, selected).unwrap();
-    assert!(fork.resume_id.is_none());
-    assert_eq!(fork.status, "idle");
-    assert_eq!(all_messages(&store, &fork.id).iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["Earlier prompt", "Earlier answer"]);
-    assert_eq!(before, serde_json::to_value(store.session(&source.id).unwrap()).unwrap());
-    assert_eq!(original.iter().map(|m| &m.content).collect::<Vec<_>>(), all_messages(&store, &source.id).iter().map(|m| &m.content).collect::<Vec<_>>());
-}
-
-#[test]
-fn edit_first_prompt_has_empty_history_and_rejects_invalid_or_active_boundaries() {
-    let (store, source) = fixture("claude");
-    let first = append(&store, &source.id, "user", "Replace this first prompt");
-    let assistant = append(&store, &source.id, "assistant", "Not editable");
-    let fork = before_message(&store, &source.id, first).unwrap();
-    assert!(all_messages(&store, &fork.id).is_empty());
-    assert!(fork.resume_id.is_none());
-    assert!(before_message(&store, &source.id, assistant).is_err());
-    assert!(before_message(&store, &fork.id, first).is_err());
-    assert!(before_message(&store, &source.id, i64::MIN).is_err());
-    for status in ["running", "waiting"] {
-        store.status(&source.id, status).unwrap();
-        assert!(before_message(&store, &source.id, first).unwrap_err().contains("Stop this task"));
-    }
-    assert_eq!(store.sessions().unwrap().len(), 2);
-}
-
-#[test]
 fn saved_message_content_is_complete_read_only_and_task_scoped() {
     let (store, source) = fixture("claude");
     let other = store
@@ -108,6 +72,23 @@ fn saved_message_content_is_complete_read_only_and_task_scoped() {
         assert!(store.message_content(&source.id, missing).is_err());
     }
     assert!(store.message_content("missing-task", 1).is_err());
+}
+
+#[test]
+fn edit_forks_stop_before_the_message_and_start_a_fresh_harness_session() {
+    let (store, source) = fixture("claude");
+    store.resume(&source.id, "native-source").unwrap();
+    append(&store, &source.id, "user", "First request");
+    append(&store, &source.id, "assistant", "First response");
+    let mistake = append(&store, &source.id, "user", "Mistaken request");
+    append(&store, &source.id, "assistant", "Mistaken response");
+    let fork = before_message(&store, &source.id, mistake).unwrap();
+    assert_eq!(fork.resume_id, None);
+    let copied: Vec<_> = all_messages(&store, &fork.id).into_iter().map(|m| m.content).collect();
+    assert_eq!(copied, ["First request", "First response"]);
+    assert_eq!(all_messages(&store, &source.id).len(), 4);
+    let first = all_messages(&store, &source.id)[0].id;
+    assert!(all_messages(&store, &before_message(&store, &source.id, first).unwrap().id).is_empty());
 }
 
 #[test]

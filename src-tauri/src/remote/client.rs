@@ -38,34 +38,16 @@ pub(crate) async fn call_within(app: &tauri::AppHandle, device_id: &str, method:
         if device_id == inner.settings.device_id {
             return Err("That is this computer.".into());
         }
-        let pairing_key = if method == super::grants::REDEEM {
-            let peer = inner.devices.iter().find(|d| d.id == device_id && d.host && !d.public_key.is_empty())
-                .ok_or(super::UNKNOWN_DEVICE)?;
-            if !peer.online { return Err(socket::OFFLINE.into()); }
-            Some(peer.public_key.clone())
-        } else {
-            inner.callable(device_id)?;
-            None
-        };
+        inner.callable(device_id)?;
         inner.pending.insert(id.clone(), (device_id.to_owned(), reply));
-        if let Some(key) = pairing_key {
-            inner.pairing_pending.insert(id.clone(), (device_id.to_owned(), key));
-        }
     }
     let forget = || {
-        let state = remote(app);
-        let mut inner = state.lock();
-        inner.pairing_pending.remove(&id);
-        inner.pending.remove(&id)
+        super::routes::settled(&id);
+        remote(app).lock().pending.remove(&id)
     };
-    // `ts` and a fresh `nonce` let the host refuse replays (docs/remote-access.md).
-    let request = json!({"type": "req", "id": id, "method": method, "params": params, "ts": chrono::Utc::now().timestamp_millis(), "nonce": uuid::Uuid::new_v4().simple().to_string()});
-    let result = if method == super::grants::REDEEM {
-        socket::send_pairing(app, device_id, &request)
-    } else {
-        socket::send_trusted(app, device_id, &request)
-    };
-    if let Err(error) = result {
+    // Sealing adds `ts` and a fresh `nonce`, so the host can refuse replays.
+    let request = json!({"type": "req", "id": id, "method": method, "params": params});
+    if let Err(error) = socket::send_to_device(app, device_id, &request) {
         forget();
         return Err(error);
     }
@@ -89,7 +71,6 @@ pub(crate) fn resolve(app: &tauri::AppHandle, from: &str, message: &Value) {
     }
     // Answered on whichever route: a failing direct link no longer retries it.
     super::routes::settled(id);
-    inner.pairing_pending.remove(id);
     let Some((_, reply)) = inner.pending.remove(id) else { return };
     let result = if message["ok"].as_bool() == Some(true) {
         Ok(message["result"].clone())

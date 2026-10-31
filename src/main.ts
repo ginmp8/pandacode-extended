@@ -1,8 +1,10 @@
 import { decodeHandoff, historicalProvider } from './provider-handoff';
-import { bindThreadReordering, compareThreadOrder, threadGroupRows } from './thread-order';
-import { FOLDER_LIMIT, PROJECT_LIMIT, folderGroups, readCollapsed, shownTasks } from './sidebar-tree';
-import { COMPLETED_OPEN_KEY, REVIEW_WINDOW, UNREVIEWED_KEY, needsReview, readOpen, sidebarSections } from './sidebar-sections';
+import { bindThreadReordering, syncRovingFocus, threadGroupRows } from './thread-order';
+import { PROJECT_LIMIT, readCollapsed, shownTasks } from './sidebar-tree';
+import { COLLAPSED_SECTIONS_KEY, COMPLETED_OPEN_KEY, UNREVIEWED_KEY, readOpen, sectionOf, sidebarSections, type HeldSection } from './sidebar-sections';
+import { PER_PROJECT, PROJECT_ORDER_KEY, SORT_KEY, compareManual, matchesFilter, readProjectOrder, readSort, taskComparator, type SidebarSort } from './sidebar-sort';
 import './styles.css';
+import './model-picker.css';
 import './smooth.css';
 import './wallpapers.css';
 import './turn-changes.css';
@@ -11,28 +13,37 @@ import './motion.css';
 import './sidebar-tree.css';
 import './inspector-bar.css';
 import './message-queue.css';
+import './schedules.css';
+import './bot-shared-channels.css';
+import './bots.css';
 import './usage-limit.css';
 import './document-viewer.css';
 import './tool-trace.css';
 import './tool-cards.css';
 import './trace-motion.css';
-import { renderDocument, setDocumentView } from './document-viewer';
-import { createFileTabs } from './file-tabs';
+import './action-dock.css';
+import { mountActionDock, mountAgents } from './action-dock';
+import { setDocumentView } from './document-viewer';
 import { moved, queuePanel, type HoldReason, type QueuedMessage } from './message-queue';
+import { initWakeups, openWakeComposer, scheduledMark, wakeCommand, wakeGlyph, wakeStrip } from './schedules-thread';
+import { TRACE_HEADER } from './schedules-api';
 import { afterRun as turnChecksAfterRun, enabled as turnChecksEnabled, noteManualSend, setEnabled as turnChecksSetEnabled } from './turn-checks';
-import { limitActive, limitBanner, limitConnections, resetLabel } from './usage-limit';
-import { cascade, enterView, glideIn, glideOut, hideToast, installDialogMotion, publishSpringEasings, revealIn, showToast, trackSegment } from './motion';
-import { updateTeamProgress } from './team-progress';
+import { limitActive, limitBanner, resetLabel } from './usage-limit';
+import { cascade, enterView, glideIn, glideOut, hideToast, installDialogMotion, publishSpringEasings, revealIn, showToast } from './motion';
+import { teamSignature, updateTeamProgress } from './team-progress';
+import { installedCatalog, setTeamRecency } from './team-catalog';
 import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } from './team-mode';
 import { renderCoordination } from './coordination-message';
 import { renderTurnChanges, changeRequest, captureChangeCards, restoreChangeCards } from './turn-changes';
 import { mountWallpapers } from './wallpapers';
-import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubReference, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, ToolActivity, TurnChanges } from './types';
+import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, TaskTokenUsage, ToolActivity, TurnChanges } from './types';
 import type { BrowserPanel } from './browser';
-import { botAvatarHtml } from './bot-avatars';
 import { call, chooseFolder, preview, subscribe } from './bridge';
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, markdown, morph } from './dom';
+import { botAvatarHtml } from './bot-avatars';
+import * as botThread from './bot-thread';
+import type { Activity as BotActivity, FailoverAsk } from './bots';
 import { mountExternalLinks } from './external-links';
 import { bindMessageActions, messageActionsHtml } from './message-actions';
 import { providerLogo } from './provider-logos';
@@ -43,40 +54,44 @@ import { groupTurns, formatDuration, turnLabel } from './turn-activity';
 import { initializeNativeAppearance } from './appearance';
 import { currentTheme, setTheme } from './theme';
 import { palette } from './palette';
-import { contextSummary, fallbackModel, parseContextUsage } from './model-catalog';
+import { contextSummary, fallbackModel, parseContextUsage, tokenCount } from './model-catalog';
 import { openCodeChoices, type OpenCodeModels } from './preview-opencode';
 import { approvalMode, approvalModes } from './approval-modes';
-import { renderTaskBoard, renderTaskDetails, stageNames, taskStage } from './task-board';
+import { renderTaskBoard, renderTaskDetails, taskStage } from './task-board';
 import { streamMarkdown } from './streaming-markdown';
 import { TerminalPanel } from './terminal-panel';
 import { ProjectRunner } from './run-project';
-import { captureTranscriptAnchor } from './transcript-scroll';
+import { captureTranscriptAnchor, followTranscriptBottom } from './transcript-scroll';
 import { Subagents } from './subagents';
 import { JevActivity } from './jev-activity';
 import { initializeSidebarResizing } from './sidebar-resize';
 import { changeUiScale, initializeUiSizing, setUiScale } from './ui-size';
 import { approvalBarHtml } from './approval-bar';
+import { decorateTranscript, initOrchestration, syncOrchestration } from './machine-orchestration';
 import { createThreadFind } from './thread-find';
 import type { RemoteHost, RemoteRepoCheck, RemoteStatus, RemoteTarget } from './remote-types';
 import type { RemoteStart } from './remote-progress';
-import { LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
-import { botAvatar, botsBarHtml, botsListHtml, botsPanelHeadHtml, storedSidebarView, storeSidebarView, syncSeen, type SidebarView } from './sidebar-bots';
+import type { RoutingMode, RoutingStatus } from './model-routing';
+import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
+import './cloud-agents.css';
+import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
+import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
 import { mountFileMentions, type MentionEntry } from './file-mentions';
+import { createFileTabs } from './file-tabs';
 import { bindFileLinkContext, configureFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
 import { createWorktrees } from './worktrees';
-import { createGithub, githubEnabled, type LinkedIssueAction, type LinkedIssueActionFailure } from './github';
-import { startAppUpdates } from './app-updates';
+import { createGithub, githubEnabled } from './github';
+import { mountUpdatePill, startAppUpdates } from './app-updates';
 import { projectIconHtml } from './project-icons';
 import { createPullView } from './github-pull';
 import { createSearchPanel } from './search-panel';
 import { createTokenSaver } from './token-saver-panel';
 import { MAX_IMAGES, mountPromptAttachments, type PromptImage } from './attachments';
-import { attachmentTarget, contextBlocks, parseAttachments } from './message-attachments';
-import { attachmentChips, sentImageKey } from './message-attachment-chips';
-import { prepareRewindDraft, type RewindDraft } from './message-rewind';
+import { attachmentChips, parseAttachments } from './message-attachments';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
 import { isMac, isWindows, shortcut } from './platform';
 import { createGoalBanner, showGoalDialog, showCommandCenter, type GoalState, type GoalAction, type CommandPanel } from './command-center';
@@ -85,43 +100,54 @@ import type { ArchitectView } from './architect';
 import { syncOverlayContext } from './overlay-client';
 import { initializeAgentUpdates } from './agent-updates';
 import { isChatProject, NO_PROJECT } from './chats';
-import type { PullReviewContext, ReviewRequest } from './hardened/review-model';
+import { CONTEXT_LIMIT, mainContext, parseBtw, readLinks, sideTitle, writeLink, type BtwLink } from './btw';
+import { BtwPanel } from './btw-panel';
+import './btw.css';
+import { mountAgentsDock } from './agents-dock';
 import { mountChangesView, type ChangesView } from './changes-view';
 import { INSPECTOR_VIEWS, closeTab, closedViews, loadTabs, openTab, sameTabs, saveTabs, threadDefault, type InspectorView } from './inspector-tabs';
+import { TailText } from './tail-text';
+import { noteChangedPaths, preloadDiffsAfterPaint } from './diff-prefetch';
 
 /* Visual thesis: calm surfaces, system typography, yellow selection, and bamboo details.
  * Content: project navigation → conversation → contextual source review.
  * Interaction: quick drawer reveals, calm dialog entrances, coalesced text updates. */
 type WorkspaceView = 'conversation' | 'board' | 'github';
 type LiveTool = { key: string; content: string | ToolActivity; statusOnly?: boolean; commentary?: boolean };
-type Stream = { text: string; retainedMessageKey?: string; tools: LiveTool[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage };
+type Stream = { body: TailText; thought: TailText; readonly text: string; readonly thinking?: string; retainedMessageKey?: string; tools: LiveTool[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage };
 /** Views this platform can show; the inspector's open tabs and selection persist across launches. */
-const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view !== 'simulator' || isMac || isWindows);
+const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view === 'simulator' ? isMac || isWindows : view === 'vm' ? isMac : true);
 let inspectorTabs = loadTabs(localStorage, INSPECTOR_AVAILABLE);
-const INSPECTOR_TITLES: Record<InspectorView, string> = { files: 'Files', search: 'Search', changes: 'Changes', browser: 'Browser', pull: 'Pull request', simulator: 'Simulators', vm: 'Virtual machines', design: 'Design' };
-const INSPECTOR_TIPS: Partial<Record<InspectorView, string>> = { simulator: 'iOS & Android simulators', design: 'Design canvas' };
-const INSPECTOR_ICONS: Record<InspectorView, string> = { files: 'file', search: 'search', changes: 'branch', browser: 'globe', pull: 'pull', simulator: 'phone', vm: 'monitor', design: 'sketch' };
+/** Open files is the inspector's per-task editor view: shown only while the task has file tabs, never saved in the strip's order. */
+type PanelView = InspectorView | 'file';
+const INSPECTOR_TITLES: Record<InspectorView, string> = { files: 'Files', search: 'Search', changes: 'Changes', browser: 'Browser', pull: 'Pull request', simulator: 'Simulators', vm: 'Virtual machines', design: 'Design', btw: 'By the way' };
+const INSPECTOR_TIPS: Partial<Record<InspectorView, string>> = { simulator: 'iOS & Android simulators', design: 'Design canvas', btw: 'By the way: a side thread' };
+const INSPECTOR_ICONS: Record<InspectorView, string> = { files: 'file', search: 'search', changes: 'branch', browser: 'globe', pull: 'pull', simulator: 'phone', vm: 'monitor', design: 'sketch', btw: 'chat' };
 /** Tab buttons keep the actions the old icon bar used, so every handler and shortcut still applies. */
-const INSPECTOR_ACTIONS: Record<InspectorView, string> = { files: 'tab-files', search: 'tab-search', changes: 'tab-changes', browser: 'browser', pull: 'tab-pull', simulator: 'tab-simulator', vm: 'tab-vm', design: 'tab-design' };
+const INSPECTOR_ACTIONS: Record<InspectorView, string> = { files: 'tab-files', search: 'tab-search', changes: 'tab-changes', browser: 'browser', pull: 'tab-pull', simulator: 'tab-simulator', vm: 'tab-vm', design: 'tab-design', btw: 'tab-btw' };
 const state = {
   projects: [] as Project[], sessions: [] as Session[], providers: [] as Provider[],
   projectId: '', sessionId: '', messages: [] as Message[], messagesLoading: false, messagesError: '', streams: new Map<string, Stream>(),
   view: (({ board: 'board', github: 'github' } as Record<string, 'board' | 'github'>)[localStorage.getItem('pandacode.view') ?? ''] ?? 'conversation') as WorkspaceView, boardPanel: false,
   sidebarCollapsed: localStorage.getItem('pandacode.sidebarCollapsed') === 'true',
-  query: '', archived: false, inspector: false, inspectorTab: threadDefault(inspectorTabs),
+  query: '', inspector: false, inspectorTab: threadDefault(inspectorTabs) as PanelView,
   projectFilter: localStorage.getItem('pandacode.projectFilter') ?? '', collapsedFolders: readCollapsed(localStorage, 'pandacode.collapsedFolders'), expandedFolders: new Set<string>(),
   /** Follow-ups typed while an agent works, per task, in delivery order; mirrored from native storage. */
   queues: new Map<string, QueuedMessage[]>(), queueHolds: new Map<string, HoldReason>(), queueEditing: '', queueBusy: new Set<string>(),
-  git: null as GitStatus | null, jj: null as JjStatus | null, files: [] as FileEntry[], filePath: '', gitError: '', filesError: '', inspectorLoading: false,
-  selectedFile: '', selectedContent: '', selectedKind: '' as '' | 'diff' | 'file', selectedStaged: false, filePreviewLoading: false,
+  git: null as GitStatus | null, jj: null as JjStatus | null, files: [] as FileEntry[], openFolders: new Set<string>(), folderFiles: new Map<string, FileEntry[]>(), gitError: '', filesError: '', inspectorLoading: false,
+  selectedFile: '', selectedContent: '', selectedKind: '' as '' | 'diff', selectedStaged: false, filePreviewLoading: false,
   browserUrl: '',
   attachments: [] as string[], drafts: new Map<string, string>(), defaultProvider: (localStorage.getItem('pandacode.defaultProvider') ?? localStorage.getItem('pandacode.provider') ?? 'claude') as ProviderId,
   browserAttachments: new Map<string, BrowserAttachment[]>(),
   moodboardAttachments: new Map<string, { id: string; projectId: string; name: string }[]>(),
   generation: 0, hasOlder: false,
+  sharedChannelId: '', sharedChannelDetail: null as SharedChannelDetail | null, sharedChannelRequest: 0,
+  sharedChannelDrafts: new Map<string, string>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
 };
 let renderFrame = 0;
 let navigationFrame = 0;
+let settledDock: HTMLElement | null = null;
+const settledResize = new ResizeObserver(() => { if (settledDock) $('#navigation').style.setProperty('--settled-height', `${settledDock.offsetHeight}px`); });
 type FinishingStream = { stream: Stream; finishedAt: number; error?: string };
 const finishingStreams = new Map<string, FinishingStream>();
 // Ignore late snapshots/events for IDs removed during this window's lifetime.
@@ -133,7 +159,6 @@ let inspectorDiff: import('./diff-viewer').DiffViewerController | undefined;
 let inspectorDiffEpoch = 0;
 let transientId = -1;
 const savedMarkdownSources = new WeakMap<HTMLElement, string>();
-const savedActivitySources = new WeakMap<HTMLElement, string>();
 let olderMessagesRequest: { sessionId: string; generation: number; beforeId: number } | undefined;
 const pendingApprovals = new Set<string>();
 const configuringSessions = new Set<string>();
@@ -149,22 +174,20 @@ let menuEpoch = 0;
 let pendingMenuOpen: { anchor: HTMLElement; release: () => void } | undefined;
 let openingProjectForTask: { id: string; generation: number } | undefined;
 let creatingTask = false;
-let workspaceReady = false;
-let creatingChat = false;
-let recoveringChatId: string | undefined;
-const chatFileAttachments = new Map<string, string[]>();
 let openingSupport = false;
 let activityTimer = 0;
 let workTimer = 0;
+let channelWorkingLabelTimer = 0;
 let browserPanel: BrowserPanel | undefined, browserWanted = false;
 let simulatorPanel: ReturnType<typeof import('./simulator').mountSimulator> | undefined, simulatorLoading: Promise<void> | undefined;
 let vmPanel: ReturnType<typeof import('./vm-panel').mountVmPanel> | undefined, vmLoading: Promise<void> | undefined;
 let designPanel: ReturnType<typeof import('./design-canvas').mountDesignCanvas> | undefined, designLoading: Promise<void> | undefined;
+let progressPip: import('./progress-pip').ProgressPip | undefined, progressPipLoading: Promise<void> | undefined;
 let browserLifecycle = Promise.resolve();
 let browserOwner = '', browserRevision = 0, inspectorSuppressed = false;
-/** Last explicit inspector preference for tasks without saved panel state (session-only). */
+/** The user's last explicit inspector toggle; a task without saved panel state follows it. */
 let inspectorChosen = true;
-type ThreadPanel = { workspace: string; open: boolean; tab: typeof state.inspectorTab; folder: string; file: string; kind: typeof state.selectedKind; staged: boolean; context?: FileLinkContext; browserUrl: string };
+type ThreadPanel = { workspace: string; open: boolean; tab: typeof state.inspectorTab; folders: string[]; file: string; kind: typeof state.selectedKind; staged: boolean; context?: FileLinkContext; browserUrl: string };
 const threadPanels = new Map<string, ThreadPanel>();
 const teams = new Map<string, TeamSnapshot | null>();
 let architectView: ArchitectView | undefined;
@@ -175,22 +198,15 @@ let jevTestRequest = 0;
 let architectSetupRequest = 0;
 let overlayOpenRequest = 0;
 let jevDecisionsEnabled = false;
-let jevSettingsSaved = false;
 function setJevAvailability(enabled: boolean): void {
   jevDecisionsEnabled = enabled;
   architectView?.setAssistEnabled(enabled);
 }
-void call<import('./jev').JevConfiguration>('jev_configuration').then(config => {
-  // Credential loading can finish after Settings has already saved a newer choice.
-  if (!jevSettingsSaved) setJevAvailability(Boolean(config.decisionsEnabled));
-}).catch(() => { /* Optional integrations never block startup. */ });
-window.addEventListener('pandacode:jev-settings', event => {
-  jevSettingsSaved = true;
-  setJevAvailability(Boolean((event as CustomEvent<import('./jev').JevConfiguration>).detail.decisionsEnabled));
-});
+void call<import('./jev').JevConfiguration>('jev_configuration').then(config => setJevAvailability(Boolean(config.decisionsEnabled))).catch(() => { /* Optional integrations never block startup. */ });
+window.addEventListener('pandacode:jev-settings', event => setJevAvailability(Boolean((event as CustomEvent<import('./jev').JevConfiguration>).detail.decisionsEnabled)));
 async function ensureArchitectView(): Promise<ArchitectView> {
   return architectLoading ??= import('./architect').then(({ ArchitectView }) => {
-    architectView = new ArchitectView({ setup: anchor => run(showArchitectSetup(anchor)), loadModels, updated: onArchitect, report, onFork: forkAtMessage, fileContext: sessionId => ({ projectId: state.projectId, sessionId }), assist: (sessionId, kind) => run(openJevAssist(kind, sessionId)) });
+    architectView = new ArchitectView({ setup: anchor => run(showArchitectSetup(anchor)), loadModels, updated: onArchitect, report, onFork: forkAtMessage, fileContext: sessionId => ({ projectId: state.projectId, sessionId }), assist: (sessionId, kind) => run(openJevAssist(kind, sessionId)), remote: sessionId => Boolean(state.sessions.find(task => task.id === sessionId)?.remoteDevice) });
     architectView.setAssistEnabled(jevDecisionsEnabled);
     $('#subagents-host').before(architectView.host);
     architectView.setTask(state.sessionId, teams.get(state.sessionId) ?? null, state.providers);
@@ -206,20 +222,28 @@ function onArchitect(team: TeamEvent): void {
   if (team.sessionId === state.sessionId && team.error && team.error !== current?.error && !/^Team (paused|stopped)\./.test(team.error)) notify(team.error);
   const wasActive = teamActive(current);
   teams.set(team.sessionId, team);
-  const task = state.sessions.find(s => s.id === team.sessionId);
+  const task = state.sessions.find(s => s.id === team.sessionId), taskState = `${task?.status}:${task?.taskStage}`;
   if (task && teamActive(team)) { task.status = 'running'; task.taskStage = 'in_progress'; }
   if (task && !teamActive(team) && !state.streams.has(task.id)) task.status = 'idle';
   void ensureArchitectView().then(view => { if (!deletedSessions.has(team.sessionId)) view.update(team); });
-  if (team.sessionId === state.sessionId) {
-    if (wasActive !== teamActive(team)) renderComposer();
-    else refreshModelLabels();
-  }
+  // A snapshot that only moved its revision shows nothing new: no composer, thread or sidebar paint.
+  if (current && teamSignature(current) === teamSignature(team) && taskState === `${task?.status}:${task?.taskStage}`) return;
+  if (team.sessionId === state.sessionId) scheduleTeamRender(wasActive !== teamActive(team));
   scheduleNavigation();
+}
+/** Team snapshots can arrive many times a frame: the composer (and thread worker lines) paint once per frame. */
+let teamFrame = 0, teamComposer = false;
+function scheduleTeamRender(composer: boolean): void {
+  teamComposer ||= composer;
+  teamFrame ||= requestAnimationFrame(() => {
+    const full = teamComposer; teamFrame = 0; teamComposer = false;
+    if (full) renderComposer(); else refreshModelLabels();
+  });
 }
 async function loadTeam(id: string): Promise<TeamSnapshot | null> {
   const known = teams.has(id), before = teams.get(id);
-  // A task on another computer is one agent there; a team saved on it (a default team) never runs here.
-  const loaded = state.sessions.find(task => task.id === id)?.remoteDevice ? null : await call<TeamSnapshot | null>('architect_get', { sessionId: id });
+  // A task on another computer shows the team its host runs; older hosts have none to show.
+  const loaded = state.sessions.find(task => task.id === id)?.remoteDevice ? await call<TeamSnapshot | null>('remote_team', { sessionId: id }).catch(() => null) : await call<TeamSnapshot | null>('architect_get', { sessionId: id });
   if (deletedSessions.has(id)) return null;
   // An update or a removal that arrived during the fetch is newer than this snapshot.
   if (teams.has(id) !== known || teams.get(id) !== before) return teams.get(id) ?? null;
@@ -229,9 +253,21 @@ async function loadTeam(id: string): Promise<TeamSnapshot | null> {
   if (id === state.sessionId) architectView?.setTask(id, loaded, state.providers);
   return loaded;
 }
+/** A mirror's host reports changed worker rows (`team` events) and run ends: reread its team. */
+const mirrorTeamReads = new Map<string, number>();
+function refreshMirrorTeam(id: string): void {
+  if (mirrorTeamReads.has(id)) return;
+  mirrorTeamReads.set(id, window.setTimeout(() => {
+    mirrorTeamReads.delete(id);
+    void call<TeamSnapshot | null>('remote_team', { sessionId: id }).then(team => {
+      if (team) onArchitect(team); else if (teams.get(id)) onArchitect({ sessionId: id, removed: true });
+    }).catch(() => undefined);
+  }, 300));
+}
 async function showArchitectSetup(anchor: HTMLElement): Promise<void> {
   if (architectSetupCleanup) { architectSetupCleanup(); return; }
   const task = session(); if (!task) return;
+  if (task.remoteDevice) { notify(mirrorTeamNote(task)); return; }
   closeMenus();
   const request = ++architectSetupRequest;
   const { openArchitectSetup } = await import('./architect');
@@ -256,75 +292,198 @@ async function showArchitectSetup(anchor: HTMLElement): Promise<void> {
   }, () => { architectSetupCleanup = undefined; });
 }
 /** Team mode needs no setup: the task's selected model leads, and the lead (or the user's prompt) picks worker models. */
-const TEAM_TIP = 'Team mode: your selected model becomes the lead. It plans the work, starts other agents in parallel, picks a model for each worker on its own, and reviews their results. To choose the workers yourself, just say so in your prompt, like "use Sonnet 5.5 workers" or "have Codex review it". Click to turn Team on or off.';
-/** Team toggles an automatic team, or with Settings → Classic team setup opens Architect & workers. */
+const TEAM_TIP = 'Team mode: your selected model becomes the lead. It plans the work, starts other agents in parallel and reviews their results. Cheap, Balanced and Best set how Panda Router picks each worker\'s model; with routing off the lead picks a model for each worker on its own. To choose the workers yourself, just say so in your prompt, like "use Sonnet 5.5 workers" or "have Codex review it".';
+const routeIcon = (path: string) => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+/** The Team menu's team kinds. Each one is Panda Router's global mode, so the next task pre-checks the kind used last. */
+/** The kinds are one global setting: every automatic team follows it, and new tasks start with it. */
+const TEAM_KINDS_HINT = 'Worker models for every team · remembered', TEAM_KINDS_OFF_HINT = 'Worker models for every team · turns routing on';
+const TEAM_KINDS: { id: RoutingMode; label: string; description: string; leading: string }[] = [
+  { id: 'cheapest', label: 'Cheap team', description: 'Cheapest model likely to pass', leading: routeIcon('<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="7.5" cy="7.5" r="1.2"/>') },
+  { id: 'balanced', label: 'Balanced team', description: 'Best value for the cost', leading: routeIcon('<path d="M12 4v16M7 20h10M5 8h14M5 8l-3 6a3 3 0 0 0 6 0zM19 8l-3 6a3 3 0 0 0 6 0z"/>') },
+  { id: 'quality', label: 'Best team', description: 'Strongest model for each worker', leading: icon('spark') },
+];
+/** The task's team as the Team button names it: off, a named agent team, a routed kind, or a team whose lead picks models. */
+function teamState(s: Session): { id: string; label: string } {
+  const team = teams.get(s.id);
+  if (!team) return { id: 'off', label: 'Team' };
+  if (team.config.rosterOnly) return { id: 'named', label: team.config.name?.trim() || 'Team' };
+  const kind = team.config.auto && routing?.enabled ? TEAM_KINDS.find(k => k.id === routing?.mode) : undefined;
+  return kind ?? { id: 'lead', label: 'Team' };
+}
+const teamButtonHtml = (s: Session) => `${teamToggles.has(s.id) ? '<span class="support-spinner" aria-hidden="true"></span>' : icon('worktree')}<span>${escape(teamState(s).label)}</span>${icon('down')}`;
+/** Team opens the team menu, or with Settings → Classic team setup opens Architect & workers. */
 function teamButton(s: Session): string {
   if (s.remoteDevice) return '';
-  const on = Boolean(teams.get(s.id));
+  const on = Boolean(teams.get(s.id)), busy = teamToggles.has(s.id);
   return classicTeamSetup()
-    ? `<button type="button" class="composer-team-button" data-action="architect-setup" aria-label="Architect & workers" aria-pressed="${on}" title="Architect & workers">${icon('worktree')}<span>Team</span></button>`
-    : `<button type="button" class="composer-team-button" data-action="team-toggle" aria-label="Team" aria-description="${escape(TEAM_TIP)}" aria-pressed="${on}" data-tip="${escape(TEAM_TIP)}">${icon('worktree')}<span>Team</span></button>`;
+    ? `<button type="button" class="composer-team-button" data-action="architect-setup" aria-label="Architect & workers" aria-pressed="${on}" aria-busy="${busy}" ${busy ? 'disabled' : ''} title="Architect & workers">${icon('worktree')}<span>Team</span></button>`
+    : `<button type="button" id="team-trigger" class="composer-team-button" data-action="team-menu" aria-description="${escape(TEAM_TIP)}" data-tip="${escape(TEAM_TIP)}" aria-haspopup="dialog" aria-expanded="false" aria-busy="${busy}" ${on ? 'data-on' : ''}>${teamButtonHtml(s)}</button>`;
 }
-const AUTO_ROSTER_MAX = 24, AUTO_PER_HARNESS = 6;
-/** Installed models the lead may pick from; it can also name any other model directly. */
-async function autoRoster(): Promise<WorkerProfile[]> {
-  const installed = state.providers.filter(p => p.installed);
-  const catalogs = await Promise.allSettled(installed.map(p => loadModels(p.id)));
-  const roster: WorkerProfile[] = [], ids = new Set<string>();
-  installed.forEach((harness, index) => {
-    const result = catalogs[index];
-    for (const model of (result.status === 'fulfilled' ? result.value : harness.models).slice(0, AUTO_PER_HARNESS)) {
-      const id = `${harness.id}-${model.id}`.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+$/, '').slice(0, 80);
-      if (!model.id || roster.length >= AUTO_ROSTER_MAX || ids.has(id)) continue;
-      ids.add(id);
-      roster.push({ id, name: `${model.name} · ${harness.name}`.slice(0, 80), provider: harness.id, model: model.id, reasoningEffort: null });
+/** Panda Router's global mode, cached for the Team button and menu; Settings announces every status it shows. */
+let routing: RoutingStatus | null = null;
+/** Every change of `routing` (a Team menu pick, a Settings status) takes a ticket; a reply lands only
+ * while no newer change has started. Reads (status, prepare) take none: they land only if no change
+ * started after them and none is pending, so a read never overrides a change. */
+let routingTicket = 0, routingConfiguring = 0, routingFailedAt = 0;
+let routingLoad: Promise<RoutingStatus | null> | null = null;
+/** A Settings status that arrived during a Team menu configure; applied if that configure fails. */
+let routingMissed: RoutingStatus | null = null;
+const ROUTING_RETRY_MS = 3000;
+/** Redraws only the Team button's label, so the prompt keeps its focus and caret. */
+function syncTeamButton(): void {
+  const trigger = document.querySelector<HTMLElement>('#team-trigger'), s = session(); if (!trigger || !s) return;
+  const html = teamButtonHtml(s);
+  if (trigger.innerHTML !== html) trigger.innerHTML = html;
+  trigger.toggleAttribute('data-on', Boolean(teams.get(s.id)));
+  trigger.setAttribute('aria-busy', String(teamToggles.has(s.id)));
+}
+function applyRouting(ticket: number, next: RoutingStatus): boolean {
+  if (ticket !== routingTicket) return false;
+  routing = next; syncTeamButton(); return true;
+}
+/** A read started at `ticket` lands only if no change started since and none is pending. */
+function applyRead(ticket: number, next: RoutingStatus): void {
+  if (!routingConfiguring) applyRouting(ticket, next);
+}
+/** Reads the status once at a time; every caller shares the request in flight. */
+function loadRouting(): Promise<RoutingStatus | null> {
+  return routingLoad ??= (async () => {
+    const ticket = routingTicket;
+    try {
+      const next = await call<RoutingStatus>('model_routing_status');
+      routingFailedAt = 0; applyRead(ticket, next); return next;
+    } catch (cause) { routingFailedAt = Date.now(); console.warn('Model routing status is unavailable', cause); return null; }
+    finally { routingLoad = null; }
+  })();
+}
+/** Until a status has loaded, a local task asks again when it renders (no request once loaded). */
+function retryRouting(s: Session | undefined): void {
+  if (!routing && s && !s.remoteDevice && Date.now() - routingFailedAt >= ROUTING_RETRY_MS) void loadRouting();
+}
+// Settings' status is newer than anything in flight, except a configure started here, whose reply follows.
+window.addEventListener('pandacode:routing', event => {
+  const next = (event as CustomEvent<RoutingStatus>).detail;
+  if (routingConfiguring) routingMissed = next; else applyRouting(++routingTicket, next);
+});
+window.addEventListener('focus', () => void loadRouting());
+void loadRouting();
+/** Turns routing on in `mode`; a refusal throws, so the menu shows it. */
+async function configureRouting(mode: RoutingMode): Promise<void> {
+  if (routing?.enabled && routing.mode === mode) return;
+  const ticket = ++routingTicket;
+  routingConfiguring++;
+  let saved = false;
+  try { applyRouting(ticket, await call<RoutingStatus>('model_routing_configure', { enabled: true, mode })); saved = true; }
+  finally {
+    routingConfiguring--;
+    // A Settings status that arrived meanwhile: re-read after a save (it may be newer), apply it after a failure.
+    if (!routingConfiguring && routingMissed) {
+      const missed = routingMissed; routingMissed = null;
+      if (saved) void loadRouting(); else applyRouting(++routingTicket, missed);
     }
-  });
-  return roster;
+  }
 }
-let teamToggleBusy = false;
-async function toggleTeam(): Promise<void> {
-  const task = session(); if (!task || teamToggleBusy) return;
-  closeMenus();
-  teamToggleBusy = true;
+/** No team, a team whose lead picks models, or a team whose workers Panda Router picks by kind (the global mode). */
+async function showTeamMenu(anchor: HTMLElement): Promise<void> {
+  const task = session(); if (!task) return;
+  if (task.remoteDevice) { notify(mirrorTeamNote(task)); return; }
+  if (!teams.has(task.id)) await loadTeam(task.id);
+  const { id: current, label } = teamState(task), team = teams.get(task.id);
+  const routed = routing?.enabled === true;
+  // A kind replaces a named agent team, and turns routing on when it is off (or its status is unknown).
+  const note = current === 'named' ? `Replaces ${label}` : '';
+  const items = [
+    { id: 'off', label: 'No team', description: 'A single agent', leading: icon('bot') },
+    ...(current === 'named' ? [{ id: 'named', label, description: 'Agent team', leading: icon('worktree') }] : []),
+    ...(!routed || current === 'lead' ? [{ id: 'lead', label: 'Team', description: 'The lead picks models', leading: icon('worktree') }] : []),
+    ...TEAM_KINDS.map((k, index) => ({ id: k.id, label: k.label, description: note || k.description, leading: k.leading, heading: index ? undefined : routed ? TEAM_KINDS_HINT : TEAM_KINDS_OFF_HINT })),
+  ].map(item => ({ ...item, selected: item.id === current }));
+  // A team turned on here redraws the composer once the menu closes, so a routing error can still show in it.
+  let turnedOn = false;
+  await showChoices(anchor, { title: 'Team', width: 320, items, afterClose: () => { if (turnedOn && task.id === state.sessionId) renderComposer(); }, onSelect: async id => {
+    if (id === current || id === 'named') return;
+    if (id === 'off') { await setTeam(task, false); return; }
+    // The team turns on first, so a refusal leaves the global mode alone; an automatic team only changes kind.
+    const keep = team && !team.config.rosterOnly && team.config.auto;
+    if (!keep) { if (!await setTeam(task, true, false)) return; turnedOn = true; }
+    if (id === 'lead') return;
+    await configureRouting(id as RoutingMode);
+    if (!routed) prepareModelRouting();
+  } });
+}
+/** An automatic team's config with the current installed models (the capped roster for the lead,
+ * the full catalog for Panda Router), keeping the limits of `base` or the last saved setup. */
+async function autoTeamConfig(base?: TeamConfig): Promise<TeamConfig> {
+  const [library, { roster, catalog }] = await Promise.all([base ? Promise.resolve(null) : call<TeamLibrary>('architect_profiles'), installedCatalog(state.providers, loadModels)]);
+  const limits = base ?? library?.lastSetup?.config;
+  return { auto: true, workers: roster, catalog, maxParallel: limits?.maxParallel ?? 0, maxRounds: limits?.maxRounds ?? 8, maxAssignments: limits?.maxAssignments ?? 24, workspace: 'shared', summaryLimit: limits?.summaryLimit ?? 3072 };
+}
+/** Warms Panda Router's profiler when a team starts; failures only reach the console. */
+function prepareModelRouting(): void {
+  void loadRouting()
+    .then(status => {
+      // The cached status may be newer than the shared read this joined.
+      if (!(routing ?? status)?.enabled) return;
+      const ticket = routingTicket;
+      return call<RoutingStatus>('model_routing_prepare').then(next => applyRead(ticket, next));
+    })
+    .catch(cause => console.warn('Model routing could not prepare', cause));
+}
+const teamToggles = new Set<string>();
+const mirrorTeamNote = (task: Session) => `Teams for this task are set up on ${task.remoteDevice?.name ?? 'the other computer'}.`;
+/** Turns an automatic team on (replacing any other team) or the task's team off; false when nothing changed.
+ * While it saves, the task is configuring: the Team button shows it, and sending and queue dispatch wait. */
+async function setTeam(task: Session, on: boolean, render = true): Promise<boolean> {
+  if (configuringSessions.has(task.id)) return false;
+  teamToggles.add(task.id); configuringSessions.add(task.id);
   try {
-    const team = teams.get(task.id) ?? await loadTeam(task.id);
+    // In place: the Team menu stays anchored to the button while it applies.
+    if (task.id === state.sessionId) syncTeamButton();
     let config: TeamConfig | null = null;
-    if (!team) {
-      const [library, workers] = await Promise.all([call<TeamLibrary>('architect_profiles'), autoRoster()]);
-      const limits = library.lastSetup?.config;
-      config = { auto: true, workers, maxParallel: limits?.maxParallel ?? 0, maxRounds: limits?.maxRounds ?? 8, maxAssignments: limits?.maxAssignments ?? 24, workspace: 'shared', summaryLimit: limits?.summaryLimit ?? 3072 };
+    if (on) {
+      prepareModelRouting();
+      config = await autoTeamConfig();
     }
-    if (task.id !== state.sessionId) return;
+    if (task.id !== state.sessionId) return false;
     const saved = await call<TeamSnapshot | null>('architect_configure', { sessionId: task.id, config, architect: null, profileId: null });
     onArchitect(saved ?? { sessionId: task.id, removed: true });
     await reloadSessions();
-    if (task.id !== state.sessionId) return;
-    renderComposer();
-  } finally { teamToggleBusy = false; }
+    teamToggles.delete(task.id); configuringSessions.delete(task.id);
+    if (task.id === state.sessionId) { if (render) renderComposer(); else syncTeamButton(); }
+    return true;
+  } finally {
+    // A failed save keeps the menu open with its error, so only the button is redrawn.
+    if (teamToggles.delete(task.id) && task.id === state.sessionId) syncTeamButton();
+    configuringSessions.delete(task.id);
+    run(dispatchQueue(task.id));
+  }
 }
 const ACTIVITY_WINDOW = 24 * 60 * 60 * 1000;
+/** Sort arrows for the sidebar's sort and view menu. */
+const SORT_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v16m-3-3 3 3 3-3M17 20V4m-3 3 3-3 3 3"/></svg>';
 const $app = document.querySelector<HTMLDivElement>('#app')!;
 $app.innerHTML = `<div class="workspace">
   <aside id="workspace-sidebar" class="sidebar" aria-label="Projects and tasks">
-    <div class="brand" data-tauri-drag-region><span class="brand-name" data-tauri-drag-region>PandaCode Extended</span></div>
+    <div class="brand" data-tauri-drag-region><span class="brand-name" data-tauri-drag-region>PandaCode</span>${button('view-menu', 'Workspace view: Conversation', 'thread', 'view-menu', 'id="view-menu" aria-haspopup="menu" aria-expanded="false"')}</div>
     <div class="sidebar-actions"><button class="new-task-button" data-action="new-task">${icon('plus')}<span>New task</span><kbd>${shortcut('N')}</kbd></button><button class="new-chat-button" data-action="new-chat" title="New chat (no project)">${icon('chat')}<span>New chat</span></button><button class="search-trigger" data-action="search">${icon('search')}<span>Search</span><kbd>${shortcut('K')}</kbd></button></div>
-    <div class="sidebar-projects"><button id="project-filter" class="project-filter" data-action="filter-projects" aria-label="Filter projects" aria-haspopup="dialog" aria-expanded="false"><span data-filter-label>All projects</span>${icon('down')}</button>${button('import-conversations', 'Import conversations', 'download', 'import-trigger')}${button('add-project', 'Open project', 'plus')}</div>
-    <div id="navigation" class="navigation"></div>
-    <div id="sidebar-note" class="sidebar-note" hidden></div>
+    <div class="sidebar-projects"><button id="project-filter" class="project-filter" data-action="filter-projects" aria-label="Filter projects" aria-haspopup="dialog" aria-expanded="false"><span data-filter-label>All projects</span>${icon('down')}</button><button id="sidebar-sort" class="icon-button sidebar-sort" data-action="sidebar-sort" aria-label="Sort and view" title="Sort and view" aria-haspopup="menu" aria-expanded="false">${SORT_ICON}</button>${button('import-conversations', 'Import conversations', 'download', 'import-trigger')}${button('add-project', 'Open project', 'plus')}</div>
+    <div class="sidebar-search">${icon('search')}<input id="sidebar-filter" type="search" aria-label="Filter tasks" placeholder="Filter tasks" autocomplete="off" spellcheck="false" maxlength="200" aria-keyshortcuts="/"><button type="button" class="sidebar-search-clear" data-action="clear-sidebar-filter" tabindex="-1" aria-label="Clear filter" title="Clear filter">${icon('close')}</button></div>
+    <div class="navigation-frame"><div id="navigation" class="navigation"></div></div>
     <section id="sidebar-bots-panel" class="bots-panel" aria-label="Bots"></section>
     <div id="sidebar-bots" class="sidebar-bots"></div>
-    <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}${button('hardened-tools', 'Review & coordination', 'worktree', '', 'id="hardened-tools-button"')}<button data-action="archive-view" id="archive-toggle" title="Archived tasks" aria-label="Archived tasks">${icon('archive')}</button><button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button><button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
+    <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}<button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button><button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
   </aside>
   <main class="main-pane">
-    <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}<button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button><div class="view-switch" role="group" aria-label="Workspace view"><button data-action="conversation-view" aria-label="Conversation view" aria-pressed="true">${icon('chat')}<span>Conversation</span></button><button data-action="board-view" aria-label="Board view" aria-pressed="false">${icon('board')}<span>Board</span></button><button data-action="github-view" aria-label="GitHub view" aria-pressed="false">${icon('github')}<span>GitHub</span></button></div><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}<span class="header-divider" aria-hidden="true"></span>${button('moodboards', 'Project moodboards', 'images')}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('terminal', `Toggle terminal (${shortcut('J')})`, 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false"')}<span class="header-divider" aria-hidden="true"></span>${button('toggle-inspector', `Toggle inspector (${shortcut('B', true)})`, 'panel', 'active', 'id="inspector-toggle"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div></header>
-    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section><div id="task-details-heading" class="task-details-heading" hidden></div><div id="subagents-host" class="subagents-host" hidden></div><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
+    <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', `Toggle inspector (${shortcut('B', true)})`, 'panel', 'active', 'id="inspector-toggle"')}${button('terminal', `Toggle terminal (${shortcut('J')})`, 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false"')}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('worktree')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div></div></header>
+    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
-  <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" aria-label="Panel views">${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section></aside>
+  <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" aria-label="Panel views"><div class="inspector-tab file-panel-tab" data-view="file" hidden><button class="inspector-tab-button" data-action="tab-open-files" aria-label="Open files" title="Open files">${icon('file')}<span class="inspector-tab-label">Open files</span></button>${button('close-inspector-tab', 'Close open files', 'close', 'inspector-tab-close', 'data-view="file"')}</div>${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section><section id="file-panel" class="file-panel" aria-label="Open files" hidden><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section></section></aside>
 </div><div id="toast" class="toast" role="status" hidden></div><dialog id="dialog"></dialog>`;
+mountAgentsDock(document.querySelector<HTMLElement>('#agents-dock-host')!, { openTask: id => run((async () => { await reloadSessions(); await selectSession(id, true); })()) });
 publishSpringEasings();
+mountActionDock($('#action-dock'));
 installDialogMotion(document.querySelector<HTMLDialogElement>('#dialog')!);
 const terminalPanel = new TerminalPanel($('#terminal-drawer'), $('#terminal-host'), report);
 const projectRunner = new ProjectRunner({
@@ -334,16 +493,35 @@ const projectRunner = new ProjectRunner({
   notify,
 });
 let sidebarDragging = false, orderingBusy = false;
-/** A thread opened from Needs review stays there while open, so its row does not jump from under the click. */
-let sectionHold = '', completedOpen = readOpen(localStorage, COMPLETED_OPEN_KEY);
-/** Threads whose turn finished while another was open (Needs review); read on first draw. */
+/** The open thread stays in the section it was opened from, so its row does not jump from under the click. */
+let sectionHold: { id: string; section: HeldSection } | undefined, completedOpen = readOpen(localStorage, COMPLETED_OPEN_KEY);
+const collapsedSections = readCollapsed(localStorage, COLLAPSED_SECTIONS_KEY);
+/** Settled lists its newest rows first, then pages in more on request. */
+const COMPLETED_FIRST = 10, COMPLETED_PAGE = 25;
+let completedShown = COMPLETED_FIRST;
+let sidebarSort: SidebarSort = readSort(localStorage);
+let projectOrder: string[] = readProjectOrder(localStorage);
+/** "3:45 PM" from "Resets 3:45 PM"; nothing when the harness did not report a reset time. */
+function limitReset(until: number | null | undefined, now: number): string {
+  return until ? resetLabel(until, now).replace(/^Resets /, '') : '';
+}
+/** A last run that ended badly: an error, or cut short by a restart. */
+const FAILED_STATUS = new Set(['error', 'interrupted']);
+/** Long branch names keep their tail ("…ant-search"), where branches usually differ. */
+function branchLabel(branch: string): string {
+  const chars = [...branch], tail = chars.length > 14 ? chars.slice(-8).join('') : '';
+  return `<span class="task-branch-name"><span class="task-branch-head">${escape(tail ? chars.slice(0, -8).join('') : branch)}</span>${tail ? `<span class="task-branch-tail">${escape(tail)}</span>` : ''}</span>`;
+}
+/** Threads whose turn finished out of sight (shown unread until opened); read on first draw. */
 let unreviewed: Set<string> | undefined;
 function saveUnreviewed(): void { try { localStorage.setItem(UNREVIEWED_KEY, JSON.stringify([...unreviewed ?? []])); } catch { /* per-launch only */ } }
 bindThreadReordering($('#navigation'), {
   busy: () => orderingBusy,
   dragging: active => { sidebarDragging = active; if (!active) renderNavigation(); },
   reorder: (ids, focus) => run(reorderThreads(ids, focus)),
-  menu: row => run(showSidebarTaskMenu(row)),
+  reorderFolders: (ids, focus) => reorderFolders(ids, focus),
+  menu: (row, point) => run(showSidebarTaskMenu(row, point)),
+  folderMenu: (heading, point) => run(showFolderMenu(heading, point)),
 });
 /* Branch and worktree control, plus optional GitHub through the user's gh CLI. */
 const github = createGithub({
@@ -362,6 +540,10 @@ const github = createGithub({
 /* Per-thread token saving: packs ride along with messages as folded guidance. */
 const tokenSaver = createTokenSaver({
   call, notify,
+  contextUsage: sessionId => {
+    const s = session();
+    return s && s.id === sessionId ? state.streams.get(s.id)?.contextUsage ?? s.contextUsage ?? null : null;
+  },
   changed: sessionId => {
     if (sessionId !== state.sessionId) return;
     const current = document.querySelector<HTMLElement>('.composer-saver-button');
@@ -369,6 +551,19 @@ const tokenSaver = createTokenSaver({
   },
 });
 void tokenSaver.loadTools();
+/* Per-task token totals from the agents' own logs; one fetch per session, refetched when a run ends. */
+const taskUsage = new Map<string, TaskTokenUsage | null>();
+function usageLine(usage: TaskTokenUsage): string {
+  return `This task so far: ${tokenCount(usage.input)} in, ${tokenCount(usage.output)} out, ${tokenCount(usage.cacheRead)} cache reads.`;
+}
+function ensureTaskUsage(sessionId: string): void {
+  if (taskUsage.has(sessionId)) return;
+  taskUsage.set(sessionId, null);
+  void call<TaskTokenUsage | null>('task_token_usage', { sessionId }).then(usage => {
+    taskUsage.set(sessionId, usage ?? null);
+    if (state.sessionId === sessionId) renderContextUsage();
+  }).catch(() => taskUsage.delete(sessionId));
+}
 const searchPanel = createSearchPanel({
   call,
   context: () => project() ? workspaceContext() : null,
@@ -376,11 +571,13 @@ const searchPanel = createSearchPanel({
 });
 const fileTabs = createFileTabs({
   call,
-  canAttach: context => Boolean(state.sessionId) && context.sessionId === state.sessionId && context.projectId === state.projectId && !session()?.remoteDevice && !session()?.archived && taskStage(session()!) !== 'completed',
+  canAttach: context => Boolean(state.sessionId) && context.sessionId === state.sessionId,
   attach: path => attachFile(path),
   preview: (path, context) => previewFile(path, context),
-  notify: text => notify(text), report: error => report(error),
+  notify: text => notify(text),
+  report: error => report(error),
   focusConversation: () => document.querySelector<HTMLElement>('#prompt')?.focus(),
+  emptied: () => { if (state.inspectorTab === 'file') { state.inspectorTab = threadDefault(inspectorTabs); renderInspector(); } },
 });
 const pullView = createPullView({
   call,
@@ -420,7 +617,7 @@ const worktrees = createWorktrees({
   git: () => state.git, gitError: () => state.gitError,
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
   attachable: () => newTaskView(),
-  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, remoteChoiceName) + botTaskControl(task, fresh),
+  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, cloudTargets, remoteChoiceName) + botTaskControl(task, fresh),
   running: () => isRunning(),
   afterAttach: async (saved, live) => {
     const index = state.sessions.findIndex(s => s.id === saved.id); if (index >= 0) state.sessions[index] = saved;
@@ -436,36 +633,41 @@ const worktrees = createWorktrees({
     closeModal();
     if (current) { state.query = ''; await selectSession(created.id, true); }
   },
-  archive: async task => { await archiveTask(task, false); },
+  settle: async task => { await changeTaskStage(task, 'completed', false); },
   extraItems: task => github.menuItems(task),
   onExtra: (id, task) => github.onMenu(id, task),
 });
-window.addEventListener('pandacode-github-change', () => { renderComposer(); renderHeader(); renderInspector(); if (githubEnabled()) run(retryLinkedIssueActionsOnConnect(state.projectId, true)); });
-window.addEventListener('focus', () => { void github.refreshLinks(state.projectId); run(retryLinkedIssueActionsOnConnect(state.projectId, true)); });
+window.addEventListener('pandacode-github-change', () => { renderComposer(); renderHeader(); renderInspector(); });
+window.addEventListener('focus', () => void github.refreshLinks(state.projectId));
 const attachments = mountPromptAttachments({
   taskId: () => state.sessionId,
-  contextKey: () => `${state.sessionId}:${state.generation}:${workspaceKey()}`,
+  blocked: taskId => {
+    const task = state.sessions.find(s => s.id === taskId);
+    if (!task) return 'Start a task before attaching anything.';
+    if (taskStage(task) === 'completed') return 'Reopen this settled task before attaching anything.';
+    return null;
+  },
+  otherImages: taskId => (state.browserAttachments.get(taskId) ?? []).filter(item => item.kind === 'screenshot').length,
+  // Grok Build's ACP agent advertises no image input; say so before a send fails.
+  imagesUnsupported: taskId => {
+    const provider = state.sessions.find(s => s.id === taskId)?.provider;
+    if (provider === 'grok') return 'Grok Build does not accept images yet. Describe them, or attach documents and folders instead.';
+    if (provider === 'zcode') return 'ZCode does not accept images yet. Describe them, or attach documents and folders instead.';
+    return null;
+  },
+  notify: message => notify(message),
+  report: error => report(error),
   insertText: text => {
     const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
     if (!prompt || prompt.disabled || prompt.dataset.sessionId !== state.sessionId) return false;
     const before = prompt.value.slice(0, prompt.selectionStart);
     prompt.setRangeText((before && !/\s$/.test(before) ? (text.includes('\n') ? '\n' : ' ') : '') + text, prompt.selectionStart, prompt.selectionEnd, 'end');
-    prompt.dispatchEvent(new Event('input', { bubbles: true })); prompt.focus(); return true;
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    prompt.focus();
+    return true;
   },
-  blocked: taskId => {
-    const task = state.sessions.find(s => s.id === taskId);
-    if (!task) return 'Start a task before attaching anything.';
-    if (task.archived) return 'Restore this archived task before attaching anything.';
-    if (taskStage(task) === 'completed') return 'Reopen this completed task before attaching anything.';
-    return null;
-  },
-  otherImages: taskId => (state.browserAttachments.get(taskId) ?? []).filter(item => item.kind === 'screenshot').length,
-  // Grok Build's ACP agent advertises no image input; say so before a send fails.
-  imagesUnsupported: taskId => state.sessions.find(s => s.id === taskId)?.provider === 'grok' ? 'Grok Build does not accept images yet. Describe them, or attach documents and folders instead.' : null,
-  notify: message => notify(message),
-  report: error => report(error),
   rerender: taskId => { if (taskId === state.sessionId) renderAttachmentBar(); },
-  menu: (anchor, items, onSelect) => showChoices(anchor, { title: 'Attach', width: 340, actions: true, items: [...items, { id: 'recipes', label: 'Workflow recipes…', description: 'Queue saved steps', icon: 'play' }], onSelect: id => { closeChoiceMenu(); run(id === 'recipes' ? openRecipes() : onSelect(id)); } }),
+  menu: (anchor, items, onSelect) => showChoices(anchor, { title: 'Attach', width: 340, actions: true, items: [...items, { id: 'recipes', label: 'Workflow recipes…', description: 'Queue saved steps', icon: 'play' }, { id: 'wake', label: 'Schedule a wake-up…', description: 'Wake this thread later', icon: 'clock' }], onSelect: id => { closeChoiceMenu(); if (id === 'wake') openWakeComposer(anchor); else run(id === 'recipes' ? openRecipes() : onSelect(id)); } }),
   projectFiles: () => { state.inspector = true; state.inspectorTab = 'files'; state.selectedKind = ''; renderInspector(); },
   sketch: (taskId, existing) => run(openSketch(taskId, existing)),
 });
@@ -576,14 +778,14 @@ const disposeMessageActions = bindMessageActions($('#transcript'), {
     const saved = state.messages.find(message => String(message.id) === key);
     return saved && saved.id > 0 && ['user', 'assistant'].includes(saved.role)
       ? call<string>('get_message_content', { sessionId, messageId: saved.id }) : saved?.content;
-  }, onFork: forkAtMessage, onEdit: editAtMessage, report,
+  }, onFork: (sessionId, messageId) => forkAtMessage(sessionId, messageId), onEdit: editAtMessage, report,
 });
 const transcriptScroller = $('#transcript');
 transcriptScroller.tabIndex = 0;
 /* Following the latest output is an intent, not a measurement. Growing content and a resizing
  * composer never clear it: only the reader scrolling up or opening a fold does, and reaching
  * the bottom sets it again. The observer re-pins before paint, so nothing jumps for a frame. */
-let stickToBottom = true, lastTranscriptTop = 0, transcriptPointerScroll = false, readerScrollingUp = false, readerSawUpwardScroll = false;
+let stickToBottom = true, lastTranscriptTop = 0;
 const transcriptGap = (): number => transcriptScroller.scrollHeight - transcriptScroller.scrollTop - transcriptScroller.clientHeight;
 const readingTranscriptTool = (): boolean => Boolean(document.activeElement?.closest('.tool-activity, .turn-activity, .turn-changes, .agent-input'));
 function followTranscript(): void {
@@ -591,69 +793,30 @@ function followTranscript(): void {
   if (readingTranscriptTool()) { if (transcriptGap() > 2) stickToBottom = false; return; }
   transcriptScroller.scrollTop = transcriptScroller.scrollHeight;
 }
-function stickTranscript(): void { readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; }
-/** Pin active streaming output before each paint, including late Markdown reflows.
- * ResizeObserver alone can observe after an intermediate frame's layout change.
- * Stop at once when the reader scrolls up; run just two frames after completion. */
-let streamFollowFrame = 0;
-let streamFollowTail = 0;
-function maintainStreamingBottom(): void {
-  if (!stickToBottom || readerScrollingUp) return;
-  streamFollowTail = 2;
-  if (streamFollowFrame) return;
-  const tick = (): void => {
-    streamFollowFrame = 0;
-    if (!stickToBottom || readerScrollingUp || !transcriptVisible() || document.hidden) return;
-    const active = state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId);
-    if (!active && streamFollowTail-- <= 0) return;
-    if (transcriptGap() > 1) followTranscript();
-    streamFollowFrame = requestAnimationFrame(tick);
-  };
-  streamFollowFrame = requestAnimationFrame(tick);
-}
+function stickTranscript(): void { stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; }
 const transcriptResize = new ResizeObserver(followTranscript);
+followTranscriptBottom(transcriptScroller, () => stickToBottom && !readingTranscriptTool());
 const observeTranscript = (): void => { transcriptResize.disconnect(); for (const node of [transcriptScroller, ...transcriptScroller.children]) transcriptResize.observe(node); };
 new MutationObserver(observeTranscript).observe(transcriptScroller, { childList: true });
 observeTranscript();
-const releaseTranscript = (): void => {
-  if (transcriptScroller.scrollHeight <= transcriptScroller.clientHeight + 2) return;
-  readerScrollingUp = true;
-  readerSawUpwardScroll = false;
-  stickToBottom = false;
-};
+const releaseTranscript = (): void => { if (transcriptScroller.scrollTop > 0) stickToBottom = false; };
 // Rebuilding or measuring the composer briefly shrinks it; a layout read then grows the transcript
 // and clamps its scroll up. Re-pin in the mutation's microtask, before that clamp can paint or
 // reach the scroll handler, where any upward scroll means the reader left.
 new MutationObserver(records => { if (records.some(record => !transcriptScroller.contains(record.target))) followTranscript(); })
   .observe($('.conversation-pane'), { childList: true, subtree: true, attributes: true });
-transcriptScroller.addEventListener('scroll', event => {
+transcriptScroller.addEventListener('scroll', () => {
   const top = transcriptScroller.scrollTop;
-  if (readerScrollingUp && top < lastTranscriptTop - 1) readerSawUpwardScroll = true;
-  if (transcriptGap() <= 2) {
-    // Auto-follow can produce a delayed scroll event after an upward wheel.
-    // Do not resume until an actual upward move was observed AND the reader
-    // subsequently returns downward to the end (also supports history scripts).
-    if (!readerScrollingUp || (readerSawUpwardScroll && top > lastTranscriptTop + 1)) {
-      readerScrollingUp = false;
-      readerSawUpwardScroll = false;
-      stickToBottom = true;
-    }
-  } else if ((transcriptPointerScroll || !event.isTrusted) && (top < lastTranscriptTop || top <= 1)) {
-    readerScrollingUp = true;
-    readerSawUpwardScroll = true;
-    stickToBottom = false;
-  }
+  // Following and not moving up (the observer's own pins): nothing can change, so skip measuring.
+  if (stickToBottom && top >= lastTranscriptTop) { lastTranscriptTop = top; void loadOlderMessages(); return; }
+  if (transcriptGap() <= 2) stickToBottom = true;
+  // Content that shrank clamps the scroll up (the old top is past the end now): that is not the reader leaving.
+  else if (stickToBottom && lastTranscriptTop > transcriptScroller.scrollHeight - transcriptScroller.clientHeight) followTranscript();
+  else if (top < lastTranscriptTop) stickToBottom = false;
   lastTranscriptTop = top;
   void loadOlderMessages();
 }, { passive: true });
-transcriptScroller.addEventListener('click', event => { if ((event.target as Element).closest('summary')) { readerScrollingUp = true; stickToBottom = false; } }, true);
-// Programmatic scroll clamping during composer resize is not a reader scrolling up.
-// Scrollbar drags, unlike reflow, carry an active pointer gesture.
-transcriptScroller.addEventListener('pointerdown', event => {
-  if (event.target === transcriptScroller) transcriptPointerScroll = true;
-});
-window.addEventListener('pointerup', () => { transcriptPointerScroll = false; });
-window.addEventListener('pointercancel', () => { transcriptPointerScroll = false; });
+transcriptScroller.addEventListener('click', event => { if ((event.target as Element).closest('summary')) stickToBottom = false; }, true);
 // A page consisting mostly of folded tools may be shorter than the viewport.
 // Let upward wheel/keyboard intent fetch its history even without a scroll event.
 transcriptScroller.addEventListener('wheel', event => { if (event.deltaY < 0) { releaseTranscript(); void loadOlderMessages(); } }, { passive: true });
@@ -662,7 +825,8 @@ transcriptScroller.addEventListener('keydown', event => {
 });
 const subagents = new Subagents($('#subagents-host'), 'subagents-panel', sessionId => ({ projectId: state.projectId, sessionId }));
 const jevActivity = new JevActivity();
-$('#subagents-host').after(jevActivity.host);
+$('#transcript').before(jevActivity.host);
+mountAgents($('#agents-toggle') as HTMLButtonElement, $('#agents-flyout'), () => architectView ? [architectView, subagents] : [subagents]);
 const wallpapers = mountWallpapers($('.workspace'));
 // The accent follows the scene on screen; a VS Code theme keeps its own colors.
 const syncPaletteWallpaper = () => palette.setWallpaper(wallpapers.enabled ? wallpapers.currentId : undefined);
@@ -676,20 +840,22 @@ window.addEventListener('pagehide', () => { disposeSidebarResizing(); disposeIns
 function project(): Project | undefined { return state.projects.find(p => p.id === state.projectId); }
 function workspaceContext(s = session()): { projectId: string; sessionId?: string } { return { projectId: s?.projectId ?? state.projectId, ...(s ? { sessionId: s.id } : {}) }; }
 function workspaceKey(): string { return `${state.projectId}:${session()?.worktreePath ?? ''}`; }
+/** PDFs and images open in a file tab like other documents; the tab still offers the browser preview. */
+const OPENS_IN_TAB = /\.(?:pdf|png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
 function workspacePath(): string { return session()?.worktreePath ?? project()?.path ?? ''; }
 configureFileLinks({
   context: () => state.projectId ? workspaceContext() : undefined,
   resolve: (context, paths) => call<ResolvedFile[]>('resolve_workspace_files', { ...context, paths }),
   open: async (context, file) => {
     try {
-      if (/\.html?$/i.test(file.path)) await previewFile(file.path, context);
-      else { state.inspectorTab = 'files'; await openFile(file.path, 'file', false, context); }
+      if (file.previewable && !OPENS_IN_TAB.test(file.path)) await previewFile(file.path, context);
+      else await openFile(file.path, 'file', false, context);
     } catch (error) { report(error); }
   },
 });
 function saveThreadPanel(): void {
   if (!state.sessionId || deletedSessions.has(state.sessionId)) return;
-  threadPanels.set(state.sessionId, { workspace: workspaceKey(), open: state.inspector, tab: state.inspectorTab, folder: state.filePath, file: state.selectedFile, kind: state.selectedKind, staged: state.selectedStaged, context: selectedFileContext && { ...selectedFileContext }, browserUrl: state.browserUrl });
+  threadPanels.set(state.sessionId, { workspace: workspaceKey(), open: state.inspector, tab: state.inspectorTab, folders: [...state.openFolders], file: state.selectedFile, kind: state.selectedKind, staged: state.selectedStaged, context: selectedFileContext && { ...selectedFileContext }, browserUrl: state.browserUrl });
 }
 function restoreThreadPanel(task?: Session): void {
   clearWorkspaceInspector(false);
@@ -697,18 +863,18 @@ function restoreThreadPanel(task?: Session): void {
   const sameWorkspace = saved?.workspace === workspaceKey();
   // Without saved state the conversation opens the panel on the selected tab, unless the user closed it or it would cover the chat.
   state.inspector = saved?.open ?? (state.view === 'conversation' && inspectorChosen && !matchMedia('(max-width: 920px)').matches);
-  state.inspectorTab = saved?.tab && inspectorTabs.open.includes(saved.tab) ? saved.tab : threadDefault(inspectorTabs); state.filePath = sameWorkspace ? saved?.folder ?? '' : '';
+  state.inspectorTab = saved?.tab && (saved.tab === 'file' || inspectorTabs.open.includes(saved.tab)) ? saved.tab : threadDefault(inspectorTabs); state.openFolders = new Set(sameWorkspace ? saved?.folders : []);
   state.selectedFile = sameWorkspace ? saved?.file ?? '' : ''; state.selectedKind = sameWorkspace ? saved?.kind ?? '' : ''; state.selectedStaged = saved?.staged ?? false;
   state.browserUrl = sameWorkspace ? saved?.browserUrl ?? '' : ''; selectedFileContext = sameWorkspace && saved?.context ? { ...saved.context } : undefined;
-  state.filePreviewLoading = Boolean(state.selectedKind);
   fileTabs.show(state.sessionId, workspaceKey());
+  state.filePreviewLoading = Boolean(state.selectedKind);
 }
 async function restoreSelectedFile(): Promise<void> {
   if (!state.selectedKind || !state.selectedFile) return;
   const request = ++fileRequest, owner = state.sessionId;
   const path = state.selectedFile, kind = state.selectedKind, context = selectedFileContext ?? workspaceContext();
   try {
-    const content = await call<string>(kind === 'file' ? 'read_file' : 'git_diff', { ...context, path, staged: state.selectedStaged });
+    const content = await call<string>('git_diff', { ...context, path, staged: state.selectedStaged });
     if (request !== fileRequest || owner !== state.sessionId) return;
     state.selectedContent = content; selectedFileContext = { ...context };
   } catch (error) {
@@ -721,10 +887,10 @@ async function restoreSelectedFile(): Promise<void> {
 function clearWorkspaceInspector(render = true): void {
   ++inspectorRequest; ++fileRequest;
   state.git = null; state.files = []; state.gitError = ''; state.filesError = ''; state.inspectorLoading = Boolean(state.projectId);
-  state.filePath = ''; state.selectedFile = ''; state.selectedContent = ''; state.selectedKind = ''; state.filePreviewLoading = false;
+  state.openFolders = new Set(); state.folderFiles = new Map(); state.selectedFile = ''; state.selectedContent = ''; state.selectedKind = ''; state.filePreviewLoading = false;
   state.browserUrl = '';
   selectedFileContext = undefined;
-  if (render) { fileTabs.show(state.sessionId, workspaceKey()); renderInspector(); }
+  if (render) renderInspector();
 }
 function renderThemeToggle(): void {
   const dark = currentTheme() === 'dark', toggle = $('#theme-toggle');
@@ -767,7 +933,7 @@ function stream(id: string): Stream {
   if (!s) {
     finishingStreams.delete(id);
     const now = Date.now();
-    s = { text: '', tools: [], status: '', approvals: new Map(), inputs: new Map(), revision: 0, lastResponseAt: null, startedAt: now, turnKey: 'turn:live:' + id, omittedActivity: false };
+    s = { body: new TailText(), thought: new TailText(), get text() { return this.body.value; }, get thinking() { return this.thought.value || undefined; }, tools: [], status: '', approvals: new Map(), inputs: new Map(), revision: 0, lastResponseAt: null, startedAt: now, turnKey: 'turn:live:' + id, omittedActivity: false };
     state.streams.set(id, s);
   }
   return s;
@@ -799,16 +965,30 @@ function finishLiveMessage(current: Stream, sessionId: string): void {
   current.tools.push({ key: current.retainedMessageKey, content: current.text.length > 16384 ? current.text.slice(0, 16384) + '\n[Activity preview truncated]' : current.text, commentary: true });
   trimLiveActivity(current, sessionId); current.revision++;
 }
- function shortProvider(id: ProviderId): string { return ({ claude: 'Claude', codex: 'Codex', kimi: 'Kimi', opencode: 'OpenCode', glm: 'GLM', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo Code', omp: 'omp', 'github-copilot': 'GitHub Copilot CLI', muse: 'Muse Code', devin: 'Devin' })[id]; }
+ function shortProvider(id: ProviderId): string { return ({ claude: 'Claude', codex: 'Codex', kimi: 'Kimi', opencode: 'OpenCode', glm: 'GLM', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo', omp: 'omp', 'github-copilot': 'GitHub Copilot CLI', muse: 'Muse Code', devin: 'Devin', zcode: 'ZCode', hermes: 'Hermes' })[id]; }
 function selectedModel(s: Session): ProviderModel { return provider(s.provider)?.models.find(model => model.id === (s.model || 'default')) ?? fallbackModel(s.provider, s.model); }
-function modelLabel(s?: Session): string {
+function modelLabel(s?: Session, withEffort = true): string {
   if (!s) return 'Default model';
   const named = teams.get(s.id)?.config;
   if (named?.rosterOnly && named.name) return named.name;
   const model = selectedModel(s), connection = taskConnection(s);
   const name = connection ? `${connection.name} · ${model.name === 'Default' ? 'Default' : model.name}` : model.name === 'Default' ? 'Default model' : model.name;
-  const effort = s.reasoningEffort && (model.reasoningEfforts?.find(effort => effort.id === s.reasoningEffort)?.name ?? s.reasoningEffort);
+  const effort = withEffort && effortLabel(s);
   return effort ? `${name} · ${effort}` : name;
+}
+/** The trigger's effort word; none for a named team, whose workers set their own. */
+function effortLabel(s: Session): string {
+  if (!s.reasoningEffort || teams.get(s.id)?.config.rosterOnly) return '';
+  return selectedModel(s).reasoningEfforts?.find(effort => effort.id === s.reasoningEffort)?.name ?? s.reasoningEffort;
+}
+/** The trigger's logo, or a named team's stacked roster. */
+function triggerLogo(s: Session): string {
+  const team = teams.get(s.id)?.config;
+  if (team?.rosterOnly) {
+    const roster = [...new Set(team.workers.map(worker => worker.provider))].slice(0, 3);
+    return `<span class="model-menu-stack" data-logo="${escape(roster.join(' '))}">${roster.map(id => providerLogo(id)).join('')}</span>`;
+  }
+  return `<span class="provider-small ${s.provider}" data-logo="${s.provider}">${providerLogo(s.provider)}</span>`;
 }
 function teamModelLabel(s?: Session): string {
   const team = s ? teams.get(s.id) : null;
@@ -821,20 +1001,21 @@ function teamModelLabel(s?: Session): string {
 }
 function refreshModelLabels(): void {
   const s = session(); if (!s) return;
-  const name = modelLabel(s);
+  const name = modelLabel(s, false), effort = effortLabel(s);
   document.querySelectorAll<HTMLElement>('[data-model-label]').forEach(label => { if (label.textContent !== name) label.textContent = name; });
+  document.querySelectorAll<HTMLElement>('[data-effort-label]').forEach(label => { if (label.textContent !== effort) label.textContent = effort; label.hidden = !effort; });
   const teamLabel = teamModelLabel(s);
   document.querySelectorAll<HTMLElement>('[data-team-model-label]').forEach(label => {
     if (label.textContent !== teamLabel) label.textContent = teamLabel;
     label.hidden = !teamLabel;
   });
   const modelTrigger = document.querySelector('#model-picker-trigger');
-  modelTrigger?.setAttribute('aria-description', [name, teamLabel].filter(Boolean).join(' '));
-  const logo = modelTrigger?.querySelector<HTMLElement>('.provider-small');
-  if (logo && !logo.classList.contains(s.provider)) { logo.className = `provider-small ${s.provider}`; logo.innerHTML = providerLogo(s.provider); }
+  modelTrigger?.setAttribute('aria-description', [modelLabel(s), teamLabel].filter(Boolean).join(' '));
+  const logo = modelTrigger?.querySelector<HTMLElement>('[data-logo]'), nextLogo = triggerLogo(s);
+  if (logo && logo.dataset.logo !== /data-logo="([^"]*)"/.exec(nextLogo)?.[1]) logo.outerHTML = nextLogo;
   const modeTrigger = document.querySelector<HTMLElement>('#mode-picker-trigger');
   const mode = approvalMode(s.provider, s.mode);
-  if (modeTrigger && (modeTrigger.dataset.mode !== mode.id || modeTrigger.title !== mode.description)) {
+  if (modeTrigger && modeTrigger.dataset.mode !== mode.id) {
     modeTrigger.dataset.mode = mode.id; modeTrigger.title = mode.description;
     modeTrigger.innerHTML = `${icon(mode.icon)}<span>${escape(mode.label)}</span>${icon('down')}`;
   }
@@ -849,11 +1030,45 @@ function renderContextUsage(): void {
   const label = context?.label ?? '';
   if (indicator.textContent !== label) indicator.textContent = label;
   indicator.title = context?.detail ?? '';
+  const usage = taskUsage.get(s.id);
+  if (usage && context) {
+    const line = usageLine(usage);
+    if (!indicator.title.includes(line)) indicator.title += `\n${line}`;
+  }
+  ensureTaskUsage(s.id);
   // The line keeps its place when empty, so the prompt never moves between threads.
-  indicator.parentElement!.classList.toggle('is-empty', !context && !s.archived);
+  indicator.parentElement!.classList.toggle('is-empty', !context);
 }
 function formatTime(timestamp: number): string { return new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
-function notify(text: string): void { const toast = $('#toast'); toast.textContent = text; showToast(toast); window.setTimeout(() => { if (toast.textContent === text) void hideToast(toast); }, 4500); }
+/** The toast's Undo, while it shows; ⌘Z runs it too. */
+let toastUndo: (() => void) | undefined, toastGeneration = 0;
+/** A short notice; a function adds Undo, `{ label, run }` one other button that stays a little longer. */
+function notify(text: string, undo?: (() => void) | { label: string; run: () => void }): void {
+  const toast = $('#toast'), generation = ++toastGeneration;
+  const action = typeof undo === 'function' ? undefined : undo;
+  toast.textContent = text; toastUndo = typeof undo === 'function' ? undo : undefined;
+  if (typeof undo === 'function') {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'toast-undo'; button.textContent = 'Undo'; button.setAttribute('aria-keyshortcuts', 'Meta+Z Control+Z');
+    button.addEventListener('click', () => { if (toastUndo !== undo) return; toastUndo = undefined; void hideToast(toast); undo(); });
+    toast.append(button);
+  } else if (action) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'toast-action'; button.textContent = action.label;
+    button.addEventListener('click', () => { void hideToast(toast); action.run(); });
+    toast.append(button);
+  }
+  showToast(toast);
+  hideToastLater(toast, generation, action ? 9000 : undo ? 5000 : 4500);
+}
+/** The toast stays while the pointer rests on it, then leaves shortly after. */
+function hideToastLater(toast: HTMLElement, generation: number, delay: number): void {
+  window.setTimeout(() => {
+    if (generation !== toastGeneration) return;
+    if (toast.matches(':hover')) { hideToastLater(toast, generation, 1200); return; }
+    toastUndo = undefined; void hideToast(toast);
+  }, delay);
+}
 function errorText(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
@@ -890,9 +1105,9 @@ function closeProjectPicker(): void { cancelPendingMenu(); const close = project
 function closeChoiceMenu(): void { cancelPendingMenu(); const close = choiceMenuCleanup; choiceMenuCleanup = undefined; choiceMenuAnchor = undefined; close?.(); }
 function closeMenus(): void { ++architectSetupRequest; ++jevTestRequest; jevTestCleanup?.(); architectSetupCleanup?.(); closeModelPicker(); closeProjectPicker(); closeChoiceMenu(); }
 function closeContentMenus(): void {
+  // Header/browser controls and the GitHub view's row menus survive transcript and composer updates.
   const anchor = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
-  if (jevTestCleanup || anchor?.id === 'task-menu-trigger' || anchor?.classList.contains('task-item') && anchor.isConnected) return;
-  closeMenus();
+  if (!jevTestCleanup && anchor?.id !== 'task-menu-trigger' && !anchor?.closest('#sidebar-bots-panel, #github-hub')) closeMenus();
 }
 function beginMenuOpen(anchor: HTMLElement): { epoch: number; release: () => void } {
   cancelPendingMenu();
@@ -928,10 +1143,15 @@ function rememberedModel(id: ProviderId): string {
 let openCodeSaved = false;
 /** Models by last use for long catalogs: OpenCode without a Settings selection, and Devin (about 110 models, most of them Fusion pairs). */
 function recentModels(id: ProviderId): string[] | null {
-  if (!(id === 'opencode' && !openCodeSaved) && id !== 'devin') return null;
+  return (id === 'opencode' && !openCodeSaved) || id === 'devin' ? usedModels(id) : null;
+}
+/** Models of `id` by the last prompt of the tasks that ran them, newest first. */
+function usedModels(id: ProviderId): string[] {
   const used = state.sessions.filter(s => s.provider === id && s.model);
   return used.sort((a, b) => (b.lastPromptAt ?? b.updatedAt) - (a.lastPromptAt ?? a.updatedAt)).map(s => s.model);
 }
+// Teams offer a long catalog's recent models only; OpenCode's saved selection is already short.
+setTeamRecency({ used: usedModels, unlimited: id => id === 'opencode' && openCodeSaved });
 function loadModels(id: ProviderId): Promise<ProviderModel[]> {
   const cached = modelCatalogs.get(id);
   if (cached && cached.expires > Date.now()) return cached.pending;
@@ -963,11 +1183,11 @@ function taskConnection(s: Session): import('./connections').Connection | undefi
   const id = namedConnections.tasks[s.id];
   return namedConnections.connections.find(c => c.id === id && c.provider === s.provider);
 }
-function onNamedConnections(snapshot: import('./connections').ConnectionSnapshot): void { namedConnections = snapshot; refreshModelLabels(); if (session()?.limitedAt) renderComposer(); }
+function onNamedConnections(snapshot: import('./connections').ConnectionSnapshot): void { namedConnections = snapshot; refreshModelLabels(); }
 /** The computer the composer's picker lists: a mirror task's, a new task's chosen one, else undefined (local). */
 function composerDevice(): string | undefined {
   const s = session();
-  return s?.remoteDevice?.id ?? (s && newTaskView() && remoteChoice !== LOCAL ? remoteChoice : undefined);
+  return s?.remoteDevice?.id ?? (s && newTaskView() && remoteChoice !== LOCAL && !cloudProvider(remoteChoice) ? remoteChoice : undefined);
 }
 function cachedFor<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>): Promise<T> {
   let pending = cache.get(key);
@@ -1020,112 +1240,132 @@ function renderNavigation(): void {
   const filterIcon = filtered ? projectAppIcon(filtered.id, filtered.name) : '';
   const shownIcon = filterLabel.previousElementSibling;
   if ((shownIcon?.outerHTML ?? '') !== filterIcon) { shownIcon?.remove(); if (filterIcon) filterLabel.insertAdjacentHTML('beforebegin', filterIcon); }
-  const sidebarSessions = listedSessions().filter(s => s.archived === state.archived && !botProjects.has(s.projectId));
-  const matching = sidebarSessions.filter(s => (!state.projectFilter || s.projectId === state.projectFilter) && s.title.toLowerCase().includes(state.query.toLowerCase()));
-  // Opening a thread reviews it; one that no longer needs review leaves the list.
+  const filterField = $('#sidebar-filter') as HTMLInputElement;
+  if (filterField.value !== state.query) filterField.value = state.query;
+  filterField.parentElement!.classList.toggle('has-query', Boolean(state.query));
+  const projectName = (s: Session) => state.projects.find(p => p.id === s.projectId)?.name ?? '';
+  const sidebarSessions = listedSessions().filter(s => !botProjects.has(s.projectId));
+  const inScope = sidebarSessions.filter(s => !state.projectFilter || s.projectId === state.projectFilter);
+  const matching = inScope.filter(s => matchesFilter(s, state.query, projectName(s)));
+  // Opening a thread (in view, with the window focused) clears its unread mark; settling one does too.
   const seen = unreviewed ?? (state.sessions.length ? unreviewed = readCollapsed(localStorage, UNREVIEWED_KEY) : new Set<string>());
-  const reviewed = [...seen].filter(id => { const task = state.sessions.find(s => s.id === id); return id === state.sessionId || (task ? task.archived || taskStage(task) === 'completed' : state.sessions.length > 0); });
+  const reviewed = [...seen].filter(id => { const task = state.sessions.find(s => s.id === id); return id === state.sessionId && transcriptVisible() && document.hasFocus() || (task ? taskStage(task) === 'completed' : state.sessions.length > 0); });
   if (reviewed.length) { for (const id of reviewed) seen.delete(id); saveUnreviewed(); }
+  const failed = (s: Session) => FAILED_STATUS.has(s.status);
+  // A held thread that starts running is held in Active from then on: after its run it stays there
+  // while it is open, and goes to its folder once you open another thread, never back to (say)
+  // the Settled section it was opened from.
+  if (sectionHold && sectionHold.section !== 'active' && isRunning(sectionHold.id)) sectionHold = { ...sectionHold, section: 'active' };
+  const order = taskComparator(sidebarSort.tasks), manual = sidebarSort.tasks === 'manual';
   const sections = sidebarSections({
-    tasks: [...matching].sort(compareThreadOrder), now, stage: taskStage, unseen: s => seen.has(s.id),
-    active: s => isRunning(s.id) || Boolean(s.resumeAtReset) && limitActive(s, now),
-    selectedId: state.sessionId, held: sectionHold === state.sessionId,
+    tasks: [...matching].sort(order), stage: taskStage,
+    // Work that needs you: running or waiting, stopped by a usage limit, or failed while you were away.
+    active: s => isRunning(s.id) || limitActive(s, now) || failed(s) && seen.has(s.id),
+    selectedId: state.sessionId, hold: sectionHold?.id === state.sessionId ? sectionHold.section : undefined,
   });
-  const visible = state.archived ? matching : sections.rest;
+  const visible = sections.rest;
   renderBots();
-  $('#archive-toggle').classList.toggle('active', state.archived);
-  $('#archive-toggle').setAttribute('aria-pressed', String(state.archived));
-  const row = (s: Session, inFolder = false, inProject = false): string => {
+  /** `card`: two lines (where, then what) for Active, Finished and Pinned; otherwise one line. */
+  const row = (s: Session, card = false, reorderable = false, showProject = false): string => {
     const p = state.projects.find(p => p.id === s.projectId);
-    const stage = chatTask(s) ? '' : taskStage(s);
-    const stageName = stage ? stageNames[stage] : '';
-    const stageDot = stage ? '<span class="stage-dot" aria-hidden="true" title="Board stage: ' + escape(stageName) + '"></span>' : '';
-    const taskTitle = '<span class="task-title-row">' + stageDot + '<span class="task-title">' + escape(s.title) + '</span></span>';
     const activityAt = lastActivity(s);
     const live = state.streams.get(s.id);
     const startedAt = live?.startedAt ?? s.lastPromptAt;
     const elapsed = isRunning(s.id) && startedAt != null ? formatDuration(now - startedAt) : '';
     const age = elapsed || (activityAt == null ? '' : responseAge(activityAt, now));
-    const status = live && (live.approvals.size || live.inputs.size) || s.status === 'waiting_approval' ? 'attention' : isRunning(s.id) ? 'running' : limitActive(s, now) ? 'limited' : '';
-    const statusLabel = status === 'attention' ? live?.inputs.size ? 'Needs your answer' : 'Needs approval' : status === 'limited' ? `Usage limit · ${resetLabel(s.limitedUntil, now)}` : 'Running';
-    // Three lines, like a card: where (app icon, checkout, age), what (title), and the branch,
-    // linked pull request or issue, and the agent working on it.
+    const answer = Boolean(live?.inputs.size);
+    const status = live && (live.approvals.size || live.inputs.size) || s.status === 'waiting_approval' ? 'attention' : isRunning(s.id) ? 'running' : limitActive(s, now) ? 'limited' : failed(s) ? 'failed' : '';
+    const statusLabel = status === 'attention' ? answer ? 'Needs your answer' : 'Needs approval' : status === 'limited' ? `Usage limit · ${resetLabel(s.limitedUntil, now)}` : status === 'failed' ? s.status === 'interrupted' ? 'Interrupted' : 'Failed' : 'Running';
+    // States that need you say so in a word; running shows its clock, the rest their age.
+    const word = status === 'attention' ? answer ? 'Answer' : 'Approval' : status === 'failed' ? statusLabel : status === 'limited' ? (limitReset(s.limitedUntil, now) ? `Limited · ${limitReset(s.limitedUntil, now)}` : 'Limited') : '';
+    const unread = seen.has(s.id) && s.id !== state.sessionId;
     const checkout = s.worktreePath ? s.worktreePath.split(/[\\/]/).filter(Boolean).pop() ?? p?.name ?? 'Project' : p?.name ?? 'Project';
     const link = s.pullRequest ?? s.issue;
     const linkMark = link ? `<span class="task-link ${link.kind === 'pull' ? 'pull' : 'issue'}" title="${escape(`${link.kind === 'pull' ? 'Pull request' : 'Issue'} #${link.number}: ${link.title}`)}">#${link.number}</span>` : '';
     // Worktree tasks show their branch; the worktree mark keeps its accessible name either way.
-    const worktreeMark = s.worktreePath ? `<span class="task-worktree" role="img" aria-label="Worktree" title="${escape(s.worktreePath)}">${icon('worktree')}</span>` : '';
-    const branch = s.worktreePath ? `<span class="task-branch">${worktreeMark}${s.worktreeBranch ? `<span>${escape(s.worktreeBranch)}</span>` : ''}</span>` : '';
-    const signalIcon = status === 'attention' ? live?.inputs.size ? 'help' : 'alert' : status === 'limited' ? 'pause' : 'activity';
-    const signals = `${status ? `<span class="task-status ${status}" role="img" aria-label="${escape(statusLabel)}" title="${escape(statusLabel)}">${icon(signalIcon)}</span>` : ''}${age ? `<span class="task-age${elapsed ? ' task-runtime' : ''}"${elapsed ? ` data-started-at="${startedAt}"` : ''} title="${elapsed ? `Working for ${elapsed}` : `Last message: ${escape(new Date(activityAt!).toLocaleString())}`}">${age}</span>` : ''}`;
-    const stageAttribute = stage ? `data-stage="${stage}"` : '';
-    const description = [shortProvider(s.provider), stage ? `Board stage: ${stageName}` : ''].filter(Boolean).join(' · ');
-    const done = taskStage(s) === 'completed';
-    // Completed rows keep their completion order, so they are not dragged.
-    const reorderable = state.archived || !done;
-    const button = `<button class="task-item${inFolder ? ' task-oneline' : ''} ${s.id === state.sessionId ? 'selected' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" ${stageAttribute} draggable="${reorderable}" data-pinned="${Boolean(s.pinned)}" ${reorderable ? 'aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''} ${s.id === state.sessionId ? 'aria-current="page"' : ''} aria-description="${escape(description)}" title="${escape(s.worktreeBranch ? `${s.title}\n${s.worktreeBranch}` : s.title)}">`;
+    const worktreeMark = (s.worktreePath ? `<span class="task-worktree" role="img" aria-label="Worktree" title="${escape(s.worktreePath)}">${icon('worktree')}</span>` : '')
+      + (s.cloud ? `<span class="task-cloud" role="img" aria-label="Runs on ${escape(s.cloud.label)}" title="Runs on a ${escape(s.cloud.label)} cloud machine">${cloudIcon()}</span>` : '');
+    const branch = s.worktreePath || s.cloud ? `<span class="task-branch">${worktreeMark}${s.worktreeBranch ? branchLabel(s.worktreeBranch) : ''}</span>` : '';
+    const signals = `${status ? `<span class="task-indicator ${status}" role="img" aria-label="${statusLabel}" title="${statusLabel}"></span>` : unread ? '<span class="task-indicator unread" role="img" aria-label="Unread" title="Unread"></span>' : ''}${word ? `<span class="task-status ${status}" aria-hidden="true">${word}</span>` : ''}${age && !word ? `<span class="task-age${elapsed ? ' task-runtime' : ''}"${elapsed ? ` data-started-at="${startedAt}"` : ''} title="${elapsed ? `Working for ${elapsed}` : `Last message: ${escape(new Date(activityAt!).toLocaleString())}`}">${age}</span>` : ''}${wakeGlyph(s.id)}`;
+    const stage = taskStage(s), done = stage === 'completed';
+    const selected = s.id === state.sessionId;
+    const button = `<button class="task-item${card ? '' : ' task-oneline'}${selected ? ' selected' : ''}${unread ? ' unread' : ''}" data-action="select-task" data-id="${escape(s.id)}" data-activity="${activeTask(s, now) ? 'active' : 'inactive'}" draggable="${reorderable}" data-pinned="${Boolean(s.pinned)}" tabindex="-1" ${reorderable ? 'aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''} ${selected ? 'aria-current="page"' : ''} aria-description="${shortProvider(s.provider)}" title="${escape([s.title, showProject || card ? chatTask(s) ? 'Chat' : p?.name ?? '' : '', s.worktreeBranch ?? ''].filter(Boolean).join('\n'))}">`;
     const pin = s.pinned ? `<span class="task-pin" role="img" aria-label="Pinned">${icon('pin')}</span>` : '';
-    const projectName = `<span class="task-project">${escape(p?.name ?? 'Project')}</span>`;
-    // Row actions sit beside the row's button (buttons cannot nest), over its right edge.
+    const projectLabel = `<span class="task-project">${escape(p?.name ?? 'Project')}</span>`;
+    // Row actions sit beside the row's button (buttons cannot nest), over its right edge. They
+    // are not Tab stops: ⌘↩ completes and the menu key or ⇧F10 opens the menu.
     const title = escape(s.title), id = escape(s.id), busy = isRunning(s.id) || configuringSessions.has(s.id);
-    const tick = state.archived || busy ? '' : `<button class="task-action task-check${done ? ' checked' : ''}" data-action="${done ? 'sidebar-reopen' : 'sidebar-complete'}" data-task="${id}" aria-label="${done ? 'Reopen' : 'Mark complete'}: ${title}" title="${done ? 'Reopen task' : 'Mark complete'}">${icon('check')}</button>`;
-    const archive = `<button class="task-action task-archive" data-action="sidebar-archive" data-task="${id}" aria-label="${s.archived ? 'Restore' : 'Archive'}: ${title}" title="${s.archived ? 'Restore task' : 'Archive task'}">${icon(s.archived ? 'undo' : 'archive')}</button>`;
-    // The archive view deletes directly; elsewhere Delete sits in the row's menu, one click from hover.
-    const last = state.archived
-      ? `<button class="task-action task-delete" data-action="sidebar-delete" data-task="${id}" aria-label="Delete: ${title}" title="${busy ? 'Stop the agent before deleting this task' : 'Delete task…'}" ${busy ? 'disabled' : ''}>${icon('trash')}</button>`
-      : `<button class="task-action task-more" data-action="sidebar-more" data-task="${id}" aria-haspopup="menu" aria-label="Task actions: ${title}" title="Task actions">${icon('more')}</button>`;
-    const wrap = (content: string) => `<div class="task-row${inFolder ? ' task-row-oneline' : ''}" id="task-row-${id}" data-stage="${stage}" data-actions="${[tick, archive, last].filter(Boolean).length}">${content}<span class="task-actions">${tick}${archive}${last}</span></div>`;
-    // Inside a project's folder the heading already names the project: one line with the
-    // title, then the worktree mark, linked PR or issue, status, age and harness.
-    if (inFolder) return wrap(`${button}<span class="task-line task-top">${taskTitle}${worktreeMark}${linkMark}${pin}${projectName}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`);
-    // With one project chosen the filter names it: two lines, the title and then the rest.
-    const head = inProject
-      ? `<span class="task-line task-top">${taskTitle}${signals}</span>`
-      : `<span class="task-line task-head">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-checkout">${escape(checkout)}</span>${signals}</span>${taskTitle}`;
-    return wrap(`${button}${head}`
-      + `<span class="task-line task-meta">${branch}${linkMark}${pin}${projectName}${providerLogo(s.provider, 'task-provider')}</span></button>`);
+    const tick = busy ? '' : `<button class="task-action task-check${done ? ' checked' : ''}" data-action="${done ? 'sidebar-reopen' : 'sidebar-complete'}" data-task="${id}" tabindex="-1" aria-label="${done ? 'Reopen' : 'Settle'}: ${title}" title="${done ? 'Reopen task' : 'Settle task'}">${icon('check')}</button>`;
+    // Delete and the rest sit in the row's menu.
+    const extra = `<button class="task-action task-more" data-action="sidebar-more" data-task="${id}" tabindex="-1" aria-haspopup="menu" aria-label="Task actions: ${title}" title="Task actions">${icon('more')}</button>`;
+    const wrap = (content: string) => `<div class="task-row${card ? '' : ' task-row-oneline'}" id="task-row-${id}" data-stage="${stage}">${content}<span class="task-actions">${tick}${extra}</span></div>`;
+    // One line: the title, then the worktree mark, linked PR or issue, status, age and harness.
+    // A flat list names each row's project: its icon first, its name after the title.
+    if (!card && showProject) return wrap(`${button}<span class="task-line task-top">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-title">${title}</span><span class="task-project-name" aria-hidden="true">${escape(chatTask(s) ? 'Chat' : p?.name ?? 'Project')}</span>${worktreeMark}${linkMark}${pin}${projectLabel}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`);
+    if (!card) return wrap(`${button}<span class="task-line task-top"><span class="task-title">${title}</span>${worktreeMark}${linkMark}${pin}${projectLabel}${signals}${providerLogo(s.provider, 'task-provider')}</span></button>`);
+    // Two lines: where (app icon, checkout, status, age), then what (title, branch, PR, harness).
+    return wrap(`${button}<span class="task-line task-head">${projectAppIcon(s.projectId, p?.name ?? '')}<span class="task-checkout">${escape(checkout)}</span>${pin}${signals}</span>`
+      + `<span class="task-line task-top"><span class="task-title">${title}</span>${branch}${linkMark}${projectLabel}${providerLogo(s.provider, 'task-provider')}</span></button>`);
   };
-  // Active and Needs review list threads that need you; Completed is closed until opened.
-  const section = (key: 'active' | 'review', label: string, name: string, tasks: Session[]) => tasks.length
-    ? `<section class="task-group sidebar-section ${key}-group" data-thread-group="${key}" aria-label="${name}"><div class="group-heading section-heading">${label}<span class="section-count">${tasks.length}</span></div><div class="task-list">${tasks.map(s => row(s, false, Boolean(state.projectFilter))).join('')}</div></section>` : '';
+  const single = Boolean(state.projectFilter);
+  const heading = (key: string, label: string, count: number) => `<div class="group-heading section-heading">${label}<span class="section-count">${count}</span></div>`;
+  const filtering = Boolean(state.query.trim());
+  // Active, Finished, Chats and Tasks fold from their headings (saved in collapsedSections); a line
+  // runs from the label to the count. `rows` draws only while open.
+  const section = (key: string, label: string, name: string, count: number, rows: () => string) => {
+    if (!count) return '';
+    const open = filtering || !collapsedSections.has(key);
+    return `<section class="task-group sidebar-section ${key}-group" data-thread-group="${key}" aria-label="${name}"><button class="group-heading section-heading section-fold" data-action="toggle-section" data-section="${key}" tabindex="-1" aria-expanded="${open}" aria-controls="${key}-tasks">${label}<span class="section-rule" aria-hidden="true"></span><span class="section-count">${count}</span>${icon('chevron')}</button><div id="${key}-tasks" class="task-list" ${open ? '' : 'hidden'}>${open ? rows() : ''}</div></section>`;
+  };
+  // While filtering, every match shows: closed sections open and limits lift, for this draw only
+  // (nothing is saved).
+  const completedVisible = completedOpen || filtering;
+  // The open (held) thread always shows, even past the first page, as in a folder.
+  const completedRows = filtering ? sections.completed : shownTasks(sections.completed, false, state.sessionId, completedShown);
+  const completedMore = sections.completed.length - completedRows.length;
   const completedSection = sections.completed.length
-    ? `<section class="task-group sidebar-section completed-group" data-thread-group="completed" aria-label="Completed tasks"><button class="group-heading section-heading section-toggle" data-action="toggle-completed" aria-expanded="${completedOpen}" aria-controls="completed-tasks">${icon('chevron')}Completed<span class="section-count">${sections.completed.length}</span></button><div id="completed-tasks" class="task-list" ${completedOpen ? '' : 'hidden'}>${completedOpen ? sections.completed.map(s => row(s, true)).join('') : ''}</div></section>` : '';
+    ? `<section class="task-group sidebar-section completed-group" data-thread-group="completed" aria-label="Settled tasks"><button class="group-heading section-heading section-toggle" data-action="toggle-completed" tabindex="-1" aria-expanded="${completedVisible}" aria-controls="completed-tasks">${icon('chevron')}Settled<span class="section-count">${sections.completed.length}</span></button><div id="completed-tasks" class="task-list" ${completedVisible ? '' : 'hidden'}>${completedVisible ? completedRows.map(s => row(s)).join('') + (completedMore ? `<button class="folder-more" data-action="completed-more" tabindex="-1">Show ${Math.min(COMPLETED_PAGE, completedMore)} more</button>` : '') : ''}</div></section>` : '';
   const sectioned = sections.active.length + sections.review.length + sections.completed.length;
-  const pinned = visible.filter(s => s.pinned).sort(compareThreadOrder);
-  // Projectless chats get their own group; a chosen project filter hides them.
-  const chats = state.projectFilter ? [] : visible.filter(s => !s.pinned && chatTask(s)).sort(compareThreadOrder);
-  const chatGroup = chats.length ? `<section class="task-group chats-group" data-thread-group="chats" aria-label="Chats"><div class="group-heading">${icon('chat')}Chats</div><div class="task-list">${chats.map(s => row(s, true)).join('')}</div></section>` : '';
-  const folders = folderGroups({
-    projects: state.projectFilter ? state.projects.filter(p => p.id === state.projectFilter) : userProjects(),
-    tasks: visible.filter(s => !s.pinned).sort(compareThreadOrder), activity: lastActivity, includeEmpty: !state.query,
-  });
-  const folder = ({ project, tasks }: (typeof folders)[number], index: number): string => {
-    // A selected project is already named by the filter above: list its tasks flat, with room for more.
-    const single = Boolean(state.projectFilter), limit = single ? PROJECT_LIMIT : FOLDER_LIMIT;
-    const open = single || !state.collapsedFolders.has(project.id), expanded = state.expandedFolders.has(project.id);
-    const rows = shownTasks(tasks, expanded, state.sessionId, limit);
-    const more = tasks.length > rows.length || expanded && tasks.length > limit
-      ? `<button class="folder-more" data-action="toggle-folder-more" data-project="${escape(project.id)}">${expanded ? 'Show less' : `Show ${tasks.length - rows.length} more`}</button>` : '';
-    if (single) return `<section class="task-group folder-group single-project" data-thread-group="project:${escape(project.id)}" data-project="${escape(project.id)}" aria-label="${escape(project.name)} tasks"><div class="task-list">${rows.map(s => row(s, false, true)).join('') || '<div class="no-tasks">No tasks yet</div>'}${more}</div></section>`;
-    return `<section class="task-group folder-group" data-thread-group="project:${escape(project.id)}" data-project="${escape(project.id)}" aria-label="${escape(project.name)} tasks"><div class="folder-row"><button class="folder-heading ${tasks.length ? '' : 'empty'}" data-action="toggle-folder" data-project="${escape(project.id)}" aria-expanded="${open}" aria-controls="folder-tasks-${index}" title="${escape(project.path)}">${projectAppIcon(project.id, project.name)}<span>${escape(project.name)}</span></button><button class="icon-button folder-new-task" data-action="project-task" data-id="${escape(project.id)}" aria-label="New task in ${escape(project.name)}" title="New task">${icon('plus')}</button></div><div id="folder-tasks-${index}" class="task-list folder-tasks" ${open ? '' : 'hidden'}>${rows.map(s => row(s, true)).join('') || '<div class="no-tasks">No tasks yet</div>'}${more}</div></section>`;
+  // Pinned keeps the order you gave it, whatever the task sort.
+  const pinned = visible.filter(s => s.pinned).sort(compareManual);
+  // "Show N more" / "Show less" under a capped list; `key` is a project id, "chats" or "all".
+  const moreButton = (key: string, total: number, shown: number, expanded: boolean, limit: number) => !filtering && (total > shown || expanded && total > limit)
+    ? `<button class="folder-more" data-action="toggle-folder-more" data-project="${escape(key)}" tabindex="-1">${expanded ? 'Show less' : `Show ${total - shown} more`}</button>` : '';
+  const capped = (key: string, tasks: Session[], limit: number) => {
+    const expanded = state.expandedFolders.has(key);
+    const rows = filtering ? tasks : shownTasks(tasks, expanded, state.sessionId, limit);
+    return { rows, more: moreButton(key, tasks.length, rows.length, expanded, limit) };
   };
+  // All projects: no folders, only sections. Projectless chats, then every other task, each row
+  // naming its project; a chosen project filter hides chats.
+  const chats = single ? [] : visible.filter(s => !s.pinned && chatTask(s));
+  const others = single ? [] : visible.filter(s => !s.pinned && !chatTask(s));
+  const listed = (key: string, tasks: Session[], showProject: boolean) => () => {
+    const { rows, more } = capped(key, tasks, sidebarSort.perProject);
+    return rows.map(s => row(s, false, manual, showProject)).join('') + more;
+  };
+  const chatGroup = section('chats', 'Chats', 'Chats', chats.length, listed('chats', chats, false));
+  const tasksGroup = section('all', 'Tasks', 'Tasks', others.length, listed('all', others, true));
+  // A selected project is already named by the filter above: list its tasks flat, with room for more.
+  const project = single ? state.projects.find(p => p.id === state.projectFilter) : undefined;
+  const projectTasks = project ? visible.filter(s => !s.pinned && s.projectId === project.id) : [];
+  const projectList = project && (projectTasks.length || !filtering && !sectioned && !pinned.length) ? (() => {
+    const { rows, more } = capped(project.id, projectTasks, PROJECT_LIMIT);
+    const list = rows.map(s => row(s, false, manual)).join('') || '<div class="no-tasks">No tasks yet</div>';
+    return `<section class="task-group folder-group single-project" data-thread-group="project:${escape(project.id)}" data-project="${escape(project.id)}" aria-label="${escape(project.name)} tasks"><div class="task-list">${list}${more}</div></section>`;
+  })() : '';
   const nav = $('#navigation');
   nav.setAttribute('aria-busy', String(orderingBusy));
   const menuTrigger = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
   const retainedRow = menuTrigger && nav.contains(menuTrigger) && menuTrigger.matches('.task-item') ? menuTrigger : null;
   const focused = nav.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
-  const focusSelector = focused?.dataset.id ? `[data-id="${CSS.escape(focused.dataset.id)}"]` : focused?.dataset.action ? `[data-action="${CSS.escape(focused.dataset.action)}"]${focused.dataset.project ? `[data-project="${CSS.escape(focused.dataset.project)}"]` : ''}${focused.dataset.task ? `[data-task="${CSS.escape(focused.dataset.task)}"]` : ''}` : '';
-  // Opening a project narrows the sidebar to it; say so, or the other tasks look lost.
-  const hidden = state.projectFilter ? sidebarSessions.filter(s => s.projectId !== state.projectFilter && taskStage(s) !== 'completed').length : 0;
-  // A one-line note pinned under the list, not a card inside it.
-  const note = $('#sidebar-note');
-  note.innerHTML = hidden && !state.archived ? `<button class="filter-note" data-action="show-all-projects" title="Show tasks from every project"><span>${hidden} more in other projects</span><strong>Show all</strong></button>` : '';
-  note.hidden = !note.innerHTML;
+  const focusSelector = focused?.dataset.id ? `[data-id="${CSS.escape(focused.dataset.id)}"]` : focused?.dataset.action ? `[data-action="${CSS.escape(focused.dataset.action)}"]${focused.dataset.project ? `[data-project="${CSS.escape(focused.dataset.project)}"]` : ''}${focused.dataset.section ? `[data-section="${CSS.escape(focused.dataset.section)}"]` : ''}${focused.dataset.task ? `[data-task="${CSS.escape(focused.dataset.task)}"]` : ''}` : '';
+  const pinnedGroup = pinned.length ? `<section class="task-group pinned-group" data-thread-group="pinned" aria-label="Pinned tasks">${heading('pinned', 'Pinned', pinned.length)}<div class="task-list">${pinned.map(s => row(s, !single, true)).join('')}</div></section>` : '';
+  const empty = filtering ? '<div class="no-tasks sidebar-no-match">No tasks match</div>' : '';
   // Morph rather than replace: unchanged rows keep their nodes, so nothing flickers.
   // Rows sit one level deeper than before (.task-row around .task-item), so morph one level deeper.
-  morph(nav, !userProjects().length && !chats.length && !pinned.length && !(state.archived ? 0 : sectioned) ? '<div class="sidebar-empty">Open a project to get started.</div>' : state.archived
-    ? `<section class="task-group archived-group" data-thread-group="archived" aria-label="Archived tasks"><div class="group-heading">Archived<span>${visible.length}</span></div><div class="task-list">${[...visible].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || compareThreadOrder(a, b)).map(s => row(s)).join('') || '<div class="no-tasks">No archived tasks</div>'}</div></section>`
-    : `${section('active', 'Active', 'Active tasks', sections.active)}${section('review', 'Needs review', 'Tasks to review', sections.review)}${pinned.length ? `<section class="task-group pinned-group" data-thread-group="pinned" aria-label="Pinned tasks"><div class="group-heading">${icon('pin')}Pinned</div><div class="task-list">${pinned.map(s => row(s, false, Boolean(state.projectFilter))).join('')}</div></section>` : ''}${chatGroup}${folders.map(folder).join('') || (state.query && !chats.length && !sectioned ? '<div class="no-tasks">No matching tasks</div>' : '')}${completedSection}`, 5);
+  morph(nav, !userProjects().length && !chats.length && !pinned.length && !sectioned ? '<div class="sidebar-empty">Open a project to get started.</div>'
+    : `${pinnedGroup}${section('active', 'Active', 'Active tasks', sections.active.length, () => sections.active.map(s => row(s, !single)).join(''))}${section('review', 'Finished', 'Finished tasks', sections.review.length, () => { const { rows, more } = capped('review', sections.review, sidebarSort.perProject); return rows.map(s => row(s, !single, manual)).join('') + more; })}${chatGroup}${tasksGroup}${projectList}${filtering && !matching.length ? empty : ''}${completedSection}`, 5);
   if (retainedRow) {
     const replacement = nav.querySelector<HTMLElement>(`.task-item[data-id="${CSS.escape(retainedRow.dataset.id!)}"]`);
     if (replacement) {
@@ -1133,20 +1373,25 @@ function renderNavigation(): void {
       retainedRow.innerHTML = replacement.innerHTML; retainedRow.className = replacement.className;
       retainedRow.title = replacement.title;
       retainedRow.dataset.pinned = replacement.dataset.pinned; retainedRow.draggable = replacement.draggable;
-      if (replacement.dataset.stage) retainedRow.dataset.stage = replacement.dataset.stage; else delete retainedRow.dataset.stage;
-      if (replacement.hasAttribute('aria-description')) retainedRow.setAttribute('aria-description', replacement.getAttribute('aria-description')!); else retainedRow.removeAttribute('aria-description');
       if (replacement.hasAttribute('aria-current')) retainedRow.setAttribute('aria-current', 'page'); else retainedRow.removeAttribute('aria-current');
       replacement.replaceWith(retainedRow);
       nav.dispatchEvent(new Event('scroll'));
     } else closeChoiceMenu();
   }
+  // The list's scrollport ends where the docked Settled section starts, so rows never pass under it.
+  const dock = nav.querySelector<HTMLElement>(':scope > .completed-group');
+  if (dock !== settledDock) {
+    settledResize.disconnect(); settledDock = dock;
+    if (dock) settledResize.observe(dock); else nav.style.removeProperty('--settled-height');
+  }
   // A row action that moved its task to another section hands focus to the task's row.
+  syncRovingFocus(nav);
   if (focusSelector) (nav.querySelector<HTMLElement>(focusSelector) ?? (focused?.dataset.task ? nav.querySelector<HTMLElement>(`.task-item[data-id="${CSS.escape(focused.dataset.task)}"]`) : null))?.focus({ preventScroll: true });
   renderBoardView();
   updateWorkTimer();
   window.clearTimeout(activityTimer);
   if (!document.hidden) {
-    const expiry = Math.min(...sections.review.map(s => s.lastResponseAt! + REVIEW_WINDOW), state.sessions.reduce((next, s) => activeTask(s, now) ? Math.min(next, lastActivity(s)! + ACTIVITY_WINDOW) : next, Infinity));
+    const expiry = Math.min(state.sessions.reduce((next, s) => activeTask(s, now) ? Math.min(next, lastActivity(s)! + ACTIVITY_WINDOW) : next, Infinity));
     if (Number.isFinite(expiry)) activityTimer = window.setTimeout(renderNavigation, Math.min(2147483647, Math.max(1, expiry - now)));
   }
 }
@@ -1162,11 +1407,19 @@ function responseAge(timestamp: number, now: number): string {
 }
 function renderHeader(): void {
   renderBoardView();
+  syncProgressPip();
   const p = project();
   terminalPanel.select(p ? workspaceContext() : undefined, p?.name ?? '');
   projectRunner.paint();
   const fresh = newTaskView(), bot = botForThread(), chat = chatTask(session());
   $('.conversation-pane').classList.toggle('new-task-page', fresh);
+  $('.conversation-pane').classList.toggle('channel-thread', Boolean(state.sharedChannelId));
+  document.body.classList.toggle('shared-channel-thread', Boolean(state.sharedChannelId));
+  if (state.sharedChannelId) {
+    const channel = state.sharedChannelDetail;
+    $('#breadcrumb').innerHTML = `<button class="channel-back" data-action="close-shared-channel" aria-label="Back to conversation">${icon('chevron')}</button><span>${escape(channel ? `#${channel.name}` : 'Shared channel')}</span>`;
+    return;
+  }
   // A chat has no project: no project bar, deploy or run script.
   document.body.classList.toggle('chat-thread', chat);
   $('.conversation-pane').classList.toggle('bot-thread', Boolean(bot));
@@ -1180,21 +1433,14 @@ function renderHeader(): void {
 }
 /** What the empty prompt invites: a task, or a message to the bot whose thread this is. */
 function composerPlaceholder(): string { const bot = botForThread(); return bot ? `Message ${escape(bot.name)}…` : chatTask(session()) ? 'Ask anything…' : 'Describe a task…'; }
-/** A bot thread's header: who you're talking to, its state, and its settings. */
+/** A bot thread's header: who you're talking to, where the thread comes from, and its settings. */
 function botCrumb(bot: import('./bots').Bot): string {
   const s = session();
   const working = state.sessions.some(task => task.projectId === bot.projectId && isRunning(task.id));
-  const status = bot.paused ? 'Paused' : working ? 'Working' : 'Ready';
   // Channel threads and scheduled work name where they come from; the bot's own chat needs no label.
   const where = s && s.id !== bot.desktopSession ? s.title.split(' · ').slice(1).join(' · ') : '';
-  return `<span class="bot-crumb">${botAvatar(bot, 'bot-crumb-avatar')}<strong>${escape(bot.name)}</strong>${where ? `<span class="bot-crumb-where">${escape(where)}</span>` : ''}<span class="bot-crumb-state" data-state="${status.toLowerCase()}">${status}</span></span><button class="icon-button bot-crumb-action" data-action="bot-pause" data-bot="${escape(bot.id)}" aria-label="${bot.paused ? 'Resume' : 'Pause'} ${escape(bot.name)}" title="${bot.paused ? 'Resume: schedules, check-ins and channels continue' : 'Pause: stop work and hold schedules and messages'}" aria-pressed="${bot.paused}">${icon(bot.paused ? 'play' : 'pause')}</button><button class="bot-crumb-settings" data-action="bot-settings" data-bot="${escape(bot.id)}" aria-label="${escape(bot.name)} settings" title="Profile, memory, schedules, channels and rules">${icon('settings')}<span>Settings</span></button>`;
-}
-/** An empty bot conversation: who it is, a few things to ask, and the settings that make it useful. */
-function botWelcome(bot: import('./bots').Bot): string {
-  const asks = ['What can you help me with?', 'Remember that I prefer short, direct answers.', 'Every weekday at 9, send me a summary of what changed.'];
-  const setup = ([['profile', 'edit', 'Instructions'], ['memory', 'leaf', 'Memory'], ['schedules', 'refresh', 'Schedules'], ['channels', 'globe', 'Channels']] as const)
-    .map(([tab, glyphName, label]) => `<button data-action="bot-settings" data-bot="${escape(bot.id)}" data-tab="${tab}">${icon(glyphName)}${label}</button>`).join('');
-  return `<div class="new-task-welcome bot-welcome">${botAvatarHtml(bot.avatar, bot.name, 'bot-welcome-avatar')}<h1>Chat with ${escape(bot.name)}</h1><p>${escape(bot.role || 'Your bot remembers, works on a schedule and answers you here or in your channels.')}</p><div class="prompt-suggestions">${asks.map(text => `<button data-action="suggest" data-text="${escape(text)}">${escape(text)} ${icon('chevron')}</button>`).join('')}</div><div class="bot-welcome-setup" role="group" aria-label="Set up ${escape(bot.name)}">${setup}</div></div>`;
+  const next = s && isRunning(s.id) ? botThread.nextModel(s.id) : undefined;
+  return botThread.crumbHtml(bot, { where, status: bot.paused ? 'Paused' : working ? 'Working' : 'Ready', nextModel: s && next ? { running: modelLabel(s), next: next.label } : undefined });
 }
 /** Where a turn's spawned workers appear: right after what the architect said in that turn. */
 function workerSlot(turn: { user?: Message; coordination?: Message }): string {
@@ -1228,27 +1474,35 @@ function changesRow(sessionId: string, changes: TurnChanges | undefined): string
   const card = changes && !state.sessions.find(task => task.id === sessionId)?.remoteDevice ? renderTurnChanges(sessionId, changes, sessionId === state.sessionId && projectRunner.available()) : '';
   return card ? `<div class="turn-changes-row">${card}</div>` : '';
 }
-/** Refresh mutable controls/author labels without touching the selected message text. */
-function refreshMessageChrome(old: HTMLElement, next: HTMLElement): void {
-  for (const selector of ['.message-actions', '.message-meta']) {
-    const before = old.querySelector<HTMLElement>(selector), after = next.querySelector<HTMLElement>(selector);
-    if (before && after && before.outerHTML !== after.outerHTML) before.replaceWith(after);
-  }
-  old.className = next.className;
-}
 function renderTranscript(preservePosition = false): void {
   closeContentMenus();
   $('.conversation-pane').classList.toggle('new-task-page', newTaskView());
   const transcript = $('#transcript');
-  const sameSession = transcript.dataset.sessionId === state.sessionId;
-  transcript.dataset.sessionId = state.sessionId;
   const restoreAnchor = preservePosition || !stickToBottom ? captureTranscriptAnchor(transcript) : undefined;
   transcript.removeAttribute('aria-busy');
   const toolViews = captureTools(transcript), groupViews = captureToolGroups(transcript), turnViews = captureTurns(transcript), changeViews = captureChangeCards(transcript), scrollTop = transcript.scrollTop;
   const liveTurn = transcript.querySelector<HTMLElement>('#stream-region .live-activity[open]:not([data-folded])');
   const unfolded = liveTurn && !liveTurnStaysOpen(liveTurn) ? captureTurns(liveTurn.parentElement!, true)[0] : undefined;
   const readingTool = readingTranscriptTool();
+  if (state.sharedChannelId) {
+    const channel = state.sharedChannelDetail;
+    transcript.innerHTML = channel ? sharedChannelThreadHtml(channel, sidebarBots) : '<p class="history-notice" role="status">Loading channel…</p>';
+    if (channel) {
+      for (const node of transcript.querySelectorAll<HTMLElement>('.bc-message-text[data-message-id]')) {
+        const message = channel.messages.find(item => item.id === node.dataset.messageId);
+        if (message) void markdown(node, message.text, transcript).catch(report);
+      }
+      const history = transcript.querySelector<HTMLElement>('.bc-history');
+      if (history) {
+        // After "Show earlier messages", the rows the user was reading stay where they were.
+        history.scrollTop = state.sharedChannelFromBottom !== null ? history.scrollHeight - state.sharedChannelFromBottom : state.sharedChannelAtBottom ? history.scrollHeight : state.sharedChannelScrollTop;
+        state.sharedChannelFromBottom = null;
+      }
+    }
+    return;
+  }
   const s = session();
+  botThread.noteThread(s?.id ?? '');
   if (!s) { transcript.innerHTML = `<div class="welcome"><span class="welcome-mark" aria-hidden="true">${icon('bamboo')}</span><h1>${project() ? 'No task selected' : 'Choose a project'}</h1><button class="primary-button" data-action="${project() ? 'new-task' : 'add-project'}">${icon('plus')}${project() ? 'Start a task' : 'Open a project'}</button></div>`; return; }
   if ((state.messagesLoading || state.messagesError) && !state.streams.has(s.id) && !finishingStreams.has(s.id)) { transcript.innerHTML = `<p class="history-notice" role="status">${state.messagesError ? 'Unable to load this task. Select it again to retry.' : 'Loading conversation…'}</p>`; return; }
   if (state.view === 'board' && newTaskView()) {
@@ -1256,81 +1510,39 @@ function renderTranscript(preservePosition = false): void {
     return;
   }
   const bot = botForThread();
-  if (newTaskView() && bot) { transcript.innerHTML = `${botWelcome(bot)}<div id="stream-region"></div>`; return; }
+  if (newTaskView() && bot && !isRunning(s.id)) {
+    transcript.innerHTML = `${botThread.welcomeHtml(bot)}<div id="stream-region"></div>`;
+    botThread.decorateTranscript(transcript, bot, s.id, state.messages, botSwitches.get(s.id) ?? [], botMessages.get(s.id) ?? []);
+    if (!botThreadMetaLoaded.has(s.id)) void refreshBotThreadMeta(bot, s.id);
+    return;
+  }
   if (newTaskView() && chatTask(s)) {
     transcript.innerHTML = `<div class="new-task-welcome chat-welcome"><span class="new-task-mark" aria-hidden="true">${icon('bamboo')}</span><h1>What’s on your mind?</h1><button id="welcome-project" class="welcome-project" data-action="change-task-project" aria-haspopup="dialog" aria-expanded="false">Move to project…</button></div><div id="stream-region"></div>`;
     return;
   }
-  if (newTaskView()) {
+  if (newTaskView() && !bot) {
     const name = project()?.name ?? 'this project';
     transcript.innerHTML = `<div class="new-task-welcome"><span class="new-task-mark" aria-hidden="true">${icon('bamboo')}</span><h1 aria-label="What should we build in ${escape(name)}?">What should we build in <button id="welcome-project" class="welcome-project" data-action="change-task-project" aria-label="Change task project" aria-haspopup="dialog" aria-expanded="false" title="${escape(project()?.path)}" ${s.worktreePath ? 'disabled' : ''}>${escape(name)}</button>?</h1></div><div id="stream-region"></div>`;
     return;
   }
   const turns = groupTurns(visibleMessages());
-  const byId = new Map(state.messages.map(message => [String(message.id), message]));
-  const previousMarkdown = new Map((sameSession ? [...transcript.querySelectorAll<HTMLElement>('[data-markdown]')] : [])
+  const previousMarkdown = new Map([...transcript.querySelectorAll<HTMLElement>('[data-markdown]')]
     .map(node => [node.dataset.markdown!, node]));
-  // Reattaching the same article after innerHTML replacement still clears the
-  // reader's Selection. Reconcile around unchanged persisted articles without
-  // disconnecting them, and never carry their DOM across a task switch.
-  const previousArticles = new Map((sameSession ? [...transcript.querySelectorAll<HTMLElement>(':scope > .message[data-message-id]')] : [])
-    .filter(node => Number(node.dataset.messageId) > 0)
-    .map(node => [node.dataset.messageId!, node]));
-  const previousActivities = new Map((sameSession ? [...transcript.querySelectorAll<HTMLElement>(':scope > details.turn-activity')] : [])
-    .map(node => [node.dataset.turnKey!, node]));
-  const activitySources = new Map<string, string>();
-  for (const turn of turns) {
-    if (turn.activity.length && turn.activity.every(message => message.id > 0 && message.sessionId === s.id)) {
-      activitySources.set(turn.key, JSON.stringify(turn.activity.map(message => [message.id, message.sessionId, message.role, message.content, message.createdAt, message.authorProvider, message.coordinationKind])));
-    }
-  }
-  const template = document.createElement('template');
-  template.innerHTML = `${state.messages.length ? '' : '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>'}${turns.map(turn => (turn.user ? messageHtml(turn.user) : '') + (turn.handoff ? messageHtml(turn.handoff) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity) : '') + turn.errors.map(message => messageHtml(message)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool')) : '') + workerSlot(turn) + changesRow(s.id, turn.changes)).join('')}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
-  const next = [...template.content.children].map(element => {
-    const node = element as HTMLElement;
-    if (node.matches('details.turn-activity')) {
-      const source = activitySources.get(node.dataset.turnKey!);
-      const old = previousActivities.get(node.dataset.turnKey!);
-      if (source !== undefined && old && savedActivitySources.get(old) === source) {
-        // A completed turn contains narrative Markdown and raw tool disclosures.
-        // Keep the entire unchanged body connected, including the reader's Range.
-        const oldSummary = old.querySelector(':scope > summary'), newSummary = node.querySelector(':scope > summary');
-        if (oldSummary && newSummary && oldSummary.outerHTML !== newSummary.outerHTML) oldSummary.replaceWith(newSummary);
-        const articles = new Map([...old.querySelectorAll<HTMLElement>('.message[data-message-id]')].map(article => [article.dataset.messageId!, article]));
-        node.querySelectorAll<HTMLElement>('.message[data-message-id]').forEach(article => {
-          const previous = articles.get(article.dataset.messageId!);
-          if (previous) refreshMessageChrome(previous, article);
-        });
-        old.className = node.className;
-        return old;
-      }
-      if (source !== undefined) savedActivitySources.set(node, source);
-    }
-    const old = previousArticles.get(node.dataset.messageId ?? '');
-    const message = byId.get(node.dataset.messageId ?? '');
-    const oldContent = old?.querySelector<HTMLElement>('.message-content');
-    const newContent = node.querySelector<HTMLElement>('.message-content');
-    if (!old || !message || message.sessionId !== s.id || !oldContent || !newContent
-      || old.classList.contains('user-message') !== node.classList.contains('user-message')
-      || (message.role === 'user' ? oldContent.textContent !== newContent.textContent : savedMarkdownSources.get(oldContent) !== message.content)) return node;
-    refreshMessageChrome(old, node);
-    return old;
-  });
-  const retained = new Set<Node>(next);
-  for (const child of [...transcript.childNodes]) if (!retained.has(child)) child.remove();
-  next.forEach((node, index) => { if (transcript.children[index] !== node) transcript.insertBefore(node, transcript.children[index] ?? null); });
+  transcript.innerHTML = `${state.messages.length === 0 && !bot ? '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>' : ''}${turns.map(turn => (turn.user ? messageHtml(turn.user) : '') + (turn.handoff ? messageHtml(turn.handoff) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity) : '') + turn.errors.map(message => messageHtml(message)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool')) : '') + workerSlot(turn) + changesRow(s.id, turn.changes)).join('')}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
+  const byId = new Map(state.messages.map(message => [String(message.id), message]));
   transcript.querySelectorAll<HTMLElement>('[data-markdown]').forEach(el => {
     const message = byId.get(el.dataset.markdown!);
     if (!message) return;
     const previous = previousMarkdown.get(el.dataset.markdown!);
     if (previous && savedMarkdownSources.get(previous) === message.content) {
       // Prepending history must not reparse responses the reader already loaded.
-      if (el !== previous) el.replaceWith(previous);
+      el.replaceWith(previous);
       bindFileLinkContext(previous, workspaceContext());
     } else {
       savedMarkdownSources.set(el, message.content);
       bindFileLinkContext(el, workspaceContext());
-      void markdown(el, message.content, transcript).catch(report);
+      // Following skips the paint's own pin (the ResizeObserver pins before paint); pin now so no task sees the gap.
+      void markdown(el, message.content, transcript).then(followTranscript, report);
     }
   });
   renderStream();
@@ -1340,15 +1552,20 @@ function renderTranscript(preservePosition = false): void {
   restoreToolGroups(transcript, groupViews);
   restoreChangeCards(transcript, changeViews);
   restoreTools(transcript, toolViews);
+  decorateTranscript();
   if (restoreAnchor) restoreAnchor();
   else if (readingTool) transcript.scrollTop = scrollTop;
   else followTranscript();
+  if (bot) {
+    botThread.decorateTranscript(transcript, bot, s.id, state.messages, botSwitches.get(s.id) ?? [], botMessages.get(s.id) ?? []);
+    if (!botThreadMetaLoaded.has(s.id)) void refreshBotThreadMeta(bot, s.id);
+  }
 }
 function savedActivityHtml(messages: Message[], expanded = activityExpanded()): string {
   return groupToolRuns(messages, message => message.role === 'tool' ? savedToolKey(message) : undefined)
     .map(run => run.kind === 'tools'
       ? renderToolGroup(run.items.map(message => ({ key: savedToolKey(message), content: message.content })), expanded)
-      : messageHtml(run.item)).join('');
+      : messageHtml(run.item, false, false)).join('');
 }
 /** A turn of only tool calls folds to its summary sentence and mark stack (`Ran 2 searches and read 3 sources`),
  * opening onto the step rail; turns with narration keep `Worked for …` over their groups. */
@@ -1395,9 +1612,7 @@ function liveTurnStaysOpen(turn: HTMLElement): boolean {
 }
 /** Live turns are left out unless asked for or being read: the saved turn starts folded (see foldSavedTurn). */
 function captureTurns(root: ParentNode, live = false): TurnView[] {
-  // A saved turn may have folded once and then been reopened by the reader;
-  // its old animation marker must not override the current disclosure state.
-  return [...root.querySelectorAll<HTMLDetailsElement>('.turn-activity')].filter(turn => live || !turn.classList.contains('live-activity') || liveTurnStaysOpen(turn)).map(turn => ({ key: turn.dataset.turnKey!, open: turn.open && (!turn.classList.contains('live-activity') || turn.dataset.folded === undefined), focused: document.activeElement === turn.querySelector('.turn-activity-summary'), toolKeys: [...turn.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey!) }));
+  return [...root.querySelectorAll<HTMLDetailsElement>('.turn-activity')].filter(turn => live || !turn.classList.contains('live-activity') || liveTurnStaysOpen(turn)).map(turn => ({ key: turn.dataset.turnKey!, open: turn.open && turn.dataset.folded === undefined, focused: document.activeElement === turn.querySelector('.turn-activity-summary'), toolKeys: [...turn.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey!) }));
 }
 /** A run that ended without a finishing frame folds here, as the live header would have. */
 function foldSavedTurn(root: ParentNode, live: TurnView): void {
@@ -1418,7 +1633,8 @@ function restoreTurns(root: ParentNode, views: TurnView[]): void {
   });
 }
 /** `afterTrace`: an answer that follows a tool trace sits flush under it without the avatar/name row (still read out). */
-function messageHtml(m: Message, afterTrace = false): string {
+/** `actions` is false for replies between tool calls: only the turn's last reply carries copy and fork. */
+function messageHtml(m: Message, afterTrace = false, actions = true): string {
   if (m.role === 'handoff') {
     const handoff = decodeHandoff(m);
     if (!handoff) return '';
@@ -1433,63 +1649,58 @@ function messageHtml(m: Message, afterTrace = false): string {
   if (m.role === 'error') return `<div class="message-error">${icon('alert')}<span>${escape(m.content)}</span></div>`;
   const isUser = m.role === 'user';
   const author = historicalProvider(m, state.messages, session()?.provider ?? state.defaultProvider);
-  return `<article class="message ${isUser ? 'user-message' : 'agent-message'}${afterTrace && !isUser ? ' after-trace' : ''}" data-message-id="${m.id}"><div class="message-meta"><span class="message-avatar ${isUser ? 'user-avatar' : ''}">${isUser ? 'Y' : providerLogo(author)}</span><strong>${isUser ? 'You' : escape(provider(author)?.name || 'Agent')}</strong><time>${formatTime(m.createdAt)}</time></div><div class="message-content ${isUser ? '' : 'markdown'}" ${isUser ? '' : `data-markdown="${m.id}"`}>${isUser ? userContent(m.content, m.sessionId, m.id) : escape(m.content)}</div>${isUser && m.id < 0 ? steerStateHtml(m) : ''}${messageActionsHtml(m.sessionId, m.id, m.id > 0 && (isUser || m.role === 'assistant'), isUser && m.id > 0, isRunning(m.sessionId))}</article>`;
+  return `<article class="message ${isUser ? 'user-message' : 'agent-message'}${afterTrace && !isUser ? ' after-trace' : ''}" data-message-id="${m.id}"><div class="message-meta"><span class="message-avatar ${isUser ? 'user-avatar' : ''}">${isUser ? 'Y' : providerLogo(author)}</span><strong>${isUser ? 'You' : escape(provider(author)?.name || 'Agent')}</strong><time>${formatTime(m.createdAt)}</time></div><div class="message-content ${isUser ? '' : 'markdown'}" ${isUser ? '' : `data-markdown="${m.id}"`}>${isUser ? scheduledMark(m.content) + userContent(m.content, m.id) : escape(m.content)}</div>${isUser && m.id < 0 ? steerStateHtml(m) : ''}${actions ? messageActionsHtml(m.sessionId, m.id, m.id > 0 && (isUser || m.role === 'assistant'), isUser && m.id > 0) : ''}</article>`;
 }
-// Keep the raw payload available for old histories while presenting individual attachments.
-function userContent(content: string, sessionId: string, messageId: number): string {
-  const { typed, blocks } = contextBlocks(content);
-  const visible = blocks.filter(block => !block.startsWith('Bot brief:\n'));
+// Context appended at send time (files, documents, folders, GitHub, browser, images) shows as
+// read-only chips under what you said; each opens its attachment (see message-attachments.ts).
+const CONTEXT_BOUNDARY = new RegExp(String.raw`\n\n(?=(?:File|Document|Folder|GitHub|Browser element|Main thread) context[ :(]|Attached (?:browser screenshot|image|mockup)[ :]|Bot brief:\n|Your ongoing role is:|Response style \(PandaCode token saver|${TRACE_HEADER.replace(/[()]/g, '\\$&')})`);
+function contextBlocks(content: string): { typed: string; blocks: string[]; wake: string[] } {
+  const index = content.search(CONTEXT_BOUNDARY);
+  if (index < 0) return { typed: content, blocks: [], wake: [] };
+  // A wake-up's trace is the scheduler's note, not an attachment: it folds on its own.
+  const all = content.slice(index + 2).split(CONTEXT_BOUNDARY);
+  return { typed: content.slice(0, index), blocks: all.filter(block => !block.startsWith(TRACE_HEADER)), wake: all.filter(block => block.startsWith(TRACE_HEADER)) };
+}
+function userContent(content: string, messageId: number): string {
+  const { typed, blocks, wake } = contextBlocks(content);
   const items = parseAttachments(blocks);
-  if (messageId > 0) for (const item of items) if (item.kind === 'image' && item.imageId) loadSentImage(sessionId, messageId, item.imageId);
-  const raw = visible.length ? `<details class="message-context"><summary>${icon('attach')}Attached context<span>${visible.length}</span></summary><pre>${escape(visible.join('\n\n'))}</pre></details>` : '';
-  return escape(typed) + attachmentChips(items, sessionId, messageId, sentImages) + raw;
+  for (const item of items) if (item.kind === 'image' && item.imageId) loadSentImage(item.imageId);
+  const details = wake.length ? `<details class="message-context"><summary>${icon('clock')}Wake-up details</summary><pre>${escape(wake.join('\n\n'))}</pre></details>` : '';
+  return escape(typed) + attachmentChips(items, messageId, sentImages) + details;
 }
+// Sent images live in the capture registry for a week; null marks one that is gone.
 const sentImages = new Map<string, string | null>();
-const sentImageLoads: (() => Promise<void>)[] = [];
-let activeSentImageLoads = 0;
-function loadNextSentImage(): void {
-  while (activeSentImageLoads < 2 && sentImageLoads.length) {
-    const load = sentImageLoads.shift()!;
-    activeSentImageLoads++;
-    void load().finally(() => { activeSentImageLoads--; loadNextSentImage(); });
-  }
-}
-const safeImageData = (url: string | null | undefined): url is string => Boolean(url && /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(url));
-function loadSentImage(sessionId: string, messageId: number, id: string): void {
-  const key = sentImageKey(sessionId, messageId, id);
-  if (sentImages.has(key) || sentImageLoads.length >= 64) return;
-  if (sentImages.size >= 64) sentImages.delete(sentImages.keys().next().value!);
-  sentImages.set(key, null);
-  sentImageLoads.push(() => call<string | null>('message_attachment_image', { sessionId, messageId, id }).then(url => {
-    if (!safeImageData(url)) return;
-    if (!sentImages.has(key) && sentImages.size >= 64) sentImages.delete(sentImages.keys().next().value!);
-    sentImages.set(key, url);
-    for (const img of document.querySelectorAll<HTMLImageElement>(`img[data-sent-image="${CSS.escape(key)}"]`)) {
+function loadSentImage(id: string): void {
+  if (sentImages.has(id)) return;
+  sentImages.set(id, null);
+  call<string | null>('prompt_image', { id }).then(url => {
+    if (!url?.startsWith('data:image/')) return;
+    sentImages.set(id, url);
+    for (const img of document.querySelectorAll<HTMLImageElement>(`img[data-prompt-image="${id}"]`)) {
       img.src = url; img.hidden = false;
       if (img.nextElementSibling?.matches('svg.icon')) img.nextElementSibling.remove();
     }
-  }).catch(() => { /* Missing captures keep a text fallback. */ }));
-  loadNextSentImage();
+  }).catch(() => { /* The chip keeps its icon and still opens the block's text. */ });
 }
 async function openMessageAttachment(element: HTMLElement): Promise<void> {
-  const sessionId = element.dataset.messageSession, messageId = Number(element.dataset.messageId), index = Number(element.dataset.index);
-  if (sessionId !== state.sessionId || !Number.isSafeInteger(messageId) || messageId <= 0 || !Number.isSafeInteger(index) || index < 0) return;
-  const message = state.messages.find(m => m.sessionId === sessionId && m.id === messageId && m.role === 'user');
-  const item = message && parseAttachments(contextBlocks(message.content).blocks)[index];
-  const task = session();
-  if (!item || !task) return;
-  if (item.kind === 'github' && item.url) { await call('open_external_url', { url: item.url }); return; }
+  // Chips in the By the way tab belong to the side thread's messages, not the open thread's.
+  const message = element.closest('.btw-panel') ? btwPanel.message(Number(element.dataset.messageId)) : state.messages.find(m => String(m.id) === element.dataset.messageId);
+  const item = message && parseAttachments(contextBlocks(message.content).blocks)[Number(element.dataset.index)];
+  if (!item) return;
+  if (item.kind === 'github') { await call('open_external_url', { url: item.url }); return; }
   if (item.kind === 'image') {
-    const url = item.imageId ? await call<string | null>('message_attachment_image', { sessionId, messageId, id: item.imageId, full: true }).catch(() => null) : null;
-    if (state.sessionId !== sessionId) return;
-    if (safeImageData(url)) { modal(item.name, `<img class="message-attachment-image" src="${escape(url)}" alt="${escape(item.name)}">`, 'message-attachment-dialog'); return; }
-    modal(item.name, `<p class="dialog-description">This image is no longer stored. The original attachment description is preserved below.</p><pre class="message-attachment-raw">${escape(item.raw)}</pre>`, 'message-attachment-dialog'); return;
+    const url = item.imageId ? sentImages.get(item.imageId) : null;
+    if (url) { modal(item.name, `<img class="message-attachment-image" src="${escape(url)}" alt="${escape(item.name)}">`, 'message-attachment-dialog'); return; }
+    modal(item.name, `<p class="dialog-description">This image is no longer stored. Here is what was sent with it.</p><pre class="message-attachment-raw">${escape(item.raw)}</pre>`, 'message-attachment-dialog'); return;
   }
-  const target = attachmentTarget(item, workspacePath());
-  if (target.kind !== 'text' && task.remoteDevice) throw new Error('This attachment belongs to a task on another computer.');
-  if (target.kind === 'workspace' && target.path) { await openFile(target.path, 'file'); return; }
-  if (target.kind === 'reveal' && target.path) { await call('reveal_message_attachment', { sessionId, messageId, path: target.path }); return; }
-  modal(item.name, `<pre class="message-attachment-raw">${escape(item.raw)}</pre>`, 'message-attachment-dialog');
+  if (item.kind === 'raw') { modal(item.name, `<pre class="message-attachment-raw">${escape(item.raw)}</pre>`, 'message-attachment-dialog'); return; }
+  // Project files are workspace-relative; documents and folders carry the path they came from.
+  const root = workspacePath().replace(/[\\/]+$/, '');
+  const relative = item.kind === 'file' && !/^(?:\/|[A-Za-z]:[\\/])/.test(item.path) ? item.path
+    : root && [root + '/', root + '\\'].some(prefix => item.path.startsWith(prefix)) ? item.path.slice(root.length + 1) : '';
+  if (relative && item.kind !== 'folder') { await openFile(relative, 'file'); return; }
+  if (!/^(?:\/|[A-Za-z]:[\\/])/.test(item.path)) throw new Error(`${item.name} was dropped from a browser, so its location is unknown.`);
+  await call('reveal_path', { path: item.path });
 }
 type ToolView = { open: boolean; rawOpen: boolean; controls: { selector: string; top: number; left: number; focused: boolean }[] };
 function captureTools(root: ParentNode): Map<string, ToolView> {
@@ -1533,46 +1744,77 @@ function renderStream(): void {
   // A final text frame can run while the saved transcript is loading. Retain
   // its tool controls until renderTranscript can transfer their reading state.
   if (!current) { updateWorkTimer(); return; }
-  const transcript = $('#transcript');
-  const scrollTop = transcript.scrollTop, readingTool = readingTranscriptTool();
-  if (region.dataset.sessionId !== state.sessionId || !region.querySelector('.live-text')) {
-    region.innerHTML = activityHtml(current.turnKey, '', '<div class="live-tools"></div><div class="live-status"></div>', { live: true }) + `<article class="message agent-message live-message" hidden><div class="message-meta"><span class="message-avatar">${providerLogo(session()?.provider ?? state.defaultProvider)}</span><strong>${escape(provider()?.name || 'Agent')}</strong><span class="streaming-label">Generating</span></div><div class="message-content streaming-content live-text"></div>${messageActionsHtml(state.sessionId, 'live', false)}</article><div class="live-errors"></div><div class="live-approvals"></div><div class="live-inputs"></div>`;
+  // A bot's welcome is for an idle, empty thread; its first live event (an approval, say) replaces it.
+  if (isRunning() && region.parentElement?.querySelector('.bot-welcome-setup')) { renderTranscript(); return; }
+  const transcript = transcriptScroller;
+  // The only layout read, and only while a tool is being read.
+  const readingTool = readingTranscriptTool(), scrollTop = readingTool ? transcript.scrollTop : 0;
+  let parts = streamParts.get(region);
+  if (region.dataset.sessionId !== state.sessionId || !parts || !region.contains(parts.output)) {
+    region.innerHTML = `<details class="thinking-block" hidden><summary class="tool-group-summary"><span class="tool-group-label">Thinking</span>${icon('chevron')}</summary><div class="tool-group-body thinking-text"></div></details>` + activityHtml(current.turnKey, '', '<div class="live-tools"></div><div class="live-status"></div>', { live: true }) + `<article class="message agent-message live-message" hidden><div class="message-meta"><span class="message-avatar">${providerLogo(session()?.provider ?? state.defaultProvider)}</span><strong>${escape(provider()?.name || 'Agent')}</strong><span class="streaming-label">Generating</span></div><div class="message-content streaming-content live-text"></div>${messageActionsHtml(state.sessionId, 'live', false)}</article><div class="live-errors"></div><div class="live-approvals"></div><div class="live-inputs"></div>`;
     region.dataset.sessionId = state.sessionId; region.dataset.revision = '-1';
+    streamParts.set(region, parts = queryStreamParts(region));
   }
-  const activity = region.querySelector<HTMLDetailsElement>('.turn-activity')!;
+  const { activity, message, thinking, output, status } = parts;
   if (activity.dataset.turnKey !== current.turnKey) { activity.dataset.turnKey = current.turnKey; delete activity.dataset.folded; activity.open = true; }
   const answered = answerAge(current);
   paintLiveHeader(activity, current, finishing ? finishing.finishedAt - current.startedAt : undefined, answered);
   scheduleAnswerFolds(answered);
   if (region.dataset.revision !== String(current.revision)) {
     paintLiveActivity(region, current, transcript);
-    region.querySelector('.live-errors')!.innerHTML = current.tools.filter(tool => tool.statusOnly).map(tool => `<div class="message-error">${icon('alert')}<span>${escape(tool.content as string)}</span></div>`).join('') + (finishing?.error ? `<div class="message-error" role="alert"><span>Couldn't load the saved response. ${escape(finishing.error)}</span><button class="secondary-button" data-action="retry-response">Retry loading response</button></div>` : '');
+    const errors = parts.errors;
+    const errorHtml = current.tools.filter(tool => tool.statusOnly).map(tool => `<div class="message-error">${icon('alert')}<span>${escape(tool.content as string)}</span></div>`).join('') + (finishing?.error ? `<div class="message-error" role="alert"><span>Couldn't load the saved response. ${escape(finishing.error)}</span><button class="secondary-button" data-action="retry-response">Retry loading response</button></div>` : '');
+    if (liveErrorHtml.get(errors) !== errorHtml) { errors.innerHTML = errorHtml; liveErrorHtml.set(errors, errorHtml); }
     // Approvals live in the bar above the prompt, not in the transcript.
-    region.querySelector('.live-approvals')!.innerHTML = '';
+    if (parts.approvals.firstChild) parts.approvals.replaceChildren();
     renderApprovalBar();
-    const inputs = region.querySelector('.live-inputs')!;
+    const inputs = parts.inputs;
     for (const input of current.inputs.values()) if (input.element.parentElement !== inputs) inputs.append(input.element);
     region.dataset.revision = String(current.revision);
   }
-  // Every frame, text included: the open cards fold once the answer is under way.
-  if (activity.dataset.folded === undefined) {
-    choreograph(region.querySelector<HTMLElement>('.live-tools')!, current.turnKey, { answering: answered >= CARDS_FOLD_MS, expandAll: activityExpanded() });
+  // The open cards fold once the answer is under way; text-only frames change neither the tools nor that.
+  const answering = answered >= CARDS_FOLD_MS, expandAll = activityExpanded(), choreographed = `${current.turnKey}:${current.revision}:${answering}:${expandAll}`;
+  if (activity.dataset.folded === undefined && activity.dataset.choreographed !== choreographed) {
+    activity.dataset.choreographed = choreographed;
+    choreograph(parts.tools, current.turnKey, { answering, expandAll });
   }
   // The answer to a traced turn hangs flush under the trace, as in the reference: no avatar/name row.
-  region.querySelector<HTMLElement>('.live-message')!.classList.toggle('after-trace', liveToolRecords(current).length > 0);
-  const output = region.querySelector<HTMLElement>('.live-text')!;
+  message.classList.toggle('after-trace', liveToolRecords(current).length > 0);
+  // One closed Thinking fold per turn; it keeps the reader's open state while the text streams in.
+  const thought = current.thinking ?? '';
+  if (thinking.dataset.turnKey !== current.turnKey) { thinking.dataset.turnKey = current.turnKey; thinking.open = false; }
+  setHidden(thinking, !thought);
+  if (parts.thought.textContent !== thought) parts.thought.textContent = thought;
   bindFileLinkContext(output, workspaceContext());
   streamMarkdown(output, current.text, transcript);
-  region.querySelector<HTMLElement>('.streaming-label')!.hidden = Boolean(finishing || current.retainedMessageKey);
-  region.querySelector<HTMLElement>('.live-message')!.hidden = !current.text;
-  const status = region.querySelector<HTMLElement>('.live-status')!;
+  setHidden(parts.streaming, Boolean(finishing || current.retainedMessageKey));
+  setHidden(message, !current.text);
   const label = current.status || 'Working…'; if (status.textContent !== label) status.textContent = label;
-  status.hidden = Boolean(finishing) || current.approvals.size > 0 || current.inputs.size > 0;
+  setHidden(status, Boolean(finishing) || current.approvals.size > 0 || current.inputs.size > 0);
+  const bot = botForThread(), sessionId = state.sessionId;
+  if (bot) botThread.paintWorking(region, bot, provider()?.name || 'the agent', () => state.streams.get(sessionId), Boolean(finishing));
   updateWorkTimer();
+  // Following needs no pin here: Markdown paints pin after themselves, and the ResizeObserver after layout.
   if (readingTool) transcript.scrollTop = scrollTop;
-  else { followTranscript(); maintainStreamingBottom(); }
 }
+type StreamParts = {
+  activity: HTMLDetailsElement; thinking: HTMLDetailsElement; thought: HTMLElement; tools: HTMLElement; status: HTMLElement;
+  message: HTMLElement; streaming: HTMLElement; output: HTMLElement; errors: HTMLElement; approvals: HTMLElement; inputs: HTMLElement;
+};
+/** renderStream's elements, kept until the region's markup is rebuilt. */
+const streamParts = new WeakMap<HTMLElement, StreamParts>();
+function queryStreamParts(region: HTMLElement): StreamParts {
+  const part = <T extends HTMLElement = HTMLElement>(selector: string): T => region.querySelector<T>(selector)!;
+  const thinking = part<HTMLDetailsElement>('.thinking-block');
+  return {
+    activity: part<HTMLDetailsElement>('.turn-activity'), thinking, thought: thinking.lastElementChild as HTMLElement,
+    tools: part('.live-tools'), status: part('.live-status'), message: part('.live-message'), streaming: part('.streaming-label'),
+    output: part('.live-text'), errors: part('.live-errors'), approvals: part('.live-approvals'), inputs: part('.live-inputs'),
+  };
+}
+const setHidden = (node: HTMLElement, hidden: boolean): void => { if (node.hidden !== hidden) node.hidden = hidden; };
 const liveGroupEntries = new WeakMap<HTMLElement, LiveTool[]>();
+const liveErrorHtml = new WeakMap<Element, string>();
 /** Patch only changed groups; text frames do not recreate tool controls or open details. */
 function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTMLElement): void {
   const host = region.querySelector<HTMLElement>('.live-tools')!;
@@ -1601,7 +1843,7 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
       if (!node) {
         node = document.createElement('article'); node.className = 'message agent-message activity-commentary-message';
         node.dataset.streamKey = key;
-        node.innerHTML = `<div class="message-content activity-commentary" data-commentary="${escape(key)}"></div>${messageActionsHtml(state.sessionId, 'commentary:' + key, false)}`;
+        node.innerHTML = `<div class="message-content activity-commentary" data-commentary="${escape(key)}"></div>`;
       }
       next.push(node); commentary.push({ node: node.querySelector<HTMLElement>('[data-commentary]')!, content: run.item.content as string });
     } else {
@@ -1613,24 +1855,7 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
         const template = document.createElement('template'); template.innerHTML = html;
         node = template.content.firstElementChild as HTMLElement; node.dataset.streamKey = key;
       } else if (!previousEntries || previousEntries.length !== run.items.length || run.items.some((entry, index) => entry !== previousEntries[index])) {
-        const html = renderToolGroup(run.items, true, true);
-        const views = captureTools(node);
-        const template = document.createElement('template'); template.innerHTML = html;
-        const fresh = template.content.firstElementChild!;
-        node.querySelector('.tool-group-summary')!.innerHTML = fresh.querySelector('.tool-group-summary')!.innerHTML;
-        const body = node.querySelector<HTMLElement>('.tool-group-body')!;
-        const oldTools = new Map([...body.children].map(tool => [(tool as HTMLElement).dataset.toolKey, tool]));
-        const oldEntries = new Map(previousEntries?.map(entry => [entry.key, entry]));
-        const nextTools = [...fresh.querySelector('.tool-group-body')!.children].map((tool, index) => {
-          const entry = run.items[index], old = oldTools.get(entry.key);
-          // Another tool finishing must not detach a summary under the pointer,
-          // or discard selection and focus in an unchanged raw result.
-          return old && oldEntries.get(entry.key) === entry ? old : tool;
-        });
-        const keptTools = new Set(nextTools);
-        for (const tool of [...body.children]) if (!keptTools.has(tool)) tool.remove();
-        nextTools.forEach((tool, index) => { if (body.children[index] !== tool) body.insertBefore(tool, body.children[index] ?? null); });
-        restoreTools(node, views);
+        patchToolGroup(node, run.items, previousEntries ?? []);
       }
       liveGroupEntries.set(node, run.items);
       next.push(node);
@@ -1646,7 +1871,39 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
   if (workers?.parentElement === host && !retained.has(workers)) region.after(workers);
   for (const child of [...host.children]) if (!retained.has(child as HTMLElement)) child.remove();
   next.forEach((node, index) => { if (host.children[index] !== node) host.insertBefore(node, host.children[index] ?? null); });
+  // Steps the agent narrated past fold once to their one-line summary, so later work never reopens them.
+  const newestGroup = next.map(node => node.classList.contains('tool-group')).lastIndexOf(true);
+  const narratedPast = next.slice(0, Math.max(newestGroup, 0)).map(node => node.classList.contains('agent-message')).lastIndexOf(true);
+  next.slice(0, Math.max(narratedPast, 0)).forEach(node => {
+    if (!node.classList.contains('tool-group') || node.dataset.earlier !== undefined) return;
+    node.dataset.earlier = '';
+    if (!liveTurnStaysOpen(node)) (node as HTMLDetailsElement).open = false;
+  });
   for (const entry of commentary) { bindFileLinkContext(entry.node, workspaceContext()); streamMarkdown(entry.node, entry.content, transcript); }
+}
+/** One changed call redraws its own row; the summary redraws only when a member's name or status changed. */
+function patchToolGroup(node: HTMLElement, items: LiveTool[], before: LiveTool[]): void {
+  const fragment = (html: string) => { const template = document.createElement('template'); template.innerHTML = html; return template.content.firstElementChild as HTMLElement; };
+  const tool = (entry: LiveTool) => typeof entry.content === 'string' ? decodeToolActivity(entry.content) : entry.content;
+  const summaryKey = (entries: LiveTool[]) => entries.map(entry => { const item = tool(entry); return `${entry.key}\0${item?.name}\0${item?.status}`; }).join('\n');
+  if (summaryKey(items) !== summaryKey(before)) {
+    // The summary reads only names and statuses, so it renders from the calls without their (large) input and output.
+    const bare = items.map(entry => { const item = tool(entry); return { key: entry.key, content: item ? { ...item, input: '', output: '' } : entry.content }; });
+    node.querySelector('.tool-group-summary')!.innerHTML = fragment(renderToolGroup(bare, true, true)).querySelector('.tool-group-summary')!.innerHTML;
+  }
+  const body = node.querySelector<HTMLElement>('.tool-group-body')!;
+  const rows = new Map([...body.children].map(row => [(row as HTMLElement).dataset.toolKey, row as HTMLElement]));
+  const kept = new Map(before.map(entry => [entry.key, entry]));
+  const changed = items.filter(entry => kept.get(entry.key) !== entry || !rows.has(entry.key));
+  const views = changed.length ? captureTools(body) : new Map<string, ToolView>();
+  for (const entry of changed) {
+    const fresh = fragment(renderToolActivity(entry.content, entry.key));
+    rows.get(entry.key)?.replaceWith(fresh); rows.set(entry.key, fresh);
+  }
+  const wanted = items.map(entry => rows.get(entry.key)!), keep = new Set(wanted);
+  for (const row of [...body.children]) if (!keep.has(row as HTMLElement)) row.remove();
+  wanted.forEach((row, index) => { if (body.children[index] !== row) body.insertBefore(row, body.children[index] ?? null); });
+  if (changed.length) restoreTools(body, new Map([...views].filter(([key]) => changed.some(entry => entry.key === key))));
 }
 // Measured from the reference at 30 fps: the answer starts at 7.20 s, the open cards fold at 8.25 s
 // and the turn folds to its summary at 9.6-9.8 s, mid-answer for any reply longer than the reference's.
@@ -1669,8 +1926,14 @@ function scheduleAnswerFolds(age: number): void {
   if (age < 0 || age >= TURN_FOLD_MS) return;
   answerTimer = window.setTimeout(() => { answerTimer = 0; renderStream(); }, (age < CARDS_FOLD_MS ? CARDS_FOLD_MS : TURN_FOLD_MS) - age + 16);
 }
+const toolRecords = new WeakMap<Stream, { revision: number; records: ToolActivity[] }>();
+/** Every tool change bumps the stream's revision, so text frames reuse the last scan. */
 function liveToolRecords(current: Stream): ToolActivity[] {
-  return current.tools.flatMap(tool => !tool.statusOnly && !tool.commentary && typeof tool.content !== 'string' ? [tool.content] : []);
+  const cached = toolRecords.get(current);
+  if (cached?.revision === current.revision) return cached.records;
+  const records = current.tools.flatMap(tool => !tool.statusOnly && !tool.commentary && typeof tool.content !== 'string' ? [tool.content] : []);
+  toolRecords.set(current, { revision: current.revision, records });
+  return records;
 }
 /** The header glyph, as in the reference: a dot cluster before the first step, the step's icon (a filled dot
  * stands in for its first frames, trace-motion.css) and level bars while the answer streams after the tools. */
@@ -1705,10 +1968,11 @@ function paintLiveHeader(activity: HTMLDetailsElement, current: Stream, workedMs
   // New steps after an early fold (the agent went back to work) unfold the trace again.
   if (mode !== 'folded' && activity.dataset.folded !== undefined) { delete activity.dataset.folded; activity.open = true; }
   const summary = activity.querySelector<HTMLElement>('.turn-activity-summary')!;
-  if (workedMs === undefined) summary.title = `Working for ${formatDuration(Date.now() - current.startedAt)}`;
+  const working = `Working for ${formatDuration(Date.now() - current.startedAt)}`;
+  if (workedMs === undefined && summary.title !== working) summary.title = working;
   const changed = label.dataset.mode !== mode || label.dataset.step !== step;
   if (label.dataset.html !== html) { label.innerHTML = html; label.dataset.html = html; }
-  label.dataset.mode = mode; label.dataset.step = step;
+  if (changed) { label.dataset.mode = mode; label.dataset.step = step; }
   if (changed && mode === 'step') enterHeader(label);
   else if (changed && mode === 'folded') enterText(label);
   if (mode === 'folded' && activity.dataset.folded === undefined && !liveTurnStaysOpen(activity)) foldTurn(activity);
@@ -1773,6 +2037,8 @@ async function respondApproval(sessionId: string, id: string, approved: boolean)
 }
 function renderComposer(): void {
   refreshTeamProgress();
+  syncProgressPip();
+  retryRouting(session());
   architectView?.setTask(state.sessionId, teams.get(state.sessionId) ?? null, state.providers);
   goalBanner.update(session()?.goalState ?? null);
   slashPicker?.dispose(); slashPicker = undefined;
@@ -1780,38 +2046,59 @@ function renderComposer(): void {
   closeContentMenus();
   const oldPrompt = document.querySelector<HTMLTextAreaElement>('#prompt');
   if (oldPrompt?.dataset.sessionId && !deletedSessions.has(oldPrompt.dataset.sessionId)) state.drafts.set(oldPrompt.dataset.sessionId, oldPrompt.value);
-  // A DOM text selection can coexist with the textarea's activeElement. Giving
-  // the rebuilt prompt its old caret would erase what the reader selected.
-  const selection = window.getSelection(), transcript = document.getElementById('transcript');
-  const readingTranscript = selection && !selection.isCollapsed && transcript
-    && Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index)).some(range => range.intersectsNode(transcript));
-  // Otherwise keep typing focus and the caret, since people type while agents work.
-  const typing = oldPrompt && document.activeElement === oldPrompt && !readingTranscript ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
+  // Re-rendering replaces the textarea; keep typing focus and the caret, since people type while agents work.
+  const typing = oldPrompt && document.activeElement === oldPrompt ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
+  if (state.sharedChannelId) {
+    const channel = state.sharedChannelDetail;
+    // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
+    const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
+    $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel)}` : '';
+    const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
+    if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
+    const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
+    const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
+    if (send) send.disabled = posting;
+    return;
+  }
   const s = session();
   if (!s) { $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
   syncOverlayContext({ projectId: s.projectId, provider: s.provider, model: s.model || 'default', mode: s.mode, reasoningEffort: s.reasoningEffort ?? null });
-  if (taskStage(s) === 'completed' || s.archived) { $('#composer-area').innerHTML = `<div class="board-completed-note">${s.archived ? 'This task is archived.' : 'This task is complete.'}${state.view === 'conversation' ? `<button type="button" class="secondary-button" data-action="${s.archived ? 'archive-task' : 'board-reopen'}">${s.archived ? 'Restore task' : 'Reopen task'}</button>` : s.archived ? '' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
+  if (taskStage(s) === 'completed') { $('#composer-area').innerHTML = `<div class="board-completed-note">This task is settled.${state.view === 'conversation' ? '<button type="button" class="secondary-button" data-action="board-reopen">Reopen task</button>' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
   const previous = state.drafts.get(s.id) ?? '';
   const running = isRunning(), behavior = approvalMode(s.provider, s.mode);
-  const team = teams.get(s.id), modelLocked = running && !team;
+  // A bot's next model can be picked mid-turn; it applies from the next turn.
+  const team = teams.get(s.id), togglingTeam = teamToggles.has(s.id), modelLocked = (running && !team && !botForThread()) || togglingTeam;
   const target = remoteTargetFor(s), offline = remoteOffline(s), checking = remoteChecks.has(s.id), retrying = target ? remoteRetries.has(target.deviceId) : false;
   const sendControl = running
     ? `<button type="button" class="send-button stop-button" data-action="stop" title="Stop task (Esc)" aria-label="${remoteStartCancels.has(s.id) ? 'Stopping…' : 'Stop task'}" ${remoteStartCancels.has(s.id) ? 'disabled' : ''}>${icon('stop')}</button>`
     : checking ? '<button type="button" class="secondary-button remote-checking" aria-label="Checking…" disabled>Checking…</button>'
     : offline ? `<button type="button" class="secondary-button remote-composer-retry" data-action="remote-retry" aria-label="${retrying ? 'Reconnecting…' : 'Retry connection'}" ${retrying ? 'disabled' : ''}>${icon('refresh')}<span>${retrying ? 'Reconnecting…' : 'Retry'}</span></button>`
-    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message">${icon('arrow')}</button>`;
-  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}"><div id="attachments" class="attachments">${attachmentBar(s)}</div><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-toolbar"><div class="composer-tools">${button('attach', 'Attach files for context', 'plus', '', 'type="button"')}<button type="button" id="model-picker-trigger" class="model-picker" data-action="model" aria-label="Choose harness and model" aria-description="${escape([modelLabel(s), teamModelLabel(s)].filter(Boolean).join(' '))}" aria-haspopup="dialog" aria-expanded="false" title="${team && !team.config.auto ? 'Choose team profile and models' : 'Choose harness and model'}" ${modelLocked ? 'disabled' : ''}><span class="provider-small ${s.provider}">${providerLogo(s.provider)}</span><span class="model-detail" data-model-label>${escape(modelLabel(s))}</span><span class="team-model-count" data-team-model-label ${teamModelLabel(s) ? '' : 'hidden'}>${teamModelLabel(s)}</span>${icon('down')}</button><span class="composer-separator"></span><button type="button" id="mode-picker-trigger" class="mode-picker" data-action="mode" data-mode="${behavior.id}" title="${escape(behavior.description)}" aria-haspopup="dialog" aria-expanded="false" ${running ? 'disabled' : ''}>${icon(behavior.icon)}<span>${escape(behavior.label)}</span>${icon('down')}</button>${teamButton(s)}${tokenSaver.button(s.id)}</div>${running && !team ? `<button type="button" class="steer-button" data-action="steer" title="Send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${icon('spark')}<span>Steer</span></button>` : ''}${sendControl}</div></form>${s.archived ? '<div class="composer-footnote"><span>Archived task</span></div>' : ''}`;
+    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam ? 'disabled' : ''}>${icon('arrow')}</button>`;
+  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}"><div id="attachments" class="attachments">${attachmentBar(s)}</div><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-toolbar"><div class="composer-tools">${button('attach', 'Attach files for context', 'plus', '', 'type="button"')}<button type="button" id="model-picker-trigger" class="model-picker" data-action="model" aria-label="Choose harness and model" aria-description="${escape([modelLabel(s), teamModelLabel(s)].filter(Boolean).join(' '))}" aria-haspopup="dialog" aria-expanded="false" title="${team && !team.config.auto ? 'Choose team profile and models' : 'Choose harness and model'}" ${modelLocked ? 'disabled' : ''}>${triggerLogo(s)}<span class="model-detail" data-model-label>${escape(modelLabel(s, false))}</span><span class="model-effort" data-effort-label ${effortLabel(s) ? '' : 'hidden'}>${escape(effortLabel(s))}</span><span class="team-model-count" data-team-model-label ${teamModelLabel(s) ? '' : 'hidden'}>${teamModelLabel(s)}</span>${icon('down')}</button><span class="composer-separator"></span><button type="button" id="mode-picker-trigger" class="mode-picker" data-action="mode" data-mode="${behavior.id}" title="${escape(behavior.description)}" aria-haspopup="dialog" aria-expanded="false" ${running || togglingTeam ? 'disabled' : ''}>${icon(behavior.icon)}<span>${escape(behavior.label)}</span>${icon('down')}</button>${teamButton(s)}${tokenSaver.button(s.id)}</div>${running && !team ? `<button type="button" class="steer-button" data-action="steer" title="Send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${icon('spark')}<span>Steer</span></button>` : ''}${sendControl}</div></form>`;
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.
+  $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="bot-failover-bar"></div>');
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="approval-bar"></div>');
-  $('#composer').insertAdjacentHTML('beforebegin', remoteMissingNote(s) + remoteStartStrip(s.id) + (running ? '' : limitBanner(s, Date.now(), limitConnections(s, namedConnections))) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team, sendable: !botProjects.has(s.projectId) && !s.archived, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued }));
-  renderApprovalBar(); resizePrompt();
+  $('#composer').insertAdjacentHTML('beforebegin', '<div id="machine-orchestration"></div>' + cloudStrip(s) + remoteStartStrip(s.id) + remoteMissingNote(s) + (composerNotes.has(s.id) ? `<div class="composer-inline-note">${escape(composerNotes.get(s.id))}</div>` : '') + (running ? '' : limitBanner(s, Date.now(), limitAlternatives(s))) + wakeStrip(s.id) + queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: botForThread()?.name ?? provider(s.provider)?.name }));
+  renderApprovalBar(); renderBotFailover(); syncOrchestration(); resizePrompt();
+  $('#transcript').toggleAttribute('data-running', running);
   void github.status(s.projectId);
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  const activeBot = running ? botForThread() : undefined;
+  if (prompt && activeBot) {
+    const entersSteer = activeBot.whileWorking === 'steer';
+    prompt.placeholder = `Enter ${entersSteer ? 'steers' : 'queues'} for ${activeBot.name} · ⌘↩ ${entersSteer ? 'queues' : 'steers'}`;
+    prompt.setAttribute('aria-description', `Enter to ${entersSteer ? 'steer current work' : 'queue for after it finishes'}. Command Enter to ${entersSteer ? 'queue for after it finishes' : 'steer now'}.`);
+    const action = document.querySelector<HTMLButtonElement>('#composer-area .steer-button');
+    if (action) { const label = entersSteer ? 'Queue' : 'Steer'; action.setAttribute('aria-label', `${label} while ${activeBot.name} is working`); action.title = `${label} while ${activeBot.name} is working`; action.querySelector('span')!.textContent = label; }
+  }
   // The prompt stays open during a run: messages typed then are queued or steered.
   // A finished run whose history failed to load waits for Retry before anything else is sent.
   if (prompt) { prompt.value = previous; prompt.disabled = state.messagesLoading || Boolean(state.messagesError) || Boolean(finishingStreams.get(s.id)?.error); }
   if (prompt && typing?.id === s.id && !prompt.disabled) { prompt.focus({ preventScroll: true }); prompt.setSelectionRange(typing.start, typing.end); }
+  if (botForThread()) botThread.paintReplyChip(s.id);
   const footnote = document.querySelector('.composer-footnote');
   if (footnote) footnote.insertAdjacentHTML('beforeend', '<span class="context-indicator" hidden></span>');
   else $('#composer-area').insertAdjacentHTML('beforeend', '<div class="composer-footnote is-empty"><span class="context-indicator" hidden></span></div>');
@@ -1822,8 +2109,8 @@ function renderComposer(): void {
     slashPicker = mountSlashCommands(prompt, {
       contextKey: () => `${state.sessionId}:${session()?.provider}:${workspacePath()}`,
       provider: () => session()?.provider ?? s.provider,
-      snapshot: () => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: s.id, cachedOnly: true }),
-      load: force => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: s.id, force }),
+      snapshot: () => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: s.id, cachedOnly: true }).then(withWake),
+      load: force => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: s.id, force }).then(withWake),
       select: () => state.drafts.set(s.id, prompt.value),
     });
     const enter = running ? `Enter to queue for when the agent finishes.${!team ? ' Command Enter to steer the running turn.' : ''}` : 'Enter to send.';
@@ -1841,7 +2128,6 @@ function renderComposer(): void {
       select: () => state.drafts.set(s.id, prompt.value),
     });
   }
-  syncComposerNote(s);
   syncRemoteConnection();
   renderedRemoteKey = remoteComposerKey(s);
 }
@@ -1875,10 +2161,10 @@ function renderBoardView(): void {
   // A thread opened from GitHub sits beside it, laid out like the board's side panel.
   $('.workspace').classList.toggle('side-thread', board || (hub && state.boardPanel));
   renderSidebarVisibility();
-  const switcher = document.querySelector<HTMLElement>('[data-action="github-view"]')!;
-  switcher.hidden = !githubEnabled();
-  for (const [action, on] of [['board-view', board], ['conversation-view', state.view === 'conversation'], ['github-view', hub]] as const) document.querySelector(`[data-action="${action}"]`)!.setAttribute('aria-pressed', String(on));
-  trackSegment($('.view-switch'), document.querySelector<HTMLElement>('.view-switch > [aria-pressed="true"]'));
+  const viewMenu = $('#view-menu'), current = WORKSPACE_VIEWS.find(view => view.id === state.view)!;
+  viewMenu.innerHTML = `${icon(current.icon)}${icon('down')}`;
+  viewMenu.setAttribute('aria-label', `Workspace view: ${current.label}`);
+  viewMenu.title = `Workspace view: ${current.label}`;
   syncGithubHub(hub);
   const pane = $('.conversation-pane');
   const paneWasHidden = pane.hidden;
@@ -1894,14 +2180,12 @@ function renderBoardView(): void {
   if (!board) return;
   const boardProject = state.projectFilter || project()?.id || state.projects[0]?.id || '';
   if (boardProject) void github.status(boardProject);
-  renderTaskBoard($('#project-board'), listedSessions(), state.projects, state.boardPanel ? state.sessionId : '', state.projectFilter, state.archived, isRunning, github.connected(boardProject));
+  renderTaskBoard($('#project-board'), listedSessions(), state.projects, state.boardPanel ? state.sessionId : '', state.projectFilter, isRunning, github.connected(boardProject));
   renderTaskDetails($('#task-details-heading'), session(), project(), isRunning(), state.messagesLoading || Boolean(state.messagesError));
 }
 /** The GitHub view, mounted the first time it is shown and refreshed with the workspace. */
 let githubHub: import('./github-hub').HubView | undefined;
 let githubHubLoading = false;
-const githubTaskPreparations = new Set<string>();
-const githubPreparedTasks = new Map<string, string>();
 function syncGithubHub(shown: boolean): void {
   const host = $('#github-hub');
   host.hidden = !shown;
@@ -1914,7 +2198,6 @@ function syncGithubHub(shown: boolean): void {
       call, projects: () => userProjects(), sessions: () => listedSessions(), running: id => isRunning(id),
       openTask: id => run(openHubTask(id)),
       startTask: input => startHubTask(input),
-      reviewPull: context => openReviewTools(context),
       showChoices: (anchor, options) => showChoices(anchor, options),
       chooseFolder, notify,
       projectsChanged: async () => { state.projects = await call<Project[]>('list_projects'); renderNavigation(); },
@@ -1930,145 +2213,22 @@ async function openHubTask(id: string): Promise<void> {
 /** Starts a thread from the GitHub view: a task in the repository's project, linked to its pull
  * request or issue, titled, with the prompt filled in and sent when asked. Mentions like `#128`
  * attach the item's content as GitHub context once the project's GitHub status is known. */
-async function startHubTask({ projectId, prompt, title, link, identity, send: start, provider: selectedProvider }: { projectId: string; prompt: string; title?: string; link?: TaskLink; identity?: string; send: boolean; provider?: ProviderId }): Promise<void> {
-  const key = `${projectId}:${identity ?? (link ? `${link.kind}:${link.number}` : title ?? prompt)}`;
-  if (githubTaskPreparations.has(key)) return;
-  githubTaskPreparations.add(key);
-  try {
-    const preparedId = identity && githubPreparedTasks.get(key);
-    if (preparedId && state.sessions.some(item => item.id === preparedId)) {
-      if (preparedId !== state.sessionId || !state.boardPanel) await openHubTask(preparedId);
-      else document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
-      return;
-    }
-    const current = session();
-    const currentLink = link?.kind === 'issue' ? current?.issue : current?.pullRequest;
-    if (current?.draft && current.projectId === projectId && title === current.title
-      && (!link || currentLink?.number === link.number && currentLink.url === link.url)) {
-      if (!state.boardPanel) await openHubTask(current.id);
-      else document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
-      return;
-    }
-    const existingDraft = !identity && state.sessions.find(item => item.draft && item.projectId === projectId && item.title === title && !deletedSessions.has(item.id)
-      && (!link || (link.kind === 'issue' ? item.issue : item.pullRequest)?.number === link.number));
-    if (existingDraft) {
-      if (existingDraft.id !== state.sessionId || !state.boardPanel) await openHubTask(existingDraft.id);
-      return;
-    }
-    await github.status(projectId);
-    await createTask(projectId, false);
-    const task = session();
-    if (!task || task.projectId !== projectId) throw new Error('Could not open a task for this repository.');
-    const replace = (next: Session) => { const index = state.sessions.findIndex(item => item.id === next.id); if (index >= 0) state.sessions[index] = next; };
-    if (selectedProvider) {
-      if (!state.providers.some(item => item.id === selectedProvider && item.installed)) throw new Error('That harness is no longer available. No prompt was sent.');
-      replace(await call<Session>('configure_session', { sessionId: task.id, provider: selectedProvider, model: rememberedModel(selectedProvider) }));
-    }
-    if (link) replace(await call<Session>('set_task_link', { sessionId: task.id, kind: link.kind, link }));
-    if (identity) githubPreparedTasks.set(key, task.id);
-    if (title) { await call('update_session', { sessionId: task.id, title }); const current = state.sessions.find(item => item.id === task.id); if (current) current.title = title; }
-    renderNavigation(); renderHeader();
-    const field = document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (!field || field.dataset.sessionId !== task.id) throw new Error('Could not populate the task composer. No prompt was sent.');
-    field.value = prompt;
-    field.dispatchEvent(new Event('input', { bubbles: true }));
-    field.focus();
-    field.setSelectionRange(prompt.length, prompt.length);
-    if (start) await send();
-  } catch (cause) { notify(`Could not prepare the GitHub task: ${cause instanceof Error ? cause.message : String(cause)}${start ? '' : ' No prompt was sent.'}`); }
-  finally { githubTaskPreparations.delete(key); }
-}
-async function prepareHubReviewTask(target: PullReviewContext, request: ReviewRequest, providers: Provider[], active: () => boolean): Promise<void> {
-  const { buildPullReview } = await import('./hardened/review-model');
-  const plan = buildPullReview(request, target);
-  const selections = [plan.setup.architect, ...plan.setup.config.workers];
-  if (selections.some(choice => !providers.some(p => p.id === choice.provider && p.installed && p.models.some(m => m.id === choice.model)))) {
-    throw new Error('Refresh the local catalog and choose available provider models for every role.');
-  }
-  if (!active()) throw new Error('The review setup closed. No task was created.');
-
-  const verifyTarget = async (): Promise<void> => {
-    const [mappings, pull] = await Promise.all([
-      call<{ projectId: string; repo: string }[]>('github_project_repos'),
-      call<Omit<PullReviewContext, 'projectId' | 'repo'>>('github_repo_pull_review_context', { repo: target.repo, number: target.number }),
-    ]);
-    const matches = mappings.filter(item => item.repo.toLowerCase() === target.repo.toLowerCase());
-    const project = state.projects.find(item => item.id === target.projectId);
-    if (matches.length !== 1 || matches[0].projectId !== target.projectId || !project
-      || isChatProject(project) || botProjects.has(project.id)) {
-      throw new Error('The repository is no longer uniquely associated with this local project. Open the matching project or clone the repository again.');
-    }
-    if (pull.number !== target.number || pull.title !== target.title || pull.url !== target.url || pull.state !== target.state
-      || pull.head !== target.head || pull.base !== target.base || pull.updatedAt !== target.updatedAt
-      || pull.files.length !== target.files.length || pull.files.some((path, i) => path !== target.files[i])) {
-      throw new Error(`Pull request #${target.number} changed during preparation. Refresh GitHub and prepare it again.`);
-    }
-    const status = await github.status(target.projectId, true);
-    if (!status?.installed || !status.authenticated || status.repo?.nameWithOwner.toLowerCase() !== target.repo.toLowerCase()) {
-      throw new Error(`GitHub context for ${target.repo} is unavailable. Reconnect GitHub or refresh the pull request, then try again.`);
-    }
-    let references: GithubReference[];
-    try { references = await call<GithubReference[]>('github_resolve', { projectId: target.projectId, numbers: [target.number] }); }
-    catch (cause) { throw new Error(`Could not load GitHub context for #${target.number}: ${cause instanceof Error ? cause.message : String(cause)}. Refresh GitHub and try again.`); }
-    const reference = references.find(item => item.number === target.number && item.kind === 'pull');
-    if (!reference || reference.url !== target.url || reference.title !== target.title) {
-      throw new Error(`GitHub could not confirm pull request #${target.number} in ${target.repo}. Refresh GitHub and try again.`);
-    }
-    if (!active()) throw new Error('The review setup closed. No task was created.');
-  };
-
-  await verifyTarget();
-  if (creatingTask) throw new Error('Another task is being prepared. Try again when it finishes.');
-  const previousSessionId = state.sessionId;
-  let created: Session | undefined;
-  creatingTask = true;
-  try {
-    created = await call<Session>('create_session', {
-      projectId: target.projectId, provider: plan.setup.architect.provider, model: plan.setup.architect.model, mode: 'plan', draft: true,
-    });
-    if (!created.id || created.projectId !== target.projectId || !created.draft) throw new Error('PandaCode did not create the expected local draft task.');
-    state.sessions.unshift(created);
-    const team = await call<TeamSnapshot | null>('architect_configure', {
-      sessionId: created.id, config: plan.setup.config, architect: plan.setup.architect, profileId: null,
-    });
-    if (!team || team.sessionId !== created.id || team.config.rosterOnly !== true) throw new Error('PandaCode did not save the selected bounded review roster.');
-    onArchitect(team);
-    const link: TaskLink = { kind: 'pull', number: target.number, url: target.url, title: target.title, state: target.state, checkedAt: Date.now() };
-    const linked = await call<Session>('set_task_link', { sessionId: created.id, kind: 'pull', link });
-    if (linked.id !== created.id || linked.projectId !== target.projectId || linked.pullRequest?.number !== target.number || linked.pullRequest.url !== target.url) {
-      throw new Error('PandaCode could not bind the new task to the selected pull request.');
-    }
-    const titled = await call<Session>('update_session', { sessionId: created.id, title: `Review #${target.number}: ${target.title}`.slice(0, 120) });
-    Object.assign(created, titled);
-    await verifyTarget();
-    if (!active()) throw new Error('The review setup closed. No task was created.');
-    closeModal(); state.query = '';
-    state.boardPanel = true;
-    await selectSession(created.id, true);
-    renderBoardView();
-    if (state.sessionId !== created.id) throw new Error('The selected task changed before its prompt was prepared.');
-    const field = document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (!field || field.dataset.sessionId !== created.id) throw new Error('The linked task opened without its composer. No prompt was inserted.');
-    field.value = plan.prompt; state.drafts.set(created.id, plan.prompt);
-    field.dispatchEvent(new Event('input', { bubbles: true })); field.focus(); field.setSelectionRange(plan.prompt.length, plan.prompt.length);
-    notify(`Review task for #${target.number} prepared. The prompt was not sent; review it in the composer and use Send when ready. The review is NOT isolated.`);
-  } catch (cause) {
-    if (created) {
-      try {
-        const discarded = await call<boolean>('discard_draft', { sessionId: created.id });
-        if (discarded) {
-          deletedSessions.add(created.id); teams.delete(created.id); state.drafts.delete(created.id);
-          state.sessions = state.sessions.filter(item => item.id !== created!.id);
-          if (state.sessionId === created.id) {
-            state.sessionId = '';
-            if (previousSessionId && state.sessions.some(item => item.id === previousSessionId)) await selectSession(previousSessionId, true);
-          }
-          renderNavigation();
-        } else notify(`The empty review draft ${created.id} could not be discarded. No prompt was sent.`);
-      } catch { notify('The review setup failed after task creation. Its unsent draft could not be removed; check the task list.'); }
-    }
-    throw cause;
-  } finally { creatingTask = false; }
+async function startHubTask({ projectId, prompt, title, link, send: start }: { projectId: string; prompt: string; title?: string; link?: TaskLink; send: boolean }): Promise<void> {
+  await github.status(projectId);
+  await createTask(projectId);
+  const task = session();
+  if (!task || task.projectId !== projectId) return;
+  const replace = (next: Session) => { const index = state.sessions.findIndex(item => item.id === next.id); if (index >= 0) state.sessions[index] = next; };
+  if (link) replace(await call<Session>('set_task_link', { sessionId: task.id, kind: link.kind, link }));
+  if (title) { await call('update_session', { sessionId: task.id, title }); const current = state.sessions.find(item => item.id === task.id); if (current) current.title = title; }
+  renderNavigation(); renderHeader();
+  const field = document.querySelector<HTMLTextAreaElement>('#prompt');
+  if (!field || field.dataset.sessionId !== task.id) return;
+  field.value = prompt;
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  field.focus();
+  field.setSelectionRange(prompt.length, prompt.length);
+  if (start) await send();
 }
 function renderSidebarVisibility(): void {
   // The board and the GitHub view are full-width; both hide the task sidebar.
@@ -2083,6 +2243,18 @@ function renderSidebarVisibility(): void {
     if (toggleFocused && !board) toggle.focus({ preventScroll: true });
   }
   toggle.hidden = board;
+  const viewMenu = $('#view-menu'), viewHost = board || collapsed ? $('.header-leading') : $('.brand');
+  if (viewMenu.parentElement !== viewHost) {
+    const focused = document.activeElement === viewMenu;
+    if (viewHost.classList.contains('brand')) viewHost.append(viewMenu);
+    else if (toggle.parentElement === viewHost) toggle.after(viewMenu);
+    else viewHost.prepend(viewMenu);
+    if (focused) viewMenu.focus({ preventScroll: true });
+  }
+  // In the header, a hairline sets the toggle and view menu apart from help and usage.
+  const viewDivider = $('#view-divider');
+  viewDivider.hidden = viewHost.classList.contains('brand');
+  if (viewMenu.nextElementSibling !== viewDivider) viewMenu.after(viewDivider);
   toggle.setAttribute('aria-expanded', String(!collapsed));
   const label = collapsed ? 'Show sidebar' : 'Hide sidebar';
   toggle.setAttribute('aria-label', label);
@@ -2093,7 +2265,7 @@ function renderSidebarVisibility(): void {
     if (utility.parentElement !== utilityHost) {
       const focused = document.activeElement === utility;
       if (board || collapsed) $('#breadcrumb').before(utility);
-      else $('#archive-toggle').before(utility);
+      else $('.sidebar-bottom [data-action="settings"]').before(utility);
       if (focused) utility.focus({ preventScroll: true });
     }
   }
@@ -2110,6 +2282,15 @@ function toggleSidebar(): void {
   if (moveFocus) $('#sidebar-toggle').focus({ preventScroll: true });
   // Refits existing terminals and keeps floating menus/native browser bounds aligned.
   window.dispatchEvent(new Event('resize'));
+}
+const WORKSPACE_VIEWS: { id: WorkspaceView; label: string; icon: string }[] = [{ id: 'conversation', label: 'Conversation', icon: 'thread' }, { id: 'board', label: 'Board', icon: 'kanban' }, { id: 'github', label: 'GitHub', icon: 'github' }];
+async function showViewMenu(anchor: HTMLElement): Promise<void> {
+  // In the sidebar the menu ends at the trigger's right edge, so it stays inside the sidebar; in the header it starts at its left edge.
+  if (choiceMenuCleanup && choiceMenuAnchor === anchor) { closeChoiceMenu(); return; }
+  const width = 200, rect = anchor.getBoundingClientRect();
+  const inSidebar = Boolean(anchor.closest('.sidebar'));
+  const point = { x: inSidebar ? Math.max(8, rect.right - width) : rect.left, y: rect.bottom };
+  await showChoices(anchor, { title: 'Workspace view', width, point, items: WORKSPACE_VIEWS.filter(view => view.id !== 'github' || githubEnabled()).map(view => ({ id: view.id, label: view.label, icon: view.icon, selected: view.id === state.view })), onSelect: id => setWorkspaceView(id as WorkspaceView) });
 }
 function setWorkspaceView(view: WorkspaceView): void {
   if (state.view === view) return;
@@ -2154,7 +2335,7 @@ async function saveBoardTaskForm(form: HTMLFormElement, data: FormData): Promise
   else {
     const harness = state.providers.find(p => p.id === state.defaultProvider && p.installed) ?? state.providers.find(p => p.installed) ?? state.providers[0];
     if (!harness) throw new Error('Open Settings to check your installed agents.');
-    saved = await call<Session>('create_board_task', { projectId: form.dataset.projectId, provider: harness.id, model: rememberedModel(harness.id), mode: 'ask', title, description });
+    saved = await call<Session>('create_board_task', { projectId: form.dataset.projectId, provider: harness.id, model: rememberedModel(harness.id), mode: 'full', title, description });
   }
   const index = state.sessions.findIndex(s => s.id === saved.id);
   if (index < 0) state.sessions.unshift(saved); else state.sessions[index] = saved;
@@ -2165,190 +2346,29 @@ async function saveBoardTaskForm(form: HTMLFormElement, data: FormData): Promise
   else { renderBoardView(); if (!id) notify('Task added to Pending.'); }
   renderNavigation();
 }
-/** Archive or restore a task. Archiving a worktree task first offers to remove its clean checkout. */
-async function archiveTask(s: Session, offerCleanup: boolean): Promise<void> {
-  const generation = state.generation, archived = !s.archived;
-  if (archived && offerCleanup && s.worktreePath && !isRunning(s.id)) {
-    const decision = await worktrees.cleanupOffer(s, 'archive');
+async function changeBoardStage(stage: 'review' | 'completed'): Promise<void> {
+  const s = session(); if (s) await changeTaskStage(s, stage);
+}
+/** Settle or reopen any task. Settling a worktree task first offers to remove its clean checkout
+ * (unless `offer` is false: the caller already dealt with it). */
+async function changeTaskStage(s: Session, stage: TaskStage, offer = true): Promise<void> {
+  if (isRunning(s.id) || configuringSessions.has(s.id)) return;
+  if (stage === 'completed' && offer && s.worktreePath) {
+    const selected = s.id === state.sessionId;
+    const decision = await worktrees.cleanupOffer(s, 'complete');
     if (!decision.proceed) return;
     if (decision.remove) await worktrees.remove(s);
+    if (selected ? session()?.id !== s.id : !state.sessions.some(task => task.id === s.id) || isRunning(s.id)) return;
   }
-  await call('update_session', { sessionId: s.id, archived });
-  await reloadSessions();
-  if (s.id === state.sessionId && generation === state.generation) {
-    state.archived = archived; renderComposer();
-  }
-  renderNavigation();
-}
-type LinkedIssueStatus = { sessionId: string; link: TaskLink; repository: string; remoteState: string; needsAction: LinkedIssueAction | null };
-const retryingIssueProjects = new Set<string>();
-let deferredIssueFailures: { projectId: string; failures: LinkedIssueActionFailure[] } | undefined;
-function stageTaskSnapshot(saved: Session): void {
-  upsertSession(saved);
-  if (saved.id === state.sessionId) renderComposer();
-  renderNavigation(); renderBoardView();
-}
-async function cancelLinkedIssueAction(sessionId: string): Promise<void> {
-  try { await call('github_cancel_linked_issue_action', { sessionId }); } catch { /* Cancellation is local best-effort; the stage is already saved. */ }
-}
-function askLinkedIssueAction(task: Session, action: LinkedIssueAction, status: LinkedIssueStatus): Promise<boolean> {
-  return new Promise(resolve => {
-    const dialog = modal(`Update GitHub issue #${status.link.number}?`, `<p class="dialog-description">${escape(status.repository)} · #${status.link.number} · ${escape(status.link.title)}</p><p>Completing or reopening this task can also ${action === 'close' ? 'close' : 'reopen'} its linked GitHub issue.</p><div class="dialog-footer"><button type="button" class="secondary-button" data-issue-decline>Keep issue ${escape(status.remoteState)}</button><button type="button" class="primary-button" data-issue-accept>${action === 'close' ? 'Close issue' : 'Reopen issue'}</button></div>`, 'github-issue-stage-dialog');
-    let settled = false;
-    const finish = (accepted: boolean) => { if (settled) return; settled = true; resolve(accepted); };
-    dialog.addEventListener('close', () => {
-      if (settled) return;
-      finish(false);
-      void cancelLinkedIssueAction(task.id);
-    }, { once: true });
-    dialog.querySelector<HTMLButtonElement>('[data-issue-decline]')!.addEventListener('click', () => {
-      finish(false);
-      void cancelLinkedIssueAction(task.id);
-      closeModal();
-    });
-    const decline = dialog.querySelector<HTMLButtonElement>('[data-issue-decline]')!;
-    decline.focus();
-    const accept = dialog.querySelector<HTMLButtonElement>('[data-issue-accept]')!;
-    accept.addEventListener('click', () => { finish(true); closeModal(); });
-  });
-}
-function issueActionDialogBody(failures: LinkedIssueActionFailure[]): string {
-  return `<p class="dialog-description" id="issue-retry-summary" role="status">These previously approved GitHub issue actions are still pending. Retry them or leave the issues unchanged.</p><ul class="github-issue-retry-list" aria-label="Pending approved GitHub issue actions">${failures.map(failure => `<li><strong>${escape(failure.repository)} #${failure.number}</strong><span>${failure.action === 'close' ? 'Close issue' : 'Reopen issue'}</span><p role="alert">${escape(failure.error)}</p></li>`).join('')}</ul><div class="dialog-footer"><button type="button" class="secondary-button" data-issue-leave>Leave issues unchanged</button><button type="button" class="primary-button" data-issue-retry>Retry approved actions</button></div>`;
-}
-function showLinkedIssueActionFailures(projectId: string, failures: LinkedIssueActionFailure[]): void {
-  if (!failures.length) return;
-  const current = document.querySelector<HTMLDialogElement>('#dialog')!;
-  if (current.open && !current.classList.contains('github-issue-retry-dialog')) {
-    deferredIssueFailures = { projectId, failures };
-    return;
-  }
-  if (current.open) return;
-  let pending = [...failures];
-  let settled = false;
-  const dialog = modal('GitHub issue actions need attention', issueActionDialogBody(pending), 'github-issue-retry-dialog');
-  const cancelPending = () => { for (const failure of pending) void cancelLinkedIssueAction(failure.sessionId); };
-  const cancelWhenClosed = () => {
-    // The preceding confirmation's queued close event can arrive after this shared dialog reopens.
-    if (dialog.open) return;
-    dialog.removeEventListener('close', cancelWhenClosed);
-    if (!settled) { settled = true; cancelPending(); }
-  };
-  dialog.addEventListener('close', cancelWhenClosed);
-  const leave = dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!;
-  const retry = dialog.querySelector<HTMLButtonElement>('[data-issue-retry]')!;
-  leave.addEventListener('click', () => { settled = true; cancelPending(); closeModal(); });
-  retry.addEventListener('click', () => { void retryLinkedIssueFailures(projectId, pending, dialog, next => { pending = next; }); });
-  leave.focus();
-}
-async function retryLinkedIssueActionsOnConnect(projectId: string, forceStatus = false): Promise<void> {
-  if (!projectId || !githubEnabled() || retryingIssueProjects.has(projectId)) return;
-  const dialog = document.querySelector<HTMLDialogElement>('#dialog');
-  if (dialog?.classList.contains('github-issue-retry-dialog')) return;
-  retryingIssueProjects.add(projectId);
+  configuringSessions.add(s.id);
   try {
-    const failures = await github.retryApprovedActions(projectId, forceStatus);
-    if (failures === null) return;
-    await github.refreshLinks(projectId);
-    if (failures.length) showLinkedIssueActionFailures(projectId, failures);
-  } catch { /* A reconnect retry is best-effort; only native returned failures are surfaced. */ }
-  finally { retryingIssueProjects.delete(projectId); }
+    // There is no archive any more: an archived task left over (old data, a mirror) is settled, and reopening clears the flag.
+    if (stage !== 'completed' && s.archived) await call('update_session', { sessionId: s.id, archived: false });
+    const changed = await call<Session>('set_task_stage', { sessionId: s.id, stage });
+    const index = state.sessions.findIndex(task => task.id === s.id); if (index >= 0) state.sessions[index] = changed;
+    if (s.id === state.sessionId) renderComposer();
+  } finally { configuringSessions.delete(s.id); renderNavigation(); renderBoardView(); }
 }
-async function retryLinkedIssueFailures(projectId: string, previous: LinkedIssueActionFailure[], dialog: HTMLDialogElement, replace: (next: LinkedIssueActionFailure[]) => void): Promise<void> {
-  const retry = dialog.querySelector<HTMLButtonElement>('[data-issue-retry]');
-  if (retry) retry.disabled = true;
-  try {
-    if (!githubEnabled()) throw new Error('GitHub is turned off. Turn it on and reconnect before retrying.');
-    const failed = await github.retryApprovedActions(projectId);
-    if (failed === null) throw new Error('GitHub is not connected. Reconnect before retrying these actions.');
-    const returned = new Map(failed.map(item => [`${item.sessionId}:${item.action}`, item]));
-    const remaining: LinkedIssueActionFailure[] = [];
-    let verified = 0;
-    for (const failure of previous) {
-      if (!githubEnabled()) { remaining.push({ ...failure, error: 'GitHub is turned off. Turn it on and reconnect before retrying.' }); continue; }
-      try {
-        const status = await call<LinkedIssueStatus>('github_linked_issue_status', { sessionId: failure.sessionId, action: failure.action });
-        const desired = failure.action === 'close' ? 'closed' : 'open';
-        if (status.needsAction === null && status.remoteState === desired) {
-          const task = state.sessions.find(item => item.id === failure.sessionId);
-          if (task) stageTaskSnapshot({ ...task, issue: status.link });
-          verified++;
-          continue;
-        }
-        const stillFailed = returned.get(`${failure.sessionId}:${failure.action}`);
-        if (stillFailed) remaining.push(stillFailed);
-        else notify(`No approved action remains for ${failure.repository} issue #${failure.number}; GitHub reports it ${status.remoteState}.`);
-      } catch (error) {
-        remaining.push({ ...failure, error: error instanceof Error ? error.message : String(error) });
-      }
-    }
-    await github.refreshLinks(projectId, true);
-    if (remaining.length) {
-      replace(remaining);
-      dialog.innerHTML = `<div class="dialog-heading"><div class="dialog-title"><h2>GitHub issue actions need attention</h2></div><button type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div>${issueActionDialogBody(remaining)}`;
-      dialog.setAttribute('aria-describedby', 'issue-retry-summary');
-      dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!.addEventListener('click', () => { for (const item of remaining) void cancelLinkedIssueAction(item.sessionId); closeModal(); });
-      dialog.querySelector<HTMLButtonElement>('[data-issue-retry]')!.addEventListener('click', () => { void retryLinkedIssueFailures(projectId, remaining, dialog, replace); });
-      dialog.querySelector<HTMLButtonElement>('[data-issue-leave]')!.focus();
-    } else {
-      replace([]);
-      closeModal();
-      if (verified) { githubHub?.refresh(); notify(`Verified ${verified} GitHub issue action${verified === 1 ? '' : 's'}.`); }
-    }
-  } catch (error) {
-    const summary = dialog.querySelector<HTMLElement>('[role="status"]');
-    if (summary) summary.textContent = error instanceof Error ? error.message : String(error);
-  } finally { if (retry?.isConnected) retry.disabled = false; }
-}
-async function applyLinkedIssueAction(task: Session, action: LinkedIssueAction, status: LinkedIssueStatus): Promise<void> {
-  try {
-    const saved = await call<Session>('github_apply_linked_issue_action', { sessionId: task.id, action });
-    stageTaskSnapshot(saved);
-    githubHub?.refresh();
-    notify(`GitHub issue #${saved.issue?.number ?? task.issue?.number} ${action === 'close' ? 'closed' : 'reopened'}.`);
-  } catch (error) {
-    showLinkedIssueActionFailures(task.projectId, [{ sessionId: task.id, action, repository: status.repository, number: status.link.number, error: error instanceof Error ? error.message : String(error) }]);
-  }
-}
-async function syncLinkedIssueForStage(task: Session, previousStage: TaskStage, stage: TaskStage): Promise<void> {
-  const action: LinkedIssueAction | undefined = stage === 'completed' && previousStage !== 'completed' ? 'close'
-    : previousStage === 'completed' && (stage === 'review' || stage === 'pending') ? 'reopen' : undefined;
-  if (!action || !githubEnabled() || !task.issue || task.issue.kind !== 'issue') return;
-  let status: LinkedIssueStatus;
-  try { status = await call<LinkedIssueStatus>('github_linked_issue_status', { sessionId: task.id, action }); }
-  catch (error) { notify(`Task stage saved. GitHub issue status could not be checked: ${error instanceof Error ? error.message : String(error)}`); return; }
-  if (status.needsAction !== action) {
-    stageTaskSnapshot({ ...task, issue: status.link });
-    if (status.remoteState === (action === 'close' ? 'closed' : 'open')) notify(`GitHub issue #${status.link.number} is already ${status.remoteState}.`);
-    else notify(`GitHub issue #${status.link.number} is ${status.remoteState}; no action was taken.`);
-    return;
-  }
-  if (await askLinkedIssueAction(task, action, status)) await applyLinkedIssueAction(task, action, status);
-}
-async function persistTaskStage(task: Session, previousStage: TaskStage, stage: TaskStage): Promise<void> {
-  const changed = await call<Session>('set_task_stage', { sessionId: task.id, stage });
-  stageTaskSnapshot(changed);
-  await syncLinkedIssueForStage(changed, previousStage, stage);
-}
-async function changeTaskStage(id: string, stage: TaskStage): Promise<void> {
-  const task = state.sessions.find(item => item.id === id);
-  if (!task || taskStage(task) === stage) return;
-  if (task.archived || isRunning(id) || configuringSessions.has(id) || finishingStreams.has(id) || task.goalState?.status === 'active' || stage === 'in_progress') {
-    notify(stage === 'in_progress' ? 'Start the task to move it to In progress.' : 'Stop active work or restore the task before changing its stage.');
-    return;
-  }
-  configuringSessions.add(id);
-  try {
-    if (stage === 'completed' && task.worktreePath) {
-      const decision = await worktrees.cleanupOffer(task, 'complete');
-      if (!decision.proceed) return;
-      if (decision.remove) await worktrees.remove(task);
-    }
-    await persistTaskStage(task, taskStage(task), stage);
-  } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
-  finally { configuringSessions.delete(id); renderNavigation(); renderBoardView(); }
-}
-async function moveBoardTask(id: string, stage: TaskStage): Promise<void> { await changeTaskStage(id, stage); }
-async function changeBoardStage(stage: 'review' | 'completed'): Promise<void> { const task = session(); if (task) await changeTaskStage(task.id, stage); }
 let fullTaskDescription: { id: string; value: string } | undefined;
 let sessionsReload = 0;
 const startingBoardTasks = new Set<string>();
@@ -2366,7 +2386,8 @@ async function startBoardTask(id: string): Promise<void> {
       state.messages = [...state.messages, { id: transientId--, sessionId: id, role: 'user', content: text, createdAt: Date.now() }];
       render();
     } else renderNavigation();
-    const team = await loadTeam(id);
+    // A mirror's team (if any) runs on its host, which starts it from the routed prompt.
+    const team = await loadTeam(id) && !selected.remoteDevice;
     await call(team ? 'architect_start' : 'start_task', { sessionId: id, ...(team ? { text } : {}) });
   } catch (error) {
     state.streams.delete(id);
@@ -2436,9 +2457,9 @@ async function latestMessagePage(sessionId: string): Promise<MessagePage> {
   return latest;
 }
 
-async function loadOlderMessages(): Promise<void> {
+async function loadOlderMessages(anywhere = false): Promise<void> {
   const transcript = $('#transcript'), sessionId = state.sessionId, generation = state.generation;
-  if (!sessionId || !state.hasOlder || state.messagesLoading || state.messagesError || !transcriptVisible() || transcript.scrollTop > 200) return;
+  if (!sessionId || !state.hasOlder || state.messagesLoading || state.messagesError || !transcriptVisible() || (!anywhere && transcript.scrollTop > 200)) return;
   if (olderMessagesRequest?.sessionId === sessionId && olderMessagesRequest.generation === generation) return;
   const beforeId = state.messages.find(message => message.id > 0)?.id;
   if (!beforeId) return;
@@ -2455,75 +2476,95 @@ async function loadOlderMessages(): Promise<void> {
     if (sessionId === state.sessionId && generation === state.generation) notify('Could not load earlier messages. Scroll up to retry.');
   } finally {
     if (olderMessagesRequest === request) { olderMessagesRequest = undefined; transcript.removeAttribute('aria-busy'); }
+    if (mirrorOlderPending === sessionId) { mirrorOlderPending = ''; void mirrorMessages({ sessionId, older: true }); }
   }
 }
 
-const pendingMessageForks = new Set<string>();
-const pendingMessageEdits = new Set<string>();
-async function editAtMessage(sessionId: string, messageId: number): Promise<void> {
-  const key = JSON.stringify([sessionId, messageId]);
-  if (pendingMessageEdits.has(key)) return;
-  const selected = state.messages.find(message => message.sessionId === sessionId && message.id === messageId && message.role === 'user');
-  if (!selected || messageId <= 0 || sessionId !== state.sessionId) throw new Error('Choose a saved user message to edit.');
-  if (isRunning(sessionId) || configuringSessions.has(sessionId)) throw new Error('Stop this task before editing an earlier message.');
-  pendingMessageEdits.add(key);
-  const generation = state.generation;
-  try {
-    const content = await call<string>('get_message_content', { sessionId, messageId });
-    const draft = await prepareRewindDraft(content, id => call<string | null>('message_attachment_image', { sessionId, messageId, id }));
-    if (isRunning(sessionId) || configuringSessions.has(sessionId)) throw new Error('Stop this task before editing an earlier message.');
-    await forkAtMessage(sessionId, messageId, { draft, generation });
-  } finally { pendingMessageEdits.delete(key); }
+/* A mirror's history arrives from its host newest page first, then older pages beneath it
+ * (remote/mirror.rs sync). The open thread redraws for newer messages, and prepends older
+ * ones in place until it holds one page; scrolling up loads the rest as for any thread. */
+const MIRROR_PREPEND = 100;
+let mirrorOlderPending = '';
+async function mirrorMessages(event: { sessionId: string; older?: boolean }): Promise<void> {
+  const { sessionId } = event, generation = state.generation;
+  if (sessionId !== state.sessionId || state.streams.has(sessionId) || finishingStreams.has(sessionId)) return;
+  const saved = state.messages.filter(message => message.id > 0).length;
+  if (event.older && saved && !state.messagesLoading) {
+    state.hasOlder = true;
+    if (olderMessagesRequest?.sessionId === sessionId) { mirrorOlderPending = sessionId; return; }
+    if (saved < MIRROR_PREPEND) await loadOlderMessages(true);
+    return;
+  }
+  const page = await latestMessagePage(sessionId);
+  if (sessionId !== state.sessionId || generation !== state.generation || state.streams.has(sessionId)) return;
+  // Replacing the page here also tells an earlier load still in flight to keep it.
+  setMessagePage(page); state.messagesLoading = false; state.messagesError = ''; renderTranscript(); if (stickToBottom) stickTranscript();
 }
-async function forkAtMessage(sessionId: string, messageId: number, edit?: { draft: RewindDraft; generation: number }): Promise<void> {
-  const key = JSON.stringify([sessionId, messageId, Boolean(edit)]);
+
+const pendingMessageForks = new Set<string>();
+/** `draft` makes an Edit: the fork stops before the message, which waits in the composer. */
+async function forkAtMessage(sessionId: string, messageId: number, draft?: string): Promise<void> {
+  const key = JSON.stringify([sessionId, messageId]);
   if (pendingMessageForks.has(key)) return;
   pendingMessageForks.add(key);
-  const generation = edit?.generation ?? state.generation;
+  const generation = state.generation;
   try {
-    const fork = await call<Session>('fork_session_at_message', { sessionId, messageId, ...(edit ? { exclusive: true } : {}) });
+    const fork = await call<Session>('fork_session_at_message', { sessionId, messageId, exclusive: draft !== undefined });
     state.sessions = [fork, ...state.sessions.filter(task => task.id !== fork.id)];
-    if (edit) {
-      state.drafts.set(fork.id, edit.draft.text);
-      attachments.restore(fork.id, edit.draft.items);
+    if (draft) state.drafts.set(fork.id, draft);
+    if (generation === state.generation) {
+      await selectSession(fork.id, true);
+      if (draft !== undefined) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
+      notify(draft !== undefined ? 'Rewound to before your message. Edit it and send.' : 'Conversation forked. Both tasks use the same checkout.');
+    } else {
+      scheduleNavigation();
+      notify('Conversation forked. Your new task is in the task list.');
     }
-    const stillSelected = generation === state.generation;
-    if (stillSelected) await selectSession(fork.id, true);
-    else scheduleNavigation();
-    notify(edit ? `Message ready to edit in a new task. Files were not rewound.${edit.draft.unavailable.length ? ` ${edit.draft.unavailable.length} unavailable attachment(s) must be attached again.` : ''}`
-      : stillSelected ? 'Conversation forked. Both tasks use the same checkout.' : 'Conversation forked. Your new task is in the task list.');
   } finally { pendingMessageForks.delete(key); }
+}
+async function editAtMessage(sessionId: string, messageId: number): Promise<void> {
+  if (isRunning(sessionId)) throw new Error('Stop the agent before editing a message.');
+  const content = await call<string>('get_message_content', { sessionId, messageId });
+  // Attached context (files, images) is not re-attached; only what you typed returns.
+  await forkAtMessage(sessionId, messageId, contextBlocks(content).typed);
 }
 
 /* Each thread's last page. Switching back draws it in the same frame as the click; the
- * saved history then refreshes behind it and redraws only if something changed. */
+ * saved history then refreshes behind it and redraws only if something changed. Bounded by
+ * size too: a thread scrolled far back keeps only its newest messages (older ones reload on
+ * scroll), and the least recently opened threads are forgotten first. */
 const THREAD_PAGES = 24;
-const threadPages = new Map<string, MessagePage>();
+const THREAD_PAGES_CHARS = 4_000_000, THREAD_PAGE_CHARS = 1_000_000;
+const threadPages = new Map<string, MessagePage & { chars: number }>();
 function rememberThread(id: string): void {
   const messages = state.messages.filter(message => message.id > 0);
   // Only a page that really is this thread's: other paths can switch tasks without a reload.
   if (!id || !messages.length || messages.some(message => message.sessionId !== id)) return;
-  threadPages.delete(id); threadPages.set(id, { messages, hasOlder: state.hasOlder });
-  if (threadPages.size > THREAD_PAGES) threadPages.delete(threadPages.keys().next().value as string);
+  let start = messages.length - 1, chars = messages[start].content.length;
+  while (start > 0 && chars + messages[start - 1].content.length <= THREAD_PAGE_CHARS) chars += messages[--start].content.length;
+  threadPages.delete(id); threadPages.set(id, { messages: start ? messages.slice(start) : messages, hasOlder: state.hasOlder || start > 0, chars });
+  let total = 0; for (const page of threadPages.values()) total += page.chars;
+  for (const [key, page] of threadPages) {
+    if (key === id || (threadPages.size <= THREAD_PAGES && total <= THREAD_PAGES_CHARS)) break;
+    threadPages.delete(key); total -= page.chars;
+  }
 }
 const pageSignature = (messages: Message[]): string => messages.filter(message => message.id > 0).map(message => `${message.id}:${message.content.length}`).join(',');
-// Best-effort visual notification state, never an agent permission or authorization gate.
-function markTraySeen(sessionId: string): void { void call('tray_seen', { sessionId }).catch(() => undefined); }
 
-async function selectSession(id: string, focusComposer = false, preservePreviousAttachments = false): Promise<void> {
+// The menu bar item lists finished tasks until they are viewed.
+function markTraySeen(sessionId: string): void { void call('tray_seen', { sessionId }).catch(() => undefined); }
+async function selectSession(id: string, focusComposer = false): Promise<void> {
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
   closeMenus();
   if (document.querySelector('#dialog')?.classList.contains('change-review-dialog')) closeModal();
   const previousTask = session(), changingTask = previousTask?.id !== id;
-  // The app can accept an inspector click before the initial task list loads.
-  // Preserve that explicit choice when the first task is selected; normal task
-  // switches still restore their task-owned panel state.
-  const initialInspector = !previousTask && state.inspector ? state.inspectorTab : undefined;
+  if (changingTask) { if (previousTask) rememberThread(previousTask.id); leaveDraft(id); saveThreadPanel(); }
+  // However it is opened (click, ⌘1…9, ⌘⇧[ / ], board, palette), the thread holds the sidebar
+  // section its row is in while it stays open, so the row never jumps from under the pointer.
   if (changingTask) {
-    if (previousTask) rememberThread(previousTask.id);
-    if (preservePreviousAttachments && previousTask && state.attachments.length) chatFileAttachments.set(previousTask.id, [...state.attachments]);
-    leaveDraft(id); saveThreadPanel();
+    const section = sectionOf(document.querySelector<HTMLElement>(`#navigation .task-item[data-id="${CSS.escape(id)}"]`)?.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup);
+    sectionHold = section ? { id, section } : undefined;
   }
   if (previousTask && previousTask.id !== id) {
     if (previousTask.taskDescription) previousTask.taskDescription = [...previousTask.taskDescription].slice(0, 512).join('');
@@ -2532,11 +2573,7 @@ async function selectSession(id: string, focusComposer = false, preservePrevious
   if (state.view !== 'conversation') state.boardPanel = true;
   // A bot's conversation lives in the Bots section; it never re-points the project filter.
   if (state.projectFilter && state.projectFilter !== s.projectId && !botProjects.has(s.projectId) && !chatTask(s)) setProjectFilter(s.projectId);
-  if (state.collapsedFolders.delete(s.projectId)) saveCollapsedFolders();
-  state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.archived = s.archived;
-  if (changingTask && initialInspector) { state.inspector = true; state.inspectorTab = initialInspector; }
-  state.attachments = changingTask ? (chatFileAttachments.get(s.id) ?? []) : state.attachments;
-  if (changingTask) chatFileAttachments.delete(s.id);
+  state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.attachments = [];
   const remembered = changingTask ? threadPages.get(id) : undefined;
   state.messages = withMirrorPrompt(id, remembered ? [...remembered.messages] : []); state.messagesLoading = !remembered; state.messagesError = ''; state.hasOlder = remembered?.hasOlder ?? false;
   const generation = ++state.generation;
@@ -2544,7 +2581,7 @@ async function selectSession(id: string, focusComposer = false, preservePrevious
   if (changingTask) run(restoreSelectedFile());
   const requestedMessages = state.messages;
   const requestedStream = state.streams.get(id), requestedFinishing = finishingStreams.get(id);
-  readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true; render();
+  stickToBottom = true; render();
   if (remembered) stickTranscript();
   if (focusComposer) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
   let page: MessagePage, details: Session;
@@ -2593,13 +2630,7 @@ async function reloadSessions(): Promise<void> {
   const [sessions, detailResult] = await Promise.all([call<Session[]>('list_sessions'),
     Promise.allSettled([selectedId ? call<Session>('get_task', { sessionId: selectedId }) : Promise.resolve(null)]).then(results => results[0])]);
   if (request !== sessionsReload) return;
-  if (detailResult.status === 'rejected' && !deletedSessions.has(selectedId)) {
-    const disappeared = selectedId && !sessions.some(task => task.id === selectedId)
-      && !state.sessions.some(task => task.id === selectedId && task.draft);
-    if (!disappeared) throw detailResult.reason;
-    // Deletion may race this refresh; do not resurrect a bot-owned ghost task.
-    removeDeletedSessions([selectedId]);
-  }
+  if (detailResult.status === 'rejected' && !deletedSessions.has(selectedId)) throw detailResult.reason;
   const details = detailResult.status === 'fulfilled' ? detailResult.value : null;
   // The open draft is not listed natively until its first prompt; keep it while it is still a draft.
   const listedIds = new Set(sessions.map(task => task.id));
@@ -2620,18 +2651,16 @@ async function reloadSessions(): Promise<void> {
     const context = state.streams.get(s.id)?.contextUsage;
     if (context) s.contextUsage = context;
   }
-  renderNavigation(); renderHeader(); refreshModelLabels();
+  renderNavigation(); renderHeader(); refreshModelLabels(); syncCloudStrip();
 }
 function removeDeletedSessions(ids: string[]): void {
   terminalPanel.forget(ids);
   const removed = new Set(ids);
   for (const id of removed) {
-    deletedSessions.add(id);
-    if (recoveringChatId === id) recoveringChatId = undefined;
+    deletedSessions.add(id); writeLink(localStorage, id, null);
     const live = state.streams.get(id); if (live) clearAgentInputs(live);
     state.streams.delete(id); finishingStreams.delete(id); teams.delete(id);
     state.drafts.delete(id); state.browserAttachments.delete(id); state.moodboardAttachments.delete(id);
-    chatFileAttachments.delete(id);
     attachments.clear(id); pendingPromptActivity.delete(id);
     subagents.forget(id);
     threadPanels.delete(id); fileTabs.forget(id);
@@ -2692,7 +2721,7 @@ async function performSlashAction(action: string, argumentsText: string, task: S
     case 'export': await exportTask(task, argumentsText || undefined); break;
     case 'worktree': worktrees.openDialog(newTaskView() ? 'attach' : 'new', argumentsText); break;
     case 'agents': showCommands(); break;
-    case 'subagents': { const trigger = document.querySelector<HTMLButtonElement>('.subagents-trigger'); if (trigger) trigger.click(); else modal('Subagents', '<p class="dialog-description">No subagents have been reported for this task yet.</p>'); break; }
+    case 'subagents': { const trigger = document.querySelector<HTMLButtonElement>('#agents-toggle:not([hidden])'); if (trigger) trigger.click(); else modal('Subagents', '<p class="dialog-description">No subagents have been reported for this task yet.</p>'); break; }
     case 'mention':
       if (argumentsText) { await projectFileText(task, argumentsText); if (task.id === state.sessionId) attachFile(argumentsText); }
       else { state.inspector = true; state.inspectorTab = 'files'; renderInspector(); }
@@ -2740,6 +2769,7 @@ async function performSlashAction(action: string, argumentsText: string, task: S
       if (!answer) throw new Error('There is no agent response to copy yet.');
       await navigator.clipboard.writeText(answer.content); notify('Response copied'); break;
     }
+    case 'btw': { const refusal = btwRefusal(task); if (refusal) throw new Error(refusal); openBtw(); if (argumentsText) await sendBtw(argumentsText); else btwPanel.focus(); break; }
     case 'pwd': modal('Working directory', `<p class="dialog-description">${escape(workspacePath())}</p>`); break;
     default: throw new Error('This command is not available in PandaCode yet.');
   }
@@ -2755,16 +2785,48 @@ function composerPayload(s: Session): { text: string; items: QueuedMessage['atta
   const text = document.querySelector<HTMLTextAreaElement>('#prompt')?.value.trim() ?? '';
   return { text, items: [...attachments.list(s.id), ...state.attachments.map(path => ({ kind: 'path' as const, path }))] as QueuedMessage['attachments'] };
 }
+async function botMessageFromComposer(s: Session, bot: import('./bots').Bot, text: string, promptItems: ReturnType<typeof attachments.list>, paths: string[], browserItems: BrowserAttachment[], moodboardItems: { id: string; projectId: string; name: string }[], forceQueue = false): Promise<void> {
+  const contexts = await Promise.all(paths.map(path => fileContext(s, path)));
+  const imageIds = [...browserItems.filter(item => item.kind === 'screenshot').map(item => item.id), ...attachments.imageIds(promptItems)];
+  const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id)
+    || (imageIds.length || moodboardItems.length ? 'Please review the attached material.' : '');
+  await call('bot_message', { botId: bot.id, text: content, imageIds, moodboardIds: moodboardItems.map(item => item.id), forceQueue });
+}
 function clearComposer(s: Session): void {
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
   if (prompt) prompt.value = '';
   state.drafts.delete(s.id); attachments.clear(s.id); state.attachments = [];
 }
 /** Queues the composer's message to send when the agent finishes. */
-async function enqueueFromComposer(): Promise<void> {
+async function enqueueFromComposer(forceQueue = false): Promise<void> {
+  if (btwFromComposer()) return;
   const s = session(); if (!s) return;
   if (remoteOffline(s)) { renderComposer(); return; }
   const { text, items } = composerPayload(s);
+  if (isWake(text)) { await wakeFromComposer(s, text); return; }
+  const bot = sidebarBots.find(item => item.desktopSession === s.id);
+  if (bot) {
+    const promptItems = attachments.list(s.id), paths = [...state.attachments];
+    const browserItems = [...(state.browserAttachments.get(s.id) ?? [])];
+    const moodboardItems = (state.moodboardAttachments.get(s.id) ?? []).filter(item => item.projectId === s.projectId);
+    if (!text && !paths.length && !browserItems.length && !moodboardItems.length && !promptItems.length) return;
+    clearComposer(s);
+    state.browserAttachments.delete(s.id);
+    const sentBoards = new Set(moodboardItems.map(item => item.id));
+    state.moodboardAttachments.set(s.id, (state.moodboardAttachments.get(s.id) ?? []).filter(item => !sentBoards.has(item.id)));
+    renderComposer(); document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
+    try {
+      await botMessageFromComposer(s, bot, text, promptItems, paths, browserItems, moodboardItems, forceQueue);
+      // The gateway may have queued it; show the row now rather than on the next queue event.
+      setQueue(s.id, await call<QueuedMessage[]>('queue_list', { sessionId: s.id }).catch(() => queueOf(s.id)));
+    } catch (error) {
+      restoreComposer(s, text, promptItems, paths);
+      if (browserItems.length) state.browserAttachments.set(s.id, browserItems);
+      if (moodboardItems.length) state.moodboardAttachments.set(s.id, [...moodboardItems, ...(state.moodboardAttachments.get(s.id) ?? [])]);
+      throw error;
+    } finally { if (s.id === state.sessionId) renderComposer(); }
+    return;
+  }
   if (!text && !items.length) return;
   clearComposerNote(s);
   // Clear at once so the next message can be typed while this one is saved.
@@ -2812,15 +2874,24 @@ function steerEvent(event: AgentEvent): void {
   if (!data?.id || !data.status) return;
   const known = steers.get(data.id);
   if (known?.status === 'failed') return;
-  steers.set(data.id, { sessionId: event.sessionId, text: event.text, ...known, mode: data.mode ?? known?.mode ?? 'live', status: data.status });
-  if (data.status === 'failed') void requeueSteer(event.sessionId, event.text || known?.text || '');
-  if (event.sessionId === state.sessionId && known?.messageId !== undefined) renderTranscript(true);
+  // A steer this window did not send (a bot routes Enter natively) still shows as the user's message.
+  // The event can beat `steer_task`'s reply: then the bubble sendSteer already drew is this steer.
+  const linked = new Set([...steers.values()].map(item => item.messageId));
+  const drawn = !known && event.sessionId === state.sessionId ? state.messages.find(m => m.id < 0 && m.role === 'user' && m.content === event.text && !linked.has(m.id)) : undefined;
+  const shown = drawn ? drawn.id : !known && data.status !== 'failed' && event.text && event.sessionId === state.sessionId ? transientId-- : undefined;
+  if (shown !== undefined && !drawn) state.messages = [...state.messages, { id: shown, sessionId: event.sessionId, role: 'user', content: event.text, createdAt: Date.now() }];
+  steers.set(data.id, { sessionId: event.sessionId, text: event.text, ...known, ...(shown !== undefined ? { messageId: shown } : {}), mode: data.mode ?? known?.mode ?? 'live', status: data.status });
+  if (data.status === 'failed') void requeueSteer(event.sessionId, event.text || known?.text || '', (event.data as { reason?: string } | undefined)?.reason || 'The agent could not take it during this turn.');
+  if (event.sessionId === state.sessionId && (known?.messageId !== undefined || shown !== undefined)) renderTranscript(true);
 }
+/** Queued entries whose steer did not land, with the reason (the queue shows "Not steered"). */
+const notSteered = new Map<string, string>();
 /** A steer the agent could not take goes back to the queue, so nothing typed is lost. */
-async function requeueSteer(sessionId: string, text: string): Promise<void> {
+async function requeueSteer(sessionId: string, text: string, reason: string): Promise<void> {
   if (!text) return;
   const entry = await call<QueuedMessage>('queue_add', { sessionId, text, attachments: [] }).catch(() => null);
   const s = state.sessions.find(item => item.id === sessionId);
+  if (entry) notSteered.set(entry.id, reason);
   if (entry) { setQueue(sessionId, [...queueOf(sessionId), entry]); notify('The agent could not take that message, so it was queued.'); }
   else { if (s) restoreComposer(s, text, [], []); notify('The agent could not take that message; it is back in the prompt.'); }
   if (sessionId === state.sessionId) renderComposer();
@@ -2833,23 +2904,41 @@ function steerStateHtml(m: Message): string {
 }
 /** Sends the composer's text into the running turn; anything that cannot steer is queued instead. */
 async function steerFromComposer(): Promise<void> {
+  if (btwFromComposer()) return;
   const s = session(); if (!s) return;
   if (remoteOffline(s)) { renderComposer(); return; }
   const { text, items } = composerPayload(s);
+  const bot = sidebarBots.find(item => item.desktopSession === s.id);
+  if (bot?.whileWorking === 'steer') return enqueueFromComposer(true);
+  if (bot && (items.length || (state.browserAttachments.get(s.id) ?? []).length || (state.moodboardAttachments.get(s.id) ?? []).length)) {
+    notify('Attachments travel with queued messages, so this one was queued.');
+    return enqueueFromComposer();
+  }
   if (!text) { document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return; }
   if (items.length || teams.get(s.id)) {
     notify(items.length ? 'Attachments travel with queued messages, so this one was queued.' : 'A team takes messages between runs, so this one was queued.');
     return enqueueFromComposer();
   }
   clearComposerNote(s); clearComposer(s); renderComposer();
+  // A mirror whose start has not attached has no run to steer yet: the message waits in the queue.
+  const starting = remoteStart(s.id);
+  if (starting && starting.stage !== 'error') {
+    const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: [] }).catch(() => null);
+    if (entry) { setQueue(s.id, [...queueOf(s.id), entry]); notify(`${starting.device} is still starting this task; your message is queued for after it.`); }
+    else restoreComposer(s, text, [], []);
+    if (s.id === state.sessionId) renderComposer();
+    return;
+  }
   try {
     await steer(s, text);
   } catch (error) {
     // A host that has not approved this device would refuse it queued too: say so, keep the text.
     if (remoteRefusal(s, error)) { restoreComposer(s, text, [], []); if (s.id === state.sessionId) renderComposer(); return; }
     // Not taken mid-turn: keep it for after the run instead of losing it.
-    notify(`${error instanceof Error ? error.message : String(error)} Queued instead.`);
+    const reason = error instanceof Error ? error.message : String(error);
+    notify(/\bqueued\b/i.test(reason) ? reason : `${reason} Queued instead.`);
     const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: [] }).catch(() => null);
+    if (entry) notSteered.set(entry.id, reason);
     if (entry) setQueue(s.id, [...queueOf(s.id), entry]); else restoreComposer(s, text, [], []);
     if (s.id === state.sessionId) renderComposer();
   }
@@ -2858,6 +2947,8 @@ async function steerFromComposer(): Promise<void> {
 async function steerQueued(s: Session, id: string): Promise<void> {
   const entry = queueOf(s.id).find(item => item.id === id); if (!entry || steeringQueued.has(id)) return;
   if (entry.attachments.length) { notify('Queued messages with attachments are sent after the run.'); return; }
+  const starting = remoteStart(s.id);
+  if (starting && starting.stage !== 'error') { notify(`${starting.device} is still starting this task; the message stays queued.`); return; }
   steeringQueued.add(id); renderComposer();
   try {
     await steer(s, entry.text);
@@ -2894,7 +2985,7 @@ async function sendQueuedNow(s: Session, id: string): Promise<void> {
   }
   sendFirst.set(s.id, { id, stopping: true, hold: state.queueHolds.get(s.id) });
   runEndings.set(s.id, 'stopped');
-  const team = teams.get(s.id);
+  const team = teams.get(s.id) && !s.remoteDevice;
   await call(team ? 'architect_control' : 'stop_session', { sessionId: s.id, ...(team ? { action: 'stop' } : {}) });
   notify('Stopping the run to send this message…');
 }
@@ -2922,7 +3013,7 @@ async function dispatchQueue(id: string): Promise<void> {
   const task = state.sessions.find(item => item.id === id);
   const first = sendFirst.get(id), next = queueOf(id).find(item => item.id === first?.id) ?? queueOf(id)[0];
   if (first && next?.id !== first.id) sendFirst.delete(id);
-  if (!task || !next || botProjects.has(task.projectId) || (state.queueHolds.has(id) && next.id !== first?.id) || state.queueBusy.has(id) || steeringQueued.has(next.id) || isRunning(id) || finishingStreams.has(id) || configuringSessions.has(id) || task.archived) return;
+  if (!task || !next || botProjects.has(task.projectId) || (state.queueHolds.has(id) && next.id !== first?.id) || state.queueBusy.has(id) || steeringQueued.has(next.id) || next.id === state.queueEditing || isRunning(id) || finishingStreams.has(id) || configuringSessions.has(id) || task.archived) return;
   if (limitActive(task)) { state.queueHolds.set(id, 'limited'); if (id === state.sessionId) renderComposer(); return; }
   state.queueBusy.add(id);
   try {
@@ -2975,7 +3066,7 @@ function scheduleLimitResumes(): void {
 }
 /** Recovery runs before queued follow-ups: continue the task, then the queue delivers when that run ends. */
 async function continueAfterLimit(task: Session, text = 'Continue where you left off.'): Promise<void> {
-  if (task.archived || isRunning(task.id) || state.queueBusy.has(task.id) || finishingStreams.has(task.id) || configuringSessions.has(task.id)) return;
+  if (task.archived || isRunning(task.id) || state.queueBusy.has(task.id) || finishingStreams.has(task.id)) return;
   const hold = state.queueHolds.get(task.id);
   if (hold === 'limited' || hold === 'restart') state.queueHolds.delete(task.id);
   task.resumeAtReset = false;
@@ -2987,17 +3078,21 @@ async function continueAfterLimit(task: Session, text = 'Continue where you left
   } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
   finally { state.queueBusy.delete(task.id); if (task.id === state.sessionId) renderComposer(); renderNavigation(); }
 }
+/** The harness's other named connections a limited task can continue on (issue #137). */
+function limitAlternatives(s: Session): { id: string; name: string }[] {
+  if (s.remoteDevice) return [];
+  const current = namedConnections.tasks[s.id];
+  return namedConnections.connections.filter(c => c.provider === s.provider && c.id !== current);
+}
+/** Moves the task to another connection and resends with its context: a harness session can't resume
+ *  across config folders, so connection_assign starts a fresh one that context recovery fills in. */
 async function continueOnConnection(task: Session, id: string): Promise<void> {
-  if (!limitActive(task) || task.archived || task.remoteDevice || isRunning(task.id) || state.queueBusy.has(task.id) || finishingStreams.has(task.id) || configuringSessions.has(task.id)) return;
-  const target = limitConnections(task, namedConnections).find(connection => connection.id === id);
-  if (!target) return;
-  configuringSessions.add(task.id);
-  try {
-    const snapshot = await call<import('./connections').ConnectionSnapshot>('connection_assign', { sessionId: task.id, connectionId: id });
-    task.resumeId = null; task.contextUsage = null;
-    onNamedConnections(snapshot);
-  } finally { configuringSessions.delete(task.id); }
-  await continueAfterLimit(task);
+  const target = limitAlternatives(task).find(c => c.id === id);
+  if (!target || isRunning(task.id) || state.queueBusy.has(task.id)) return;
+  const from = taskConnection(task)?.name ?? `the default ${provider(task.provider)?.name ?? task.provider} setup`;
+  onNamedConnections(await call('connection_assign', { sessionId: task.id, connectionId: id }));
+  task.resumeId = null;
+  await continueAfterLimit(task, `Continue where you left off. (Moved to the connection “${target.name}” because ${from} reached its usage limit.)`);
 }
 async function limitAction(action: string, element: HTMLElement): Promise<void> {
   const s = session(); if (!s) return;
@@ -3020,6 +3115,23 @@ async function projectFileText(s: Session, path: string): Promise<string> {
 async function fileContext(s: Session, path: string): Promise<string> {
   const content = await projectFileText(s, path);
   return `\n\nFile context: ${path}\n\`\`\`\n${content.slice(0, 32768)}${content.length > 32768 ? '\n[Context truncated at 32 KiB]' : ''}\n\`\`\``;
+}
+/** `/wake` is handled here for every harness, so it works whether or not the CLI knows it. */
+const WAKE_SLASH: SlashCommand = { id: 'pandacode:wake', name: '/wake', description: 'Wake this thread later', argumentHint: '[30m | 9:00 | tomorrow] [message]', kind: 'action', source: 'PandaCode' };
+function withWake(catalog: { commands: SlashCommand[]; warnings: string[] }): { commands: SlashCommand[]; warnings: string[] } {
+  return catalog.commands.some(command => command.name === '/wake') ? catalog : { ...catalog, commands: [WAKE_SLASH, ...catalog.commands] };
+}
+/** Checked without awaiting, so an ordinary send prepares in the same task as the click. */
+const WAKE_TEXT = /^\/wake(?:\s+([\s\S]*))?$/i;
+const isWake = (text: string) => WAKE_TEXT.test(text.trim());
+/** Runs a typed `/wake …` and clears the prompt; false when the text is something else. */
+async function wakeFromComposer(s: Session, text: string): Promise<boolean> {
+  const match = WAKE_TEXT.exec(text.trim()); if (!match) return false;
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  await wakeCommand(s.id, match[1] ?? '', document.querySelector<HTMLElement>('#composer') ?? $('#composer-area'));
+  if (prompt?.isConnected && prompt.value.trim() === text.trim()) { prompt.value = ''; resizePrompt(); }
+  state.drafts.delete(s.id);
+  return true;
 }
 const mirrorLocalSlash = new Set(['console', 'goal', 'usage', 'hooks', 'preferences', 'imports', 'conversations', 'plugins', 'jobs', 'fork', 'archive', 'delete', 'export', 'worktree', 'cd', 'plan', 'fast', 'diff', 'integrations', 'pwd']);
 function remoteSlashUnavailable(action: string): boolean { return action.startsWith('console:') || mirrorLocalSlash.has(action); }
@@ -3055,16 +3167,23 @@ function remoteRefusal(s: Session, error: unknown): boolean {
   return Boolean(text);
 }
 async function send(): Promise<void> {
+  if (btwFromComposer()) return;
   const draft = document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? ''; const text = draft.trim(); const s = session();
-  if (!text || !s || s.archived || taskStage(s) === 'completed' || isRunning() || finishingStreams.has(s.id) || state.messagesLoading || state.messagesError || configuringSessions.has(s.id)) return;
+  if (!s) return;
+  if (isWake(text)) { await wakeFromComposer(s, text); return; }
+  const bot = sidebarBots.find(item => item.desktopSession === s.id);
+  const hasBotAttachments = Boolean(bot && (state.attachments.length || state.browserAttachments.get(s.id)?.length || attachments.list(s.id).length || state.moodboardAttachments.get(s.id)?.some(item => item.projectId === s.projectId)));
+  if ((!text && !hasBotAttachments) || s.archived || taskStage(s) === 'completed' || isRunning() || finishingStreams.has(s.id) || state.messagesLoading || state.messagesError || configuringSessions.has(s.id)) return;
   clearComposerNote(s);
   if (remoteOffline(s)) { renderComposer(); return; }
   const fresh = !s.remoteDevice && newTaskView();
   const target = fresh ? remoteTargets.find(item => item.deviceId === remoteChoice) : undefined;
   if (target) return sendRemote(s, target, draft, text);
-  if (fresh && remoteChoice !== LOCAL) { renderComposer(); return; }
+  if (fresh && remoteChoice !== LOCAL && !cloudProvider(remoteChoice)) { renderComposer(); return; }
   // A failed start elsewhere no longer applies once this task is sent another way.
   clearRemoteStart(s.id);
+  const cloud = !s.remoteDevice && !s.cloud && newTaskView() ? cloudTargets.find(item => item.ready && item.provider === cloudProvider(remoteChoice)) : undefined;
+  if (cloud) return sendCloud(s, cloud, draft, text);
   // Preparing attachments or awaiting admission blocks only this task.
   configuringSessions.add(s.id);
   noteManualSend(s.id);
@@ -3112,7 +3231,8 @@ async function send(): Promise<void> {
   try {
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
     // Mentioned issues and pull requests travel with the message, so every harness can read them.
-    const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text, Boolean(s.pullRequest)) + tokenSaver.contextFor(s.id);
+    const rawContent = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + await botTaskBrief(s) + tokenSaver.contextFor(s.id);
+    const content = rawContent || (bot ? 'Please review the attached material.' : rawContent);
     const sentIds = new Set(browserItems.map(item => item.id));
     const remaining = (state.browserAttachments.get(s.id) ?? []).filter(item => !sentIds.has(item.id));
     if (remaining.length) state.browserAttachments.set(s.id, remaining); else state.browserAttachments.delete(s.id);
@@ -3125,18 +3245,17 @@ async function send(): Promise<void> {
     const currentPrompt = document.querySelector<HTMLTextAreaElement>('#prompt');
     if (currentPrompt?.dataset.sessionId === s.id && currentPrompt.value === draft) currentPrompt.value = '';
     if (state.drafts.get(s.id) === draft) state.drafts.delete(s.id);
-    const sent = sentPrompt(s, content, sentAt);
+    sent = sentPrompt(s, content, Date.now());
     if (isCurrent()) {
-      readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true;
+      stickToBottom = true;
       state.messages = [...state.messages, sent];
       state.attachments = state.attachments.filter(path => !filePaths.includes(path)); render();
-      const sentRows = $('#transcript').querySelectorAll<HTMLElement>('.user-message');
-      if (sentRows.length) enterView(sentRows[sentRows.length - 1], 12);
+      const shown = $('#transcript').querySelectorAll<HTMLElement>('.user-message');
+      if (shown.length) enterView(shown[shown.length - 1], 12);
     } else renderNavigation();
     const imageIds = [...screenshots, ...attachments.imageIds(promptItems)];
     // A bot's own conversation goes through the bot, which adds its brief and memories.
-    const bot = sidebarBots.find(item => item.desktopSession === s.id);
-    if (bot && !imageIds.length && !moodboardItems.length && !teams.get(s.id)) await call('bot_message', { botId: bot.id, text: content });
+    if (bot) await call('bot_message', { botId: bot.id, text: content, imageIds, moodboardIds: moodboardItems.map(item => item.id) });
     else await call(teams.get(s.id) && !s.remoteDevice && !moodboardItems.length ? 'architect_start' : 'send_message', { sessionId: s.id, text: content, imageIds, moodboardIds: moodboardItems.map(item => item.id) });
   } catch (error) {
     pendingPromptActivity.delete(s.id); if (sent) dropMirrorPrompt(s.id, sent);
@@ -3166,6 +3285,121 @@ async function send(): Promise<void> {
     if (remoteRefusal(s, error)) return;
     throw error;
   } finally { pendingPromptActivity.delete(s.id); configuringSessions.delete(s.id); }
+}
+// /btw side threads (docs/btw.md): a second task beside this one, fed what the main thread said.
+const btwPanel = new BtwPanel({
+  call, report, userHtml: (content, id) => userContent(content, id),
+  side: () => { const link = btwLink(state.sessionId), side = link && state.sessions.find(task => task.id === link.sideId); return side && { session: side, hiddenThrough: link.hiddenThrough ?? 0 }; },
+  live: sideId => {
+    const live = state.streams.get(sideId), status = state.sessions.find(task => task.id === sideId)?.status;
+    return { text: live?.text ?? '', running: isRunning(sideId), waiting: Boolean(live?.approvals.size || live?.inputs.size) || status === 'waiting' || status === 'waiting_approval' };
+  },
+  mainRunning: () => isRunning(),
+  send: text => sendBtw(text),
+  openFull: sideId => run(selectSession(sideId, true)),
+  newThread: () => { writeLink(localStorage, state.sessionId, null); renderInspector(); btwPanel.focus(); },
+  close: () => { state.inspector = false; renderInspector(); },
+  insertMain: text => {
+    const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'); if (!prompt) return;
+    prompt.value = prompt.value.trim() ? `${prompt.value.trimEnd()}\n\n${text}` : text; state.drafts.set(state.sessionId, prompt.value); resizePrompt();
+  },
+});
+/** The side thread linked to a main thread. An archived or unlisted one is not reused (the next /btw
+ *  starts fresh); the link is never erased here, since a session list can briefly lag a new side thread. */
+function btwLink(mainId: string): BtwLink | undefined {
+  const link = readLinks(localStorage)[mainId];
+  const side = link && state.sessions.find(task => task.id === link.sideId);
+  return side && !side.archived ? link : undefined;
+}
+function openBtw(): void { inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'btw'; state.selectedKind = ''; renderInspector(); }
+/** Why this task cannot open a side thread, if it cannot. */
+function btwRefusal(main: Session): string {
+  if (main.remoteDevice || main.cloud) return 'Side threads run on this computer, and this task runs elsewhere.';
+  if (botProjects.has(main.projectId)) return 'Bot conversations cannot open side threads. Ask in a project task instead.';
+  return '';
+}
+/** `/btw …` in the main prompt goes to the side thread, never to the main thread's queue or steer. */
+function btwFromComposer(): boolean {
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'), s = session();
+  const text = prompt && s ? parseBtw(prompt.value) : null;
+  if (text === null || !prompt || !s) return false;
+  const refusal = btwRefusal(s);
+  if (refusal) { notify(refusal); return true; }
+  if (text && (composerPayload(s).items.length || state.browserAttachments.get(s.id)?.length || state.moodboardAttachments.get(s.id)?.length)) {
+    notify('Side questions cannot carry attachments. Remove them, or send without /btw.'); return true;
+  }
+  prompt.value = ''; state.drafts.delete(s.id); resizePrompt(); openBtw();
+  if (!text) { btwPanel.focus(); return true; }
+  run(sendBtw(text).catch(error => {
+    const current = document.querySelector<HTMLTextAreaElement>('#prompt');
+    if (current?.dataset.sessionId === s.id && !current.value) { current.value = `/btw ${text}`; resizePrompt(); }
+    else if (!state.drafts.get(s.id)) state.drafts.set(s.id, `/btw ${text}`);
+    throw error;
+  }));
+  return true;
+}
+/** A new side thread in the main thread's project, harness, model and checkout. */
+async function createBtw(main: Session, prompt: string): Promise<BtwLink> {
+  let side: Session, link: BtwLink;
+  if (main.worktreePath) {
+    // Only a fork keeps a worktree checkout; its copied transcript stays hidden in the panel.
+    const page = await call<MessagePage>('get_messages', { sessionId: main.id });
+    const last = [...page.messages].reverse().find(m => m.id > 0 && (m.role === 'user' || m.role === 'assistant'));
+    if (!last) throw new Error('Send a first message in this task before asking on the side.');
+    side = await call<Session>('fork_session_at_message', { sessionId: main.id, messageId: last.id });
+    const copied = await call<MessagePage>('get_messages', { sessionId: side.id });
+    link = { sideId: side.id, seenId: last.id, hiddenThrough: Math.max(0, ...copied.messages.map(m => m.id)) };
+  } else {
+    side = await call<Session>('create_session', { projectId: main.projectId, provider: main.provider, model: main.model, mode: main.mode });
+    link = { sideId: side.id, seenId: 0 };
+  }
+  const title = sideTitle(prompt);
+  await call('update_session', { sessionId: side.id, title });
+  state.sessions = [{ ...side, title }, ...state.sessions.filter(task => task.id !== side.id)];
+  writeLink(localStorage, main.id, link); renderNavigation();
+  return link;
+}
+/** One create-or-send at a time per main thread, so two quick /btw prompts share one side thread. */
+const btwSending = new Map<string, Promise<void>>();
+function sendBtw(text: string): Promise<void> {
+  const main = session(); if (!main) return Promise.resolve();
+  const refusal = btwRefusal(main);
+  if (refusal) return Promise.reject(new Error(refusal));
+  const next = (btwSending.get(main.id) ?? Promise.resolve()).catch(() => undefined).then(() => deliverBtw(main, text));
+  btwSending.set(main.id, next);
+  void next.catch(() => undefined).finally(() => { if (btwSending.get(main.id) === next) btwSending.delete(main.id); });
+  return next;
+}
+/** Sends to the side thread with the main thread's news since its last message. */
+async function deliverBtw(main: Session, text: string): Promise<void> {
+  const link = btwLink(main.id) ?? await createBtw(main, text);
+  const side = state.sessions.find(task => task.id === link.sideId)!;
+  if (isRunning(side.id)) throw new Error('The side thread is still answering. Send this when it finishes.');
+  // Running from here on: no second send can pass the check above, and a failure below tears down only this run.
+  stream(side.id).status = 'Starting agent'; side.status = 'running';
+  const showing = () => state.sessionId === main.id && state.inspectorTab === 'btw';
+  if (showing()) renderInspector();
+  let sentLink: BtwLink | undefined;
+  try {
+    const page = await call<MessagePage>('get_messages', { sessionId: main.id });
+    const strip = (content: string) => { const index = content.search(CONTEXT_BOUNDARY); return index < 0 ? content : content.slice(0, index); };
+    // Only the newest page came back: older unseen history is reported as left out.
+    const gap = page.hasOlder && (page.messages[0]?.id ?? 0) > link.seenId;
+    const context = mainContext({ title: main.title, status: isRunning(main.id) ? 'running' : main.status },
+      page.messages.map(m => ({ ...m, content: m.role === 'user' ? strip(m.content) : m.content })), link.seenId, state.streams.get(main.id)?.text ?? '', CONTEXT_LIMIT, gap);
+    const content = text + context.text;
+    sentLink = { ...link, seenId: context.seenId };
+    writeLink(localStorage, main.id, sentLink);
+    if (showing()) btwPanel.sent(side.id, content);
+    await call('send_message', { sessionId: side.id, text: content, imageIds: [], moodboardIds: [] });
+  } catch (error) {
+    state.streams.delete(side.id); side.status = 'idle';
+    // Roll back only our own write; a New side thread chosen meanwhile stays.
+    const current = readLinks(localStorage)[main.id];
+    if (sentLink && current?.sideId === sentLink.sideId && current.seenId === sentLink.seenId) writeLink(localStorage, main.id, link);
+    if (showing()) { renderInspector(); void btwPanel.reload(); }
+    throw error;
+  }
 }
 async function finishResponse(sessionId: string, finishing: FinishingStream): Promise<void> {
   const current = () => finishingStreams.get(sessionId) === finishing && !state.streams.has(sessionId);
@@ -3202,7 +3436,7 @@ function completeTurnChanges(event: AgentEvent): void {
     messages.push({ id: transientId--, sessionId: event.sessionId, role: 'changes', content: '', createdAt: Date.now(), turnChanges: data.turnChanges });
     state.messages = messages;
   }
-  if (current) { current.text = ''; current.retainedMessageKey = undefined; current.tools = []; current.omittedActivity = false; current.revision++; current.startedAt = Date.now(); current.turnKey = 'turn:live:' + transientId--; }
+  if (current) { current.body.set(''); current.thought.set(''); current.retainedMessageKey = undefined; current.tools = []; current.omittedActivity = false; current.revision++; current.startedAt = Date.now(); current.turnKey = 'turn:live:' + transientId--; }
   if (event.sessionId === state.sessionId) {
     renderTranscript();
     // A task on another computer has its messages copied when the run ends; its `done` reloads them.
@@ -3218,6 +3452,7 @@ function completeTurnChanges(event: AgentEvent): void {
 }
 function onAgent(event: AgentEvent): void {
   remoteStartAttached(event.sessionId);
+  queueMicrotask(() => btwPanel.event(event.sessionId, event.kind));
   if (botsView) queueMicrotask(() => botsView?.agent(event.sessionId, event.kind));
   if ((event.kind === 'done' || event.kind === 'turn_start') && botForThread()) queueMicrotask(renderHeader);
   if (deletedSessions.has(event.sessionId)) return;
@@ -3247,6 +3482,10 @@ function onAgent(event: AgentEvent): void {
   if (event.kind === 'turn_start') return;
   if (event.kind === 'commands_changed') { if (event.sessionId === state.sessionId) slashPicker?.refresh(true); return; }
   if (event.kind === 'subagent') { subagents.receive(event.sessionId, event.data); return; }
+  // Hosts send `team` (a changed worker row) only for mirrors; it is not a local event kind.
+  const workerRow = (event.kind as string) === 'team';
+  if ((workerRow || event.kind === 'done' && teams.get(event.sessionId)) && state.sessions.find(task => task.id === event.sessionId)?.remoteDevice) refreshMirrorTeam(event.sessionId);
+  if (workerRow) return;
   // Native reports each steer's pending, delivered or failed state.
   if (event.kind === 'steer') { steerEvent(event); return; }
   const s = state.sessions.find(s => s.id === event.sessionId);
@@ -3262,14 +3501,14 @@ function onAgent(event: AgentEvent): void {
   if (event.kind === 'done') {
     if (s) refreshFileLinks(workspaceContext(s));
     void detectPullRequest(event.sessionId);
-    if (s && botProjects.has(s.projectId)) void refreshBotPreviews();
+    if (s && botProjects.has(s.projectId)) { if (event.sessionId !== state.sessionId) respondedBots.add(s.projectId); void refreshBotPreviews(); }
     for (const [id, item] of steers) if (item.sessionId === event.sessionId) steers.delete(id);
     const finishing = { stream: state.streams.get(event.sessionId) ?? stream(event.sessionId), finishedAt: Date.now() };
     clearAgentInputs(finishing.stream);
     finishingStreams.set(event.sessionId, finishing);
     state.streams.delete(event.sessionId); if (s) s.status = 'idle';
-    // A turn that finished out of view waits in Needs review.
-    if (s && s.id !== state.sessionId) { (unreviewed ??= readCollapsed(localStorage, UNREVIEWED_KEY)).add(s.id); saveUnreviewed(); }
+    // A turn that finished out of view (another thread, the board, another app) shows unread until opened.
+    if (s && (s.id !== state.sessionId || !transcriptVisible() || !document.hasFocus())) { (unreviewed ??= readCollapsed(localStorage, UNREVIEWED_KEY)).add(s.id); saveUnreviewed(); }
     updateWorkTimer();
     // A failed or stopped run holds the queue; a clean finish sends the next queued message.
     const ending = runEndings.get(event.sessionId); runEndings.delete(event.sessionId);
@@ -3278,8 +3517,13 @@ function onAgent(event: AgentEvent): void {
     if (first?.stopping) sendFirst.set(event.sessionId, { id: first.id });
     if (first?.stopping && ending === 'stopped') { if (first.hold) state.queueHolds.set(event.sessionId, first.hold); else state.queueHolds.delete(event.sessionId); }
     else if (ending) state.queueHolds.set(event.sessionId, ending);
+    if (s && botProjects.has(s.projectId)) {
+      if (ending === 'failed') failedBotProjects.add(s.projectId);
+      else if (!ending) failedBotProjects.delete(s.projectId);
+    }
     if (!ending) void maybeTurnChecks(event.sessionId);
     if (event.sessionId === state.sessionId) { renderStream(); renderComposer(); }
+    void applyNextBotModel(event.sessionId);
     void finishResponse(event.sessionId, finishing).finally(() => run(dispatchQueue(event.sessionId))); return;
   }
   if (event.kind === 'session') return;
@@ -3288,7 +3532,8 @@ function onAgent(event: AgentEvent): void {
     const until = (event.data as { resetsAt?: number | null } | undefined)?.resetsAt ?? null;
     if (s) { s.limitedAt = Date.now(); s.limitedUntil = until; s.resumeAtReset = false; }
     runEndings.set(event.sessionId, 'limited');
-    notify(`${s?.title ?? 'Task'}: ${event.text}${until ? ` · ${resetLabel(until)}` : ''}`);
+    // A bot's limit already shows as its sidebar chip and above its composer.
+    if (!sidebarBots.some(bot => bot.projectId === s?.projectId)) notify(`${s?.title ?? 'Task'}: ${event.text}${until ? ` · ${resetLabel(until)}` : ''}`);
     renderNavigation(); if (event.sessionId === state.sessionId) renderComposer();
     return;
   }
@@ -3298,15 +3543,17 @@ function onAgent(event: AgentEvent): void {
   if (event.kind === 'message_start') finishLiveMessage(current, event.sessionId);
   if (event.kind === 'text') {
     if (event.text && current.retainedMessageKey) {
-      current.text = ''; current.retainedMessageKey = undefined; current.revision++;
+      current.body.set(''); current.retainedMessageKey = undefined; current.revision++;
     }
-    current.text = (current.text + event.text).slice(-262144);
+    current.body.append(event.text);
     if (event.text.trim()) {
       updateStreamStatus(current, 'Generating response');
       current.lastResponseAt = Date.now();
       if (s) { becameActive = !activeTask(s); s.lastResponseAt = current.lastResponseAt; }
     }
   }
+  // Not saved with the transcript, so the fold lives only while the turn streams.
+  if ((event.kind as string) === 'thinking') current.thought.append(event.text);
   if (event.kind === 'tool') {
     const tool = event.tool;
     const key = tool ? 'tool:' + tool.id : 'live:' + transientId--;
@@ -3324,7 +3571,7 @@ function onAgent(event: AgentEvent): void {
     if (event.text === 'Stopping agent') clearAgentInputs(current);
   }
   if (event.kind === 'error') { if (runEndings.get(event.sessionId) !== 'limited') runEndings.set(event.sessionId, 'failed'); current.tools.push({ key: 'error:' + transientId--, content: 'Error: ' + event.text.slice(0, 8192), statusOnly: true }); trimLiveActivity(current, event.sessionId); current.revision++; notify(event.text); }
-  if (event.kind === 'approval' && event.requestId) { current.approvals.set(event.requestId, event.text); current.revision++; updateStreamStatus(current, 'Waiting for approval'); if (event.sessionId !== state.sessionId) notify(`${s?.title ?? 'Task'} needs approval`); }
+  if (event.kind === 'approval' && event.requestId) { current.approvals.set(event.requestId, event.text); current.revision++; updateStreamStatus(current, 'Waiting for approval'); if (event.sessionId !== state.sessionId) notify(`${(s?.title ?? 'Task').replace(/ · You$/, '')} needs approval`); }
   if (event.kind === 'approval_cancelled' && event.requestId && current.approvals.delete(event.requestId)) {
     current.revision++; if (!current.approvals.size && current.status === 'Waiting for approval') updateStreamStatus(current, 'Continuing task');
   }
@@ -3337,7 +3584,7 @@ function onAgent(event: AgentEvent): void {
       scheduleNavigation();
     }, Boolean(s?.remoteDevice)));
     current.revision++; updateStreamStatus(current, 'Waiting for your answer');
-    if (event.sessionId !== state.sessionId) notify(`${s?.title ?? 'Task'} needs your answer`);
+    if (event.sessionId !== state.sessionId) notify(`${(s?.title ?? 'Task').replace(/ · You$/, '')} needs your answer`);
   }
   if (event.kind === 'input_cancelled' && event.requestId) {
     current.inputs.get(event.requestId)?.dispose(); current.inputs.delete(event.requestId); current.revision++;
@@ -3353,21 +3600,29 @@ function onAgent(event: AgentEvent): void {
 }
 
 async function refreshInspector(): Promise<void> {
-  fileTabs.show(state.sessionId, workspaceKey());
   void projectRunner.refresh();
   const request = ++inspectorRequest;
   const p = project(); if (!p) { state.git = null; state.jj = null; state.files = []; state.gitError = ''; state.filesError = ''; state.inspectorLoading = false; renderInspector(); return; }
   state.inspectorLoading = true; renderInspector();
-  const id = p.id, folder = state.filePath, context = workspaceContext(), key = workspaceKey();
-  const results = await Promise.allSettled([call<GitStatus>('git_status', context), call<FileEntry[]>('list_files', { ...context, path: folder }), call<JjStatus>('jj_status', context)]);
-  if (request !== inspectorRequest || id !== state.projectId || key !== workspaceKey() || folder !== state.filePath) return;
+  const id = p.id, folders = [...state.openFolders], context = workspaceContext(), key = workspaceKey();
+  const [results, children] = await Promise.all([
+    Promise.allSettled([call<GitStatus>('git_status', context), call<FileEntry[]>('list_files', { ...context, path: '' }), call<JjStatus>('jj_status', context)]),
+    Promise.allSettled(folders.map(path => call<FileEntry[]>('list_files', { ...context, path }))),
+  ]);
+  if (request !== inspectorRequest || id !== state.projectId || key !== workspaceKey()) return;
+  // Only folders still open take the new listing; a failed read keeps the last one rather than collapsing the folder.
+  children.forEach((result, index) => {
+    const path = folders[index];
+    if (result.status === 'fulfilled' && state.openFolders.has(path)) state.folderFiles.set(path, result.value);
+  });
   state.inspectorLoading = false;
   state.git = results[0].status === 'fulfilled' ? results[0].value : null;
+  if (state.git) noteChangedPaths(state.git.files.map(file => file.path));
   state.gitError = results[0].status === 'rejected' ? errorText(results[0].reason) || 'Git status could not be loaded.' : '';
   state.files = results[1].status === 'fulfilled' ? results[1].value : [];
   state.jj = results[2].status === 'fulfilled' ? results[2].value : null;
   state.filesError = results[1].status === 'rejected' ? errorText(results[1].reason) || 'The folder could not be read.' : '';
-  renderInspector(); renderHeader(); fileTabs.reload();
+  renderInspector(); renderHeader(); if (state.inspector && state.inspectorTab === 'file') fileTabs.reload();
 }
 /** The simulator panel stays mounted once opened; hiding it stops its frames. */
 function syncSimulatorPanel(): void {
@@ -3387,7 +3642,7 @@ function syncSimulatorPanel(): void {
 }
 /** The VM panel stays mounted once opened; hiding it stops its frames. */
 function syncVmPanel(): void {
-  const wanted = state.inspector && state.inspectorTab === 'vm' && !inspectorSuppressed;
+  const wanted = isMac && state.inspector && state.inspectorTab === 'vm' && !inspectorSuppressed;
   $('#vm-panel').hidden = !wanted;
   if (wanted) { $('#inspector-content').hidden = true; $('#inspector-refresh').hidden = true; }
   if (!wanted) { vmPanel?.hide(); return; }
@@ -3400,6 +3655,16 @@ function syncVmPanel(): void {
     });
     if (state.inspector && state.inspectorTab === 'vm' && !inspectorSuppressed) vmPanel.show();
   }).catch(error => { vmLoading = undefined; report(error); });
+}
+/** The thread's visual progress PiP: conversation view only, never on the new-task page. */
+function syncProgressPip(): void {
+  const id = state.sessionId, allowed = Boolean(id) && state.view === 'conversation' && !newTaskView();
+  if (progressPip) { progressPip.update(id, allowed, allowed && isRunning()); return; }
+  if (!id) return;
+  progressPipLoading ??= import('./progress-pip').then(({ mountProgressPip }) => {
+    progressPip = mountProgressPip($('#progress-pip'), { call, notify });
+    syncProgressPip();
+  }).catch(error => { progressPipLoading = undefined; report(error); });
 }
 /** The design canvas stays mounted once opened; hidden, it makes no calls. */
 function syncDesignPanel(): void {
@@ -3469,7 +3734,7 @@ async function performAgentUiAction(request: AgentUiAction): Promise<unknown> {
   await active();
   const { action, args } = request;
   if (action === 'open_task') { await selectSession(String(args.taskId)); return { opened: state.sessionId === args.taskId }; }
-  if (action === 'open_file') { if (args.view === 'rendered' || args.view === 'raw') setDocumentView(String(args.path), args.view); state.inspectorTab = 'files'; await openFile(String(args.path), 'file'); return { opened: fileTabs.active === args.path }; }
+  if (action === 'open_file') { if (args.view === 'rendered' || args.view === 'raw') setDocumentView(String(args.path), args.view); await openFile(String(args.path), 'file'); return { opened: fileTabs.active === args.path }; }
   if (action === 'open_terminal') { if (!terminalPanel.open) await toggleTerminal(); return { opened: terminalPanel.open }; }
   if (action === 'run_project') return projectRunner.run(request.requestId, active);
   if (action === 'preview_file') { await previewFile(String(args.path), workspaceContext(), active); return { opened: true }; }
@@ -3480,15 +3745,6 @@ async function performAgentUiAction(request: AgentUiAction): Promise<unknown> {
     return browserPanel.navigate(String(args.url));
   }
   if (!browserPanel || !state.inspector || state.inspectorTab !== 'browser') throw new Error('Open the browser in this task first.');
-  if (action === 'browser_review' || action === 'browser_viewport') {
-    const owner = browserPanel; await active();
-    if (owner !== browserPanel) throw new Error('Browser changed. Retry in the visible task.');
-    const result = action === 'browser_review'
-      ? await owner.review?.(args)
-      : await owner.resizeReview?.(String(args.origin), Number(args.width), Number(args.height));
-    await active(); if (result === undefined || owner !== browserPanel) throw new Error('Browser review is no longer available.');
-    return result;
-  }
   if (action === 'read_browser') return call('browser_inspect', { action: 'read' });
   if (action === 'browser_click' || action === 'browser_type') return call('browser_inspect', { action: action === 'browser_click' ? 'click' : 'type', selector: args.selector, text: args.text });
   if (action === 'browser_action') { await call('browser_action', { action: args.action }); return { dispatched: true }; }
@@ -3500,21 +3756,25 @@ async function performAgentUiAction(request: AgentUiAction): Promise<unknown> {
 }
 /** Adds the selected view's tab when something opened it, then draws the strip in the open order. */
 function renderInspectorTabs(pullLinked: boolean): void {
-  const tabs = openTab(inspectorTabs, state.inspectorTab);
+  const tabs = state.inspectorTab === 'file' ? inspectorTabs : openTab(inspectorTabs, state.inspectorTab);
   if (!sameTabs(tabs, inspectorTabs)) { inspectorTabs = tabs; saveTabs(localStorage, tabs); }
   const nav = $('.inspector-tabs'), add = nav.querySelector<HTMLElement>('.inspector-tab-add')!;
   const shown = tabs.open.filter(view => view !== 'pull' || pullLinked);
-  const items = [...nav.querySelectorAll<HTMLElement>(':scope>.inspector-tab')];
+  const files = nav.querySelector<HTMLElement>(':scope>.file-panel-tab')!;
+  files.hidden = !fileTabs.count;
+  const items = [files, ...nav.querySelectorAll<HTMLElement>(':scope>.inspector-tab:not(.file-panel-tab)')];
   for (const item of items) {
-    const view = item.dataset.view as InspectorView, selected = view === state.inspectorTab;
-    item.hidden = !shown.includes(view);
-    item.querySelector<HTMLElement>('.inspector-tab-close')!.hidden = shown.length < 2;
+    const view = item.dataset.view as PanelView, selected = view === state.inspectorTab;
+    if (item !== files) {
+      item.hidden = !shown.includes(view as InspectorView);
+      item.querySelector<HTMLElement>('.inspector-tab-close')!.hidden = shown.length < 2;
+    }
     const tab = item.querySelector<HTMLElement>('.inspector-tab-button')!;
     tab.classList.toggle('selected', selected);
     if (selected) tab.setAttribute('aria-current', 'true'); else tab.removeAttribute('aria-current');
   }
   // Move nodes only when the order changed, so a focused tab keeps focus.
-  if (items.filter(item => !item.hidden).map(item => item.dataset.view).join() !== shown.join()) for (const view of shown) nav.insertBefore(items.find(item => item.dataset.view === view)!, add);
+  if (items.filter(item => !item.hidden && item !== files).map(item => item.dataset.view).join() !== shown.join()) for (const view of shown) nav.insertBefore(items.find(item => item.dataset.view === view)!, add);
   add.hidden = !closedViews(tabs, INSPECTOR_AVAILABLE.filter(view => view !== 'pull' || pullLinked)).length;
   const current = items.find(item => item.dataset.view === state.inspectorTab);
   if (current && !current.hidden && nav.clientWidth) {
@@ -3526,7 +3786,14 @@ function openInspectorView(view: InspectorView): void {
   const tab = document.querySelector<HTMLElement>(`.inspector-tab[data-view="${view}"] .inspector-tab-button`);
   if (tab) run(action(tab.dataset.action!, tab));
 }
-function closeInspectorTab(view: InspectorView): void {
+function closeInspectorTab(view: PanelView): void {
+  if (view === 'file') {
+    fileTabs.forget(state.sessionId);
+    if (state.inspectorTab === 'file') state.inspectorTab = threadDefault(inspectorTabs);
+    renderInspector();
+    document.querySelector<HTMLElement>(`.inspector-tab[data-view="${state.inspectorTab}"] .inspector-tab-button`)?.focus();
+    return;
+  }
   const next = closeTab(inspectorTabs, view);
   if (next === inspectorTabs) return;
   const wasSelected = state.inspectorTab === view;
@@ -3563,10 +3830,38 @@ function showChangesView(target: HTMLElement, key: string): void {
   }
   changesView.update(state.git, undefined);
 }
+/** Files tab rows, VS Code style: open folders list their children inline, indented by depth. */
+function fileTree(files: FileEntry[], depth: number): string {
+  return files.map(file => {
+    const open = file.isDir && state.openFolders.has(file.path), path = escape(file.path);
+    const row = `<div class="file-row" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : isPreviewableFile(file.path) && !OPENS_IN_TAB.test(file.path) ? 'preview-file' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.(html?|svg)$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}</div>`;
+    return row + (open ? fileTree(state.folderFiles.get(file.path) ?? [], depth + 1) : '');
+  }).join('');
+}
+async function toggleFolder(path: string): Promise<void> {
+  // The tree redraws from scratch, so keyboard focus returns to the folder row it was on.
+  const render = () => {
+    const focused = (document.activeElement as HTMLElement | null)?.dataset.path === path;
+    renderInspector();
+    if (focused) document.querySelector<HTMLElement>(`#inspector-content [data-action="toggle-file-folder"][data-path="${CSS.escape(path)}"]`)?.focus();
+  };
+  if (state.openFolders.delete(path)) { state.folderFiles.delete(path); render(); return; }
+  state.openFolders.add(path); render();
+  const key = workspaceKey();
+  try {
+    const files = await call<FileEntry[]>('list_files', { ...workspaceContext(), path });
+    if (key === workspaceKey() && state.openFolders.has(path)) state.folderFiles.set(path, files);
+  } catch (error) {
+    if (key !== workspaceKey()) return;
+    state.openFolders.delete(path); report(error);
+  }
+  render();
+}
 function renderInspector(): void {
   const diffEpoch = ++inspectorDiffEpoch;
   inspectorDiff?.dispose(); inspectorDiff = undefined;
-  const visible = state.inspector && !inspectorSuppressed;
+  // A shared channel has no checkout of its own, so the inspector steps aside.
+  const visible = state.inspector && !inspectorSuppressed && !state.sharedChannelId;
   const inspector = $('#inspector');
   inspector.hidden = !visible;
   // Keep the resize edge immediately interactive and native browser bounds stable.
@@ -3574,12 +3869,13 @@ function renderInspector(): void {
   $('#inspector-toggle').classList.toggle('active', visible);
   const pullTask = githubEnabled() && session()?.pullRequest ? session() : undefined;
   if (state.inspectorTab === 'pull' && !pullTask) { const shown = inspectorTabs.open.filter(view => view !== 'pull'); state.inspectorTab = shown.includes('changes') || !shown.length ? 'changes' : shown[0]; }
+  if (state.inspectorTab === 'file' && !fileTabs.count) state.inspectorTab = threadDefault(inspectorTabs);
   renderInspectorTabs(Boolean(pullTask));
   const pullTab = $('.inspector-tabs').querySelector<HTMLButtonElement>('[data-action="tab-pull"]')!;
   if (pullTask) { pullTab.title = `Pull request #${pullTask.pullRequest!.number}`; pullTab.setAttribute('aria-label', `Pull request #${pullTask.pullRequest!.number}`); }
   const changeCount = state.git?.files.length ?? 0;
   $('.inspector-tabs [data-action="tab-changes"]').setAttribute('aria-label', changeCount ? `Changes, ${changeCount} changed ${changeCount === 1 ? 'file' : 'files'}` : 'Changes');
-  $('#inspector-title').textContent = INSPECTOR_TITLES[state.inspectorTab];
+  $('#inspector-title').textContent = state.inspectorTab === 'file' ? 'Open files' : INSPECTOR_TITLES[state.inspectorTab];
   $('#changes-count').textContent = state.git?.files.length ? String(state.git.files.length) : '';
   const changesKey = `${state.projectId}\0${state.sessionId}\0${workspacePath()}`;
   const keepChanges = state.inspectorTab === 'changes' && !state.selectedKind && Boolean(project()) && !session()?.remoteDevice && !(state.jj?.isRepo && !state.jj.colocated) && changesViewKey === changesKey && (state.inspectorLoading || (!state.gitError && Boolean(state.git?.isRepo)));
@@ -3588,10 +3884,15 @@ function renderInspector(): void {
   syncSimulatorPanel();
   syncVmPanel();
   syncDesignPanel();
-  if (state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
+  const showFiles = state.inspectorTab === 'file';
+  $('#file-panel').hidden = !showFiles;
+  if (showFiles) { $('#inspector-content').hidden = true; $('#inspector-refresh').hidden = true; }
+  if (showFiles || state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
   const target = $('#inspector-content');
   if (state.inspectorTab === 'pull' && pullTask && visible) { pullView.show(target, pullTask); return; }
   pullView.dispose();
+  if (state.inspectorTab === 'btw' && visible) { btwPanel.show(target); return; }
+  btwPanel.dispose();
   if (!project()) { target.innerHTML = '<div class="inspector-empty">Open a project to browse files and review changes.</div>'; return; }
   const remote = session()?.remoteDevice;
   if (remote) { $('#changes-count').textContent = ''; target.innerHTML = `<div class="inspector-empty">${icon('monitor')}<h3>Runs on ${escape(remote.name)}</h3><p>Its changes and files are on that computer, so review and commit them there.</p></div>`; return; }
@@ -3607,8 +3908,7 @@ function renderInspector(): void {
   }
   if (state.selectedKind) {
     if (state.filePreviewLoading) { target.innerHTML = '<div class="inspector-empty" role="status">Loading file…</div>'; return; }
-    target.innerHTML = `<div class="file-preview-header"><button data-action="back-inspector">${icon('chevron', 'rotate-180')} Back</button><div class="file-preview-actions">${isPreviewableFile(state.selectedFile) ? button('preview-selected-file', 'Preview in browser', 'globe') : ''}${button('copy-file', 'Copy file', 'copy')}${state.selectedKind === 'file' ? selectedFileContext?.sessionId && selectedFileContext.sessionId !== state.sessionId ? '' : `<button data-action="attach-file" data-path="${escape(state.selectedFile)}">${icon('attach')} Attach</button>` : button('toggle-diff-stage', state.selectedStaged ? 'Unstage file' : 'Stage file', state.selectedStaged ? 'close' : 'plus')}</div></div><div class="file-preview-title">${icon('file')}<span title="${escape(state.selectedFile)}">${escape(state.selectedFile)}</span></div>${state.selectedKind === 'diff' ? '<div class="inspector-diff-host"></div>' : '<div class="document-host"></div>'}`;
-    if (state.selectedKind === 'file') renderDocument(target.querySelector<HTMLElement>('.document-host')!, state.selectedFile, state.selectedContent);
+    target.innerHTML = `<div class="file-preview-header"><button data-action="back-inspector">${icon('chevron', 'rotate-180')} Back</button><div class="file-preview-actions">${isPreviewableFile(state.selectedFile) ? button('preview-selected-file', 'Preview in browser', 'globe') : ''}${button('copy-file', 'Copy file', 'copy')}${button('toggle-diff-stage', state.selectedStaged ? 'Unstage file' : 'Stage file', state.selectedStaged ? 'close' : 'plus')}</div></div><div class="file-preview-title">${icon('file')}<span title="${escape(state.selectedFile)}">${escape(state.selectedFile)}</span></div><div class="inspector-diff-host"></div>`;
     if (state.selectedKind === 'diff' && state.inspector) {
       const host = target.querySelector<HTMLElement>('.inspector-diff-host')!;
       const patch = state.selectedContent, path = state.selectedFile;
@@ -3621,7 +3921,7 @@ function renderInspector(): void {
     return;
   }
   if (state.inspectorTab === 'files') {
-    target.innerHTML = `<div class="file-folder-path"><span>${escape(project()?.name)}${state.filePath ? ' / ' + escape(state.filePath) : ''}</span>${state.filePath ? button('parent-folder', 'Go to parent folder', 'arrow') : ''}</div><div class="file-list">${state.files.map(file => `<div class="file-row"><button data-action="${file.isDir ? 'open-folder' : /\.html?$/i.test(file.path) ? 'preview-file' : 'open-file'}" data-path="${escape(file.path)}">${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span>${file.isDir ? icon('chevron') : ''}</button>${!file.isDir && /\.(html?|svg)$/i.test(file.path) ? button('open-file', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${escape(file.path)}" data-source="true"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${escape(file.path)}"`) : ''}</div>`).join('') || '<div class="inspector-empty">This folder is empty.</div>'}</div>`; return;
+    target.innerHTML = `<div class="file-folder-path"><span>${escape(project()?.name)}</span>${state.openFolders.size ? button('collapse-folders', 'Collapse folders', 'minimize') : ''}</div><div class="file-list">${fileTree(state.files, 0) || '<div class="inspector-empty">This folder is empty.</div>'}</div>`; return;
   }
   if (state.jj?.isRepo && !state.jj.colocated) {
     showJjPanel(target, state.jj, {
@@ -3657,12 +3957,13 @@ async function previewFile(path: string, context = workspaceContext(), active?: 
 }
 async function openFile(path: string, kind: 'file' | 'diff', staged = false, context = workspaceContext(), source = false): Promise<void> {
   const p = project(); if (!p) return;
+  // Files open as tabs in the inspector's Open files view beside their task's conversation.
   if (kind === 'file') {
     if (context.sessionId && context.sessionId !== state.sessionId) await selectSession(context.sessionId);
-    if (context.projectId !== state.projectId || (context.sessionId && context.sessionId !== state.sessionId) || session()?.remoteDevice) return;
+    if (context.sessionId && context.sessionId !== state.sessionId) return;
     if (state.view !== 'conversation' && !state.boardPanel) setWorkspaceView('conversation');
-    fileTabs.show(state.sessionId, workspaceKey());
-    fileTabs.open(path, context, source); return;
+    fileTabs.open(path, context, source);
+    ++fileRequest; inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'file'; state.selectedKind = ''; renderInspector(); return;
   }
   const request = ++fileRequest, generation = state.generation; const content = await call<string>('git_diff', { ...context, path, staged }); if (request !== fileRequest || p.id !== state.projectId || generation !== state.generation) return;
   selectedFileContext = { ...context };
@@ -3685,7 +3986,6 @@ async function stage(paths: string[], staged: boolean): Promise<void> {
 let previousFocus: HTMLElement | null = null;
 let wallpaperSettingsCleanup: (() => void) | undefined;
 let changeReviewCleanup: (() => void) | undefined;
-let reviewToolsCleanup: (() => void) | undefined;
 let providerSettingsCleanup: (() => void) | undefined;
 let agentUsageCleanup: (() => void) | undefined;
 let conversationImportCleanup: (() => void) | undefined;
@@ -3693,7 +3993,6 @@ let openCodeModelsCleanup: (() => void) | undefined;
 let moodboardsCleanup: (() => void) | undefined;
 let botsView: import('./bots').BotsView | undefined;
 function disposeSettingsViews(): void {
-  reviewToolsCleanup?.(); reviewToolsCleanup = undefined;
   botsView?.dispose(); botsView = undefined;
   boardMentionPicker?.dispose(); boardMentionPicker = undefined;
   agentUsageCleanup?.(); agentUsageCleanup = undefined;
@@ -3741,115 +4040,6 @@ function modal(title: string, body: string, cls = ''): HTMLDialogElement {
 const LONG_DESCRIPTION = 90;
 // Close before disposing so the departing dialog still shows its content while it fades.
 function closeModal(): void { closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
-/** Optional local presentation over existing commands. Never use reloadSessions here:
- * that helper also schedules automatic limit resumes in the original application. */
-async function openReviewTools(pullReview?: PullReviewContext): Promise<void> {
-  const dialog = modal(pullReview ? 'Review with coordination' : 'Review & coordination', '<div id="hardened-review-root"><p role="status">Loading local tools...</p></div>', 'hardened-review-dialog');
-  const root = dialog.querySelector<HTMLElement>('#hardened-review-root')!;
-  const openingGeneration = state.generation;
-  const { mountReviewTools } = await import('./hardened/review-panel');
-  if (!dialog.open || !root.isConnected) return;
-  let observedTask = session() ?? null, observedTeam = teams.get(state.sessionId) ?? null;
-  reviewToolsCleanup = mountReviewTools(root, {
-    call,
-    snapshot: () => {
-      const selected = session() ?? null;
-      const task = selected?.id === observedTask?.id ? observedTask : selected;
-      const team = task?.id === observedTask?.id ? observedTeam : teams.get(task?.id ?? '') ?? null;
-      return {
-        task, team, providers: state.providers,
-        projectName: state.projects.find(p => p.id === task?.projectId)?.name ?? '',
-        hasMessages: state.messagesLoading || Boolean(state.messagesError) || state.messages.length > 0 || state.hasOlder,
-        sessions: state.sessions.filter(s => !deletedSessions.has(s.id)),
-        teams: [...teams.values()].filter((t): t is TeamSnapshot => Boolean(t) && t!.sessionId !== team?.sessionId).concat(team ? [team] : []),
-        pending: [...state.streams].map(([sessionId, stream]) => ({ sessionId, approvals: stream.approvals.size, questions: stream.inputs.size })),
-      };
-    },
-    refresh: async () => {
-      const id = state.sessionId;
-      if (!id) { observedTask = null; observedTeam = null; return; }
-      const before = teams.get(id), known = teams.has(id);
-      const [task, team] = await Promise.all([call<Session>('get_task', { sessionId: id }), call<TeamSnapshot | null>('architect_get', { sessionId: id })]);
-      if (!dialog.open || !root.isConnected || state.sessionId !== id || deletedSessions.has(id)) return;
-      if (task.id !== id || team && team.sessionId !== id) throw new Error('Task identity changed. Reopen the tools.');
-      observedTask = task;
-      observedTeam = teams.has(id) !== known || teams.get(id) !== before ? teams.get(id) ?? null : team;
-    },
-    loadProviders: async (selected = ['codex']) => {
-      const catalog = await call<Provider[]>('list_providers');
-      // Only explicitly selected providers undergo model discovery. Never launch all CLIs
-      // merely because a user opens the panel; the original command remains authoritative.
-      const ids = [...new Set(selected)].filter(id => catalog.some(p => p.id === id && p.installed));
-      const discovered = await Promise.all(ids.map(async id => [id,
-        await call<ProviderModel[]>('list_provider_models', { provider: id })] as const));
-      const modelsByProvider = new Map(discovered);
-      return catalog.map(p => modelsByProvider.has(p.id) ? { ...p, models: modelsByProvider.get(p.id)! } : p);
-    },
-    reviewReadiness: () => call('review_readiness'),
-    openTask: async (id, workerId) => {
-      if (deletedSessions.has(id) || !state.sessions.some(s => s.id === id)) throw new Error('Task is no longer available. Refresh the original task list.');
-      const team = teams.get(id) ?? (observedTeam?.sessionId === id ? observedTeam : null);
-      if (workerId && !team?.workers.some(w => w.id === workerId)) throw new Error('This worker does not belong to the selected task. Refresh first.');
-      closeModal(); await selectSession(id, true);
-      if (workerId && state.sessionId === id && !deletedSessions.has(id)) {
-        const view = await ensureArchitectView();
-        if (state.sessionId === id && teams.get(id)?.workers.some(w => w.id === workerId)) view.openWorker(workerId);
-      }
-    },
-    insertPrompt: async (id, text, expectedRequest, knownProviders) => {
-      const localTarget = () => {
-        const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-        if (!task || task.id !== id || deletedSessions.has(id) || task.archived || task.remoteDevice
-          || task.mode !== 'plan' || isRunning(id)
-          || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) {
-          throw new Error('Select the same fresh, idle, local project task in Read only (plan) mode.');
-        }
-        if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim()) throw new Error('The composer changed or contains a draft. Nothing was replaced.');
-        if (state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('Remove existing attachments before inserting this review prompt.');
-        return { task, prompt };
-      };
-      localTarget();
-      // Recheck authoritative native state after the async model-catalog and message
-      // reads. Changing models/teams on the same task ID must not reuse approval.
-      const [{ reviewProblems }, latest, team, page] = await Promise.all([
-        import('./hardened/review-model'),
-        call<Session>('get_task', { sessionId: id }),
-        call<TeamSnapshot | null>('architect_get', { sessionId: id }),
-        call<MessagePage>('get_messages', { sessionId: id }),
-      ]);
-      if (latest.id !== id || reviewProblems({ task: latest, team, providers: knownProviders, hasMessages: page.hasOlder || page.messages.length > 0 }, expectedRequest).length) {
-        throw new Error('Task or review team settings changed. Refresh and prepare a new prompt.');
-      }
-      const { task, prompt } = localTarget();
-      if (task.provider !== latest.provider || task.model !== latest.model) {
-        throw new Error('Select the same fresh, idle, local project task in Read only (plan) mode.');
-      }
-      prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
-    },
-    copyText: text => navigator.clipboard.writeText(text),
-    ...(pullReview ? { preparePullReview: (target: PullReviewContext, request: ReviewRequest, providers: Provider[]) =>
-      prepareHubReviewTask(target, request, providers, () => dialog.open && root.isConnected && state.generation === openingGeneration) } : {}),
-    cancelReview: () => closeModal(),
-    workflow: {
-      call,
-      current: () => { const task = session(); return task && !deletedSessions.has(task.id) && !isChatProject(state.projects.find(p => p.id === task.projectId)) && !botProjects.has(task.projectId) ? task : null; },
-      active: () => dialog.open && root.isConnected && Boolean(session()) && !isRunning(state.sessionId),
-      insert: (id, text) => {
-        const task = session(), prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-        if (!dialog.open || !root.isConnected || !task || task.id !== id || task.archived || task.remoteDevice || deletedSessions.has(id) || isRunning(id) || isChatProject(state.projects.find(p => p.id === task.projectId)) || botProjects.has(task.projectId)) throw new Error('Select the same idle local project task.');
-        if (!prompt?.isConnected || prompt.dataset.sessionId !== id || prompt.value.trim() || state.attachments.length || attachments.list(id).length || state.browserAttachments.get(id)?.length || state.moodboardAttachments.get(id)?.length) throw new Error('The composer has a draft or attachments. Nothing was replaced.');
-        prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); closeModal(); prompt.focus();
-      },
-      open: async view => {
-        if (!dialog.open || !root.isConnected || !session() || isRunning(state.sessionId)) throw new Error('Select the same idle project task.');
-        closeModal();
-        if (view === 'recipes') await openRecipes();
-        else { inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'browser'; state.selectedKind = ''; renderInspector(); }
-      },
-    },
-  }, pullReview);
-}
-
 async function showTurnDiff(element: HTMLElement): Promise<void> {
   const request = changeRequest(element); if (!request) return;
   await openSavedDiff(request.sessionId, request.changes, request.path);
@@ -3918,22 +4108,29 @@ async function showProjectPicker(anchor: HTMLElement): Promise<void> {
     onNewProject: () => { if (selected.id === state.sessionId && generation === state.generation) showOpenProject(true); },
   });
 }
+/** One line for the picker: the lead's model, then the worker count. */
+function pickerTeamDetail(profile: TeamLibrary['profiles'][number]): string {
+  const { architect, config } = profile.setup;
+  const lead = provider(architect.provider)?.models.find(model => model.id === architect.model)?.name ?? (architect.model && architect.model !== 'default' ? architect.model : `${provider(architect.provider)?.name ?? architect.provider} default`);
+  return `${lead} · ${config.workers.length} ${config.workers.length === 1 ? 'worker' : 'workers'}`;
+}
 async function showModel(anchor: HTMLElement): Promise<void> {
   if (pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
   if (modelPickerCleanup) { closeModelPicker(); return; }
   const selected = session(); if (!selected || configuringSessions.has(selected.id)) return;
-  if (teams.get(selected.id) && !teams.get(selected.id)?.config.auto) { await showArchitectSetup(anchor); return; }
-  if (isRunning()) return;
+  if (teams.get(selected.id) && !selected.remoteDevice && !teams.get(selected.id)?.config.auto) { await showArchitectSetup(anchor); return; }
+  const botNext = Boolean(botForThread());
+  if (isRunning() && !botNext) return;
   closeProjectPicker();
   closeChoiceMenu();
   const { epoch, release } = beginMenuOpen(anchor);
   const generation = state.generation;
   const [{ openModelPicker }, library] = await Promise.all([import('./model-picker'), call<TeamLibrary>('architect_profiles').catch(() => null), call<import('./connections').ConnectionSnapshot>('connections_list').then(snapshot => { namedConnections = snapshot; }).catch(() => undefined)]).finally(release);
-  if (epoch !== menuEpoch || modelPickerCleanup || !anchor.isConnected || selected.id !== state.sessionId || generation !== state.generation || isRunning()) return;
+  if (epoch !== menuEpoch || modelPickerCleanup || !anchor.isConnected || selected.id !== state.sessionId || generation !== state.generation || (isRunning() && !botNext)) return;
   const device = composerDevice();
   const named = library && !device ? namedTeams(library) : [];
   modelPickerCleanup = openModelPicker({
-    teams: named.map(profile => ({ id: profile.id, name: profile.name, detail: teamDetail(profile, id => provider(id)?.name ?? id), provider: profile.setup.architect.provider, selected: isTeam(teams.get(selected.id)?.config, profile) })),
+    teams: named.map(profile => ({ id: profile.id, name: profile.name, detail: pickerTeamDetail(profile), provider: profile.setup.architect.provider, roster: [profile.setup.architect.provider, ...profile.setup.config.workers.map(worker => worker.provider)], selected: isTeam(teams.get(selected.id)?.config, profile) })),
     onTeamSelect: async id => {
       const profile = named.find(team => team.id === id);
       if (!profile) throw new Error('This agent team no longer exists.');
@@ -3965,6 +4162,11 @@ async function showModel(anchor: HTMLElement): Promise<void> {
       } finally { configuringSessions.delete(selected.id); }
     },
     onSelect: async (providerId, model, connection) => {
+      if (botNext && isRunning(selected.id) && selected.id === state.sessionId) {
+        const changed = providerId !== selected.provider || (model || 'default') !== (selected.model || 'default');
+        botThread.setNextModel(selected.id, changed ? { provider: providerId, model, label: model && model !== 'default' ? model : provider(providerId)?.name ?? providerId } : undefined);
+        renderHeader(); return;
+      }
       if (selected.id !== state.sessionId || generation !== state.generation || isRunning()) throw new Error('Select the task again to change its model.');
       configuringSessions.add(selected.id);
       try {
@@ -3973,12 +4175,15 @@ async function showModel(anchor: HTMLElement): Promise<void> {
           await call<TeamSnapshot | null>('architect_configure', { sessionId: selected.id, config: null, architect: null, profileId: null });
           onArchitect({ sessionId: selected.id, removed: true });
         }
+        // An automatic team keeps its limits but learns about newly installed models.
+        const auto = teams.get(selected.id)?.config;
+        if (auto?.auto && !auto.rosterOnly) {
+          const saved = await call<TeamSnapshot | null>('architect_configure', { sessionId: selected.id, config: await autoTeamConfig(auto), architect: null, profileId: null });
+          onArchitect(saved ?? { sessionId: selected.id, removed: true });
+        }
         const updated = await call<Session>('configure_session', { sessionId: selected.id, provider: providerId, model });
         const index = state.sessions.findIndex(s => s.id === selected.id); if (index >= 0) state.sessions[index] = updated;
-        if (!device && (connection ?? null) !== (namedConnections.tasks[selected.id] ?? null)) {
-          namedConnections = await call('connection_assign', { sessionId: selected.id, connectionId: connection });
-          updated.resumeId = null; updated.contextUsage = null;
-        }
+        if (!device && (connection ?? null) !== (namedConnections.tasks[selected.id] ?? null)) namedConnections = await call('connection_assign', { sessionId: selected.id, connectionId: connection });
         if (!device) {
           if (!localStorage.getItem('pandacode.defaultProvider')) state.defaultProvider = providerId;
           localStorage.setItem('pandacode.provider', providerId); localStorage.setItem('pandacode.model.' + providerId, model);
@@ -4017,8 +4222,8 @@ async function showDeploy(anchor: HTMLElement): Promise<void> {
     await send();
   } });
 }
-async function createTask(projectId = state.projectId, reuseDraft = true): Promise<void> {
-  if (creatingTask || !workspaceReady) return;
+async function createTask(projectId = state.projectId): Promise<void> {
+  if (creatingTask) return;
   const projects = state.projects.filter(p => !isChatProject(p));
   const active = projects.find(p => p.id === projectId)
     ?? projects.find(p => p.id === localStorage.getItem('pandacode.project')) ?? userProjects()[0];
@@ -4033,112 +4238,58 @@ async function createTask(projectId = state.projectId, reuseDraft = true): Promi
   // (typed text or a worktree) is reopened; from inside one, New task starts another.
   const current = state.sessionId;
   leaveDraft('');
-  const existing = reuseDraft && state.sessions.find(task => task.draft && task.id !== current && task.projectId === active.id && !deletedSessions.has(task.id));
+  // A settled draft (its worktree removed) is never reopened.
+  const existing = state.sessions.find(task => task.draft && task.id !== current && task.projectId === active.id && !deletedSessions.has(task.id) && taskStage(task) !== 'completed');
   if (existing) { state.query = ''; closeModal(); await selectSession(existing.id, true); return; }
   creatingTask = true;
   let created: Session;
   try {
-    created = await call<Session>('create_session', { projectId: active.id, provider: harness.id, model: rememberedModel(harness.id), mode: 'ask', draft: true });
+    created = await call<Session>('create_session', { projectId: active.id, provider: harness.id, model: rememberedModel(harness.id), mode: 'full', draft: true });
   } finally { creatingTask = false; }
   state.sessions.unshift(created);
   if (generation !== state.generation) { renderNavigation(); return; }
   state.query = ''; closeModal(); await selectSession(created.id, true);
 }
-function untouchedSelectedChat(task: Session): boolean {
-  if (task.id !== state.sessionId || !chatTask(task) || task.resumeId || task.archived || isRunning(task.id)
-    || state.messagesLoading || state.messagesError || state.messages.length || task.lastPromptAt != null || task.lastResponseAt != null) return false;
-  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-  const draft = prompt?.dataset.sessionId === task.id ? prompt.value : state.drafts.get(task.id) ?? '';
-  return !draft.length && !state.attachments.length && !attachments.list(task.id).length
-    && !state.browserAttachments.get(task.id)?.length && !state.moodboardAttachments.get(task.id)?.length;
-}
-async function refreshChatProject(projectId: string): Promise<void> {
-  let failure: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      state.projects = await call<Project[]>('list_projects');
-      if (state.projects.some(project => project.id === projectId && isChatProject(project))) return;
-      failure = new Error('The new chat project could not be found.');
-    } catch (error) { failure = error; }
-  }
-  throw failure;
-}
 /** A projectless chat: its own folder, the usual harness and model. */
 async function createChat(): Promise<void> {
-  if (creatingChat || creatingTask) return;
+  if (creatingTask) return;
   closeModelPicker(); closeProjectPicker();
-  const selected = session();
-  if (selected && untouchedSelectedChat(selected)) {
-    if (recoveringChatId === selected.id) recoveringChatId = undefined;
-    document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return;
-  }
-  // A failed navigation can leave the newly created chat selected but unloaded.
-  // Keep its recovery ID until that same session loads successfully.
   const generation = state.generation;
   const harness = state.providers.find(p => p.id === state.defaultProvider && p.installed)
     ?? state.providers.find(p => p.installed) ?? state.providers[0];
   if (!harness) { notify('Open Settings to check your installed agents.'); return; }
   leaveDraft('');
-  creatingChat = true; creatingTask = true;
-  const button = document.querySelector<HTMLButtonElement>('.new-chat-button');
-  if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
-  let created: Session | undefined;
+  creatingTask = true;
+  let created: Session;
   try {
-    created = recoveringChatId ? state.sessions.find(task => task.id === recoveringChatId) : undefined;
-    if (!created) {
-      created = await call<Session>('chat_create', { provider: harness.id, model: rememberedModel(harness.id), mode: 'ask' });
-      const existing = state.sessions.find(task => task.id === created!.id);
-      if (existing) Object.assign(existing, created); else state.sessions.unshift(created);
-      recoveringChatId = created.id;
-    }
-    await refreshChatProject(created.projectId);
-    renderNavigation();
-    if (generation !== state.generation) { recoveringChatId = undefined; return; }
-    if (state.projectFilter) setProjectFilter('');
-    state.query = ''; closeModal();
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await selectSession(created.id, true, true);
-        if (state.sessionId !== created.id) { recoveringChatId = undefined; return; }
-        recoveringChatId = undefined;
-        return;
-      } catch (error) {
-        if (state.sessionId !== created.id || attempt === 1) throw error;
-      }
-    }
-  } catch (error) {
-    if (!created || state.projects.some(project => project.id === created!.projectId && !isChatProject(project))) recoveringChatId = undefined;
-    if (created) renderNavigation();
-    throw error;
-  } finally {
-    creatingTask = false; creatingChat = false;
-    if (button?.isConnected) { button.disabled = false; button.removeAttribute('aria-busy'); }
-  }
+    created = await call<Session>('chat_create', { provider: harness.id, model: rememberedModel(harness.id), mode: 'full' });
+    state.projects = await call<Project[]>('list_projects');
+  } finally { creatingTask = false; }
+  state.sessions.unshift(created);
+  if (generation !== state.generation) { renderNavigation(); return; }
+  if (state.projectFilter) setProjectFilter('');
+  state.query = ''; closeModal(); await selectSession(created.id, true);
 }
 /** Drops a chat's hidden project (and its empty folder) once no task uses it. */
-async function forgetChat(projectId: string, strict = false): Promise<boolean> {
-  try {
-    const cleaned = await call<boolean>('chat_cleanup', { projectId });
-    if (cleaned) state.projects = state.projects.filter(p => p.id !== projectId);
-    return cleaned;
-  } catch (error) {
-    // Project changes retain their existing best-effort cleanup behavior.
-    // Deletion must report failures because its native mutation cannot be retried.
-    if (strict) throw error;
-    return false;
-  }
+async function forgetChat(projectId: string): Promise<void> {
+  if (await call<boolean>('chat_cleanup', { projectId }).catch(() => false)) state.projects = state.projects.filter(p => p.id !== projectId);
 }
-type ChoiceOptions = Omit<Parameters<typeof import('./choice-menu').openChoiceMenu>[0], 'anchor' | 'onClose'>;
-async function showChoices(anchor: HTMLElement, options: ChoiceOptions, guardGeneration = true): Promise<void> {
-  if (pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
-  if (choiceMenuCleanup && choiceMenuAnchor === anchor) { closeChoiceMenu(); return; }
+type ChoiceOptions = Omit<Parameters<typeof import('./choice-menu').openChoiceMenu>[0], 'anchor' | 'onClose'> & { afterClose?: () => void };
+async function showChoices(anchor: HTMLElement, options: ChoiceOptions): Promise<void> {
+  // A second click on the trigger closes its menu; a right-click (a point) moves it there instead.
+  if (!options.point && pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
+  if (!options.point && choiceMenuCleanup && choiceMenuAnchor === anchor) { closeChoiceMenu(); return; }
   closeMenus();
   const { epoch, release } = beginMenuOpen(anchor);
   const generation = state.generation;
   const { openChoiceMenu } = await import('./choice-menu').finally(release);
-  if (epoch !== menuEpoch || guardGeneration && generation !== state.generation || !anchor.isConnected) return;
+  if (epoch !== menuEpoch || generation !== state.generation || !anchor.isConnected) return;
   choiceMenuAnchor = anchor;
-  choiceMenuCleanup = openChoiceMenu({ ...options, anchor, onClose: () => { choiceMenuCleanup = undefined; choiceMenuAnchor = undefined; } });
+  choiceMenuCleanup = openChoiceMenu({ ...options, anchor, onClose: () => {
+    choiceMenuCleanup = undefined; choiceMenuAnchor = undefined;
+    if (anchor.closest('#sidebar-bots-panel')) window.setTimeout(() => { if (botsListPendingRender) renderBots(); }, 0);
+    options.afterClose?.();
+  } });
 }
 async function showMode(anchor: HTMLElement): Promise<void> {
   const s = session(); if (!s || isRunning() || configuringSessions.has(s.id)) return;
@@ -4146,7 +4297,7 @@ async function showMode(anchor: HTMLElement): Promise<void> {
   const modes = approvalModes(s.provider, s.mode);
   await showChoices(anchor, { title: 'Permissions', width: 320, items: modes.map(mode => ({ ...mode, selected: s.mode === mode.id })), onSelect: async id => {
     if (s.id !== state.sessionId || generation !== state.generation || isRunning() || configuringSessions.has(s.id)) throw new Error('Select the task again to change its permissions.');
-    const chosen = modes.find(mode => mode.id === id); if (!chosen || chosen.disabled) throw new Error('Choose an available approval behavior.');
+    const chosen = modes.find(mode => mode.id === id); if (!chosen) throw new Error('Choose an available approval behavior.');
     configuringSessions.add(s.id);
     try {
       await call('update_session', { sessionId: s.id, mode: id as Mode });
@@ -4170,7 +4321,7 @@ async function showTaskMenu(anchor: HTMLElement): Promise<void> {
     { id: 'rename', label: 'Rename task', icon: 'edit' },
     { id: 'jev-tests', label: 'Browser tests with Jev', icon: 'spark' },
     ...jevDecisionsEnabled ? [{ id: 'jev-assist', label: 'Jev assistance', icon: 'spark' }] : [],
-    { id: 'archive-task', label: s.archived ? 'Restore task' : 'Archive task', icon: 'archive' },
+    taskStage(s) === 'completed' ? { id: 'board-reopen', label: 'Reopen task', icon: 'undo' } : { id: 'board-complete', label: 'Settle task', icon: 'check', disabled: isRunning(s.id) || configuringSessions.has(s.id) },
     ...s.provider === 'codex' ? [{ id: 'goal', label: 'Manage goal', icon: 'spark' }, { id: 'jobs', label: 'Background commands', icon: 'terminal' }, { id: 'usage', label: 'Codex usage', icon: 'activity' }] : [],
     { id: 'harness-console', label: 'Open harness console', icon: 'terminal' },
     { id: 'copy-path', label: s.worktreePath ? 'Copy worktree path' : 'Copy project path', icon: 'copy' },
@@ -4189,7 +4340,7 @@ async function pinTask(id: string): Promise<void> {
     const saved = await call<Session>('pin_session', { sessionId: id, pinned: !task.pinned });
     const current = state.sessions.find(item => item.id === id);
     if (current) { current.pinned = saved.pinned; current.sidebarOrder = saved.sidebarOrder; }
-    notify(saved.pinned ? 'Task pinned' : 'Task unpinned');
+    notify(saved.pinned ? 'Task pinned' : 'Task unpinned', saved.pinned ? undefined : () => run(pinTask(id)));
   } finally { orderingBusy = false; renderNavigation(); }
 }
 async function reorderThreads(ids: string[], focus: string): Promise<void> {
@@ -4210,38 +4361,67 @@ async function reorderThreads(ids: string[], focus: string): Promise<void> {
   }
 }
 /** Row buttons and the row menu act on any sidebar task, not only the open one. */
-function sidebarTaskAction(kind: 'complete' | 'reopen' | 'archive' | 'delete', id: string): void {
+function sidebarTaskAction(kind: 'complete' | 'reopen' | 'delete', id: string): void {
   const task = state.sessions.find(item => item.id === id); if (!task) return;
-  if (kind === 'delete') showDeleteTask(task.id, chatTask(task));
-  else if (kind === 'archive') run(archiveTask(task, true));
-  else run(changeTaskStage(task.id, kind === 'complete' ? 'completed' : 'review'));
+  const current = () => state.sessions.find(item => item.id === id);
+  if (kind === 'delete') showDeleteTask(task);
+  else {
+    // Undo puts back exactly what settling took away: the stage and the unread mark.
+    const before = taskStage(task), unread = unreviewed?.has(id) ?? false;
+    run(changeTaskStage(task, kind === 'complete' ? 'completed' : 'review').then(() => {
+      const saved = current();
+      if (kind === 'complete' && saved && taskStage(saved) === 'completed') notify('Task settled', () => {
+        const again = current(); if (!again) return;
+        run(changeTaskStage(again, before).then(() => {
+          if (!unread || id === state.sessionId) return;
+          (unreviewed ??= readCollapsed(localStorage, UNREVIEWED_KEY)).add(id); saveUnreviewed(); renderNavigation();
+        }));
+      });
+    }));
+  }
 }
-async function showSidebarTaskMenu(anchor: HTMLElement): Promise<void> {
+async function showSidebarTaskMenu(anchor: HTMLElement, point?: { x: number; y: number }): Promise<void> {
   const id = anchor.dataset.id!, task = state.sessions.find(item => item.id === id);
   if (!task) return;
   const ids = threadGroupRows(anchor).map(row => row.dataset.id!), index = ids.indexOf(id);
-  const deleteBlocked = isRunning(id) || configuringSessions.has(id) || finishingStreams.has(id) || task.goalState?.status === 'active';
-  const deleteDescription = task.goalState?.status === 'active' ? 'Pause the active goal before deleting this chat.'
-    : isRunning(id) ? 'Stop the agent before deleting this chat.'
-      : finishingStreams.has(id) ? 'Wait for the agent to finish before deleting this chat.' : undefined;
+  const group = anchor.closest<HTMLElement>('[data-thread-group]')?.dataset.threadGroup ?? '';
+  // Active and Settled keep their own order: no Move up/down there.
+  const movable = !['active', 'completed'].includes(group);
   const fixed = !anchor.draggable, busy = isRunning(id) || configuringSessions.has(id), done = taskStage(task) === 'completed';
-  await showChoices(anchor, { title: 'Task actions', actions: true, items: [
+  const unread = unreviewed?.has(id) ?? false, path = task.worktreePath ?? state.projects.find(p => p.id === task.projectId)?.path ?? '';
+  const branch = task.worktreeBranch ?? '';
+  await showChoices(anchor, { title: 'Task actions', point, actions: true, width: 280, items: [
     { id: 'pin', label: task.pinned ? 'Unpin task' : 'Pin task', icon: 'pin', disabled: orderingBusy },
-    { id: 'up', label: 'Move up', icon: 'arrow', disabled: fixed || orderingBusy || index < 1 },
-    { id: 'down', label: 'Move down', icon: 'down', disabled: fixed || orderingBusy || index === ids.length - 1 },
-    ...task.archived ? [] : [{ id: 'stage', label: done ? 'Reopen' : 'Mark complete', icon: done ? 'undo' : 'check', disabled: busy }],
-    { id: 'archive', label: task.archived ? 'Restore' : 'Archive', icon: task.archived ? 'undo' : 'archive' },
-    ...(!chatTask(task) ? [{ id: 'delete', label: 'Delete task…', icon: 'trash', danger: true, disabled: deleteBlocked, description: deleteDescription }] : []),
-    ...(chatTask(task) ? [{ id: 'delete-chat', label: 'Delete chat…', icon: 'trash', danger: true, disabled: deleteBlocked, description: deleteDescription }] : []),
-  ], onSelect: choice => {
+    ...movable ? [
+      { id: 'up', label: 'Move up', icon: 'arrow', disabled: fixed || orderingBusy || index < 1 },
+      { id: 'down', label: 'Move down', leading: icon('arrow', 'icon-down'), disabled: fixed || orderingBusy || index === ids.length - 1 },
+    ] : [],
+    { id: 'rename', label: 'Rename…', icon: 'edit', separator: true },
+    ...task.archived ? [] : [{ id: 'wake', label: 'Schedule a wake-up…', icon: 'clock' }],
+    ...id === state.sessionId ? [] : [{ id: 'unread', label: unread ? 'Mark as read' : 'Mark as unread', icon: 'chat' }],
+    ...branch && !task.archived && !task.remoteDevice ? [{ id: 'branch-task', label: `New task from ${branch}…`, icon: 'worktree' }] : [],
+    ...branch ? [{ id: 'copy-branch', label: 'Copy branch name', icon: 'copy', separator: true }] : [],
+    ...path ? [{ id: 'copy-path', label: task.worktreePath ? 'Copy worktree path' : 'Copy project path', icon: 'copy', separator: !branch }] : [],
+    { id: 'copy-id', label: 'Copy task ID', icon: 'copy', separator: !branch && !path },
+    { id: 'stage', label: done ? 'Reopen' : 'Settle', icon: done ? 'undo' : 'check', disabled: busy, separator: true },
+    { id: 'delete', label: 'Delete task…', icon: 'trash', danger: true, disabled: busy || finishingStreams.has(id), description: isRunning(id) ? 'Stop the agent before deleting this task.' : undefined },
+  ], onSelect: async choice => {
     closeChoiceMenu();
     if (choice === 'pin') { run(pinTask(id)); return; }
-    if (choice === 'delete-chat') {
-      const current = state.sessions.find(item => item.id === id);
-      if (current && chatTask(current)) showDeleteTask(id, true);
-      return;
+    if (choice === 'wake') { openWakeComposer(anchor.isConnected ? anchor : $('#navigation'), id); return; }
+    if (choice === 'stage' || choice === 'delete') { sidebarTaskAction(choice === 'stage' ? done ? 'reopen' : 'complete' : choice, id); return; }
+    // Renames the row's task in place; the open thread stays open.
+    if (choice === 'rename') { showRename(task); return; }
+    if (choice === 'branch-task') { await selectSession(id); worktrees.openDialog('new'); return; }
+    if (choice === 'unread') {
+      const seen = unreviewed ??= readCollapsed(localStorage, UNREVIEWED_KEY);
+      if (unread) seen.delete(id); else seen.add(id);
+      saveUnreviewed(); renderNavigation(); return;
     }
-    if (choice === 'stage' || choice === 'archive' || choice === 'delete') { sidebarTaskAction(choice === 'stage' ? done ? 'reopen' : 'complete' : choice, id); return; }
+    if (choice === 'copy-branch' || choice === 'copy-path' || choice === 'copy-id') {
+      await navigator.clipboard.writeText(choice === 'copy-branch' ? branch : choice === 'copy-path' ? path : id);
+      notify(choice === 'copy-branch' ? 'Branch name copied' : choice === 'copy-path' ? 'Path copied' : 'Task ID copied'); return;
+    }
     // Resolve the current list after an agent activity change or project filter.
     const row = $('#navigation').querySelector<HTMLElement>(`.task-item[data-id="${CSS.escape(id)}"]`);
     if (!row) return;
@@ -4251,14 +4431,98 @@ async function showSidebarTaskMenu(anchor: HTMLElement): Promise<void> {
       [current[from], current[to]] = [current[to], current[from]];
       run(reorderThreads(current, id));
     }
-  } }, false);
+  } });
+}
+/** A folder's menu (… or right-click): new task, collapse the others, reveal, remove. */
+async function showFolderMenu(heading: HTMLElement, point?: { x: number; y: number }): Promise<void> {
+  const id = heading.dataset.project!, project = state.projects.find(p => p.id === id);
+  if (!project) return;
+  const anchor = heading.parentElement?.querySelector<HTMLElement>('.folder-actions') ?? heading;
+  await showChoices(anchor, { title: 'Project actions', point, actions: true, width: 280, items: [
+    { id: 'new', label: 'New task', icon: 'plus' },
+    { id: 'collapse', label: 'Collapse other projects', icon: 'folder' },
+    { id: 'reveal', label: isMac ? 'Reveal in Finder' : isWindows ? 'Show in Explorer' : 'Open folder', icon: 'folder', separator: true },
+    { id: 'remove', label: 'Remove project…', icon: 'trash', danger: true, separator: true },
+  ], onSelect: async choice => {
+    closeChoiceMenu();
+    if (choice === 'new') { await createTask(id); return; }
+    if (choice === 'reveal') { await call('reveal_path', { path: project.path }); return; }
+    if (choice === 'remove') { showRemoveProject(project); return; }
+    for (const other of userProjects()) if (other.id !== id) state.collapsedFolders.add(other.id);
+    state.collapsedFolders.delete(id); saveCollapsedFolders(); renderNavigation();
+  } });
+}
+function showRemoveProject(project: Project): void {
+  modal(`Remove ${project.name}?`, `<form id="remove-project-form" data-project-id="${escape(project.id)}"><p class="dialog-description">Its tasks are removed from PandaCode. The folder stays on disk.</p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button class="primary-button danger">Remove project</button></div></form>`, 'compact-dialog');
+}
+/** Projects: Manual. Saves the dragged folder order; projects not in it lead, newest first. */
+function reorderFolders(ids: string[], focus: string): void {
+  projectOrder = [...ids, ...projectOrder.filter(id => !ids.includes(id))];
+  try { localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(projectOrder)); } catch { /* per-launch preference only */ }
+  renderNavigation();
+  $('#navigation').querySelector<HTMLElement>(`.folder-heading[data-project="${CSS.escape(focus)}"]`)?.focus({ preventScroll: true });
+}
+/** Sort and view: task order and tasks per section. Saved per window. */
+async function showSidebarSort(anchor: HTMLElement): Promise<void> {
+  const sort = sidebarSort;
+  await showChoices(anchor, { title: 'Sort and view', width: 280, items: [
+    { id: 'tasks:manual', label: 'Manual', description: 'drag to arrange', heading: 'Sort tasks', selected: sort.tasks === 'manual' },
+    { id: 'tasks:recent', label: 'Recent activity', selected: sort.tasks === 'recent' },
+    { id: 'tasks:created', label: 'Created', selected: sort.tasks === 'created' },
+    ...PER_PROJECT.map(count => ({ id: `perProject:${count}`, label: `${count} tasks`, short: String(count), segment: 'Show per section', selected: sort.perProject === count })),
+  ], onSelect: id => {
+    const [key, value] = id.split(':');
+    const next: SidebarSort = key === 'perProject' ? { ...sidebarSort, perProject: Number(value) } : { ...sidebarSort, [key]: value };
+    sidebarSort = readSort({ getItem: () => JSON.stringify(next) });
+    try { localStorage.setItem(SORT_KEY, JSON.stringify(sidebarSort)); } catch { /* per-launch preference only */ }
+    renderNavigation();
+  } });
+}
+/** Rows in the order they are drawn, skipping closed folders and sections. */
+function visibleSidebarRows(): HTMLElement[] {
+  return [...$('#navigation').querySelectorAll<HTMLElement>('.task-item')].filter(row => !row.closest('[hidden]'));
+}
+/** ⌘1…⌘9 open the Nth visible task, ⌘⇧[ and ⌘⇧] the previous and next, / filters, ⌘Z undoes. */
+function sidebarShortcut(event: KeyboardEvent): boolean {
+  const command = event.metaKey || event.ctrlKey, target = event.target as HTMLElement;
+  const typing = target.matches('input, textarea, select, [contenteditable="true"]');
+  if (event.key === 'Escape' && target.id === 'sidebar-filter') {
+    event.preventDefault();
+    if ((target as HTMLInputElement).value) { state.query = ''; renderNavigation(); } else target.blur();
+    return true;
+  }
+  // Never take keys meant for the prompt or any other field.
+  if (typing) return false;
+  if (command && !event.shiftKey && !event.altKey && /^[1-9]$/.test(event.key)) {
+    const row = visibleSidebarRows()[Number(event.key) - 1];
+    if (row) { event.preventDefault(); run(selectSession(row.dataset.id!)); }
+    return Boolean(row);
+  }
+  if (command && event.shiftKey && !event.altKey && (event.code === 'BracketLeft' || event.code === 'BracketRight')) {
+    const rows = visibleSidebarRows(), index = rows.findIndex(row => row.dataset.id === state.sessionId);
+    const next = rows[index < 0 ? 0 : index + (event.code === 'BracketLeft' ? -1 : 1)];
+    event.preventDefault();
+    if (next) run(selectSession(next.dataset.id!));
+    return true;
+  }
+  // / filters from the task list or anywhere that is not a control (the typing guard above already
+  // passed); when the field is not shown (a narrow window) the key is left alone.
+  const filter = $('#sidebar-filter');
+  const control = !$('#navigation').contains(target) && target.closest('button, a[href], [role="button"], [role="menuitem"], [role="tab"], summary');
+  if (event.key === '/' && !command && !event.altKey && !control && filter.getClientRects().length) {
+    event.preventDefault(); filter.focus(); return true;
+  }
+  if (command && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z' && toastUndo) {
+    event.preventDefault(); const undo = toastUndo; toastUndo = undefined; void hideToast($('#toast')); undo(); return true;
+  }
+  return false;
 }
 /** A project's favicon or app icon; the sidebar redraws once a new one has loaded. */
 function projectAppIcon(projectId: string, name: string): string {
   return projectIconHtml(projectId, name, id => call<string | null>('project_icon', { projectId: id }), () => renderNavigation());
 }
 async function showProjectFilter(anchor: HTMLElement): Promise<void> {
-  await showChoices(anchor, { title: 'Filter projects', searchPlaceholder: 'Search projects…', items: [
+  await showChoices(anchor, { title: 'Filter projects', searchPlaceholder: 'Search projects…', width: 300, items: [
     { id: '', label: 'All projects', icon: 'folder', selected: !state.projectFilter },
     ...userProjects().map(p => ({ id: p.id, label: p.name, description: p.path, leading: projectAppIcon(p.id, p.name), selected: p.id === state.projectFilter })),
   ], onSelect: async id => {
@@ -4300,16 +4564,9 @@ async function showDefaultModel(anchor: HTMLElement): Promise<void> {
     },
   });
 }
-function showDeleteTask(targetId = state.sessionId, chatOnly = false): void {
-  const task = state.sessions.find(item => item.id === targetId);
-  if (!task || isRunning(task.id) || configuringSessions.has(task.id) || finishingStreams.has(task.id) || chatOnly && !chatTask(task)) return;
-  const taskId = task.id, projectId = task.projectId;
-  const label = chatOnly ? 'chat' : 'task';
-  const title = chatOnly ? 'Delete chat?' : 'Delete task?';
-  const description = chatOnly
-    ? 'Permanently delete this chat and its worker history from PandaCode? This cannot be undone. Its folder is removed only if it contains no user files.'
-    : 'Permanently delete this conversation and its worker history from PandaCode? This cannot be undone. Its terminal tabs close and running commands may stop. Project files and worktrees stay.';
-  const dialog = modal(title, `<form id="delete-task-form"><p class="delete-task-name">${escape(task.title)}</p><p class="delete-task-description">${description}</p><p class="delete-task-error" role="alert" hidden></p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="secondary-button delete-task-confirm">Delete ${label}</button></div></form>`, 'delete-task-dialog');
+function showDeleteTask(task = session()): void {
+  if (!task || isRunning(task.id) || configuringSessions.has(task.id)) return;
+  const dialog = modal('Delete task?', `<form id="delete-task-form"><p class="delete-task-name">${escape(task.title)}</p><p class="delete-task-description">Permanently delete this conversation and its worker history from PandaCode? This cannot be undone. Its terminal tabs close and running commands may stop. Project files and worktrees stay.</p><p class="delete-task-error" role="alert" hidden></p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="secondary-button delete-task-confirm">Delete task</button></div></form>`, 'delete-task-dialog');
   const form = dialog.querySelector<HTMLFormElement>('#delete-task-form')!;
   const confirm = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
   const error = form.querySelector<HTMLElement>('[role="alert"]')!;
@@ -4321,29 +4578,11 @@ function showDeleteTask(targetId = state.sessionId, chatOnly = false): void {
     confirm.disabled = true; confirm.setAttribute('aria-busy', 'true'); error.hidden = true;
     void (async () => {
       try {
-        const current = state.sessions.find(item => item.id === taskId);
-        if (!current || chatOnly && (!chatTask(current) || current.projectId !== projectId)) throw new Error('This chat is no longer available.');
-        if (isRunning(taskId) || configuringSessions.has(taskId) || finishingStreams.has(taskId)) throw new Error('Stop the agent before deleting this conversation.');
-        if (current.goalState?.status === 'active') throw new Error('Pause the active goal before deleting this conversation.');
-        const cleanupProjectId = chatTask(current) ? current.projectId : undefined;
-        const result = await call<{deletedSessionIds: string[]}>('delete_session', { sessionId: taskId });
-        // Commit the native outcome to the UI before optional cleanup. A failed
-        // cleanup must not leave a deleted conversation available for a second delete.
+        const result = await call<{deletedSessionIds: string[]}>('delete_session', { sessionId: task.id });
+        if (chatTask(task)) await forgetChat(task.projectId);
         removeDeletedSessions(result.deletedSessionIds);
         if (ownsDialog()) closeModal();
-        if (cleanupProjectId) {
-          try {
-            const cleaned = await forgetChat(cleanupProjectId, true);
-            const stillNeeded = state.sessions.some(item => item.projectId === cleanupProjectId);
-            if (!cleaned && !stillNeeded && state.projects.some(p => p.id === cleanupProjectId)) {
-              throw new Error('The hidden chat project is still registered.');
-            }
-          } catch (cleanupError) {
-            report(new Error(`${chatOnly ? 'Chat' : 'Task'} deleted, but hidden project cleanup failed: ${errorText(cleanupError)}`));
-            return;
-          }
-        }
-        notify(chatOnly ? 'Chat deleted' : 'Task deleted');
+        notify('Task deleted');
       } catch (failure) {
         if (ownsDialog()) { error.textContent = String(failure instanceof Error ? failure.message : failure); error.hidden = false; }
         else report(failure);
@@ -4351,7 +4590,7 @@ function showDeleteTask(targetId = state.sessionId, chatOnly = false): void {
     })();
   });
 }
-function showRename(): void { const s = session(); if (!s) return; modal('Rename task', `<form id="rename-form"><label for="task-title" class="field-label">Task name</label><input id="task-title" name="title" value="${escape(s.title)}" maxlength="200" required><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button class="primary-button">Save</button></div></form>`); document.querySelector<HTMLInputElement>('#task-title')?.select(); }
+function showRename(task?: Session): void { const s = task ?? session(); if (!s) return; modal('Rename task', `<form id="rename-form" data-session-id="${escape(s.id)}"><label for="task-title" class="field-label">Task name</label><input id="task-title" name="title" value="${escape(s.title)}" maxlength="200" required><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button class="primary-button">Save</button></div></form>`); document.querySelector<HTMLInputElement>('#task-title')?.select(); }
 let settingsDiscoveryGeneration = 0;
 async function discoverSettingsProviders(): Promise<Provider[]> {
   const generation = ++settingsDiscoveryGeneration;
@@ -4370,11 +4609,13 @@ async function discoverSettingsProviders(): Promise<Provider[]> {
 let settingsView: import('./settings').SettingsView | undefined;
 let settingsOpening: Promise<void> | undefined;
 let settingsReturnFocus: HTMLElement | null = null;
-async function showSettings(section?: import('./settings').SettingsSection): Promise<void> {
+async function showSettings(section?: import('./settings').SettingsSection, intent?: { newForSession?: string; editScheduleId?: string }): Promise<void> {
   // "Back to settings" in a dialog returns here; the dialog closes first.
   if (document.querySelector<HTMLDialogElement>('#dialog')?.open) closeModal();
   closeMenus();
   const host = $('#settings-page');
+  // A schedules intent needs a fresh mount; the page reads it once.
+  if (settingsView && intent) closeSettings();
   if (settingsView) { if (section) settingsView.show(section); return; }
   if (settingsOpening) { await settingsOpening; if (section) (settingsView as import("./settings").SettingsView | undefined)?.show(section); return; }
   settingsReturnFocus = document.activeElement as HTMLElement | null;
@@ -4391,8 +4632,9 @@ async function showSettings(section?: import('./settings').SettingsSection): Pro
       github: target => github.mountSettings(target, project()?.id ?? state.projects[0]?.id ?? ''),
       teams: { loadModels, call },
       cloud: { call, listen: (name, callback) => subscribe(name, callback) },
-      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })), sessionId: () => state.sessionId || null },
+      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },
       remote: remoteHost,
+      schedules: { intent, openThread: id => { closeSettings(); run(selectSession(id, true)); } },
       embed: {
         colors: async target => (await import('./theme-settings')).mountThemeSettings(target, { call, notify, chooseVsix: () => import('./bridge').then(bridge => bridge.chooseVsix()) }),
         wallpapers: async target => {
@@ -4403,6 +4645,7 @@ async function showSettings(section?: import('./settings').SettingsSection): Pro
         },
         providerConnections: async target => (await import('./provider-settings')).mountProviderSettings(target, async () => { modelCatalogs.clear(); await discoverSettingsProviders(); renderComposer(); }, { harnesses: state.providers.map(p => ({ id: p.id, name: p.name })), saved: onNamedConnections }),
         openCodeModels: async target => (await import('./opencode-model-settings')).mountOpenCodeModels(target, () => invalidateModels('opencode')),
+        harnessPrivacy: async target => (await import('./harness-privacy')).mountHarnessPrivacy(target),
       },
       close: closeSettings,
     });
@@ -4411,6 +4654,7 @@ async function showSettings(section?: import('./settings').SettingsSection): Pro
 }
 function closeSettings(): void {
   settingsView?.dispose(); settingsView = undefined;
+  run(refreshCloudTargets());
   const host = $('#settings-page');
   host.hidden = true; host.replaceChildren();
   $('.workspace').classList.remove('settings-open');
@@ -4590,7 +4834,7 @@ function botsOptions(providers: Provider[]): import('./bots').BotsOptions {
   };
 }
 async function showBots(open: { botId?: string; startNew?: boolean } = {}): Promise<void> {
-  const dialog = modal('Bots', '<div id="bots-host"><p role="status">Loading bots…</p></div>', 'bots-dialog');
+  const dialog = modal(open.startNew ? 'New bot' : 'Bots', '<div id="bots-host"><p role="status">Loading bots…</p></div>', 'bots-dialog');
   const host = dialog.querySelector<HTMLElement>('#bots-host')!;
   try {
     const [{ mountBots }, providers] = await Promise.all([
@@ -4619,56 +4863,66 @@ async function showBotSettings(botId: string, tab?: import('./bots').Section): P
 /** Bots shown in the sidebar. Their workspaces stay out of the project tree, and their
  * conversations deliver queued messages natively, so the window never sends them twice. */
 let sidebarBots: import('./bots').Bot[] = [];
+let sidebarChannels: SharedChannelSummary[] = [];
 let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
-let botReloadGeneration = 0;
-let taskBots = new Map<string, string>();
+const botSwitches = new Map<string, BotActivity[]>();
+const botMessages = new Map<string, botThread.BotMessageMarker[]>();
+const botFailovers = new Map<string, FailoverAsk>();
+const botFailoverErrors = new Map<string, string>();
+const botThreadMetaLoaded = new Set<string>();
+const botThreadMetaRequests = new Map<string, number>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
-  const generation = ++botReloadGeneration;
-  const [bots, links, projects] = await Promise.all([
+  const [nextBots, nextChannels] = await Promise.all([
     call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
-    call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots)),
-    withProjects ? call<Project[]>('list_projects') : Promise.resolve(null),
+    call<SharedChannelSummary[]>('bot_shared_channels').catch(() => sidebarChannels),
   ]);
-  if (generation !== botReloadGeneration) return;
-  sidebarBots = bots; botProjects = new Set(bots.map(bot => bot.projectId));
-  taskBots = new Map(Object.entries(links));
+  sidebarBots = nextBots;
+  sidebarChannels = nextChannels;
+  botsLoaded = true;
+  botProjects = new Set(sidebarBots.map(bot => bot.projectId));
+  taskBots = new Map(Object.entries(await call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots))));
+  // An earlier build could leave the filter on a bot's workspace; send it back to All projects.
   if (botProjects.has(state.projectFilter)) setProjectFilter('');
-  if (projects) state.projects = projects;
+  // A new bot brings a workspace project; a renamed bot renames it.
+  if (withProjects) state.projects = await call<Project[]>('list_projects');
   renderNavigation(); renderHeader();
 }
+/* A project task can start with a bot (#114): its first message carries the bot's brief and
+ * skills, and it uses the bot's harness and model. The task keeps its own project and checkout. */
+let taskBots = new Map<string, string>();
 const NO_BOT = 'none';
 function botTaskControl(task: Session, fresh: boolean): string {
   const bot = sidebarBots.find(item => item.id === taskBots.get(task.id));
   if (!fresh) return bot ? `<span class="composer-computer composer-computer-fixed" aria-label="Bot: ${escape(bot.name)} (fixed for this task)">${icon('bot')}<span>with ${escape(bot.name)}</span></span>` : '';
-  if (!sidebarBots.length || botProjects.has(task.projectId) || chatTask(task) || task.remoteDevice || remoteChoice !== LOCAL || Boolean(teams.get(task.id))) return '';
+  if (!sidebarBots.length || botProjects.has(task.projectId) || chatTask(task) || task.remoteDevice || task.cloud || remoteChoice !== LOCAL) return '';
   const name = bot?.name ?? 'No bot';
   return `<button type="button" id="composer-bot" class="composer-computer" data-action="bot-task-menu" aria-label="Bot: ${escape(name)}" aria-haspopup="dialog" aria-expanded="false" title="Start this task with a bot">${icon('bot')}<span>${escape(name)}</span>${icon('down')}</button>`;
 }
 async function showBotTaskMenu(anchor: HTMLElement): Promise<void> {
-  const task = session(); if (!task || configuringSessions.has(task.id)) return;
+  const task = session(); if (!task) return;
   const chosen = taskBots.get(task.id) ?? NO_BOT;
-  const items = [{ id: NO_BOT, label: 'No bot', icon: 'close', selected: chosen === NO_BOT }, ...sidebarBots.map(bot => ({ id: bot.id, label: bot.name, description: bot.paused ? 'Paused' : bot.role, icon: 'bot', disabled: bot.paused, selected: bot.id === chosen }))];
+  const items = [{ id: NO_BOT, label: 'No bot', icon: 'close', selected: chosen === NO_BOT }, ...sidebarBots.map(bot => ({ id: bot.id, label: bot.name, description: bot.role, icon: 'bot', selected: bot.id === chosen }))];
   await showChoices(anchor, { title: 'Bot', width: 280, items, onSelect: id => { closeChoiceMenu(); run(assignTaskBot(task, id === NO_BOT ? null : id)); } });
 }
 async function assignTaskBot(task: Session, botId: string | null): Promise<void> {
-  if (!newTaskView() || state.sessionId !== task.id || configuringSessions.has(task.id)) throw new Error("Choose a bot before the task's first message.");
+  if (!newTaskView() || state.sessionId !== task.id) throw new Error('Choose a bot before the task\'s first message.');
+  if (configuringSessions.has(task.id)) return;
   configuringSessions.add(task.id);
   try {
-    // Native code commits profile defaults and the link together, preserving task permissions.
     const bot = await call<import('./bots').Bot | null>('bot_assign_task', { sessionId: task.id, botId });
-    const saved = await call<Session>('get_task', { sessionId: task.id }).catch(error => {
-      if (!state.sessions.some(item => item.id === task.id)) return null;
-      throw error;
-    });
-    const index = state.sessions.findIndex(item => item.id === task.id);
-    // Leaving an empty draft may discard it while IPC settles. Never resurrect it.
-    if (saved && index >= 0) state.sessions[index] = saved;
-    if (bot && index >= 0) taskBots.set(task.id, bot.id);
-    else taskBots.delete(task.id);
+    if (bot) {
+      taskBots.set(task.id, bot.id);
+      // The bot's harness and model become the task's defaults; the picker can still change them.
+      if (bot.provider !== task.provider || bot.model !== task.model) upsertSession(await call<Session>('configure_session', { sessionId: task.id, provider: bot.provider, model: bot.model }));
+    } else taskBots.delete(task.id);
   } finally { configuringSessions.delete(task.id); }
   if (state.sessionId === task.id) render();
+}
+/** The bot's brief for a task's next message, once per brief version; empty without a bot. */
+async function botTaskBrief(task: Session): Promise<string> {
+  return taskBots.has(task.id) ? await call<string | null>('bot_task_brief', { sessionId: task.id }) ?? '' : '';
 }
 const userProjects = (): Project[] => state.projects.filter(project => !botProjects.has(project.id) && !isChatProject(project));
 /** Whether a task runs as a projectless chat. */
@@ -4677,8 +4931,7 @@ const chatTask = (task: Session | undefined): boolean => Boolean(task && isChatP
  * signed-in account's targets; the started task is an ordinary session with `remoteDevice`. */
 const remoteHost: RemoteHost = { call, listen: (name, callback) => subscribe(name as 'remote://status', callback), notify, openUrl: url => call('open_external_url', { url }) };
 type RemoteAccountDevice = Omit<RemoteTarget, 'deviceId'> & { id: string; current: boolean; host: boolean };
-let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL, remoteSignedIn = false, remoteConnected = false, remotePresenceReady = false, remoteTargetsAvailable = false;
-let remoteRefreshRevision = 0;
+let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL, remoteSignedIn = false, remoteConnected = false, remotePresenceReady = false;
 /** The chosen computer's last known name, for when it leaves the list (signed out or revoked). */
 let remoteChoiceName: string | undefined;
 /** What the composer was last drawn with, so presence updates redraw it only when this changes. */
@@ -4686,7 +4939,7 @@ let renderedRemoteKey = '';
 let pairingPrompt: (() => void) | undefined, pairingLoading = false;
 const remoteChecks = new Set<string>(), remoteStartCancels = new Set<string>(), remoteRetries = new Set<string>(), remoteRetryErrors = new Map<string, string>();
 function remoteDeviceId(s: Session): string | undefined {
-  return s.remoteDevice?.id ?? (newTaskView() && remoteChoice !== LOCAL ? remoteChoice : undefined);
+  return s.remoteDevice?.id ?? (!s.cloud && newTaskView() && remoteChoice !== LOCAL && !cloudProvider(remoteChoice) ? remoteChoice : undefined);
 }
 function remoteTargetFor(s: Session): RemoteTarget | undefined {
   const id = remoteDeviceId(s); if (!id) return undefined;
@@ -4697,11 +4950,11 @@ function remoteTargetFor(s: Session): RemoteTarget | undefined {
 function remoteOffline(s: Session): boolean {
   const id = remoteDeviceId(s); if (!id || !remotePresenceReady) return false;
   const target = remoteTargetFor(s);
-  return !remoteTargetsAvailable || !target || !target.online || !remoteSignedIn || !remoteConnected;
+  return !target || !target.online || (remoteSignedIn && !remoteConnected);
 }
 /** A New task's chosen computer that is no longer in the account's list, or undefined. */
 function remoteMissing(s: Session): string | undefined {
-  if (s.remoteDevice || !newTaskView() || remoteChoice === LOCAL || !remotePresenceReady) return undefined;
+  if (s.remoteDevice || s.cloud || !newTaskView() || remoteChoice === LOCAL || cloudProvider(remoteChoice) || !remotePresenceReady) return undefined;
   return remoteTargets.some(item => item.deviceId === remoteChoice) ? undefined : remoteChoiceName ?? 'That computer';
 }
 function remoteMissingNote(s: Session): string {
@@ -4724,54 +4977,32 @@ function syncRemoteConnection(): void {
   if (old) old.outerHTML = markup; else region.insertAdjacentHTML('beforeend', markup);
 }
 async function refreshRemoteTargets(signedIn: boolean): Promise<void> {
-  const revision = ++remoteRefreshRevision;
-  let targets: RemoteTarget[];
-  try {
-    targets = signedIn ? await call<RemoteTarget[]>('remote_targets') : [];
-  } catch {
-    if (revision !== remoteRefreshRevision) return;
-    // Keep the explicit choice and fail closed until its availability is known again.
-    remoteTargetsAvailable = false; remotePresenceReady = true;
-    const task = session();
-    if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
-    else syncRemoteConnection();
-    return;
-  }
-  if (revision !== remoteRefreshRevision || signedIn !== remoteSignedIn) return;
-  remoteChoiceName = remoteTargets.find(target => target.deviceId === remoteChoice)?.name ?? remoteChoiceName;
-  remoteTargets = targets; remoteTargetsAvailable = true; remotePresenceReady = true;
+  remoteSignedIn = signedIn;
+  if (signedIn) {
+    const devices = await call<RemoteAccountDevice[]>('remote_devices').catch(() => undefined);
+    if (devices) remoteTargets = devices.filter(device => !device.current && device.host).map(({ id: deviceId, name, platform, online, lastSeen }) => ({ deviceId, name, platform, online, lastSeen }));
+  } else remoteTargets = [];
+  remotePresenceReady = true;
+  const chosen = remoteTargets.find(item => item.deviceId === remoteChoice);
+  if (chosen) remoteChoiceName = chosen.name;
+  for (const target of remoteTargets) if (target.online) remoteRetryErrors.delete(target.deviceId);
+  syncPairingPrompt(signedIn);
+  // The chip and status update in place; the prompt is redrawn only when what it offers changes,
+  // so presence never closes an open @ menu, a picker or an IME composition.
   renderHeader();
-  const task = session();
-  if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
-  else syncRemoteConnection();
+  const s = session(); if (!s) return;
+  if (remoteComposerKey(s) !== renderedRemoteKey) renderComposer(); else syncRemoteConnection();
 }
-async function initRemote(): Promise<void> {
-  await subscribe('remote://status', (status: RemoteStatus) => { remoteSignedIn = status.signedIn; remoteConnected = status.connected; run(refreshRemoteTargets(remoteSignedIn)); });
-  await subscribe('remote://presence', () => run(refreshRemoteTargets(remoteSignedIn)));
-  // A build without the Connect commands, or a signed-out one, simply offers no other computers.
-  const status = await call<RemoteStatus>('remote_status').catch(() => undefined);
-  if (status) { remoteSignedIn = status.signedIn; remoteConnected = status.connected; await refreshRemoteTargets(remoteSignedIn); }
+/** Devices asking this computer for access (src/remote-pairing-prompt.ts), while signed in to Connect. */
+function syncPairingPrompt(signedIn: boolean): void {
+  if (!signedIn) { pairingPrompt?.(); pairingPrompt = undefined; return; }
+  if (pairingPrompt || pairingLoading) return;
+  pairingLoading = true;
+  import('./remote-pairing-prompt').then(module => { if (remoteSignedIn && !pairingPrompt) pairingPrompt = module.mountPairingPrompt(remoteHost); })
+    .catch(error => console.warn('Could not load the pairing prompt', error))
+    .finally(() => { pairingLoading = false; });
 }
-async function showComputerMenu(anchor: HTMLElement): Promise<void> {
-  await showChoices(anchor, { title: 'Run on', width: 280, items: computerItems(remoteTargets, remoteChoice), onSelect: id => {
-    closeChoiceMenu();
-    const task = session();
-    if (id !== LOCAL && task && taskBots.has(task.id)) { notify('Choose No bot before running this task on another computer.'); return; }
-    remoteChoice = id; remoteChoiceName = remoteTargets.find(item => item.deviceId === id)?.name; renderHeader();
-    if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
-    if (task && newTaskView()) run(adaptPickerToComputer(task, id, remoteTargets.find(item => item.deviceId === id)?.name ?? 'That computer'));
-  } });
-}
-/** Resolves true on Continue; Cancel or closing the dialog resolves false. */
-function confirmBehind(name: string, check: RemoteRepoCheck): Promise<boolean> {
-  const dialog = modal('GitHub is behind this computer', behindDialog(name, check));
-  const form = dialog.querySelector<HTMLFormElement>('#remote-behind-form')!;
-  return new Promise(resolve => {
-    dialog.addEventListener('close', () => resolve(false), { once: true });
-    form.addEventListener('submit', event => { event.preventDefault(); event.stopPropagation(); resolve(true); closeModal(); }, { once: true });
-  });
-}
-/** A New task sent with another computer chosen: check GitHub, then start it there with the same settings. */
+/** Retry: reconnects to the relay now (`remote_reconnect`), then resubscribes, with any failure shown inline. */
 async function retryRemoteConnection(): Promise<void> {
   const s = session(), id = s && remoteDeviceId(s); if (!s || !id || remoteRetries.has(id)) return;
   remoteRetries.add(id); remoteRetryErrors.delete(id); clearComposerNote(s); renderComposer();
@@ -4820,9 +5051,118 @@ async function stopTask(s: Session): Promise<void> {
   runEndings.set(s.id, 'stopped');
   const current = state.streams.get(s.id);
   if (current) { current.status = 'Stopping agent'; current.revision++; clearAgentInputs(current); renderStream(); }
-  const team = teams.get(s.id);
+  const team = teams.get(s.id) && !s.remoteDevice;
   await call(team ? 'architect_control' : 'stop_session', { sessionId: s.id, ...(team ? { action: 'stop' } : {}) });
 }
+/* Cloud agents (docs/cloud-agents.md): connected cloud providers are "Run on" targets too,
+ * whether or not Connect is signed in. A cloud task is an ordinary session with `cloud`. */
+let cloudTargets: CloudTarget[] = [];
+async function refreshCloudTargets(): Promise<void> {
+  cloudTargets = await call<CloudTarget[]>('cloud_agent_targets').catch(() => cloudTargets);
+  const chosen = cloudProvider(remoteChoice);
+  if (chosen && !cloudTargets.some(target => target.ready && target.provider === chosen)) remoteChoice = LOCAL;
+  renderHeader();
+}
+/** Redraws the strip in place, so progress never re-renders the prompt someone is typing in. */
+function syncCloudStrip(): void {
+  const s = session(), old = document.querySelector<HTMLElement>('#composer-area .cloud-strip'), composer = document.querySelector('#composer');
+  if (!s || !composer || old?.querySelector('[aria-expanded="true"]')) return;
+  const markup = cloudStrip(s);
+  if (old) { if (old.outerHTML !== markup) { if (markup) old.outerHTML = markup; else old.remove(); } }
+  else if (markup) composer.insertAdjacentHTML('beforebegin', markup);
+}
+function onCloudProgress(event: { sessionId: string; stage: CloudStage; detail?: string | null }): void {
+  const task = state.sessions.find(item => item.id === event.sessionId);
+  // A task that just turned into a cloud task may not be listed as one yet.
+  if (!task?.cloud) { run(reloadSessions()); return; }
+  task.cloud = { ...task.cloud, stage: event.stage, detail: event.detail ?? null };
+  if (task.id === state.sessionId) { syncCloudStrip(); renderHeader(); }
+  renderNavigation();
+}
+async function initCloudAgents(): Promise<void> {
+  // bridge.ts has no typed overload for this event yet.
+  await (subscribe as unknown as (name: string, callback: typeof onCloudProgress) => Promise<() => void>)('cloud-agent://progress', onCloudProgress);
+  await refreshCloudTargets();
+}
+async function showCloudMenu(anchor: HTMLElement): Promise<void> {
+  const s = session(); if (!s?.cloud) return;
+  await showChoices(anchor, { title: 'Cloud machine', width: 240, items: cloudActionItems(s), onSelect: async id => {
+    closeChoiceMenu();
+    if (id === 'delete' && !await confirmDeleteMachine(s)) return;
+    try { await call('cloud_agent_action', { sessionId: s.id, action: id }); }
+    catch (error) { notify(errorText(error)); return; }
+    if (id === 'open') openVm();
+    else if (id === 'delete') notify('Deleted the cloud machine. Your next message creates a new one.');
+  } });
+}
+function confirmDeleteMachine(s: Session): Promise<boolean> {
+  const dialog = modal('Delete cloud machine?', deleteMachineDialog(s));
+  const form = dialog.querySelector<HTMLFormElement>('#cloud-delete-form')!;
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(false), { once: true });
+    form.addEventListener('submit', event => { event.preventDefault(); event.stopPropagation(); resolve(true); closeModal(); }, { once: true });
+  });
+}
+/** A New task sent with a cloud provider chosen: the same message content as a Connect start, on a cloud machine. */
+async function sendCloud(s: Session, target: CloudTarget, draft: string, text: string): Promise<void> {
+  const filePaths = [...state.attachments], promptItems = attachments.list(s.id);
+  const refusal = harnessRefusal(s.provider, provider(s.provider)?.name ?? s.provider);
+  if (refusal) throw new Error(refusal);
+  if ((state.browserAttachments.get(s.id) ?? []).length || (state.moodboardAttachments.get(s.id) ?? []).length || attachments.imageIds(promptItems).length) throw new Error(`Images and browser captures can’t be sent to a cloud machine yet. Remove them, or run on this computer.`);
+  configuringSessions.add(s.id);
+  try {
+    const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
+    const content = text + contexts.join('') + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
+    const prompt = () => document.querySelector<HTMLTextAreaElement>('#prompt');
+    if (state.sessionId !== s.id || prompt()?.value !== draft) throw new Error('Your task or message changed. Send it again.');
+    const started = await call<Session>('cloud_agent_start', {
+      // The empty New task draft becomes the cloud task, so no stray draft is left behind.
+      sessionId: s.id, projectId: s.projectId, provider: target.provider, prompt: content, harness: s.provider, model: s.model, mode: s.mode, effort: s.reasoningEffort ?? null,
+    });
+    attachments.consume(s.id, promptItems);
+    state.attachments = state.attachments.filter(path => !filePaths.includes(path));
+    const field = prompt(); if (field?.dataset.sessionId === s.id) field.value = '';
+    state.drafts.delete(s.id);
+    remoteChoice = LOCAL;
+    await reloadSessions();
+    state.query = ''; await selectSession(started.id, true);
+  } finally { configuringSessions.delete(s.id); }
+}
+async function initRemote(): Promise<void> {
+  let signedIn = false;
+  await subscribe('remote://status', (status: RemoteStatus) => { signedIn = status.signedIn; remoteConnected = status.connected; run(refreshRemoteTargets(signedIn)); });
+  await subscribe('remote://presence', () => run(refreshRemoteTargets(signedIn)));
+  // A start whose reply was lost links later (`resume_start`) and brings the host's worktree note.
+  await (subscribe as unknown as (name: string, callback: (note: { sessionId: string; note: string }) => void) => Promise<unknown>)('remote://start-note', ({ sessionId, note }) => {
+    const mirror = state.sessions.find(task => task.id === sessionId);
+    if (mirror) showComposerNote(mirror, note);
+  });
+  // A build without the Connect commands, or a signed-out one, simply offers no other computers.
+  const status = await call<RemoteStatus>('remote_status').catch(() => undefined);
+  if (status) { signedIn = status.signedIn; remoteConnected = status.connected; await refreshRemoteTargets(signedIn); }
+}
+async function showComputerMenu(anchor: HTMLElement): Promise<void> {
+  await showChoices(anchor, { title: 'Run on', width: 280, items: computerItems(remoteTargets, remoteChoice, cloudTargets), onSelect: id => {
+    closeChoiceMenu();
+    if (id === SETUP_CHOICE) { run(showSettings('cloud')); return; }
+    if (id === CONNECT_SETUP) { run(showSettings('remote')); return; }
+    remoteChoice = id; remoteChoiceName = remoteTargets.find(item => item.deviceId === id)?.name; renderHeader();
+    const task = session();
+    if (task && remoteComposerKey(task) !== renderedRemoteKey) renderComposer();
+    if (cloudProvider(id)) { if (task && newTaskView()) { const refusal = harnessRefusal(task.provider, provider(task.provider)?.name ?? task.provider); if (refusal) notify(refusal); } return; }
+    if (task && newTaskView()) run(adaptPickerToComputer(task, id, remoteTargets.find(item => item.deviceId === id)?.name ?? 'That computer'));
+  } });
+}
+/** Resolves true on Continue; Cancel or closing the dialog resolves false. */
+function confirmBehind(name: string, check: RemoteRepoCheck): Promise<boolean> {
+  const dialog = modal('GitHub is behind this computer', behindDialog(name, check));
+  const form = dialog.querySelector<HTMLFormElement>('#remote-behind-form')!;
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(false), { once: true });
+    form.addEventListener('submit', event => { event.preventDefault(); event.stopPropagation(); resolve(true); closeModal(); }, { once: true });
+  });
+}
+/** A New task sent with another computer chosen: check GitHub, then start it there with the same settings. */
 async function sendRemote(s: Session, target: RemoteTarget, draft: string, text: string): Promise<void> {
   const filePaths = [...state.attachments], promptItems = attachments.list(s.id), browserItems = state.browserAttachments.get(s.id) ?? [];
   if ((state.moodboardAttachments.get(s.id) ?? []).length) throw new Error(`Moodboards can’t be sent to ${target.name} yet. Remove them, or run on this computer.`);
@@ -4837,7 +5177,8 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     const prompt = () => document.querySelector<HTMLTextAreaElement>('#prompt');
     if (state.sessionId !== s.id || prompt()?.value !== draft) throw new Error('Your task or message changed. Send it again.');
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
-    const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text, Boolean(s.pullRequest)) + tokenSaver.contextFor(s.id);
+    const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
+    remoteChecks.delete(s.id);
     // Shown at once, like send(): the prompt, and a turn below it that reports the start's
     // stages until the host's events stream in. Saved history gets the host's copy of the
     // prompt after the run (remote/mirror.rs); until then `mirrorPrompts` keeps this one.
@@ -4849,7 +5190,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     const sentField = prompt(); if (sentField?.dataset.sessionId === s.id && sentField.value === draft) sentField.value = '';
     if (state.drafts.get(s.id) === draft) state.drafts.delete(s.id);
     if (state.sessionId === s.id) {
-      readerScrollingUp = false; readerSawUpwardScroll = false; stickToBottom = true; state.messages = [...state.messages, sent]; render();
+      stickToBottom = true; state.messages = [...state.messages, sent]; render();
       const shown = $('#transcript').querySelectorAll<HTMLElement>('.user-message');
       if (shown.length) enterView(shown[shown.length - 1], 12);
     }
@@ -4860,7 +5201,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
       if (state.sessionId === s.id) renderStream();
     };
     // A failure shows in the strip above the composer with Retry, so it is not also a toast.
-    const started = await trackRemoteStart(s.id, target, startId => call<{ sessionId: string }>('remote_start_task', {
+    const started = await trackRemoteStart(s.id, target, startId => call<{ sessionId: string; note?: string }>('remote_start_task', {
       // The empty New task draft becomes the mirror, so no stray draft is left behind.
       sessionId: s.id, deviceId: target.deviceId, projectId: s.projectId, prompt: content, provider: s.provider, model: s.model, mode: s.mode,
       effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath), branch: s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
@@ -4889,6 +5230,9 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     state.attachments = state.attachments.filter(path => !filePaths.includes(path));
     await reloadSessions();
     state.query = ''; await selectSession(sessionId, true);
+    // A busy or dirty checkout on the host gave way to a worktree: say so once, under the prompt.
+    const mirror = state.sessions.find(task => task.id === sessionId);
+    if (started.note && mirror) showComposerNote(mirror, started.note);
     if (remoteStartCancels.delete(s.id)) {
       // Stop was pressed while the host could not yet say whether the start was cancelled; it attached, so stop it now.
       runEndings.set(sessionId, 'stopped');
@@ -4905,11 +5249,32 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
 /** The sidebar shows tasks or bots; the bar at its bottom switches between them. */
 let sidebarView: SidebarView = storedSidebarView();
 let botsQuery = '';
+/** Skeleton rows show until the first bots_list answers, so the empty state never flashes. */
+let botsLoaded = false;
+let hiddenBotsOpen = (() => { try { return localStorage.getItem('pandacode.botsHiddenOpen') === 'true'; } catch { return false; } })();
+let botsListPendingRender = false;
+/** Bot workspaces whose run finished while another thread was open; cleared when the bot opens. */
+const respondedBots = new Set<string>();
+const failedBotProjects = new Set<string>();
+function botSignals(bot: import('./bots').Bot, unread: Map<string, number>): BotSignals {
+  const tasks = state.sessions.filter(task => task.projectId === bot.projectId), now = Date.now();
+  const live = tasks.map(task => state.streams.get(task.id)).filter(item => item !== undefined);
+  const limited = tasks.find(task => limitActive(task, now));
+  return {
+    waiting: live.some(item => item.inputs.size) ? 'question' : live.some(item => item.approvals.size) ? 'approval' : undefined,
+    failed: failedBotProjects.has(bot.projectId),
+    limited: limited ? { until: limited.limitedUntil ?? null } : undefined,
+    working: tasks.some(task => isRunning(task.id)), unread: unread.get(bot.id) ?? 0, responded: respondedBots.has(bot.projectId),
+  };
+}
 function renderBots(): void {
   const bar = document.querySelector<HTMLElement>('#sidebar-bots'), panel = document.querySelector<HTMLElement>('#sidebar-bots-panel');
   if (!bar || !panel) return;
   const current = session(), open = state.view === 'conversation' ? current?.projectId : undefined;
-  const unread = syncSeen(sidebarBots, open);
+  if (open) respondedBots.delete(open);
+  const unread = syncSeen(sidebarBots, open, bot => state.sessions.filter(task => task.projectId === bot.projectId && task.lastResponseAt).map(task => task.lastResponseAt!));
+  const markRead = panel.querySelector<HTMLButtonElement>('.bots-mark-read');
+  if (markRead) markRead.hidden = unread.size === 0;
   document.querySelector('.sidebar')?.classList.toggle('bots-view', sidebarView === 'bots');
   const barHtml = botsBarHtml(sidebarView, sidebarBots.length, unread.size);
   if (bar.innerHTML !== barHtml) bar.innerHTML = barHtml;
@@ -4917,10 +5282,218 @@ function renderBots(): void {
   if (!panel.firstElementChild) {
     panel.innerHTML = botsPanelHeadHtml();
     panel.querySelector<HTMLInputElement>('[data-bots-search]')!.addEventListener('input', event => { botsQuery = (event.target as HTMLInputElement).value; renderBots(); });
+    document.addEventListener('pointerdown', event => {
+      const target = event.target as Element | null;
+      if (target?.closest('#sidebar-bots-panel')) return;
+      hideCreateBotMenu();
+    }, true);
+    bindBotRows(panel.querySelector<HTMLElement>('.bots-panel-list')!);
   }
   const list = panel.querySelector<HTMLElement>('.bots-panel-list')!;
-  const html = botsListHtml({ bots: sidebarBots, selectedProject: current?.projectId, working: bot => state.sessions.some(task => task.projectId === bot.projectId && isRunning(task.id)) }, unread, botsQuery);
-  if (list.innerHTML !== html) list.innerHTML = html;
+  const html = botsListHtml({ bots: sidebarBots, channels: sidebarChannels, selectedProject: state.sharedChannelId ? undefined : current?.projectId, selectedChannel: state.sharedChannelId, signals: bot => botSignals(bot, unread), loaded: botsLoaded, hiddenOpen: hiddenBotsOpen }, botsQuery);
+  if (list.innerHTML !== html) {
+    const menuAnchor = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
+    if (menuAnchor && list.contains(menuAnchor)) botsListPendingRender = true;
+    else { list.innerHTML = html; botsListPendingRender = false; }
+  }
+}
+/** Right-click (or the context-menu key) opens a row's menu; rows drag to reorder. */
+function bindBotRows(list: HTMLElement): void {
+  const rowOf = (target: EventTarget | null) => (target as HTMLElement | null)?.closest<HTMLElement>('[data-bot-row]') ?? null;
+  // A right click can also produce a non-primary click on the nested open button.
+  // Keep that event from navigating away while the context menu opens.
+  list.addEventListener('click', event => {
+    if (event.button !== 0) { event.preventDefault(); event.stopPropagation(); }
+  }, true);
+  list.addEventListener('contextmenu', event => {
+    const row = rowOf(event.target); if (!row) return;
+    event.preventDefault();
+    run(showBotMenu(row.querySelector<HTMLElement>('.bot-row-open')!, row.dataset.botRow!));
+  });
+  list.addEventListener('contextmenu', event => {
+    const row = (event.target as HTMLElement | null)?.closest<HTMLElement>('.channel-row[data-channel]'); if (!row) return;
+    event.preventDefault();
+    run(showSharedChannelMenu(row, row.dataset.channel!));
+  });
+  let dragged = '', draggedGroup = '';
+  list.addEventListener('dragstart', event => {
+    const row = rowOf(event.target); if (!row) return;
+    if (!['pinned', 'bots'].includes(row.dataset.botGroup ?? '')) { event.preventDefault(); return; }
+    dragged = row.dataset.botRow!; draggedGroup = row.dataset.botGroup ?? ''; event.dataTransfer?.setData('text/plain', dragged);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  });
+  list.addEventListener('dragover', event => { const row = rowOf(event.target); if (dragged && row?.dataset.botGroup === draggedGroup) { event.preventDefault(); row.classList.add('drag-over'); } });
+  list.addEventListener('dragleave', event => { const row = rowOf(event.target); if (row && !row.contains(event.relatedTarget as Node | null)) row.classList.remove('drag-over'); });
+  list.addEventListener('drop', event => {
+    const row = rowOf(event.target); if (!dragged || !row) return;
+    if (row.dataset.botGroup !== draggedGroup) return;
+    event.preventDefault();
+    const shown = [...list.querySelectorAll<HTMLElement>('[data-bot-row]')].map(item => item.dataset.botRow!);
+    if (row.dataset.botRow !== dragged) { moveBot(shown, dragged, row.dataset.botRow!); renderBots(); }
+    dragged = ''; draggedGroup = '';
+  });
+  list.addEventListener('dragend', () => { list.querySelectorAll('.drag-over').forEach(item => item.classList.remove('drag-over')); dragged = ''; draggedGroup = ''; });
+  list.addEventListener('keydown', event => {
+    if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    const row = rowOf(event.target), group = row?.dataset.botGroup;
+    if (!row || !['pinned', 'bots'].includes(group ?? '')) return;
+    const peers = [...list.querySelectorAll<HTMLElement>(`[data-bot-group="${group}"]`)];
+    const index = peers.indexOf(row), next = index + (event.key === 'ArrowUp' ? -1 : 1);
+    if (next < 0 || next >= peers.length) return;
+    event.preventDefault();
+    const all = [...list.querySelectorAll<HTMLElement>('[data-bot-row]')].map(item => item.dataset.botRow!);
+    const before = event.key === 'ArrowUp' ? peers[next].dataset.botRow! : peers[next + 1]?.dataset.botRow ?? null;
+    moveBot(all, row.dataset.botRow!, before);
+    const id = row.dataset.botRow!;
+    const live = document.querySelector<HTMLElement>('#bots-reorder-live');
+    if (live) live.textContent = `Moved ${sidebarBots.find(bot => bot.id === id)?.name ?? 'bot'} ${event.key === 'ArrowUp' ? 'up' : 'down'} within ${group}.`;
+    renderBots();
+    document.querySelector<HTMLButtonElement>(`[data-bot-row="${CSS.escape(id)}"] .bot-row-open`)?.focus();
+  });
+}
+async function showBotMenu(anchor: HTMLElement, botId: string): Promise<void> {
+  const bot = sidebarBots.find(item => item.id === botId); if (!bot) return;
+  const pinned = pinnedBots().has(bot.id);
+  await showChoices(anchor, { title: `${bot.name} actions`, actions: true, items: [
+    { id: 'pin', label: pinned ? 'Unpin' : 'Pin', icon: 'pin' },
+    { id: 'edit', label: 'Edit bot', icon: 'edit' },
+    { id: 'duplicate', label: 'Duplicate bot', icon: 'copy' },
+    { id: 'hide', label: bot.paused ? 'Restore' : 'Hide (pause)', icon: bot.paused ? 'play' : 'pause' },
+    { id: 'delete', label: 'Delete bot…', icon: 'trash', danger: true },
+  ], onSelect: id => { closeChoiceMenu(); run(botMenuAction(id, bot.id)); } });
+}
+async function showCreateBotMenu(anchor: HTMLElement): Promise<void> {
+  const menu = document.querySelector<HTMLElement>('#bot-create-menu'); if (!menu) return;
+  menu.hidden = !menu.hidden;
+  anchor.setAttribute('aria-expanded', String(!menu.hidden));
+  if (!menu.hidden) menu.querySelector<HTMLElement>('[role=menuitem]')?.focus();
+}
+function hideCreateBotMenu(): void {
+  const menu = document.querySelector<HTMLElement>('#bot-create-menu');
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  document.querySelector('[data-action="new-bot-menu"]')?.setAttribute('aria-expanded', 'false');
+}
+function syncChannelWorkingLabel(): void {
+  if (channelWorkingLabelTimer) { window.clearInterval(channelWorkingLabelTimer); channelWorkingLabelTimer = 0; }
+  if (!state.sharedChannelId || !state.sharedChannelDetail?.activeBotIds.length) return;
+  channelWorkingLabelTimer = window.setInterval(() => {
+    if (!state.sharedChannelId || !state.sharedChannelDetail?.activeBotIds.length) { syncChannelWorkingLabel(); return; }
+    const label = document.querySelector<HTMLElement>('.bc-history .bc-working .bot-working-label');
+    if (label) label.textContent = botThread.pickLabel(label.textContent ?? '');
+  }, 4_000);
+}
+/** Channel history rows per page, as `HISTORY_PAGE` in `shared_channels.rs`. */
+const CHANNEL_PAGE = 100;
+async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<void> {
+  if (!channelId) return;
+  const request = ++state.sharedChannelRequest;
+  const history = document.querySelector<HTMLElement>('.bc-history');
+  if (history) {
+    state.sharedChannelScrollTop = history.scrollTop;
+    state.sharedChannelAtBottom = history.scrollHeight - history.clientHeight - history.scrollTop < 32;
+  }
+  const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+  if (prompt && state.sharedChannelId) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
+  try {
+    const detail = await call<SharedChannelDetail>('bot_shared_channel_detail', { channelId, limit: state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE });
+    if (request !== state.sharedChannelRequest || channelId !== state.sharedChannelId) return;
+    state.sharedChannelDetail = detail;
+    renderHeader(); renderTranscript(true); renderComposer(); renderBots();
+    syncChannelWorkingLabel();
+  } catch (error) { if (channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
+}
+function activateSharedChannel(channelId: string): void {
+  state.sharedChannelId = channelId;
+  state.sharedChannelDetail = null;
+  state.sharedChannelScrollTop = 0;
+  state.sharedChannelAtBottom = true;
+  state.view = 'conversation'; state.boardPanel = false;
+  render(); renderInspector(); renderBots();
+  void refreshSharedChannel(channelId);
+}
+function closeSharedChannel(): void {
+  state.sharedChannelId = ''; state.sharedChannelDetail = null;
+  state.sharedChannelRequest++;
+  syncChannelWorkingLabel();
+  render(); renderInspector(); renderBots();
+}
+function sharedChannelUi(): SharedChannelUiOptions {
+  return { call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify };
+}
+async function createSharedChannel(): Promise<void> {
+  const { openCreateChannel } = await import('./bot-shared-channels');
+  openCreateChannel(sharedChannelUi());
+}
+async function openSharedChannel(id: string): Promise<void> {
+  const { openSharedChannel } = await import('./bot-shared-channels');
+  await openSharedChannel(id, sharedChannelUi());
+}
+async function showSharedChannelMenu(anchor: HTMLElement, channelId: string): Promise<void> {
+  const channel = sidebarChannels.find(item => item.id === channelId); if (!channel) return;
+  await showChoices(anchor, { title: `#${channel.name} actions`, actions: true, items: channel.archived
+    ? [{ id: 'restore', label: 'Restore', icon: 'undo' }]
+    : [{ id: 'edit', label: 'Edit', icon: 'edit' }, { id: 'delete', label: 'Delete', icon: 'trash', danger: true }],
+  onSelect: id => { closeChoiceMenu(); run(sharedChannelMenuAction(id, channel)); } });
+}
+async function sharedChannelMenuAction(action: string, channel: SharedChannelSummary): Promise<void> {
+  try {
+    if (action === 'edit') {
+      const { openSharedChannelSettings } = await import('./bot-shared-channels');
+      await openSharedChannelSettings(channel.id, sharedChannelUi());
+    }
+    else {
+      await call('bot_shared_channel_archive', { channelId: channel.id, archived: action !== 'restore' });
+      await reloadBotProjects(false);
+    }
+  } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
+}
+async function botMenuAction(id: string, botId: string): Promise<void> {
+  const bot = sidebarBots.find(item => item.id === botId); if (!bot) return;
+  if (id === 'pin') { setBotPinned(bot.id, !pinnedBots().has(bot.id)); renderBots(); }
+  else if (id === 'edit') await showBotSettings(bot.id);
+  else if (id === 'hide') await setBotPaused(bot, !bot.paused);
+  else if (id === 'duplicate') await duplicateBot(bot);
+  else if (id === 'delete') await deleteBot(bot);
+}
+async function setBotPaused(bot: import('./bots').Bot, paused: boolean): Promise<void> {
+  try {
+    await call('bot_set_paused', { botId: bot.id, paused });
+    notify(paused ? `${bot.name} paused` : `${bot.name} resumed`);
+  } catch (error) {
+    notify(`Couldn’t ${paused ? 'pause' : 'resume'} ${bot.name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  await reloadBotProjects(false);
+}
+async function duplicateBot(bot: import('./bots').Bot): Promise<void> {
+  try {
+    const { bot: source } = await call<import('./bots').BotDetail>('bot_detail', { botId: bot.id });
+    const input: import('./bots').BotInput = { name: `${[...source.name].slice(0, 55).join('')} copy`, role: source.role, instructions: source.instructions, goals: source.goals, avatar: source.avatar, provider: source.provider, model: source.model, mode: source.mode, heartbeatMinutes: source.heartbeatMinutes, color: source.color ?? '', reasoningEffort: source.reasoningEffort ?? '', backupModels: source.backupModels ?? [], fallbackMode: source.fallbackMode ?? 'ask', notify: source.notify ?? true, whileWorking: source.whileWorking ?? 'queue', showPlan: source.showPlan ?? false };
+    await call('bot_create', { input });
+    notify(`${input.name} created`);
+  } catch (error) {
+    notify(`Couldn’t duplicate ${bot.name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  await reloadBotProjects();
+}
+async function deleteBot(bot: import('./bots').Bot): Promise<void> {
+  if (!await confirmBotDelete(bot.name)) return;
+  try { await call('bot_delete', { botId: bot.id }); }
+  catch (error) { notify(`Couldn’t delete ${bot.name}: ${error instanceof Error ? error.message : String(error)}`); return; }
+  setBotPinned(bot.id, false);
+  notify(`${bot.name} deleted`);
+  await reloadBotProjects(); await reloadSessions();
+  if (!session()) state.sessionId = '';
+  render();
+}
+function confirmBotDelete(name: string): Promise<boolean> {
+  const dialog = modal(`Delete ${name}?`, '<form id="delete-bot-form"><p class="delete-task-description">This removes the bot, its conversations and its channel connections. Its workspace folder stays on disk.</p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="secondary-button delete-task-confirm">Delete bot</button></div></form>', 'delete-task-dialog');
+  const form = dialog.querySelector<HTMLFormElement>('#delete-bot-form')!;
+  form.querySelector<HTMLButtonElement>('[data-action="close-dialog"]')!.focus();
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(false), { once: true });
+    form.addEventListener('submit', event => { event.preventDefault(); event.stopPropagation(); resolve(true); closeModal(); }, { once: true });
+  });
 }
 function setSidebarView(view: SidebarView): void {
   sidebarView = view; storeSidebarView(view); renderBots();
@@ -4936,9 +5509,58 @@ function botForThread(): import('./bots').Bot | undefined {
   const s = state.view === 'conversation' ? session() : undefined;
   return s ? sidebarBots.find(bot => bot.projectId === s.projectId) : undefined;
 }
+function switchKey(item: BotActivity): string {
+  return [item.at, item.detail.sessionId, item.detail.provider, item.detail.model, item.detail.cause, item.detail.back].join(':');
+}
+function mergeBotSwitches(current: BotActivity[], incoming: BotActivity[]): BotActivity[] {
+  const merged = new Map<string, BotActivity>();
+  for (const item of [...current, ...incoming]) merged.set(switchKey(item), item);
+  return [...merged.values()].sort((a, b) => a.at - b.at);
+}
+async function refreshBotThreadMeta(bot: import('./bots').Bot, sessionId: string, force = false): Promise<void> {
+  if (!force && (botThreadMetaLoaded.has(sessionId) || botThreadMetaRequests.has(sessionId))) return;
+  const request = (botThreadMetaRequests.get(sessionId) ?? 0) + 1;
+  botThreadMetaRequests.set(sessionId, request);
+  try {
+    const [ask, switches, messages] = await Promise.all([
+      call<FailoverAsk | null>('bot_failover_pending', { sessionId }),
+      call<BotActivity[]>('bot_model_switches', { sessionId }),
+      call<botThread.BotMessageMarker[]>('bot_message_markers', { sessionId }),
+    ]);
+    if (botThreadMetaRequests.get(sessionId) !== request) return;
+    if (ask?.sessionId === sessionId) botFailovers.set(sessionId, ask); else botFailovers.delete(sessionId);
+    botSwitches.set(sessionId, mergeBotSwitches(botSwitches.get(sessionId) ?? [], switches));
+    botMessages.set(sessionId, messages);
+    botThreadMetaLoaded.add(sessionId);
+    if (state.sessionId === sessionId && botForThread()?.id === bot.id) { renderTranscript(true); renderComposer(); }
+  } catch (error) {
+    console.warn('Could not load bot conversation markers:', error);
+  } finally {
+    if (botThreadMetaRequests.get(sessionId) === request) botThreadMetaRequests.delete(sessionId);
+  }
+}
+function renderBotFailover(): void {
+  const host = document.querySelector<HTMLElement>('#bot-failover-bar');
+  const ask = botFailovers.get(state.sessionId);
+  if (host) host.innerHTML = `${botThread.failoverHtml(ask)}${ask && botFailoverErrors.has(state.sessionId) ? `<p class="bot-failover-error" role="alert">${escape(botFailoverErrors.get(state.sessionId)!)}</p>` : ''}`;
+}
+/** A model picked during a bot's turn takes over once the turn ends; if the next turn already
+ *  started (a queued message), it stays pending and is tried again at that turn's end. */
+async function applyNextBotModel(sessionId: string): Promise<void> {
+  const next = botThread.nextModel(sessionId);
+  if (!next || isRunning(sessionId)) return;
+  try {
+    const updated = await call<Session>('configure_session', { sessionId, provider: next.provider, model: next.model });
+    botThread.setNextModel(sessionId, undefined);
+    state.sessions = state.sessions.map(task => task.id === sessionId ? updated : task);
+    if (sessionId === state.sessionId) { renderComposer(); renderHeader(); }
+  } catch (error) { console.warn('The bot keeps its model until the next turn ends:', error); }
+}
 /** Opens a bot's conversation in this app, creating it the first time. */
 async function openBot(botId: string): Promise<void> {
+  const bot = sidebarBots.find(item => item.id === botId); if (bot) respondedBots.delete(bot.projectId);
   const id = await call<string>('bot_desktop_thread', { botId });
+  if (bot) { sidebarBots = sidebarBots.map(item => item.id === botId ? { ...item, desktopSession: id } : item); renderBots(); }
   if (!state.sessions.some(task => task.id === id)) await reloadSessions();
   await selectSession(id, true);
 }
@@ -4960,7 +5582,7 @@ function showCommands(): void {
   modal('Go to anything', `<div class="command-search">${icon('search')}<input id="command-query" aria-label="Search tasks and commands" placeholder="Search tasks and commands…" autocomplete="off"></div><div id="command-results" class="command-results"></div><div class="command-footer"><span>↑ ↓ to navigate</span><span>↵ to open</span><span>esc to close</span></div>`, 'command-dialog'); renderCommands('');
 }
 function renderCommands(query: string): void {
-  const commands = [{ action: 'new-task', label: 'New task', icon: 'plus', shortcut: shortcut('N') }, { action: 'new-chat', label: 'New chat (no project)', icon: 'chat', shortcut: '' }, { action: 'add-project', label: 'Open project', icon: 'folder', shortcut: '' }, { action: 'browser', label: 'Open browser', icon: 'globe', shortcut: '' }, { action: 'terminal', label: 'Toggle terminal', icon: 'terminal', shortcut: shortcut('J') }, { action: 'settings', label: 'Settings', icon: 'settings', shortcut: shortcut(',') }, { action: 'agent-usage', label: 'Agent usage', icon: 'activity', shortcut: '' }, { action: 'bots', label: 'Bots', icon: 'bot', shortcut: '' }, { action: 'import-conversations', label: 'Import conversations', icon: 'download', shortcut: '' }, { action: 'worktree', label: 'Create worktree', icon: 'branch', shortcut: '' }, ...(githubEnabled() ? [{ action: 'github-view', label: 'GitHub', icon: 'github', shortcut: '' }] : [])].filter(c => c.label.toLowerCase().includes(query.toLowerCase()));
+  const commands = [{ action: 'new-task', label: 'New task', icon: 'plus', shortcut: shortcut('N') }, { action: 'new-chat', label: 'New chat (no project)', icon: 'chat', shortcut: '' }, { action: 'add-project', label: 'Open project', icon: 'folder', shortcut: '' }, { action: 'browser', label: 'Open browser', icon: 'globe', shortcut: '' }, { action: 'terminal', label: 'Toggle terminal', icon: 'terminal', shortcut: shortcut('J') }, { action: 'settings', label: 'Settings', icon: 'settings', shortcut: shortcut(',') }, { action: 'agent-usage', label: 'Agent usage', icon: 'activity', shortcut: '' }, { action: 'bots', label: 'Bots', icon: 'bot', shortcut: '' }, { action: 'import-conversations', label: 'Import conversations', icon: 'download', shortcut: '' }, { action: 'worktree', label: 'Create worktree', icon: 'branch', shortcut: '' }, { action: 'conversation-view', label: 'Conversation', icon: 'thread', shortcut: '' }, { action: 'board-view', label: 'Board', icon: 'kanban', shortcut: '' }, ...(session() && !session()!.archived ? [{ action: 'wake-later', label: 'Schedule a wake-up…', icon: 'clock', shortcut: '' }] : []), ...(githubEnabled() ? [{ action: 'github-view', label: 'GitHub', icon: 'github', shortcut: '' }] : [])].filter(c => c.label.toLowerCase().includes(query.toLowerCase()));
   const tasks = listedSessions().filter(s => s.title.toLowerCase().includes(query.toLowerCase())).slice(0, 12);
   $('#command-results').innerHTML = `${commands.length ? '<div class="command-section">Commands</div>' : ''}${commands.map(c => `<button data-action="${c.action}" data-command="true">${icon(c.icon)}<span>${c.label}</span><kbd>${c.shortcut}</kbd></button>`).join('')}${tasks.length ? '<div class="command-section">Tasks</div>' : ''}${tasks.map(s => `<button data-action="select-task" data-id="${escape(s.id)}" data-command="true">${providerLogo(s.provider)}<span>${escape(s.title)}<small>${escape(state.projects.find(p => p.id === s.projectId)?.name)} · ${shortProvider(s.provider)}</small></span></button>`).join('')}${!commands.length && !tasks.length ? '<div class="inspector-empty">No matching tasks or commands.</div>' : ''}`;
   $('#command-results').querySelector('button')?.classList.add('command-selected');
@@ -4977,12 +5599,12 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   if (name.startsWith('limit-')) { await limitAction(name, element); return; }
   switch (name) {
     case 'support': await openSupport(); break;
-    case 'hardened-tools': await openReviewTools(); break;
     case 'new-task': if (state.view === 'board') showBoardTaskForm(); else await createTask(); break;
     case 'new-chat': if (state.view !== 'conversation') setWorkspaceView('conversation'); await createChat(); break;
     case 'board-view': setWorkspaceView('board'); break;
     case 'conversation-view': setWorkspaceView('conversation'); break;
     case 'github-view': setWorkspaceView('github'); break;
+    case 'wake-later': openWakeComposer(document.querySelector<HTMLElement>('#composer') ?? $('#composer-area')); break;
     case 'toggle-sidebar': toggleSidebar(); break;
     case 'board-add': showBoardTaskForm(); break;
     case 'board-open': await selectSession(element.dataset.id!); break;
@@ -4992,9 +5614,19 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'board-complete': await changeBoardStage('completed'); break;
     case 'board-reopen': await changeBoardStage('review'); break;
     case 'project-task': await createTask(element.dataset.id!); break;
-    case 'toggle-folder': { const id = element.dataset.project!; if (!state.collapsedFolders.delete(id)) state.collapsedFolders.add(id); saveCollapsedFolders(); renderNavigation(); break; }
+    case 'toggle-folder': {
+      // While filtering every folder shows its matches; a click must not quietly save open/closed.
+      if (state.query.trim()) break;
+      const id = element.dataset.project!;
+      if (element.getAttribute('aria-expanded') === 'true') state.collapsedFolders.add(id); else state.collapsedFolders.delete(id);
+      saveCollapsedFolders(); renderNavigation(); break;
+    }
+    case 'completed-more': completedShown += COMPLETED_PAGE; renderNavigation(); break;
+    case 'sidebar-sort': await showSidebarSort(element); break;
+    case 'view-menu': await showViewMenu(element); break;
+    case 'folder-menu': { const heading = element.parentElement?.querySelector<HTMLElement>('.folder-heading'); if (heading) await showFolderMenu(heading); break; }
+    case 'clear-sidebar-filter': state.query = ''; renderNavigation(); $('#sidebar-filter').focus(); break;
     case 'toggle-folder-more': { const id = element.dataset.project!; if (!state.expandedFolders.delete(id)) state.expandedFolders.add(id); renderNavigation(); break; }
-    case 'show-all-projects': setProjectFilter(''); renderNavigation(); break;
     case 'add-project': showOpenProject(); break;
     case 'browse-project': {
       const input = document.querySelector<HTMLInputElement>('#project-folder'); if (!input) break;
@@ -5004,25 +5636,25 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       break;
     }
     case 'open-turn-diff': await showTurnDiff(element); break;
-    case 'select-task': {
-      const group = element.closest<HTMLElement>('#navigation [data-thread-group]')?.dataset.threadGroup;
-      sectionHold = group === 'review' ? element.dataset.id! : '';
-      await selectSession(element.dataset.id!); break;
-    }
+    case 'select-task': await selectSession(element.dataset.id!); break;
     case 'sidebar-complete': sidebarTaskAction('complete', element.dataset.task!); break;
     case 'sidebar-reopen': sidebarTaskAction('reopen', element.dataset.task!); break;
-    case 'sidebar-archive': sidebarTaskAction('archive', element.dataset.task!); break;
     case 'sidebar-delete': sidebarTaskAction('delete', element.dataset.task!); break;
     case 'sidebar-more': { const row = element.closest('.task-row')?.querySelector<HTMLElement>('.task-item'); if (row) await showSidebarTaskMenu(row); break; }
-    case 'toggle-completed': completedOpen = !completedOpen; try { localStorage.setItem(COMPLETED_OPEN_KEY, String(completedOpen)); } catch { /* per-launch preference only */ } renderNavigation(); break;
+    case 'toggle-section': {
+      if (state.query.trim()) break;
+      const key = element.dataset.section!;
+      if (!collapsedSections.delete(key)) collapsedSections.add(key);
+      try { localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsedSections])); } catch { /* per-launch preference only */ }
+      renderNavigation(); break;
+    }
+    case 'toggle-completed': if (state.query.trim()) break; completedOpen = !completedOpen; completedShown = COMPLETED_FIRST; try { localStorage.setItem(COMPLETED_OPEN_KEY, String(completedOpen)); } catch { /* per-launch preference only */ } renderNavigation(); break;
     case 'select-project': await selectProject(element.dataset.id!); break;
-    case 'archive-view': state.archived = !state.archived; renderNavigation(); break;
     case 'toggle-theme': toggleTheme(); break;
     case 'colors-settings': await showColorsSettings(); break;
     case 'ui-size-decrease': changeUiScale(-1); break;
     case 'ui-size-increase': changeUiScale(1); break;
     case 'ui-size-reset': setUiScale(1); break;
-    case 'archive-task': { const s = session(); if (s) await archiveTask(s, true); break; }
     case 'delete-task': showDeleteTask(); break;
     case 'search': showCommands(); break;
     case 'retry-response': { const finishing = finishingStreams.get(state.sessionId); if (finishing) await finishResponse(state.sessionId, finishing); break; }
@@ -5038,17 +5670,21 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'jev-assist': await openJevAssist(); break;
     case 'agent-usage': await showAgentUsage(); break;
     case 'bots': await showBots(); break;
-    case 'new-bot': await showBots({ startNew: true }); break;
+    case 'new-bot': hideCreateBotMenu(); await showBots({ startNew: true }); break;
+    case 'new-bot-menu': await showCreateBotMenu(element); break;
+    case 'new-channel': hideCreateBotMenu(); await createSharedChannel(); break;
+    case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
+    case 'close-shared-channel': closeSharedChannel(); break;
+    case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;
-    case 'bot-pause': if (element.dataset.bot) { const bot = sidebarBots.find(item => item.id === element.dataset.bot); if (bot) { await call('bot_set_paused', { botId: bot.id, paused: !bot.paused }); notify(bot.paused ? `${bot.name} resumed` : `${bot.name} paused`); await reloadBotProjects(false); } } break;
+    case 'bot-pause': if (element.dataset.bot) { const bot = sidebarBots.find(item => item.id === element.dataset.bot); if (bot) await setBotPaused(bot, !bot.paused); } break;
+    case 'toggle-hidden-bots': hiddenBotsOpen = !hiddenBotsOpen; try { localStorage.setItem('pandacode.botsHiddenOpen', String(hiddenBotsOpen)); } catch { /* Keep the choice for this window. */ } renderBots(); break;
+    case 'mark-bots-read': markAllBotsRead(sidebarBots, bot => state.sessions.filter(task => task.projectId === bot.projectId && task.lastResponseAt).map(task => task.lastResponseAt!)); renderBots(); break;
     case 'open-bot': if (element.dataset.bot) await openBot(element.dataset.bot); break;
-    case 'bot-task-menu': await showBotTaskMenu(element); break;
     case 'computer-menu': await showComputerMenu(element); break;
-    case 'remote-choose-computer': {
-      const anchor = document.querySelector<HTMLElement>('#composer-computer');
-      if (anchor) await showComputerMenu(anchor);
-      break;
-    }
+    case 'remote-choose-computer': { const chip = document.querySelector<HTMLElement>('#composer-computer'); if (chip) await showComputerMenu(chip); break; }
+    case 'bot-task-menu': await showBotTaskMenu(element); break;
+    case 'cloud-menu': await showCloudMenu(element); break;
     case 'toggle-bots-view': setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
     case 'import-conversations': await showConversationImport(); break;
     case 'agent-updates': await agentUpdates.show(); break;
@@ -5073,8 +5709,10 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'terminal': await toggleTerminal(); break;
     case 'toggle-inspector': state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector; inspectorSuppressed = false; renderInspector(); break;
     case 'tab-vm': openVm(); break;
+    case 'tab-btw': openBtw(); btwPanel.focus(); break;
     case 'inspector-add-tab': await showInspectorViews(element); break;
-    case 'close-inspector-tab': closeInspectorTab(element.dataset.view as InspectorView); break;
+    case 'close-inspector-tab': closeInspectorTab(element.dataset.view as PanelView); break;
+    case 'tab-open-files': state.inspectorTab = 'file'; state.selectedKind = ''; renderInspector(); break;
     case 'tab-design': inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'design'; state.selectedKind = ''; renderInspector(); break;
     case 'deploy': await showDeploy(element); break;
     case 'tab-simulator': case 'simulator': if (name === 'simulator' && state.inspector && state.inspectorTab === 'simulator' && !inspectorSuppressed) { state.inspectorTab = 'changes'; renderInspector(); } else openSimulator(); break;
@@ -5084,16 +5722,17 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'tab-changes': case 'tab-files': state.inspectorTab = name === 'tab-files' ? 'files' : 'changes'; state.selectedKind = ''; renderInspector(); break;
     case 'tab-search': state.inspectorTab = 'search'; state.selectedKind = ''; renderInspector(); document.querySelector<HTMLInputElement>('#inspector-content .search-input')?.focus(); break;
     case 'browser': inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'browser'; state.selectedKind = ''; renderInspector(); break;
-    case 'refresh-inspector': if (state.inspectorTab === 'pull') { pullView.forget(state.sessionId); renderInspector(); break; } if (state.inspectorTab === 'search') searchPanel.refresh(); refreshFileLinks(workspaceContext()); await refreshInspector(); break;
-    case 'open-folder': state.filePath = element.dataset.path!; await refreshInspector(); break;
-    case 'parent-folder': state.filePath = state.filePath.split('/').slice(0, -1).join('/'); await refreshInspector(); break;
+    case 'refresh-inspector': if (state.inspectorTab === 'btw') { await btwPanel.reload(); break; } if (state.inspectorTab === 'pull') { pullView.forget(state.sessionId); renderInspector(); break; } if (state.inspectorTab === 'search') searchPanel.refresh(); refreshFileLinks(workspaceContext()); await refreshInspector(); break;
+    case 'toggle-file-folder': await toggleFolder(element.dataset.path!); break;
+    case 'collapse-folders': state.openFolders = new Set(); state.folderFiles = new Map(); renderInspector(); document.querySelector<HTMLElement>('#inspector-content .file-row button')?.focus(); break;
     case 'run-project': if (!element.dataset.sessionId || element.dataset.sessionId === state.sessionId) await projectRunner.run(); break;
     case 'preview-file': await previewFile(element.dataset.path!); break;
     case 'preview-selected-file': await previewFile(state.selectedFile, selectedFileContext); break;
-    case 'open-file': await openFile(element.dataset.path!, 'file', false, workspaceContext(), element.dataset.source === 'true'); break;
+    case 'open-file': await openFile(element.dataset.path!, 'file'); break;
+    case 'open-message-attachment': await openMessageAttachment(element); break;
+    case 'view-source': await openFile(element.dataset.path!, 'file', false, workspaceContext(), true); break;
     case 'open-diff': await openFile(element.dataset.path!, 'diff', element.dataset.staged === 'true'); break;
     case 'back-inspector': state.selectedKind = ''; renderInspector(); break;
-    case 'open-message-attachment': await openMessageAttachment(element); break;
     case 'attach': await attachments.openMenu(element); break;
     case 'attach-file': attachFile(element.dataset.path!); break;
     case 'detach': state.attachments = state.attachments.filter(p => p !== element.dataset.path); renderComposer(); break;
@@ -5113,7 +5752,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       break;
     }
     case 'architect-setup': await showArchitectSetup(element); break;
-    case 'team-toggle': await toggleTeam(); break;
+    case 'team-menu': await showTeamMenu(element); break;
     case 'steer': await steerFromComposer(); break;
     case 'remote-retry': await retryRemoteConnection(); break;
     case 'stop': if (session()) { notify('Stopping task…'); await stopTask(session()!); } break;
@@ -5125,61 +5764,67 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   }
 }
 mountExternalLinks(document, url => call('open_external_url', { url }), report);
-document.addEventListener('contextmenu', event => {
-  const card = (event.target as Element).closest<HTMLElement>('#project-board .board-card[data-task-id]');
-  if (!card) return;
-  event.preventDefault();
-  const task = state.sessions.find(item => item.id === card.dataset.taskId);
-  if (!task) return;
-  const busy = isRunning(task.id) || configuringSessions.has(task.id) || finishingStreams.has(task.id) || task.goalState?.status === 'active';
-  void showChoices(card, { title: 'Board task actions', actions: true, items: [
-    ...(['pending', 'review', 'completed'] as TaskStage[]).filter(stage => stage !== taskStage(task)).map(stage => ({
-      id: stage, label: stage === 'completed' ? 'Mark complete' : stage === 'review' ? 'Move to Review' : 'Move to Pending',
-      icon: stage === 'completed' ? 'check' : 'arrow', disabled: busy || task.archived,
-      description: busy ? 'Stop active work before changing the stage.' : task.archived ? 'Restore the task first.' : undefined,
-    })),
-    { id: 'archive', label: task.archived ? 'Restore task' : 'Archive task', icon: 'archive', disabled: busy },
-    { id: 'delete', label: 'Delete task…', icon: 'trash', danger: true, disabled: busy },
-  ], onSelect: choice => {
-    closeChoiceMenu();
-    if (choice === 'archive') run(archiveTask(task, true));
-    else if (choice === 'delete') showDeleteTask(task.id, chatTask(task));
-    else run(changeTaskStage(task.id, choice as TaskStage));
-  } });
-});
-document.addEventListener('dragstart', event => {
-  const card = (event.target as Element).closest<HTMLElement>('.board-card[draggable="true"]');
-  if (!card || !event.dataTransfer) return;
-  event.dataTransfer.setData('text/plain', card.dataset.taskId ?? ''); event.dataTransfer.effectAllowed = 'move';
-});
-document.addEventListener('dragover', event => {
-  const column = (event.target as Element).closest<HTMLElement>('.board-column');
-  if (!column || !event.dataTransfer?.types.includes('text/plain')) return;
-  event.preventDefault(); event.dataTransfer.dropEffect = 'move'; column.classList.add('board-drop-target');
-});
-document.addEventListener('dragleave', event => {
-  const column = (event.target as Element).closest<HTMLElement>('.board-column');
-  if (column && !column.contains(event.relatedTarget as Node | null)) column.classList.remove('board-drop-target');
-});
-document.addEventListener('drop', event => {
-  const column = (event.target as Element).closest<HTMLElement>('.board-column');
-  if (!column) return;
-  event.preventDefault(); document.querySelectorAll('.board-drop-target').forEach(item => item.classList.remove('board-drop-target'));
-  const id = event.dataTransfer?.getData('text/plain');
-  if (id && column.dataset.stage) run(moveBoardTask(id, column.dataset.stage as TaskStage));
-});
 document.addEventListener('click', event => {
-  const target = event.target as Element;
-  // Message markup cannot grant access to arbitrary application actions. Only
-  // the saved user's attachment button opts into this delegated handler.
-  const element = target.closest('.markdown,.streaming-content,.message-content')
-    ? target.closest<HTMLElement>('.user-message > .message-content > .message-attachments > button[data-action="open-message-attachment"]')
-    : target.closest<HTMLElement>('[data-action]');
-  if (!element || element instanceof HTMLButtonElement && element.disabled) return;
-  event.preventDefault(); run(action(element.dataset.action!, element));
+  const button = (event.target as Element | null)?.closest<HTMLButtonElement>('[data-shared-action]');
+  if (!button || !state.sharedChannelId) return;
+  const action = button.dataset.sharedAction;
+  if (action === 'reassign-toggle') { const menu = button.nextElementSibling as HTMLElement | null; if (menu) { menu.hidden = !menu.hidden; button.setAttribute('aria-expanded', String(!menu.hidden)); } return; }
+  const channelId = state.sharedChannelId, messageId = button.dataset.message;
+  if (action === 'earlier') {
+    const history = button.closest<HTMLElement>('.bc-history');
+    state.sharedChannelLimits.set(channelId, (state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE) + CHANNEL_PAGE);
+    button.disabled = true;
+    if (history) state.sharedChannelFromBottom = history.scrollHeight - history.scrollTop;
+    run(refreshSharedChannel(channelId));
+    return;
+  }
+  if (action === 'stop') run(call('bot_shared_channel_stop', { channelId }).then(() => refreshSharedChannel(channelId)).catch(error => notify(String(error))));
+  else if (action === 'continue' && messageId) run(call('bot_shared_channel_continue', { channelId, messageId }).then(() => refreshSharedChannel(channelId)).catch(error => notify(String(error))));
+  else if (action === 'reassign' && messageId && button.dataset.bot) run(call('bot_shared_channel_reassign', { channelId, messageId, botId: button.dataset.bot }).then(() => refreshSharedChannel(channelId)).catch(error => notify(String(error))));
+});
+document.addEventListener('click', event => { const target = event.target as Element; if (target.closest('.markdown,.streaming-content,.message-content') && !target.closest('.message-attachments')) return; const element = target.closest<HTMLElement>('[data-action]'); if (!element || element instanceof HTMLButtonElement && element.disabled) return; event.preventDefault(); run(action(element.dataset.action!, element)); });
+document.addEventListener('click', event => {
+  const button = (event.target as Element).closest<HTMLButtonElement>('[data-failover]');
+  if (!button || button.disabled) return;
+  const card = button.closest<HTMLElement>('.bot-failover'), sessionId = card?.dataset.failoverSession;
+  const action = button.dataset.failover;
+  if (!card || !sessionId || !botFailovers.has(sessionId) || (action !== 'send' && action !== 'wait')) return;
+  event.preventDefault(); button.disabled = true;
+  const always = card.querySelector<HTMLInputElement>('[data-failover-always]')?.checked ?? false;
+  run((async () => {
+    try {
+      botFailoverErrors.delete(sessionId);
+      await call('bot_failover_decide', { sessionId, action, always });
+      botFailovers.delete(sessionId);
+      if (state.sessionId === sessionId) renderComposer();
+    } catch (error) {
+      botFailoverErrors.set(sessionId, error instanceof Error ? error.message : String(error));
+      if (state.sessionId === sessionId) renderComposer();
+      if (button.isConnected) button.disabled = false;
+    }
+  })());
 });
 document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
+  if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
+    const channelId = state.sharedChannelId, text = String(new FormData(form).get('text') ?? '').trim();
+    if (!text) return;
+    state.sharedChannelDrafts.delete(channelId);
+    const channel = state.sharedChannelDetail;
+    const recipients = (channel?.memberIds ?? []).filter(id => {
+      const name = sidebarBots.find(bot => bot.id === id)?.name;
+      return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
+    }).slice(0, 2);
+    state.sharedChannelPosting.add(channelId); renderComposer();
+    // A failed post goes back to its own channel's draft, unless something new was typed there.
+    run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
+      state.sharedChannelPosting.delete(channelId);
+      if (!state.sharedChannelDrafts.get(channelId)?.trim()) state.sharedChannelDrafts.set(channelId, text);
+      notify(error instanceof Error ? error.message : String(error));
+      if (channelId === state.sharedChannelId) renderComposer();
+    }));
+    return;
+  }
   if (form.id === 'composer') { run(send()); return; }
   const data = new FormData(form); const submitter = form.querySelector<HTMLButtonElement>('button:not([type="button"])'); if (submitter) submitter.disabled = true;
   run((async () => {
@@ -5187,7 +5832,8 @@ document.addEventListener('submit', event => {
       if (form.id === 'board-task-form') { await saveBoardTaskForm(form, data); }
       else if (form.id === 'open-project-form') {
         const path = String(data.get('path') || '').trim(); if (!path) return; await addProject(path);
-      } else if (form.id === 'rename-form') { const title = String(data.get('title') || '').trim(); if (!title) return; await call('update_session', { sessionId: state.sessionId, title }); closeModal(); await reloadSessions(); }
+      } else if (form.id === 'rename-form') { const title = String(data.get('title') || '').trim(); if (!title) return; await call('update_session', { sessionId: form.dataset.sessionId || state.sessionId, title }); closeModal(); await reloadSessions(); }
+      else if (form.id === 'remove-project-form') { await removeProject(form.dataset.projectId!); closeModal(); }
       else if (form.id.startsWith('worktree-')) { await worktrees.submit(form, data); }
       else if (form.id.startsWith('github-')) { await github.submit(form, data); }
       else if (form.id === 'commit-form') { const message = document.querySelector<HTMLTextAreaElement>('#commit-message')!.value.trim(); if (!message) { notify('Enter a commit message.'); return; } const result = await call<string>('git_commit', { ...workspaceContext(), message }); await refreshInspector(); notify(result || 'Changes committed'); }
@@ -5202,7 +5848,12 @@ function resizePrompt(): void {
   prompt.style.overflowY = prompt.scrollHeight > prompt.clientHeight + 1 ? 'auto' : 'hidden';
 }
 window.addEventListener('pandacode-ui-scale-change', resizePrompt);
-document.addEventListener('input', event => { const input = event.target as HTMLInputElement; if (input.id === 'command-query') renderCommands(input.value); if (input.id === 'prompt') resizePrompt(); });
+document.addEventListener('input', event => { const input = event.target as HTMLInputElement; if (input.id === 'command-query') renderCommands(input.value); if (input.id === 'prompt') resizePrompt(); if (input.id === 'shared-channel-prompt' && state.sharedChannelId) state.sharedChannelDrafts.set(state.sharedChannelId, input.value); if (input.id === 'sidebar-filter') { state.query = input.value; renderNavigation(); } });
+document.addEventListener('scroll', event => {
+  if (!state.sharedChannelId) return;
+  const history = (event.target as Element | null)?.closest?.('.bc-history') as HTMLElement | null;
+  if (history) { state.sharedChannelScrollTop = history.scrollTop; state.sharedChannelAtBottom = history.scrollHeight - history.clientHeight - history.scrollTop < 32; }
+}, true);
 document.addEventListener('change', event => {
   const input = event.target as HTMLInputElement;
   if (input.id === 'daily-wallpapers') wallpapers.setEnabled(input.checked);
@@ -5239,6 +5890,7 @@ document.addEventListener('keydown', event => {
   // ⌘F finds in the open thread; ⌘G and ⇧⌘G step through its matches.
   if (command && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f') { if (session() && transcriptVisible()) { event.preventDefault(); threadFind.open(); } return; }
   if (command && !event.altKey && event.key.toLowerCase() === 'g' && threadFind.isOpen()) { event.preventDefault(); threadFind.step(event.shiftKey ? -1 : 1); return; }
+  if (sidebarShortcut(event)) return;
   if (command && event.key.toLowerCase() === 'n') { event.preventDefault(); if (state.view === 'board') showBoardTaskForm(); else run(createTask()); }
   else if (command && event.key.toLowerCase() === 'j') { event.preventDefault(); run(toggleTerminal()); }
   else if (command && event.key === ',') { event.preventDefault(); run(showSettings()); }
@@ -5249,6 +5901,7 @@ document.addEventListener('keydown', event => {
     if (isRunning()) run(event.metaKey || event.ctrlKey ? steerFromComposer() : enqueueFromComposer());
     else if (finishingStreams.has(state.sessionId)) run(enqueueFromComposer()); else run(send());
   }
+  else if (event.key === 'Enter' && (event.target as HTMLElement).id === 'shared-channel-prompt' && !event.shiftKey && !event.isComposing) { event.preventDefault(); (event.target as HTMLTextAreaElement).form?.requestSubmit(); }
   else if (event.key === 'Enter' && (event.target as HTMLElement).classList.contains('queue-edit') && (event.metaKey || event.ctrlKey)) { event.preventDefault(); run(saveQueueEdit()); }
   else if (event.key === 'Escape' && settingsView && !event.defaultPrevented && !document.querySelector<HTMLDialogElement>('#dialog')?.open && !document.querySelector('.floating-menu')) { event.preventDefault(); closeSettings(); }
   else if (event.key === 'Escape' && state.view !== 'conversation' && state.boardPanel && !event.defaultPrevented) { event.preventDefault(); closeMenus(); state.boardPanel = false; renderBoardView(); }
@@ -5271,12 +5924,6 @@ installTooltips();
 new MutationObserver(() => compactSublines(document.querySelector('#dialog')!)).observe(document.querySelector('#dialog')!, { childList: true, subtree: true });
 window.addEventListener('focus', renderNavigation);
 document.addEventListener('visibilitychange', () => { renderNavigation(); if (!document.hidden) { renderHeader(); renderStream(); } updateWorkTimer(); });
-document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('close', () => {
-  const pending = deferredIssueFailures;
-  if (!pending) return;
-  deferredIssueFailures = undefined;
-  queueMicrotask(() => showLinkedIssueActionFailures(pending.projectId, pending.failures));
-});
 if (localStorage.getItem('pandacode.compact') === 'true') document.body.classList.add('compact');
 // Material file icons arrive in a lazy chunk and have light-theme variants; markup is baked at render time.
 // A full render() here would close open menus mid-click; other icon spots pick the icons up on their next render.
@@ -5288,29 +5935,62 @@ async function boot(): Promise<void> {
   window.addEventListener(TEAM_MODE_EVENT, () => { if (session()) renderComposer(); });
   await subscribe('sessions-deleted', event => removeDeletedSessions(event.sessionIds));
   await subscribe('sessions-changed', () => run(reloadSessions()));
+  await subscribe('mirror-messages' as 'queue-changed', (event: { sessionId: string; older?: boolean }) => run(mirrorMessages(event)));
   // An agent booted or asked to show a simulator: bring the panel forward.
   // An agent started or asked to show a VM: bring the panel forward.
   run(subscribe('vm-changed', event => { if (event && !Array.isArray(event) && event.show) openVm(); void vmPanel?.refresh(); }).then(() => undefined));
-  // bridge.ts has no typed overload for this event yet.
   run((subscribe as (name: string, callback: () => void) => Promise<() => void>)('design-changed', () => void designPanel?.refresh()).then(() => undefined));
   run(subscribe('agent-event', (event: AgentEvent) => {
-    if (event.kind !== 'done' || event.sessionId !== state.sessionId) return;
+    if (event.kind !== 'done') return;
+    // A run can finish while another task is open; its totals refresh when next shown.
+    taskUsage.delete(event.sessionId);
+    if (event.sessionId !== state.sessionId) return;
+    ensureTaskUsage(event.sessionId);
     void designPanel?.refresh();
+    progressPip?.refresh(event.sessionId);
     if (document.hasFocus()) markTraySeen(event.sessionId);
   }).then(() => undefined));
-  run(subscribe('tray-open-session', sessionId => run((async () => {
+  run((subscribe as (name: string, callback: (event: unknown) => void) => Promise<() => void>)('tray-open-session', sessionId => run((async () => {
     if (typeof sessionId !== 'string') return;
     if (!state.sessions.some(s => s.id === sessionId)) await reloadSessions();
     if (state.view !== 'conversation') state.boardPanel = true;
     await selectSession(sessionId, true);
   })())).then(() => undefined));
+  run((subscribe as (name: string, callback: (event: { sessionId?: string } | null) => void) => Promise<() => void>)('progress-changed', event => progressPip?.refresh(event?.sessionId)).then(() => undefined));
   run(subscribe('simulator-changed', event => { if (event?.show) openSimulator(); void simulatorPanel?.refresh(); }).then(() => undefined));
   run(subscribe('bots-changed', () => run((async () => { botProjectsLoad = reloadBotProjects(); await botProjectsLoad; botsView?.refresh(); })())).then(() => undefined));
+  run(subscribe('bot-shared-channel-changed', event => { run(reloadBotProjects(false)); if (state.sharedChannelId && (!event?.channelId || event.channelId === state.sharedChannelId)) void refreshSharedChannel(); }).then(() => undefined));
+  run(subscribe('bot-messages-changed', () => {
+    botThreadMetaLoaded.clear();
+    const bot = botForThread();
+    if (bot && state.sessionId) void refreshBotThreadMeta(bot, state.sessionId, true);
+  }).then(() => undefined));
   run(initRemote());
+  run(initCloudAgents());
+  run(initOrchestration({ call, listen: (name, callback) => (subscribe as (name: string, callback: (event: any) => void) => Promise<() => void>)(name, callback), notify, modal, closeModal, openSession: id => run(selectSession(id, true)), sessionId: () => state.sessionId, running: () => isRunning(), title: id => state.sessions.find(s => s.id === id)?.title }));
   run(subscribe('bot-notification', event => { if (event?.text) notify(String(event.text).replace(/\s+/g, ' ').slice(0, 160)); }).then(() => undefined));
+  run(subscribe('bot-failover', (ask: FailoverAsk) => {
+    if (!ask?.sessionId) return;
+    botFailovers.set(ask.sessionId, ask);
+    if (state.sessionId === ask.sessionId) renderComposer();
+  }).then(() => undefined));
+  run(subscribe('bot-model-switch', (event: { botId?: string; at?: number; text?: string; detail?: Record<string, unknown> }) => {
+    const sessionId = typeof event?.detail?.sessionId === 'string' ? event.detail.sessionId : '';
+    const bot = sidebarBots.find(item => item.id === event?.botId);
+    if (!sessionId || !bot) return;
+    const activity: BotActivity = { id: Number(event.at) || Date.now(), kind: 'model-switch', summary: event.text ?? '', detail: event.detail ?? {}, at: Number(event.at) || Date.now() };
+    botSwitches.set(sessionId, mergeBotSwitches(botSwitches.get(sessionId) ?? [], [activity]));
+    if (state.sessionId === sessionId) renderTranscript(true);
+    void refreshBotThreadMeta(bot, sessionId, true);
+  }).then(() => undefined));
   // Bots appear in the sidebar once loaded; startup does not wait for them.
   botProjectsLoad = reloadBotProjects(false); run(botProjectsLoad);
   run(subscribe('bot-pairing', event => { if (event?.code) notify(`${event.senderName || 'Someone'} wants to talk to a bot. Approve code ${event.code} in Bots.`); }).then(() => undefined));
+  // Wake-ups for the open thread and the sidebar's clocks; refreshed on schedules-changed.
+  run(initWakeups({
+    sessionId: () => state.sessionId, showChoices, notify, report, changed: scheduleNavigation,
+    openSettings: intent => run(showSettings('schedules', intent)),
+  }));
   // Agents can queue or remove follow-ups through their tools; an idle, unheld task sends right away.
   await subscribe('queue-changed', payload => run((async () => {
     const id = payload?.sessionId; if (!id) return;
@@ -5355,36 +6035,16 @@ async function boot(): Promise<void> {
   run(fileIconsReady.then(refreshFileIcons));
   window.addEventListener('pandacode-theme-change', refreshFileIcons);
   if (state.view !== 'conversation' && state.generation === bootGeneration) { state.boardPanel = false; renderInspector(); renderBoardView(); }
-  if (githubEnabled()) for (const project of state.projects) {
-    if (state.sessions.some(task => task.projectId === project.id && task.issue?.kind === 'issue')) run(retryLinkedIssueActionsOnConnect(project.id));
-  }
   if (!preview && !state.providers.some(p => p.installed)) notify('Open Settings to check your installed agent CLIs.');
-  workspaceReady = true;
-  // Sidebar actions must not accept clicks before provider/project discovery.
-  // This also makes early user clicks wait for the real event handler/boot state.
-  document.querySelector<HTMLButtonElement>('.new-task-button')?.removeAttribute('disabled');
 }
 // PandaCode's own updates: checked on GitHub Releases, installed when no agent is working.
-const updates = startAppUpdates({ busy: () => state.sessions.some(task => isRunning(task.id)), notify });
-{
-  const pill = $('#update-status');
-  const paint = () => {
-    const current = updates.state;
-    pill.hidden = current.kind !== 'ready' && current.kind !== 'installing';
-    if (current.kind !== 'ready' && current.kind !== 'installing') return;
-    pill.title = current.kind === 'ready' ? `PandaCode ${current.version} is ready. Restart now, or it restarts on its own when your agents are done.` : `Installing ${current.version}…`;
-    (pill as HTMLButtonElement).disabled = current.kind === 'installing';
-  };
-  updates.subscribe(paint);
-  pill.addEventListener('click', () => { void updates.restart(); });
-  paint();
-}
+mountUpdatePill($('#update-status') as HTMLButtonElement, startAppUpdates({ busy: () => state.sessions.some(task => isRunning(task.id)), notify }));
 const agentUpdates = initializeAgentUpdates({
   modal, closeModal, report, providers: () => state.providers,
   providersChanged: async () => { await discoverSettingsProviders(); refreshModelLabels(); slashPicker?.refresh(true); },
 });
 window.addEventListener('pagehide', () => agentUpdates.dispose(), { once: true });
-renderThemeToggle(); render(); renderInspector();
-document.querySelector<HTMLButtonElement>('.new-task-button')?.setAttribute('disabled', '');
-run(boot());
+renderThemeToggle(); render(); renderInspector(); run(boot());
+// The diff engine (module, highlighter workers, themes) starts right after the first paint.
+preloadDiffsAfterPaint();
 if (!preview) initializeNativeAppearance();

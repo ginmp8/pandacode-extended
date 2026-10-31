@@ -1,8 +1,5 @@
 node_modules/
 __pycache__/
-.venv/
-venv/
-coverage/
 dist/
 src-tauri/target/
 src-tauri/gen/
@@ -21,6 +18,3 @@ website/.astro/
 *.p8
 *.key
 *.pem
-*.log
-
-.vite-cache/

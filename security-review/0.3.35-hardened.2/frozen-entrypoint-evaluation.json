@@ -1,6 +1,0 @@
-{
-  "file": "candidate/tests/hardened-entrypoint.test.mjs",
-  "sha256": "fadfb1822d955dcf30368f005424aaf31116000d5ad54e2f97765b64a6515d86",
-  "cases": 3,
-  "red": "entrypoint-red.tap: 3/3 failed; integration function absent"
-}

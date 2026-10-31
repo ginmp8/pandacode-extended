@@ -290,9 +290,6 @@ fn payload(state: &str, questions: &[Question]) -> Result<Value, String> {
 }
 
 fn openrouter_body(model: &str, state: &str, questions: &[Question]) -> Result<Vec<u8>, String> {
-    if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
-        return Err("Choose a valid OpenRouter decision model.".into());
-    }
     let user = encode(&payload(state, questions)?)?;
     encode(&json!({
         "model": model,
@@ -746,9 +743,6 @@ mod tests {
 
     #[test]
     fn openrouter_reuses_the_typed_payload_and_validates_answers() {
-        for model in ["", "vendor/model\n", &"x".repeat(201)] {
-            assert!(openrouter_body(model, "Evidence", &questions()).is_err());
-        }
         let body: Value =
             serde_json::from_slice(&openrouter_body("vendor/model", "Evidence", &questions()).unwrap())
                 .unwrap();

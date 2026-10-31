@@ -29,9 +29,6 @@ const userMessages = (page: Page, text: string) => page.locator('#transcript .us
 
 test('the first prompt to another computer shows at once, with the start stages in its turn', async ({ page }) => {
   await sendToStudio(page, 'Run the slow suite over there');
-  // The remote start is manually paced: hold the preview's final streaming frame
-  // until the browser has observed the complete streamed text.
-  await page.evaluate(() => { (window as any).__holdPreviewCompletion = true; });
   const status = page.locator('#stream-region .live-status');
   // Still connecting: the host has not answered, yet the prompt is in the thread.
   await expect(userMessages(page, 'Run the slow suite over there')).toHaveCount(1);
@@ -53,8 +50,6 @@ test('the first prompt to another computer shows at once, with the start stages 
   // The host's events stream in under the prompt, before the run ends.
   await expect(page.locator('#stream-region .live-text')).toContainText('This is the browser preview');
   await expect(userMessages(page, 'Run the slow suite over there')).toHaveCount(1);
-  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
-  await page.evaluate(() => (window as any).__releasePreviewCompletion());
   // After the run, history (copied from the host) holds exactly one copy.
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
   await expect(page.locator('#transcript .agent-message.message').filter({ hasText: 'Open the native PandaCode app' }).first()).toBeVisible();
@@ -64,14 +59,11 @@ test('the first prompt to another computer shows at once, with the start stages 
 
   // A follow-up on the mirror shows at once too, streams live, and ends with one copy.
   const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
-  await page.evaluate(() => { (window as any).__holdPreviewCompletion = true; });
   await prompt.fill('Now the fast suite');
   await prompt.press('Enter');
   await expect(userMessages(page, 'Now the fast suite')).toHaveCount(1);
   await expect(page.locator('#stream-region .live-text')).toContainText('This is the browser preview');
   await expect(userMessages(page, 'Now the fast suite')).toHaveCount(1);
-  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
-  await page.evaluate(() => (window as any).__releasePreviewCompletion());
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
   await expect(page.locator('#transcript .user-message[data-message-id^="-"]')).toHaveCount(0);
   await expect(userMessages(page, 'Now the fast suite')).toHaveCount(1);
@@ -97,64 +89,4 @@ test('a failed start takes the prompt back to the composer, and Retry shows it a
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
   await expect(page.locator('#transcript .agent-message.message').filter({ hasText: 'Open the native PandaCode app' }).first()).toBeVisible();
   await expect(userMessages(page, 'Try the flaky build')).toHaveCount(1);
-});
-
-test('a mirror follow-up prepared in the background stays visible until host history catches up', async ({ page }) => {
-  await page.route('**/src/github.ts*', async route => {
-    const response = await route.fetch(), source = await response.text();
-    const marker = /async function contextFor\([^)]*\) \{/;
-    expect(source).toMatch(marker);
-    await route.fulfill({ response, body: source.replace(marker, `$&
-      if (window.__holdRemoteContext) {
-        window.__holdRemoteContext = false;
-        await new Promise(resolve => { window.__releaseRemoteContext = resolve; });
-      }
-    `) });
-  });
-  await page.route('**/src/preview.ts*', async route => {
-    const response = await route.fetch(), source = await response.text();
-    const marker = /switch\s*\(command\)\s*\{/;
-    expect(source).toMatch(marker);
-    await route.fulfill({ response, body: source.replace(marker, `
-      if (command === 'send_message' && window.__holdRemoteFollowup) {
-        window.__holdRemoteFollowup = false;
-        const task = session(args.sessionId);
-        if (!task.remoteDevice) throw new Error('Expected a remote mirror');
-        task.status = 'running'; task.taskStage = 'in_progress'; task.lastPromptAt = Date.now();
-        messages[task.id].push({ id: ++id, sessionId: task.id, role: 'user', content: args.text, createdAt: Date.now() });
-        agent({ sessionId: task.id, kind: 'status', text: 'Waiting for the host' });
-        window.__finishRemoteFollowup = () => finish(task.id, 'Background follow-up completed.');
-        return undefined;
-      }
-      switch (command) {
-    `) });
-  });
-  await sendToStudio(page, 'Start the mirror conversation');
-  for (let step = 0; step < 8; step++) await next(page);
-  await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 10_000 });
-  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
-  const mirrorId = await prompt.getAttribute('data-session-id');
-  await page.evaluate(() => {
-    (window as any).__holdRemoteContext = true;
-    (window as any).__holdRemoteFollowup = true;
-  });
-  await prompt.fill('Follow up after switching tasks');
-  await prompt.press('Enter');
-  await page.waitForFunction(() => typeof (window as any).__releaseRemoteContext === 'function');
-  await page.locator('#navigation .task-item[data-id="session-1"]').click();
-  await prompt.fill('Keep the local task draft');
-  await page.evaluate(() => (window as any).__releaseRemoteContext());
-  await page.waitForFunction(() => typeof (window as any).__finishRemoteFollowup === 'function');
-  await expect(prompt).toHaveValue('Keep the local task draft');
-  await expect(userMessages(page, 'Follow up after switching tasks')).toHaveCount(0);
-  await page.locator(`#navigation .task-item[data-id="${mirrorId}"]`).click();
-  await expect(userMessages(page, 'Follow up after switching tasks')).toHaveCount(1);
-  await expect(userMessages(page, 'Start the mirror conversation')).toHaveCount(1);
-  await expect(page.locator('#stream-region .live-status')).toHaveText('Waiting for the host');
-  await page.evaluate(() => (window as any).__finishRemoteFollowup());
-  await expect(page.locator('#transcript')).toContainText('Background follow-up completed.');
-  await expect(page.locator('#transcript .user-message[data-message-id^="-"]')).toHaveCount(0);
-  await expect(userMessages(page, 'Follow up after switching tasks')).toHaveCount(1);
-  await page.locator('#navigation .task-item[data-id="session-1"]').click();
-  await expect(prompt).toHaveValue('Keep the local task draft');
 });

@@ -2,9 +2,8 @@ import { test as base, expect, type Page, type TestInfo } from '@playwright/test
 import { mkdir, writeFile } from 'node:fs/promises';
 
 const screenshots = '/private/tmp/pandacode-landing-checks';
-const repo = 'https://github.com/ginmp8/pandacode-extended';
-const originalRepo = 'https://github.com/aicodeking/pandacode';
-const releases = `${originalRepo}/releases/latest`;
+const repo = 'https://github.com/aicodeking/pandacode';
+const releases = `${repo}/releases/latest`;
 const issues = `${repo}/issues`;
 const test = base.extend<{ browserHealth: void }>({
   browserHealth: [async ({ page }, use) => {
@@ -52,14 +51,11 @@ test('hero, supported harnesses, and complete page have valid resources and resp
   for (const id of ['hero-distribution', 'download-distribution']) {
     const disclosure = page.locator(`#${id}`);
     await expect(disclosure).toContainText('macOS · Windows · Linux');
-    await expect(disclosure).toContainText('original PandaCode builds, not PandaCode Extended installers');
-    await expect(disclosure).toContainText('Unsigned build');
-    await expect(disclosure).toContainText('Windows x64: unsigned installer');
-    await expect(disclosure).toContainText('Linux x64: AppImage');
-    await expect(disclosure).toContainText('Apple silicon · macOS 12+');
-    await expect(disclosure).toContainText('Not notarized by Apple');
-    await expect(disclosure).toContainText('macOS may block the first launch');
-    await expect(disclosure.getByRole('link', { name: /First-launch help/ })).toHaveAttribute('href', 'https://support.apple.com/en-us/102445');
+    await expect(disclosure).toContainText('Signed and notarized by Apple');
+    await expect(disclosure).not.toContainText('Unsigned build');
+    await expect(disclosure).toContainText('Windows x64 and arm64: unsigned installer');
+    await expect(disclosure).toContainText('Linux x86_64 and aarch64: AppImage');
+    await expect(disclosure).toContainText('Apple silicon or Intel · macOS 12+');
     await expect(page.locator(`[data-download][aria-describedby~="${id}"]`)).toHaveCount(1);
   }
   await capture(page, info, 'hero');
@@ -72,7 +68,7 @@ test('hero, supported harnesses, and complete page have valid resources and resp
   }
   await expect(page.locator('#preview-notes')).toContainText('free, open-source software');
   await expect(page.locator('#preview-notes')).toContainText('provider subscriptions and model usage are separate');
-  await expect(page.locator('#preview-notes')).toContainText('Apple silicon Macs, Windows x64, and Linux x64 are published on GitHub Releases');
+  await expect(page.locator('#preview-notes')).toContainText('Apple silicon and Intel Macs, Windows x64 and arm64, and Linux x86_64 and aarch64 are published on GitHub Releases');
   await expect(page.locator('#preview-notes').getByRole('link', { name: 'PandaCode License' })).toHaveAttribute('href', '/license/');
   await expect(page.locator('#preview-notes').getByRole('link', { name: /Report an issue/ })).toHaveAttribute('href', issues);
   await expect.poll(() => page.locator('img:visible').evaluateAll(images => images.filter(image => !(image as HTMLImageElement).complete || !(image as HTMLImageElement).naturalWidth).map(image => (image as HTMLImageElement).src))).toEqual([]);
@@ -135,7 +131,8 @@ async function expectPrivacyDetails(page: Page) {
   await expect(footer.getByRole('link', {name: 'License', exact: true})).toHaveAttribute('href', '/license/');
   await expect(footer.getByRole('link', {name: 'Changelog', exact: true})).toHaveAttribute('href', '/changelog/');
   await expect(footer.getByRole('link', {name: 'GitHub', exact: true})).toHaveAttribute('href', repo);
-  await expect(footer.getByRole('link', {name: 'Support', exact: true})).toHaveAttribute('href', issues);
+  await expect(footer.getByRole('link', {name: 'Support', exact: true})).toHaveAttribute('href', '/support/');
+  await expect(footer.getByRole('link', {name: 'Issues', exact: true})).toHaveAttribute('href', issues);
   await expect(footer.getByRole('link', {name: 'Terms'})).toHaveCount(0);
 }
 
@@ -195,9 +192,13 @@ test('download and source links go to GitHub, open safely, and fetch nothing unt
   await expect(page.locator('.download-content').getByRole('link', {name: /Download PandaCode/})).toHaveAttribute('href', releases);
   await expect(page.locator('.download-content').getByRole('link', {name: /View the source on GitHub/})).toHaveAttribute('href', repo);
   const direct = page.locator('[data-platform-download]');
-  await expect(direct).toHaveCount(3);
-  for (const [index, file] of ['PandaCode-macOS-arm64.dmg', 'PandaCode-Windows-x64-setup.exe', 'PandaCode-Linux-x86_64.AppImage'].entries()) {
-    await expect(direct.nth(index)).toHaveAttribute('href', `${originalRepo}/releases/latest/download/${file}`);
+  await expect(direct).toHaveCount(6);
+  for (const [index, file] of [
+    'PandaCode-macOS-arm64.dmg', 'PandaCode-macOS-x64.dmg',
+    'PandaCode-Windows-x64-setup.exe', 'PandaCode-Windows-arm64-setup.exe',
+    'PandaCode-Linux-x86_64.AppImage', 'PandaCode-Linux-aarch64.AppImage',
+  ].entries()) {
+    await expect(direct.nth(index)).toHaveAttribute('href', `${repo}/releases/latest/download/${file}`);
   }
   for (const link of await page.locator('a[href^="https://github.com/"]:not([data-platform-download])').all()) {
     await expect(link).toHaveAttribute('target', '_blank');
@@ -227,7 +228,7 @@ test('the open-source section explains the license, privacy and building from so
   await expect(section.getByRole('heading', { level: 2 })).toHaveText('Free to use.Open to everyone.');
   for (const fact of ['MIT-based license.', 'No account.', 'No telemetry.', 'Bring your own agents.', 'Built in the open.']) await expect(section).toContainText(fact);
   const build = section.locator('pre');
-  for (const command of [`git clone ${repo}.git`, 'cd pandacode-extended', 'npm ci', 'npm run desktop']) await expect(build).toContainText(command);
+  for (const command of [`git clone ${repo}.git`, 'cd pandacode', 'npm ci', 'npm run desktop']) await expect(build).toContainText(command);
   await expect(section.getByRole('link', { name: /Star on GitHub/ })).toHaveAttribute('href', repo);
   await expect(section.getByRole('link', { name: /Contribute/ })).toHaveAttribute('href', issues);
   await expect(section.getByRole('link', { name: /Read the license/ })).toHaveAttribute('href', '/license/');
@@ -411,7 +412,7 @@ test('server-rendered hero and feature copy remain visible without JavaScript', 
   await expect(page.locator('.download-content .button')).toHaveAttribute('href', releases);
   await expect(page.locator('#open-source pre')).toContainText('npm run desktop');
   await expect(page.locator('#download-distribution')).toBeVisible();
-  await expect(page.locator('#download-distribution')).toContainText('Not notarized by Apple');
+  await expect(page.locator('#download-distribution')).toContainText('Signed and notarized by Apple');
   await expectPreviewDisclosures(page);
   await expectPrivacyDetails(page);
   await expectComparison(page);

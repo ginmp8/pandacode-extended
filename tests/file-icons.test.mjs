@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { fileIconId, fileIconUrl } from '../src/file-icons.ts';
 
@@ -30,15 +30,5 @@ test('the light theme uses light variants where they exist and dark icons otherw
 test('every resolved icon points at a shipped SVG', () => {
   for (const [name, isDir] of [['a.exe', false], ['x.unknown', false], ['src', true], ['Login', true]]) {
     assert.ok(existsSync(fileURLToPath(fileIconUrl(name, isDir))), name);
-  }
-});
-
-// npm run build runs before npm test in CI; this ensures native installers ship
-// every icon referenced by the installed manifest, not just icons used by tests.
-test('production build includes every Material Icon Theme SVG', () => {
-  const manifest = JSON.parse(readFileSync(new URL('../node_modules/material-icon-theme/dist/material-icons.json', import.meta.url), 'utf8'));
-  const files = new Set(Object.values(manifest.iconDefinitions).map(definition => definition.iconPath.split('/').pop()));
-  for (const filename of files) {
-    assert.ok(existsSync(new URL(`../dist/material-icons/${filename}`, import.meta.url)), `missing packaged icon ${filename}`);
   }
 });

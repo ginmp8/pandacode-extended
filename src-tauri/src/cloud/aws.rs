@@ -1,11 +1,10 @@
 //! AWS sandboxes through the user's own AWS CLI login (profiles, SSO or `aws login`):
 //! EC2 desktops for Linux (Ubuntu, arm64) and Windows Server, reached only through
-//! Systems Manager. No SSH key pair or VNC ingress rule is added; the account's default
-//! VPC security-group policy still applies. Commands run with SSM Run Command and the
-//! screen is VNC bound to the instance's localhost, forwarded by an SSM port-forwarding
-//! session. Instances are tagged `pandacode=sandbox`.
+//! Systems Manager. Instances have no inbound ports or key pairs; commands run with SSM
+//! Run Command and the screen is VNC bound to the instance's localhost, forwarded by an
+//! SSM port-forwarding session. Instances are tagged `pandacode=sandbox`.
 use serde_json::{json, Value};
-use std::{io::Write, path::PathBuf, process::Command, time::Duration};
+use std::{process::Command, time::Duration};
 
 use super::Machine;
 use crate::workspace::run_process;
@@ -13,38 +12,6 @@ use crate::workspace::run_process;
 pub const ROLE: &str = "PandaCodeSandboxRole";
 pub const PROFILE: &str = "PandaCodeSandboxProfile";
 const QUICK: Duration = Duration::from_secs(90);
-
-/// This file contains guest passwords. Create it exclusively with private Unix
-/// permissions before writing any bytes, and clean up on both success and error.
-struct UserDataFile {
-    path: PathBuf,
-}
-impl UserDataFile {
-    fn create(contents: &str) -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("pandacode-user-data-{}.txt", uuid::Uuid::new_v4()));
-        Self::create_at(path, contents).map_err(|e| format!("Could not write private AWS user data: {e}"))
-    }
-    fn create_at(path: PathBuf, contents: &str) -> std::io::Result<Self> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path)?;
-        // Construct the guard only after create_new succeeds: a pre-existing
-        // file or symlink must neither be changed nor removed on refusal.
-        let temporary = Self { path };
-        let written = file.write_all(contents.as_bytes()).and_then(|_| file.sync_all());
-        drop(file);
-        written?;
-        Ok(temporary)
-    }
-}
-impl Drop for UserDataFile {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Aws {
@@ -81,12 +48,10 @@ pub fn cli_error(stderr: &str) -> String {
 /// Linux user data: a light Xfce desktop on VNC display :1, bound to localhost.
 pub fn linux_user_data(password: &str) -> String {
     format!(r#"#!/bin/bash
-set +x
-set -euo pipefail
+set -eux
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q --no-install-recommends xfce4 xfce4-terminal dbus-x11 tigervnc-standalone-server tigervnc-common tigervnc-tools fonts-dejavu-core xdg-utils
-umask 077
 install -d -o ubuntu -g ubuntu -m 700 /home/ubuntu/.vnc
 printf '%s\n' {password} | vncpasswd -f > /home/ubuntu/.vnc/passwd
 chown ubuntu:ubuntu /home/ubuntu/.vnc/passwd && chmod 600 /home/ubuntu/.vnc/passwd
@@ -112,43 +77,21 @@ systemctl enable --now pandacode-vnc.service
 }
 
 /// Windows user data: TightVNC on loopback only, and automatic sign-in so the screen shows
-/// a desktop rather than the lock screen. EC2 user data and the guest's Winlogon
-/// configuration necessarily contain this guest password; they are not a secret vault.
+/// a desktop rather than the lock screen.
 pub fn windows_user_data(password: &str) -> String {
     let vnc = &password[..8.min(password.len())];
     format!(r#"<powershell>
 $ErrorActionPreference = 'Stop'
-Set-PSDebug -Off
-$staging = Join-Path $env:TEMP ('PandaCode-TightVNC-' + [guid]::NewGuid().ToString('N'))
-if (Test-Path -LiteralPath $staging) {{ throw 'Installer staging already exists.' }}
-$acl = [System.Security.AccessControl.DirectorySecurity]::new()
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {{
-    $identity = [System.Security.Principal.SecurityIdentifier]::new($sid)
-    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
-    $acl.AddAccessRule($rule)
-}}
-[System.IO.Directory]::CreateDirectory($staging, $acl) | Out-Null
-$msi = Join-Path $staging 'tightvnc.msi'
-try {{
-    Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 120 -Uri 'https://www.tightvnc.com/download/2.8.90/tightvnc-2.8.90-gpl-setup-64bit.msi' -OutFile $msi
-    $signature = Get-AuthenticodeSignature -LiteralPath $msi
-    if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {{ throw 'TightVNC installer has no valid Authenticode signature.' }}
-    $publisher = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
-    if (@('GlavSoft LLC', 'GlavSoft LLC.', 'GlavSoft OOO') -notcontains $publisher) {{ throw 'TightVNC installer publisher is not trusted.' }}
-    $installed = Start-Process "$env:SystemRoot\System32\msiexec.exe" -Wait -PassThru -ArgumentList "/i `"$msi`" /quiet /norestart ADDLOCAL=Server SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=0 SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD={vnc} SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1 SET_LOOPBACKONLY=1 VALUE_OF_LOOPBACKONLY=1"
-    if ($installed.ExitCode -notin @(0, 3010)) {{ throw 'TightVNC installation failed.' }}
-}} finally {{
-    Remove-Item -LiteralPath $staging -Recurse -Force
-}}
 $password = '{password}'
 net user Administrator $password
-if ($LASTEXITCODE -ne 0) {{ throw 'Could not configure the guest account.' }}
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 Set-ItemProperty $winlogon -Name AutoAdminLogon -Value '1'
 Set-ItemProperty $winlogon -Name DefaultUserName -Value 'Administrator'
 Set-ItemProperty $winlogon -Name DefaultPassword -Value $password
 powercfg /change monitor-timeout-ac 0
+$msi = "$env:TEMP\tightvnc.msi"
+Invoke-WebRequest -UseBasicParsing -Uri 'https://www.tightvnc.com/download/2.8.90/tightvnc-2.8.90-gpl-setup-64bit.msi' -OutFile $msi
+Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msi`" /quiet /norestart ADDLOCAL=Server SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=0 SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD={vnc} SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1 SET_LOOPBACKONLY=1 VALUE_OF_LOOPBACKONLY=1"
 Restart-Computer -Force
 </powershell>
 "#)
@@ -163,8 +106,7 @@ impl Aws {
     pub fn command(&self, args: &[&str]) -> Result<Command, String> {
         let aws = crate::token_saver::find_tool("aws").ok_or("The AWS CLI is not installed. Install it (brew install awscli), sign in with `aws login`, then connect again.")?;
         let mut command = Command::new(aws);
-        command.args(args).args(["--region", &self.region, "--output", "json", "--no-cli-pager"])
-            .env("AWS_PAGER", "").env("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true");
+        command.args(args).args(["--region", &self.region, "--output", "json", "--no-cli-pager"]).env("AWS_PAGER", "");
         if let Some(profile) = &self.profile {
             command.args(["--profile", profile]);
         }
@@ -233,17 +175,18 @@ impl Aws {
         let image = self.call(&["ssm", "get-parameter", "--name", flavor.parameter], QUICK)?["Parameter"]["Value"].as_str().map(str::to_string).ok_or("AWS did not report a current image for this OS.")?;
         let password = format!("Bb{}!7", &uuid::Uuid::new_v4().simple().to_string()[..18]);
         let user_data = if os == "windows" { windows_user_data(&password) } else { linux_user_data(&password) };
-        let file = UserDataFile::create(&user_data)?;
+        let file = std::env::temp_dir().join(format!("pandacode-user-data-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&file, &user_data).map_err(|e| e.to_string())?;
         let tags = format!("ResourceType=instance,Tags=[{{Key=Name,Value={name}}},{{Key=pandacode,Value=sandbox}},{{Key=pandacode-os,Value={os}}}]");
         // Ubuntu and Windows Server images both boot from /dev/sda1.
         let disk = format!("DeviceName=/dev/sda1,Ebs={{VolumeSize={},VolumeType=gp3,DeleteOnTermination=true}}", flavor.disk_gb);
         let launched = self.call(&[
             "ec2", "run-instances", "--image-id", &image, "--instance-type", flavor.instance_type, "--count", "1",
-            "--iam-instance-profile", &format!("Name={PROFILE}"), "--user-data", &format!("file://{}", file.path.display()),
+            "--iam-instance-profile", &format!("Name={PROFILE}"), "--user-data", &format!("file://{}", file.display()),
             "--tag-specifications", &tags, "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
             "--block-device-mappings", &disk, "--instance-initiated-shutdown-behavior", "stop",
         ], Duration::from_secs(180));
-        drop(file);
+        let _ = std::fs::remove_file(&file);
         let launched = launched.map_err(|e| if e.contains("VPCIdNotSpecified") || e.contains("No default VPC") { "This region has no default VPC. Create one (VPC console → Actions → Create default VPC) or pick another region.".into() } else { e })?;
         let instance = launched["Instances"][0].clone();
         Ok((Self::machine(&instance), password))
@@ -302,7 +245,7 @@ mod tests {
         assert!(machine.desktop && machine.detail.contains("Windows Server"));
     }
     #[test]
-    fn desktops_keep_vnc_on_localhost_without_a_vnc_firewall_exception() {
+    fn desktops_keep_vnc_on_localhost_and_never_open_ports() {
         let linux = linux_user_data("Bbsecret123!7");
         assert!(linux.contains("-localhost yes") && linux.contains("vncpasswd -f") && linux.contains("'Bbsecret123!7'"));
         let windows = windows_user_data("Bbsecret123!7");
@@ -311,89 +254,11 @@ mod tests {
         assert_eq!(flavor("linux").unwrap().vnc_port, 5901);
         assert!(flavor("macos").is_err());
     }
-
-    #[test]
-    fn user_data_file_is_private_exclusive_and_removed_after_use() {
-        let dir = std::env::temp_dir().join(format!("pandacode-user-data-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("user-data.txt");
-        {
-            let file = UserDataFile::create_at(path.clone(), "fixture-password").unwrap();
-            assert_eq!(std::fs::read_to_string(&file.path).unwrap(), "fixture-password");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                assert_eq!(std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777, 0o600);
-            }
-        }
-        assert!(!path.exists());
-        std::fs::write(&path, "keep-existing-file").unwrap();
-        assert!(UserDataFile::create_at(path.clone(), "replacement").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep-existing-file");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn user_data_file_is_removed_when_the_caller_fails() {
-        let path = std::env::temp_dir().join(format!("pandacode-user-data-error-{}", uuid::Uuid::new_v4()));
-        let failed: Result<(), String> = {
-            let _file = UserDataFile::create_at(path.clone(), "fixture-password").unwrap();
-            Err("The simulated AWS request failed.".into())
-        };
-        assert!(failed.is_err());
-        assert!(!path.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn user_data_file_never_follows_or_removes_an_existing_symlink() {
-        let dir = std::env::temp_dir().join(format!("pandacode-user-data-link-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let target = dir.join("target.txt");
-        let path = dir.join("user-data.txt");
-        std::fs::write(&target, "keep-target").unwrap();
-        std::os::unix::fs::symlink(&target, &path).unwrap();
-        assert!(UserDataFile::create_at(path.clone(), "replacement").is_err());
-        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep-target");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn linux_user_data_disables_inherited_tracing_before_secrets() {
-        let generated = linux_user_data("fixture-secret");
-        let prefix = generated.split("export DEBIAN_FRONTEND").next().unwrap();
-        // Only exercise the prologue and an inert printf, never provisioning.
-        let probe = format!("{prefix}\nprintf '%s' 'fixture-secret' >/dev/null\n");
-        let output = Command::new("bash").args(["-x", "-c", &probe]).output().unwrap();
-        assert!(output.status.success());
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-secret"));
-        assert!(output.stdout.is_empty());
-    }
-
-    #[test]
-    fn windows_verifies_publisher_before_install_and_cleans_up_before_autologon() {
-        let script = windows_user_data("Bbfixture123!7");
-        let signature = script.find("Get-AuthenticodeSignature -LiteralPath $msi").unwrap();
-        let valid = script.find("$signature.Status -ne 'Valid'").unwrap();
-        let publisher = script.find("-notcontains $publisher").unwrap();
-        let install = script.find("Start-Process").unwrap();
-        let cleanup = script.find("Remove-Item -LiteralPath $staging -Recurse -Force").unwrap();
-        let autologon = script.find("Set-ItemProperty $winlogon -Name AutoAdminLogon").unwrap();
-        assert!(signature < valid && valid < publisher && publisher < install);
-        assert!(install < cleanup && cleanup < autologon);
-        assert!(script.contains("} finally {"));
-        assert!(script.contains("'GlavSoft LLC', 'GlavSoft LLC.', 'GlavSoft OOO'"));
-        assert!(script.contains("SetAccessRuleProtection($true, $false)"));
-        assert!(script.contains("-MaximumRedirection 0 -TimeoutSec 120"));
-    }
     #[test]
     fn the_cli_uses_the_chosen_profile_and_region() {
         if crate::token_saver::find_tool("aws").is_none() { return; }
         let command = Aws { profile: Some("work".into()), region: "eu-west-1".into() }.command(&["sts", "get-caller-identity"]).unwrap();
         let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["sts", "get-caller-identity", "--region", "eu-west-1", "--output", "json", "--no-cli-pager", "--profile", "work"]);
-        assert!(command.get_envs().any(|(key, value)| key == "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS" && value.is_some_and(|value| value == "true")));
     }
 }

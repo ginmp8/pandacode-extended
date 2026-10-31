@@ -18,11 +18,6 @@ const MAX_FILE: u64 = 32 * 1024 * 1024;
 const IDLE: Duration = Duration::from_secs(30 * 60);
 const MAX_SERVERS: usize = 8;
 const MAX_CONNECTIONS: usize = 12;
-// Workspace HTML is untrusted content, not a web app granted the checkout's origin.
-// Interactive apps remain available through an explicitly opened development URL.
-const PREVIEW_CSP: &str = "sandbox allow-same-origin; default-src 'none'; script-src 'none'; connect-src 'none'; worker-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-// The bootstrap contains only our generated same-origin redirect, never file contents.
-const BOOTSTRAP_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,11 +296,6 @@ pub struct FilePreviews {
     servers: Mutex<VecDeque<Server>>,
 }
 impl FilePreviews {
-    pub(crate) fn is_preview_url(&self, url: &tauri::Url) -> bool {
-        self.servers.lock().map(|servers| servers.iter().any(|server| {
-            server.origin == url.origin().ascii_serialization() && !server.stop.is_closed()
-        })).unwrap_or(false)
-    }
     /// Called only by the trusted app's browser navigation command. A recreated
     /// private webview has no preview cookie, even though the saved URL is clean.
     /// Never authorize guest-initiated navigation or an unrelated localhost server.
@@ -652,8 +642,7 @@ async fn handle(mut stream: TcpStream, access: &Access) -> std::io::Result<()> {
         413 => "Content Too Large",
         _ => "Bad Request",
     };
-    let csp = if matches!(&reply, Ok(Reply::Bootstrap(_, _))) { BOOTSTRAP_CSP } else { PREVIEW_CSP };
-    let headers = format!("HTTP/1.1 {code} {reason}\r\nContent-Type: {mime}\r\nContent-Length: {length}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nCross-Origin-Resource-Policy: same-origin\r\nX-Frame-Options: DENY\r\nX-DNS-Prefetch-Control: off\r\nContent-Security-Policy: {csp}\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n{extra}\r\n");
+    let headers = format!("HTTP/1.1 {code} {reason}\r\nContent-Type: {mime}\r\nContent-Length: {length}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nCross-Origin-Resource-Policy: same-origin\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n{extra}\r\n");
     stream.write_all(headers.as_bytes()).await?;
     if !head {
         if let Ok(Reply::Bootstrap(_, body)) = &reply {
@@ -859,28 +848,6 @@ mod tests {
         let response = request(&secret, secret.path(), "").await;
         assert!(response.starts_with("HTTP/1.1 404"));
         assert!(!response.contains("PRIVATE"));
-    }
-
-    #[tokio::test]
-    async fn untrusted_html_is_served_with_script_network_and_form_isolation() {
-        let f = Fixture::new();
-        f.write("web/hello world.html", "<h1>Preview</h1><script>fetch('/appsettings.json')</script>");
-        let state = FilePreviews::default();
-        let url = tauri::Url::parse(&state.prepare(&f.0, "web/hello world.html").unwrap().url).unwrap();
-        assert!(state.is_preview_url(&url));
-        assert!(!state.is_preview_url(&tauri::Url::parse("https://example.com/").unwrap()));
-        let bootstrap = request(&url, url.path(), "").await;
-        assert!(bootstrap.contains(&format!("Content-Security-Policy: {BOOTSTRAP_CSP}\r\n")));
-        assert!(!bootstrap.contains("appsettings"));
-        let cookie = authorize(&url).await;
-        let response = request(&url, "/web/hello%20world.html", &cookie).await;
-        assert!(response.starts_with("HTTP/1.1 200"));
-        assert!(response.contains(&format!("Content-Security-Policy: {PREVIEW_CSP}\r\n")));
-        assert!(response.contains("X-DNS-Prefetch-Control: off\r\n"));
-        assert!(response.contains("script-src 'none'"));
-        assert!(response.contains("connect-src 'none'"));
-        assert!(response.contains("form-action 'none'"));
-        state.shutdown();
     }
 
     #[tokio::test]

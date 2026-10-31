@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-const installed = ['claude', 'codex', 'kimi', 'opencode', 'glm', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'kilo', 'cline', 'github-copilot', 'muse', 'devin'];
+const installed = ['claude', 'codex', 'kimi', 'opencode', 'glm', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'github-copilot', 'muse', 'devin', 'zcode', 'hermes'];
 const usageButton = (page: Page) => page.getByRole('button', { name: 'Agent usage', exact: true });
 const dialog = (page: Page) => page.getByRole('dialog', { name: 'Agent usage', exact: true });
 const card = (page: Page, name: string) => dialog(page).locator('.usage-card').filter({ hasText: name });
@@ -9,19 +9,19 @@ const calls = (page: Page): Promise<{ provider: string; refresh: boolean }[]> =>
 const tab = (page: Page, name: string) => dialog(page).getByRole('tab', { name, exact: true });
 const hourOn = (daysBack: number, hour = 14) => { const now = new Date(); return Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysBack, hour).getTime() / 3_600_000); };
 const ledger = () => ({
-  scannedAt: Date.now(), pricing: { source: 'bundled', fetchedAt: null }, sources: [{ provider: 'claude', files: 3 }, { provider: 'codex', files: 2 }],
+  scannedAt: Date.now(), pricing: { source: 'live', fetchedAt: Date.now() }, sources: [{ provider: 'claude', files: 3 }, { provider: 'codex', files: 2 }],
   models: [{ provider: 'claude', name: 'claude-opus-5-5', priced: true }, { provider: 'codex', name: 'gpt-6-astra', priced: true }, { provider: 'codex', name: 'codex-auto-review', priced: false }],
   rows: [[hourOn(0), 0, 1000, 90_000, 2000, 7000, 4.25, 3.1], [hourOn(2), 1, 5000, 40_000, 0, 5000, 1.5, 0.4], [hourOn(2), 2, 9000, 0, 0, 1000, 0, 0], [hourOn(60), 0, 100, 100, 0, 100, 20, 0]],
   sessions: [{ provider: 'claude', first: hourOn(3), last: hourOn(0) }, { provider: 'codex', first: hourOn(2), last: hourOn(2) }, { provider: 'claude', first: hourOn(60), last: hourOn(60) }],
 });
 
-async function openApp(page: Page, hold: string[] = [], failures: string[] = []): Promise<void> {
-  await page.addInitScript(({ hold, failures, ledgerFixture }) => {
+async function openApp(page: Page, hold: string[] = [], failures: string[] = [], connections: unknown = null): Promise<void> {
+  await page.addInitScript(({ hold, failures, ledgerFixture, connections }) => {
     const result = (provider: string, status: string, message: string | null = null) => ({
       provider, status, windows: [], plan: null, message, checkedAt: Date.now(), stale: false, source: null, dashboardUrl: null,
     });
     (window as any).__usageFixture = {
-      hold, failures, calls: [], pending: [], ledgerCalls: [], ledgerError: null, ledger: ledgerFixture,
+      hold, failures, calls: [], pending: [], ledgerCalls: [], ledgerError: null, ledger: ledgerFixture, connections,
       prompts: [[Math.floor(Date.now() / 3_600_000), 'kimi', 4]],
       responses: {
         claude: {
@@ -40,13 +40,15 @@ async function openApp(page: Page, hold: string[] = [], failures: string[] = [])
         glm: result('glm', 'error', 'The GLM usage service is temporarily unavailable.'),
         grok: result('grok', 'unsupported', 'Grok Build does not expose account usage.'),
         mimo: result('mimo', 'unavailable', 'Usage is not available for this MiMo account.'),
-        kilo: result('kilo', 'unsupported', 'Kilo Code does not expose credits or limits through this agent. Check your Kilo account or model provider dashboard.'),
+        deepseek: { ...result('deepseek', 'ready', 'Balance CNY 110.00 (granted 10.00, topped up 100.00).'), source: 'DeepSeek balance API' },
+        kilo: result('kilo', 'unsupported', 'Kilo Code does not expose credits or limits through this agent.'),
         'github-copilot': result('github-copilot', 'unsupported', 'GitHub Copilot CLI does not expose usage limits through this agent.'),
         muse: result('muse', 'unsupported', 'Muse Code reports its usage windows only inside a running session.'),
         devin: result('devin', 'unsupported', 'Devin does not expose plan limits through its ACP server.'),
+        zcode: result('zcode', 'unsupported', 'ZCode does not expose plan limits through its app-server.'),
       },
     };
-  }, { hold, failures, ledgerFixture: ledger() });
+  }, { hold, failures, ledgerFixture: ledger(), connections });
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
     const source = await response.text();
@@ -60,11 +62,14 @@ async function openApp(page: Page, hold: string[] = [], failures: string[] = [])
         return structuredClone(fixture.ledger);
       }
       if (command === 'prompt_activity') return structuredClone(window.__usageFixture.prompts);
+      if (command === 'connections_list' && window.__usageFixture.connections) return structuredClone(window.__usageFixture.connections);
       if (command === 'agent_usage') {
         const fixture = window.__usageFixture;
         fixture.calls.push(structuredClone(args));
         if (fixture.failures.includes(args.provider)) throw new Error('Usage service temporarily unavailable.');
         const result = structuredClone(fixture.responses[args.provider]);
+        if (args.connection === 'personal') result.windows = [{ label: '5-hour window', usedPercent: 97, resetsAt: null, detail: null }];
+        if (args.connection === 'work') return { ...result, status: 'unavailable', windows: [], message: 'Claude is configured with an API key, custom endpoint, or environment credentials.' };
         if (fixture.hold.includes(args.provider)) return new Promise(resolve => {
           fixture.pending.push({ provider: args.provider, resolve, result });
         });
@@ -80,8 +85,6 @@ async function openApp(page: Page, hold: string[] = [], failures: string[] = [])
 async function openUsage(page: Page): Promise<void> {
   await usageButton(page).click();
   await expect(dialog(page)).toBeVisible();
-  // The dialog shell opens before its lazy usage view mounts.
-  await expect(refresh(page)).toBeVisible();
 }
 
 async function release(page: Page, provider?: string): Promise<void> {
@@ -146,8 +149,8 @@ test('Agent usage shows successful and unavailable cards while a different provi
   await expect(card(page, 'OpenCode')).toContainText('OpenCode does not expose account usage.');
   await expect(card(page, 'GLM Coding Plan')).toContainText('The GLM usage service is temporarily unavailable.');
   await expect(card(page, 'MiMo Token Plan')).toContainText('Usage is not available for this MiMo account.');
-  await expect(card(page, 'Kilo Code')).toContainText('Kilo Code does not expose credits or limits through this agent.');
-  for (const name of ['Kimi Code', 'OpenCode', 'GLM Coding Plan', 'MiMo Token Plan', 'Kilo Code']) {
+  await expect(card(page, 'DeepSeek')).toContainText('Balance CNY 110.00 (granted 10.00, topped up 100.00).');
+  for (const name of ['Kimi Code', 'OpenCode', 'GLM Coding Plan', 'MiMo Token Plan', 'DeepSeek']) {
     await expect(card(page, name).getByRole('progressbar')).toHaveCount(0);
   }
   await expect(refresh(page)).toBeDisabled();
@@ -228,7 +231,7 @@ test('Agent usage ignores responses from a closed panel after a new panel has lo
   await expect(dialog(page)).toHaveText(current, { useInnerText: true });
   await expect(card(page, 'Codex').getByRole('progressbar').first()).toHaveAttribute('aria-valuenow', '72');
   await expect(refresh(page)).toBeEnabled();
-  // The closed panel must not start any remaining queued requests after these settle.
+  // The closed panel must not start its four queued requests after these settle.
   expect(await calls(page)).toHaveLength(installed.length + 3);
   expect(errors).toEqual([]);
 });
@@ -239,7 +242,7 @@ test('Agent usage remains reachable in the sidebar, collapsed header, and board 
   await openApp(page);
   for (const mode of ['sidebar', 'collapsed', 'board']) {
     if (mode === 'collapsed') await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
-    if (mode === 'board') await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    if (mode === 'board') { await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click(); }
     await expect(usageButton(page)).toHaveCount(1);
     await expect(usageButton(page)).toBeVisible();
     await expect(usageButton(page)).toHaveAttribute('id', 'agent-usage-button');
@@ -323,4 +326,18 @@ test('Agent usage keeps limits working when local logs cannot be read', async ({
   await expect(dialog(page).locator('.usage-cost-hero').getByRole('alert')).toHaveText('Reading agent logs took too long. Try again later.');
   await expect(dialog(page).locator('.usage-limit-hero')).toContainText('45%');
   await expect(dialog(page).locator('.cost-chart')).toHaveCount(0);
+});
+
+test('each named connection shows its own limits under its harness', async ({ page }) => {
+  const connection = (id: string, name: string) => ({ id, provider: 'claude', name, args: [], env: {}, secretEnv: [], configDir: `/Users/sample/.claude-${id}`, revision: 1 });
+  await openApp(page, [], [], { connections: [connection('personal', 'Claude Personal'), connection('work', 'Claude Work')], tasks: {} });
+  await openUsage(page);
+  await tab(page, 'Claude').click();
+  const claude = card(page, 'Claude Code');
+  await expect(claude.locator('.usage-connection-default')).toHaveText('Default setup');
+  const personal = claude.getByRole('region', { name: 'Claude Personal', exact: true });
+  await expect(personal.getByRole('progressbar', { name: 'Claude Personal · 5-hour window' })).toHaveAttribute('aria-valuenow', '97');
+  await expect(claude.getByRole('region', { name: 'Claude Work', exact: true })).toContainText('API key');
+  // The default setup and each connection are separate checks, read by connection id.
+  await expect.poll(async () => (await calls(page)).filter(call => call.provider === 'claude').map(call => (call as any).connection ?? null)).toEqual([null, 'personal', 'work']);
 });

@@ -13,29 +13,15 @@ const file = () => new File(Paths.cache, 'project-icons.json');
 const demo = () => useConnect.getState().demo;
 
 let loaded: Promise<void> | null = null;
-let epoch = 0;
-let writes: Promise<void> = Promise.resolve();
-let clearing: Promise<void> = Promise.resolve();
-
-function serialize(run: () => Promise<void>): Promise<void> {
-  const next = writes.then(run);
-  writes = next.catch(() => undefined);
-  return next;
-}
-
 /** Reads the cache file once; entries fetched meanwhile win. */
 export function loadIcons(): Promise<void> {
   if (demo()) return Promise.resolve();
-  const started = epoch;
-  const cleared = clearing;
   loaded ??= (async () => {
-    await cleared;
-    if (started !== epoch) return;
     try {
       const f = file();
       if (!f.exists) return;
       const stored = parseIcons(await f.text());
-      if (started === epoch) useIcons.setState(s => ({ cache: { ...stored, ...s.cache } }));
+      useIcons.setState(s => ({ cache: { ...stored, ...s.cache } }));
     } catch { /* unreadable: start empty */ }
   })();
   return loaded;
@@ -43,20 +29,15 @@ export function loadIcons(): Promise<void> {
 
 export async function saveIcons(): Promise<void> {
   if (demo()) return;
-  const started = epoch;
   try {
-    await serialize(async () => {
-      if (started !== epoch || demo()) return;
-      const f = file();
-      if (!f.exists) f.create();
-      await f.write(JSON.stringify(useIcons.getState().cache));
-    });
+    const f = file();
+    if (!f.exists) f.create();
+    await f.write(JSON.stringify(useIcons.getState().cache));
   } catch { /* a cache: the next fetch fills it again */ }
 }
 
 /** Forgets the icons in memory (leaving demo mode); the next load reads the file again. */
 export function resetIcons() {
-  epoch++;
   loaded = null;
   useIcons.setState({ cache: {} });
 }
@@ -64,11 +45,10 @@ export function resetIcons() {
 /** Account deletion: memory and the cache file. */
 export async function clearIcons(): Promise<void> {
   resetIcons();
-  clearing = serialize(async () => {
+  try {
     const f = file();
     if (f.exists) f.delete();
-  });
-  await clearing;
+  } catch { /* nothing to delete */ }
 }
 
 /** The project's icon as a data: URL, or null for the coloured initial. */

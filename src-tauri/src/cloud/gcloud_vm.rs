@@ -1,13 +1,13 @@
-//! Google Cloud machines for explicit sandbox management: Compute Engine VMs driven
+//! Google Cloud machines for cloud agents (docs/cloud-agents.md): Compute Engine VMs driven
 //! by the user's own `gcloud` login (the connection in Settings → Cloud stores only the
 //! project and region; credentials never reach PandaCode). Machines are `e2-standard-2`
 //! Debian 12 VMs labelled `pandacode=true`, listed by that label.
 //!
 //! Commands run with `gcloud compute ssh --tunnel-through-iap`: gcloud creates and
-//! publishes its own key and keeps its own known_hosts (it trusts a new VM's key on
-//! first use, then checks it). Instances have no public address. The user must
-//! preconfigure the pandacode-allow-iap-ssh rule for IAP and the pandacode target tag,
-//! and grant IAP-secured Tunnel User rights. PandaCode never writes firewall rules.
+//! publishes its own key and keeps its own known_hosts (it trusts a new VM's key on first use, then checks it), and nothing needs an open SSH port. The
+//! one thing IAP needs is a firewall rule admitting Google's IAP range
+//! (35.235.240.0/20) on port 22, so `create` adds `pandacode-allow-iap-ssh` to the default
+//! network when missing (idempotent). The user also needs IAP-secured Tunnel User rights.
 use serde_json::Value;
 use std::{process::Command, thread::sleep, time::Duration};
 
@@ -17,6 +17,7 @@ use crate::Result;
 
 const DEFAULT_ZONE: &str = "us-central1-a";
 const FIREWALL: &str = "pandacode-allow-iap-ssh";
+const IAP_RANGE: &str = "35.235.240.0/20";
 const OUTPUT: usize = 4 << 20;
 /// ssh readiness after create/start: attempts × pause.
 const SSH_TRIES: u32 = 12;
@@ -37,7 +38,7 @@ fn native_id(name: &str, zone: &str) -> String {
     format!("{name}.{zone}")
 }
 fn split_native(native: &str) -> Result<(&str, &str)> {
-    native.rsplit_once('.').filter(|(name, zone)| valid_name(name) && valid_name(zone)).ok_or_else(|| "Unknown Google Cloud machine.".into())
+    native.rsplit_once('.').filter(|(name, zone)| valid_name(name) && !zone.is_empty()).ok_or_else(|| "Unknown Google Cloud machine.".into())
 }
 fn valid_name(name: &str) -> bool {
     name.len() <= 63 && name.starts_with(|c: char| c.is_ascii_lowercase()) && !name.ends_with('-') && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -47,7 +48,10 @@ fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
 }
 fn create_args(name: &str, zone: &str) -> Vec<String> {
-    strings(&["compute", "instances", "create", name, "--zone", zone, "--machine-type", "e2-standard-2", "--image-family", "debian-12", "--image-project", "debian-cloud", "--boot-disk-size", "50GB", "--labels", "pandacode=true", "--tags", "pandacode", "--no-address", "--format", "json"])
+    strings(&["compute", "instances", "create", name, "--zone", zone, "--machine-type", "e2-standard-2", "--image-family", "debian-12", "--image-project", "debian-cloud", "--boot-disk-size", "50GB", "--labels", "pandacode=true", "--format", "json"])
+}
+fn firewall_args() -> Vec<String> {
+    strings(&["compute", "firewall-rules", "create", FIREWALL, "--network", "default", "--direction", "INGRESS", "--allow", "tcp:22", "--source-ranges", IAP_RANGE, "--description", "PandaCode cloud agents: SSH through Identity-Aware Proxy"])
 }
 fn ssh_args(name: &str, zone: &str, command: &str) -> Vec<String> {
     let mut args = strings(&["compute", "ssh", name, "--zone", zone, "--tunnel-through-iap", "--quiet", "--command"]);
@@ -106,7 +110,7 @@ impl Gcloud {
         if self.run(&describe, Duration::from_secs(60))?.status.success() {
             return Ok(());
         }
-        Err("Configure the pandacode-allow-iap-ssh firewall rule for IAP (35.235.240.0/20, tcp:22, target tag pandacode) before creating a VM. PandaCode does not change network firewall rules.".into())
+        self.text(&firewall_args(), Duration::from_secs(120)).map(|_| ())
     }
     fn wait_for_ssh(&self, name: &str, zone: &str) -> Result<()> {
         let mut last = String::new();
@@ -134,7 +138,7 @@ impl Gcloud {
 impl Sandbox for Gcloud {
     /// VMs run until stopped; the disk persists.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: 24 * 60 }
+        Info { persistent: true, max_unattended_minutes: 24 * 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         let text = self.text(&strings(&["compute", "instances", "list", "--filter=labels.pandacode=true", "--format=json"]), Duration::from_secs(90))?;
@@ -192,10 +196,10 @@ mod tests {
         let create = create_args("pc-ab12", "us-central1-a").join(" ");
         assert!(create.starts_with("compute instances create pc-ab12 --zone us-central1-a --machine-type e2-standard-2"));
         assert!(create.contains("--image-family debian-12") && create.contains("--labels pandacode=true"));
-        assert!(create.contains("--no-address") && create.contains("--tags pandacode"));
         let ssh = ssh_args("pc-ab12", "us-central1-a", "echo 'hi' && ls");
         assert!(ssh.contains(&"--tunnel-through-iap".to_string()) && !ssh.iter().any(|a| a.starts_with("--strict-host-key")));
         assert_eq!(ssh.last().unwrap(), r"sh -c 'echo '\''hi'\'' && ls'");
+        assert!(firewall_args().join(" ").contains("--source-ranges 35.235.240.0/20"));
         assert!(power_args("delete", "pc-ab12", "z").contains(&"--delete-disks=all".to_string()));
         assert!(!power_args("stop", "pc-ab12", "z").iter().any(|a| a.starts_with("--delete")));
     }

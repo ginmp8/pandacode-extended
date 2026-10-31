@@ -1,4 +1,4 @@
-//! Runloop devboxes for explicit sandbox management, through the REST API
+//! Runloop devboxes for cloud agents (docs/cloud-agents.md), through the REST API
 //! (https://docs.runloop.ai/api-reference/devboxes). Suspending a devbox keeps its disk.
 use serde_json::{json, Value};
 use std::{
@@ -76,6 +76,9 @@ impl Runloop {
         };
         self.post(&format!("/v1/devboxes/{id}/{verb}"), json!({})).await.map(|_| ())
     }
+    pub async fn state(&self, id: &str) -> Result<String> {
+        Ok(machine(&self.call(reqwest::Method::GET, &format!("/v1/devboxes/{id}"), None).await?).state)
+    }
     /// Restarts the idle clock set at creation; it can't be shortened or lengthened per call.
     pub async fn keep_alive(&self, id: &str) -> Result<()> {
         self.post(&format!("/v1/devboxes/{id}/keep_alive"), json!({})).await.map(|_| ())
@@ -85,7 +88,6 @@ impl Runloop {
     pub async fn exec(&self, id: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         let started = self.post(&format!("/v1/devboxes/{id}/execute_async"), json!({"command": format!("sh -c {} 2>&1", super::shell_quote(command))})).await?;
         let execution = started["execution_id"].as_str().ok_or("Runloop did not start the command.")?.to_string();
-        super::sandbox::validate_id(&execution)?;
         let deadline = Instant::now() + timeout;
         loop {
             let view = if started["status"] == "completed" && started.get("exit_status").is_some() { started.clone() } else { self.call(reqwest::Method::GET, &format!("/v1/devboxes/{id}/executions/{execution}"), None).await? };
@@ -104,7 +106,7 @@ impl Runloop {
 impl Sandbox for Runloop {
     /// Idle devboxes suspend with their disk kept, so files persist; running processes may not.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: IDLE_SECONDS / 60 }
+        Info { persistent: true, max_unattended_minutes: IDLE_SECONDS / 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(Runloop::list(self))
@@ -114,6 +116,9 @@ impl Sandbox for Runloop {
     }
     fn power(&self, native: &str, action: &str) -> Result<()> {
         block(Runloop::power(self, native, action))
+    }
+    fn state(&self, native: &str) -> Result<String> {
+        block(Runloop::state(self, native))
     }
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(Runloop::exec(self, native, command, timeout))
@@ -176,16 +181,16 @@ mod tests {
         api.power("dbx_2", "start").await.unwrap();
         api.power("dbx_1", "delete").await.unwrap();
         assert!(api.power("dbx_1", "pause").await.is_err());
-        assert_eq!(machine(&json!({"id": "dbx_2", "status": "suspended"})).state, "stopped");
-        assert_eq!(machine(&json!({"id": "dbx_4", "status": "shutdown"})).state, "error");
-        assert_eq!(machine(&json!({"id": "dbx_6", "status": "failure"})).state, "error");
+        assert_eq!(api.state("dbx_2").await.unwrap(), "stopped");
+        assert_eq!(api.state("dbx_4").await.unwrap(), "error");
+        assert_eq!(api.state("dbx_6").await.unwrap(), "error");
         let log = seen.lock().unwrap();
         assert!(log.iter().all(|r| r.authorization.as_deref() == Some("Bearer key-1")));
         let body: Value = serde_json::from_str(&log[1].body).unwrap();
         assert_eq!(body["metadata"], json!({"pandacode": "true"}));
         assert_eq!(body["launch_parameters"]["lifecycle"], json!({"after_idle": {"idle_time_seconds": 21600, "on_idle": "suspend"}}));
         assert!(body["launch_parameters"].get("keep_alive_time_seconds").is_none());
-        assert_eq!(Sandbox::info(&api), Info { persistent: true, max_lease_minutes: 360 });
+        assert_eq!(Sandbox::info(&api), Info { persistent: true, max_unattended_minutes: 360 });
     }
 
     #[tokio::test]
@@ -210,8 +215,30 @@ mod tests {
         let api = Runloop::new(Some(base.clone()), "k".into());
         assert!(api.exec("d", "sleep 9", Duration::from_millis(100)).await.unwrap_err().contains("time limit"));
         assert!(seen.lock().unwrap().iter().any(|r| r.path.ends_with("/kill")));
-        assert!(api.list().await.unwrap_err().contains("refused the credentials"));
+        assert!(api.state("x").await.unwrap_err().contains("refused the credentials"));
         assert!(connect("", &Value::Null).is_err());
     }
 
+    /// Needs RUNLOOP_API_KEY; run with `cargo test runloop_live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn runloop_live() {
+        let api = Runloop::new(None, std::env::var("RUNLOOP_API_KEY").expect("RUNLOOP_API_KEY"));
+        let made = Sandbox::create(&api, "pandacode-smoke").unwrap();
+        let id = made.id.trim_start_matches("runloop:").to_string();
+        let run = || -> Result<()> {
+            for _ in 0..60 {
+                if Sandbox::state(&api, &id)? == "running" { break; }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            assert_eq!(Sandbox::exec(&api, &id, "echo hi", Duration::from_secs(60))?, (Some(0), "hi\n".into()));
+            Sandbox::spawn(&api, &id, "sleep 120")?;
+            let (_, ps) = Sandbox::exec(&api, &id, "ps -eo args | grep '[s]leep 120'", Duration::from_secs(30))?;
+            assert!(ps.contains("sleep 120"));
+            Sandbox::keep_alive(&api, &id, 30)
+        };
+        let result = run();
+        Sandbox::power(&api, &id, "delete").unwrap();
+        result.unwrap();
+    }
 }

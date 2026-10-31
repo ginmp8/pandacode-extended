@@ -7,7 +7,6 @@ import type { Account, Bot, Device, Message, Provider, ProviderModel, PullDetail
 import { idleLive, type Live } from './reduce.ts';
 import { unmatched, type Sent } from './sent.ts';
 import type { Team } from './team.ts';
-import { trusted, type Pins } from '../connect/trust.ts';
 
 export type { Live, LiveItem } from './reduce.ts';
 
@@ -23,8 +22,6 @@ export interface ConnectState {
   account: Account | null;
   deviceId: string;
   devices: Device[];
-  pins: Pins;
-  fingerprint: string;
   /** tasks.list per host. `cachedAt`: restored from the inbox cache (src/store/inbox-cache.ts), not yet listed live. */
   tasks: Record<string, TasksList & { loadedAt: number; cachedAt?: number }>;
   /** Messages per taskKey, oldest first: the newest window (tail page or disk cache), grown by afterId and beforeId pages. Absent until first loaded. */
@@ -55,27 +52,27 @@ export interface ConnectState {
 
 export const initialState = (): ConnectState => ({
   configured: !!build, ready: false, signedIn: false, connected: false, account: null, deviceId: '',
-  devices: [], pins: {}, fingerprint: '', tasks: {}, messages: {}, older: {}, history: {}, sent: {}, live: {}, providers: {}, models: {}, bots: {}, pulls: {}, teams: {}, outdated: {}, error: null, demo: false,
+  devices: [], tasks: {}, messages: {}, older: {}, history: {}, sent: {}, live: {}, providers: {}, models: {}, bots: {}, pulls: {}, teams: {}, outdated: {}, error: null, demo: false,
 });
 
 export const useConnect = create<ConnectState>(() => initialState());
 
-export interface DeviceRow extends Device { current: boolean; trusted: boolean; keyChanged: boolean }
+export interface DeviceRow extends Device { current: boolean }
 
 function useRows(): DeviceRow[] {
-  const { devices, deviceId, pins, demo } = useConnect(useShallow(s => ({ devices: s.devices, deviceId: s.deviceId, pins: s.pins, demo: s.demo })));
-  return useMemo(() => devices.map(d => ({ ...d, current: d.id === deviceId, trusted: demo || trusted(d, pins), keyChanged: Object.hasOwn(pins, d.id) && pins[d.id] !== d.publicKey })), [devices, deviceId, pins, demo]);
+  const { devices, deviceId } = useConnect(useShallow(s => ({ devices: s.devices, deviceId: s.deviceId })));
+  return useMemo(() => devices.map(d => ({ ...d, current: d.id === deviceId })), [devices, deviceId]);
 }
 
 const EMPTY: never[] = [];
 
-export const useStatus = () => useConnect(useShallow(s => ({ configured: s.configured, ready: s.ready, signedIn: s.signedIn, connected: s.connected, account: s.account, error: s.error, demo: s.demo, fingerprint: s.fingerprint })));
+export const useStatus = () => useConnect(useShallow(s => ({ configured: s.configured, ready: s.ready, signedIn: s.signedIn, connected: s.connected, account: s.account, error: s.error, demo: s.demo })));
 /** Every device signed in to the account. */
 export const useDevices = useRows;
 /** Other computers with remote access on: the ones the phone can open. */
 export function useHosts(): DeviceRow[] {
   const all = useRows();
-  return useMemo(() => all.filter(d => !d.current && d.host && d.trusted), [all]);
+  return useMemo(() => all.filter(d => !d.current && d.host), [all]);
 }
 export const useTasks = (deviceId: string) => useConnect(s => s.tasks[deviceId]);
 /** null while copying, the last copy's error, or undefined. */

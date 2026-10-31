@@ -3,7 +3,6 @@ export interface AccountDeletionContext<Socket> {
   storage: { deleteAll(): Promise<void> };
 }
 
-/** A successful response follows durable deletion, never only a socket close. */
 export async function deleteAccountState<Socket>(
   ctx: AccountDeletionContext<Socket>,
   close: (socket: Socket, code: number, reason: string) => void,

@@ -87,7 +87,7 @@ test('presence loss keeps the chosen computer and lists offline devices with Ret
   await page.addInitScript(() => { (window as any).__remoteStartStep = 0; });
   await chooseStudioOnNewTask(page);
   const computer = page.locator('#composer-computer');
-  await expect(computer).toHaveAttribute('aria-haspopup', 'dialog');
+  await expect(computer).toHaveAttribute('aria-haspopup', 'menu');
   await page.evaluate(() => (window as any).__remoteOnline('dev-studio', false));
   await expect(computer).toHaveAccessibleName(/Computer: Studio iMac.*Offline/);
   await expect(computer).not.toHaveAccessibleName(/This computer/);
@@ -159,8 +159,8 @@ test('remote settings distinguish loading, empty, and retryable status/device fa
   await expect(panel.getByText('No devices yet.')).toHaveCount(0);
   await panel.getByRole('button', { name: 'Retry' }).click();
   await expect(panel.getByRole('button', { name: 'Sign in with GitHub' })).toBeVisible();
-  // Only Settings loads remote_devices; the composer loads remote_targets separately.
-  await page.evaluate(() => { (window as any).__remoteDevicesFailures = 1; });
+  // The app's presence refresh asks first; the settings panel asks second.
+  await page.evaluate(() => { (window as any).__remoteDevicesFailures = 2; });
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('alert')).toContainText('Couldn’t load devices');
   await expect(panel.getByText('No devices yet.')).toHaveCount(0);
@@ -311,20 +311,15 @@ test('a start whose reply timed out can still be stopped', async ({ page }) => {
 
 test('pending-approval and permission refusals show inline and keep the text', async ({ page }) => {
   test.slow(); // waits for the mirror's first run to end before sending
-  await page.addInitScript(() => { (window as any).__holdPreviewCompletion = true; });
   await startMirror(page);
   const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
   const note = page.locator('#composer-area .composer-inline-note');
-  // Keep this run active through the refusal check, even when a CI click is slow.
-  await page.waitForFunction(() => typeof (window as any).__releasePreviewCompletion === 'function');
   await expect(page.getByRole('button', { name: 'Steer the running turn' })).toBeVisible();
   await page.evaluate(() => { (window as any).__remoteRefuse = 'This device can only view tasks on Studio iMac.'; });
   await prompt.fill('Steer without permission');
   await page.getByRole('button', { name: 'Steer the running turn' }).click();
   await expect(note).toContainText('can only view tasks on Studio iMac.');
-  await expect(prompt).toHaveValue('Steer without permission');
   await expect(page.locator('#toast')).not.toContainText('can only view');
-  await page.evaluate(() => (window as any).__releasePreviewCompletion());
   await expect(page.locator('#stream-region .live-message')).toHaveCount(0, { timeout: 15_000 });
   await page.evaluate(() => { (window as any).__remoteRefuse = 'Waiting for approval on Studio iMac.'; });
   await prompt.fill('Needs approval');

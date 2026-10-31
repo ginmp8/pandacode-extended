@@ -54,9 +54,9 @@ test('shows Approve for me as unavailable instead of another mode on a harness w
   await expect(menu).toContainText('no agent-reviewed approvals');
 });
 
-test('keeps the existing Plan policy description for Claude Code', async ({ page }) => {
+test('describes Plan mode investigation for Claude Code', async ({ page }) => {
   await page.locator('#mode-picker-trigger').click();
   await page.getByRole('dialog', { name: 'Permissions', exact: true }).getByRole('menuitemradio', { name: 'Plan mode', exact: true }).click();
-  await expect(page.locator('#mode-picker-trigger')).toHaveAttribute('title', /Explore and plan changes before implementation/);
+  await expect(page.locator('#mode-picker-trigger')).toHaveAttribute('title', /web lookups run, even outside this project/);
   await expect.poll(() => savedPermission(page)).toBe('plan');
 });

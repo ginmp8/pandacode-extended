@@ -1,77 +1,76 @@
+/// <reference types="node" />
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PersistentReplay, type ReplayStore } from '../src/connect/replay.ts';
+import { Cursors, followReplay, MAX_REPLAY_PAGES } from '../src/store/replay.ts';
+import type { AgentEvent, SubscribeReply } from '../src/connect/types.ts';
 
-const now = 1_000_000;
-const nonce = (id: number) => `unique-nonce-${String(id).padStart(8, '0')}`;
-function storage(raw: string | null = null) {
-  return { raw, writes: 0, readError: false, writeError: false,
-    async read() { if (this.readError) throw new Error('read failed'); return this.raw; },
-    async write(value: string) { this.writes++; if (this.writeError) throw new Error('write failed'); this.raw = value; },
-  };
+const ev = (seq: number, sessionId = 'a'): AgentEvent => ({ sessionId, kind: 'text', text: `e${seq}`, seq } as AgentEvent);
+
+/** A host whose journal for task `a` holds seqs 1..last, replaying `per` events per page. */
+const host = (last: number, per: number, calls: any[], during?: () => void) => async (params: any): Promise<SubscribeReply> => {
+  calls.push(params);
+  during?.();
+  const after = params.afterSeq?.a ?? 0;
+  const top = Math.min(after + per, last);
+  const events = params.afterSeq ? Array.from({ length: top - after }, (_, n) => ev(after + n + 1)) : [];
+  const more = params.afterSeq !== undefined && top < last;
+  return { epoch: 'E', more, tasks: [{ sessionId: 'a', status: 'running', lastId: 1, title: 't', events, seq: more ? top : last, ...(more ? { more: true } : {}) }] };
+};
+
+/** The viewer: shows replayed events through fresh, live ones through keep → fresh. */
+function viewer(c: Cursors) {
+  const shown: number[] = [];
+  const show = (list: AgentEvent[], epoch: unknown) => shown.push(...c.fresh('h', epoch, list).map(e => e.seq!));
+  const live = (list: AgentEvent[]) => { if (!c.keep('h', 'E', list)) show(list, 'E'); };
+  return { shown, show, live };
 }
 
-test('receipt persistence completes before acceptance and duplicates are refused', async () => {
-  const store = storage();
-  const replay = new PersistentReplay(store);
-  await assert.rejects(replay.check(now, nonce(1), now), /unavailable/);
-  await replay.load();
-  assert.equal(await replay.check(now, nonce(1), now), true);
-  assert.deepEqual(JSON.parse(store.raw!), { timestamp: now, receivedAt: now });
-  assert.equal(await replay.check(now, nonce(1), now + 1), false);
-  assert.equal(store.writes, 1);
-  assert.equal(await replay.check(now - 1, nonce(2), now + 1), true, 'fresh out-of-order replies work within the launch');
-  assert.equal(JSON.parse(store.raw!).timestamp, now, 'the checkpoint never moves backwards');
+test('replay pages are drained while `more`, and a live event meanwhile hides none of them', async () => {
+  const c = new Cursors();
+  c.fresh('h', 'E', [ev(2)]); // left off at seq 2
+  const v = viewer(c);
+  const calls: any[] = [];
+  let sent = false;
+  // A live frame (seq 11) arrives while the first page is in flight.
+  const result = await followReplay(c, 'h', ['a'], host(10, 3, calls, () => { if (!sent) { sent = true; v.live([ev(11)]); } }), v.show);
+  assert.deepEqual(calls.map(p => p.afterSeq.a), [2, 5, 8], 'each page continues from the last replayed seq');
+  assert.deepEqual(v.shown, [3, 4, 5, 6, 7, 8, 9, 10]);
+  for (const e of result.held.entries) v.show(e.events, e.epoch);
+  assert.deepEqual(v.shown, [3, 4, 5, 6, 7, 8, 9, 10, 11], 'the held live event comes last');
+  assert.equal(result.tasks.length, 1);
+  assert.notEqual(result.tasks[0].gap, true);
+  v.live([ev(12)]);
+  assert.equal(v.shown.at(-1), 12, 'not held once the round is over');
 });
 
-test('a restart refuses every previously accepted timestamp and catches up with fresh frames', async () => {
-  const store = storage();
-  const first = new PersistentReplay(store);
-  await first.load();
-  assert.equal(await first.check(now, nonce(1), now), true);
-  const restarted = new PersistentReplay(store);
-  await restarted.load();
-  assert.equal(await restarted.check(now, nonce(1), now + 1), false);
-  assert.equal(await restarted.check(now, nonce(2), now + 1), false, 'equal-ms ambiguity fails closed after restart');
-  assert.equal(await restarted.check(now + 1, nonce(3), now + 1), true);
-  assert.equal(await restarted.check(now + 2, nonce(4), now), false, 'clock rollback cannot reopen the replay window');
+test('a replay longer than the page limit becomes a gap', async () => {
+  const c = new Cursors();
+  c.fresh('h', 'E', [ev(1)]);
+  const v = viewer(c);
+  const calls: any[] = [];
+  const result = await followReplay(c, 'h', ['a'], host(1000, 1, calls), v.show);
+  assert.equal(calls.length, MAX_REPLAY_PAGES);
+  assert.equal(result.tasks[0].gap, true);
 });
 
-test('missing state is allowed, corrupted or unreadable state is never reset', async () => {
-  for (const raw of ['bad', 'null', '[]', '{}', '{"timestamp":-1,"receivedAt":0}', '{"timestamp":1.5,"receivedAt":0}']) {
-    const store = storage(raw);
-    const replay = new PersistentReplay(store);
-    await assert.rejects(replay.load(), /replay checkpoint/);
-    await assert.rejects(replay.check(now, nonce(1), now), /unavailable/);
-    assert.equal(store.writes, 0);
-    assert.equal(store.raw, raw);
-  }
-  const store = storage();
-  store.readError = true;
-  await assert.rejects(new PersistentReplay(store).load(), /read failed/);
+test('a later page that fails marks the unfinished task as a gap; a first that fails returns no reply', async () => {
+  const c = new Cursors();
+  c.fresh('h', 'E', [ev(1)]);
+  const v = viewer(c);
+  const ok = host(10, 3, []);
+  let n = 0;
+  const flaky = async (p: any) => { if (++n === 2) throw new Error('offline'); return ok(p); };
+  const result = await followReplay(c, 'h', ['a'], flaky, v.show);
+  assert.equal(result.tasks[0].gap, true);
+  const failed = await followReplay(c, 'h', ['a'], async () => { throw new Error('offline'); }, v.show);
+  assert.equal(failed.reply, null);
 });
 
-test('storage failures permanently stop admission for the launch', async () => {
-  const store = storage();
-  const replay = new PersistentReplay(store);
-  await replay.load();
-  store.writeError = true;
-  await assert.rejects(replay.check(now, nonce(1), now), /without accepting/);
-  store.writeError = false;
-  await assert.rejects(replay.check(now + 1, nonce(2), now + 1), /unavailable/);
-  assert.equal(store.raw, null);
-});
-
-test('an in-progress secure write cannot apply its frame early', async () => {
-  let finish!: () => void;
-  const store: ReplayStore = { read: async () => null, write: () => new Promise(resolve => { finish = resolve; }) };
-  const replay = new PersistentReplay(store);
-  await replay.load();
-  let applied = false;
-  const accepted = replay.check(now, nonce(1), now).then(ok => { applied = ok; });
-  await Promise.resolve();
-  assert.equal(applied, false);
-  finish();
-  await accepted;
-  assert.equal(applied, true);
+test('a task with no position takes its held live events, not the reply seq', async () => {
+  const c = new Cursors();
+  const v = viewer(c);
+  // First subscribe (no epoch): nothing replayed; a live event (seq 9) lands before the reply says seq 10.
+  const result = await followReplay(c, 'h', ['a'], host(10, 3, [], () => v.live([ev(9)])), v.show);
+  for (const e of result.held.entries) v.show(e.events, e.epoch);
+  assert.deepEqual(v.shown, [9]);
 });

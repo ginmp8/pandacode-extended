@@ -1,35 +1,34 @@
 ---
-/* Historical upstream + Extended notes with independent source-qualified keys. */
+/* Every release, newest first, from releases/X.Y.Z.md (lib/changelog.ts). */
 import Page from '../layouts/Page.astro';
-import { releases, formatDate, type Release } from '../lib/changelog';
+import { releases, formatDate } from '../lib/changelog';
 const [latest] = releases;
-// Preserve existing upstream anchors. Prefix Extended anchors to avoid future collisions.
-const id = (release: Release) => (release.origin === 'extended' ? 'vextended-' : 'v') + release.version.replace(/[^A-Za-z0-9]+/g, '-');
-const months = releases.reduce<{ label: string; items: Release[] }[]>((groups, release) => {
+const id = (version: string) => `v${version.replace(/\./g, '-')}`;
+const months = releases.reduce<{ label: string; versions: string[] }[]>((groups, release) => {
   const label = release.date ? new Date(`${release.date}T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : 'Earlier';
   const last = groups.at(-1);
-  return last?.label === label ? [...groups.slice(0, -1), { label, items: [...last.items, release] }] : [...groups, { label, items: [release] }];
+  return last?.label === label ? [...groups.slice(0, -1), { label, versions: [...last.versions, release.version] }] : [...groups, { label, versions: [release.version] }];
 }, []);
 ---
 <Page title="Changelog" current="changelog" eyebrow="LITTLE BY LITTLE"
-  heading="PandaCode Extended and original release history."
-  description={`Original PandaCode references and Extended source revisions. Latest source note: ${latest.displayVersion}${latest.date ? `, ${formatDate(latest.date)}` : ''}.`}
-  lede={`${releases.length} source notes, including upstream-only references; neither native release publication nor full upstream feature parity is implied.`}>
+  heading="What’s new in PandaCode."
+  description={`Every PandaCode release, newest first. Latest: ${latest.version}${latest.date ? `, ${formatDate(latest.date)}` : ''}.`}
+  lede={`${releases.length} releases and counting. Every release is published on GitHub, with its source.`}>
   <div slot="hero" class="changelog-latest page-rise">
-    <span class="live-dot" aria-hidden="true"></span>Latest source note <a href={`#${id(latest)}`}>{latest.displayVersion}</a>{latest.date && <> · <time datetime={latest.date}>{formatDate(latest.date)}</time></>}
+    <span class="live-dot" aria-hidden="true"></span>Latest <a href={`#${id(latest.version)}`}>{latest.version}</a>{latest.date && <> · <time datetime={latest.date}>{formatDate(latest.date)}</time></>}
   </div>
 
   <div class="changelog-layout section-width">
     <nav class="changelog-rail" aria-label="Releases">
-      {months.map(month => <div class="rail-month"><p>{month.label}</p><ul>{month.items.map(release => <li><a href={`#${id(release)}`} data-rail={id(release)}>{release.displayVersion}</a></li>)}</ul></div>)}
+      {months.map(month => <div class="rail-month"><p>{month.label}</p><ul>{month.versions.map(version => <li><a href={`#${id(version)}`} data-rail={id(version)}>{version}</a></li>)}</ul></div>)}
     </nav>
     <ol class="changelog-list">
       {releases.map((release, index) => (
-        <li class="release reveal" id={id(release)} aria-labelledby={`${id(release)}-title`}>
+        <li class="release reveal" id={id(release.version)} aria-labelledby={`${id(release.version)}-title`}>
           <div class="release-marker" aria-hidden="true"><span></span></div>
           <div class="release-meta">
-            <h2 id={`${id(release)}-title`}><a href={`#${id(release)}`}>{release.displayVersion}</a></h2>
-            {index === 0 && <span class="release-badge">Latest source note</span>}<span class="release-badge">{release.origin === 'upstream' ? 'Original reference' : release.version.includes('hardened') ? 'Extended legacy' : 'Extended source'}</span>
+            <h2 id={`${id(release.version)}-title`}><a href={`#${id(release.version)}`}>{release.version}</a></h2>
+            {index === 0 && <span class="release-badge">Latest</span>}
             {release.date && <time datetime={release.date}>{formatDate(release.date)}</time>}
           </div>
           <div class="release-body">
@@ -42,5 +41,5 @@ const months = releases.reduce<{ label: string; items: Release[] }[]>((groups, r
       ))}
     </ol>
   </div>
-  <p class="changelog-note section-width">These notes combine <a href="https://github.com/aicodeking/pandacode/releases">original PandaCode reference releases</a> and PandaCode Extended source history. A referenced upstream release does not mean its features or binaries are included in Extended. See <a href="https://github.com/ginmp8/pandacode-extended/releases">Extended GitHub releases (repository rename pending)</a> for any explicitly published assets. Automatic upstream installers and application updates are disabled in this distribution.</p>
+  <p class="changelog-note section-width">PandaCode is an Alpha preview. macOS builds are signed and notarized by Apple. Windows builds aren’t Authenticode signed yet, so Windows may warn on first launch. Download builds only from <a href="https://github.com/aicodeking/pandacode/releases">GitHub Releases</a>, or build from source. Linux needs X11 or XWayland.</p>
 </Page>

@@ -1,9 +1,0 @@
-
-running 4 tests
-test replay::tests::clock_rollback_after_restart_cannot_revive_pruned_ciphertext ... ok
-test replay::tests::unavailable_or_unwritable_receipts_never_admit_a_message ... ok
-test replay::tests::admitted_nonces_survive_restart_and_a_second_connection ... ok
-test replay::tests::capacity_never_evicts_live_receipts_and_only_expired_rows_are_removed ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
-

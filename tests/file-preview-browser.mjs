@@ -9,15 +9,11 @@ assert.ok(url, 'The native fixture must provide its preview URL.');
 assert.ok(restoredUrl, 'The native fixture must provide its reauthorized preview URL.');
 async function assertPreview(page, label) {
   assert.equal(await page.locator('#preview-heading').textContent(), 'Workspace preview', `${label}: HTML`);
-  await page.waitForFunction(() => document.querySelector('#preview-image')?.naturalWidth === 32);
+  await page.waitForFunction(() => document.body.dataset.loaded === 'true' && document.querySelector('#preview-image')?.naturalWidth === 32);
   assert.equal(await page.locator('#preview-heading').evaluate(element => getComputedStyle(element).color), 'rgb(212, 170, 25)', `${label}: CSS`);
-  assert.equal(await page.evaluate(() => document.body.dataset.loaded), undefined, `${label}: workspace JavaScript never executes`);
-  assert.notEqual(await page.title(), 'Preview ready', `${label}: script blocked`);
+  assert.equal(await page.title(), 'Preview ready', `${label}: JavaScript`);
   assert.ok(!page.url().includes('__pandacode_preview'), `${label}: clean final URL`);
-  assert.equal(await page.evaluate(async () => {
-    try { await fetch('/.env'); return false; } catch { return true; }
-  }), true, `${label}: connect-src denies local file reads as well as external requests`);
-  assert.equal((await page.context().request.get(new URL('/.env', page.url()).href)).status(), 404, `${label}: hidden-file protection`);
+  assert.equal(await page.evaluate(async () => (await fetch('/.env')).status), 404, `${label}: hidden-file protection`);
 }
 const unrelated = http.createServer((_request, response) => {
   response.setHeader('Content-Type', 'text/html');
@@ -62,7 +58,7 @@ try {
           assert.equal(restoredPage.url(), cleanUrl.href, `${label}: reload preserves URL`);
         } finally { await context.close(); }
       }
-      console.log(`${name}: HTML/CSS/SVG preserved; scripts/fetch blocked; cookies, reload, restoration and hidden-file protection passed.`);
+      console.log(`${name}: HTML, CSS, JavaScript, SVG, cookies, reload, fresh-context restoration, query/fragment and hidden-file protection passed.`);
     } finally { await browser.close(); }
   }
 } finally { await new Promise(resolve => unrelated.close(resolve)); }

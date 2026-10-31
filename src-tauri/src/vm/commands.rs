@@ -53,8 +53,9 @@ pub async fn vm_create(app: AppHandle, image: String, name: String) -> Result<St
         let vms = app.state::<Vms>();
         vms.create(&image, &name)?;
         vms.show(Some(name.clone()));
-        // A new VM starts at once. Desktop package installation is a separate action.
+        // A new VM starts at once; Linux ones then get their desktop.
         vms.start(&name, None)?;
+        super::desktop::ensure_in_background(app.clone(), name);
         let _ = app.emit("vm-changed", serde_json::json!({}));
         status(&vms)
     })
@@ -71,6 +72,7 @@ pub async fn vm_power(app: AppHandle, name: String, action: String, share: Optio
         match action.as_str() {
             "start" => {
                 vms.start(&name, share.as_deref())?;
+                super::desktop::ensure_in_background(app.clone(), name.clone());
             }
             "stop" => vms.stop(&name)?,
             "suspend" => vms.suspend(&name)?,

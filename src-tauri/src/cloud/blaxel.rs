@@ -1,9 +1,9 @@
-//! Blaxel sandboxes for explicit sandbox management. The control plane is
+//! Blaxel sandboxes for cloud agents (docs/cloud-agents.md). The control plane is
 //! `https://api.blaxel.ai/v0` (https://docs.blaxel.ai/api-reference/compute/create-sandbox);
 //! commands go to each sandbox's own API at the `metadata.url` Blaxel reports
 //! (https://docs.blaxel.ai/api-reference/process/execute-a-command). A sandbox without an
-//! open connection drops to standby with memory, files and processes snapshotted.
-//! Explicit commands can wake it; PandaCode does not install a background keep-alive process.
+//! open connection drops to standby in ~15 s with memory, files and processes snapshotted, so
+//! detached work starts as a `keepAlive` process, which holds the sandbox awake.
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -32,7 +32,7 @@ fn machine(sandbox: &Value) -> Machine {
         "UPLOADING" | "BUILDING" | "BUILT" | "DEPLOYING" | "UNARCHIVING" => "starting",
         "DEACTIVATING" | "ARCHIVING" | "DELETING" => "stopping",
         "ARCHIVED" => "stopped",
-        // Deactivated and terminated sandboxes cannot be revived.
+        // Deactivated and terminated sandboxes can't be revived; "error" makes callers recreate.
         _ => "error",
     };
     let memory = sandbox["spec"]["runtime"]["memory"].as_u64().unwrap_or(4096);
@@ -84,17 +84,19 @@ impl Blaxel {
         match action {
             "delete" => self.api(reqwest::Method::DELETE, &format!("/sandboxes/{name}"), None).await.map(|_| ()),
             // Standby is automatic and keeps everything; any request to the sandbox wakes it.
-            "stop" => Err("Blaxel standby is automatic; it has no explicit Stop operation. Use Delete to remove the sandbox.".into()),
+            "stop" => Ok(()),
             "start" => self.exec(name, "true", Duration::from_secs(60)).await.map(|_| ()),
-            _ => Err(format!("Blaxel sandboxes can start or be deleted, not {action}.")),
+            _ => Err(format!("Blaxel sandboxes can start, stop or be deleted, not {action}.")),
         }
+    }
+    pub async fn state(&self, name: &str) -> Result<String> {
+        Ok(machine(&self.api(reqwest::Method::GET, &format!("/sandboxes/{name}"), None).await?).state)
     }
 
     /// The sandbox's own API address, `metadata.url`.
     async fn url(&self, name: &str) -> Result<String> {
         let sandbox = self.api(reqwest::Method::GET, &format!("/sandboxes/{name}"), None).await?;
-        let url = sandbox["metadata"]["url"].as_str().filter(|u| !u.is_empty()).ok_or("Blaxel did not report an address for this sandbox yet.")?;
-        http::endpoint(SERVICE, url, &["run.blaxel.ai"], &self.api)
+        sandbox["metadata"]["url"].as_str().filter(|u| !u.is_empty()).map(|u| u.trim_end_matches('/').to_string()).ok_or_else(|| "Blaxel did not report an address for this sandbox yet.".into())
     }
     fn output(process: &Value) -> (Option<i32>, String) {
         let logs = process["logs"].as_str().map(str::to_string).unwrap_or_else(|| format!("{}{}", process["stdout"].as_str().unwrap_or_default(), process["stderr"].as_str().unwrap_or_default()));
@@ -109,7 +111,6 @@ impl Blaxel {
         let deadline = Instant::now() + timeout;
         // The sandbox API reports the pid as a string, but a number must work too.
         let id = process["pid"].as_str().map(str::to_string).or_else(|| process["pid"].as_u64().map(|n| n.to_string())).or_else(|| process["name"].as_str().map(str::to_string)).unwrap_or_default();
-        if process["status"] == "running" { super::sandbox::validate_id(&id)?; }
         while process["status"] == "running" {
             if Instant::now() >= deadline {
                 let _ = self.call(reqwest::Method::DELETE, &format!("{url}/process/{id}/kill"), None, Duration::from_secs(15)).await;
@@ -120,12 +121,18 @@ impl Blaxel {
         }
         Ok(Self::output(&process))
     }
+    /// A `keepAlive` process with no timeout stays up, and holds the sandbox out of standby.
+    pub async fn spawn(&self, name: &str, command: &str) -> Result<()> {
+        let url = self.url(name).await?;
+        let body = json!({"command": format!("sh -c {}", super::shell_quote(command)), "keepAlive": true, "timeout": 0, "waitForCompletion": false});
+        self.call(reqwest::Method::POST, &format!("{url}/process"), Some(body), Duration::from_secs(60)).await.map(|_| ())
+    }
 }
 
 impl Sandbox for Blaxel {
-    /// Standby snapshots files and memory. No background keep-alive process is installed.
+    /// Standby snapshots files and memory; no expiry is set, so a `keepAlive` process runs on.
     fn info(&self) -> Info {
-        Info { persistent: true, max_lease_minutes: 24 * 60 }
+        Info { persistent: true, max_unattended_minutes: 24 * 60 }
     }
     fn list(&self) -> Result<Vec<Machine>> {
         block(Blaxel::list(self))
@@ -136,12 +143,18 @@ impl Sandbox for Blaxel {
     fn power(&self, native: &str, action: &str) -> Result<()> {
         block(Blaxel::power(self, native, action))
     }
+    fn state(&self, native: &str) -> Result<String> {
+        block(Blaxel::state(self, native))
+    }
     fn exec(&self, native: &str, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
         block(Blaxel::exec(self, native, command, timeout))
     }
-    /// Standby is automatic; this manual adapter does not install a background process.
+    /// Nothing to extend: no TTL is set and the agent's `keepAlive` process prevents standby.
     fn keep_alive(&self, _native: &str, _minutes: u32) -> Result<()> {
-        Err("Blaxel does not offer an explicit activity lease.".into())
+        Ok(())
+    }
+    fn spawn(&self, native: &str, command: &str) -> Result<()> {
+        block(Blaxel::spawn(self, native, command))
     }
 }
 
@@ -208,13 +221,12 @@ mod tests {
         assert_eq!(machines.iter().map(|m| (m.id.as_str(), m.state.as_str())).collect::<Vec<_>>(), vec![("blaxel:a-1", "running"), ("blaxel:d", "starting")]);
         assert_eq!(machines[0].detail, "Blaxel · 2 CPU · 4 GB");
         assert_eq!(api.create("job").await.unwrap().id, "blaxel:job-abc123");
-        assert!(api.power("a-1", "stop").await.is_err());
+        api.power("a-1", "stop").await.unwrap();
         api.power("a-1", "delete").await.unwrap();
         assert!(api.power("a-1", "pause").await.is_err());
-        assert_eq!(machine(&json!({"metadata": {"name": "pending"}, "status": "DEPLOYING"})).state, "starting");
-        assert_eq!(machine(&json!({"metadata": {"name": "gone"}, "status": "TERMINATED"})).state, "error");
-        assert_eq!(machine(&json!({"metadata": {"name": "archived"}, "status": "ARCHIVED"})).state, "stopped");
-        assert!(Sandbox::keep_alive(&api, "a-1", 30).is_err());
+        assert_eq!(api.state("pending").await.unwrap(), "starting");
+        assert_eq!(api.state("gone").await.unwrap(), "error");
+        assert_eq!(api.state("archived").await.unwrap(), "stopped");
         let log = seen.lock().unwrap();
         assert!(log.iter().all(|r| r.authorization.as_deref() == Some("Bearer key-1") && r.headers.iter().any(|(n, v)| n == "x-blaxel-workspace" && v == "ws")));
         let body: Value = serde_json::from_str(&log[1].body).unwrap();
@@ -223,18 +235,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_commands_and_polls_slow_ones_without_background_processes() {
+    async fn runs_commands_polls_slow_ones_and_spawns_with_keep_alive() {
         let (api, seen) = blaxel();
         assert_eq!(api.exec("a-1", "echo $((6*7))", Duration::from_secs(9)).await.unwrap(), (Some(3), "42\n".to_string()));
         assert_eq!(api.exec("a-1", "sleep 100", Duration::from_secs(9)).await.unwrap(), (Some(0), "late\n".to_string()));
         assert_eq!(api.exec("a-1", "sleep 200", Duration::from_secs(9)).await.unwrap(), (Some(1), "num\n".to_string()));
-        assert!(Sandbox::keep_alive(&api, "a-1", 30).is_err());
+        api.spawn("a-1", "agent run").await.unwrap();
+        Sandbox::keep_alive(&api, "a-1", 30).unwrap();
         assert!(api.exec("pending", "ls", Duration::from_secs(5)).await.unwrap_err().contains("address"));
         let log = seen.lock().unwrap();
         let posts: Vec<Value> = log.iter().filter(|r| r.path == "/sbx/process").map(|r| serde_json::from_str(&r.body).unwrap()).collect();
         assert_eq!(posts[0], json!({"command":"sh -c 'echo $((6*7))'","waitForCompletion":true,"timeout":9}));
-        assert_eq!(posts.len(), 3);
-        assert!(posts.iter().all(|post| post.get("keepAlive").is_none()));
+        assert_eq!(posts[3], json!({"command":"sh -c 'agent run'","keepAlive":true,"timeout":0,"waitForCompletion":false}));
     }
 
     #[test]
@@ -246,12 +258,26 @@ mod tests {
         assert!(block(api.list()).unwrap_err().contains("refused the credentials"));
     }
 
-    #[tokio::test]
-    async fn does_not_forward_workspace_credentials_to_untrusted_process_servers() {
-        let (base, seen) = mock::serve(|_, _| (200, r#"{"metadata":{"url":"https://run.blaxel.ai.attacker.invalid"}}"#));
-        let error = Blaxel::new(Some(base), "fixture-api".into(), "workspace".into()).exec("box-1", "true", Duration::from_secs(2)).await.unwrap_err();
-        assert!(error.contains("untrusted sandbox address"), "{error}");
-        assert_eq!(seen.lock().unwrap().len(), 1);
+    /// Needs BL_API_KEY and BL_WORKSPACE; run with `cargo test blaxel_live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn blaxel_live() {
+        let api = Blaxel::new(None, std::env::var("BL_API_KEY").expect("BL_API_KEY"), std::env::var("BL_WORKSPACE").expect("BL_WORKSPACE"));
+        let made = Sandbox::create(&api, "pandacode-smoke").unwrap();
+        let id = made.id.trim_start_matches("blaxel:").to_string();
+        let run = || -> Result<()> {
+            for _ in 0..60 {
+                if Sandbox::state(&api, &id)? == "running" { break; }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            assert_eq!(Sandbox::exec(&api, &id, "echo hi", Duration::from_secs(60))?, (Some(0), "hi\n".into()));
+            Sandbox::spawn(&api, &id, "sleep 120")?;
+            let (_, ps) = Sandbox::exec(&api, &id, "ps -eo args | grep '[s]leep 120'", Duration::from_secs(30))?;
+            assert!(ps.contains("sleep 120"));
+            Ok(())
+        };
+        let result = run();
+        Sandbox::power(&api, &id, "delete").unwrap();
+        result.unwrap();
     }
-
 }

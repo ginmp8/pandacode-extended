@@ -4,9 +4,9 @@
 //! (`skills/adapter.rs`), never over a file PandaCode did not write, and reports drift.
 mod adapter;
 mod catalog;
-pub(crate) mod scoped;
 mod github;
 mod safety;
+pub(crate) mod scoped;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -169,38 +169,22 @@ fn valid_id(id: &str) -> bool {
 /// `name:` and `description:` from leading `---` frontmatter, and the text after it.
 fn frontmatter(text: &str) -> (Option<String>, Option<String>, &str) {
     let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else { return (None, None, text) };
-    let mut offset = 0usize;
-    let mut boundary = None;
-    for line in rest.split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) == "---" { boundary = Some((offset, offset + line.len())); break; }
-        offset += line.len();
-    }
-    let Some((end, body_at)) = boundary else { return (None, None, text) };
-    let lines: Vec<_> = rest[..end].lines().collect();
-    let field = |key: &str| -> Option<String> {
-        let (index, value) = lines.iter().enumerate().find_map(|(i, line)| line.strip_prefix(key).map(|v| (i, v.trim())))?;
-        let value = if matches!(value, ">" | ">-" | ">+" | "|" | "|-" | "|+") {
-            let mut block = Vec::new();
-            for line in &lines[index + 1..] {
-                if !line.is_empty() && !line.starts_with([' ', '\t']) { break; }
-                block.push(line.trim().to_string());
-            }
-            if value.starts_with('|') { block.join("\n") }
-            else {
-                let mut folded = String::new();
-                for line in block {
-                    if line.is_empty() { folded.push('\n'); }
-                    else { if !folded.is_empty() && !folded.ends_with('\n') { folded.push(' '); } folded.push_str(&line); }
-                }
-                folded
-            }
-        } else { value.trim_matches(['"', '\'']).to_string() };
-        let value = value.trim().to_string();
-        (!value.is_empty()).then_some(value)
+    let Some(end) = rest.find("\n---") else { return (None, None, text) };
+    let lines: Vec<&str> = rest[..end].lines().collect();
+    let field = |key: &str| {
+        let at = lines.iter().position(|line| line.starts_with(key))?;
+        let value = lines[at][key.len()..].trim();
+        // A YAML block scalar (`description: >-`) continues on the indented lines below it.
+        let value = if matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+") {
+            lines[at + 1..].iter().take_while(|l| l.starts_with([' ', '\t']) || l.trim().is_empty()).map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+        } else {
+            value.trim_matches(['"', '\'']).to_string()
+        };
+        Some(value).filter(|v| !v.is_empty())
     };
-    (field("name:"), field("description:"), rest[body_at..].trim_start_matches(['\r', '\n']))
+    let body = rest[end + 4..].trim_start_matches(['\r', '\n']);
+    (field("name:"), field("description:"), body)
 }
-
 fn main_file(kind: Kind) -> &'static str {
     match kind {
         Kind::Skill => "SKILL.md",
@@ -230,7 +214,6 @@ fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
 /// Regular, non-hidden files under `path` (or `path` itself), bounded.
 fn read_local(path: &Path) -> Result<Files, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-    if meta.file_type().is_symlink() { return Err("Skill sources cannot be symbolic links.".into()); }
     if meta.is_file() {
         if meta.len() as usize > MAX_BYTES {
             return Err("That file is larger than 1 MB.".into());
@@ -241,10 +224,7 @@ fn read_local(path: &Path) -> Result<Files, String> {
     let mut files = Vec::new();
     let mut total = 0;
     let mut pending = vec![path.to_path_buf()];
-    let mut directories = 0usize;
     while let Some(dir) = pending.pop() {
-        directories += 1;
-        if directories > 4096 { return Err("A skill contains too many directories.".into()); }
         for entry in fs::read_dir(&dir).map_err(|e| format!("Could not read {}: {e}", dir.display()))?.flatten() {
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
@@ -252,12 +232,7 @@ fn read_local(path: &Path) -> Result<Files, String> {
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_dir() {
                 pending.push(entry.path());
-            } else if kind.is_symlink() {
-                return Err("A skill contains a symbolic link; links are not imported.".into());
             } else if kind.is_file() {
-                if entry.metadata().map_err(|e| e.to_string())?.len() > MAX_BYTES as u64 {
-                    return Err("A skill file is larger than 1 MiB.".into());
-                }
                 let bytes = fs::read(entry.path()).map_err(|e| e.to_string())?;
                 total += bytes.len();
                 if files.len() >= MAX_FILES || total > MAX_BYTES {
@@ -296,22 +271,6 @@ impl Library {
         fs::write(&temp, json).and_then(|_| fs::rename(&temp, self.meta_path(&meta.id))).map_err(|e| format!("Could not save the library: {e}"))
     }
     fn files(&self, id: &str) -> Result<Files, String> {
-        if !valid_id(id) { return Err("Unknown skill.".into()); }
-        // Hidden additions were not imported and must not disappear during an update.
-        let mut pending = vec![self.dir.join(id)];
-        let mut visited = 0usize;
-        while let Some(dir) = pending.pop() {
-            visited += 1;
-            if visited > 4096 { return Err("Skill library contains too many directories.".into()); }
-            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let kind = entry.file_type().map_err(|e| e.to_string())?;
-                if entry.file_name().to_string_lossy().starts_with('.') || kind.is_symlink() {
-                    return Err("Skill library contains added hidden files or links; PandaCode will not overwrite it.".into());
-                }
-                if kind.is_dir() { pending.push(entry.path()); }
-            }
-        }
         let mut files = read_local(&self.dir.join(id))?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
@@ -320,21 +279,6 @@ impl Library {
         let files = self.files(&meta.id)?;
         let findings = files.iter().flat_map(|(path, bytes)| safety::scan(path, &String::from_utf8_lossy(bytes))).collect();
         Ok(Item { files: files.into_iter().map(|(p, _)| p).collect(), findings, meta })
-    }
-
-    /// Metadata-only lookup for execution admission. A damaged unrelated item must not
-    /// prevent another task from running; selected ids are validated explicitly later.
-    fn metadata_entries(&self) -> Result<Vec<Meta>, String> {
-        let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(format!("Could not read skill metadata: {e}")),
-        };
-        let mut ids: Vec<String> = entries.flatten()
-            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".json").map(str::to_string))
-            .filter(|id| valid_id(id)).collect();
-        ids.sort();
-        Ok(ids.into_iter().filter_map(|id| self.load(&id).ok()).collect())
     }
 
     pub fn list(&self) -> Result<Vec<Item>, String> {
@@ -351,15 +295,12 @@ impl Library {
     /// Add or update an item. Updating keeps activations; they show as outdated until the
     /// user activates again, so a new version never reaches a harness without them.
     pub fn import(&self, kind: Kind, files: Files, fallback_name: &str, source: Source) -> Result<Item, String> {
-        if files.len() > MAX_FILES || files.iter().map(|(_, b)| b.len()).sum::<usize>() > MAX_BYTES {
-            return Err("A skill must be at most 64 files and 1 MiB.".into());
-        }
-        let mut paths = std::collections::HashSet::new();
-        for (relative, _) in &files {
-            if !github::valid_path(relative) || relative.split('/').any(|p| p.starts_with('.')) || !paths.insert(relative.to_ascii_lowercase()) {
-                return Err("A skill contains an unsafe or duplicate path.".into());
-            }
-        }
+        self.import_as(kind, files, fallback_name, source, false)
+    }
+
+    /// `import`, refusing (under the library lock, so a concurrent import cannot slip in
+    /// between a check and the write) to replace an item that came from another source.
+    pub(crate) fn import_as(&self, kind: Kind, files: Files, fallback_name: &str, source: Source, same_source_only: bool) -> Result<Item, String> {
         let files = normalize(kind, files)?;
         let main = files.iter().find(|(p, _)| p == main_file(kind)).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
         let (name, description, body) = frontmatter(&main);
@@ -375,23 +316,13 @@ impl Library {
         if previous.as_ref().is_some_and(|p| p.kind != kind) {
             return Err(format!("A {} named {id} is already in the library.", if kind == Kind::Skill { "rule" } else { "skill" }));
         }
-        if let Some(previous) = &previous {
-            let same_location = if source.kind == "github" { github::same_location(&previous.source.location, &source.location) }
-                else { previous.source.location == source.location };
-            if previous.source.kind != source.kind || !same_location {
-                return Err(format!("{id} already exists from another source; choose a different skill name."));
-            }
-            if content_hash(&self.files(&id)?) != previous.sha256 {
-                return Err(format!("{id} was edited on disk; PandaCode will not overwrite it."));
-            }
+        if let Some(taken) = previous.as_ref().filter(|p| same_source_only && !p.source.location.eq_ignore_ascii_case(&source.location)) {
+            return Err(format!("{id} is already in the library from {}.", taken.source.location));
         }
         let folder = self.dir.join(&id);
-        if previous.is_none() && folder.exists() {
-            return Err(format!("{id} already has unmanaged files; PandaCode will not overwrite them."));
-        }
-        let stage = self.dir.join(format!(".{id}-{}", uuid::Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&folder);
         for (relative, bytes) in &files {
-            let path = stage.join(relative);
+            let path = folder.join(relative);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
@@ -401,18 +332,9 @@ impl Library {
         let meta = Meta {
             acknowledged: previous.as_ref().and_then(|p| p.acknowledged.clone()).filter(|a| *a == sha256),
             activations: previous.map(|p| p.activations).unwrap_or_default(),
-            id: id.clone(), name, kind, description, source, sha256, imported_at: now_ms(),
+            id, name, kind, description, source, sha256, imported_at: now_ms(),
         };
-        let backup = self.dir.join(format!(".{id}-backup-{}", uuid::Uuid::new_v4()));
-        let existed = folder.exists();
-        if existed { fs::rename(&folder, &backup).map_err(|e| format!("Could not preserve {id}: {e}"))?; }
-        if let Err(error) = fs::rename(&stage, &folder).map_err(|e| e.to_string()).and_then(|_| self.save(&meta)) {
-            let _ = fs::remove_dir_all(&folder);
-            if existed { let _ = fs::rename(&backup, &folder); }
-            let _ = fs::remove_dir_all(&stage);
-            return Err(format!("Could not update {id}: {error}"));
-        }
-        if existed { let _ = fs::remove_dir_all(backup); }
+        self.save(&meta)?;
         self.item(meta)
     }
 
@@ -435,9 +357,6 @@ impl Library {
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         let item = self.item(self.load(id)?)?;
         let meta = item.meta;
-        if content_hash(&self.files(id)?) != meta.sha256 {
-            return Err("The library files were edited on disk. Re-import them under a new name before activating.".into());
-        }
         let acknowledged = if item.findings.is_empty() || meta.acknowledged.as_deref() == Some(meta.sha256.as_str()) {
             meta.acknowledged.clone()
         } else if acknowledge {
@@ -516,8 +435,8 @@ impl Library {
         {
             let _guard = LOCK.lock().map_err(|e| e.to_string())?;
             let meta = self.load(id)?;
-            if !meta.activations.is_empty() || self.assigned(id)? {
-                return Err(format!("Turn {} off everywhere and remove its bot/project selections before removing it.", meta.name));
+            if !meta.activations.is_empty() {
+                return Err(format!("Turn {} off everywhere before removing it.", meta.name));
             }
             fs::remove_dir_all(self.dir.join(id)).ok();
             fs::remove_file(self.meta_path(id)).map_err(|e| format!("Could not remove {id}: {e}"))?;
@@ -612,6 +531,9 @@ pub(crate) fn library(app: &AppHandle) -> Result<Library, String> {
     let home = crate::agent_usage_providers::home().ok_or("Could not find your home folder.")?;
     Ok(Library::new(dir, home))
 }
+fn repo_name(repo: &str) -> String {
+    repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').trim_end_matches(".git").to_string()
+}
 fn root(state: &AppState, project_id: Option<String>, session_id: Option<String>) -> Result<Option<PathBuf>, String> {
     project_id.map(|id| state.root(&id, session_id.as_deref())).transpose()
 }
@@ -637,7 +559,7 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
 #[tauri::command]
 pub async fn skills_import_github(app: AppHandle, repo: String, path: String, git_ref: Option<String>, kind: Kind) -> crate::Result<Item> {
     crate::blocking(move || {
-        let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches(".git").to_string();
+        let repo = repo_name(&repo);
         let (files, commit) = github::fetch(&repo, &path, git_ref.as_deref())?;
         let path = path.trim_matches('/').to_string();
         let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(repo.rsplit('/').next().unwrap_or_default()).to_string();
@@ -667,80 +589,37 @@ pub async fn skills_scan(app: AppHandle, id: String) -> crate::Result<Vec<Findin
     crate::blocking(move || library(&app)?.scan(&id)).await
 }
 #[tauri::command]
-pub async fn skills_remove(app: AppHandle, state: State<'_, AppState>, id: String) -> crate::Result<Vec<Item>> {
-    let store = state.store.clone();
-    crate::blocking(move || {
-        let store = store.lock().map_err(|e| e.to_string())?;
-        library(&app)?.remove_with_store(&store, &id)
-    }).await
+pub async fn skills_remove(app: AppHandle, id: String) -> crate::Result<Vec<Item>> {
+    crate::blocking(move || library(&app)?.remove(&id)).await
 }
 
-fn local_window(window: &tauri::WebviewWindow) -> crate::Result<()> {
-    if window.label() != "main" { return Err("Skills are managed from the main window.".into()); }
-    Ok(())
-}
 #[tauri::command]
 pub async fn skills_catalogs(app: AppHandle) -> crate::Result<catalog::Catalogs> {
     crate::blocking(move || library(&app)?.catalogs()).await
 }
 #[tauri::command]
-pub async fn skills_catalog_add(app: AppHandle, window: tauri::WebviewWindow, repo: String, git_ref: Option<String>) -> crate::Result<catalog::Catalogs> {
-    local_window(&window)?;
-    crate::blocking(move || {
-        let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches(".git");
-        let git_ref = git_ref.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
-        library(&app)?.catalog_add(&github::api, repo, git_ref)
-    }).await
+pub async fn skills_catalog_add(app: AppHandle, repo: String, git_ref: Option<String>) -> crate::Result<catalog::Catalogs> {
+    let git_ref = git_ref.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    crate::blocking(move || library(&app)?.add_catalog(&github::api, &repo_name(&repo), git_ref)).await
 }
 #[tauri::command]
-pub async fn skills_catalog_refresh(app: AppHandle, window: tauri::WebviewWindow, repo: String) -> crate::Result<catalog::Catalogs> {
-    local_window(&window)?;
-    crate::blocking(move || library(&app)?.catalog_refresh(&github::api, &repo)).await
+pub async fn skills_catalog_refresh(app: AppHandle, repo: String) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.refresh_catalog(&github::api, &repo)).await
 }
 #[tauri::command]
-pub async fn skills_catalog_state(app: AppHandle, window: tauri::WebviewWindow, repo: String, state: Option<catalog::State>) -> crate::Result<catalog::Catalogs> {
-    local_window(&window)?;
-    crate::blocking(move || library(&app)?.catalog_state(&repo, state)).await
+pub async fn skills_catalog_state(app: AppHandle, repo: String, state: catalog::State) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.set_catalog_state(&repo, state)).await
 }
 #[tauri::command]
-pub async fn skills_catalog_import(app: AppHandle, window: tauri::WebviewWindow, repo: String, paths: Vec<String>) -> crate::Result<catalog::Imported> {
-    local_window(&window)?;
-    crate::blocking(move || library(&app)?.catalog_import(&github::api, &repo, &paths)).await
-}
-fn scope_exists(store: &crate::storage::Store, target: scoped::Target, id: &str) -> crate::Result<()> {
-    match target {
-        scoped::Target::Bot => { crate::bots::get(store, id)?; },
-        scoped::Target::Project => { store.workspace_root(id, None)?; },
-    }
-    Ok(())
+pub async fn skills_catalog_import(app: AppHandle, repo: String, paths: Option<Vec<String>>) -> crate::Result<catalog::Imported> {
+    crate::blocking(move || library(&app)?.import_catalog(&github::api, &repo, paths.as_deref())).await
 }
 #[tauri::command]
-pub async fn skills_scope_get(app: AppHandle, state: State<'_, AppState>, target: scoped::Target, target_id: String) -> crate::Result<Vec<scoped::Pin>> {
-    { let store = state.store.lock().map_err(|e| e.to_string())?; scope_exists(&store, target, &target_id)?; }
-    crate::blocking(move || library(&app)?.selection(target, &target_id)).await
-}
-#[tauri::command]
-pub async fn skills_scope_set(app: AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, target: scoped::Target, target_id: String, ids: Vec<String>, acknowledge: Option<bool>) -> crate::Result<Vec<scoped::Pin>> {
-    local_window(&window)?;
-    let store = state.store.clone();
-    crate::blocking(move || {
-        // Keep target existence valid until persistence, serialized with deletion and cleanup.
-        let store = store.lock().map_err(|e| e.to_string())?;
-        scope_exists(&store, target, &target_id)?;
-        library(&app)?.select(target, &target_id, &ids, acknowledge.unwrap_or(false))
-    }).await
-}
-#[tauri::command]
-pub async fn skills_task_resolve(app: AppHandle, state: State<'_, AppState>, session_id: String) -> crate::Result<scoped::Resolution> {
-    let library = library(&app)?;
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let session = store.session(&session_id)?;
-    let root = store.workspace_root(&session.project_id, Some(&session_id))?;
-    scoped::task(&library, &store, &session, &root)
+pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs> {
+    crate::blocking(move || library(&app)?.discover(&github::api)).await
 }
 
 #[cfg(test)]
 mod tests;
-
 #[cfg(test)]
 mod catalog_tests;

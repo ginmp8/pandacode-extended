@@ -5,9 +5,6 @@ import { build, NOT_CONFIGURED } from './config.ts';
 import { publicKey } from './crypto.ts';
 import * as secrets from './secrets.ts';
 import type { Account, Device } from './types.ts';
-import { parseToken } from './token.ts';
-export { parseToken } from './token.ts';
-export type { Claims } from './token.ts';
 
 export const SIGNED_OUT = 'This phone was signed out of PandaCode Connect.';
 const KEY_CHANGED = 'The relay has another key for this device.';
@@ -104,24 +101,40 @@ function deviceName(): string {
   return [...(name || 'Phone')].slice(0, 64).join('');
 }
 
-/** Polls GitHub, then registers the existing phone identity. Key conflicts never reset it silently. */
+/** Polls GitHub, then registers this phone with the relay. A 409 gets a new device id, once. */
 export async function finishSignIn(code: SignInCode, signal?: AbortSignal): Promise<{ token: string; account: Account; deviceId: string }> {
   const secret = await secrets.getSecret(); // made before polling; a failed write fails sign-in
   const ghToken = await githubToken(code, signal);
-  if (signal?.aborted) throw new Error('Sign-in was cancelled.');
   const platform = Platform.OS === 'ios' ? 'ios' : 'android';
   const register = (id: string) => relay('POST', '/v1/auth/github', null, { githubToken: ghToken, device: { id, name: deviceName(), platform, publicKey: publicKey(secret) } });
-  const deviceId = await secrets.getDeviceId();
-  const reply = await register(deviceId);
+  let deviceId = await secrets.getDeviceId();
+  let reply;
+  try {
+    reply = await register(deviceId);
+  } catch (error) {
+    if ((error as Error).message !== KEY_CHANGED) throw error;
+    deviceId = await secrets.newDeviceId();
+    reply = await register(deviceId);
+  }
   const token = reply?.token, account = reply?.account;
   if (typeof token !== 'string' || token.length > 4096) throw new Error('The relay did not return a token.');
-  if (!account || typeof account.id !== 'string' || typeof account.login !== 'string') throw new Error('The relay returned an unreadable account.');
-  const claims = parseToken(token);
-  if (!claims || claims.acct !== account.id || claims.dev !== deviceId || expired(token)) throw new Error('The relay token does not match this account and phone.');
+  if (!account || typeof account.login !== 'string') throw new Error('The relay returned an unreadable account.');
   const clean: Account = { id: String(account.id), login: account.login, avatarUrl: String(account.avatarUrl ?? '') };
-  // The client saves these together inside its session write boundary. A cancelled
-  // or signed-out request must not repopulate credentials after a local clear.
+  await secrets.setToken(token);
+  await secrets.setAccount(clean);
   return { token, account: clean, deviceId };
+}
+
+export interface Claims { acct: string; dev: string; iat: number; exp: number }
+
+export function parseToken(token: string): Claims | null {
+  try {
+    const part = token.split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
+    const c = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '=')));
+    return typeof c.acct === 'string' && typeof c.dev === 'string' && typeof c.exp === 'number' ? c : null;
+  } catch {
+    return null;
+  }
 }
 
 export const expired = (token: string, nowS = Date.now() / 1000) => (parseToken(token)?.exp ?? 0) <= nowS;

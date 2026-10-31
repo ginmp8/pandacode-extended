@@ -7,7 +7,7 @@ import { escape, icon } from './dom';
 import { age } from './github-hub-prompts';
 import { glyph, type HubPull } from './github-hub';
 
-export interface HubRun { id: number; runNumber: number; headSha: string; workflow: string; title: string; branch: string; event: string; state: string; createdAt: string; startedAt: string; updatedAt: string; url: string; attempt: number; pulls: number[] }
+export interface HubRun { id: number; workflow: string; title: string; branch: string; event: string; state: string; createdAt: string; startedAt: string; updatedAt: string; url: string; attempt: number; pulls: number[] }
 export interface RunStep { name: string; state: string; startedAt: string; completedAt: string }
 /** `summary` is the job's check-run summary as Markdown, bounded natively. */
 export interface RunJob { id: number; name: string; state: string; startedAt: string; completedAt: string; url: string; steps: RunStep[]; summary: string }

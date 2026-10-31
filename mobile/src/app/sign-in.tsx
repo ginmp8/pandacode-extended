@@ -4,7 +4,7 @@ import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import * as WebBrowser from 'expo-web-browser';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { connect } from '../connect/client.ts';
 import type { SignInCode } from '../connect/auth.ts';
@@ -43,13 +43,6 @@ export default function SignIn() {
     }
   };
   const cancel = () => { connect.signInCancel(); setCode(null); };
-  const clearSignIn = () => Alert.alert('Clear saved sign-in?', 'This removes the saved relay token and account. Your device key and explicitly trusted computer keys stay unchanged.', [
-    { text: 'Cancel', style: 'cancel' },
-    { text: 'Clear sign-in', style: 'destructive', onPress: () => {
-      void connect.signOut().then(() => connect.init()).then(() => setError(''))
-        .catch(e => setError((e as Error).message));
-    } },
-  ]);
   const demo = () => connect.enterDemo().catch(e => setError((e as Error).message));
   const explore = <Button label="Explore the demo" onPress={demo} />;
   const copy = async () => {
@@ -63,13 +56,13 @@ export default function SignIn() {
     <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.top}>
         <Image source={icon} style={styles.icon} accessibilityIgnoresInvertColors />
-        <Text style={[styles.title, { color: colors.text }]}>PandaCode Extended</Text>
+        <Text style={[styles.title, { color: colors.text }]}>PandaCode</Text>
         <Text style={[styles.lead, { color: colors.secondary }]}>See and steer the tasks running on your computers. Tasks never run on this phone.</Text>
       </View>
       {!status.configured ? (
         <Glass style={styles.card}>
           <Text style={[styles.body, { color: colors.text }]}>PandaCode Connect is not configured in this build.</Text>
-          <Text style={[styles.small, { color: colors.secondary }]}>{configProblem} Configure this build with your own Connect relay and GitHub OAuth app. See the mobile README for setup instructions.</Text>
+          <Text style={[styles.small, { color: colors.secondary }]}>{configProblem} Put PANDACODE_RELAY_URL and PANDACODE_GITHUB_CLIENT_ID in mobile/.env (or the shell), then restart Metro with npx expo start --clear.</Text>
           {explore}
         </Glass>
       ) : code ? (
@@ -93,7 +86,6 @@ export default function SignIn() {
           {!!(error || status.error) && <Text style={[styles.small, { color: colors.red, textAlign: 'center' }]}>{error || status.error}</Text>}
           {starting ? <ActivityIndicator /> : <Button label="Sign in with GitHub" kind="primary" onPress={start} />}
           {!starting && explore}
-          {!starting && !!status.error && <Button label="Clear saved sign-in…" onPress={clearSignIn} />}
           <Text style={[styles.small, styles.hint, { color: colors.secondary }]}>No computer yet? The demo shows sample computers and tasks, with nothing sent anywhere.</Text>
         </View>
       )}

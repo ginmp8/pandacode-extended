@@ -4,13 +4,17 @@ import { escape, icon } from './dom';
 /* PandaCode Connect start progress (docs/remote-access.md): while `remote_start_task`
  * waits for another computer to find or clone the project, the host reports its stages
  * (`task.progress`, re-emitted here as `remote://start-progress`) and the New task shows
- * them in a strip above the composer or in the pending transcript turn. A
+ * them in a strip above the composer, like a cloud task's (src/cloud-agents.ts). A
  * failure stays there with Retry until the next send or Dismiss. */
 
 export type RemoteStartStage = 'connecting' | 'finding' | 'downloading' | 'preparing' | 'starting' | 'error';
 /** `remote://start-progress`, validated natively (`remote/start.rs` `progress_payload`). */
 export interface RemoteStartProgress { deviceId: string; startId?: string | null; repo?: string | null; stage: Exclude<RemoteStartStage, 'connecting'>; percent?: number | null; detail?: string | null }
-export interface RemoteStart { sessionId: string; startId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; waiting?: boolean; mirrorId?: string; settle?: (error?: Error) => void }
+export interface RemoteStart {
+  sessionId: string; deviceId: string; device: string; repo: string | null; stage: RemoteStartStage; percent: number | null; detail: string | null; retry?: () => void; onStage?: (start: RemoteStart) => void; cancelling?: boolean; startId?: string;
+  /** The start's reply was lost (`Waiting for <device>…`): the mirror row exists, its host task may not yet. */
+  waiting?: boolean; mirrorId?: string; settle?: (error?: Error) => void;
+}
 
 const EVENT = 'remote://start-progress';
 const STAGES: readonly RemoteStartStage[] = ['connecting', 'finding', 'downloading', 'preparing', 'starting', 'error'];
@@ -66,15 +70,10 @@ function watch(): void {
   observer.observe(area, { childList: true });
 }
 
-/** Each attempt has its own ID, including retries of the same task. Legacy hosts
- * without an ID can update only an unambiguous active attempt on that computer. */
+/** A host's stage: matched by start id (the viewer's task id), else the computer. */
 export function onRemoteStartProgress(event: RemoteStartProgress): void {
   if (!event || !STAGES.includes(event.stage)) return;
-  const candidates = [...starts.values()].filter(item => item.deviceId === event.deviceId);
-  const active = candidates.filter(item => item.stage !== 'error');
-  const start = event.startId != null
-    ? candidates.find(item => item.startId === event.startId)
-    : active.length === 1 ? active[0] : undefined;
+  const start = (event.startId && [...starts.values()].find(item => item.startId === event.startId)) || [...starts.values()].find(item => item.deviceId === event.deviceId && item.stage !== 'error');
   if (!start || start.deviceId !== event.deviceId) return;
   // A frame that arrives late never moves a start backwards, except into an error.
   if (event.stage !== 'error' && STAGES.indexOf(event.stage) < STAGES.indexOf(start.stage)) return;
@@ -99,7 +98,7 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
  * With `onStage`, each stage goes to it instead of the strip, which then shows only a failure. */
 export async function trackRemoteStart<T>(sessionId: string, target: { deviceId: string; name: string }, start: (startId: string) => Promise<T>, retry?: () => void, onStage?: (start: RemoteStart) => void): Promise<T> {
   await listen();
-  const entry: RemoteStart = { sessionId, startId: crypto.randomUUID(), deviceId: target.deviceId, device: target.name, repo: null, stage: 'connecting', percent: null, detail: null, retry, onStage };
+  const entry: RemoteStart = { sessionId, deviceId: target.deviceId, device: target.name, repo: null, stage: 'connecting', percent: null, detail: null, retry, onStage };
   starts.set(sessionId, entry);
   syncRemoteStartStrip();
   // Settled early by a cancellation, by the error frame of a start being cancelled, and,
@@ -107,19 +106,21 @@ export async function trackRemoteStart<T>(sessionId: string, target: { deviceId:
   let ended: Promise<void> = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
   ended.catch(() => undefined);
   try {
-    // Reuse the unique start ID for cancellation and a reply lost after host admission.
-    const call = start(entry.startId);
+    // A new id per deliberate attempt: the host remembers a failed or cancelled startId.
+    const attempt = `${sessionId}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    entry.startId = attempt;
+    const call = start(attempt);
     call.catch(() => undefined);
     const result = await Promise.race([call, ended.then(() => call)]);
     if (waitingFor(entry) && starts.get(sessionId) === entry) {
+      // The row was kept: Stop still cancels the start until the task attaches or fails.
       entry.waiting = true;
       const mirror = (result as { sessionId?: unknown } | null)?.sessionId;
       if (typeof mirror === 'string') entry.mirrorId = mirror;
       ended = new Promise((resolve, reject) => { entry.settle = error => error ? reject(error) : resolve(); });
-      ended.catch(() => undefined);
       await ended;
     }
-    if (starts.get(sessionId) === entry) starts.delete(sessionId);
+    starts.delete(sessionId);
     return result;
   } catch (error) {
     if (starts.get(sessionId) === entry) {

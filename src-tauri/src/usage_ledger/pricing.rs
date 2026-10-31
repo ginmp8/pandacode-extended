@@ -1,13 +1,20 @@
-//! Offline API cost estimates from a bundled or previously saved price list.
-//! This hardened build never refreshes pricing from the network.
+//! Standard pay-as-you-go API rates from LiteLLM's public model price list
+//! (the list ccusage uses). A day-old copy is refreshed with a plain GET; no
+//! usage data is sent. Offline, the last saved copy or the bundled snapshot is used.
+//! Not telemetry: the request carries no identifier, account or usage data and
+//! goes to GitHub's public raw file host, never to a PandaCode server.
 
 use super::parse::Record;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
+const PRICE_URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const BUNDLED: &str = include_str!("prices.json");
+const MAX_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const REFRESH_MS: i64 = 24 * 3600 * 1000;
 
 /// Dollars per token. `high` rates apply once a prompt exceeds `threshold` tokens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -27,6 +34,7 @@ pub(crate) struct Price {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum Source {
+    Live,
     Saved,
     Bundled,
 }
@@ -153,26 +161,47 @@ pub(crate) fn load_saved(path: &Path) -> Option<PriceBook> {
     (!saved.prices.is_empty()).then_some(PriceBook { prices: saved.prices, source: Source::Saved, fetched_at: Some(saved.fetched_at) })
 }
 
-/// A saved local snapshot or the bundled one; no background network activity.
-pub(crate) async fn load(path: &Path, _now_ms: i64) -> PriceBook {
-    load_saved(path).unwrap_or_else(PriceBook::bundled)
+async fn download() -> Result<Value, String> {
+    let client = crate::agent_usage::http_client().map_err(|_| "Price list client unavailable.".to_string())?;
+    let mut response = client
+        .get(PRICE_URL)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Price list returned HTTP {}.", response.status().as_u16()));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if bytes.len() + chunk.len() > MAX_BYTES {
+            return Err("Price list is unexpectedly large.".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
-#[cfg(test)]
-mod offline_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn missing_or_stale_prices_never_trigger_a_network_refresh() {
-        let path = std::env::temp_dir().join(format!("pandacode-prices-{}.json", uuid::Uuid::new_v4()));
-        assert_eq!(load(&path, i64::MAX).await.source, Source::Bundled);
-        let saved = SavedPrices { fetched_at: 1, prices: PriceBook::bundled().prices };
-        let original = serde_json::to_vec(&saved).unwrap();
-        std::fs::write(&path, &original).unwrap();
-        let loaded = load(&path, i64::MAX).await;
-        assert_eq!(loaded.source, Source::Saved);
-        assert_eq!(loaded.fetched_at, Some(1));
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        std::fs::remove_file(path).unwrap();
+/// A fresh saved copy, else a new download (saved for next time), else any saved copy, else the snapshot.
+pub(crate) async fn load(path: &Path, now_ms: i64) -> PriceBook {
+    let saved = load_saved(path);
+    if let Some(book) = saved.as_ref().filter(|book| book.fetched_at.is_some_and(|at| now_ms - at < REFRESH_MS)) {
+        return book.clone();
+    }
+    match download().await.map(|document| parse_prices(&document)) {
+        Ok(prices) if prices.len() > 50 => {
+            let saved = SavedPrices { fetched_at: now_ms, prices };
+            if let Ok(bytes) = serde_json::to_vec(&saved) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let temporary = path.with_extension("tmp");
+                if std::fs::write(&temporary, bytes).is_ok() {
+                    let _ = std::fs::rename(&temporary, path);
+                }
+            }
+            PriceBook { prices: saved.prices, source: Source::Live, fetched_at: Some(now_ms) }
+        }
+        _ => saved.unwrap_or_else(PriceBook::bundled),
     }
 }

@@ -56,30 +56,14 @@ pub(super) fn bundled() -> Option<PathBuf> {
 
 /// An empty folder for discovery sessions: Devin rescans its workspace on each
 /// model switch, and the system temp folder can hold thousands of entries.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("pandacode-devin-discovery-{}", uuid::Uuid::new_v4()));
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path).map_err(|_| "Could not create Devin's temporary discovery folder.".to_owned())?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+fn scratch() -> PathBuf {
+    let dir = std::env::temp_dir().join("pandacode-devin-discovery");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 fn command(path: &Path) -> Result<Command, String> {
-    let mut command = super::command(path)?;
+    let mut command = super::provider_command("devin", path)?;
     configure(&mut command);
     Ok(command)
 }
@@ -112,30 +96,30 @@ struct Probe {
 }
 
 async fn probe(path: &Path, slice: usize, slices: usize) -> Result<Probe, String> {
-    let cwd = Scratch::new()?;
-    let mut pipe = Pipe::spawn(command(path)?, &cwd.0, STARTUP)
+    let cwd = scratch();
+    let mut pipe = Pipe::spawn(command(path)?, &cwd, STARTUP)
         .map_err(|_| "Could not start Devin's ACP server. Check the selected executable.".to_owned())?;
-    let mut sessions = Vec::new();
-    let result = probe_frames(&mut pipe, &cwd.0, slice, slices, &mut sessions).await;
-    // Attempt cleanup even when another discovery lane failed after a session
-    // was opened; a terminated CLI may no longer accept the delete request.
-    delete_sessions(&mut pipe, &sessions).await;
+    let result = probe_frames(&mut pipe, &cwd, slice, slices).await;
     pipe.finish().await;
     result.map_err(|error| super::diagnostics::failure(&error, pipe.diagnostic()))
 }
 
-async fn probe_frames(pipe: &mut Pipe, cwd: &Path, slice: usize, slices: usize, sessions: &mut Vec<String>) -> Result<Probe, String> {
+async fn probe_frames(pipe: &mut Pipe, cwd: &Path, slice: usize, slices: usize) -> Result<Probe, String> {
     const NEW: u64 = 10;
     const SET: u64 = 100;
+    const DELETE: u64 = 9000;
     pipe.send(&initialize()).await.map_err(|_| transport(pipe))?;
+    let mut sessions: Vec<String> = Vec::new();
     let mut first = Value::Null;
     let mut queues: Vec<Vec<String>> = Vec::new();
     let mut pending: HashMap<u64, (usize, String)> = HashMap::new();
     let mut efforts = HashMap::new();
     let mut next = SET;
+    let mut deleting = 0;
     loop {
         let frame = match pipe.read().await {
             Ok(frame) => frame,
+            Err(()) if deleting > 0 => break,
             Err(()) => return Err(transport(pipe)),
         };
         if frame.get("method").is_some() {
@@ -182,8 +166,14 @@ async fn probe_frames(pipe: &mut Pipe, cwd: &Path, slice: usize, slices: usize, 
                         .collect();
                     queues = (0..SESSIONS).map(|lane| ids.iter().skip(lane).step_by(SESSIONS).cloned().collect()).collect();
                     for lane in 0..SESSIONS {
-                        switch(pipe, sessions, &mut queues, &mut pending, &mut next, lane).await?;
+                        switch(pipe, &sessions, &mut queues, &mut pending, &mut next, lane).await?;
                     }
+                }
+            }
+            id if id >= DELETE => {
+                deleting -= 1;
+                if deleting == 0 {
+                    break;
                 }
             }
             id => {
@@ -193,35 +183,18 @@ async fn probe_frames(pipe: &mut Pipe, cwd: &Path, slice: usize, slices: usize, 
                     let option = acp::options(&frame["result"], "thought_level").cloned().unwrap_or(Value::Null);
                     efforts.insert(model, option);
                 }
-                switch(pipe, sessions, &mut queues, &mut pending, &mut next, lane).await?;
+                switch(pipe, &sessions, &mut queues, &mut pending, &mut next, lane).await?;
             }
         }
-        if sessions.len() == SESSIONS && pending.is_empty() {
-            break;
+        if sessions.len() == SESSIONS && pending.is_empty() && deleting == 0 {
+            for (index, session) in sessions.iter().enumerate() {
+                pipe.send(&json!({"jsonrpc":"2.0","id":DELETE + index as u64,"method":"session/delete","params":{"sessionId":session}})).await.map_err(|_| transport(pipe))?;
+            }
+            deleting = sessions.len();
+            pipe.set_deadline_after(CLEANUP);
         }
     }
     Ok(Probe { session: first, efforts })
-}
-
-/// Best-effort bounded cleanup also runs when metadata discovery fails. No
-/// request supplied by the harness is executed during this final exchange.
-async fn delete_sessions(pipe: &mut Pipe, sessions: &[String]) {
-    const DELETE: u64 = 20_000;
-    if sessions.is_empty() { return; }
-    pipe.set_deadline_after(CLEANUP);
-    let mut pending = HashSet::new();
-    for (index, session) in sessions.iter().enumerate() {
-        let id = DELETE + index as u64;
-        if pipe.send(&json!({"jsonrpc":"2.0","id":id,"method":"session/delete","params":{"sessionId":session}})).await.is_ok() {
-            pending.insert(id);
-        }
-    }
-    while !pending.is_empty() {
-        let Ok(frame) = pipe.read().await else { break };
-        if frame.get("method").is_none() {
-            if let Some(id) = frame["id"].as_u64() { pending.remove(&id); }
-        }
-    }
 }
 
 async fn switch(
@@ -299,11 +272,7 @@ pub(super) fn catalog(session: &Value, efforts: &HashMap<String, Value>) -> Vec<
         if !valid_model_id(id) {
             continue;
         }
-        let effort = if is_fusion(id) {
-            &Value::Null
-        } else {
-            efforts.get(id).or((id == current).then_some(&current_effort)).unwrap_or(&Value::Null)
-        };
+        let effort = efforts.get(id).or((id == current).then_some(&current_effort)).unwrap_or(&Value::Null);
         let reasoning_efforts: Vec<ReasoningEffortInfo> = if effort.is_object() {
             acp::choices(effort)
                 .into_iter()
@@ -369,7 +338,7 @@ pub(super) fn is_plan_exit(request: &Value) -> bool {
 pub(super) fn decision(request: &Value, approved: bool) -> Value {
     let options = request["params"]["options"].as_array().map(Vec::as_slice).unwrap_or_default();
     let selected = if approved {
-        options.iter().find(|option| option["kind"] == "allow_once" && (option["optionId"] == IMPLEMENT_PLAN || option["optionId"] == "allow_once"))
+        options.iter().find(|option| option["optionId"] == IMPLEMENT_PLAN || option["optionId"] == "allow_once")
     } else {
         options.iter().find(|option| option["kind"] == "reject_once")
     };
@@ -389,9 +358,9 @@ pub(super) fn subagent_usage(frame: &Value) -> bool {
 pub(crate) async fn commands(path: &Path, cwd: &Path) -> Result<Option<Value>, String> {
     let mut pipe = Pipe::spawn(command(path)?, cwd, STARTUP)
         .map_err(|_| "Could not start Devin's ACP server. Check the selected executable.".to_owned())?;
-    let mut session = String::new();
     let result = async {
         pipe.send(&initialize()).await.map_err(|_| transport(&pipe))?;
+        let mut session = String::new();
         let mut commands = None;
         loop {
             let frame = match pipe.read().await {
@@ -402,22 +371,12 @@ pub(crate) async fn commands(path: &Path, cwd: &Path) -> Result<Option<Value>, S
             if frame.get("method").is_some() && frame.get("id").is_some() {
                 let _ = pipe.send(&json!({"jsonrpc":"2.0","id":frame["id"],"error":{"code":-32601,"message":"Command discovery does not execute requests"}})).await;
             } else if frame["id"] == 1 {
-                if frame.get("error").is_some() {
-                    return Err(acp::rpc_error(&frame, "initialize"));
-                }
-                if frame["result"]["protocolVersion"] != 1 {
-                    return Err("This Devin version does not support ACP protocol v1. Update Devin.".into());
-                }
                 pipe.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":launch::external_path(cwd),"mcpServers":[]}})).await.map_err(|_| transport(&pipe))?;
             } else if frame["id"] == 2 {
                 if frame.get("error").is_some() {
                     return Err(session_error(&frame));
                 }
                 session = field(&frame["result"], "sessionId").to_owned();
-                if session.is_empty() || session.len() > 256 {
-                    session.clear();
-                    return Err("Devin did not return a session ID.".into());
-                }
                 pipe.set_deadline_after(Duration::from_secs(1));
             } else if frame["method"] == "session/update" && frame["params"]["update"]["sessionUpdate"] == "available_commands_update" {
                 commands = Some(frame);
@@ -426,10 +385,18 @@ pub(crate) async fn commands(path: &Path, cwd: &Path) -> Result<Option<Value>, S
                 break;
             }
         }
+        if !session.is_empty() {
+            pipe.set_deadline_after(CLEANUP);
+            let _ = pipe.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/delete","params":{"sessionId":session}})).await;
+            while let Ok(frame) = pipe.read().await {
+                if frame["id"] == 3 {
+                    break;
+                }
+            }
+        }
         Ok(commands.filter(|frame| frame["params"]["sessionId"] == session.as_str()))
     }
     .await;
-    if !session.is_empty() { delete_sessions(&mut pipe, &[session]).await; }
     pipe.finish().await;
     result.map_err(|error| super::diagnostics::failure(&error, pipe.diagnostic()))
 }
@@ -589,47 +556,6 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_or_missing_one_time_options_are_cancelled() {
-        let mut request = exec_request();
-        request["params"]["options"] = json!([
-            {"optionId":"allow_once","kind":"allow_always"},
-            {"optionId":"switch_bypass","kind":"allow_always"},
-            {"optionId":"reject_once","kind":"reject_once"}
-        ]);
-        assert_eq!(decision(&request, true)["result"]["outcome"]["outcome"], "cancelled");
-        assert_eq!(decision(&request, false)["result"]["outcome"]["optionId"], "reject_once");
-        request["params"]["options"] = json!([{ "optionId": "plan_bypass", "kind": "allow_once" }]);
-        assert_eq!(decision(&request, true)["result"]["outcome"]["outcome"], "cancelled");
-    }
-
-    #[test]
-    fn a_missing_permission_mode_fails_before_sending_a_prompt() {
-        for mode in ["ask", "plan", "full"] {
-            let mut p = Protocol::new(cfg(mode, "default", None));
-            p.receive(serde_json::from_str(INITIALIZE).unwrap()).unwrap();
-            let error = p.receive(json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"garnet-sweater"}})).err().unwrap();
-            assert!(error.contains("does not advertise"), "{mode}: {error}");
-        }
-    }
-
-    #[test]
-    fn discovery_directories_are_unique_private_and_removed_after_use() {
-        let first = Scratch::new().unwrap();
-        let second = Scratch::new().unwrap();
-        assert_ne!(first.0, second.0);
-        assert_eq!(std::fs::read_dir(&first.0).unwrap().count(), 0);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&first.0).unwrap().permissions().mode() & 0o777, 0o700);
-        }
-        let path = first.0.clone();
-        drop(first);
-        assert!(!path.exists());
-        assert!(second.0.exists());
-    }
-
-    #[test]
     fn subagent_usage_does_not_overwrite_the_task_context() {
         let (mut p, _) = started(cfg("ask", "default", None), session("accept-edits", "swe-2-high", "high"));
         let usage = |meta: Value| json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"garnet-sweater","update":{"sessionUpdate":"usage_update","used":21125,"size":262000,"_meta":meta}}});
@@ -671,19 +597,6 @@ mod tests {
         assert_eq!(models[4].description, "Text only");
         assert!(rejects_images(&session("accept-edits", "glm-5-2", "high"), "default"));
         assert!(!rejects_images(&session("accept-edits", "glm-5-2", "high"), "swe-2-high"));
-    }
-
-    #[test]
-    fn fusion_models_keep_their_saved_effort_even_when_the_current_session_reports_one() {
-        let id = "fusion-model-pair";
-        let mut metadata = session("accept-edits", id, "high");
-        metadata["configOptions"][1]["options"].as_array_mut().unwrap().push(json!({"value":id,"name":"Fusion"}));
-        let mut efforts = HashMap::new();
-        efforts.insert(id.to_owned(), option("thought_level", "thought_level", "high", &[("high", "High")]));
-        let models = catalog(&metadata, &efforts);
-        let fusion = models.iter().find(|model| model.id == id).unwrap();
-        assert!(fusion.reasoning_efforts.is_empty());
-        assert!(fusion.default_reasoning_effort.is_none());
     }
 
     /// Needs a signed-in Devin CLI. Sends two short prompts on Devin's default

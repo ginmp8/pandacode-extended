@@ -12,30 +12,15 @@ const control = (page: Page, name: string) => panel(page).getByRole('toolbar', {
 const cspViolations = new WeakMap<Page, string[]>();
 test.afterEach(async ({ page }) => { expect(errors.get(page) ?? []).toEqual([]); expect(cspViolations.get(page) ?? []).toEqual([]); });
 
-async function open(page: Page, platform = 'MacIntel', previewHook = ''): Promise<void> {
-  // Pick the desktop platform explicitly: local Tart on macOS, cloud machines everywhere.
-  await page.addInitScript(platform => Object.defineProperty(Navigator.prototype, 'platform', { get: () => platform }), platform);
+async function open(page: Page): Promise<void> {
   const runtimeErrors: string[] = []; errors.set(page, runtimeErrors);
   page.on('pageerror', error => runtimeErrors.push(error.message));
-  // Native vm_frame returns JPEG bytes. Keep the preview's VM lookup/running checks,
-  // but use a recorded 1024×768 preview frame instead of encoding one asynchronously.
-  // The panel still decodes and paints it under the desktop CSP before showing it.
-  const frame = readFileSync('tests/fixtures/vm-screen.jpg').toString('base64');
-  await page.route('**/src/preview-vm.ts*', async route => {
-    const response = await route.fetch(); const source = await response.text();
-    const marker = /async function frame\(\) \{/g;
-    expect(source.match(marker)).toHaveLength(1);
-    await route.fulfill({ response, body: source.replace(marker, `async function frame() {
-      return Uint8Array.from(atob(${JSON.stringify(frame)}), byte => byte.charCodeAt(0)).buffer;
-    `) });
-  });
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch(); const source = await response.text();
     const marker = /async function invoke\(command, args\) \{/;
     expect(source).toMatch(marker);
     await route.fulfill({ response, body: source.replace(marker, `async function invoke(command, args) {
       if (command.startsWith('vm_') || command.startsWith('cloud_')) (window.__vmCalls ??= []).push({ command, args: structuredClone(args) });
-      ${previewHook}
       return invokePreview(command, args);
     }
     async function invokePreview(command, args) {`) });
@@ -62,27 +47,23 @@ async function createAndStart(page: Page): Promise<void> {
   await panel(page).getByRole('button', { name: 'Set up VMs' }).click();
   await expect(panel(page).getByText('Create a machine', { exact: true })).toBeVisible();
   await panel(page).getByRole('button', { name: /^Ubuntu 24\.04/ }).click();
-  // A new VM starts at once. Starting it never installs desktop packages.
+  // A new VM starts at once and shows its screen while the desktop installs.
   await expect(panel(page).getByRole('img', { name: 'VM screen' })).toBeVisible();
   expect((await calls(page, 'vm_create'))[0]).toEqual({ image: 'ubuntu', name: 'pandacode-ubuntu' });
   await expect(panel(page).getByRole('button', { name: 'Choose VM' })).toContainText('pandacode-ubuntu');
 }
 
-test('VM start does not install packages; Add a desktop remains an explicit action', async ({ page }) => {
+test('sets up Tart, creates a VM and shows its live screen', async ({ page }) => {
   await open(page);
   await expect(panel(page).getByText('Run Linux, macOS and Windows machines')).toBeVisible();
   await createAndStart(page);
   await expect(control(page, 'Stop VM')).toBeVisible();
-  expect(await calls(page, 'vm_desktop')).toEqual([]);
-  await expect(panel(page).locator('.vm-status')).not.toContainText('Installing a desktop');
-  await expect(control(page, 'Add a desktop')).toBeVisible();
+  // Linux gets its desktop on its own; the panel says so until it is done. Only macOS suspends.
+  await expect(panel(page).getByRole('status')).toContainText('Installing a desktop for agents');
   await control(page, 'Stop VM').click();
   await control(page, 'Start VM').click();
   await expect(panel(page).locator('.vm-status')).not.toContainText('Installing a desktop');
-  expect(await calls(page, 'vm_desktop')).toEqual([]);
-  await control(page, 'Add a desktop').click();
-  await expect.poll(() => calls(page, 'vm_desktop')).toEqual([{ name: 'pandacode-ubuntu' }]);
-  await expect(panel(page).getByRole('status')).toContainText('Desktop ready');
+  await expect(control(page, 'Add a desktop')).toBeHidden();
   await expect(control(page, 'Suspend VM')).toBeHidden();
   const size = await panel(page).getByRole('img', { name: 'VM screen' }).evaluate((canvas: HTMLCanvasElement) => [canvas.width, canvas.height]);
   expect(size).toEqual([1024, 768]);
@@ -195,139 +176,4 @@ test('a cloud desktop streams its screen and takes input; a commands-only sandbo
   await page.getByRole('menuitemradio', { name: 'Cloudflare container' }).click();
   await expect(panel(page).getByText(/has no screen/)).toBeVisible();
   await expect(control(page, 'Share project read-only at start')).toBeHidden();
-});
-
-const manualProviders = [
-  { id: 'gcloud', name: 'Google Cloud', label: 'Google Cloud VM', fields: { 'Project ID': 'fixture-project', Region: 'us-central1', Zone: 'us-central1-a' } },
-  { id: 'e2b', name: 'E2B', label: 'E2B', fields: { 'API key': 'fixture-key' } },
-  { id: 'modal', name: 'Modal', label: 'Modal', fields: { 'Token secret': 'fixture-secret', 'Token ID': 'ak-fixture', 'Prepared image': 'debian:bookworm-slim' }, noStop: true },
-  { id: 'vercel', name: 'Vercel', label: 'Vercel Sandbox', fields: { 'Access token': 'fixture-token', 'Sandbox project ID': 'prj_fixture', 'Sandbox team ID': 'team_fixture' }, noStop: true },
-  { id: 'codesandbox', name: 'CodeSandbox', label: 'CodeSandbox', fields: { 'API key': 'fixture-key' } },
-  { id: 'runloop', name: 'Runloop', label: 'Runloop', fields: { 'API key': 'fixture-key' } },
-  { id: 'blaxel', name: 'Blaxel', label: 'Blaxel', fields: { 'API key': 'fixture-key', Workspace: 'fixture-workspace' }, noStop: true },
-  { id: 'tensorlake', name: 'Tensorlake', label: 'Tensorlake', fields: { 'API key': 'fixture-key' } },
-  { id: 'freestyle', name: 'Freestyle', label: 'Freestyle', fields: { 'API key': 'fixture-key' } },
-  { id: 'boat', name: 'boat', label: 'boat', fields: { 'API key': 'fixture-key' } },
-  { id: 'instabox', name: 'InstaBox', label: 'InstaBox', fields: { 'API key': 'fixture-key' } },
-] satisfies { id: string; name: string; label: string; fields: Record<string, string>; noStop?: boolean }[];
-
-for (const provider of manualProviders) {
-  test(`${provider.name} manual machines are reachable on Linux and respect their power capabilities`, async ({ page }) => {
-    await open(page, 'Linux x86_64');
-    await expect(panel(page).getByText(/Local VMs need a Mac with Apple silicon/)).toBeVisible();
-    await expect(panel(page).getByRole('button', { name: 'Set up VMs' })).toHaveCount(0);
-    await connect(page, provider.name, provider.fields as Record<string, string>);
-    expect(await calls(page, 'cloud_create')).toEqual([]);
-    expect(await calls(page, 'cloud_power')).toEqual([]);
-    await panel(page).locator(`[data-vm-create="cloud:${provider.id}"]`).click();
-    await expect(panel(page).getByText(/has no screen/)).toBeVisible();
-    const created = (await calls(page, 'cloud_create')).at(-1);
-    expect(created.provider).toBe(provider.id);
-    expect(created.name).toMatch(/^pandacode-[a-z0-9]+$/);
-    await expect(control(page, 'Share project read-only at start')).toBeHidden();
-    if ('noStop' in provider && provider.noStop) {
-      await expect(control(page, 'Stop VM')).toBeDisabled();
-      expect(await calls(page, 'cloud_power')).toEqual([]);
-    } else {
-      await control(page, 'Stop VM').click();
-      await expect(panel(page).getByText(/is stopped/)).toBeVisible();
-      await control(page, 'Start VM').click();
-      await expect(panel(page).getByText(/has no screen/)).toBeVisible();
-      expect((await calls(page, 'cloud_power')).map(call => call.action)).toEqual(['stop', 'start']);
-    }
-    await panel(page).getByRole('button', { name: 'Choose VM' }).click();
-    await page.getByRole('menuitemradio', { name: `Delete ${created.name}`, exact: true }).click();
-    await expect.poll(async () => (await calls(page, 'cloud_power')).at(-1)?.action).toBe('delete');
-    await expect(panel(page).getByText('Create a machine', { exact: true })).toBeVisible();
-    expect(await calls(page, 'vm_setup')).toEqual([]);
-    expect(await calls(page, 'vm_create')).toEqual([]);
-    expect(await calls(page, 'vm_desktop')).toEqual([]);
-  });
-}
-
-test('InstaBox saves a validated image for future machines and requests a lease only when selected', async ({ page }) => {
-  await open(page, 'Linux x86_64');
-  await connect(page, 'InstaBox', { 'API key': 'fixture-key' });
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  const settings = page.getByRole('region', { name: 'Settings', exact: true });
-  await settings.getByRole('tab', { name: 'Cloud sandboxes', exact: true }).click();
-  const images = settings.getByRole('combobox', { name: 'InstaBox machine image' });
-  await expect(images).toBeEnabled();
-  await images.selectOption('snapshot:ready-image');
-  await expect(settings.locator('.cloud-image-status')).toContainText('Saved. New machines start from Prepared snapshot.');
-  expect(await calls(page, 'cloud_instabox_set_image')).toEqual([{ image: 'snapshot:ready-image' }]);
-  expect(await calls(page, 'cloud_create')).toEqual([]);
-  await settings.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
-  await panel(page).locator('[data-vm-create="cloud:instabox"]').click();
-  await expect(panel(page).getByText(/has no screen/)).toBeVisible();
-  expect(await calls(page, 'cloud_keep_alive')).toEqual([]);
-  await panel(page).getByRole('button', { name: 'Choose VM' }).click();
-  await page.getByRole('menuitemradio', { name: 'Request 30-minute activity lease', exact: true }).click();
-  await expect.poll(async () => (await calls(page, 'cloud_keep_alive')).at(-1)).toMatchObject({ id: expect.stringMatching(/^instabox:/), minutes: 30 });
-});
-
-test('Runloop labels the fixed six-hour activity renewal before requesting it', async ({ page }) => {
-  await open(page, 'Linux x86_64');
-  await connect(page, 'Runloop', { 'API key': 'fixture-key' });
-  await panel(page).locator('[data-vm-create="cloud:runloop"]').click();
-  await expect(panel(page).getByText(/has no screen/)).toBeVisible();
-  await panel(page).getByRole('button', { name: 'Choose VM' }).click();
-  await page.getByRole('menuitemradio', { name: 'Request 360-minute activity lease', exact: true }).click();
-  await expect.poll(async () => (await calls(page, 'cloud_keep_alive')).at(-1)).toMatchObject({ id: expect.stringMatching(/^runloop:/), minutes: 360 });
-});
-
-test('a Vercel deploy connection needs a Sandbox project before offering machine creation', async ({ page }) => {
-  await open(page, 'Linux x86_64');
-  await connect(page, 'Vercel', { 'Access token': 'fixture-token', 'Team slug': 'fixture' });
-  await expect(panel(page).locator('[data-vm-create="cloud:vercel"]')).toHaveCount(0);
-  expect(await calls(page, 'cloud_create')).toEqual([]);
-});
-
-test('InstaBox ignores an old image list after disconnecting and connecting another account', async ({ page }) => {
-  await open(page, 'Linux x86_64', `
-    if (command === 'cloud_instabox_images' && window.__delayImages) {
-      window.__delayImages = false;
-      return new Promise(resolve => { window.__releaseOldImages = () => resolve({ images: [{ value: 'snapshot:old-account', label: 'Old account image' }], selected: 'snapshot:old-account' }); });
-    }`);
-  await page.evaluate(() => { (window as any).__delayImages = true; });
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  const settings = page.getByRole('region', { name: 'Settings', exact: true });
-  await settings.getByRole('tab', { name: 'Cloud sandboxes', exact: true }).click();
-  const form = settings.getByRole('form', { name: 'Connect InstaBox' });
-  await settings.getByRole('button', { name: 'Connect InstaBox', exact: true }).click();
-  await form.getByLabel('InstaBox API key').fill('fixture-account-a');
-  await form.locator('[type="submit"]').click();
-  await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseOldImages)).toBe('function');
-  await settings.getByRole('button', { name: 'Disconnect InstaBox', exact: true }).click();
-  await settings.getByRole('button', { name: 'Connect InstaBox', exact: true }).click();
-  await form.getByLabel('InstaBox API key').fill('fixture-account-b');
-  await form.locator('[type="submit"]').click();
-  const images = settings.getByRole('combobox', { name: 'InstaBox machine image' });
-  await expect(images).toBeEnabled();
-  await expect(images).toHaveValue('template:agent-browser');
-  await page.evaluate(async () => { (window as any).__releaseOldImages(); await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
-  await expect(images.locator('option')).toHaveText(['Agent browser', 'Prepared snapshot']);
-  await expect(images).toHaveValue('template:agent-browser');
-});
-
-test('InstaBox prevents connection changes while an image save is pending', async ({ page }) => {
-  await open(page, 'Linux x86_64', `
-    if (command === 'cloud_instabox_set_image') {
-      const result = previewCloud.setImage(args.image);
-      return new Promise(resolve => { window.__releaseImageSave = () => resolve(result); });
-    }`);
-  await connect(page, 'InstaBox', { 'API key': 'fixture-key' });
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  const settings = page.getByRole('region', { name: 'Settings', exact: true });
-  await settings.getByRole('tab', { name: 'Cloud sandboxes', exact: true }).click();
-  const images = settings.getByRole('combobox', { name: 'InstaBox machine image' });
-  await expect(images).toBeEnabled();
-  await images.selectOption('snapshot:ready-image');
-  await expect(images).toBeDisabled();
-  await expect(settings.getByRole('button', { name: 'Disconnect InstaBox', exact: true })).toBeDisabled();
-  await expect(settings.getByRole('button', { name: 'Connect E2B', exact: true })).toBeDisabled();
-  expect(await calls(page, 'cloud_disconnect')).toEqual([]);
-  await page.evaluate(() => (window as any).__releaseImageSave());
-  await expect(settings.getByRole('button', { name: 'Disconnect InstaBox', exact: true })).toBeEnabled();
-  await expect(images).toHaveValue('snapshot:ready-image');
 });

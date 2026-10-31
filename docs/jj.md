@@ -18,10 +18,8 @@ Basic support for [Jujutsu](https://github.com/jj-vcs/jj) checkouts (issue #36).
   - Mirror tasks never reach jj: `Store::workspace_root` refuses them (`This task runs on <name>.`).
 - **Frontend** (`src/jj.ts`): `showJjPanel(container, status, callbacks)` draws the change, files
   (click → `jj_diff` → `openDiff`), Describe/New/Commit and the log, reusing the Changes tab's classes.
-  Non-colocated repos get the panel instead of the Git UI. Colocated repos keep Git; the
-  `jjChip(status)` helper is not mounted in the redesigned Changes panel. This is the limitation
-  declared in [original 0.3.45](../releases/0.3.45.md), not evidence that the helper test places a badge
-  in the current interface. The integration patch examples below describe the earlier design.
+  `jjChip(status)` is the label shown in the Git branch card of a colocated repo. Non-colocated repos
+  get the panel instead of the Git UI.
 - **Preview** (`src/preview-jj.ts`): `invokeJj` mocks the commands. It is off unless
   `window.__previewJj` is `true` (or `'colocated'`), so other suites still see Git.
 - **Tests**: `cargo test --lib jj::` parses recorded `jj log`/`jj diff --summary` output and checks that

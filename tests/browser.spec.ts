@@ -58,7 +58,7 @@ test.describe('browser workspace', () => {
     await expect(page.locator('#inspector')).toBeVisible();
   });
 
-  test('file previews open HTML and SVG in the browser with a separate source action', async ({ page }) => {
+  test('HTML previews in the browser with a separate source action, and images open in a tab that can preview them', async ({ page }) => {
     await openInspectorTab(page, 'Files');
     await page.getByRole('button', { name: 'Files', exact: true }).click();
     await page.getByRole('button', { name: 'View source of index.html', exact: true }).click();
@@ -71,12 +71,17 @@ test.describe('browser workspace', () => {
     await page.locator('.file-row').getByRole('button', { name: 'public', exact: true }).click();
     await page.locator('.file-row').getByRole('button', { name: 'favicon.svg', exact: true }).click();
     await expect(page.locator('.file-view-path')).toHaveText('public/favicon.svg');
-    await expect(page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'favicon.svg', exact: true })).toHaveAttribute('aria-selected', 'true');
-    expect((await commandCalls(page, 'prepare_file_preview')).map(call => call.args.path)).toEqual(['index.html']);
+    await expect(page.locator('.office-viewer[data-kind="image"] img')).toBeVisible();
+    expect((await commandCalls(page, 'read_file')).some(call => call.args.path === 'public/favicon.svg')).toBe(false);
     await page.getByRole('button', { name: 'Preview in browser', exact: true }).click();
     await expect(browserUrl(page)).toHaveValue(/\/public\/favicon\.svg$/);
-    await expect.poll(async () => (await commandCalls(page, 'prepare_file_preview')).at(-1)?.args).toMatchObject({ projectId: 'project-1', sessionId: 'session-1', path: 'public/favicon.svg' });
-    expect((await commandCalls(page, 'read_file')).some(call => call.args.path === 'public/favicon.svg')).toBe(false);
+    // View source shows the SVG's text, not the image.
+    await page.getByRole('button', { name: 'Files', exact: true }).click();
+    await page.getByRole('button', { name: 'View source of favicon.svg', exact: true }).click();
+    await expect(page.locator('.file-view-path')).toHaveText('public/favicon.svg');
+    await expect(page.locator('.office-viewer[data-kind="image"]')).toHaveCount(0);
+    await expect.poll(async () => (await commandCalls(page, 'read_file')).some(call => call.args.path === 'public/favicon.svg')).toBe(true);
+    await expect(page.locator('.file-view-body')).toContainText('<svg');
   });
 
   test('file preview errors keep the file list usable', async ({ page }) => {
@@ -98,19 +103,10 @@ test.describe('browser workspace', () => {
     await response.getByRole('button', { name: 'src/main.ts', exact: true }).click();
     await expect(page.locator('.file-view-path')).toHaveText('src/main.ts');
     await expect(response.getByRole('button', { name: 'missing.html', exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     await page.locator('.board-card').filter({ hasText: 'Make search feel instant' }).click();
-    await expect(page.locator('#prompt')).toHaveAttribute('data-session-id', 'session-1');
-    await expect(page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'main.ts', exact: true })).toHaveAttribute('aria-selected', 'true');
-    await expect(page.locator('#transcript')).toHaveAttribute('inert', '');
-    await page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'Conversation', exact: true }).click();
-    await expect(page.locator('#transcript')).not.toHaveAttribute('inert', '');
     await page.locator('.message-content').getByRole('button', { name: 'public/favicon.svg', exact: true }).click();
     await expect(page.locator('.file-view-path')).toHaveText('public/favicon.svg');
-    await expect(page.getByRole('tablist', { name: 'Open files' }).getByRole('tab', { name: 'favicon.svg', exact: true })).toHaveAttribute('aria-selected', 'true');
-    await page.getByRole('button', { name: 'Preview in browser', exact: true }).click();
-    await expect(browserUrl(page)).toHaveValue(/\/public\/favicon\.svg$/);
-    await expect.poll(async () => (await commandCalls(page, 'prepare_file_preview')).at(-1)?.args).toMatchObject({ projectId: 'project-1', sessionId: 'session-1', path: 'public/favicon.svg' });
     expect((await commandCalls(page, 'prepare_file_preview')).every(call => call.args.sessionId === 'session-1' && call.args.projectId === 'project-1')).toBe(true);
   });
 
@@ -510,58 +506,4 @@ test.describe('native element picker script', () => {
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
     expect(await page.evaluate(() => (window as any).afterCancel)).toBe(true);
   });
-});
-
-
-test('the first task selection preserves a Browser tab opened during startup', async ({ page }) => {
-  await page.addInitScript(() => { (window as any).__holdInitialSessions = true; });
-  await page.route('**/src/preview.ts*', async route => {
-    const response = await route.fetch();
-    const source = await response.text();
-    const marker = /switch \(command\) \{/;
-    expect(source).toMatch(marker);
-    await route.fulfill({ response, body: source.replace(marker, `
-      if (command === 'list_sessions' && window.__holdInitialSessions) {
-        await new Promise(resolve => { window.__releaseInitialSessions = resolve; });
-      }
-      switch (command) {`) });
-  });
-  await page.goto('/');
-  try {
-    await openBrowser(page);
-    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseInitialSessions)).toBe('function');
-  } finally {
-    // Always unblock the real preview command, including when the assertion fails.
-    await page.evaluate(() => {
-      (window as any).__holdInitialSessions = false;
-      (window as any).__releaseInitialSessions?.();
-    });
-  }
-  await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
-  await expect(browserUrl(page)).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Browser', exact: true })).toBeVisible();
-});
-
-test('Linux offers explicit system browsing without changing native Browser QA or file previews', async ({ page }) => {
-  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Linux x86_64' }));
-  await installPreviewProbe(page);
-  await page.goto('/');
-  await openBrowser(page);
-  await browserUrl(page).fill('https://example.test/application');
-  await browserPanel(page).getByRole('button', { name: 'Open in system browser', exact: true }).click();
-  await expect.poll(async () => (await commandCalls(page, 'browser_open_external')).length).toBe(1);
-  expect((await commandCalls(page, 'browser_open_external'))[0].args).toEqual({ url: 'https://example.test/application' });
-  expect(await commandCalls(page, 'browser_open')).toHaveLength(0);
-  await expect(browserPanel(page).locator('.browser-notice')).toContainText('QA and captures stay with the native Browser pane');
-  await navigate(page, 'localhost:5173');
-  await expect(browserPanel(page).getByRole('button', { name: 'Browser QA', exact: true })).toBeVisible();
-  await expect.poll(async () => (await commandCalls(page, 'browser_open')).length).toBe(1);
-  await openInspectorTab(page, 'Files');
-  await page.getByRole('button', { name: 'Files', exact: true }).click();
-  await page.locator('.file-row').getByRole('button', { name: 'index.html', exact: true }).click();
-  await expect(browserUrl(page)).toHaveValue(/\/index\.html$/);
-  expect(await commandCalls(page, 'browser_open_external')).toHaveLength(1);
-  await browserPanel(page).getByRole('button', { name: 'Open in system browser', exact: true }).click();
-  await expect(browserPanel(page).locator('.browser-notice')).toContainText('Workspace file previews stay in the native Browser pane');
-  expect(await commandCalls(page, 'open_external_url')).toHaveLength(0);
 });

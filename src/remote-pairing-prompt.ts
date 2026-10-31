@@ -18,9 +18,9 @@ export const APPROVE_SCOPES: { id: GrantScope; label: string }[] = [
 export const SCOPE_LABELS: Record<GrantScope, string> = { pending: 'Waiting for approval', view: 'View only', control: 'Control', full: 'Full access', blocked: 'Blocked' };
 export const SCOPE_HELP = 'View only: see tasks, changes and diffs. Control: also send prompts, stop tasks and answer approvals. Full access: also start tasks, merge pull requests and message bots. Blocked: refused.';
 
-/** The complete key fingerprint in groups of four, matching native approval admission. */
+/** The first 16 hex digits of a key fingerprint in groups of four, to compare by eye on both computers. */
 export function groupFingerprint(fingerprint: string): string {
-  return (fingerprint.match(/.{1,4}/g) ?? []).join(' ');
+  return (fingerprint.slice(0, 16).match(/.{1,4}/g) ?? []).join(' ');
 }
 
 const options = (selected: GrantScope) => APPROVE_SCOPES.map(scope => `<option value="${scope.id}"${scope.id === selected ? ' selected' : ''}>${scope.label}</option>`).join('');
@@ -36,8 +36,6 @@ export function mountPairingPrompt(host: RemoteHost): () => void {
     const element = document.createElement('section');
     element.className = 'pairing-prompt';
     element.dataset.device = pending.deviceId;
-    // Freeze the full fingerprint the user saw, not a later presence value.
-    element.dataset.fingerprint = pending.fingerprint;
     element.setAttribute('role', 'alert');
     element.innerHTML = `<div class="pairing-prompt-text"><strong>${escape(pending.name || 'A device')} wants access to this computer</strong><small>Its key is <code>${escape(groupFingerprint(pending.fingerprint))}</code>. Approve only if it matches the key shown on that device.</small></div>
       <div class="pairing-prompt-actions"><select aria-label="Access for ${escape(pending.name)}">${options('control')}</select><button type="button" class="primary-button" data-approve>Approve</button><button type="button" class="secondary-button" data-block>Block</button><button type="button" class="secondary-button" data-later aria-label="Decide later">Later</button></div>`;
@@ -51,7 +49,7 @@ export function mountPairingPrompt(host: RemoteHost): () => void {
     if (target.hasAttribute('data-later')) { element.remove(); return; }
     const scope = target.hasAttribute('data-block') ? 'blocked' : element.querySelector('select')!.value;
     target.disabled = true;
-    void host.call('remote_set_device_grant', { deviceId, scope, ...(scope === 'blocked' ? {} : { expectedFingerprint: element.dataset.fingerprint }) }).then(() => element.remove(), error => { target.disabled = false; host.notify(error instanceof Error ? error.message : String(error)); });
+    void host.call('remote_set_device_grant', { deviceId, scope }).then(() => element.remove(), error => { target.disabled = false; host.notify(error instanceof Error ? error.message : String(error)); });
   });
   const unlisten: Promise<() => void>[] = [
     host.listen('remote://device-pending', (pending: DevicePending) => { if (pending?.deviceId) show(pending); }),

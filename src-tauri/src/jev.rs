@@ -29,8 +29,6 @@ const MAX_SCREENSHOT: u64 = 2 * 1024 * 1024;
 const MAX_LIVE_FRAME: u64 = 256 * 1024;
 const WATCH_TTL: Duration = Duration::from_secs(10);
 const HISTORY: usize = 20;
-const SECRET_SERVICE: &str = "app.pandacode.jev";
-const SETUP_WARNING: &str = "Saved Jev settings or credentials could not be read. Browser testing is disabled. Unlock the OS secure store or recover the existing settings file, then restart PandaCode. The original settings file has been preserved.";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +36,7 @@ pub struct Settings {
     pub enabled: bool,
     #[serde(default)]
     pub decisions_enabled: bool,
+    /// "typesafe" (default) or "openrouter"; the OpenRouter key lives in `secret_store`.
     #[serde(default = "default_provider")]
     pub decision_provider: String,
     #[serde(default)]
@@ -64,30 +63,20 @@ impl Default for Settings {
 fn default_provider() -> String {
     "typesafe".into()
 }
+const SECRET_SERVICE: &str = "app.pandacode.jev";
+const OPENROUTER_ACCOUNT: &str = "openrouter";
+fn openrouter_key() -> Option<String> {
+    crate::secret_store::get(SECRET_SERVICE, OPENROUTER_ACCOUNT)
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Saved {
     #[serde(default)]
     settings: Settings,
-    // Deserialize legacy files once, but never write credentials to disk again.
-    #[serde(default, skip_serializing)]
-    typesafe_key: String,
-    #[serde(default, skip_serializing)]
-    text_key: String,
-    #[serde(default, skip_serializing)]
-    openrouter_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    credential_ref: Option<CredentialRef>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CredentialRef {
-    id: String,
-    typesafe: bool,
-    text: bool,
     #[serde(default)]
-    openrouter: bool,
+    typesafe_key: String,
+    #[serde(default)]
+    text_key: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,7 +93,7 @@ impl From<&Saved> for Configuration {
             settings: saved.settings.clone(),
             typesafe_key_saved: !saved.typesafe_key.is_empty(),
             text_key_saved: !saved.text_key.is_empty(),
-            openrouter_key_saved: !saved.openrouter_key.is_empty(),
+            openrouter_key_saved: openrouter_key().is_some(),
         }
     }
 }
@@ -243,312 +232,39 @@ struct Runtime {
     installing: bool,
     setup_warning: Option<String>,
 }
-#[derive(Clone, Copy)]
-enum Initialization {
-    Pending,
-    Complete,
-    Failed,
-}
-
-struct Instance {
-    runtime: Mutex<Runtime>,
-    initialized: tokio::sync::watch::Sender<Initialization>,
-}
-
-impl Instance {
-    fn pending(parent: &Path) -> Result<Arc<Self>> {
-        let dir = parent.join("jev");
-        private_dir(&dir)?;
-        let (initialized, _) = tokio::sync::watch::channel(Initialization::Pending);
-        Ok(Arc::new(Self {
-            runtime: Mutex::new(Runtime {
-                dir,
-                saved: Saved::default(),
-                active: HashMap::new(),
-                installing: false,
-                setup_warning: None,
-            }),
-            initialized,
-        }))
-    }
-
-    fn initialize(
-        self: &Arc<Self>,
-        load: impl FnOnce(&Path) -> (Saved, Option<String>) + Send + 'static,
-    ) {
-        let dir = match self.runtime.lock() {
-            Ok(state) => state.dir.clone(),
-            Err(_) => {
-                self.initialized.send_replace(Initialization::Failed);
-                return;
-            }
-        };
-        let instance = self.clone();
-        // Initialization belongs to the instance, not to a command waiting for
-        // it. Cancelling a waiter must never restart a credential migration.
-        tauri::async_runtime::spawn(async move {
-            let loaded = crate::blocking(move || {
-                let loaded = load(&dir.join("settings.json"));
-                cleanup_interrupted_profiles(&dir);
-                Ok(loaded)
-            })
-            .await;
-            instance.publish(loaded);
-        });
-    }
-
-    fn publish(&self, loaded: Result<(Saved, Option<String>)>) {
-        let completed = match self.runtime.lock() {
-            Ok(mut state) => {
-                let (saved, warning) =
-                    loaded.unwrap_or_else(|_| (Saved::default(), Some(SETUP_WARNING.into())));
-                state.saved = saved;
-                state.setup_warning = warning;
-                Initialization::Complete
-            }
-            Err(_) => Initialization::Failed,
-        };
-        self.initialized.send_replace(completed);
-    }
-
-    async fn ready(&self) -> Result<()> {
-        let mut initialized = self.initialized.subscribe();
-        loop {
-            match *initialized.borrow_and_update() {
-                Initialization::Complete => return Ok(()),
-                Initialization::Failed => return Err("Jev settings are unavailable.".into()),
-                Initialization::Pending => {}
-            }
-            initialized
-                .changed()
-                .await
-                .map_err(|_| "Jev settings are unavailable.".to_owned())?;
-        }
-    }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Runtime>> {
-        self.runtime
-            .lock()
-            .map_err(|_| "Jev settings are unavailable.".into())
-    }
-
-    async fn configuration(&self) -> Result<Configuration> {
-        self.ready().await?;
-        Ok(Configuration::from(&self.lock()?.saved))
-    }
-
-    async fn snapshot(&self) -> Result<(PathBuf, Saved, Option<String>)> {
-        self.ready().await?;
-        let state = self.lock()?;
-        Ok((
-            state.dir.clone(),
-            state.saved.clone(),
-            state.setup_warning.clone(),
-        ))
-    }
-
-    async fn save(
-        self: &Arc<Self>,
-        settings: Settings,
-        typesafe_key: Option<String>,
-        text_key: Option<String>,
-        openrouter_key: Option<String>,
-    ) -> Result<Configuration> {
-        self.ready().await?;
-        let instance = self.clone();
-        crate::blocking(move || {
-            let mut state = instance.lock()?;
-            if state.installing {
-                return Err(
-                    "Wait for the Jev installation to finish before changing its settings.".into(),
-                );
-            }
-            let path = state.dir.join("settings.json");
-            let mut next = saved_for_update(&path, &state.saved, state.setup_warning.is_some())?;
-            next.settings = settings;
-            if let Some(value) = typesafe_key {
-                next.typesafe_key = value;
-            }
-            if let Some(value) = text_key {
-                next.text_key = value;
-            }
-            if let Some(value) = openrouter_key {
-                next.openrouter_key = value;
-            }
-            let next = validate_saved(next)?;
-            if next.settings.decisions_enabled
-                && next.settings.decision_provider == "openrouter"
-                && next.openrouter_key.is_empty()
-            {
-                return Err("Add your OpenRouter API key to use it for decisions.".into());
-            }
-            let next = persist_saved(&path, &next)?;
-            if !next.settings.enabled {
-                for active in state.active.values() {
-                    active.stopped.store(true, Ordering::SeqCst);
-                }
-            }
-            state.saved = next;
-            state.setup_warning = None;
-            Ok(Configuration::from(&state.saved))
-        })
-        .await
-    }
-
-    async fn begin_install(&self, app_state: &AppState) -> Result<(PathBuf, Settings)> {
-        self.ready().await?;
-        let _admission = app_state
-            .agents
-            .lock()
-            .map_err(|_| "Task registry is unavailable.")?;
-        admission(app_state.shutdown.load(Ordering::SeqCst))?;
-        let mut state = self.lock()?;
-        if state.installing {
-            return Err("Jev is already being installed.".into());
-        }
-        if !state.active.is_empty() {
-            return Err("Stop browser tests before changing their runtime.".into());
-        }
-        state.installing = true;
-        Ok((state.dir.clone(), state.saved.settings.clone()))
-    }
-
-    async fn begin_test(
-        &self,
-        app_state: &AppState,
-        report: &Report,
-        stopped: Arc<AtomicBool>,
-        parent_stopped: Option<&AtomicBool>,
-    ) -> Result<(PathBuf, Saved)> {
-        self.ready().await?;
-        if parent_stopped.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-            return Err("The agent has stopped.".into());
-        }
-        // Shares task deletion and shutdown admission. Recheck ownership after
-        // hydration, before reserving the browser test or copying credentials.
-        with_task_admission(app_state, &report.session_id, |_| {
-            let mut state = self.lock()?;
-            reserve(&mut state, report, stopped)?;
-            Ok((state.dir.clone(), state.saved.clone()))
-        })
-    }
-}
-
-static RUNTIME: OnceLock<Arc<Instance>> = OnceLock::new();
-fn instance() -> Result<&'static Arc<Instance>> {
+static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
+fn runtime() -> Result<std::sync::MutexGuard<'static, Runtime>> {
     RUNTIME
         .get()
-        .ok_or_else(|| "Jev settings are not initialized.".into())
-}
-fn runtime() -> Result<std::sync::MutexGuard<'static, Runtime>> {
-    instance()?.lock()
-}
-pub(crate) async fn ready() -> Result<()> {
-    instance()?.ready().await
+        .ok_or("Jev settings are not initialized.")?
+        .lock()
+        .map_err(|_| "Jev settings are unavailable.".into())
 }
 
 pub fn setup(parent: &Path) -> Result<()> {
-    let instance = Instance::pending(parent)?;
+    let dir = parent.join("jev");
+    private_dir(&dir)?;
+    let path = dir.join("settings.json");
+    let (saved, setup_warning) = load_saved(&path);
+    cleanup_interrupted_profiles(&dir);
     RUNTIME
-        .set(instance.clone())
-        .map_err(|_| "Jev settings are already initialized.".to_owned())?;
-    instance.initialize(load_saved);
-    Ok(())
+        .set(Mutex::new(Runtime {
+            dir,
+            saved,
+            active: HashMap::new(),
+            installing: false,
+            setup_warning,
+        }))
+        .map_err(|_| "Jev settings are already initialized.".into())
 }
 fn load_saved(path: &Path) -> (Saved, Option<String>) {
-    load_saved_with(
-        path,
-        |account| crate::secret_store::get(SECRET_SERVICE, account),
-        persist_saved,
-    )
-}
-fn load_saved_with(
-    path: &Path,
-    mut read_key: impl FnMut(&str) -> Option<String>,
-    migrate: impl FnOnce(&Path, &Saved) -> Result<Saved>,
-) -> (Saved, Option<String>) {
     if !path.exists() {
         return (Saved::default(), None);
     }
-    match read_json(path, MAX_LINE).and_then(validate_saved).and_then(|mut saved| {
-        if let Some(reference) = &saved.credential_ref {
-            if uuid::Uuid::parse_str(&reference.id).is_err() {
-                return Err("Invalid Jev credential reference.".into());
-            }
-            let mut read = |name: &str, present: bool| -> Result<String> {
-                if !present { return Ok(String::new()); }
-                read_key(&format!("{}.{name}", reference.id))
-                    .ok_or_else(|| "Jev credentials are unavailable in the OS secure store.".into())
-            };
-            saved.typesafe_key = read("typesafe", reference.typesafe)?;
-            saved.text_key = read("text", reference.text)?;
-            saved.openrouter_key = read("openrouter", reference.openrouter)?;
-            validate_saved(saved)
-        } else if !saved.typesafe_key.is_empty() || !saved.text_key.is_empty() || !saved.openrouter_key.is_empty() {
-            // Commit a new vault generation before replacing the legacy file.
-            // On failure the original file and its keys remain recoverable.
-            migrate(path, &saved)
-        } else {
-            Ok(saved)
-        }
-    }) {
+    match read_json(path, MAX_LINE).and_then(validate_saved) {
         Ok(saved) => (saved, None),
-        Err(_) => (Saved::default(), Some(SETUP_WARNING.into())),
+        Err(_) => (Saved::default(), Some("Saved Jev settings could not be read. Browser testing is disabled; enter and save its settings again. The original settings file has been preserved.".into())),
     }
-}
-
-fn saved_for_update(path: &Path, current: &Saved, recovery_required: bool) -> Result<Saved> {
-    if !recovery_required { return Ok(current.clone()); }
-    // A failed startup read leaves disabled defaults in memory. Never let an
-    // ordinary Save replace the recovery file with those empty defaults.
-    let (recovered, warning) = load_saved(path);
-    if warning.is_some() {
-        return Err("Jev settings are still unavailable. Unlock the OS secure store or recover the existing settings file before saving; the original file has been preserved.".into());
-    }
-    Ok(recovered)
-}
-
-/// An immutable vault generation makes the JSON file the commit point. A failed
-/// key write or settings write never overwrites the previous working credentials.
-fn persist_saved(path: &Path, saved: &Saved) -> Result<Saved> {
-    persist_saved_with(saved,
-        |account, value| crate::secret_store::set(SECRET_SERVICE, account, value),
-        |account| crate::secret_store::remove(SECRET_SERVICE, account),
-        |bytes| private_write(path, bytes))
-}
-
-fn persist_saved_with(
-    saved: &Saved,
-    mut put: impl FnMut(&str, &str) -> Result<()>,
-    mut remove: impl FnMut(&str),
-    write: impl FnOnce(&[u8]) -> Result<()>,
-) -> Result<Saved> {
-    let reference = CredentialRef {
-        id: uuid::Uuid::new_v4().to_string(),
-        typesafe: !saved.typesafe_key.is_empty(),
-        text: !saved.text_key.is_empty(),
-        openrouter: !saved.openrouter_key.is_empty(),
-    };
-    let accounts = [format!("{}.typesafe", reference.id), format!("{}.text", reference.id), format!("{}.openrouter", reference.id)];
-    let mut next = saved.clone();
-    next.credential_ref = Some(reference);
-    let result = (|| {
-        for (account, value) in accounts.iter().zip([&saved.typesafe_key, &saved.text_key, &saved.openrouter_key]) {
-            if !value.is_empty() { put(account, value)?; }
-        }
-        let bytes = serde_json::to_vec(&next).map_err(|_| "Could not encode Jev settings.")?;
-        write(&bytes)
-    })();
-    if let Err(error) = result {
-        for account in &accounts { remove(account); }
-        return Err(error);
-    }
-    if let Some(previous) = &saved.credential_ref {
-        for name in ["typesafe", "text", "openrouter"] {
-            remove(&format!("{}.{name}", previous.id));
-        }
-    }
-    Ok(next)
 }
 pub fn enabled() -> bool {
     runtime().is_ok_and(|state| state.saved.settings.enabled)
@@ -561,7 +277,10 @@ pub(crate) fn decision_credentials() -> Result<(bool, String, crate::jev_decisio
     let state = runtime()?;
     let settings = &state.saved.settings;
     let (key, provider) = if settings.decision_provider == "openrouter" {
-        (state.saved.openrouter_key.clone(), Provider::OpenRouter { model: settings.decision_model.clone() })
+        (
+            openrouter_key().unwrap_or_default(),
+            Provider::OpenRouter { model: settings.decision_model.clone() },
+        )
     } else {
         (state.saved.typesafe_key.clone(), Provider::TypeSafe)
     };
@@ -575,7 +294,7 @@ pub(crate) fn active_for_tasks(ids: &[String]) -> Result<bool> {
     let Some(runtime) = RUNTIME.get() else {
         return Ok(false);
     };
-    let state = runtime.runtime.lock().map_err(|_| "Jev settings are unavailable.")?;
+    let state = runtime.lock().map_err(|_| "Jev settings are unavailable.")?;
     Ok(has_active_tasks(&state, ids))
 }
 fn has_active_tasks(state: &Runtime, ids: &[String]) -> bool {
@@ -723,7 +442,6 @@ fn validate_saved(mut saved: Saved) -> Result<Saved> {
     }
     saved.typesafe_key = key(saved.typesafe_key)?;
     saved.text_key = key(saved.text_key)?;
-    saved.openrouter_key = key(saved.openrouter_key)?;
     Ok(saved)
 }
 fn normalized_url(input: &str) -> Result<String> {
@@ -790,7 +508,7 @@ fn validate_request(mut request: Request) -> Result<Request> {
 
 #[tauri::command]
 pub async fn jev_configuration() -> Result<Configuration> {
-    instance()?.configuration().await
+    Ok(Configuration::from(&runtime()?.saved))
 }
 #[tauri::command]
 pub async fn jev_save_configuration(
@@ -799,11 +517,56 @@ pub async fn jev_save_configuration(
     text_key: Option<String>,
     openrouter_key: Option<String>,
 ) -> Result<Configuration> {
-    instance()?
-        .save(settings, typesafe_key, text_key, openrouter_key)
-        .await
+    crate::blocking(move || {
+        let mut state = runtime()?;
+        if state.installing {
+            return Err(
+                "Wait for the Jev installation to finish before changing its settings.".into(),
+            );
+        }
+        let mut next = state.saved.clone();
+        next.settings = settings;
+        if let Some(value) = typesafe_key {
+            next.typesafe_key = value;
+        }
+        if let Some(value) = text_key {
+            next.text_key = value;
+        }
+        let next = validate_saved(next)?;
+        let openrouter_key = openrouter_key.map(key).transpose()?;
+        if decision_needs_key(&next, &openrouter_key) {
+            return Err("Add your OpenRouter API key to use it for decisions.".into());
+        }
+        private_write(
+            &state.dir.join("settings.json"),
+            &serde_json::to_vec(&next).map_err(|_| "Could not encode Jev settings.")?,
+        )?;
+        match openrouter_key.as_deref() {
+            Some("") => crate::secret_store::remove(SECRET_SERVICE, OPENROUTER_ACCOUNT),
+            Some(value) => crate::secret_store::set(SECRET_SERVICE, OPENROUTER_ACCOUNT, value)?,
+            None => {}
+        }
+        if !next.settings.enabled {
+            for active in state.active.values() {
+                active.stopped.store(true, Ordering::SeqCst);
+            }
+        }
+        state.saved = next;
+        state.setup_warning = None;
+        Ok(Configuration::from(&state.saved))
+    })
+    .await
 }
 
+// Decisions on OpenRouter need a key, either already saved or arriving with this save.
+fn decision_needs_key(next: &Saved, incoming: &Option<String>) -> bool {
+    next.settings.decisions_enabled
+        && next.settings.decision_provider == "openrouter"
+        && match incoming.as_deref() {
+            Some(value) => value.is_empty(),
+            None => openrouter_key().is_none(),
+        }
+}
 #[tauri::command]
 pub async fn jev_decision_models(provider: String) -> Result<Vec<crate::jev_decisions::DecisionModel>> {
     crate::jev_decisions::models::list(&provider).await
@@ -956,7 +719,14 @@ async fn process_output(
     result
 }
 async fn doctor() -> Result<Doctor> {
-    let (dir, saved, setup_warning) = instance()?.snapshot().await?;
+    let (dir, saved, setup_warning) = {
+        let state = runtime()?;
+        (
+            state.dir.clone(),
+            state.saved.clone(),
+            state.setup_warning.clone(),
+        )
+    };
     let python = venv_python(&dir);
     let mut result = if python.is_file() {
         let runner = write_runner(&dir)?;
@@ -1018,7 +788,23 @@ impl Drop for InstallGuard {
 }
 #[tauri::command]
 pub async fn jev_install_runtime(app: tauri::AppHandle) -> Result<Doctor> {
-    let (dir, settings) = instance()?.begin_install(&app.state::<AppState>()).await?;
+    let (dir, settings) = {
+        let app_state = app.state::<AppState>();
+        let _admission = app_state
+            .agents
+            .lock()
+            .map_err(|_| "Task registry is unavailable.")?;
+        admission(app_state.shutdown.load(Ordering::SeqCst))?;
+        let mut state = runtime()?;
+        if state.installing {
+            return Err("Jev is already being installed.".into());
+        }
+        if !state.active.is_empty() {
+            return Err("Stop browser tests before changing their runtime.".into());
+        }
+        state.installing = true;
+        (state.dir.clone(), state.saved.settings.clone())
+    };
     let _guard = InstallGuard;
     let uv = crate::providers::executable("uv");
     let python = venv_python(&dir);
@@ -1502,14 +1288,16 @@ async fn start(
     }
     let report = Report::starting(session_id, &request);
     let stopped = Arc::new(AtomicBool::new(false));
-    let (dir, saved) = instance()?
-        .begin_test(
-            &app.state::<AppState>(),
-            &report,
-            stopped.clone(),
-            parent_stopped.as_deref(),
-        )
-        .await?;
+    let (dir, saved) = {
+        // Shares the agent updater's admission lock. An agent update cannot pass
+        // its idle check between this lifecycle check and reserving the browser test.
+        let app_state = app.state::<AppState>();
+        with_task_admission(&app_state, session_id, |_| {
+            let mut state = runtime()?;
+            reserve(&mut state, &report, stopped.clone())?;
+            Ok((state.dir.clone(), state.saved.clone()))
+        })?
+    };
     let response = report.clone();
     let _ = app.emit("jev-run", &report);
     tauri::async_runtime::spawn(async move {
@@ -1571,7 +1359,7 @@ fn short(value: &str, limit: usize) -> String {
 fn sanitized(value: &str, saved: &Saved, limit: usize) -> String {
     // Redact before truncating, otherwise a secret cut at the limit could leak a prefix.
     let mut value = value.to_owned();
-    for secret in [&saved.typesafe_key, &saved.text_key, &saved.openrouter_key] {
+    for secret in [&saved.typesafe_key, &saved.text_key] {
         if !secret.is_empty() {
             value = value.replace(secret, "[redacted]");
         }
@@ -1909,10 +1697,6 @@ async fn execute(
 }
 
 #[cfg(test)]
-#[path = "jev/startup_tests.rs"]
-mod startup_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     fn request() -> Request {
@@ -1958,7 +1742,6 @@ mod tests {
         let saved = Saved {
             typesafe_key: "super-secret-type".into(),
             text_key: "super-secret-text".into(),
-            openrouter_key: "super-secret-openrouter".into(),
             ..Saved::default()
         };
         let json = serde_json::to_string(&Configuration::from(&saved)).unwrap();
@@ -1972,114 +1755,6 @@ mod tests {
             ..saved
         })
         .is_err());
-    }
-    #[test]
-    fn legacy_credentials_move_to_the_vault_and_restart_without_plaintext() {
-        let dir = temp();
-        let path = dir.join("settings.json");
-        private_write(&path, &serde_json::to_vec(&json!({
-            "settings": Settings::default(),
-            "typesafeKey": "fixture-typesafe-key",
-            "textKey": "fixture-text-key",
-            "openrouterKey": "fixture-openrouter-key"
-        })).unwrap()).unwrap();
-        let (saved, warning) = load_saved(&path);
-        assert!(warning.is_none());
-        assert_eq!(saved.typesafe_key, "fixture-typesafe-key");
-        assert_eq!(saved.text_key, "fixture-text-key");
-        assert_eq!(saved.openrouter_key, "fixture-openrouter-key");
-        let disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!disk.contains("fixture-") && !disk.contains("typesafeKey") && !disk.contains("textKey") && !disk.contains("openrouterKey"));
-        assert!(disk.contains("credentialRef"));
-        let (reloaded, warning) = load_saved(&path);
-        assert!(warning.is_none());
-        assert_eq!(reloaded.typesafe_key, saved.typesafe_key);
-        assert_eq!(reloaded.text_key, saved.text_key);
-        assert_eq!(reloaded.openrouter_key, saved.openrouter_key);
-        let reference = saved.credential_ref.unwrap();
-        for name in ["typesafe", "text", "openrouter"] {
-            crate::secret_store::remove(SECRET_SERVICE, &format!("{}.{name}", reference.id));
-        }
-        let (unavailable, warning) = load_saved(&path);
-        assert!(warning.is_some());
-        assert!(!unavailable.settings.enabled && unavailable.typesafe_key.is_empty());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), disk);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn failed_vault_or_settings_write_preserves_previous_credential_generation() {
-        use std::cell::{Cell, RefCell};
-        for fail_at in ["typesafe", "text", "openrouter", "settings"] {
-            let old_id = uuid::Uuid::new_v4().to_string();
-            let old_account = format!("{old_id}.typesafe");
-            let vault = RefCell::new(HashMap::from([(old_account.clone(), "old-key".to_owned())]));
-            let attempted_write = Cell::new(false);
-            let saved = Saved {
-                typesafe_key: "new-typesafe".into(), text_key: "new-text".into(), openrouter_key: "new-openrouter".into(),
-                credential_ref: Some(CredentialRef { id: old_id, typesafe: true, text: false, openrouter: false }),
-                ..Saved::default()
-            };
-            let result = persist_saved_with(&saved, |account, value| {
-                if account.ends_with(&format!(".{fail_at}")) { return Err("Vault unavailable.".into()); }
-                vault.borrow_mut().insert(account.into(), value.into());
-                Ok(())
-            }, |account| { vault.borrow_mut().remove(account); }, |bytes| {
-                attempted_write.set(true);
-                assert!(!String::from_utf8_lossy(bytes).contains("new-typesafe"));
-                Err("Settings could not be committed.".into())
-            });
-            assert!(result.is_err());
-            assert_eq!(attempted_write.get(), fail_at == "settings");
-            assert_eq!(*vault.borrow(), HashMap::from([(old_account, "old-key".into())]));
-        }
-    }
-
-    #[test]
-    fn saving_after_unavailable_vault_preserves_the_recovery_file() {
-        let dir = temp();
-        let path = dir.join("settings.json");
-        let id = uuid::Uuid::new_v4().to_string();
-        let account = format!("{id}.typesafe");
-        let reference = Saved {
-            credential_ref: Some(CredentialRef { id, typesafe: true, text: false, openrouter: false }),
-            ..Saved::default()
-        };
-        private_write(&path, &serde_json::to_vec(&reference).unwrap()).unwrap();
-        let original = std::fs::read(&path).unwrap();
-        let (disabled, warning) = load_saved(&path);
-        assert!(warning.is_some());
-        assert!(saved_for_update(&path, &disabled, true).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-
-        crate::secret_store::set(SECRET_SERVICE, &account, "fixture-recovered-key").unwrap();
-        let recovered = saved_for_update(&path, &disabled, true).unwrap();
-        assert_eq!(recovered.typesafe_key, "fixture-recovered-key");
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        crate::secret_store::remove(SECRET_SERVICE, &account);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn clearing_credentials_commits_empty_refs_before_removing_old_vault_entries() {
-        use std::cell::{Cell, RefCell};
-        let old_id = uuid::Uuid::new_v4().to_string();
-        let committed = Cell::new(false);
-        let removed = RefCell::new(Vec::new());
-        let saved = Saved { credential_ref: Some(CredentialRef { id: old_id.clone(), typesafe: true, text: true, openrouter: true }), ..Saved::default() };
-        let next = persist_saved_with(&saved, |_, _| panic!("empty keys must not be stored"), |account| {
-            assert!(committed.get());
-            removed.borrow_mut().push(account.to_owned());
-        }, |bytes| {
-            let value: Value = serde_json::from_slice(bytes).unwrap();
-            assert_eq!(value["credentialRef"]["typesafe"], false);
-            assert_eq!(value["credentialRef"]["text"], false);
-            assert_eq!(value["credentialRef"]["openrouter"], false);
-            committed.set(true);
-            Ok(())
-        }).unwrap();
-        assert!(next.typesafe_key.is_empty() && next.text_key.is_empty() && next.openrouter_key.is_empty());
-        assert_eq!(*removed.borrow(), vec![format!("{old_id}.typesafe"), format!("{old_id}.text"), format!("{old_id}.openrouter")]);
     }
     #[test]
     fn decision_provider_defaults_to_typesafe_and_validates_openrouter() {
@@ -2100,13 +1775,10 @@ mod tests {
         assert!(with("openrouter", "", false).is_ok());
         assert_eq!(with("openrouter", " vendor/model ", true).unwrap().settings.decision_model, "vendor/model");
         assert!(with("other", "", false).is_err());
-        let old: Settings = serde_json::from_value(json!({
-            "enabled": false, "pythonPath": "", "chromePath": "", "textModel": "v/m", "textBaseUrl": "https://example.com/v1"
-        })).unwrap();
-        assert_eq!(old.decision_provider, "typesafe");
-        assert!(old.decision_model.is_empty());
-        let reference: CredentialRef = serde_json::from_value(json!({"id": uuid::Uuid::new_v4().to_string(), "typesafe": true, "text": true})).unwrap();
-        assert!(!reference.openrouter, "old vault references must remain readable");
+        let saved = Saved { settings: Settings { decisions_enabled: true, decision_provider: "openrouter".into(), decision_model: "v/m".into(), ..Settings::default() }, ..Saved::default() };
+        assert!(decision_needs_key(&saved, &None));
+        assert!(decision_needs_key(&saved, &Some(String::new())));
+        assert!(!decision_needs_key(&saved, &Some("sk-or-test".into())));
     }
     #[test]
     fn verifies_assertions_instead_of_model_done() {

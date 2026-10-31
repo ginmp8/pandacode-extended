@@ -3,7 +3,7 @@
 // background prefetch holds while any download waits. Bytes go to the disk cache
 // (src/store/attachment-files.ts) and come back as a file:// URI for expo-image.
 import { acceptChunk, attachmentKey, workspaceId, type Progress, type Variant } from '../store/attachments.ts';
-import { cachedBlob, loadBlobs, partial } from '../store/attachment-files.ts';
+import { cachedBlob, finishBlob, loadBlobs, partial } from '../store/attachment-files.ts';
 import { UNKNOWN_METHOD, type Method } from './rpc.ts';
 
 /** Chunks per download at most (the host sends up to 120 KiB per chunk, 8 MiB per image). */
@@ -27,12 +27,6 @@ const unsupported = new Set<string>();
 const inflight = new Map<string, Promise<string>>();
 let line: Promise<unknown> = Promise.resolve();
 let waiting = 0;
-let generation = 0;
-export function resetAttachmentRequests() {
-  generation++;
-  inflight.clear();
-  unsupported.clear();
-}
 
 const sourceId = (source: Source) => ('id' in source ? source.id : workspaceId(source.path));
 
@@ -45,8 +39,6 @@ export const attachmentsUnsupported = (deviceId: string, source: Source) => unsu
 
 /** The attachment's file:// URI, downloading it if needed. Concurrent asks share one download. */
 export function fetchAttachment(deps: AttachmentDeps, deviceId: string, sessionId: string, source: Source, variant: Variant): Promise<string> {
-  const version = generation;
-  const current = () => { if (version !== generation) throw new Error('The attachment session has ended.'); };
   const id = sourceId(source);
   const key = attachmentKey(deviceId, sessionId, id, variant);
   const running = inflight.get(key);
@@ -55,9 +47,9 @@ export function fetchAttachment(deps: AttachmentDeps, deviceId: string, sessionI
   const run = demo
     ? demo.then(uri => uri ?? Promise.reject(new Error('Not in the demo.')))
     // A cached file doesn't wait in line behind other downloads.
-    : loadBlobs().then(() => { current(); return cachedBlob(key) ?? enqueue(deps, () => { current(); return download(deps, deviceId, sessionId, source, variant, key, current); }); });
+    : loadBlobs().then(() => cachedBlob(key) ?? enqueue(deps, () => download(deps, deviceId, sessionId, source, variant, key)));
   inflight.set(key, run);
-  const done = () => { if (inflight.get(key) === run) inflight.delete(key); };
+  const done = () => inflight.delete(key);
   run.then(done, done);
   return run;
 }
@@ -72,7 +64,7 @@ function enqueue<T>(deps: AttachmentDeps, task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-async function download(deps: AttachmentDeps, deviceId: string, sessionId: string, source: Source, variant: Variant, key: string, current: () => void): Promise<string> {
+async function download(deps: AttachmentDeps, deviceId: string, sessionId: string, source: Source, variant: Variant, key: string): Promise<string> {
   const kind = 'id' in source ? 'a' : 'w';
   if (unsupported.has(`${deviceId}:${kind}`)) throw new Error(UNKNOWN_METHOD);
   const method: Method = 'id' in source ? 'task.attachment' : 'task.workspaceImage';
@@ -81,13 +73,10 @@ async function download(deps: AttachmentDeps, deviceId: string, sessionId: strin
   let at: Progress = { offset: file.size };
   for (let n = 0; n < MAX_CHUNKS; n++) {
     await deps.after(deviceId, sessionId);
-    current();
     let reply: unknown;
     try {
       reply = await deps.call(deviceId, method, { sessionId, ...source, variant, ...(at.offset ? { offset: at.offset } : {}) });
-      current();
     } catch (error) {
-      current();
       if ((error as Error).message === UNKNOWN_METHOD) unsupported.add(`${deviceId}:${kind}`);
       throw error;
     }
@@ -96,14 +85,13 @@ async function download(deps: AttachmentDeps, deviceId: string, sessionId: strin
       next = acceptChunk(at, reply);
     } catch (error) {
       // A resumed file that no longer matches starts over next time.
-      await file.reset();
+      file.reset();
       throw error;
     }
-    if (next.data) await file.append(next.data);
-    current();
+    if (next.data) file.append(next.data);
     at = { offset: next.offset, total: next.total, mime: next.mime };
-    if (next.done) return file.finish(next.mime!, next.offset);
+    if (next.done) return finishBlob(key, next.mime!, next.offset);
   }
-  await file.reset();
+  file.reset();
   throw new Error('That attachment is too large to show here.');
 }

@@ -47,17 +47,8 @@ export function required(name, env = process.env) {
 }
 
 export function version(value) {
-  // Historical four-component and hardened IDs remain parseable for archival compatibility.
-  // New Extended releases are strictly X.Y.Z (enforced by extendedVersion).
-  const match = typeof value === 'string' && value.length <= 32
-    ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.([1-9]\d*)|-hardened(?:\.([1-9]\d*))?)?$/.exec(value)
-    : null;
-  if (!match || match.slice(1).some(part => part !== undefined && !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be X.Y.Z, X.Y.Z.N, X.Y.Z-hardened, or X.Y.Z-hardened.N.');
+  if (typeof value !== 'string' || value.length > 32 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value) || value.split('.').some(part => !Number.isSafeInteger(Number(part)))) throw new Error('Release version must be a stable SemVer such as 0.3.0.');
   return value;
-}
-
-export function cargoVersion(value) {
-  return version(value).replace(/^(\d+\.\d+\.\d+)\.(\d+)$/, '$1+$2');
 }
 
 export async function json(path) { return JSON.parse(await readFile(path, 'utf8')); }
@@ -67,7 +58,7 @@ export async function json(path) { return JSON.parse(await readFile(path, 'utf8'
 export function cargoLockVersion(lock, next) {
   const entry = /(\[\[package\]\]\r?\nname = "pandacode"\r?\nversion = )"[^"]+"/;
   if (!entry.test(lock)) throw new Error('No pandacode package in src-tauri/Cargo.lock.');
-  return lock.replace(entry, `$1"${cargoVersion(next)}"`);
+  return lock.replace(entry, `$1"${version(next)}"`);
 }
 
 export async function digest(path) {
@@ -92,7 +83,7 @@ export function releaseDirectory(releaseVersion) {
  * its signature. `signatures` maps release targets to the contents of their `.sig` files.
  * Files are on the repository that publishes the release (GITHUB_REPOSITORY in Actions),
  * so a fork's release points at its own assets. */
-export function updaterManifest(releaseVersion, notes, signatures, pubDate = new Date().toISOString(), repository = process.env.GITHUB_REPOSITORY || 'ginmp8/pandacode-extended') {
+export function updaterManifest(releaseVersion, notes, signatures, pubDate = new Date().toISOString(), repository = process.env.GITHUB_REPOSITORY || 'aicodeking/pandacode') {
   const v = version(releaseVersion);
   if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repository)) throw new Error(`Not a GitHub repository: ${repository}`);
   const platforms = {};

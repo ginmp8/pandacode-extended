@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+// The workspace view (Conversation, Board, GitHub) is picked from the sidebar's view menu.
+const showView = async (page: Page, name: string) => { await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name, exact: true }).click(); };
 
 const board = (page: Page) => page.getByRole('region', { name: 'Project board', exact: true });
 const column = (page: Page, name: string) => board(page).getByRole('region', { name, exact: true });
@@ -44,14 +46,8 @@ async function storedMessages(page: Page, sessionId: string): Promise<any[]> {
   }, sessionId);
 }
 
-async function readyIssueTaskForCompletion(page: Page, title = 'Add keyboard shortcuts'): Promise<void> {
-  const task = await savedTask(page, title);
-  if (task.taskStage === 'pending') await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Review'));
-  await card(page, title).click();
-}
-
 async function openBoard(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Board view', exact: true }).click();
+  await showView(page, 'Board');
   await expect(board(page)).toBeVisible();
 }
 
@@ -72,247 +68,26 @@ test.describe('project board', () => {
     await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
   });
 
-  test('right-click menu moves idle cards to Review and Completed using persisted stages', async ({ page }) => {
-    await openBoard(page);
-    await queueTask(page, 'Right-click stage management');
-    const task = await savedTask(page, 'Right-click stage management');
-    const item = () => page.locator(`.board-card[data-task-id="${task.id}"]`);
-    await item().click({ button: 'right' });
-    const menu = page.getByRole('dialog', { name: 'Board task actions', exact: true });
-    await expect(menu.getByRole('menuitem', { name: 'Move to Review' })).toBeVisible();
-    await menu.getByRole('menuitem', { name: 'Move to Review' }).click();
-    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Right-click stage management' })).toBeVisible();
-    expect((await savedTask(page, 'Right-click stage management')).taskStage).toBe('review');
-    await item().click({ button: 'right' });
-    await menu.getByRole('menuitem', { name: 'Mark complete' }).click();
-    await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Right-click stage management' })).toBeVisible();
-    expect((await savedTask(page, 'Right-click stage management')).completedAt).toEqual(expect.any(Number));
-    await item().click({ button: 'right' });
-    await menu.getByRole('menuitem', { name: 'Move to Pending' }).click();
-    await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Right-click stage management' })).toBeVisible();
-    expect((await savedTask(page, 'Right-click stage management')).completedAt).toBeNull();
-    expect((await calls(page, 'set_task_stage')).map(item => item.args.stage)).toEqual(['review', 'completed', 'pending']);
-  });
-
-  test('moves idle tasks bidirectionally between stages by dragging cards', async ({ page }) => {
-    await openBoard(page);
-    await queueTask(page, 'Drag between stages');
-    const task = await savedTask(page, 'Drag between stages');
-    const sidebarRow = page.locator('#navigation .task-item[data-id="' + task.id + '"]');
-    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
-    await expect(sidebarRow.locator('.stage-dot')).toHaveAttribute('title', 'Board stage: Pending');
-    const source = page.locator(`.board-card[data-task-id="${task.id}"]`);
-    await source.dragTo(column(page, 'Review'));
-    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow).toHaveAttribute('data-stage', 'review');
-    const reviewColor = await sidebarRow.locator('.stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor);
-    expect(reviewColor).toBe(await page.locator('.board-column[data-stage="review"] .stage-dot').evaluate(dot => getComputedStyle(dot).backgroundColor));
-    expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'review', completedAt: null });
-    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
-    await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow).toHaveAttribute('data-stage', 'pending');
-    expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'pending', completedAt: null });
-    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
-    await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Drag between stages', exact: true })).toBeVisible();
-    await expect(sidebarRow).toHaveCount(0);
-    expect(await savedTask(page, 'Drag between stages')).toMatchObject({ taskStage: 'completed', completedAt: expect.any(Number) });
-  });
-  test('confirms linked issue close and reopen only after each saved stage', async ({ page }) => {
-    await openBoard(page);
-    const title = 'Add keyboard shortcuts';
-    await readyIssueTaskForCompletion(page, title);
-    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
-    const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await expect(confirm).toContainText('orbit-labs/orbit');
-    await expect(confirm).toContainText('Keyboard shortcut cheat sheet');
-    await expect(confirm.getByRole('button', { name: 'Keep issue open', exact: true })).toBeFocused();
-    expect((await calls(page, 'set_task_stage')).at(-1).args.stage).toBe('completed');
-    await confirm.getByRole('button', { name: 'Close issue', exact: true }).click();
-    await expect(confirm).toBeHidden();
-    await expect(page.locator('#toast')).toContainText('GitHub issue #131 closed.');
-    await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('closed');
-
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
-    await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
-    const reopen = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await reopen.getByRole('button', { name: 'Reopen issue', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('open');
-
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
-    await readyIssueTaskForCompletion(page, title);
-    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
-    const closeAgain = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await closeAgain.getByRole('button', { name: 'Close issue', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, title)).issue.state).toBe('closed');
-    expect((await calls(page, 'github_apply_linked_issue_action')).map(call => call.args.action)).toEqual(['close', 'reopen', 'close']);
-  });
-  test('Board drag offers issue confirmation and decline keeps local completion only', async ({ page }) => {
-    await openBoard(page);
-    const task = await savedTask(page, 'Add keyboard shortcuts');
-    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
-    const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await expect(confirm).toBeVisible();
-    await confirm.getByRole('button', { name: 'Keep issue open', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).taskStage).toBe('completed');
-    expect(await calls(page, 'github_apply_linked_issue_action')).toHaveLength(0);
-    expect((await calls(page, 'github_cancel_linked_issue_action')).at(-1).args.sessionId).toBe(task.id);
-    await expect(page.locator('#toast')).not.toContainText('closed.');
-  });
-  test('dragging a completed issue task to Pending confirms reopen and focuses the safe choice', async ({ page }) => {
-    await openBoard(page);
-    const task = await savedTask(page, 'Add keyboard shortcuts');
-    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Completed'));
-    const close = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await expect(close.getByRole('button', { name: 'Keep issue open', exact: true })).toBeFocused();
-    await close.getByRole('button', { name: 'Close issue', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
-
-    await page.locator(`.board-card[data-task-id="${task.id}"]`).dragTo(column(page, 'Pending'));
-    const reopen = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await expect(reopen.getByRole('button', { name: 'Keep issue closed', exact: true })).toBeFocused();
-    await reopen.getByRole('button', { name: 'Reopen issue', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).taskStage).toBe('pending');
-    expect((await calls(page, 'github_apply_linked_issue_action')).map(item => item.args.action)).toEqual(['close', 'reopen']);
-  });
-  test('dismissal cancels the pending issue intent; already-correct and unrelated tasks do not prompt', async ({ page }) => {
-    await page.evaluate(() => { (window as any).__previewGithubIssueStates = { 'project-1:131': 'closed' }; });
-    await openBoard(page);
-    await readyIssueTaskForCompletion(page);
-    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
-    await expect(page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true })).toHaveCount(0);
-    await expect(page.locator('#toast')).toContainText('GitHub issue #131 is already closed.');
-
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
-    await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
-    const confirm = page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true });
-    await expect(confirm).toBeVisible();
-    await expect(confirm.getByRole('button', { name: 'Keep issue closed', exact: true })).toBeFocused();
-    await page.keyboard.press('Escape');
-    await expect(confirm).toBeHidden();
-    await expect.poll(async () => (await calls(page, 'github_cancel_linked_issue_action')).length).toBe(1);
-    expect(await page.evaluate(() => ((window as any).__boardCalls ?? []).filter((call: any) => call.command === 'github_apply_linked_issue_action').length)).toBe(0);
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
-    await card(page, 'Make search feel instant').click();
-    await page.evaluate(async () => {
-      const { invoke } = await import((window as any).__boardPreviewUrl);
-      await invoke('set_task_link', { sessionId: 'session-1', kind: 'pull', link: { kind: 'pull', number: 130, url: 'https://github.com/orbit-labs/orbit/pull/130', title: 'Sample PR', state: 'open', checkedAt: Date.now() } });
-    });
-    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
-    await expect(page.getByRole('dialog', { name: /Update GitHub issue/ })).toHaveCount(0);
-    expect(await calls(page, 'github_linked_issue_status')).toHaveLength(2);
-  });
-  test('GitHub disabled stays local without checking or writing the linked issue', async ({ page }) => {
-    await page.evaluate(() => localStorage.setItem('pandacode.github', 'off'));
-    await page.reload();
-    // Restore the initial task before using the preview's direct-IPC helpers.
-    await expect(page.locator('#prompt')).toBeEnabled();
-    await openBoard(page);
-    await readyIssueTaskForCompletion(page);
-    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
-    await expect(page.getByRole('dialog', { name: /Update GitHub issue/ })).toHaveCount(0);
-    expect(await calls(page, 'github_linked_issue_status')).toHaveLength(0);
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).taskStage).toBe('completed');
-  });
-  test('issue action failure exposes retry without claiming success', async ({ page }) => {
-    await page.evaluate(() => { (window as any).__failLinkedIssueAction = true; });
-    await openBoard(page);
-    await readyIssueTaskForCompletion(page);
-    await page.getByRole('button', { name: 'Mark complete', exact: true }).click();
-    await page.getByRole('dialog', { name: 'Update GitHub issue #131?', exact: true }).getByRole('button', { name: 'Close issue', exact: true }).click();
-    await expect.poll(async () => (await calls(page, 'github_apply_linked_issue_action')).length).toBe(1);
-    const failed = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
-    await expect(failed).toBeVisible();
-    await expect(failed).toContainText('temporarily unavailable');
-    await expect(page.locator('#toast')).not.toContainText('closed.');
-    // A late close event from the preceding confirmation must not cancel the open retry form.
-    await failed.evaluate(dialog => dialog.dispatchEvent(new Event('close')));
-    expect(await calls(page, 'github_cancel_linked_issue_action')).toHaveLength(0);
-    await failed.getByRole('button', { name: 'Retry approved actions', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
-    expect(await calls(page, 'github_retry_linked_issue_actions')).not.toHaveLength(0);
-    expect((await calls(page, 'github_apply_linked_issue_action')).map(call => call.args.action)).toEqual(['close']);
-  });
-  test('dismissing a retry dialog still cancels after an earlier close event arrives', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
-      (window as any).__failLinkedIssueAction = true;
-    });
-    await page.reload();
-    // Startup retries follow the initial task load; wait for that phase before checking the dialog.
-    await expect(page.locator('#prompt')).toBeEnabled();
-    const failures = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
-    await expect(failures).toBeVisible();
-    await failures.evaluate(dialog => dialog.dispatchEvent(new Event('close')));
-    expect(await calls(page, 'github_cancel_linked_issue_action')).toHaveLength(0);
-    await expect(failures.getByRole('button', { name: 'Leave issues unchanged', exact: true })).toBeFocused();
-    await page.keyboard.press('Escape');
-    await expect(failures).toBeHidden();
-    await expect.poll(async () => (await calls(page, 'github_cancel_linked_issue_action')).length).toBe(1);
-    expect((await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('open');
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pandacode.preview.githubIssueActions') ?? '[]'))).toEqual([]);
-  });
-  test('retries a persisted approved issue action after GitHub reconnects', async ({ page }) => {
-    await page.addInitScript(() => {
-      (window as any).__previewGithubDisconnected = true;
-      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
-    });
-    await page.reload();
-    await expect(page.locator('.new-task-button')).toBeEnabled({ timeout: 15_000 });
-    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant', { timeout: 15_000 });
-    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(0);
-    await page.evaluate(() => { (window as any).__previewGithubDisconnected = false; window.dispatchEvent(new Event('focus')); });
-    await expect.poll(async () => (await calls(page, 'github_retry_linked_issue_actions')).length).toBe(1);
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
-  });
-  test('startup retries a persisted approved issue action and keeps failed retries visible', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
-      (window as any).__failLinkedIssueAction = true;
-    });
-    await page.reload();
-    // Startup retries follow the initial task load; wait for that phase before checking the dialog.
-    await expect(page.locator('#prompt')).toBeEnabled();
-    const failures = page.getByRole('dialog', { name: 'GitHub issue actions need attention', exact: true });
-    await expect(failures).toBeVisible();
-    await expect(failures).toContainText('orbit-labs/orbit #131');
-    await expect(failures).toContainText('temporarily unavailable');
-    await expect(failures.getByRole('button', { name: 'Leave issues unchanged', exact: true })).toBeFocused();
-    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(1);
-    await failures.getByRole('button', { name: 'Retry approved actions', exact: true }).click();
-    await expect.poll(async () => (await savedTask(page, 'Add keyboard shortcuts')).issue.state).toBe('closed');
-    await expect(failures).toBeHidden();
-    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(2);
-  });
-  test('startup skips persisted issue retries while GitHub integration is off', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem('pandacode.github', 'off');
-      localStorage.setItem('pandacode.preview.githubIssueActions', JSON.stringify([['session-3', { action: 'close', number: 131, repository: 'orbit-labs/orbit', targetStage: 'completed' }]]));
-    });
-    await page.reload();
-    await expect.poll(async () => page.evaluate(() => document.querySelector('.task-item.selected') !== null)).toBe(true);
-    expect(await calls(page, 'github_retry_linked_issue_actions')).toHaveLength(0);
-    expect(await calls(page, 'github_status')).toHaveLength(0);
-  });
   test('switches views without losing the conversation draft and remembers the chosen view', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await prompt(page).fill('Keep this unsent conversation draft');
     await openBoard(page);
-    for (const name of ['Pending', 'In progress', 'Review', 'Completed']) await expect(column(page, name)).toBeVisible();
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    for (const name of ['Pending', 'In progress', 'Review', 'Settled']) await expect(column(page, name)).toBeVisible();
+    await showView(page, 'Conversation');
     await expect(board(page)).toBeHidden();
     await expect(prompt(page)).toHaveValue('Keep this unsent conversation draft');
     await openBoard(page);
     await page.reload();
     await expect(board(page)).toBeVisible();
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await showView(page, 'Conversation');
     await page.reload();
     await expect(board(page)).toBeHidden();
     await expect(prompt(page)).toBeVisible();
     expect(errors).toEqual([]);
   });
 
-  test('uses the full window in Board while keeping project and archive controls available', async ({ page }) => {
+  test('uses the full window in Board while keeping the project filter available', async ({ page }) => {
     const sidebar = page.getByRole('complementary', { name: 'Projects and tasks', exact: true, includeHidden: true });
     const main = page.getByRole('main');
     await expect(sidebar).toBeVisible();
@@ -323,23 +98,16 @@ test.describe('project board', () => {
     await expect.poll(async () => (await main.boundingBox())!.x).toBe(0);
     await expect.poll(async () => (await main.boundingBox())!.width).toBe(1440);
     const filter = board(page).getByRole('button', { name: 'Filter projects', exact: true });
-    const archived = board(page).getByRole('button', { name: 'Archived tasks', exact: true });
     await expect(filter).toBeVisible();
-    await expect(archived).toBeVisible();
+    // There is no archive: settled work stays on the board.
+    await expect(board(page).getByRole('button', { name: 'Archived tasks', exact: true })).toHaveCount(0);
     await filter.click();
     await page.getByRole('dialog', { name: 'Filter projects', exact: true }).getByRole('menuitemradio', { name: 'pandacode', exact: true }).click();
     await expect(card(page, 'Explore the project')).toBeVisible();
     await expect(card(page, 'Make search feel instant')).toHaveCount(0);
     await expect(board(page).getByRole('heading', { name: 'pandacode', exact: true })).toBeVisible();
 
-    await archived.click();
-    await expect(archived).toHaveAttribute('aria-pressed', 'true');
-    await expect(card(page, 'Explore the project')).toHaveCount(0);
-    await archived.click();
-    await expect(archived).toHaveAttribute('aria-pressed', 'false');
-    await expect(card(page, 'Explore the project')).toBeVisible();
-
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await showView(page, 'Conversation');
     await expect(sidebar).toBeVisible();
     await expect.poll(async () => (await main.boundingBox())!.x).toBeGreaterThan(0);
     await expect(sidebar.getByRole('button', { name: 'Filter projects', exact: true })).toContainText('pandacode');
@@ -351,7 +119,7 @@ test.describe('project board', () => {
     await openBoard(page);
     await queueTask(page, 'Fix the settings keyboard order', 'Tab through every setting and preserve a logical focus order.');
     const task = await savedTask(page, 'Fix the settings keyboard order');
-    expect(task).toMatchObject({ mode: 'ask', projectId: 'project-2', taskStage: 'pending', taskDescription: 'Tab through every setting and preserve a logical focus order.', status: 'idle', archived: false, completedAt: null });
+    expect(task).toMatchObject({ mode: 'full', projectId: 'project-2', taskStage: 'pending', taskDescription: 'Tab through every setting and preserve a logical focus order.', status: 'idle', archived: false, completedAt: null });
     expect(await storedMessages(page, task.id)).toEqual([]);
     expect(await calls(page, 'start_task')).toEqual([]);
     expect(await calls(page, 'send_message')).toEqual([]);
@@ -367,7 +135,7 @@ test.describe('project board', () => {
     await expect(card(page, task.title)).toBeVisible();
   });
 
-  test('starts pending work, displays agent comments, requires review, and reopens completed work', async ({ page }) => {
+  test('starts pending work, displays agent comments, requires review, and reopens settled work', async ({ page }) => {
     await openBoard(page);
     const title = 'Review search accessibility';
     const description = 'Check the search input label and keyboard navigation.';
@@ -387,10 +155,10 @@ test.describe('project board', () => {
     expect(task).toMatchObject({ taskStage: 'review', status: 'idle', completedAt: null, archived: false });
     await expect(details(page).locator('.agent-message').first()).toBeVisible();
     await expect(details(page)).toContainText('This is the browser preview.');
-    await expect(details(page).getByRole('button', { name: 'Mark complete', exact: true })).toBeEnabled();
+    await expect(details(page).getByRole('button', { name: 'Settle', exact: true })).toBeEnabled();
     await page.screenshot({ path: '/private/tmp/pandacode-board-review.png', animations: 'disabled' });
-    await details(page).getByRole('button', { name: 'Mark complete', exact: true }).click();
-    await expect(column(page, 'Completed').getByRole('button', { name: `Open task: ${title}`, exact: true })).toBeVisible();
+    await details(page).getByRole('button', { name: 'Settle', exact: true }).click();
+    await expect(column(page, 'Settled').getByRole('button', { name: `Open task: ${title}`, exact: true })).toBeVisible();
     const completed = await savedTask(page, title);
     expect(completed.taskStage).toBe('completed');
     expect(completed.completedAt).toBeGreaterThan(Date.now() - 10_000);
@@ -399,7 +167,7 @@ test.describe('project board', () => {
     await details(page).getByRole('button', { name: 'Reopen task', exact: true }).click();
     await expect(column(page, 'Review').getByRole('button', { name: `Open task: ${title}`, exact: true })).toBeVisible();
     expect(await savedTask(page, title)).toMatchObject({ taskStage: 'review', completedAt: null, archived: false });
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await showView(page, 'Conversation');
     await expect(page.locator(`.task-item[data-id="${task.id}"]`)).toBeVisible();
     expect((await calls(page, 'start_task')).length).toBe(1);
   });
@@ -422,13 +190,13 @@ test.describe('project board', () => {
     expect((await storedMessages(page, task.id)).find(message => message.role === 'user')?.content).toBe('Explain the install, dev, and test commands.');
   });
 
-  test('can reopen completed board work after switching back to the conversation view', async ({ page }) => {
+  test('can reopen settled board work after switching back to the conversation view', async ({ page }) => {
     await page.unroute('**/src/preview.ts*');
     await installPreviewProbe(page, `Object.assign(sessions[1], { taskStage: 'completed', taskDescription: 'A completed navigation task.', completedAt: now });`);
     await page.reload();
     await openBoard(page);
-    await column(page, 'Completed').getByRole('button', { name: 'Open task: Refine the navigation', exact: true }).click();
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await column(page, 'Settled').getByRole('button', { name: 'Open task: Refine the navigation', exact: true }).click();
+    await showView(page, 'Conversation');
     await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
     await expect(prompt(page)).toBeEnabled();
     expect(await savedTask(page, 'Refine the navigation')).toMatchObject({ taskStage: 'review', completedAt: null });
@@ -549,36 +317,45 @@ test.describe('project board', () => {
     await page.screenshot({ path: '/private/tmp/pandacode-board-light-compact.png', animations: 'disabled' });
   });
 
-  test('archives completed tasks after a week while retaining recent completions and pending tasks', async ({ page }) => {
+  test('a task still archived from older data is settled, and Reopen clears the flag', async ({ page }) => {
     await page.unroute('**/src/preview.ts*');
-    await installPreviewProbe(page, `
-      for (const fixture of [
-        { id: 'expired-board', title: 'Completed last week', taskStage: 'completed', completedAt: now - 604800001 },
-        { id: 'recent-board', title: 'Completed this week', taskStage: 'completed', completedAt: now - 601200000, pinned: true },
-        { id: 'old-pending-board', title: 'Still pending after a week', taskStage: 'pending', completedAt: null }
-      ]) sessions.push({ ...sessions[1], ...fixture, taskDescription: 'Saved task details', createdAt: now - 691200000, updatedAt: now - 691200000, lastResponseAt: null, archived: false });
-    `);
+    await installPreviewProbe(page, `sessions.push({ ...sessions[1], id: 'old-archived', title: 'Archived long ago', taskStage: 'completed', completedAt: now - 604800001, archived: true, taskDescription: 'Saved task details', pinned: false, sidebarOrder: null, lastResponseAt: null });`);
     await page.reload();
-    // The seeded pinned completion is selected at boot; choose the active task for the filter check.
-    await page.locator('.task-item[data-id="session-1"]').click();
-    await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
-    await expect(prompt(page)).toBeEnabled();
-    await page.locator('#project-filter').click();
-    await page.getByRole('dialog', { name: 'Filter projects', exact: true }).getByRole('menuitemradio', { name: 'pandacode', exact: true }).click();
-    await expect(page.locator('#sidebar-note .filter-note')).toHaveText('4 more in other projectsShow all');
-    await page.locator('#sidebar-note .filter-note').click();
     await openBoard(page);
-    await expect(card(page, 'Completed last week')).toHaveCount(0);
-    await expect(column(page, 'Completed').getByRole('button', { name: 'Open task: Completed this week', exact: true })).toBeVisible();
-    await expect(column(page, 'Pending').getByRole('button', { name: 'Open task: Still pending after a week', exact: true })).toBeVisible();
-    expect(await savedTask(page, 'Completed last week')).toMatchObject({ archived: true, taskStage: 'completed' });
-    expect(await savedTask(page, 'Completed this week')).toMatchObject({ archived: false, taskStage: 'completed' });
-    await expect(page.locator('.task-item[data-id="recent-board"]')).toHaveCount(0);
-    await expect(page.locator('.task-item[data-id="old-pending-board"]')).toHaveCount(1);
-    await board(page).getByRole('button', { name: 'Archived tasks', exact: true }).click();
-    await expect(card(page, 'Completed last week')).toBeVisible();
-    await expect(page.locator('.task-item[data-id="expired-board"]')).toHaveCount(1);
-    await card(page, 'Completed last week').click();
+    await expect(board(page)).not.toContainText('archive after');
+    await column(page, 'Settled').getByRole('button', { name: 'Open task: Archived long ago', exact: true }).click();
     await expect(details(page)).toContainText('Saved task details');
+    await details(page).getByRole('button', { name: 'Reopen task', exact: true }).click();
+    await expect(column(page, 'Review').getByRole('button', { name: 'Open task: Archived long ago', exact: true })).toBeVisible();
+    expect(await savedTask(page, 'Archived long ago')).toMatchObject({ archived: false, taskStage: 'review' });
   });
 });
+
+test('the sidebar view menu switches views, marks the current one and stays reachable', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#navigation .task-item').first().waitFor();
+  const trigger = page.getByRole('button', { name: 'Workspace view: Conversation', exact: true });
+  await expect(page.locator('.sidebar .brand')).toContainText('PandaCode');
+  await expect(page.locator('.sidebar .brand #view-menu')).toBeVisible();
+  await expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(page.locator('.workspace-header .view-switch')).toHaveCount(0);
+  await trigger.click();
+  const items = page.getByRole('menuitemradio');
+  await expect(items).toHaveText(['Conversation', 'Board', 'GitHub']);
+  await expect(page.getByRole('menuitemradio', { name: 'Conversation', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
+  await expect(page.locator('.workspace')).toHaveClass(/\bboard-view\b/);
+  // The board hides the sidebar, so the menu moves into the header.
+  const boardTrigger = page.locator('.header-leading #view-menu');
+  await expect(boardTrigger).toBeVisible();
+  await expect(boardTrigger).toHaveAttribute('aria-label', 'Workspace view: Board');
+  await boardTrigger.click();
+  await expect(page.getByRole('menuitemradio', { name: 'Board', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+  await showView(page, 'Conversation');
+  await expect(page.locator('.sidebar .brand #view-menu')).toBeVisible();
+  // The narrow rail keeps it under the sidebar toggle.
+  await page.setViewportSize({ width: 620, height: 800 });
+  await expect(page.locator('.sidebar .brand #view-menu')).toBeVisible();
+});
+

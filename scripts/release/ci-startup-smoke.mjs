@@ -96,8 +96,11 @@ async function killTree(child, platform) {
   if (!child.pid) return;
   if (platform === 'win32') {
     // The owned root process remains alive until taskkill resolves its children.
+    // Resolve it under System32: PATH need not carry System32 (Git Bash strips it),
+    // and a missing taskkill leaves the fixture running for the whole test run.
+    const taskkill = join(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows', 'System32', 'taskkill.exe');
     await new Promise(resolve => {
-      const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+      const killer = spawn(taskkill, ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore', timeout: 10_000 });
       killer.once('error', resolve); killer.once('close', resolve);
     });
   } else {
@@ -153,7 +156,7 @@ async function main() {
       await observeProcess(command, args, { env, cwd: directory, durationMs: 15_000 });
     } else {
       const destination = join(directory, 'installed');
-      // The hardened installer requires WebView2 to be provisioned on the runner.
+      // WebView2 bootstrap may download its runtime on a clean runner.
       await observeProcess(installer, installArguments(destination), { env, cwd: directory, durationMs: 120_000, expectExit: true, windowsVerbatimArguments: true });
       const names = await readdir(destination);
       const binaries = names.filter(name => name.toLowerCase() === 'pandacode.exe');

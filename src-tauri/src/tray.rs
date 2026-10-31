@@ -37,14 +37,14 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &MenuItem::with_id(app, "show", "Open PandaCode Extended", true, None::<&str>)?,
-            &MenuItem::with_id(app, "quit", "Quit PandaCode Extended", true, None::<&str>)?,
+            &MenuItem::with_id(app, "show", "Open PandaCode", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "Quit PandaCode", true, None::<&str>)?,
         ],
     )?;
     TrayIconBuilder::with_id(ID)
         .icon(Image::from_bytes(include_bytes!("../icons/tray-template@2x.png"))?)
         .icon_as_template(true)
-        .tooltip("PandaCode Extended")
+        .tooltip("PandaCode")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(on_menu)
@@ -68,10 +68,7 @@ pub(crate) fn refresh(app: &AppHandle) {
 
 pub(crate) fn finished(app: &AppHandle, session_id: &str, stopped: bool, successful: bool) {
     if !stopped {
-        let mut unseen = lock(&UNSEEN);
-        unseen.insert(session_id.into(), !successful);
-        // Preserve the hardened fork's memory bound for long-lived sessions.
-        while unseen.len() > 1024 { unseen.pop_first(); }
+        lock(&UNSEEN).insert(session_id.into(), !successful);
     }
     refresh(app);
 }
@@ -103,7 +100,7 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-pub(crate) fn show(app: &AppHandle) {
+pub fn show(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -126,7 +123,7 @@ fn toggle(app: &AppHandle, rect: Rect) -> tauri::Result<()> {
         open(app, &window, rect)
     } else {
         let window = tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("index.html?view=tray".into()))
-            .title("PandaCode Extended")
+            .title("PandaCode")
             .inner_size(WIDTH, 420.0)
             .resizable(false)
             .decorations(false)
@@ -143,9 +140,7 @@ fn toggle(app: &AppHandle, rect: Rect) -> tauri::Result<()> {
                         && url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")
                         && url.port() == Some(1420));
-                // A same-origin navigation must not turn this limited window into a workspace.
                 local && matches!(url.path(), "/index.html" | "/")
-                    && url.query_pairs().any(|(key, value)| key == "view" && value == "tray")
             })
             .build()?;
         if let Err(error) = crate::appearance::setup(&window) {
@@ -317,12 +312,7 @@ fn refresh_usage(app: &AppHandle, refresh_now: bool) {
             }
         }
     }
-    // Avoid unbounded child checks if the user repeatedly opens/refreshes the panel.
-    const MAX_PROVIDERS: usize = 32;
-    let providers: Vec<_> = providers.into_iter().take(MAX_PROVIDERS).collect();
-    if CHECKING.compare_exchange(0, providers.len(), Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return; // A check is already underway; its completion updates the panel.
-    }
+    CHECKING.fetch_add(providers.len(), Ordering::SeqCst);
     let _ = app.emit_to(LABEL, "tray-changed", ());
     for provider in providers {
         let app = app.clone();

@@ -29,14 +29,10 @@ not in public issues.
 
 ## Set up and run
 
-Use the reviewed source archive for this revision. Cloning or installing the
-upstream project does not include these local hardening changes. On Windows,
-provision WebView2 separately before running the app; this installer will not
-download it. Keep antivirus protection enabled.
-
 ```sh
-cd pandacode-0.3.34.hardened
-npm ci --ignore-scripts
+git clone https://github.com/aicodeking/pandacode.git
+cd pandacode
+npm ci
 npm run tauri dev      # or: npm run desktop
 ```
 
@@ -47,11 +43,10 @@ for every new IPC command.
 
 Never point a development build at your real data with risky changes: pass a
 different identifier, for example
-`npm run tauri -- dev --config '{"identifier":"ai.pandacode.dev"}'`.
+`npx tauri dev --config '{"identifier":"ai.pandacode.dev"}'`.
 
-To build an installer for your OS: `npm run package`, or
-`npm run release:build` for a local artifact with a checksum. No automatic
-publication workflow is included (see
+To build an installer for your OS: `npm run tauri build`, or
+`npm run release:build` for the same packaging the release workflow uses (see
 [docs/releasing.md](docs/releasing.md)).
 
 ## Checks
@@ -63,8 +58,8 @@ npx tsc --noEmit                                     # typecheck
 npm run build                                        # typecheck + bundle; tests read dist/
 npm test                                             # Node unit tests (tests/*.test.mjs)
 npm run test:release                                 # release script tests
-cargo test --locked --manifest-path src-tauri/Cargo.toml      # Rust tests
-cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml      # Rust tests
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 For UI changes, also run the relevant Playwright tests in Chrome and WebKit

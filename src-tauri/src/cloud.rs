@@ -8,45 +8,41 @@
 pub mod agentcore;
 pub mod aws;
 pub mod aws_screen;
+pub mod blaxel;
+pub mod boat;
 pub mod cloudflare;
+pub mod codesandbox;
 pub mod commands;
 pub mod daytona;
 pub mod deploy;
-pub mod http;
-pub mod sandbox;
+pub mod digitalocean;
+pub mod docker;
 pub mod e2b;
-pub mod modal;
-pub mod vercel_sandbox;
-pub mod codesandbox;
-pub mod runloop;
-pub mod blaxel;
-pub mod tensorlake;
 pub mod freestyle;
-pub mod boat;
-pub mod instabox;
 pub mod gcloud_vm;
+pub mod hetzner;
+pub mod http;
+pub mod instabox;
+pub mod modal;
+pub mod railway_sandbox;
+pub mod runloop;
+pub mod runpod;
+pub mod sandbox;
+pub mod ssh;
+pub mod tensorlake;
+pub mod vercel_sandbox;
+pub mod vultr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::secret_store;
 
 const SERVICE: &str = "app.pandacode.cloud";
-/// Serialize connection/settings commits across native windows. Provider validation
-/// may be performed before taking this lock when the connection is rechecked after it.
-pub fn settings_guard() -> crate::Result<std::sync::MutexGuard<'static, ()>> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().map_err(|_| "Cloud settings are temporarily unavailable.".into())
-}
-
-#[cfg(test)]
-pub fn settings_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap()
-}
-pub const PROVIDERS: [&str; 15] = ["daytona", "cloudflare", "aws", "agentcore", "gcloud", "e2b", "modal", "vercel", "codesandbox", "runloop", "blaxel", "tensorlake", "freestyle", "boat", "instabox"];
+pub const PROVIDERS: [&str; 21] = ["daytona", "docker", "digitalocean", "vultr", "hetzner", "runpod", "cloudflare", "aws", "agentcore", "gcloud", "e2b", "modal", "vercel", "codesandbox", "runloop", "blaxel", "tensorlake", "freestyle", "railway", "boat", "instabox"];
 
 /// A cloud machine as the panel and tools see it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Machine {
     pub id: String,
     pub provider: String,
@@ -59,26 +55,19 @@ pub struct Machine {
     pub detail: String,
 }
 
-impl Serialize for Machine {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut value = serializer.serialize_struct("Machine", 8)?;
-        value.serialize_field("id", &self.id)?;
-        value.serialize_field("provider", &self.provider)?;
-        value.serialize_field("name", &self.name)?;
-        value.serialize_field("state", &self.state)?;
-        value.serialize_field("os", &self.os)?;
-        value.serialize_field("desktop", &self.desktop)?;
-        value.serialize_field("detail", &self.detail)?;
-        value.serialize_field("capabilities", &sandbox::capabilities(&self.provider))?;
-        value.end()
-    }
-}
-
 /// `daytona:abc` → (`daytona`, `abc`) for known providers.
 pub fn split(id: &str) -> Option<(&str, &str)> {
     let (provider, native) = id.split_once(':')?;
-    (PROVIDERS.contains(&provider) && !native.is_empty() && native.len() <= 200 && !native.contains(char::is_control)).then_some((provider, native))
+    (PROVIDERS.contains(&provider) && valid_native(native)).then_some((provider, native))
+}
+
+/// Native IDs go into provider URLs and paths, so they are plain names: letters, digits,
+/// `-`, `_` and `.` (Google Cloud joins name and zone with one), never a `..` or leading dot.
+pub fn valid_native(native: &str) -> bool {
+    (1..=200).contains(&native.len())
+        && native.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && !native.starts_with('.')
+        && !native.contains("..")
 }
 
 /// Non-secret connection settings, stored as one JSON value in the secure store.
@@ -101,7 +90,8 @@ pub struct Settings {
     /// Google Cloud uses the gcloud CLI's own login; PandaCode stores the project and region.
     pub gcloud_project: Option<String>,
     pub gcloud_region: Option<String>,
-    /// Non-secret provider choices. API credentials remain separate vault entries.
+    /// Non-secret options of the providers added for cloud agents, by provider ID
+    /// (for example `{"vercel": {"projectId": "prj_…"}}`). Secrets go in `set_secret`.
     pub providers: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 pub fn settings() -> Settings {
@@ -134,7 +124,13 @@ mod tests {
         assert_eq!(split("daytona:3f2a"), Some(("daytona", "3f2a")));
         assert_eq!(split("pandacode-ubuntu"), None);
         assert_eq!(split("other:x"), None);
+        assert_eq!(split("netlify:project"), None);
         assert_eq!(split("daytona:"), None);
+        assert_eq!(split("gcloud:pc-a.us-central1-a"), Some(("gcloud", "pc-a.us-central1-a")));
+        for bad in ["instabox:m_1/exec", "instabox:m_1?x=1", "instabox:m_1#x", "instabox:..", "instabox:a..b", "instabox:.x", "instabox:m 1", "instabox:m%2F1", "instabox:m:1", "instabox:m\\1"] {
+            assert_eq!(split(bad), None, "{bad}");
+        }
+        assert_eq!(split(&format!("e2b:{}", "a".repeat(201))), None);
     }
     #[test]
     fn quotes_for_the_shell() {
@@ -142,8 +138,6 @@ mod tests {
     }
     #[test]
     fn settings_round_trip_through_the_secure_store() {
-        let _serial = settings_test_guard();
-        let _guard = settings_guard().unwrap();
         let saved = Settings { daytona_api_url: Some("https://example.test/api".into()), cloudflare_sandboxes: vec!["a".into()], ..Settings::default() };
         save_settings(&saved).unwrap();
         assert_eq!(settings(), saved);

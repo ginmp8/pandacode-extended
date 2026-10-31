@@ -131,26 +131,20 @@ fn busy(app: &tauri::AppHandle, channel: &Channel) -> bool {
     session.is_some_and(|session| state.agents.lock().map(|agents| agents.contains_key(&session)).unwrap_or(false))
 }
 
-async fn events(app: &tauri::AppHandle, channel: &Channel, after: u64, request: &Request) -> Option<Value> {
+async fn events(app: &tauri::AppHandle, channel: &Channel, after: u64) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     let was_busy = busy(app, channel);
     loop {
         let notified = wake().notified();
-        // A pending long poll must not outlive revocation of its link/channel
-        // or a change that disables access through a tunnel.
-        let current = authorized(app, &channel.id, request)?;
-        if !request.loopback_host() && current.config["remote"].as_bool() != Some(true) {
-            return None;
-        }
         let items = pending_after(&channel.id, after);
         let now_busy = busy(app, channel);
         if !items.is_empty() || now_busy != was_busy || tokio::time::Instant::now() >= deadline {
             let cursor = items.last().map_or(after.max(cursor()), |item| item.id);
-            return Some(json!({
+            return json!({
                 "events": items.iter().map(|item| json!({"id": item.id, "text": item.text, "thread": item.thread, "at": item.at})).collect::<Vec<_>>(),
                 "busy": now_busy,
                 "cursor": cursor,
-            }));
+            });
         }
         // Wake on a new reply, or every few seconds to notice the run starting or ending.
         let wait = Duration::from_secs(3).min(deadline.saturating_duration_since(tokio::time::Instant::now()));
@@ -168,10 +162,7 @@ pub(crate) async fn api(app: &tauri::AppHandle, channel_id: &str, action: &str, 
         ("GET", "history") => Response::json(200, &history(app, &channel)),
         ("GET", "events") => {
             let after = request.query.get("after").and_then(|value| value.parse().ok()).unwrap_or(0);
-            match events(app, &channel, after, request).await {
-                Some(events) => Response::json(200, &events),
-                None => Response::json(401, &json!({"error": "This link is no longer valid. Copy a fresh one from PandaCode."})),
-            }
+            Response::json(200, &events(app, &channel, after).await)
         }
         ("POST", "messages") => {
             if !allow_post(&channel.id) {
@@ -179,7 +170,7 @@ pub(crate) async fn api(app: &tauri::AppHandle, channel_id: &str, action: &str, 
             }
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
             let text = body["text"].as_str().unwrap_or_default().to_owned();
-            let inbound = gateway::Inbound { bot_id: channel.bot_id.clone(), channel_id: channel.id.clone(), thread: THREAD.into(), sender_id: "web".into(), sender_name: "You (web)".into(), text, trusted: true };
+            let inbound = gateway::Inbound { bot_id: channel.bot_id.clone(), channel_id: channel.id.clone(), thread: THREAD.into(), sender_id: "web".into(), sender_name: "You (web)".into(), text, trusted: true, image_ids: None, moodboard_ids: None };
             match gateway::deliver(app, inbound).await {
                 Ok(_) => Response::json(200, &json!({"ok": true, "busy": busy(app, &channel)})),
                 Err(error) => Response::json(400, &json!({"error": error})),
@@ -234,6 +225,7 @@ main{flex:1;overflow-y:auto;padding:20px 16px 10px;display:flex;flex-direction:c
 .dots{display:inline-flex;gap:3px;padding:8px 10px;border-radius:12px;background:var(--bubble)}.dots i{width:5px;height:5px;border-radius:50%;background:var(--muted);animation:bob 1.2s ease-in-out infinite}.dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
 @keyframes bob{0%,60%,100%{transform:none;opacity:.45}30%{transform:translateY(-3px);opacity:1}}
 .hello{margin:auto;text-align:center;color:var(--muted);max-width:420px;display:flex;flex-direction:column;align-items:center;gap:8px}
+:is(.avatar,.mini) img{width:100%;height:100%;border-radius:50%;object-fit:cover}
 .hello .avatar{width:64px;height:64px;font-size:30px;box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 40%,transparent)}
 .hello b{color:var(--ink);font-size:17px;margin-top:6px}
 .chips{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:8px}.chips button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer}
@@ -243,7 +235,6 @@ form{display:flex;align-items:flex-end;gap:8px;padding:10px 16px calc(12px + env
 .box{flex:1;display:flex;align-items:flex-end;gap:8px;border:1px solid var(--line);background:var(--panel);border-radius:22px;padding:6px 6px 6px 16px;box-shadow:0 6px 24px rgba(0,0,0,.06)}
 .box:focus-within{border-color:color-mix(in srgb,var(--accent) 80%,var(--line))}
 textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);padding:6px 0;font:inherit;max-height:180px;outline:none}
-:is(.avatar,.mini) img{width:100%;height:100%;border-radius:50%;object-fit:cover}
 .send{flex:none;width:34px;height:34px;border:0;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;cursor:pointer}
 .send:disabled{opacity:.4;cursor:default}
 @media (prefers-reduced-motion:no-preference){.msg,.actions{animation:in .24s cubic-bezier(.2,.8,.2,1)}@keyframes in{from{opacity:0;transform:translateY(6px)}}}
@@ -263,10 +254,6 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
   const log = document.getElementById("log"), input = document.getElementById("input"), form = document.getElementById("form");
   const status = document.getElementById("status"), sendButton = document.getElementById("send");
   let cursor = 0, botName = "Bot", glyph = "·", image = "", role = "", typing = null;
-  function showAvatar(el) {
-    if (!image) { el.textContent = glyph; return; }
-    const img = document.createElement("img"); img.alt = ""; img.src = image; el.replaceChildren(img);
-  }
   const api = (path, init = {}) => fetch("/api/chat/" + channel + "/" + path, { ...init, headers: { ...(init.headers || {}), Authorization: "Bearer " + token, "Content-Type": "application/json" } })
     .then(async r => { const body = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(body.error || "Something went wrong."), { revoked: r.status === 401 }); return body; });
   const escape = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -358,6 +345,11 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
     if (value && !typing) { typing = document.createElement("div"); typing.className = "typing"; typing.setAttribute("role", "status"); typing.innerHTML = '<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>'; typing.append(botName + " is working…"); log.append(typing); scroll(); }
     if (!value && typing) { typing.remove(); typing = null; }
   }
+  // Uploaded icons are data: URLs, set through .src so they are never parsed as markup.
+  function showAvatar(el) {
+    if (!image) { el.textContent = glyph; return; }
+    const img = document.createElement("img"); img.alt = ""; img.src = image; el.replaceChildren(img);
+  }
   function hello() {
     const box = document.createElement("div"); box.className = "hello";
     box.innerHTML = '<span class="avatar"></span><b></b><span></span><div class="chips"></div>';
@@ -395,12 +387,7 @@ textarea{flex:1;resize:none;border:0;background:transparent;color:var(--ink);pad
       await Promise.race([engine, new Promise(resolve => setTimeout(resolve, 1500))]);
       const r = await api("history");
       if (r.bot) {
-        botName = r.bot.name; role = r.bot.role || "";
-        const avatar = typeof r.bot.avatar === "string" ? r.bot.avatar : "";
-        // Native storage accepts bounded PNG thumbnails. Keep that boundary here too;
-        // legacy glyphs remain text and presets use initials without fetching assets.
-        image = avatar.length <= 300000 && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(avatar) ? avatar : "";
-        glyph = avatar && !avatar.startsWith("panda:") && !avatar.includes(":") && Array.from(avatar).length <= 4 ? avatar : (Array.from(botName)[0] || "·").toUpperCase();
+        botName = r.bot.name; role = r.bot.role || ""; image = /^data:image\/(png|jpeg|webp|gif);base64,/.test(r.bot.avatar || "") ? r.bot.avatar : ""; glyph = (r.bot.avatar && !image && !r.bot.avatar.startsWith("panda:")) ? r.bot.avatar : r.bot.name.slice(0, 1).toUpperCase();
         document.getElementById("name").textContent = r.bot.name; document.title = r.bot.name; showAvatar(document.getElementById("avatar"));
         status.textContent = r.bot.paused ? "Paused" : (role || "On your computer");
       }

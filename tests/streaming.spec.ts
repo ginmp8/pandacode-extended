@@ -41,7 +41,8 @@ async function installControlledStreaming(page: Page): Promise<void> {
           messageStart() { persist(); agent({ sessionId: s.id, kind: 'message_start', text: '' }); },
           startTool() {
             persist();
-            liveTool = { id: 'controlled-background-' + s.id + '-' + ++toolIndex, name: 'Bash', status: 'running', input: 'npm test', output: '' };
+            // A command long enough to be clipped in the card, so the row keeps its full-data disclosure.
+            liveTool = { id: 'controlled-background-' + s.id + '-' + ++toolIndex, name: 'Bash', status: 'running', input: 'npm test -- --reporter=' + 'verbose,'.repeat(60), output: '' };
             const liveToolMessage = { id: ++id, sessionId: s.id, role: 'tool', content: encodeTool(liveTool), createdAt: Date.now() };
             recordedTools.set(liveTool.id, { tool: liveTool, message: liveToolMessage });
             messages[s.id].push(liveToolMessage);
@@ -54,10 +55,9 @@ async function installControlledStreaming(page: Page): Promise<void> {
             record.message.content = encodeTool(record.tool);
             agent({ sessionId: s.id, kind: 'tool', text: 'Bash output', tool: { ...record.tool } });
           },
-          tool(overrides = {}) {
+          tool() {
             persist();
             const activity = { id: 'controlled-read-' + s.id + '-' + ++toolIndex, name: 'Read', status: 'completed', input: 'README.md', output: 'Controlled fixture output.' };
-            Object.assign(activity, overrides);
             messages[s.id].push({ id: ++id, sessionId: s.id, role: 'tool', content: encodeTool(activity), createdAt: Date.now() });
             agent({ sessionId: s.id, kind: 'tool', text: 'Read completed', tool: activity });
             return activity.id;
@@ -78,7 +78,7 @@ async function installControlledStreaming(page: Page): Promise<void> {
 
 async function startTurn(page: Page, view: View, expandActivity = true): Promise<string> {
   if (view === 'board') {
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     const board = page.getByRole('region', { name: 'Project board', exact: true });
     await board.getByRole('button', { name: 'Add task', exact: true }).click();
     await page.locator('#dialog').getByRole('textbox', { name: 'Task title', exact: true }).fill('Controlled streaming response');
@@ -86,7 +86,7 @@ async function startTurn(page: Page, view: View, expandActivity = true): Promise
     await page.locator('#dialog').getByRole('button', { name: 'Add to pending', exact: true }).click();
     await page.getByRole('region', { name: 'Task details', exact: true }).getByRole('button', { name: 'Start task', exact: true }).click();
   } else {
-    await page.getByRole('button', { name: /^New task (?:⌘|Ctrl) N$/ }).click();
+    await page.getByRole('button', { name: 'New task ⌘ N', exact: true }).click();
     await expect(page.getByRole('heading', { name: /^What should we build in/ })).toBeVisible();
     await expect(prompt(page)).toBeEnabled();
     await prompt(page).fill('Controlled streaming response');
@@ -117,297 +117,6 @@ test.describe('streamed responses', () => {
     await installControlledStreaming(page);
     await page.goto('/');
     await expect(page.locator('.task-item.selected .task-title')).toHaveText('Make search feel instant');
-  });
-
-  for (const fixture of [
-    { name: 'Skill', input: JSON.stringify({ skill: 'simplify', args: 'Only show after disclosure' }), output: 'Launching skill: simplify' },
-    { name: 'unknown_tool', input: 'Only show after disclosure', output: '' },
-  ]) {
-    test(`${fixture.name} without a card keeps raw details closed until keyboard disclosure`, async ({ page }) => {
-      await page.emulateMedia({ reducedMotion: 'reduce' });
-      const id = await startTurn(page, 'conversation');
-      const key = await page.evaluate(({ id, fixture }) => (window as any).__streamFixtures[id].tool(fixture), { id, fixture });
-      const tool = transcript(page).locator(`details.tool-trace[data-tool-key="tool:${key}"]`);
-      const raw = tool.locator('details.tool-trace-raw');
-      await expect(tool).toHaveCount(1);
-      await expect(tool.locator('.tool-trace-card')).toHaveCount(0);
-      await expect(tool).not.toHaveAttribute('open', '');
-      await expect(raw).not.toHaveAttribute('open', '');
-      await expect(raw.locator('[data-tool-section="input"] pre')).toBeHidden();
-      await tool.locator(':scope > summary').focus();
-      await tool.locator(':scope > summary').press('Enter');
-      await expect(tool).toHaveAttribute('open', '');
-      await expect(raw.locator('[data-tool-section="input"] pre')).toBeHidden();
-      await raw.locator(':scope > summary').focus();
-      await raw.locator(':scope > summary').press('Enter');
-      await expect(raw.locator('[data-tool-section="input"] pre')).toBeVisible();
-      await expect(raw.locator('[data-tool-section="input"] pre')).toHaveText(fixture.input);
-      await page.evaluate(id => (window as any).__streamFixtures[id].tool(), id);
-      await expect(raw).toHaveAttribute('open', '');
-      await finish(page, id);
-      await expect(tool).toHaveAttribute('open', '');
-      await expect(raw).toHaveAttribute('open', '');
-      await expect(raw.locator('[data-tool-section="input"] pre')).toBeVisible();
-    });
-  }
-
-  test('opening raw details on an automatic tool card pins the reader choice across later results', async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: 'reduce' });
-    const id = await startTurn(page, 'conversation');
-    const key = await page.evaluate(id => (window as any).__streamFixtures[id].tool(), id);
-    const tool = transcript(page).locator(`details.tool-trace[data-tool-key="tool:${key}"]`);
-    const raw = tool.locator('details.tool-trace-raw');
-    await expect(tool).toHaveAttribute('open', '');
-    await expect(raw).not.toHaveAttribute('open', '');
-    await expect(raw.locator('[data-tool-section="output"] pre')).toBeHidden();
-    await raw.locator(':scope > summary').focus();
-    await raw.locator(':scope > summary').press('Enter');
-    await expect(raw.locator('[data-tool-section="output"] pre')).toBeVisible();
-    await page.evaluate(id => { for (let i = 0; i < 4; i++) (window as any).__streamFixtures[id].tool(); }, id);
-    await expect(page.locator('#stream-region .tool-activity')).toHaveCount(5);
-    await expect(tool).toHaveAttribute('open', '');
-    await expect(raw).toHaveAttribute('open', '');
-    await finish(page, id);
-    await expect(raw.locator('[data-tool-section="output"] pre')).toBeVisible();
-  });
-
-  test('another tool updating preserves an unchanged live summary during a pointer click', async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: 'reduce' });
-    const id = await startTurn(page, 'conversation');
-    const second = await page.evaluate(id => {
-      const fixture = (window as any).__streamFixtures[id];
-      fixture.startTool(); return fixture.startTool();
-    }, id);
-    const tools = page.locator('#stream-region details.tool-trace');
-    await expect(tools).toHaveCount(2);
-    const first = tools.first(), summary = first.locator(':scope > summary');
-    await expect(first).not.toHaveAttribute('open', '');
-    await summary.evaluate(summary => {
-      const tool = summary.parentElement!;
-      const saved = (window as any).__unchangedLiveTool = { summary, tool, detached: false };
-      new MutationObserver(records => {
-        for (const record of records) for (const removed of record.removedNodes) {
-          if (removed === tool || removed.contains(summary)) saved.detached = true;
-        }
-      }).observe(document.querySelector('#stream-region .live-tools')!, { childList: true, subtree: true });
-    });
-    const box = (await summary.boundingBox())!;
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.down();
-    await page.evaluate(({ id, second }) => (window as any).__streamFixtures[id].updateTool('completed', second), { id, second });
-    await expect(tools.nth(1)).toHaveAttribute('data-tool-status', 'completed');
-    expect(await summary.evaluate(summary => {
-      const saved = (window as any).__unchangedLiveTool;
-      return { sameSummary: summary === saved.summary, sameTool: summary.parentElement === saved.tool, connected: saved.summary.isConnected, detached: saved.detached };
-    })).toEqual({ sameSummary: true, sameTool: true, connected: true, detached: false });
-    await page.mouse.up();
-    await expect(first).toHaveAttribute('open', '');
-    await page.evaluate(({ id, second }) => (window as any).__streamFixtures[id].updateTool('completed', second), { id, second });
-    await expect(first).toHaveAttribute('open', '');
-  });
-
-  test('switching reduced motion on settles tool expansion, row entry and header animations already running', async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const id = await startTurn(page, 'conversation');
-    await page.evaluate(() => {
-      const query = matchMedia('(prefers-reduced-motion: reduce)');
-      const snapshot = () => document.querySelector('#stream-region')!.getAnimations({ subtree: true })
-        .filter(animation => animation.playState === 'running').map(animation => animation.constructor.name);
-      (window as any).__traceMotionSnapshot = snapshot;
-      query.addEventListener('change', () => {
-        if (query.matches) requestAnimationFrame(() => { (window as any).__traceMotionAfter = snapshot(); });
-      });
-    });
-    await page.evaluate(id => (window as any).__streamFixtures[id].tool({
-      name: 'mcp__docs__search_docs', input: JSON.stringify({ query: 'motion preference' }),
-      output: JSON.stringify({ results: Array.from({ length: 6 }, (_, i) => ({ title: 'Source ' + i, url: 'https://docs.example.com/' + i, snippet: 'A result row.' })) }),
-    }), id);
-    await page.waitForFunction(() => {
-      const running = (window as any).__traceMotionSnapshot();
-      if (running.includes('Animation')) { (window as any).__traceMotionBefore = running; return true; }
-      return false;
-    });
-    await page.emulateMedia({ reducedMotion: 'reduce' });
-    await expect.poll(() => page.evaluate(() => (window as any).__traceMotionAfter)).toEqual([]);
-    expect(await page.evaluate(() => (window as any).__traceMotionBefore)).toContain('Animation');
-    const tool = page.locator('#stream-region details.tool-trace');
-    await expect(tool).toHaveAttribute('open', '');
-    expect(await tool.locator('.tool-activity-body').evaluate(node => (node as HTMLElement).style.overflow)).toBe('');
-    await expect(tool.locator('.tc-row')).toHaveCount(6);
-    // Turning the preference off permits future motion, without restarting old animations.
-    await page.emulateMedia({ reducedMotion: 'no-preference' });
-    expect(await tool.evaluate(node => node.getAnimations({ subtree: true }).filter(animation => animation.constructor.name === 'Animation' && animation.playState === 'running').length)).toBe(0);
-  });
-
-  for (const folding of ['card', 'turn'] as const) {
-    test(`switching reduced motion on completes an in-flight tool ${folding} collapse without clipped content`, async ({ page }) => {
-      await page.emulateMedia({ reducedMotion: 'no-preference' });
-      const id = await startTurn(page, 'conversation');
-      await page.evaluate(id => (window as any).__streamFixtures[id].tool(), id);
-      await expect(page.locator('#stream-region details.tool-trace')).toHaveAttribute('open', '');
-      await expect.poll(() => page.locator('#stream-region').evaluate(root => root.getAnimations({ subtree: true }).filter(animation => animation.constructor.name === 'Animation' && animation.playState === 'running').length)).toBe(0);
-      await page.evaluate(async folding => {
-        const motion = await import('/src/trace-motion.ts');
-        const activity = document.querySelector<HTMLDetailsElement>('#stream-region .live-activity')!;
-        const target = folding === 'turn' ? activity : activity.querySelector<HTMLDetailsElement>('details.tool-trace')!;
-        const content = target.querySelector<HTMLElement>(':scope > .tool-activity-body, :scope > .turn-activity-body')!;
-        const query = matchMedia('(prefers-reduced-motion: reduce)');
-        query.addEventListener('change', () => {
-          if (query.matches) requestAnimationFrame(() => {
-            (window as any).__foldingTraceAfter = { open: target.open, closing: target.hasAttribute('data-closing'), overflow: content.style.overflow, height: content.style.height,
-              running: target.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length };
-          });
-        });
-        if (folding === 'turn') motion.foldTurn(activity);
-        else motion.choreograph(activity.querySelector<HTMLElement>('.live-tools')!, activity.dataset.turnKey!, { answering: true, expandAll: false });
-        (window as any).__foldingTraceBefore = { closing: target.hasAttribute('data-closing'), running: target.getAnimations({ subtree: true }).some(animation => animation.constructor.name === 'Animation' && animation.playState === 'running') };
-      }, folding);
-      expect(await page.evaluate(() => (window as any).__foldingTraceBefore)).toEqual({ closing: true, running: true });
-      await page.emulateMedia({ reducedMotion: 'reduce' });
-      // A frozen first-frame snapshot cannot pass just because the old animation
-      // eventually reached its natural end during an assertion retry.
-      await expect.poll(() => page.evaluate(() => (window as any).__foldingTraceAfter))
-        .toEqual({ open: false, closing: false, overflow: '', height: '', running: 0 });
-    });
-  }
-
-  for (const author of ['user', 'agent']) {
-    test(`history handoff preserves selection in an unchanged historical ${author} message without detaching it`, async ({ page }) => {
-      if (author === 'agent') {
-        // The default sample ends in tool activity, so its assistant messages
-        // are nested narration. Persist a real completed response first.
-        const earlier = await startTurn(page, 'conversation');
-        await push(page, earlier, 'An earlier assistant response remains available for selection.');
-        await expect(live(page)).toHaveText('An earlier assistant response remains available for selection.');
-        await finish(page, earlier);
-      }
-      const historical = transcript(page).locator(`:scope > .${author}-message[data-message-id]`).first();
-      await expect(historical).toBeVisible();
-      await expect(historical).toHaveAttribute('data-message-id', /^[1-9]\d*$/);
-      // A second turn uses the same session id; wait for its new fixture rather
-      // than accepting the id left behind by the previous completed turn.
-      await page.evaluate(() => { delete (window as any).__latestStreamId; });
-      await prompt(page).fill('Complete a turn while an earlier message is being read');
-      await prompt(page).press('Enter');
-      await expect.poll(() => page.evaluate(() => (window as any).__latestStreamId ?? '')).not.toBe('');
-      const id = await page.evaluate(() => (window as any).__latestStreamId);
-      await push(page, id, 'FINAL_RESPONSE_FOR_HISTORY_HANDOFF');
-      await expect(live(page)).toHaveText('FINAL_RESPONSE_FOR_HISTORY_HANDOFF');
-      await historical.scrollIntoViewIfNeeded();
-      const selected = await historical.evaluate(article => {
-        const walker = document.createTreeWalker(article.querySelector('.message-content')!, NodeFilter.SHOW_TEXT);
-        let node = walker.nextNode() as Text | null;
-        while (node && !node.textContent?.trim()) node = walker.nextNode() as Text | null;
-        if (!node) throw new Error('Historical fixture has no selectable text.');
-        const range = document.createRange(); range.setStart(node, 0); range.setEnd(node, Math.min(18, node.length));
-        const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
-        const saved = (window as any).__historicalSelection = { article, node, text: selection.toString(), detached: false };
-        new MutationObserver(records => {
-          for (const record of records) for (const removed of record.removedNodes) {
-            if (removed === article || removed.contains(article) || removed.contains(node)) saved.detached = true;
-          }
-        }).observe(document.querySelector('#transcript')!, { childList: true, subtree: true });
-        return saved.text;
-      });
-      expect(selected.length).toBeGreaterThan(0);
-      await page.evaluate(id => { (window as any).__streamHoldMessages = id; (window as any).__streamFixtures[id].done(); }, id);
-      await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseStreamMessages)).toBe('function');
-      expect(await page.evaluate(() => ({ selected: window.getSelection()?.toString(), detached: (window as any).__historicalSelection.detached }))).toEqual({ selected, detached: false });
-      await page.evaluate(() => { (window as any).__streamHoldMessages = null; (window as any).__releaseStreamMessages(); });
-      await expect(prompt(page)).toBeEnabled();
-      await expect(transcript(page).locator('.agent-message .message-content').filter({ hasText: 'FINAL_RESPONSE_FOR_HISTORY_HANDOFF' })).toHaveCount(1);
-      await expect(transcript(page).locator('.agent-message').filter({ hasText: 'FINAL_RESPONSE_FOR_HISTORY_HANDOFF' })).toHaveAttribute('data-message-id', /^[1-9]\d*$/);
-      expect(await historical.evaluate(article => {
-        const saved = (window as any).__historicalSelection;
-        return { sameArticle: article === saved.article, nodeConnected: saved.node.isConnected, selected: window.getSelection()?.toString(), detached: saved.detached };
-      })).toEqual({ sameArticle: true, nodeConnected: true, selected, detached: false });
-      await page.locator('#navigation .task-item', { hasText: 'Explore the project' }).click();
-      await expect(page.locator('#navigation .task-item.selected .task-title')).toHaveText('Explore the project');
-      await expect(transcript(page)).toContainText('The project is a small native workspace');
-      expect(await page.evaluate(() => (window as any).__historicalSelection.article.isConnected)).toBe(false);
-      expect(await page.evaluate(() => window.getSelection()?.toString())).not.toBe(selected);
-    });
-  }
-
-  for (const content of ['commentary', 'raw output']) {
-    test(`history handoff preserves selection inside expanded historical ${content} without detaching its turn`, async ({ page }) => {
-      await page.emulateMedia({ reducedMotion: 'reduce' });
-      const earlier = await startTurn(page, 'conversation');
-      await push(page, earlier, 'Historical commentary stays readable during later work.');
-      await expect(live(page)).toHaveText('Historical commentary stays readable during later work.');
-      await page.evaluate(id => (window as any).__streamFixtures[id].tool({ name: 'Bash', input: 'printf "recorded output"', output: 'Historical raw output stays readable during later work.' }), earlier);
-      await expect(page.locator('#stream-region .tool-activity')).toHaveCount(1);
-      await push(page, earlier, 'The earlier turn is complete.');
-      await expect(live(page)).toHaveText('The earlier turn is complete.');
-      await finish(page, earlier);
-      const historicalTurn = transcript(page).locator(':scope > details.turn-activity').first();
-      await expect(historicalTurn.locator('.agent-message[data-message-id]').first()).toHaveAttribute('data-message-id', /^[1-9]\d*$/);
-      await page.evaluate(() => { delete (window as any).__latestStreamId; });
-      await prompt(page).fill('Complete another turn while earlier activity is being read');
-      await prompt(page).press('Enter');
-      await expect.poll(() => page.evaluate(() => (window as any).__latestStreamId ?? '')).not.toBe('');
-      const id = await page.evaluate(() => (window as any).__latestStreamId);
-      await push(page, id, 'FINAL_RESPONSE_AFTER_HISTORICAL_ACTIVITY');
-      await expect(live(page)).toHaveText('FINAL_RESPONSE_AFTER_HISTORICAL_ACTIVITY');
-      if (!await historicalTurn.evaluate((turn: HTMLDetailsElement) => turn.open)) await historicalTurn.locator(':scope > summary').click();
-      const target = content === 'commentary' ? historicalTurn.locator('.agent-message .message-content').first()
-        : historicalTurn.locator('[data-tool-section="output"] pre').first();
-      if (content === 'raw output') {
-        const group = historicalTurn.locator('.tool-group').first();
-        if (!await group.evaluate((details: HTMLDetailsElement) => details.open)) await group.locator(':scope > summary').click();
-        const tool = group.locator('details.tool-trace').first();
-        if (!await tool.evaluate((details: HTMLDetailsElement) => details.open)) await tool.locator(':scope > summary').click();
-        const raw = tool.locator('.tool-trace-raw');
-        if (!await raw.evaluate((details: HTMLDetailsElement) => details.open)) await raw.locator(':scope > summary').click();
-      }
-      await expect(target).toBeVisible();
-      const selected = await target.evaluate(target => {
-        const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
-        let node = walker.nextNode() as Text | null;
-        while (node && !node.textContent?.trim()) node = walker.nextNode() as Text | null;
-        if (!node) throw new Error('Historical activity fixture has no selectable text.');
-        const range = document.createRange(); range.setStart(node, 0); range.setEnd(node, Math.min(18, node.length));
-        const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
-        const turn = target.closest('.turn-activity')!;
-        const saved = (window as any).__historicalActivitySelection = { target, turn, node, text: selection.toString(), detached: false };
-        new MutationObserver(records => {
-          for (const record of records) for (const removed of record.removedNodes) {
-            if (removed === turn || removed.contains(turn) || removed.contains(node)) saved.detached = true;
-          }
-        }).observe(document.querySelector('#transcript')!, { childList: true, subtree: true });
-        return saved.text;
-      });
-      expect(selected.length).toBeGreaterThan(0);
-      await page.evaluate(id => { (window as any).__streamHoldMessages = id; (window as any).__streamFixtures[id].done(); }, id);
-      await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseStreamMessages)).toBe('function');
-      expect(await page.evaluate(() => {
-        const saved = (window as any).__historicalActivitySelection;
-        return { selected: window.getSelection()?.toString(), detached: saved.detached, connected: saved.node.isConnected };
-      })).toEqual({ selected, detached: false, connected: true });
-      await page.evaluate(() => { (window as any).__streamHoldMessages = null; (window as any).__releaseStreamMessages(); });
-      await expect(transcript(page).locator('.agent-message').filter({ hasText: 'FINAL_RESPONSE_AFTER_HISTORICAL_ACTIVITY' })).toHaveAttribute('data-message-id', /^[1-9]\d*$/);
-      await expect(target).toBeVisible();
-      expect(await target.evaluate(target => {
-        const saved = (window as any).__historicalActivitySelection;
-        return { sameTarget: target === saved.target, sameTurn: target.closest('.turn-activity') === saved.turn, selected: window.getSelection()?.toString(), detached: saved.detached, connected: saved.node.isConnected };
-      })).toEqual({ sameTarget: true, sameTurn: true, selected, detached: false, connected: true });
-    });
-  }
-
-  test('history handoff preserves composer typing and caret when no transcript text is selected', async ({ page }) => {
-    const id = await startTurn(page, 'conversation');
-    await push(page, id, 'A completed response alongside a follow-up draft.');
-    await expect(live(page)).toHaveText('A completed response alongside a follow-up draft.');
-    await prompt(page).fill('A draft follow-up that must not be sent yet.');
-    await prompt(page).evaluate((textarea: HTMLTextAreaElement) => {
-      window.getSelection()?.removeAllRanges();
-      textarea.focus(); textarea.setSelectionRange(8, 17);
-    });
-    await finish(page, id);
-    await expect(transcript(page).locator('.agent-message').filter({ hasText: 'A completed response alongside a follow-up draft.' })).toHaveAttribute('data-message-id', /^[1-9]\d*$/);
-    await expect(prompt(page)).toBeFocused();
-    await expect(prompt(page)).toHaveValue('A draft follow-up that must not be sent yet.');
-    expect(await prompt(page).evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd])).toEqual([8, 17]);
   });
 
   test('live tool activity stays open regardless of Settings and preserves manual disclosure choices during updates', async ({ page }) => {
@@ -499,8 +208,9 @@ test.describe('streamed responses', () => {
         return first;
       }, id);
       await expect(liveGroups(page)).toHaveCount(1);
-      // A live group with a running call reads in the present tense.
-      await expect(liveGroups(page).first().locator('.tool-group-label')).toHaveText('Running 1 command and reading 1 file…');
+      // Completed calls lead the live group's sentence; the running call is counted apart.
+      await expect(liveGroups(page).first().locator('.tool-group-label')).toHaveText('Read 1 file');
+      await expect(liveGroups(page).first().locator('.tool-group-status')).toHaveText(' · 1 running');
       // Live groups are the open step rail; the header carries the running sentence instead of a group summary.
       await expect(liveGroups(page).first()).toHaveAttribute('open', '');
       await expect(liveGroups(page).first().locator('.tool-group-summary')).toBeHidden();
@@ -524,6 +234,16 @@ test.describe('streamed responses', () => {
 
       const firstGroup = liveGroups(page).first();
       const firstTool = page.locator(`#stream-region .tool-activity[data-tool-key="tool:${firstToolId}"]`);
+      // Steps narrated past fold to their summary in the conversation and stay folded as new work arrives.
+      if (view === 'conversation') {
+        await expect(firstGroup).not.toHaveAttribute('open', '');
+        await expect(firstGroup.locator('.tool-group-summary')).toBeVisible();
+        await page.evaluate(({ id, thirdToolId }) => (window as any).__streamFixtures[id].updateTool('running', thirdToolId), { id, thirdToolId });
+        await expect(firstGroup).not.toHaveAttribute('open', '');
+        await expect(firstTool).not.toHaveAttribute('open', '');
+        await firstGroup.locator('.tool-group-summary').click();
+      }
+      await expect(firstGroup).toHaveAttribute('open', '');
       await firstTool.locator(':scope > summary').click();
       await firstTool.locator('.tool-trace-raw > summary').click();
       await page.evaluate(({ id, toolId }) => (window as any).__streamFixtures[id].updateTool('running', toolId), { id, toolId: firstToolId });
@@ -584,7 +304,12 @@ test.describe('streamed responses', () => {
       await expect(liveGroups(page).locator('.tool-group-label')).toHaveText(['Read 5 files', 'Read 1 file', 'Read 1 file']);
       await expect.poll(() => liveSequence(page)).toEqual(['I’m checking the project files.', '5 tools', '1 tool', 'The files look good. I’m checking one last detail.', '1 tool']);
       await expect(page.locator('#stream-region .tool-activity')).toHaveCount(7);
-      for (const group of await liveGroups(page).all()) await expect(group).toHaveAttribute('open', '');
+      // In the conversation, groups the agent narrated past fold to their summary; the board keeps every group open.
+      const groups = await liveGroups(page).all();
+      for (const [index, group] of groups.entries()) {
+        if (view === 'board' || index === groups.length - 1) await expect(group).toHaveAttribute('open', '');
+        else await expect(group).not.toHaveAttribute('open', '');
+      }
       await expect(page.locator('#stream-region [data-commentary]')).toBeVisible();
       await expect(live(page)).toBeVisible();
       if (view === 'board') {
@@ -794,7 +519,7 @@ test.describe('streamed responses', () => {
     const id = await startTurn(page, 'conversation');
     await push(page, id, 'First stream segment. ');
     await expect(live(page)).toContainText('First stream segment.');
-    await page.getByRole('button', { name: 'Board view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
     await push(page, id, 'Arrived with the panel closed. ');
     await page.locator(`[data-action="board-open"][data-id="${id}"]`).click();
     await expect(live(page)).toContainText('First stream segment. Arrived with the panel closed.');
@@ -802,7 +527,7 @@ test.describe('streamed responses', () => {
     await push(page, id, 'Arrived in the background. ');
     await expect(transcript(page)).not.toContainText('First stream segment.');
     await expect(transcript(page)).toContainText('The project is a small native workspace');
-    await page.getByRole('button', { name: 'Conversation view', exact: true }).click();
+    await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Conversation', exact: true }).click();
     await page.locator(`.task-item[data-id="${id}"]`).click();
     await expect(live(page)).toContainText('First stream segment. Arrived with the panel closed. Arrived in the background.');
     await push(page, id, 'Final segment.');

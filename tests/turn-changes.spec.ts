@@ -63,13 +63,13 @@ test.describe('turn changes', () => {
   for (const view of ['conversation', 'board']) test(`shows one compact completed-turn card after streaming in ${view}`, async ({ page }) => {
     await page.clock.install(); await install(page);
     if (view === 'board') {
-      await page.getByRole('button', { name: 'Board view', exact: true }).click();
+      await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name: 'Board', exact: true }).click();
       await page.getByRole('region', { name: 'Project board', exact: true }).getByRole('button', { name: 'Add task', exact: true }).click();
       await page.getByRole('textbox', { name: 'Task title', exact: true }).fill('Sample change with a saved diff');
       await page.getByRole('button', { name: 'Add to pending', exact: true }).click();
       await page.getByRole('region', { name: 'Task details', exact: true }).getByRole('button', { name: 'Start task', exact: true }).click();
     } else {
-      await page.getByRole('button', { name: /^New task (?:⌘|Ctrl) N$/ }).click();
+      await page.getByRole('button', { name: 'New task ⌘ N', exact: true }).click();
       await expect(page.getByRole('heading', { name: /^What should we build in/ })).toBeVisible();
       await expect(page.locator('#prompt')).toBeEnabled();
       await page.locator('#prompt').fill('Sample change with a saved diff'); await page.locator('#prompt').press('Enter');
@@ -264,10 +264,11 @@ test.describe('turn changes', () => {
 
   test('completed worker conversations show their own changed files and request their snapshot', async ({ page }) => {
     await page.clock.install(); await install(page); await selectFixture(page);
-    await page.getByRole('button', { name: 'Team', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Team', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await page.locator('#team-trigger').click();
+    await page.getByRole('menuitemradio', { name: 'Balanced team', exact: true }).click();
+    await expect(page.locator('#team-trigger')).toHaveAttribute('data-on', '');
     await page.locator('#prompt').fill('Demonstrate the worker change review'); await page.locator('#prompt').press('Enter');
-    await page.getByRole('button', { name: 'Open workers', exact: true }).click();
+    await page.locator('#agents-toggle').click();
     await page.clock.runFor(8000);
     const workers = page.getByRole('dialog', { name: 'Workers', exact: true });
     await workers.locator('.architect-worker-row').first().click();

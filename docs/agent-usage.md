@@ -10,15 +10,7 @@ The panel opens on **Overview**:
 
 Each agent has a tab with its limit windows, its cost for the period and a year activity calendar.
 
-The browser preview uses labeled sample limits and costs. The desktop reads the default account and, in each installed harness's tab, separately lists its saved named connections. Limits may include usage from the same account in other applications.
-
-## Named connections in 0.3.41-hardened
-
-Create connections in **Settings → Providers**, then open **Agent usage** and choose the harness tab. **Default setup** and each named connection have separate subscription-limit results. Named Claude Code and Codex connections use their own configuration directory and environment. A changed/deleted connection invalidates the result; the frontend also checks the returned connection id. Unsupported harnesses and connections with a custom executable or extra CLI arguments show **Not exposed** rather than querying a different account. API-key setups do not inherit another account's subscription limits.
-
-Refresh remains explicit. Per-connection caches use the connection id and revision, with a bounded number of entries. No credentials are returned to the frontend. The **Estimated API cost** ledger is still aggregated by harness; this revision does not assign historical dollar costs to named connections.
-
-When a task reaches a reported limit, its banner can offer **Continue on…** for another saved connection of the same harness. This is an explicit action: the backend validates the connection, invalidates the old native resume id, preserves the transcript and recovers context before the next message. It never switches automatically. The banner offers compatible saved choices; it does not promise that an alternative has spare quota. See [connection/session safeguards](connection-session-safety.md) for recovery bounds and native-control limitations.
+The browser preview uses labeled sample limits and costs. The desktop reads the account configured by each harness. Named connections (Settings → Providers → Connections) appear separately under their harness's tab, below its **Default setup**: each Claude Code and Codex connection is read through its own config folder and environment (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, its variables and secrets) with the same readers, and cached by connection and revision (`agent_usage` with `connection`). Connections of other harnesses say their limits are not read separately rather than showing the default account's. Checks still run only when the panel opens or on Refresh. Limits may include usage from the same account in other applications.
 
 ## Estimated API cost
 
@@ -28,7 +20,7 @@ The estimate answers "what would these tokens have cost through the API?". It do
 - **Counting.** A Claude reply streams several copies and resumed sessions copy history, so replies are de-duplicated by message ID and request ID across all files. Subagent logs count toward cost but not toward sessions.
   - Codex events carry a running total. An event whose total has not moved is a repeat and is skipped. A September 2026 check across 1,200 local rollouts found no token events duplicated between files.
   - Codex `input_tokens` already includes cached and cache-write tokens, and `output_tokens` includes reasoning, so neither is counted twice.
-- **Pricing.** Rates come from [LiteLLM's public price list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json), the list ccusage uses. This revision never fetches it. Estimates use an existing `usage-prices.json` or the snapshot bundled in `src-tauri/src/usage_ledger/prices.json`; the rates can be stale.
+- **Pricing.** Rates come from [LiteLLM's public price list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json), the list ccusage uses. It is fetched with a plain GET at most daily and saved as `usage-prices.json`. Offline, the saved copy or the snapshot bundled in `src-tauri/src/usage_ledger/prices.json` is used.
   - The vendor's own listing wins over reseller entries.
   - Rates cover uncached input, cache reads, 5-minute and 1-hour cache writes, output, and the long-context tier above 200k or 272k tokens.
   - Batch, priority and fast-mode pricing are excluded.
@@ -74,8 +66,8 @@ OpenCode authentication content takes precedence over its saved file, and saved 
 - No prompt or paid inference is needed. PandaCode does not independently refresh or rewrite harness OAuth tokens; the Codex CLI remains responsible for its own authentication lifecycle.
 - No credentials or raw provider responses cross into the webview, logs, analytics, or PandaCode servers. Only normalized limit fields are returned. The limit cache is in memory and creates no database migration or new credential store.
 - Agent logs are read only while the panel is open, one scan at a time, in a blocking worker with a 5-minute bound. Parsers keep token counts, the model name and the hour; prompt, reply and tool text is discarded as each line is parsed. Per-file counts are saved as `usage-ledger-cache.json` in the app data folder with each file's read offset, so a reopen only reads appended bytes. On the September 2026 test machine the first scan of 7.9 GB took about 6 s, a rescan 10 ms, and the UI payload was about 100 KB. Results are reused for 60 seconds unless Refresh is pressed.
-- Cost estimation makes no price-list network request in this revision. Provider account-limit queries remain part of the selected provider integration.
-- Locked or inaccessible credentials produce an actionable state rather than a Keychain prompt. macOS Keychain reads run in a short-lived, bounded helper with user interaction disabled; this does not change the main app’s credential behavior. Users can sign in through their harness and refresh.
+- The price-list download is the only network request the estimate makes. No usage data is sent.
+- Locked or inaccessible credentials produce an actionable state rather than a Keychain prompt. macOS Keychain reads run in a short-lived, bounded helper with user interaction disabled; PandaCode's own saved keys are read from its secrets file first (see [secret storage](providers.md#secret-storage)). Users can sign in through their harness and refresh.
 
 ## Code and verification
 

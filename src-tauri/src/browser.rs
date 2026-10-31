@@ -13,9 +13,6 @@ use tauri::{Emitter, Manager, Webview};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod platform;
 
-#[path = "browser/review.rs"]
-mod review;
-
 const LABEL: &str = "browser-guest";
 const MAX_PNG: usize = 5 * 1024 * 1024;
 type Result<T> = std::result::Result<T, String>;
@@ -47,15 +44,6 @@ pub struct BrowserState {
     load_generation: AtomicU64,
     generation: AtomicU64,
     pick_key: Mutex<Option<String>>,
-    preview_origin: Mutex<Option<String>>,
-}
-
-impl BrowserState {
-    fn permits_navigation(&self, url: &tauri::Url) -> bool {
-        self.preview_origin.lock().map(|origin| {
-            origin.as_ref().is_none_or(|origin| origin == &url.origin().ascii_serialization())
-        }).unwrap_or(false)
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,27 +110,6 @@ fn normalize_url(input: &str) -> Result<tauri::Url> {
         return Err("Only HTTP and HTTPS URLs without embedded credentials can be opened.".into());
     }
     Ok(url)
-}
-
-fn external_allowed(url: &tauri::Url, is_preview: bool, preview_origin: Option<&str>) -> Result<()> {
-    if is_preview || preview_origin.is_some_and(|origin| origin == url.origin().ascii_serialization()) {
-        return Err("Workspace file previews stay in the native Browser pane.".into());
-    }
-    Ok(())
-}
-
-/// Explicit UI choice only. A local document cannot escape its preview origin
-/// through this route, and system browsing never advertises native QA access.
-#[tauri::command]
-pub async fn browser_open_external(caller: Webview, app: tauri::AppHandle, url: String) -> Result<()> {
-    guard(&caller)?;
-    let url = normalize_url(&url)?;
-    {
-        let state = app.state::<BrowserState>();
-        let origin = state.preview_origin.lock().map_err(|_| "Browser navigation is unavailable.")?;
-        external_allowed(&url, app.state::<crate::file_preview::FilePreviews>().is_preview_url(&url), origin.as_deref())?;
-    }
-    crate::open_external_url(url.to_string()).await
 }
 
 fn allowed_url(url: &tauri::Url) -> bool {
@@ -276,11 +243,6 @@ pub async fn browser_open(
     let bounds = bounded(bounds, &window)?;
     let state = app.state::<BrowserState>();
     let _lifecycle = state.lifecycle.lock().await;
-    // Only this trusted UI command may leave a file preview's origin. A document's
-    // link, refresh or script cannot turn its local data into an outbound URL.
-    *state.preview_origin.lock().map_err(|_| "Browser navigation is unavailable.")? =
-        app.state::<crate::file_preview::FilePreviews>().is_preview_url(&url)
-            .then(|| url.origin().ascii_serialization());
     cancel_pick(&app);
     update(&app, |s| {
         s.url = url.to_string();
@@ -299,8 +261,7 @@ pub async fn browser_open(
             .incognito(true)
             .devtools(false)
             .on_navigation(move |url| {
-                if !current_view(&nav_app, generation) || !allowed_url(url)
-                    || !nav_app.state::<BrowserState>().permits_navigation(url) {
+                if !current_view(&nav_app, generation) || !allowed_url(url) {
                     return false;
                 }
                 cancel_pick(&nav_app);
@@ -472,7 +433,7 @@ pub async fn browser_inspect(
 ) -> Result<serde_json::Value> {
     guard(&caller)?;
     let view = guest(&app)?;
-    if !matches!(action.as_str(), "read" | "click" | "type" | "review") {
+    if !matches!(action.as_str(), "read" | "click" | "type") {
         return Err("Unknown browser operation.".into());
     }
     let selector = selector.unwrap_or_default();
@@ -481,9 +442,7 @@ pub async fn browser_inspect(
         return Err("Browser input is too large.".into());
     }
     let args = serde_json::json!({"action":action,"selector":selector,"text":text});
-    let script = if action == "review" { review::script(&text)? } else {
-        include_str!("browser_agent.js").replace("__PANDACODE_ARGS__", &args.to_string())
-    };
+    let script = include_str!("browser_agent.js").replace("__PANDACODE_ARGS__", &args.to_string());
     let raw = evaluate(&view, script).await?;
     if raw.len() > 128 * 1024 {
         return Err("Browser result is too large.".into());
@@ -810,30 +769,6 @@ pub async fn browser_close(caller: Webview, app: tauri::AppHandle) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn explicit_system_browsing_preserves_preview_origins() {
-        let ordinary = normalize_url("localhost:5173/app").unwrap();
-        assert!(external_allowed(&ordinary, false, None).is_ok());
-        assert!(external_allowed(&ordinary, true, None).is_err());
-        assert!(external_allowed(&ordinary, false, Some("http://localhost:5173")).is_err());
-        for input in ["file:///tmp/private.html", "https://user:password@example.com/", "javascript:alert(1)"] {
-            assert!(normalize_url(input).is_err());
-        }
-    }
-
-    #[test]
-    fn file_preview_cannot_navigate_to_an_external_or_other_local_origin() {
-        let state = BrowserState::default();
-        *state.preview_origin.lock().unwrap() = Some("http://127.0.0.1:34567".into());
-        assert!(state.permits_navigation(&tauri::Url::parse("http://127.0.0.1:34567/next.html").unwrap()));
-        for url in ["https://example.com/?data=private", "http://127.0.0.1:34568/", "http://localhost:34567/", "http://127.0.0.1.evil.example:34567/"] {
-            assert!(!state.permits_navigation(&tauri::Url::parse(url).unwrap()), "{url}");
-        }
-        // A new, explicit browser_open action clears this restriction for ordinary browsing.
-        *state.preview_origin.lock().unwrap() = None;
-        assert!(state.permits_navigation(&tauri::Url::parse("https://example.com/").unwrap()));
-    }
-
     #[tokio::test]
     async fn capture_cleanup_keeps_recent_and_unmanaged_files() {
         let dir = std::env::temp_dir().join(format!("pandacode-captures-{}", uuid::Uuid::new_v4()));

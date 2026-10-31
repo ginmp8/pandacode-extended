@@ -41,6 +41,12 @@ function customSwatch(url: string, pressed: boolean): string {
   return `<button type="button" class="avatar-swatch" data-avatar-choice="custom" aria-pressed="${pressed}" aria-label="Uploaded image"><img alt="" src="${url}"></button>`;
 }
 
+export function colorPicker(current: string): string {
+  const safe = COLOR.test(current) ? current : '';
+  const swatch = (value: string, label: string) => `<button type="button" class="color-swatch${value ? '' : ' auto'}" data-color-choice="${value}" aria-pressed="${value === safe}" aria-label="${label}" title="${label}"${value ? ` style="background:${value}"` : ''}></button>`;
+  return `<div class="color-picker" role="group" aria-label="Color"><input type="hidden" name="color" value="${escape(safe)}">` + swatch('', 'Automatic') + PANDAS.map(p => swatch(p.color, p.name)).join('') + '</div>';
+}
+
 export function avatarPicker(current: string): string {
   const swatches = PANDAS.map(p => `<button type="button" class="avatar-swatch" data-avatar-choice="${p.id}" aria-pressed="${p.id === current}" aria-label="${p.name} panda">${pandaSvg(p.id)}</button>`).join('');
   return `<div class="avatar-picker" role="radiogroup" aria-label="Icon"><input type="hidden" name="avatar" value="${escape(current)}">${swatches}`
@@ -95,7 +101,7 @@ async function upload(picker: HTMLElement, input: HTMLInputElement): Promise<voi
 export function handleAvatarPicker(event: Event): boolean {
   const target = event.target;
   if (!(target instanceof Element)) return false;
-  const picker = target.closest<HTMLElement>('.avatar-picker');
+  const picker = target.closest<HTMLElement>('.avatar-picker, .color-picker');
   if (!picker) return false;
   if (event.type === 'change') {
     if (!(target instanceof HTMLInputElement) || !target.matches('[data-avatar-upload]')) return false;
@@ -104,6 +110,16 @@ export function handleAvatarPicker(event: Event): boolean {
   }
   if (event.type !== 'click') return false;
   if (target.closest('[data-avatar-upload-button]')) { picker.querySelector<HTMLInputElement>('[data-avatar-upload]')!.click(); return true; }
+  const color = target.closest<HTMLElement>('[data-color-choice]');
+  if (color && picker.matches('.color-picker')) {
+    const next = color.dataset.colorChoice ?? '';
+    const hidden = picker.querySelector<HTMLInputElement>('input[name=color]')!;
+    hidden.value = COLOR.test(next) ? next : '';
+    picker.querySelectorAll('[data-color-choice]').forEach(button => button.setAttribute('aria-pressed', String(button === color)));
+    picker.closest('form')?.querySelector<HTMLElement>('.avatar-picker')?.style.setProperty('--panda-bg', hidden.value || 'initial');
+    hidden.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
   const swatch = target.closest<HTMLElement>('[data-avatar-choice]');
   if (!swatch) return false;
   const choice = swatch.dataset.avatarChoice!;

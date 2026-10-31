@@ -1,6 +1,6 @@
 # PandaCode Extended 0.7.0 — Known issues and remediation status
 
-**Status:** Five non-dependency issues open; dependency issue **KI-06 resolved in the source candidate** of the **unreleased** [Extended 0.7.0 source candidate](../../../release/extended/0.7.0.md).  
+**Status:** Five non-dependency issues remain open; dependency **KI-06** and SQLite compatibility **KI-07** have source fixes pending release acceptance in the **unreleased** [Extended 0.7.0 source candidate](../../../release/extended/0.7.0.md).  
 **Source reviewed:** [`2f21bb67`](https://github.com/ginmp8/pandacode-extended/commit/2f21bb67e3d59b5b01f794a8cc6d8b686f5a95eb), PR [#86](https://github.com/ginmp8/pandacode-extended/pull/86), reviewed 2026-10-31.  
 **Scope:** Findings observed in the candidate code and risks that require runtime reproduction. **Documented does not mean fixed, accepted, or verified at runtime.**
 
@@ -15,6 +15,8 @@
 | [EXT-070-KI-05](#ext-070-ki-05--running-agents-retain-launch-time-mcp-configuration) | Minor / policy-dependent | Confirmed launch-time behavior | Existing agent sessions | Open, deferred |
 
 | [EXT-070-KI-06](#ext-070-ki-06--mobile-expo-dependency-audit-remediated-in-source) | Major / original release gate | Audit + source regression + mobile checks | Mobile/Expo transitive dependency vulnerabilities | Resolved in source candidate (Extended fix) |
+
+| [EXT-070-KI-07](#ext-070-ki-07--legacy-extended-sqlite-schema-collision) | Major / upgrade blocker | Reproduced schema mismatch | Legacy Extended database lacks imported upstream columns | Fixed in source candidate; CI pending |
 
 Severities are provisional engineering priorities, not evidence of an exploited vulnerability. The owner may schedule remediation in a later revision, but merge/release risk acceptance requires a separate, explicit decision.
 
@@ -104,6 +106,16 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 **Verified result:** The security audit for all four npm workspaces passed with 0 findings in [CI run 41243766188](https://github.com/ginmp8/pandacode-extended/actions/runs/41243766188), and the mobile regression progressed beyond the formerly failing poisoning assertion. Final mobile export/native validation must be read from the complete run; do not claim it passed without its job conclusion.
 
 **Further action:** Monitor for an official patched `deepmerge` release and replace the Extended vendored copy after independent poisoning tests and full Expo compatibility verification. Native iOS/Android binary smoke tests remain a distinct release-acceptance requirement.
+
+## EXT-070-KI-07 — Legacy Extended SQLite schema collision
+
+**Previous severity:** Major / upgrade blocker. Task and Schedules pages can fail after switching from Extended main to upstream 0.3.85 source.  
+**Source status:** Fixed in the unreleased source candidate; final CI and native upgrade acceptance are distinct gates.  
+**Symptom:** The task-list query raises `no such column: cloud` while fetching sessions. The Schedules UI can surface the same error because it also loads the shared session list.  
+**Cause:** Extended main assigned schema versions 27–32 to different changes than upstream 0.3.85. In Extended, migration 27 created `github_issue_actions`, whereas upstream migration 27 added `sessions.cloud`. Upstream migration 32 added `sessions.remote_backfill_base`, and bot capability/table additions also diverged. An existing Extended v32 database skips these older-numbered upstream migrations.  
+**Fix:** Transactional schema migration **37** checks for missing `sessions.cloud` and `sessions.remote_backfill_base` before adding them and runs idempotent bot soul, capability and schema upgrades, including `bots.skills` and shared bot tables. Existing task records and MCP references are preserved; there are no destructive table rebuilds or automatic permission changes.  
+**Regression test:** `storage::tests::upgrades_extended_v32_database_without_losing_tasks_or_bot_settings` uses a file-backed database with removed upstream objects and a preserved session/bot, then exercises `Store::open`, session and Schedules listing, bot values and reopen behavior. An isolated SQLite test reproduced the missing-column failure before applying the additive SQL.  
+**Limits:** This fix takes effect only when a corrected build opens the database. Real upgraded installations, full bot permission parity and native installer behavior remain separate validation requirements. Back up the database before installing a new unreleased build.
 
 ## Release-readiness notes (separate from the five open application findings)
 

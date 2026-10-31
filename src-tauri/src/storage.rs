@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 37;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -530,6 +530,32 @@ impl Store {
                 }
                 migration.execute_batch("CREATE INDEX IF NOT EXISTS machine_threads_reported_by ON machine_threads(reported_by) WHERE reported_by IS NOT NULL;
                   PRAGMA user_version=36;").map_err(|e| e.to_string())?;
+            }
+            if version < 37 {
+                // Extended main and upstream 0.3.85 used versions 27-32 for
+                // different schema changes. An existing Extended DB skips
+                // upstream cloud, mirror and bot migrations on that basis.
+                // Reconcile only missing objects inside the transaction.
+                for (name, definition) in [
+                    ("cloud", "TEXT CHECK(cloud IS NULL OR json_valid(cloud))"),
+                    ("remote_backfill_base", "INTEGER"),
+                ] {
+                    let exists: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name=?1)",
+                        [name],
+                        |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !exists {
+                        migration.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {name} {definition};"))
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                // Idempotent helpers preserve existing soul/MCP settings and
+                // add the upstream bot capabilities, tables and profile fields.
+                crate::bots::migrate_soul(&migration)?;
+                crate::bots::migrate_capabilities(&migration)?;
+                crate::bots::upgrade(&migration)?;
+                migration.execute_batch("PRAGMA user_version=37;").map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

@@ -49,3 +49,27 @@ The unit regression [`mobile/tests/dependency-security.test.ts`](../../../mobile
 Security audit checks remain mandatory and failing by default; no `--force` installation, npm audit allowlist, skipped advisory or CI threshold relaxation was used. The Extended documentation lives under `docs/extended/`, its release notes under `release/extended/`, and its local dependency patch under `mobile/vendor/extended/`. Neither the upstream PandaCode documentation nor its GitHub fork is modified by this Extended-only remediation.
 
 For non-dependency application findings, see [Known issues](known-issues.md). For publication identity and release status, see [Extended 0.7.0 release notes](../../../release/extended/0.7.0.md).
+
+## Rust dependency security follow-up for Extended 0.7.0
+
+**Scope:** PandaCode Extended only, based on `base/hardened`; no changes to the upstream fork. These are review candidates pending full CI and platform validation.
+
+| Dependency | Previous lock | Candidate lock | Reason |
+| --- | --- | --- | --- |
+| `rustls` | 0.23.45 | 0.23.46 | RUSTSEC-2026-0346 and 0347 (plus other applicable 0.23.46 fixes) |
+| `rustls-webpki` | 0.103.15 | 0.103.16 | RUSTSEC-2026-0382 / CVE-2026-111943 |
+| `webpki-roots` (resolved 1.x) | 1.0.9 | 1.0.11 | RUSTSEC-2026-0381 / CVE-2026-111943 |
+| `webpki-root-certs` | 1.0.9 | 1.0.11 | RUSTSEC-2026-0383 / CVE-2026-111943 |
+| `tokio` | 1.53.1 | 1.53.3 | RUSTSEC-2026-0386 (unsafe I/O descriptor construction) |
+| Direct `zip` | 2.4.2 | 9.0.4 | RUSTSEC-2026-0367 through 0369: extraction privilege escalation and symlink safety |
+| `zip` via `tauri-plugin-updater` | 4.6.1 | removed from resolved graph | Disable the updater's optional legacy Windows ZIP-extraction feature, preserving `rustls-tls` |
+
+The `webpki-roots` 0.26.11 compatibility wrapper is retained and now references the patched 1.x roots. The direct `zip` upgrade uses its existing restricted `deflate` feature; theme-import code uses `ZipArchive::by_name`, not `ZipArchive::extract`.
+
+**Updater compatibility boundary:** `tauri-plugin-updater` remains at 2.9.0 with its optional `zip` feature disabled. Existing direct signed update transport remains available. Legacy compressed Windows update formats such as `.nsis.zip` and `.msi.zip` are not supported by this configuration until tested. The current Tauri bundle target is `.app`; Windows installers are not release-validated here.
+
+**Supply-chain controls:** `actions/checkout` is pinned to v5.1.0 (SHA `fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09`) and `actions/setup-node` to v5.0.0 (SHA `a0853c24544627f65ddf259abe73b1d18a591444`) in CI and release workflows. The actions use Node 24 internally; application jobs still select Node 22 explicitly. A separate RustSec `cargo-audit` job audits the committed `Cargo.lock` without ignored advisories. npm audits still cover desktop, website, mobile, and relay. An additional Cloudflare Worker audit resolves the standalone manifest on the runner **without a committed lock**, so its results are non-reproducible until a dedicated lockfile is added.
+
+**Validation required before claiming resolution:** `cargo metadata --locked`, `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`, `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, `cargo audit --file src-tauri/Cargo.lock`, npm audits, VSIX theme import regressions, TLS connectivity, and platform-specific updater behavior. The Cargo.lock was reconciled against the official crates.io index for version/checksum metadata and checked for missing graph references; **Cargo tooling was unavailable in the local authoring environment**, and this does not replace Cargo resolution/build verification. If CI reports other advisories, do not ignore or classify them as resolved.
+
+Existing Extended security controls and the locally patched `mobile/vendor/extended/deepmerge` fork must remain unchanged.

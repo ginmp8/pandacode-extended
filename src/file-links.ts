@@ -114,7 +114,7 @@ export function workspaceImagePath(src: string, documentPath: string): string | 
       else base.push(part);
     }
     const path = base.join('/');
-    return /\.(?:png|jpe?g|webp|svg)$/i.test(path) && !base.includes('.git') ? path : undefined;
+    return /\.(?:png|jpe?g|webp)$/i.test(path) && !base.includes('.git') ? path : undefined;
   } catch { return; }
 }
 

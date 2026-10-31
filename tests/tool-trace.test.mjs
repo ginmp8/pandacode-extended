@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { describeTool, mcpAction, mcpCard, summarizeTools, summaryIcons, toolPreview, traceRowHtml, shellCommand, toolKind } from '../src/tool-trace.ts';
 import { richCard } from '../src/tool-cards.ts';
+import { renderToolActivity } from '../src/tool-activity.ts';
+import { PANDACODE_TOOLS } from '../src/tool-trace-pandacode.ts';
 
 const tool = (name, input, extra = {}) => ({ name, status: 'completed', input: typeof input === 'string' ? input : JSON.stringify(input), output: '', ...extra });
 

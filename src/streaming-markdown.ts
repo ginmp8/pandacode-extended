@@ -26,18 +26,6 @@ export function settledMarkdown(value: string): string {
     image ? '' : !match.includes('](') && /^\s*x?\s*$/i.test(label) ? match : `[${label}](${OPEN_HREF})`);
 }
 
-/** What to show of a still-streaming value without ever holding text back: an open link shows as its
- * (underlined) label, an open code span as code. Inside an open fence the value is already code. */
-export function settledMarkdown(value: string): string {
-  if ((value.match(FENCE)?.length ?? 0) % 2) return value;
-  const paragraph = value.slice(value.lastIndexOf('\n\n') + 1);
-  const ticks = paragraph.match(/`+/g) ?? [];
-  // ponytail: pairs backtick runs by count, not length; a ``span with ` inside`` may close a frame late.
-  if (ticks.length % 2) return value + ticks[ticks.length - 1];
-  return value.replace(OPEN_LINK, (match, image: string, label: string) =>
-    image ? '' : !match.includes('](') && /^\s*x?\s*$/i.test(label) ? match : `[${label}](${OPEN_HREF})`);
-}
-
 // Syntax whose meaning reaches across blank lines: reference definitions and footnotes apply to the
 // whole document, <details> is matched by the renderer across paragraphs, and these raw HTML blocks
 // run past blank lines.
@@ -118,15 +106,16 @@ async function paint(state: Paint): Promise<void> {
   const value = state.value;
   state.pending = true;
   try {
-    const html = await markdownHtml(settledMarkdown(value));
+    const ends = blockBoundaries(value), tailAt = ends.at(-1) ?? 0;
+    // Settled blocks stay painted while the text only grows past them; any other change repaints all.
+    if (!value.startsWith(state.source) || (state.source && !ends.includes(state.source.length))) restart(state);
+    const fresh = value.slice(state.source.length, tailAt), tail = value.slice(tailAt), shown = settledMarkdown(tail);
+    // A reply opened whole (a thread reopened) draws from the cache; the next change settles its blocks.
+    const known = state.source ? undefined : markdownCache.get(value);
+    const [settledHtml, tailHtml] = known !== undefined ? ['', known]
+      : await Promise.all([fresh ? markdownHtml(fresh, false) : '', markdownHtml(shown, false)]);
     if (!state.target.isConnected || state.value !== value) return;
-    const fragment = document.createElement('template');
-    fragment.innerHTML = html;
-    for (const open of fragment.content.querySelectorAll(`a[href="${OPEN_HREF}"]`)) {
-      const label = document.createElement('span'); label.className = 'md-open-link'; label.append(...open.childNodes);
-      open.replaceWith(label);
-    }
-    decorateFileLinks(fragment.content, state.target);
+    const settled = fragment(settledHtml, state.target);
     const restore = state.scroll ? preserveTranscriptPosition(state.scroll, state.target) : undefined;
     reconcile(state.target, [...settled, ...fragment(tailHtml, state.target)], state.nodes);
     if (known === undefined) { state.nodes += settled.length; state.source = value.slice(0, tailAt); state.settledHtml += settledHtml; }

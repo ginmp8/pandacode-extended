@@ -7,6 +7,7 @@ export const PANDAS: { id: string; name: string; color: string }[] = [
 ].map(([name, color], i) => ({ id: `panda:${i}`, name, color }));
 
 const IMAGE = /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/;
+const COLOR = /^#[0-9a-f]{6}$/i;
 const UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const MAX_UPLOAD = 5 * 1024 * 1024;
 const SIZE = 128;
@@ -28,11 +29,12 @@ export function pandaSvg(id: string): string {
     + `<ellipse cx="32" cy="42" rx="2.8" ry="1.9" fill="${INK}"/><path d="M29 45.5q3 2.5 6 0" fill="none" stroke="${INK}" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 }
 
-export function botAvatarHtml(avatar: string, name: string, cls = ''): string {
+export function botAvatarHtml(avatar: string, name: string, cls = '', color = ''): string {
   const value = avatar.trim();
   const art = pandaSvg(value) || (value.length <= MAX_AVATAR_URL && IMAGE.test(value) ? `<img alt="" src="${value}">` : '');
   const content = art || escape(value || name.trim().slice(0, 1).toUpperCase() || '?');
-  return `<span class="bot-avatar${art ? ' has-art' : ''}${cls ? ` ${cls}` : ''}" aria-hidden="true">${content}</span>`;
+  const tint = COLOR.test(color) ? ` style="--bot-color:${color};--panda-bg:${color}"` : '';
+  return `<span class="bot-avatar${art ? ' has-art' : ''}${cls ? ` ${cls}` : ''}"${tint} aria-hidden="true">${content}</span>`;
 }
 
 function customSwatch(url: string, pressed: boolean): string {

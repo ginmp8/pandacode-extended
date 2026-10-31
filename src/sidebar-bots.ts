@@ -1,7 +1,9 @@
 import './sidebar-bots.css';
 import type { Bot } from './bots';
 import { escape, icon } from './dom';
+import { resetLabel } from './usage-limit';
 import { botAvatarHtml } from './bot-avatars';
+import { channelFaceCluster, type SharedChannelSummary } from './bot-shared-channels';
 
 /* The sidebar's Bots view: a bar at the bottom of the sidebar switches the whole sidebar
  * between tasks and a list of bots, each with its avatar, latest message and time. */
@@ -62,8 +64,25 @@ export function markAllBotsRead(bots: Bot[], replies: (bot: Bot) => number[] = (
 }
 
 export function botAvatar(bot: Bot, cls = 'bot-card-face'): string {
-  // Pandas and uploaded images bring their own art; text glyphs keep the per-bot color.
-  return botAvatarHtml(bot.avatar, bot.name, cls).replace('<span ', `<span style="--bot-color:${avatarColor(bot.id)}" `);
+  return botAvatarHtml(bot.avatar, bot.name, cls, bot.color);
+}
+
+function readIds(key: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string' && id.length <= 200).slice(0, 2000) : [];
+  } catch { return []; }
+}
+function writeIds(key: string, ids: string[]): void {
+  try { localStorage.setItem(key, JSON.stringify(ids)); } catch { /* Persisting this view is optional. */ }
+}
+export function pinnedBots(): Set<string> { return new Set(readIds(PINS_KEY)); }
+export function setBotPinned(id: string, pinned: boolean): void {
+  writeIds(PINS_KEY, [...readIds(PINS_KEY).filter(item => item !== id), ...(pinned ? [id] : [])]);
+}
+export function moveBot(shown: string[], id: string, before: string | null): void {
+  const rest = shown.filter(item => item !== id), at = before ? rest.indexOf(before) : -1;
+  writeIds(ORDER_KEY, at < 0 ? [...rest, id] : [...rest.slice(0, at), id, ...rest.slice(at)]);
 }
 
 /** Today shows the time; this week the weekday; older, the date. */

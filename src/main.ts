@@ -72,7 +72,7 @@ import type { RoutingMode, RoutingStatus } from './model-routing';
 import { LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
 import { botAvatar, botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
 import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
-import { cloudProvider, cloudStrip, type CloudTarget } from './cloud-agents';
+import { cloudActionItems, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, SETUP_CHOICE, type CloudStage, type CloudTarget } from './cloud-agents';
 import { mountAgentsDock } from './agents-dock';
 import { mountActionDock, mountAgents } from './action-dock';
 import { TailText } from './tail-text';
@@ -634,7 +634,7 @@ const worktrees = createWorktrees({
   git: () => state.git, gitError: () => state.gitError,
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
   attachable: () => newTaskView(),
-  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, remoteChoiceName) + botTaskControl(task, fresh),
+  computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, remoteChoiceName, cloudTargets) + botTaskControl(task, fresh),
   running: () => isRunning(),
   afterAttach: async (saved, live) => {
     const index = state.sessions.findIndex(s => s.id === saved.id); if (index >= 0) state.sessions[index] = saved;
@@ -650,7 +650,7 @@ const worktrees = createWorktrees({
     closeModal();
     if (current) { state.query = ''; await selectSession(created.id, true); }
   },
-  settle: async task => { await changeTaskStage(task, 'completed'); },
+  settle: async task => { await changeTaskStage(task.id, 'completed'); },
   extraItems: task => github.menuItems(task),
   onExtra: (id, task) => github.onMenu(id, task),
 });
@@ -3494,8 +3494,15 @@ async function send(): Promise<void> {
   const draft = document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? ''; const text = draft.trim(); const s = session();
   if (!text || !s || s.archived || taskStage(s) === 'completed' || isRunning() || finishingStreams.has(s.id) || state.messagesLoading || state.messagesError || configuringSessions.has(s.id)) return;
   clearComposerNote(s);
-  if (remoteOffline(s)) { renderComposer(); return; }
   const fresh = !s.remoteDevice && newTaskView();
+  const cloud = fresh ? cloudProvider(remoteChoice) : undefined;
+  if (cloud) {
+    const target = cloudTargets.find(item => item.provider === cloud && item.ready);
+    if (!target) { notify('The chosen cloud provider is unavailable. Choose another computer.'); renderComposer(); return; }
+    if (taskBots.has(s.id)) { notify('Choose No bot before starting a cloud task.'); return; }
+    return sendCloud(s, target, draft, text);
+  }
+  if (remoteOffline(s)) { renderComposer(); return; }
   const target = fresh ? remoteTargets.find(item => item.deviceId === remoteChoice) : undefined;
   if (target) return sendRemote(s, target, draft, text);
   if (fresh && remoteChoice !== LOCAL) { renderComposer(); return; }
@@ -5294,7 +5301,7 @@ let renderedRemoteKey = '';
 let pairingPrompt: (() => void) | undefined, pairingLoading = false;
 const remoteChecks = new Set<string>(), remoteStartCancels = new Set<string>(), remoteRetries = new Set<string>(), remoteRetryErrors = new Map<string, string>();
 function remoteDeviceId(s: Session): string | undefined {
-  return s.remoteDevice?.id ?? (newTaskView() && remoteChoice !== LOCAL ? remoteChoice : undefined);
+  return s.remoteDevice?.id ?? (newTaskView() && remoteChoice !== LOCAL && !cloudProvider(remoteChoice) ? remoteChoice : undefined);
 }
 function remoteTargetFor(s: Session): RemoteTarget | undefined {
   const id = remoteDeviceId(s); if (!id) return undefined;
@@ -5309,7 +5316,7 @@ function remoteOffline(s: Session): boolean {
 }
 /** A New task's chosen computer that is no longer in the account's list, or undefined. */
 function remoteMissing(s: Session): string | undefined {
-  if (s.remoteDevice || !newTaskView() || remoteChoice === LOCAL || !remotePresenceReady) return undefined;
+  if (s.remoteDevice || !newTaskView() || remoteChoice === LOCAL || cloudProvider(remoteChoice) || !remotePresenceReady) return undefined;
   return remoteTargets.some(item => item.deviceId === remoteChoice) ? undefined : remoteChoiceName ?? 'That computer';
 }
 function remoteMissingNote(s: Session): string {
@@ -5353,6 +5360,77 @@ async function refreshRemoteTargets(signedIn: boolean): Promise<void> {
   if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
   else syncRemoteConnection();
 }
+/* Cloud agents require explicit selection of an already-connected provider. The
+ * local/Connect execution paths remain unchanged, and unsupported attachments fail closed. */
+let cloudTargets: CloudTarget[] = [];
+async function refreshCloudTargets(): Promise<void> {
+  const refreshed = await call<CloudTarget[]>('cloud_agent_targets').catch(() => [] as CloudTarget[]);
+  cloudTargets = refreshed;
+  const chosen = cloudProvider(remoteChoice);
+  if (chosen && !cloudTargets.some(target => target.ready && target.provider === chosen)) remoteChoice = LOCAL;
+  renderHeader();
+}
+function syncCloudStrip(): void {
+  const s = session(), old = document.querySelector<HTMLElement>('#composer-area .cloud-strip'), composer = document.querySelector('#composer');
+  if (!s || !composer || old?.querySelector('[aria-expanded="true"]')) return;
+  const markup = cloudStrip(s);
+  if (old) { if (old.outerHTML !== markup) { if (markup) old.outerHTML = markup; else old.remove(); } }
+  else if (markup) composer.insertAdjacentHTML('beforebegin', markup);
+}
+function onCloudProgress(event: { sessionId: string; stage: CloudStage; detail?: string | null }): void {
+  const task = state.sessions.find(item => item.id === event.sessionId);
+  if (!task?.cloud) { run(reloadSessions()); return; }
+  task.cloud = { ...task.cloud, stage: event.stage, detail: event.detail ?? null };
+  if (task.id === state.sessionId) { syncCloudStrip(); renderHeader(); }
+  renderNavigation();
+}
+async function initCloudAgents(): Promise<void> {
+  await (subscribe as unknown as (name: string, callback: typeof onCloudProgress) => Promise<() => void>)('cloud-agent://progress', onCloudProgress);
+  await refreshCloudTargets();
+}
+async function sendCloud(s: Session, target: CloudTarget, draft: string, text: string): Promise<void> {
+  if (!target.ready || !cloudTargets.some(item => item.provider === target.provider && item.ready)) throw new Error('Connect this cloud provider in Settings first.');
+  if (taskBots.has(s.id) || s.remoteDevice) throw new Error('Cloud machines are available only for new unlinked local tasks.');
+  const refusal = harnessRefusal(s.provider, provider(s.provider)?.name ?? s.provider);
+  if (refusal) throw new Error(refusal);
+  const filePaths = [...state.attachments], promptItems = attachments.list(s.id);
+  if ((state.browserAttachments.get(s.id) ?? []).length || (state.moodboardAttachments.get(s.id) ?? []).length || attachments.imageIds(promptItems).length) throw new Error('Remove image and browser attachments before starting a cloud task.');
+  configuringSessions.add(s.id);
+  try {
+    const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
+    const content = text + contexts.join('') + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
+    const prompt = () => document.querySelector<HTMLTextAreaElement>('#prompt');
+    if (state.sessionId !== s.id || prompt()?.value !== draft || cloudProvider(remoteChoice) !== target.provider) throw new Error('The task, cloud provider or message changed. Send it again.');
+    const started = await call<Session>('cloud_agent_start', { sessionId: s.id, projectId: s.projectId, provider: target.provider, prompt: content, harness: s.provider, model: s.model, mode: s.mode, effort: s.reasoningEffort ?? null });
+    attachments.consume(s.id, promptItems);
+    state.attachments = state.attachments.filter(path => !filePaths.includes(path));
+    const field = prompt(); if (field?.dataset.sessionId === s.id) field.value = '';
+    state.drafts.delete(s.id);
+    remoteChoice = LOCAL;
+    await reloadSessions();
+    state.query = ''; await selectSession(started.id, true);
+  } finally { configuringSessions.delete(s.id); }
+}
+async function showCloudMenu(anchor: HTMLElement): Promise<void> {
+  const s = session(); if (!s?.cloud) return;
+  await showChoices(anchor, { title: 'Cloud machine', width: 240, items: cloudActionItems(s), onSelect: async id => {
+    closeChoiceMenu();
+    if (id === 'delete') {
+      const dialog = modal('Delete cloud machine?', deleteMachineDialog(s));
+      const form = dialog.querySelector<HTMLFormElement>('#cloud-delete-form')!;
+      const approved = await new Promise<boolean>(resolve => {
+        dialog.addEventListener('close', () => resolve(false), { once: true });
+        form.addEventListener('submit', event => { event.preventDefault(); event.stopPropagation(); resolve(true); closeModal(); }, { once: true });
+      });
+      if (!approved) return;
+    }
+    try { await call('cloud_agent_action', { sessionId: s.id, action: id }); }
+    catch (error) { notify(errorText(error)); return; }
+    if (id === 'open') openVm();
+    else if (id === 'delete') notify('Deleted the cloud machine. Your next message creates a new one.');
+  } });
+}
+
 async function initRemote(): Promise<void> {
   await subscribe('remote://status', (status: RemoteStatus) => { remoteSignedIn = status.signedIn; remoteConnected = status.connected; run(refreshRemoteTargets(remoteSignedIn)); });
   await subscribe('remote://presence', () => run(refreshRemoteTargets(remoteSignedIn)));
@@ -5361,12 +5439,23 @@ async function initRemote(): Promise<void> {
   if (status) { remoteSignedIn = status.signedIn; remoteConnected = status.connected; await refreshRemoteTargets(remoteSignedIn); }
 }
 async function showComputerMenu(anchor: HTMLElement): Promise<void> {
-  await showChoices(anchor, { title: 'Run on', width: 280, items: computerItems(remoteTargets, remoteChoice), onSelect: id => {
+  await showChoices(anchor, { title: 'Run on', width: 280, items: [
+    ...computerItems(remoteTargets, remoteChoice, cloudTargets),
+    { id: SETUP_CHOICE, label: 'Set up cloud providers…', icon: 'settings' },
+  ], onSelect: id => {
     closeChoiceMenu();
+    if (id === SETUP_CHOICE) { run(showSettings('cloud')); return; }
     const task = session();
     if (id !== LOCAL && task && taskBots.has(task.id)) { notify('Choose No bot before running this task on another computer.'); return; }
     remoteChoice = id; remoteChoiceName = remoteTargets.find(item => item.deviceId === id)?.name; renderHeader();
     if (task && renderedRemoteKey !== remoteComposerKey(task)) renderComposer();
+    if (cloudProvider(id)) {
+      if (task && newTaskView()) {
+        const refusal = harnessRefusal(task.provider, provider(task.provider)?.name ?? task.provider);
+        if (refusal) notify(refusal);
+      }
+      return;
+    }
     if (task && newTaskView()) run(adaptPickerToComputer(task, id, remoteTargets.find(item => item.deviceId === id)?.name ?? 'That computer'));
   } });
 }
@@ -5988,6 +6077,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'refresh-inspector': if (state.inspectorTab === 'pull') { pullView.forget(state.sessionId); renderInspector(); break; } if (state.inspectorTab === 'search') searchPanel.refresh(); refreshFileLinks(workspaceContext()); await refreshInspector(); break;
     case 'toggle-file-folder': await toggleFolder(element.dataset.path!); break;
     case 'collapse-folders': state.openFolders = new Set(); state.folderFiles = new Map(); renderInspector(); document.querySelector<HTMLElement>('#inspector-content .file-row button')?.focus(); break;
+    case 'cloud-menu': await showCloudMenu(element); break;
     case 'run-project': if (!element.dataset.sessionId || element.dataset.sessionId === state.sessionId) await projectRunner.run(); break;
     case 'preview-file': await previewFile(element.dataset.path!); break;
     case 'preview-selected-file': await previewFile(state.selectedFile, selectedFileContext); break;

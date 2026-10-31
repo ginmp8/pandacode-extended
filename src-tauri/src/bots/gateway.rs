@@ -118,16 +118,14 @@ fn compose(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str, k
 /// Puts the bot's skills in its own workspace for this conversation's harness (project scope,
 /// never harness-global), and returns the brief text for skills that harness reads from the prompt.
 fn workspace_skills(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str) -> (String, Vec<String>) {
-    let (Ok(task), Ok(root), Ok(library)) = (store.session(session_id), store.workspace_root(&bot.project_id, None), crate::skills::library(app)) else { return Default::default() };
-    let harness = task.provider;
-    let mut skipped = library.sync_project(&harness, &root, &bot.skills);
-    if crate::skills::scoped::has_skill_folder(&harness) {
-        let installed = library.project_active(&harness, &root).into_iter().filter(|id| bot.skills.contains(id)).collect::<Vec<_>>();
-        return (brief::skills("", &installed, &skipped), skipped);
-    }
-    let (text, more) = library.prompt_text(&bot.skills);
-    skipped.extend(more);
-    (brief::skills(&text, &[], &skipped), skipped)
+    let (Ok(task), Ok(library)) = (store.session(session_id), crate::skills::library(app)) else { return Default::default() };
+    let Ok(root) = store.workspace_root(&task.project_id, Some(session_id)) else { return Default::default() };
+    let Ok(resolution) = library.resolve(&task.provider, &root, &task.project_id, Some(&bot.id)) else {
+        return (String::new(), vec!["Selected skills could not be verified.".into()]);
+    };
+    let installed = resolution.items.iter().filter(|item| item.delivery == "native").map(|item| item.name.clone()).collect::<Vec<_>>();
+    let skipped = resolution.items.iter().filter_map(|item| item.reason.as_ref().map(|reason| format!("{}: {reason}", item.name))).collect::<Vec<_>>();
+    (brief::skills(&resolution.text, &installed, &skipped), skipped)
 }
 
 /// Starts a turn, or queues the message when the task is already working.

@@ -14,7 +14,6 @@ import { renderPanel, panelClick, panelSubmit, panelChange, invalidateActivity, 
 export interface Bot {
   id: string; name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; projectId: string;
   provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; nextHeartbeatAt: number | null;
-  mcp: string[];
   paused: boolean; memoryVersion: number; notifyChannelId: string | null; notifyThread: string | null; createdAt: number; updatedAt: number;
   /** Profile settings added later; older data (and preview mocks) may leave them out. */
   color?: string; reasoningEffort?: string; backupModels?: BackupModel[]; fallbackMode?: 'ask' | 'auto'; notify?: boolean; whileWorking?: 'queue' | 'steer'; showPlan?: boolean;
@@ -25,7 +24,13 @@ export interface Bot {
   /** The latest thing said in that conversation, flattened to one line. */
   lastMessage?: { role: 'user' | 'assistant'; text: string; at: number } | null;
 }
-export interface BotInput { name: string; role: string; instructions: string; goals: string; soul: string; avatar: string; provider: ProviderId; model: string; mode: string; heartbeatMinutes: number; }
+export interface BackupModel { provider: ProviderId; model: string; }
+export interface BotInput {
+  name: string; role: string; instructions: string; goals: string; soul?: string; avatar: string;
+  provider: ProviderId; model: string; mode: string; heartbeatMinutes: number;
+  color?: string; reasoningEffort?: string; backupModels?: BackupModel[]; fallbackMode?: 'ask' | 'auto';
+  notify?: boolean; whileWorking?: 'queue' | 'steer'; showPlan?: boolean;
+}
 export interface Memory { id: string; content: string; source: 'user' | 'bot'; createdAt: number; }
 export interface Schedule { id: string; botId: string; title: string; prompt: string; kind: 'once' | 'interval' | 'daily' | 'weekdays'; intervalMinutes: number | null; timeOfDay: string | null; nextRunAt: number | null; lastRunAt: number | null; enabled: boolean; createdBy: 'user' | 'bot'; createdAt: number; }
 export type ChannelKind = 'web' | 'telegram' | 'slack' | 'discord' | 'whatsapp';

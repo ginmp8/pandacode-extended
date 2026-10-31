@@ -1021,7 +1021,9 @@ fn mcp_references_are_bounded_names_and_never_raw_skills() {
     }
     assert_eq!(get(&f.store, &bot.id).unwrap().mcp, saved.mcp);
     let raw_skills: bool = f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='skills')", [], |r| r.get(0)).unwrap();
-    assert!(!raw_skills, "Extended keeps Skills in its scoped hash-pinned library");
+    assert!(raw_skills, "Only skill identifiers may be stored; prompt delivery remains scope- and hash-pinned.");
+    let stored: String = f.store.db.query_row("SELECT skills FROM bots WHERE id=?1", [&bot.id], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "[]", "MCP selection never installs or enables a skill");
 }
 
 fn project_task(f: &Fixture) -> crate::storage::Session {
@@ -1992,12 +1994,12 @@ fn capabilities_persist_as_references_and_rebrief() {
     let f = fixture();
     let a = bot(&f);
     let b = create(&f.store, &input("Other"), &f.root).unwrap();
-    let saved = set_capabilities(&f.store, &a.id, &["review".into(), "review".into(), "deploy".into()], &["github".into()]).unwrap();
+    let saved = set_skills_and_capabilities(&f.store, &a.id, &["review".into(), "review".into(), "deploy".into()], &["github".into()]).unwrap();
     assert_eq!((saved.skills.clone(), saved.mcp.clone()), (vec!["review".to_string(), "deploy".into()], vec!["github".to_string()]));
     assert!(saved.memory_version > a.memory_version);
     assert_eq!(get(&f.store, &a.id).unwrap().skills, saved.skills, "persisted");
     assert!(get(&f.store, &b.id).unwrap().skills.is_empty(), "same harness, separate selections");
-    assert!(set_capabilities(&f.store, &a.id, &["../x".into()], &[]).is_err());
+    assert!(set_skills_and_capabilities(&f.store, &a.id, &["../x".into()], &[]).is_err());
     // Editing the profile keeps the references.
     assert_eq!(update(&f.store, &a.id, &input("Scout")).unwrap().skills, saved.skills);
     assert!(brief::compose(&saved, &[], DESKTOP, "").contains("MCP servers chosen for this bot: github"));
@@ -2027,7 +2029,8 @@ fn project_tasks_get_their_own_bot_brief_and_skill_union() {
     std::fs::create_dir_all(&checkout).unwrap();
     let project = f.store.add_project(&checkout).unwrap();
     library.activate("lint", "kimi", crate::skills::Scope::Project, Some(&f.store.workspace_root(&project.id, None).unwrap()), false).unwrap();
-    let reviewer = set_capabilities(&f.store, &bot(&f).id, &["review".into()], &[]).unwrap();
+    let reviewer = set_skills_and_capabilities(&f.store, &bot(&f).id, &["review".into()], &[]).unwrap();
+    library.select(crate::skills::scoped::Target::Bot, &reviewer.id, &["review".into()], false).unwrap();
     let mut other_input = input("Writer");
     other_input.instructions = "Write docs.".into();
     let writer = create(&f.store, &other_input, &f.root).unwrap();
@@ -2041,7 +2044,7 @@ fn project_tasks_get_their_own_bot_brief_and_skill_union() {
     assert!(assign_task(&f.store, &one.id, Some("missing")).is_err());
 
     let first = task_brief(&f.store, Some(&library), &one.id).unwrap().unwrap();
-    assert!(first.contains("You are Scout") && first.contains("Do review.") && first.contains("Do lint."), "union of bot and project skills");
+    assert!(first.contains("You are Scout") && first.contains("Do review.") && first.contains("lint"), "scoped bot prompt and approved project-native skill");
     assert_eq!(first.matches("### review").count(), 1);
     assert!(!first.contains("pandacode_bot_remember"), "bot tools are not registered in project tasks");
     assert_eq!(task_brief(&f.store, Some(&library), &one.id).unwrap(), None, "the brief goes with the first message only");

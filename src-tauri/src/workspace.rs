@@ -15,7 +15,7 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::{mpsc, atomic::{AtomicBool, Ordering}},
+    sync::{mpsc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}},
     thread,
     time::{Duration, Instant},
 };

@@ -3395,7 +3395,7 @@ mod tests {
     }
 
     #[test]
-    fn kilo_is_registered_with_its_cli_and_catalog_defined_efforts() {
+    fn kilo_is_registered_with_its_cli_and_catalog_defined_efforts_upstream_regression() {
         assert!(PROVIDERS.contains(&("kilo", "Kilo Code")));
         assert_eq!(executable_name("kilo"), "kilo");
         assert!(validate_reasoning_effort("kilo", None).is_ok());
@@ -3591,7 +3591,7 @@ mod tests {
     }
 
     #[test]
-    fn approve_for_me_runs_only_where_the_harness_reviews_actions() {
+    fn approve_for_me_runs_only_where_the_harness_reviews_actions_upstream_regression() {
         for provider in ["claude", "glm", "mimo"] {
             assert!(review_supported(provider, "review").is_ok());
         }

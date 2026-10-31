@@ -11,9 +11,10 @@ import type { TeamSnapshot, TeamWorker } from './architect-types';
 import { createPreviewCloud, createPreviewVm } from './preview-vm';
 import { createPreviewTurnChanges } from './preview-turn-changes';
 // Bundled with the preview, not lazily imported: a late module load during a paused test clock stalled startup.
-import { invokeBots, taskBotId, forgetBotTask, retryBotTask, prepareBotTask } from './preview-bots';
+import { invokeBots, taskBotId, forgetBotTask, retryBotTask, prepareBotTask, previewBotBusy } from './preview-bots';
 import { invokeRemote, previewRemoteStart } from './preview-remote';
 import { createPreviewDesign } from './preview-design';
+import { previewProgress } from './preview-progress';
 import { BRIEF_ID, GALLERY_ID, briefAnswer, briefMessages, briefTimings, briefTools, galleryMessages } from './preview-traces';
 import { createPreviewSkills } from './preview-skills';
 import { previewCapabilities } from './preview-capabilities';
@@ -244,11 +245,7 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
     { id: 'gpt-6-luna', name: 'GPT-6 Luna', description: 'most efficient OpenAI model for focused, high-volume tasks' },
     { id: 'moonshotai/Kimi-K3', name: 'Kimi K3', description: 'long-horizon coding & knowledge work with 1M context' },
   ],
-  // Recorded from `kilo acp` 7.3.41; efforts belong to its current model only.
-  kilo: [
-    { id: 'kilo/stealth/claude-sonnet-4.6', name: 'Kilo Gateway/Stealth: Claude Sonnet 4.6 (20% off)', description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'].map(id => ({ id, name: id, description: '' })), defaultReasoningEffort: 'none' },
-    { id: 'kilo/anthropic/claude-sonnet-4.6', name: 'Kilo Gateway/Anthropic: Claude Sonnet 4.6', description: '' },
-  ],
+  hermes: [{ id: 'hermes/default', name: 'Hermes default', description: 'Sample Hermes model.' }],
   // Recorded from `cline --acp` 3.0.73; efforts are its --thinking levels.
   cline: ['anthropic/claude-sonnet-5.5', 'anthropic/claude-opus-5.5', 'openai/gpt-6-sol'].map((id, index) => ({ id, name: ['Claude Sonnet 5.5', 'Claude Opus 5.5', 'GPT-6 Sol'][index], description: '', reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'].map(effort => ({ id: effort, name: effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1), description: '' })) })),
   'github-copilot': [{ id: 'default', name: 'Default', description: 'Use the model configured in GitHub Copilot CLI.' }],
@@ -649,6 +646,33 @@ function finishTiming(sessionId: string): void {
 /* A task on another computer: like remote/mirror.rs, its history here is what was copied
  * from the host, which happens when a run ends (just before its `done`). */
 const mirrorSynced = new Map<string, number>();
+/* tests: a mirror whose host runs subagents and an architect team. `list_subagents` answers
+ * with what native code would have saved from the host's events; `remote_team` and
+ * `remote_worker_messages` answer like remote/mirror.rs from the host's `task.team`. */
+const mirrorSubagents = new Map<string, Map<string, unknown>>();
+const mirrorTeams = new Map<string, TeamSnapshot>();
+const mirrorWorkerMessages = new Map<string, Message[]>();
+(window as any).__previewMirrorTeam = (sessionId = 'mirror-team') => {
+  sessions.unshift({ ...sessions[0], id: sessionId, title: 'Remote team task', resumeId: null, status: 'running', remoteDevice: { id: 'dev-studio', name: 'Studio iMac' }, lastResponseAt: now });
+  messages[sessionId] = [{ id: ++id, sessionId, role: 'user', content: 'Split the docs work', createdAt: now }];
+  const worker = (n: number, status: TeamWorker['status'], summary: string): TeamWorker => ({ id: `w${n}`, sessionId: `host-worker-${n}`, profileId: 'auto', name: `Worker ${n}`, provider: 'codex', model: 'gpt-5.5', status, assignment: `Part ${n}`, summary, error: null, dependsOn: [], files: [], readOnly: false, attempt: 1, abandoned: false, checkpoint: null, createdAt: now, updatedAt: now });
+  mirrorTeams.set(sessionId, { sessionId, config: { auto: true, workers: [], maxParallel: 0, maxRounds: 6, maxAssignments: 0, workspace: 'shared', summaryLimit: 0 }, status: 'running', round: 1, revision: 1, workers: [worker(1, 'completed', 'Wrote the intro'), worker(2, 'running', '')], error: null, summary: null, updatedAt: now });
+  // `__previewMirrorLongWorker(n)`: worker 1's transcript becomes n messages, several pages long.
+  (window as any).__previewMirrorLongWorker = (count: number) => mirrorWorkerMessages.set('w1', Array.from({ length: count }, (_, index) => ({ id: index + 1, sessionId: 'host-worker-1', role: index % 2 ? 'assistant' : 'user', content: `Worker line ${index + 1}`, createdAt: now }) as Message));
+  mirrorWorkerMessages.set('w1', [{ id: 1, sessionId: 'host-worker-1', role: 'user', content: 'Part 1', createdAt: now }, { id: 2, sessionId: 'host-worker-1', role: 'assistant', content: 'Intro written on the host.', createdAt: now }]);
+  emit('sessions-changed', {});
+  const w = window as any;
+  // The host's `subagent` events, re-emitted under the local id (and saved, as natively).
+  w.__mirrorSubagent = (data: { id: string }) => { mirrorSubagents.set(sessionId, new Map(mirrorSubagents.get(sessionId)).set(data.id, data)); agent({ sessionId, kind: 'subagent', text: '', data } as unknown as AgentEvent); };
+  // A `team` event: the host changed a worker row.
+  w.__mirrorTeamWorker = (row: Partial<TeamWorker> & { id: string }) => {
+    const team = mirrorTeams.get(sessionId)!;
+    const workers = team.workers.some(item => item.id === row.id) ? team.workers.map(item => item.id === row.id ? { ...item, ...row } : item) : [...team.workers, { ...team.workers[0], ...row }];
+    mirrorTeams.set(sessionId, { ...team, workers, revision: team.revision + 1 });
+    agent({ sessionId, kind: 'team', text: '', data: row } as unknown as AgentEvent);
+  };
+};
+
 function syncMirror(sessionId: string): void { if (mirrorSynced.has(sessionId)) mirrorSynced.set(sessionId, id); }
 function finish(sessionId: string, content: string) { const time = Date.now(); messages[sessionId].push({ id: ++id, sessionId, role: 'assistant', content, createdAt: time }); finishTiming(sessionId); const s = session(sessionId); if (content.trim()) s.lastResponseAt = time; s.status = 'idle'; s.taskStage = 'review'; s.updatedAt = time; timers.delete(sessionId); activeTools.delete(sessionId); syncMirror(sessionId); agent({ sessionId, kind: 'done', text: '' }); }
 /** Replays the Morning brief reference: five MCP tools (running, then completed), then the answer in chunks. `?replay=N` scales the pace. */
@@ -1703,8 +1727,6 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'cloud_create': result = previewCloud.create(args.provider, args.name); break;
     case 'cloud_power': result = previewCloud.power(args.id, args.action); break;
     case 'cloud_keep_alive': result = previewCloud.keepAlive(args.id, args.minutes); break;
-    case 'cloud_instabox_images': result = previewCloud.images(); break;
-    case 'cloud_instabox_set_image': result = previewCloud.setImage(args.image); break;
     case 'cloud_frame': result = await previewCloud.frame(args.id); break;
     case 'cloud_input': result = previewCloud.input(args.id, args.input); break;
     case 'vm_status': result = previewVm.status(); break;

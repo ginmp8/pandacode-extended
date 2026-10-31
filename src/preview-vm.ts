@@ -79,6 +79,7 @@ export function createPreviewVm() {
  * machines per provider, a drawn desktop for providers with screens, and recorded input. */
 export function createPreviewCloud() {
   const connected = new Map<string, string | null>();
+  const inheritEnvironment = new Set<string>();
   const savedOptions = new Map<string, Record<string, unknown>>();
   const machines: CloudMachine[] = [];
   const inputs: { id: string; input: Record<string, unknown> }[] = [];
@@ -93,13 +94,23 @@ export function createPreviewCloud() {
   };
   let sandboxes = false;
   const providers = ['daytona', 'cloudflare', 'aws', 'railway', ...Object.keys(SANDBOX_PROVIDERS)];
-  const connections = () => providers.map(provider => ({ provider, connected: connected.has(provider), detail: connected.get(provider) ?? null, ...(provider === 'cloudflare' ? { sandboxes: connected.has(provider) && sandboxes } : provider === 'vercel' ? { sandboxes: connected.has(provider) && Boolean(savedOptions.get(provider)?.projectId) } : {}) }));
+  const AGENT_TARGETS = [['e2b', 'E2B'], ['daytona', 'Daytona'], ['docker', 'Docker'], ['digitalocean', 'DigitalOcean'], ['vultr', 'Vultr'], ['hetzner', 'Hetzner'], ['runpod', 'RunPod'], ['modal', 'Modal'], ['vercel', 'Vercel Sandbox'], ['codesandbox', 'CodeSandbox'], ['runloop', 'Runloop'], ['blaxel', 'Blaxel'], ['tensorlake', 'Tensorlake'], ['freestyle', 'Freestyle'], ['boat', 'boat'], ['instabox', 'InstaBox'], ['cloudflare', 'Cloudflare'], ['aws', 'AWS EC2'], ['gcloud', 'Google Cloud']] as const;
+  const connections = () => providers.map(provider => ({ provider, connected: connected.has(provider), detail: connected.get(provider) ?? null, inheritEnvironment: inheritEnvironment.has(provider), ...(provider === 'cloudflare' ? { sandboxes: connected.has(provider) && sandboxes } : provider === 'vercel' ? { sandboxes: connected.has(provider) && Boolean(savedOptions.get(provider)?.projectId) } : {}) }));
   const imageChoices = [{ value: 'template:agent-browser', label: 'Agent browser' }, { value: 'snapshot:ready-image', label: 'Prepared snapshot' }];
   let selectedImage = 'template:agent-browser';
   const find = (id: unknown) => { const machine = machines.find(m => m.id === id); if (!machine) throw new Error('Unknown cloud machine.'); return machine; };
   return {
     inputs, leases,
     connections,
+    agentTargets() { return AGENT_TARGETS.map(([provider, label]) => ({ provider, label, ready: connected.has(provider) })); },
+    setInheritEnvironment(provider: unknown, inherit: unknown) {
+      const id = String(provider);
+      if (!providers.includes(id)) throw new Error('Choose an available cloud provider.');
+      if (inherit) inheritEnvironment.add(id); else inheritEnvironment.delete(id);
+      return connections();
+    },
+    instaboxImages() { return this.images(); },
+    setInstaboxImage(image: unknown) { return this.setImage(image); },
     connect(provider: unknown, key: unknown, options: Record<string, unknown>) {
       if (typeof provider !== 'string' || !providers.includes(provider)) throw new Error('Unknown cloud provider.');
       if (provider !== 'aws' && provider !== 'gcloud' && (typeof key !== 'string' || !key.trim())) throw new Error('Enter the key.');

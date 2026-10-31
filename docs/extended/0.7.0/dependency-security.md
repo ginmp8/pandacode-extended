@@ -82,3 +82,9 @@ The first execution of the separate Cloudflare Worker audit in [CI run 412525010
 - `wrangler` **4.151.0 → 4.156.0** to leave the vulnerable Wrangler/Miniflare/`undici` dependency range, including [GHSA-2m5v-pch6-74hx](https://github.com/advisories/GHSA-2m5v-pch6-74hx) and [GHSA-4qv8-2p9j-2685](https://github.com/advisories/GHSA-4qv8-2p9j-2685).
 
 The npm audit CI check remains fail-closed. **CI must confirm these new pins actually resolve without advisories.** A committed lockfile for this nested package is still required for fully reproducible installs; the current CI generates an ephemeral lockfile only for scanning.
+
+### Cloudflare Sandbox helper-image version consistency
+
+The previous Rust regression expected the old `@cloudflare/sandbox` 1.0.1 while the Worker package had already been upgraded to 1.0.3. The donor `cloudflare/sandbox` Docker image tag was also still 1.0.1. The Dockerfile and the Rust test now require matching `1.0.3` versions. The test checks that the donor image tag matches the declared SDK version, in addition to retaining the fixed minimum SDK version. This follows [Cloudflare's 1.x helper-image version requirement](https://developers.cloudflare.com/sandbox/reference/).
+
+**External validation still required:** GitHub Actions' Rust test validates the declared version alignment but does not prove that Docker Hub actually serves `docker.io/cloudflare/sandbox:1.0.3` or that the image builds and deploys. Verify the donor image tag and execute a Cloudflare Worker/container build and smoke test before publishing the feature. Do not substitute an older mismatched helper or suppress the regression to get a green CI.

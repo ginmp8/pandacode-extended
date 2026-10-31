@@ -186,9 +186,14 @@ mod tests {
         let worker = FILES.iter().find(|(path, _)| *path == "src/index.ts").unwrap().1;
         assert!(worker.contains("timingSafeEqual") && worker.contains("IDLE_MS = 10 * 60 * 1000"));
         assert!(worker.contains("/keepalive") && worker.contains("keepAlive(minutes: number)") && worker.contains("setInactivityTimeout"));
-        assert!(FILES.iter().any(|(path, contents)| *path == "Dockerfile" && contents.contains("cloudflare/sandbox:1.0.1")));
         let package: Value = serde_json::from_str(FILES.iter().find(|(path, _)| *path == "package.json").unwrap().1).unwrap();
-        assert_eq!(package["dependencies"]["@cloudflare/sandbox"], "1.0.1");
+        let sdk_version = package["dependencies"]["@cloudflare/sandbox"].as_str().unwrap();
+        assert_eq!(sdk_version, "1.0.3");
+        let dockerfile = FILES.iter().find(|(path, _)| *path == "Dockerfile").unwrap().1;
+        assert!(
+            dockerfile.contains(&format!("docker.io/cloudflare/sandbox:{sdk_version}")),
+            "Cloudflare sandbox helper image must match the installed @cloudflare/sandbox package"
+        );
     }
 
     #[tokio::test]

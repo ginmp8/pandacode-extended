@@ -18,7 +18,7 @@ const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
 let activityId = 1;
 /** Ordinary tasks started with a bot, and those that have had its brief. */
-const taskBots = new Map<string, string>(), taskBriefed = new Set<string>();
+
 const MINUTE = 60_000;
 const MODES = ['ask', 'auto', 'review', 'plan', 'full'];
 const taskBots = new Map<string, string>();
@@ -172,7 +172,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const input = validate(args.input);
       const id = crypto.randomUUID(), now = Date.now();
       const project = host.addProject(input.name);
-      const bot: Bot = { ...input, mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
+      const bot: Bot = { ...input, skills: [], mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
       const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [] };
       log(entry, 'created', `Created ${bot.name}`);
       bots.set(id, entry); result = structuredClone(bot); changed(); break;
@@ -187,7 +187,13 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const entry = store(args.botId), values = args.mcp;
       if (!Array.isArray(values) || values.length > 50 || values.some(value => typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value.trim()).length > 100 || /[\x00-\x1f\x7f]/.test(value))) throw new Error('Use up to 50 bounded MCP server names.');
       const mcp = [...new Set<string>(values.map(value => value.trim()))];
-      if (JSON.stringify(mcp) !== JSON.stringify(entry.bot.mcp)) entry.bot = { ...entry.bot, mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      if (args.skills !== undefined) {
+        const skills = args.skills;
+        if (!Array.isArray(skills) || skills.length > 50 || skills.some(value => typeof value !== 'string' || !/^[a-z0-9-]{1,64}$/.test(value))) throw new Error('Use up to 50 library skill identifiers.');
+        entry.bot = { ...entry.bot, skills: [...new Set<string>(skills)], mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      } else if (JSON.stringify(mcp) !== JSON.stringify(entry.bot.mcp)) {
+        entry.bot = { ...entry.bot, mcp, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
+      }
       result = structuredClone(entry.bot); changed(); break;
     }
     case 'bot_assign_task': {
@@ -233,26 +239,13 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       await host.invoke('send_message', { sessionId: thread.sessionId, text: text + brief, imageIds: [], moodboardIds: [] });
       result = thread.sessionId; changed(); break;
     }
-    case 'bot_set_capabilities': {
-      const entry = store(args.botId);
-      entry.bot = { ...entry.bot, skills: [...new Set<string>(args.skills ?? [])], mcp: [...new Set<string>(args.mcp ?? [])], memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
-      log(entry, 'updated', 'Skills and MCP servers changed'); result = structuredClone(entry.bot); changed(); break;
-    }
-    case 'bot_assign_task': {
-      if ([...bots.values()].some(entry => entry.threads.some(thread => thread.sessionId === args.sessionId))) throw new Error('A bot\'s own conversations already use that bot.');
-      taskBriefed.delete(args.sessionId);
-      if (!args.botId) { taskBots.delete(args.sessionId); result = null; break; }
-      result = structuredClone(store(args.botId).bot); taskBots.set(args.sessionId, args.botId); break;
-    }
-    case 'bot_task_links': result = Object.fromEntries(taskBots); break;
     case 'bot_task_brief': {
+      // Preview tasks use the same version-bound, read-only profile as native task admission.
       const botId = taskBots.get(args.sessionId);
-      if (!botId || taskBriefed.has(args.sessionId)) { result = null; break; }
-      const bot = store(botId).bot; taskBriefed.add(args.sessionId);
-      result = `\n\nBot brief:\nYou are ${bot.name}. ${bot.instructions}${bot.skills.length ? `\n\nSkills (from the PandaCode library):\n${bot.skills.map(id => `### ${id}`).join('\n')}` : ''}${bot.mcp.length ? `\n\nMCP servers chosen for this bot: ${bot.mcp.join(', ')}.` : ''}`;
-      // Tests read the briefs sent, since the transcript hides them.
-      ((globalThis as any).__botTaskBriefs ??= []).push({ sessionId: args.sessionId, brief: result });
-      break;
+      const bot = botId ? store(botId).bot : null;
+      if (!bot || taskBriefVersions.get(args.sessionId) === bot.memoryVersion) { result = null; break; }
+      taskBriefVersions.set(args.sessionId, bot.memoryVersion);
+      result = profileBrief(bot, true); break;
     }
     case 'bot_schedule_create': {
       const entry = store(args.botId); const input = args.input ?? {};

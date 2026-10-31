@@ -1,7 +1,7 @@
 import type { ToolActivity } from './types';
 import { escape, icon } from './dom.ts';
 import { pandacodeTool } from './tool-trace-pandacode.ts';
-import { PARTIAL, describeTool, toolFailed, summarizeGroup, summaryIcons, toolPreview, traceIcon, traceRowHtml } from './tool-trace.ts';
+import { PARTIAL, describeTool, kindIcon, toolFailed, summarizeGroup, summarizeTools, summaryIcons, toolPreview, traceIcon, traceRowHtml } from './tool-trace.ts';
 
 const MAX_CONTENT = 100_000;
 const MAX_DETAIL = 20_000;

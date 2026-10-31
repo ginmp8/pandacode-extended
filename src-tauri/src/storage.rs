@@ -3213,6 +3213,81 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
     }
 
+    /// The Extended main branch used schema 27-32 for different migrations than
+    /// upstream 0.3.85. Reusing those version numbers must never strand user data
+    /// behind missing cloud, mirror or bot columns.
+    #[test]
+    fn upgrades_extended_v32_database_without_losing_tasks_or_bot_settings() {
+        let dir = std::env::temp_dir().join(format!("pandacode-extended-v32-{}", id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.sqlite3");
+        let session_id;
+        {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&dir).unwrap();
+            let session = store.create_session(&project.id, "claude", "sonnet", "auto").unwrap();
+            store.message(&session.id, "user", "Keep this task").unwrap();
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at,mcp)
+                 VALUES('legacy-bot','Keep this bot',?1,'claude','sonnet','auto',1,1,'[\"trusted-server\"]')",
+                [&project.id],
+            ).unwrap();
+            // Reconstruct the columns/tables absent from Extended schema 32,
+            // preserving real task and bot records while changing only schema.
+            store.db.execute_batch("
+                DROP TABLE bot_shared_channel_deliveries;
+                DROP TABLE bot_shared_channel_messages;
+                DROP TABLE bot_shared_channel_members;
+                DROP TABLE bot_shared_channels;
+                DROP TABLE bot_messages;
+                ALTER TABLE bots DROP COLUMN skills;
+                ALTER TABLE sessions DROP COLUMN cloud;
+                ALTER TABLE sessions DROP COLUMN remote_backfill_base;
+                PRAGMA user_version=32;
+            ").unwrap();
+            session_id = session.id;
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.session(&session_id).unwrap().id, session_id);
+            assert!(store.sessions().unwrap().iter().any(|s| s.id == session_id),
+                "sidebar and Schedules must load legacy tasks");
+            assert!(crate::schedules::list(&store, None).unwrap().is_empty());
+            let has_column = |table: &str, name: &str| -> bool {
+                store.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                    params![table, name],
+                    |row| row.get(0),
+                ).unwrap()
+            };
+            for column in ["cloud", "remote_backfill_base"] {
+                assert!(has_column("sessions", column), "missing sessions.{column}");
+            }
+            assert!(has_column("bots", "skills"), "missing bots.skills");
+            let retained: (String, String, String) = store.db.query_row(
+                "SELECT name,mcp,skills FROM bots WHERE id='legacy-bot'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(retained, (
+                "Keep this bot".into(), "[\"trusted-server\"]".into(), "[]".into()
+            ));
+            let shared: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_shared_channels')",
+                [],
+                |row| row.get(0),
+            ).unwrap();
+            assert!(shared, "new upstream bot tables must be created");
+            let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+            assert_eq!(version, 37);
+        }
+        // The schema reconciliation must not need to run again on next start.
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.session(&session_id).unwrap().id, session_id);
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn schema_version_constant_matches_the_newest_migration_step() {
         let source = include_str!("storage.rs");

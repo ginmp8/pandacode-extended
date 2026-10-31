@@ -50,6 +50,8 @@ jobs:
         run: cd mobile && ./node_modules/.bin/expo config --json > /dev/null
       - name: ESLint compatibility
         run: npm run lint --prefix mobile
+      - name: Expo iOS JS export compatibility
+        run: cd mobile && ./node_modules/.bin/expo export --platform ios --output-dir /tmp/pandacode-extended-ios-export
 
   web:
     name: Typecheck, unit tests, website

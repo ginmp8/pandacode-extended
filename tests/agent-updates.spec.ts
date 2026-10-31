@@ -3,23 +3,24 @@ import { expect, test, type Page } from '@playwright/test';
 const popup = (page: Page) => page.getByRole('region', { name: 'Agent updates', exact: true });
 const dialog = (page: Page) => page.getByRole('dialog', { name: 'Agent updates', exact: true });
 const calls = (page: Page, command: string) => page.evaluate(command => (window as any).__agentUpdates.calls.filter((entry: any) => entry.command === command), command);
-async function open(page: Page): Promise<void> {
+async function open(page: Page, autoCheck = true): Promise<void> {
   await page.clock.install();
-  await page.addInitScript(() => {
+  await page.addInitScript((enabled: boolean) => {
     const update = (provider: string, name: string, providers = [provider]) => ({ provider, name, providers, installedVersion: '1.0.0', latestVersion: '1.1.0', status: 'available', method: 'Native updater', canUpdate: true, message: null, checkedAt: Date.now(), docsUrl: null });
-    (window as any).__agentUpdates = { calls: [], hold: false, failure: '', checkFailure: false, results: [
+    (window as any).__agentUpdates = { calls: [], hold: false, failure: '', checkFailure: false, autoCheck: enabled, results: [
       update('claude', 'Claude Code', ['claude', 'glm', 'mimo']), update('codex', 'Codex'),
       { ...update('kimi', 'Kimi Code'), status: 'current', latestVersion: '1.0.0' },
       { ...update('opencode', 'OpenCode'), status: 'unsupported', canUpdate: false, latestVersion: null, method: null, message: 'Update this custom installation using its package manager.', docsUrl: 'https://opencode.ai/docs/cli/' },
       { ...update('kilo', 'Kilo Code'), status: 'unsupported', canUpdate: false, latestVersion: null, method: null, message: 'PandaCode cannot update this agent. Use its own updater or package manager.' },
     ] };
-  });
+  }, autoCheck);
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch(), source = await response.text();
     const marker = /switch\s*\(command\)\s*\{/;
     expect(source).toMatch(marker);
     await route.fulfill({ response, body: source.replace(marker, `
       const fixture = window.__agentUpdates;
+      if (command === 'feature_controls_get') return {agentUpdateChecks: fixture.autoCheck};
       if (['check_agent_updates', 'update_agent', 'list_providers'].includes(command)) fixture.calls.push({command, args: structuredClone(args)});
       if (command === 'check_agent_updates') {
         if (fixture.checkFailure) throw new Error('Update service unavailable.');
@@ -51,6 +52,15 @@ async function manual(page: Page): Promise<void> {
 }
 
 test.describe('Agent updates', () => {
+  test('does not check agent updates automatically by default, but still allows manual checks', async ({ page }) => {
+    await open(page, false);
+    await page.clock.fastForward(9000);
+    expect(await calls(page, 'check_agent_updates')).toEqual([]);
+    await expect(popup(page)).toBeHidden();
+    await manual(page);
+    expect(await calls(page, 'check_agent_updates')).toHaveLength(1);
+  });
+
   test('checks after startup without stealing prompt focus and groups shared Claude installations', async ({ page }) => {
     await open(page);
     const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });

@@ -225,7 +225,7 @@ export function initializeAgentUpdates(host: AgentUpdatesHost): AgentUpdatesCont
   void call<{ agentUpdateChecks: boolean }>('feature_controls_get')
     .then(flags => { if (!disposed) { backgroundEnabled = flags.agentUpdateChecks; schedule(); } })
     .catch(() => { /* If unavailable, do not start background requests. */ });
-  void subscribe<{ agentUpdateChecks: boolean }>('feature-controls-changed', flags => {
+  void subscribe('feature-controls-changed', (flags: { agentUpdateChecks: boolean }) => {
     if (disposed) return;
     backgroundEnabled = flags.agentUpdateChecks;
     if (!backgroundEnabled) { allowPopup = false; hidePopup(); }

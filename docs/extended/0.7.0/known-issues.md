@@ -1,6 +1,6 @@
-# PandaCode Extended 0.7.0 — Known issues and deferred follow-ups
+# PandaCode Extended 0.7.0 — Known issues and remediation status
 
-**Status:** Open register for the **unreleased** [Extended 0.7.0 source candidate](../release/extended/0.7.0.md).  
+**Status:** Five non-dependency issues open; dependency issue **KI-06 resolved in the source candidate** of the **unreleased** [Extended 0.7.0 source candidate](../../../release/extended/0.7.0.md).  
 **Source reviewed:** [`2f21bb67`](https://github.com/ginmp8/pandacode-extended/commit/2f21bb67e3d59b5b01f794a8cc6d8b686f5a95eb), PR [#86](https://github.com/ginmp8/pandacode-extended/pull/86), reviewed 2026-10-31.  
 **Scope:** Findings observed in the candidate code and risks that require runtime reproduction. **Documented does not mean fixed, accepted, or verified at runtime.**
 
@@ -14,7 +14,7 @@
 | [EXT-070-KI-04](#ext-070-ki-04--failed-settings-reads-can-reactivate-bots-or-lan-routes) | Major | Confirmed fallback behavior | Inaccessible or corrupted settings | Open, deferred |
 | [EXT-070-KI-05](#ext-070-ki-05--running-agents-retain-launch-time-mcp-configuration) | Minor / policy-dependent | Confirmed launch-time behavior | Existing agent sessions | Open, deferred |
 
-| [EXT-070-KI-06](#ext-070-ki-06--mobile-expo-dependency-audit-remains-open) | Major / release gate | GitHub Actions audit reproduced | Mobile/Expo transitive dependency vulnerabilities | Open, requires migration |
+| [EXT-070-KI-06](#ext-070-ki-06--mobile-expo-dependency-audit-remediated-in-source) | Major / original release gate | Audit + source regression + mobile checks | Mobile/Expo transitive dependency vulnerabilities | Resolved in source candidate (Extended fix) |
 
 Severities are provisional engineering priorities, not evidence of an exploited vulnerability. The owner may schedule remediation in a later revision, but merge/release risk acceptance requires a separate, explicit decision.
 
@@ -22,7 +22,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Severity:** Blocker (security-policy mismatch)  
 **Confidence:** Potential defect; effective runtime behavior is **not yet established**.  
-**Evidence:** [`src-tauri/src/providers.rs`](../src-tauri/src/providers.rs) configures Codex with `-c "mcp_servers={}"` when `external_mcp_servers` is false. The intended isolation depends on how the installed Codex version merges that override with existing user/project MCP definitions.
+**Evidence:** [`src-tauri/src/providers.rs`](../../../src-tauri/src/providers.rs) configures Codex with `-c "mcp_servers={}"` when `external_mcp_servers` is false. The intended isolation depends on how the installed Codex version merges that override with existing user/project MCP definitions.
 
 **Impact:** The UI could say the external MCP policy is Off while previously configured servers remain available to Codex. A green build cannot establish effective tool isolation.
 
@@ -36,7 +36,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Severity:** Major (unintended cloud cost / misleading failure)  
 **Confidence:** Confirmed source ordering.  
-**Evidence:** [`src-tauri/src/cloud_agents/tasks.rs`](../src-tauri/src/cloud_agents/tasks.rs) calls `prepare_machine` before `credentials::push`; the Off check currently runs inside [`credentials.rs`](../src-tauri/src/cloud_agents/credentials.rs). Creating/starting a machine and syncing a checkout can therefore precede the refusal.
+**Evidence:** [`src-tauri/src/cloud_agents/tasks.rs`](../../../src-tauri/src/cloud_agents/tasks.rs) calls `prepare_machine` before `credentials::push`; the Off check currently runs inside [`credentials.rs`](../../../src-tauri/src/cloud_agents/credentials.rs). Creating/starting a machine and syncing a checkout can therefore precede the refusal.
 
 **Impact:** A rejected cloud-agent start can still create or start billable resources and upload workspace files.
 
@@ -50,7 +50,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Severity:** Major (credential lifetime / revocation clarity)  
 **Confidence:** Confirmed limitation by the control implementation and documentation.  
-**Evidence:** [`src-tauri/src/cloud_agents/credentials.rs`](../src-tauri/src/cloud_agents/credentials.rs) rejects **new** transfers while Off; no corresponding cleanup or token revocation is performed by the Feature controls setter.
+**Evidence:** [`src-tauri/src/cloud_agents/credentials.rs`](../../../src-tauri/src/cloud_agents/credentials.rs) rejects **new** transfers while Off; no corresponding cleanup or token revocation is performed by the Feature controls setter.
 
 **Impact:** Turning the switch Off does not remove earlier uploaded login files or revoke tokens already available in cloud environments.
 
@@ -64,7 +64,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Severity:** Major (unsafe fallback / persistence integrity)  
 **Confidence:** Confirmed fallback behavior; real corruption/restart case remains untested.  
-**Evidence:** [`src-tauri/src/feature_controls.rs`](../src-tauri/src/feature_controls.rs) treats absent, unreadable and invalid stored JSON the same way by using `Settings::default()`, where `bots_paused=false`. [`src-tauri/src/remote/routes.rs`](../src-tauri/src/remote/routes.rs) also defaults `direct_routes=true` if route settings cannot be read.
+**Evidence:** [`src-tauri/src/feature_controls.rs`](../../../src-tauri/src/feature_controls.rs) treats absent, unreadable and invalid stored JSON the same way by using `Settings::default()`, where `bots_paused=false`. [`src-tauri/src/remote/routes.rs`](../../../src-tauri/src/remote/routes.rs) also defaults `direct_routes=true` if route settings cannot be read.
 
 **Impact:** A user-selected global bot pause can be silently lost when configuration storage becomes unavailable or corrupted. With Connect independently enabled, direct LAN routing may also be restored without the user's intent.
 
@@ -78,7 +78,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Severity:** Minor for documented deferred application; Major if users expect immediate enforcement.  
 **Confidence:** Confirmed process-level design; individual harness behavior may differ.  
-**Evidence:** [`src-tauri/src/providers.rs`](../src-tauri/src/providers.rs) assembles MCP arguments before process spawn; [`src-tauri/src/providers/warm.rs`](../src-tauri/src/providers/warm.rs) includes the preference in the warm-process key. The preference setter does not forcibly restart existing processes.
+**Evidence:** [`src-tauri/src/providers.rs`](../../../src-tauri/src/providers.rs) assembles MCP arguments before process spawn; [`src-tauri/src/providers/warm.rs`](../../../src-tauri/src/providers/warm.rs) includes the preference in the warm-process key. The preference setter does not forcibly restart existing processes.
 
 **Impact:** Switching External MCP servers Off can leave already-running agents using their original MCP configuration until a new process starts.
 
@@ -88,26 +88,27 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 **Acceptance:** The UI clearly communicates timing, running work is not killed without approval, and new runs obey the saved preference.
 
-## EXT-070-KI-06 — Mobile / Expo dependency audit remains open
+## EXT-070-KI-06 — Mobile / Expo dependency audit remediated in source
 
-**Severity:** Major; affects release readiness for a distribution that includes the mobile client.  
-**Confidence:** Confirmed npm audit findings on the committed mobile lockfile in [CI run 41241914440](https://github.com/ginmp8/pandacode-extended/actions/runs/41241914440). Exploit reachability must be reviewed separately.
+**Previous severity:** Major; originally a release gate.  
+**Resolution status:** **Resolved in the Extended source candidate**, subject to final CI and native-device release validation. This does **not** mean every upstream library has published an official fix.  
+**Initial evidence:** [CI run 41242276061](https://github.com/ginmp8/pandacode-extended/actions/runs/41242276061) reported 27 npm audit findings (3 high, 23 moderate, 1 low) in Expo mobile dependencies.  
+**Remediation source:** [Extended security commits](https://github.com/ginmp8/pandacode-extended/pull/86) and the [dependency security record](dependency-security.md).
 
-**Evidence:** `npm audit --prefix mobile --audit-level=low` reports **27 affected packages: 3 high, 23 moderate, 1 low**. Representative findings include `node-forge`, `zod`, `glob`, nested `minimatch`, and `deepmerge`. These are **mobile-specific** findings and are distinct from the already-patched root/website packages.
+**Remediation:**
 
-**Impact:** Risks include unsafe cryptographic parsing, resource exhaustion, and prototype poisoning in paths selected by Expo/Metro and tooling. Some paths are build/dev-only; runtime reachability is not established by the audit.
+- Upgrade mobile `glob` 13.0.6 → 14.0.3, `minimatch` 10.2.6/3.1.5 → 11.0.3 (including nested ESLint copies), `node-forge` 1.4.0 → 1.4.2, `zod` 3.25.76 → 4.6.7 and `path-scurry` 2.0.2 → 3.0.0; pin transitive versions via the mobile project's npm overrides.
+- The public npm advisory for `deepmerge` has no official patched release. Downgrading to 4.1.1 made the audit green **but still reproduced prototype poisoning in a real regression test**. The Extended-only vendored fork [`mobile/vendor/extended/deepmerge`](../../../mobile/vendor/extended/deepmerge/README.md) is based on MIT-licensed upstream 4.3.1 and blocks malicious keys in both merge inputs. No change is made to the upstream PandaCode repository.
+- Preserve `npm audit --audit-level=low` on all npm workspaces and add independent mobile frozen install, tests, lint, Expo config and iOS JS bundle export checks.
 
-**Compatibility constraint:** The reported `npm audit fix --force` remediation would install Expo 51 against the current Expo 58 project. Do **not** downgrade or override dependencies blindly just to produce a green audit.
+**Verified result:** The security audit for all four npm workspaces passed with 0 findings in [CI run 41243766188](https://github.com/ginmp8/pandacode-extended/actions/runs/41243766188), and the mobile regression progressed beyond the formerly failing poisoning assertion. Final mobile export/native validation must be read from the complete run; do not claim it passed without its job conclusion.
 
-**Remediation:** Profile mobile dependency reachability and tree ownership, apply available compatible patches, and coordinate incompatible Expo/Metro/ESLint updates as an explicit migration with mobile build and runtime tests. Use supported manager commands and avoid hand-editing generated native outputs.
+**Further action:** Monitor for an official patched `deepmerge` release and replace the Extended vendored copy after independent poisoning tests and full Expo compatibility verification. Native iOS/Android binary smoke tests remain a distinct release-acceptance requirement.
 
-**Acceptance:** A clean frozen mobile installation, successful native/Expo regression tests and a documented zero-unmitigated-critical/high audit (preferably all severities), with any remaining vulnerabilities explicitly reviewed. No bypass, skipped check or unsupported Expo downgrade.
-
-**Status:** **Open; not remediated by the desktop/website dependency patches.** See [security tracking](dependency-security-extended-0.7.0.md).
-
-## Release-readiness notes (separate from the six deferred findings)
+## Release-readiness notes (separate from the five open application findings)
 
 - The planned Extended release number is `0.7.0`, but the imported app's package/Cargo version remains `0.3.85`. Version metadata, release assets and updater identity must be reconciled before tagging.
+- The mobile npm dependency remediation is tracked as a source-level resolution, not a native binary release, and remains subject to final compatibility gates.
 - The upstream source replacement omitted some Extended-only release/documentation files present on the prior `main`, including `releases/extended/0.6.0.md`. Preserve the required history and revalidate Extended-exclusive behavior before merging.
 - [CI run #41224890859](https://github.com/ginmp8/pandacode-extended/actions/runs/41224890859) passed 3/3 checks at `2f21bb67`, but did **not** certify native Settings restart, effective Codex MCP isolation, cloud cost/preflight, or a two-device Connect scenario.
 - This register is **documentation only**. No corresponding code remediation, issue tracker items, merge, release or explicit risk acceptance was performed here.

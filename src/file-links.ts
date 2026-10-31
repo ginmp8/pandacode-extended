@@ -102,7 +102,10 @@ export function captureFileLinkContext(target: HTMLElement): object | undefined 
 export function workspaceImagePath(src: string, documentPath: string): string | undefined {
   if (!src || src.length > 4096 || /[\\\x00-\x1f]/.test(src) || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(src)) return;
   try {
-    const decoded = decodeURIComponent(src);
+    // Queries/fragments annotate local document links but are never part of
+    // the workspace path. Preserve '?' and '#' inside the document's own folder.
+    const local = src.split(/[?#]/, 1)[0];
+    const decoded = decodeURIComponent(local);
     if (/[\\\x00-\x1f]/.test(decoded) || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(decoded)) return;
     const base = decoded.startsWith('/') ? [] : documentPath.split('/').slice(0, -1);
     for (const part of decoded.split('/')) {
@@ -111,7 +114,7 @@ export function workspaceImagePath(src: string, documentPath: string): string | 
       else base.push(part);
     }
     const path = base.join('/');
-    return /\.(?:png|jpe?g|webp)$/i.test(path) && !base.includes('.git') && !/[?#]/.test(path) ? path : undefined;
+    return /\.(?:png|jpe?g|webp|svg)$/i.test(path) && !base.includes('.git') ? path : undefined;
   } catch { return; }
 }
 

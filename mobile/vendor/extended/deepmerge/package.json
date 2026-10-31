@@ -1,0 +1,9 @@
+{
+  "name": "deepmerge",
+  "version": "4.3.2-extended.1",
+  "description": "PandaCode Extended security-maintained deepmerge fork",
+  "private": true,
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

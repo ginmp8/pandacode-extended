@@ -1,5 +1,6 @@
 import { decodeHandoff, historicalProvider } from './provider-handoff';
-import { bindThreadReordering, compareThreadOrder, threadGroupRows } from './thread-order';
+import { bindThreadReordering, compareThreadOrder, syncRovingFocus, threadGroupRows } from './thread-order';
+import { PER_PROJECT, PROJECT_ORDER_KEY, SORT_KEY, compareManual, matchesFilter, readProjectOrder, readSort, taskComparator, type SidebarSort } from './sidebar-sort';
 import { FOLDER_LIMIT, PROJECT_LIMIT, folderGroups, readCollapsed, shownTasks } from './sidebar-tree';
 import { COMPLETED_OPEN_KEY, REVIEW_WINDOW, UNREVIEWED_KEY, needsReview, readOpen, sidebarSections } from './sidebar-sections';
 import './styles.css';
@@ -19,24 +20,26 @@ import './document-viewer.css';
 import './tool-trace.css';
 import './tool-cards.css';
 import './trace-motion.css';
+import './action-dock.css';
+import './cloud-agents.css';
 import { renderDocument, setDocumentView } from './document-viewer';
 import { createFileTabs } from './file-tabs';
 import { moved, queuePanel, type HoldReason, type QueuedMessage } from './message-queue';
 import { afterRun as turnChecksAfterRun, enabled as turnChecksEnabled, noteManualSend, setEnabled as turnChecksSetEnabled } from './turn-checks';
 import { limitActive, limitBanner, limitConnections, resetLabel } from './usage-limit';
 import { cascade, enterView, glideIn, glideOut, hideToast, installDialogMotion, publishSpringEasings, revealIn, showToast, trackSegment } from './motion';
-import { updateTeamProgress } from './team-progress';
+import { teamSignature, updateTeamProgress } from './team-progress';
+import { installedCatalog, setTeamRecency } from './team-catalog';
 import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } from './team-mode';
 import { renderCoordination } from './coordination-message';
 import { renderTurnChanges, changeRequest, captureChangeCards, restoreChangeCards } from './turn-changes';
 import { mountWallpapers } from './wallpapers';
-import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubReference, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, ToolActivity, TurnChanges } from './types';
+import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GithubReference, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, TaskTokenUsage, ToolActivity, TurnChanges } from './types';
 import type { BrowserPanel } from './browser';
 import { botAvatarHtml } from './bot-avatars';
 import { call, chooseFolder, preview, subscribe } from './bridge';
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, markdown, morph } from './dom';
-import { botAvatarHtml } from './bot-avatars';
 import * as botThread from './bot-thread';
 import type { Activity as BotActivity, FailoverAsk } from './bots';
 import { mountExternalLinks } from './external-links';
@@ -65,13 +68,19 @@ import { approvalBarHtml } from './approval-bar';
 import { createThreadFind } from './thread-find';
 import type { RemoteHost, RemoteRepoCheck, RemoteStatus, RemoteTarget } from './remote-types';
 import type { RemoteStart } from './remote-progress';
+import type { RoutingMode, RoutingStatus } from './model-routing';
 import { LOCAL, behindDialog, behindText, cancelledRemoteStart, clearRemoteStart, computerControl, computerItems, lastSeenText, remoteStart, remoteStartAttached, remoteStartStrip, startStageText, trackRemoteStart } from './remote-target';
-import { botAvatar, botsBarHtml, botsListHtml, botsPanelHeadHtml, storedSidebarView, storeSidebarView, syncSeen, type SidebarView } from './sidebar-bots';
+import { botAvatar, botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { cloudProvider, cloudStrip, type CloudTarget } from './cloud-agents';
+import { mountAgentsDock } from './agents-dock';
+import { mountActionDock, mountAgents } from './action-dock';
+import { TailText } from './tail-text';
+import { noteChangedPaths } from './diff-prefetch';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
 import { mountFileMentions, type MentionEntry } from './file-mentions';
-import { createFileTabs } from './file-tabs';
 import { bindFileLinkContext, configureFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
 import { createWorktrees } from './worktrees';
 import { createGithub, githubEnabled, type LinkedIssueAction, type LinkedIssueActionFailure } from './github';
@@ -101,7 +110,7 @@ import { INSPECTOR_VIEWS, closeTab, closedViews, loadTabs, openTab, sameTabs, sa
  * Interaction: quick drawer reveals, calm dialog entrances, coalesced text updates. */
 type WorkspaceView = 'conversation' | 'board' | 'github';
 type LiveTool = { key: string; content: string | ToolActivity; statusOnly?: boolean; commentary?: boolean };
-type Stream = { text: string; retainedMessageKey?: string; tools: LiveTool[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage };
+type Stream = { body: TailText; thought: TailText; readonly text: string; readonly thinking?: string; retainedMessageKey?: string; tools: LiveTool[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage };
 /** Views this platform can show; the inspector's open tabs and selection persist across launches. */
 const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view !== 'simulator' || isMac || isWindows);
 let inspectorTabs = loadTabs(localStorage, INSPECTOR_AVAILABLE);
@@ -312,6 +321,7 @@ const teamButtonHtml = (s: Session) => `${teamToggles.has(s.id) ? '<span class="
 function teamButton(s: Session): string {
   if (s.remoteDevice) return '';
   const on = Boolean(teams.get(s.id));
+  const busy = teamToggles.has(s.id) || configuringSessions.has(s.id);
   return classicTeamSetup()
     ? `<button type="button" class="composer-team-button" data-action="architect-setup" aria-label="Architect & workers" aria-pressed="${on}" aria-busy="${busy}" ${busy ? 'disabled' : ''} title="Architect & workers">${icon('worktree')}<span>Team</span></button>`
     : `<button type="button" id="team-trigger" class="composer-team-button" data-action="team-menu" aria-description="${escape(TEAM_TIP)}" data-tip="${escape(TEAM_TIP)}" aria-haspopup="dialog" aria-expanded="false" aria-busy="${busy}" ${on ? 'data-on' : ''}>${teamButtonHtml(s)}</button>`;
@@ -478,6 +488,33 @@ $app.innerHTML = `<div class="workspace">
   <section id="settings-page" aria-label="Settings" hidden></section>
   <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" aria-label="Panel views">${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section></aside>
 </div><div id="toast" class="toast" role="status" hidden></div><dialog id="dialog"></dialog>`;
+// Preserve the Extended header controls while placing fork dock content on the same real nodes.
+const header = document.querySelector<HTMLElement>('.workspace-header')!;
+const agentsHost = document.createElement('div'); agentsHost.id = 'agents-dock-host'; header.append(agentsHost);
+const actionDock = document.createElement('div'); actionDock.id = 'action-dock'; actionDock.className = 'action-dock';
+actionDock.setAttribute('role', 'toolbar'); actionDock.setAttribute('aria-label', 'Workspace actions');
+for (const [groupName, ids] of [
+  ['panels', ['inspector-toggle', 'terminal-toggle', 'browser-toggle']],
+  ['actions', ['run-project-button', 'deploy-button', 'task-menu-trigger']],
+  ['status', ['update-status']],
+] as const) {
+  const group = document.createElement('div'); group.className = 'action-dock-group'; group.dataset.group = groupName;
+  for (const id of ids) {
+    const item = document.getElementById(id);
+    if (item) group.append(item);
+  }
+  actionDock.append(group);
+}
+header.append(actionDock);
+const agentsFlyout = document.createElement('div'); agentsFlyout.id = 'agents-flyout'; agentsFlyout.className = 'agents-flyout'; agentsFlyout.hidden = true;
+const subagentsHost = document.getElementById('subagents-host');
+if (subagentsHost) agentsFlyout.append(subagentsHost);
+header.append(agentsFlyout);
+const agentsToggle = document.createElement('button'); agentsToggle.id = 'agents-toggle'; agentsToggle.className = 'agents-toggle';
+agentsToggle.hidden = true; agentsToggle.setAttribute('aria-label', 'Agents'); agentsToggle.setAttribute('aria-haspopup', 'dialog');
+agentsToggle.setAttribute('aria-controls', 'agents-flyout');
+agentsToggle.innerHTML = icon('worktree');
+actionDock.querySelector('[data-group="panels"]')?.append(agentsToggle);
 mountAgentsDock(document.querySelector<HTMLElement>('#agents-dock-host')!, { openTask: id => run((async () => { await reloadSessions(); await selectSession(id, true); })()) });
 publishSpringEasings();
 mountActionDock($('#action-dock'));
@@ -643,15 +680,6 @@ const attachments = mountPromptAttachments({
   },
   notify: message => notify(message),
   report: error => report(error),
-  insertText: text => {
-    const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (!prompt || prompt.disabled || prompt.dataset.sessionId !== state.sessionId) return false;
-    const before = prompt.value.slice(0, prompt.selectionStart);
-    prompt.setRangeText((before && !/\s$/.test(before) ? (text.includes('\n') ? '\n' : ' ') : '') + text, prompt.selectionStart, prompt.selectionEnd, 'end');
-    prompt.dispatchEvent(new Event('input', { bubbles: true }));
-    prompt.focus();
-    return true;
-  },
   rerender: taskId => { if (taskId === state.sessionId) renderAttachmentBar(); },
   menu: (anchor, items, onSelect) => showChoices(anchor, { title: 'Attach', width: 340, actions: true, items: [...items, { id: 'recipes', label: 'Workflow recipes…', description: 'Queue saved steps', icon: 'play' }], onSelect: id => { closeChoiceMenu(); run(id === 'recipes' ? openRecipes() : onSelect(id)); } }),
   projectFiles: () => { state.inspector = true; state.inspectorTab = 'files'; state.selectedKind = ''; renderInspector(); },
@@ -1167,7 +1195,7 @@ function recentModels(id: ProviderId): string[] | null {
   return used.sort((a, b) => (b.lastPromptAt ?? b.updatedAt) - (a.lastPromptAt ?? a.updatedAt)).map(s => s.model);
 }
 // Teams offer a long catalog's recent models only; OpenCode's saved selection is already short.
-setTeamRecency({ used: usedModels, unlimited: id => id === 'opencode' && openCodeSaved });
+setTeamRecency({ used: id => recentModels(id) ?? [], unlimited: id => id === 'opencode' && openCodeSaved });
 function loadModels(id: ProviderId): Promise<ProviderModel[]> {
   const cached = modelCatalogs.get(id);
   if (cached && cached.expires > Date.now()) return cached.pending;
@@ -6289,7 +6317,7 @@ async function boot(): Promise<void> {
   document.querySelector<HTMLButtonElement>('.new-task-button')?.removeAttribute('disabled');
 }
 // PandaCode's own updates: checked on GitHub Releases, installed when no agent is working.
-mountUpdatePill($('#update-status') as HTMLButtonElement, startAppUpdates({ busy: () => state.sessions.some(task => isRunning(task.id)), notify }));
+// Extended intentionally disables network-based self-updating; the status control stays hidden.
 const agentUpdates = initializeAgentUpdates({
   modal, closeModal, report, providers: () => state.providers,
   providersChanged: async () => { await discoverSettingsProviders(); refreshModelLabels(); slashPicker?.refresh(true); },

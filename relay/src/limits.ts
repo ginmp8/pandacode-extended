@@ -11,6 +11,12 @@ export const MAX_REF_CHARS = 64;
 /** A socket with no ping answered (or no join) for this long is dead. Clients ping every 30 s. */
 export const STALE_MS = 75_000;
 
+/** Opt-in push registrations and notifications remain strictly bounded. */
+export const MAX_PUSH_TOKEN_CHARS = 512;
+export const MAX_PUSH_TOKENS_PER_DEVICE = 3;
+export const NOTIFY_COALESCE_MS = 30_000;
+export const MAX_NOTIFY_CHARS = 256;
+
 /** Read no more than `limit` bytes, including when Content-Length is absent or false.
  * Never call request.json()/arrayBuffer() on an unbounded untrusted stream.
  */

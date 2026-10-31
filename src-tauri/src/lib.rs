@@ -2695,7 +2695,7 @@ async fn reveal_path(path: String) -> Result<()> {
 #[tauri::command]
 async fn prompt_image(app: tauri::AppHandle, id: String) -> Result<Option<String>> {
     let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("browser-captures");
-    blocking(move || prompt_attachments::image_data_url(&dir, &id)).await
+    blocking(move || prompt_attachments::image_data_url(&dir, &id, true)).await
 }
 
 #[tauri::command]

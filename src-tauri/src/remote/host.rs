@@ -31,6 +31,8 @@ const JOURNAL_EVENTS: usize = 2000;
 const JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 const JOURNAL_TOTAL: usize = 32 * 1024 * 1024;
 const JOURNAL_TASKS: usize = 2048;
+/// Completed streams expire after ten minutes without a viewer, retaining bounded replay.
+const JOURNAL_IDLE: Duration = Duration::from_secs(10 * 60);
 /// The part of a subscribe reply that replayed events may fill; the rest comes in later
 /// pages (`more`), each another subscribe from where the viewer now is.
 const REPLAY_BUDGET: usize = PAGE_BUDGET / 3;
@@ -1835,11 +1837,12 @@ pub(crate) struct Journal {
     seq: u64,
     bytes: usize,
     rings: HashMap<String, Ring>,
+    sweeping: bool,
 }
 
 impl Default for Journal {
     fn default() -> Self {
-        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new() }
+        Self { epoch: uuid::Uuid::new_v4().simple().to_string(), seq: 0, bytes: 0, rings: HashMap::new(), sweeping: false }
     }
 }
 
@@ -1850,6 +1853,8 @@ struct Ring {
     /// The newest `seq` dropped to stay in bounds.
     dropped: u64,
     bytes: usize,
+    touched: Option<Instant>,
+    finished: bool,
     events: std::collections::VecDeque<(u64, usize, Value)>,
 }
 
@@ -1871,21 +1876,55 @@ pub(crate) struct Resumed {
 impl Journal {
     /// Starts recording a task's events, unless it already is.
     fn watch(&mut self, session: &str) {
-        if self.rings.contains_key(session) {
+        let now = Instant::now();
+        if let Some(ring) = self.rings.get_mut(session) {
+            ring.touched = Some(now);
             return;
         }
+        self.sweep(now);
         if self.rings.len() >= JOURNAL_TASKS {
             let quiet = self.rings.iter().min_by_key(|(_, ring)| ring.events.back().map_or(ring.since, |(seq, ..)| *seq)).map(|(id, _)| id.clone());
             if let Some(ring) = quiet.and_then(|id| self.rings.remove(&id)) {
                 self.bytes -= ring.bytes;
             }
         }
-        self.rings.insert(session.to_owned(), Ring { since: self.seq, ..Default::default() });
+        self.rings.insert(session.to_owned(), Ring { since: self.seq, touched: Some(now), ..Default::default() });
+    }
+
+    /// Arm one delayed sweep only when a completed stream is eligible for expiry.
+    fn arm(&mut self, now: Instant) -> Option<Duration> {
+        if self.sweeping {
+            return None;
+        }
+        let due = self.rings.values().filter(|ring| ring.finished).filter_map(|ring| ring.touched.map(|time| time + JOURNAL_IDLE)).min()?;
+        self.sweeping = true;
+        Some(due.saturating_duration_since(now))
+    }
+
+    fn fire(&mut self, now: Instant) -> Option<Duration> {
+        self.sweeping = false;
+        self.sweep(now);
+        self.arm(now)
+    }
+
+    /// Keep active streams; evict completed streams only after their last subscription.
+    fn sweep(&mut self, now: Instant) {
+        let bytes = &mut self.bytes;
+        self.rings.retain(|_, ring| {
+            let keep = !ring.finished || ring.touched.is_some_and(|last| now.saturating_duration_since(last) < JOURNAL_IDLE);
+            if !keep {
+                *bytes -= ring.bytes;
+            }
+            keep
+        });
     }
 
     /// Numbers and keeps an event of a recorded (or, with `subscribed`, newly recorded)
     /// task; the event as sent, with its `seq`, or None when nobody follows the task.
     fn record(&mut self, session: &str, mut event: Value, subscribed: bool) -> Option<Value> {
+        let now = Instant::now();
+        let finished = event["kind"] == "run.finished";
+        if finished { self.sweep(now); }
         if !self.rings.contains_key(session) {
             if !subscribed {
                 return None;
@@ -1896,6 +1935,8 @@ impl Journal {
         event["seq"] = json!(self.seq);
         let size = event.to_string().len();
         let ring = self.rings.get_mut(session)?;
+        if subscribed || finished { ring.touched = Some(now); }
+        ring.finished = finished;
         ring.events.push_back((self.seq, size, event.clone()));
         ring.bytes += size;
         self.bytes += size;
@@ -2927,57 +2968,13 @@ fn followed(inner: &super::Inner, session_id: &str) -> Option<bool> {
 /// that comes back gets it in its replay too.
 fn journaled(app: &tauri::AppHandle, session_id: &str, value: Value, queue: Queue) {
     let Some(state) = app.try_state::<super::Remote>() else { return };
-    let delay = journal_and_enqueue(&mut state.lock(), session_id, value, queue);
+    let (delay, sweep) = {
+        let mut inner = state.lock();
+        let delay = journal_and_enqueue(&mut inner, session_id, value, queue);
+        (delay, inner.journal.arm(Instant::now()))
+    };
     if let Some(delay) = delay {
         tauri::async_runtime::spawn(flush(app.clone(), delay));
-    }
-}
-
-/// Run ends are journaled as `kind: "run.finished"` entries carrying the frame's fields; the
-/// live `run.finished` frame carries the same object, `seq` included.
-fn journal_and_enqueue(inner: &mut super::Inner, session_id: &str, mut value: Value, queue: Queue) -> Option<Duration> {
-    let subscribed = followed(inner, session_id)?;
-    if queue == Queue::Settled && inner.subscribers.values().any(|s| s.finished.iter().any(|item| item["sessionId"] == session_id)) {
-        return None;
-    }
-    if queue != Queue::Event {
-        value["kind"] = json!("run.finished");
-    }
-    let value = inner.journal.record(session_id, value, subscribed)?;
-    enqueue(inner, session_id, |subscriber| match queue {
-        Queue::Event => push_event(&mut subscriber.events, value.clone()),
-        Queue::Finished | Queue::Settled => subscriber.finished.push(value.clone()),
-    })
-}
-
-/// Adds to the buffers of the task's subscribers; the delay of a flush to schedule, if none is.
-fn enqueue(inner: &mut super::Inner, session_id: &str, mut add: impl FnMut(&mut Subscriber)) -> Option<Duration> {
-    if !inner.settings.host_enabled || inner.outbox.is_none() || !inner.subscribers.values().any(|s| s.sessions.contains(session_id)) {
-        return None;
-    }
-    if !prune_subscribers(inner, Instant::now()) {
-        return None;
-    }
-    for subscriber in inner.subscribers.values_mut().filter(|s| s.sessions.contains(session_id)) {
-        add(subscriber);
-    }
-    if std::mem::replace(&mut inner.flushing, true) {
-        return None;
-    }
-    let delay = flush_delay(inner.flushed_at, inner.flush_frames, Instant::now());
-    if delay.is_zero() {
-        inner.flush_frames = 0;
-    }
-    Some(delay)
-}
-
-/// The first event after a quiet spell goes at once (a turn's first delta shows without
-/// waiting); events right behind it are gathered for [`FLUSH`], and once a burst has sent
-/// `frames` frames, for [`SUSTAINED`].
-pub(crate) fn flush_delay(last: Option<Instant>, frames: u32, now: Instant) -> Duration {
-    match last {
-        Some(at) if now.saturating_duration_since(at) < SUSTAINED => if frames < BURST_FRAMES { FLUSH } else { SUSTAINED },
-        _ => Duration::ZERO,
     }
     if let Some(sweep) = sweep {
         tauri::async_runtime::spawn(sweep_later(app.clone(), sweep));

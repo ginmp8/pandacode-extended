@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS bots(
   instructions TEXT NOT NULL DEFAULT '',
   goals TEXT NOT NULL DEFAULT '',
   soul TEXT NOT NULL DEFAULT '',
-  mcp TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(mcp)),
   avatar TEXT NOT NULL DEFAULT '',
   project_id TEXT NOT NULL REFERENCES projects(id),
   provider TEXT NOT NULL,
@@ -176,7 +175,7 @@ CREATE INDEX IF NOT EXISTS bot_messages_source ON bot_messages(source_session_id
 
 /// Profile columns added after the bots table first shipped (schema 25). Fresh databases get
 /// them from `SCHEMA`; `upgrade` adds whichever are missing, so it is safe to run every start.
-const ADDED_COLUMNS: [(&str, &str); 7] = [
+const ADDED_COLUMNS: [(&str, &str); 10] = [
     ("color", "TEXT NOT NULL DEFAULT ''"),
     ("reasoning_effort", "TEXT NOT NULL DEFAULT ''"),
     ("backup_models", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(backup_models))"),
@@ -184,6 +183,9 @@ const ADDED_COLUMNS: [(&str, &str); 7] = [
     ("notify", "INTEGER NOT NULL DEFAULT 1 CHECK(notify IN (0,1))"),
     ("while_working", "TEXT NOT NULL DEFAULT 'queue'"),
     ("show_plan", "INTEGER NOT NULL DEFAULT 0 CHECK(show_plan IN (0,1))"),
+    ("soul", "TEXT NOT NULL DEFAULT ''"),
+    ("skills", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skills))"),
+    ("mcp", "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(mcp))"),
 ];
 
 pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
@@ -225,8 +227,6 @@ pub struct Bot {
     pub next_heartbeat_at: Option<i64>,
     pub paused: bool,
     pub memory_version: i64,
-    /// Names from the harness configuration, with no credentials or server definitions.
-    pub mcp: Vec<String>,
     pub notify_channel_id: Option<String>,
     pub notify_thread: Option<String>,
     pub created_at: i64,
@@ -308,7 +308,13 @@ pub struct Thread {
     pub updated_at: i64,
 }
 
-const BOT_COLUMNS: &str = "id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,paused,memory_version,notify_channel_id,notify_thread,created_at,updated_at,soul,mcp";
+const BOT_COLUMNS: &str = "id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,paused,memory_version,notify_channel_id,notify_thread,created_at,updated_at,color,reasoning_effort,backup_models,fallback_mode,notify,while_working,show_plan,soul,skills,mcp";
+
+fn json_column<T: serde::de::DeserializeOwned>(r: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<T> {
+    serde_json::from_str(&r.get::<_, String>(column)?).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
 
 fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
     Ok(Bot {
@@ -330,8 +336,16 @@ fn bot_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         notify_thread: r.get(15)?,
         created_at: r.get(16)?,
         updated_at: r.get(17)?,
-        soul: r.get(18)?,
-        mcp: serde_json::from_str(&r.get::<_, String>(19)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, Box::new(e)))?,
+        color: r.get(18)?,
+        reasoning_effort: r.get(19)?,
+        backup_models: json_column(r, 20)?,
+        fallback_mode: r.get(21)?,
+        notify: r.get(22)?,
+        while_working: r.get(23)?,
+        show_plan: r.get(24)?,
+        soul: r.get(25)?,
+        skills: json_column(r, 26)?,
+        mcp: json_column(r, 27)?,
     })
 }
 
@@ -563,8 +577,8 @@ pub(crate) fn create(store: &Store, input: &BotInput, root: &std::path::Path) ->
     store
         .db
         .execute(
-            "INSERT INTO bots(id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,created_at,updated_at,soul) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13,?14)",
-            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, project.id, input.provider, input.model, input.mode, input.heartbeat_minutes, schedule::heartbeat_after(input.heartbeat_minutes, now), now, input.soul],
+            "INSERT INTO bots(id,name,role,instructions,goals,avatar,project_id,provider,model,mode,heartbeat_minutes,next_heartbeat_at,created_at,updated_at,color,reasoning_effort,backup_models,fallback_mode,notify,while_working,show_plan,soul) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, project.id, input.provider, input.model, input.mode, input.heartbeat_minutes, schedule::heartbeat_after(input.heartbeat_minutes, now), now, input.color, input.reasoning_effort, json!(input.backup_models).to_string(), input.fallback_mode, input.notify, input.while_working, input.show_plan, input.soul],
         )
         .map_err(|e| e.to_string())?;
     log(store, &id, "created", &format!("Created {}", input.name), json!({}))?;
@@ -576,13 +590,13 @@ pub(crate) fn update(store: &Store, id: &str, input: &BotInput) -> Result<Bot> {
     let before = get(store, id)?;
     let now = crate::storage::now();
     let next = if before.heartbeat_minutes == input.heartbeat_minutes { before.next_heartbeat_at } else { schedule::heartbeat_after(input.heartbeat_minutes, now) };
-    // Instructions and goals are part of the brief; bump the version so open threads get them.
-    let brief_changed = before.instructions != input.instructions || before.goals != input.goals || before.role != input.role || before.name != input.name || before.soul != input.soul;
+    // Identity, instructions, goals and soul are part of the brief; bump the version so open threads get them.
+    let brief_changed = before.instructions != input.instructions || before.goals != input.goals || before.role != input.role || before.name != input.name || before.show_plan != input.show_plan || before.soul != input.soul;
     store
         .db
         .execute(
-            "UPDATE bots SET name=?2,role=?3,instructions=?4,goals=?5,avatar=?6,provider=?7,model=?8,mode=?9,heartbeat_minutes=?10,next_heartbeat_at=?11,memory_version=memory_version+?12,updated_at=?13,soul=?14 WHERE id=?1",
-            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, input.provider, input.model, input.mode, input.heartbeat_minutes, next, brief_changed as i64, now, input.soul],
+            "UPDATE bots SET name=?2,role=?3,instructions=?4,goals=?5,avatar=?6,provider=?7,model=?8,mode=?9,heartbeat_minutes=?10,next_heartbeat_at=?11,memory_version=memory_version+?12,updated_at=?13,color=?14,reasoning_effort=?15,backup_models=?16,fallback_mode=?17,notify=?18,while_working=?19,show_plan=?20,soul=?21 WHERE id=?1",
+            params![id, input.name, input.role, input.instructions, input.goals, input.avatar, input.provider, input.model, input.mode, input.heartbeat_minutes, next, brief_changed as i64, now, input.color, input.reasoning_effort, json!(input.backup_models).to_string(), input.fallback_mode, input.notify, input.while_working, input.show_plan, input.soul],
         )
         .map_err(|e| e.to_string())?;
     if before.name != input.name {

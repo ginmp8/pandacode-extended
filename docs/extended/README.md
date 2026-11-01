@@ -4,6 +4,8 @@ This directory contains **PandaCode Extended-specific** behavior, security polic
 
 - [Extended 0.7.0 source-candidate documentation](0.7.0/README.md)
 - [Upstream 0.3.87 /btw side-thread parity candidate](upstream/0.3.87-btw-side-threads.md)
+- [Pinned upstream application source identity](upstream/source-baseline.json)
+- [Upstream 0.3.87 source fidelity and version repair](upstream/source-fidelity-0.3.87.md)
 - [Original upstream 0.3.86 release notes, mirrored without edits](../../releases/0.3.86.md)
 - [Original upstream 0.3.87 release notes, mirrored without edits](../../releases/0.3.87.md)
 - [Extended 0.7.0 canonical release notes](../../releases/extended/0.7.0.md)

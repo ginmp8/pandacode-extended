@@ -1,6 +1,6 @@
 # The donor image ships the helper @cloudflare/sandbox uses; keep its tag equal to the
 # installed @cloudflare/sandbox version.
-ARG SANDBOX_TOOLS_IMAGE=docker.io/cloudflare/sandbox:1.0.1
+ARG SANDBOX_TOOLS_IMAGE=docker.io/cloudflare/sandbox:1.0.3
 FROM ${SANDBOX_TOOLS_IMAGE} AS sandbox-tools
 
 # A small Debian with Node, Python and Git, so agents can build and run most projects.

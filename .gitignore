@@ -1,4 +1,5 @@
 node_modules/
+.vite-cache/
 __pycache__/
 dist/
 src-tauri/target/

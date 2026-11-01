@@ -1,14 +1,14 @@
 # Upstream PandaCode 0.3.86: inset shell and calmer motion
 
-**Status:** Feature integration candidate for PandaCode Extended 0.7.0. Not released or merged. Upstream 0.3.86 parity is **not** claimed.
+**Status:** Feature source merged into Extended `main` by [PR #90](https://github.com/ginmp8/pandacode-extended/pull/90) on 2026-11-01, at commit `94b61ac97af1fb14a9f9aafca30a3ccceb20cebe`; the Extended product release remains unpublished, with native QA still pending. Upstream 0.3.86 package/version parity is **not** claimed.
 
 ## Pinned source and destination
 
-- Base: `ginmp8/pandacode-extended` `base/hardened@c795e4c7307c257ccb24b9b0faa651c3dc500fb2` (Extended 0.7.0 / upstream 0.3.85 baseline).
+- Historical import base (at the time of PR #90): Extended commit `c795e4c7307c257ccb24b9b0faa651c3dc500fb2` (upstream 0.3.85 baseline). This is not the current branch HEAD.
 - Previous upstream release: `ginmp8/pandacode@df884aa0d347a00e7407bedbd46c6f7ee69342e3` (0.3.85).
 - Feature commit: `ginmp8/pandacode@944251a9a6ba5db8d93fd2e6f674aed17c493389`.
 - Pinned upstream main: `ginmp8/pandacode@e55b19acc3d9ef43567c9654a688916376634901` (0.3.86).
-- Review target: Extended `main`. The protected concept of a clean `base/hardened` is left unchanged.
+- Merge destination: Extended `main@94b61ac97af1fb14a9f9aafca30a3ccceb20cebe` (PR #90). On the later `base/development@ab08af492446d889d4a4ddc60a5c06a8c6a11bd0`, the 0.3.86 feature remains present, with only `src/main.ts` advanced to upstream 0.3.87.
 
 ## Scope and implementation method
 
@@ -23,11 +23,17 @@ The feature introduces an inset conversation/inspector/Settings layout, smoother
 - Desktop TypeScript build: `npm ci && npm run build`.
 - Unit and release regressions: `npm test && npm run test:release`.
 - Browser coverage: `npx playwright test tests/layout-preferences.spec.ts tests/ui.spec.ts tests/wallpapers.spec.ts tests/browser.spec.ts tests/thread-header-overlay.spec.ts tests/action-dock.spec.ts`. Exercise dark/light modes, inspector open/close and resize, Settings, sidebar collapse, Board/GitHub, wallpaper and reduced motion.
-- Repository CI must pass on the PR's exact final head SHA, including dependency audits and Rust/mobile regression jobs. Do not infer CI success from a different commit.
+- Repository CI on the merged `main` commit [`94b61ac`](https://github.com/ginmp8/pandacode-extended/actions/runs/41270578636) completed successfully. This does not validate the later `base/development@ab08af` `/btw` change; its exact-SHA CI and native/browser acceptance still need execution.
 - Manual native UI review on macOS/Windows is still needed to confirm window controls, material/tint contrast, accessibility preferences and embedded browser overlay behavior.
 
 **Not verified at the point of initial import:** full local desktop/browser execution, native macOS/Windows rendering, or release readiness. These require executed checks on the submitted candidate; imported upstream tests alone are not proof.
 
 ## Recovery and boundaries
 
-The source snapshot remains available at `base/hardened@c795e4c`. The feature is isolated in `feature/0.7.0-inset-shell-fork-0.3.86`, with no changes to `base/hardened`, no merge, no release and no edits to the fork. If a regression is found, amend only this feature branch after examining the affected behavior and tests.
+The original source baseline is the immutable Extended commit `c795e4c`. The feature was initially isolated in `feature/0.7.0-inset-shell-fork-0.3.86`, then **merged into `main` through PR #90**. Do not amend or rewrite the old feature branch as if it were still unmerged. If a regression is verified, use a new scoped corrective commit on the authorized integration branch with fresh HEAD/CI checks; do not reset, force-push or discard subsequent work. The upstream fork is unchanged.
+
+## Sequential source fidelity verification (2026-11-01)
+
+The complete upstream `0.3.85..0.3.86` comparison contains two commits (the functional commit and `chore: release 0.3.86`) and 27 changed paths: 19 implementation/test files, `AGENTS.md`, and 7 release/version/lockfile paths. At the pinned Extended `base/development@ab08af492446d889d4a4ddc60a5c06a8c6a11bd0`, **18 of the 19 implementation/test blobs exactly match the 0.3.86 fork release**. The 19th, `src/main.ts`, exactly matches the *successor* fork release 0.3.87 (which includes the 0.3.86 feature). This is correct forward progression, not a missing or downgraded predecessor.
+
+The 0.3.86 `AGENTS.md` blob also matches upstream 0.3.86. Seven release/version/lockfile paths intentionally retain Extended lineage or are not copied; they are not evidence of missing runtime functionality. The 0.3.87 feature's four source/test files are all exact matches to upstream 0.3.87, as recorded in [the separate, release-unmapped /btw port audit](../upstream/0.3.87-btw-side-threads.md). **These are source hash checks, not executed integration, native, accessibility or security tests**.

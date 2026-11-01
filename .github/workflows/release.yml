@@ -25,6 +25,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - name: Verify pinned upstream source release identity
+        run: node --test scripts/release/version-identity.test.mjs
       - name: Read and check the version
         id: version
         run: |

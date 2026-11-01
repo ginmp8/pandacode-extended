@@ -22,6 +22,7 @@ import './tool-trace.css';
 import './tool-cards.css';
 import './trace-motion.css';
 import './action-dock.css';
+import './inset-shell.css';
 import { mountActionDock, mountAgents } from './action-dock';
 import { setDocumentView } from './document-viewer';
 import { moved, queuePanel, type HoldReason, type QueuedMessage } from './message-queue';
@@ -29,7 +30,7 @@ import { initWakeups, openWakeComposer, scheduledMark, wakeCommand, wakeGlyph, w
 import { TRACE_HEADER } from './schedules-api';
 import { afterRun as turnChecksAfterRun, enabled as turnChecksEnabled, noteManualSend, setEnabled as turnChecksSetEnabled } from './turn-checks';
 import { limitActive, limitBanner, resetLabel } from './usage-limit';
-import { cascade, enterView, glideIn, glideOut, hideToast, installDialogMotion, publishSpringEasings, revealIn, showToast } from './motion';
+import { cascade, enterView, glideIn, glideOut, hidePanel, hideToast, holdDim, installDialogMotion, publishSpringEasings, releaseHold, revealIn, settleIn, showPanel, showToast } from './motion';
 import { teamSignature, updateTeamProgress } from './team-progress';
 import { installedCatalog, setTeamRecency } from './team-catalog';
 import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } from './team-mode';
@@ -462,7 +463,7 @@ const ACTIVITY_WINDOW = 24 * 60 * 60 * 1000;
 /** Sort arrows for the sidebar's sort and view menu. */
 const SORT_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v16m-3-3 3 3 3-3M17 20V4m-3 3 3-3 3 3"/></svg>';
 const $app = document.querySelector<HTMLDivElement>('#app')!;
-$app.innerHTML = `<div class="workspace">
+$app.innerHTML = `<div class="workspace" data-tauri-drag-region>
   <aside id="workspace-sidebar" class="sidebar" aria-label="Projects and tasks">
     <div class="brand" data-tauri-drag-region><span class="brand-name" data-tauri-drag-region>PandaCode</span>${button('view-menu', 'Workspace view: Conversation', 'thread', 'view-menu', 'id="view-menu" aria-haspopup="menu" aria-expanded="false"')}</div>
     <div class="sidebar-actions"><button class="new-task-button" data-action="new-task">${icon('plus')}<span>New task</span><kbd>${shortcut('N')}</kbd></button><button class="new-chat-button" data-action="new-chat" title="New chat (no project)">${icon('chat')}<span>New chat</span></button><button class="search-trigger" data-action="search">${icon('search')}<span>Search</span><kbd>${shortcut('K')}</kbd></button></div>
@@ -1105,9 +1106,9 @@ function closeProjectPicker(): void { cancelPendingMenu(); const close = project
 function closeChoiceMenu(): void { cancelPendingMenu(); const close = choiceMenuCleanup; choiceMenuCleanup = undefined; choiceMenuAnchor = undefined; close?.(); }
 function closeMenus(): void { ++architectSetupRequest; ++jevTestRequest; jevTestCleanup?.(); architectSetupCleanup?.(); closeModelPicker(); closeProjectPicker(); closeChoiceMenu(); }
 function closeContentMenus(): void {
-  // Header/browser controls and the GitHub view's row menus survive transcript and composer updates.
+  // Header/browser controls, the workspace view menu and the GitHub view's row menus survive transcript and composer updates.
   const anchor = choiceMenuAnchor ?? pendingMenuOpen?.anchor;
-  if (!jevTestCleanup && anchor?.id !== 'task-menu-trigger' && !anchor?.closest('#sidebar-bots-panel, #github-hub')) closeMenus();
+  if (!jevTestCleanup && anchor?.id !== 'task-menu-trigger' && anchor?.id !== 'view-menu' && !anchor?.closest('#sidebar-bots-panel, #github-hub')) closeMenus();
 }
 function beginMenuOpen(anchor: HTMLElement): { epoch: number; release: () => void } {
   cancelPendingMenu();
@@ -1474,8 +1475,25 @@ function changesRow(sessionId: string, changes: TurnChanges | undefined): string
   const card = changes && !state.sessions.find(task => task.id === sessionId)?.remoteDevice ? renderTurnChanges(sessionId, changes, sessionId === state.sessionId && projectRunner.available()) : '';
   return card ? `<div class="turn-changes-row">${card}</div>` : '';
 }
+/** On a first visit, the previous thread's rows stay (inert, dimmed to 0.7) for at most
+ *  TRANSCRIPT_HOLD_MS while the page loads; then the loading line takes over at once. */
+const TRANSCRIPT_HOLD_MS = 150;
+let transcriptRows: string | undefined, transcriptHold: { expired: boolean; timer: number } | undefined;
+function holdTranscript(transcript: HTMLElement, id: string, rows: string | undefined): boolean {
+  if (transcriptHold) { if (transcriptHold.expired) return false; transcriptRows = rows; return true; }
+  if (!rows || rows === id || !holdDim(transcript)) return false;
+  transcriptHold = { expired: false, timer: window.setTimeout(() => { if (transcriptHold) { transcriptHold.expired = true; renderTranscript(); } }, TRANSCRIPT_HOLD_MS) };
+  transcriptRows = rows;
+  return true;
+}
+function releaseTranscriptHold(transcript: HTMLElement, settle: boolean): void {
+  if (!transcriptHold) return;
+  clearTimeout(transcriptHold.timer); transcriptHold = undefined;
+  releaseHold(transcript, settle);
+}
 function renderTranscript(preservePosition = false): void {
   closeContentMenus();
+  const heldRows = transcriptRows; transcriptRows = undefined;
   $('.conversation-pane').classList.toggle('new-task-page', newTaskView());
   const transcript = $('#transcript');
   const restoreAnchor = preservePosition || !stickToBottom ? captureTranscriptAnchor(transcript) : undefined;
@@ -1485,6 +1503,7 @@ function renderTranscript(preservePosition = false): void {
   const unfolded = liveTurn && !liveTurnStaysOpen(liveTurn) ? captureTurns(liveTurn.parentElement!, true)[0] : undefined;
   const readingTool = readingTranscriptTool();
   if (state.sharedChannelId) {
+    releaseTranscriptHold(transcript, false);
     const channel = state.sharedChannelDetail;
     transcript.innerHTML = channel ? sharedChannelThreadHtml(channel, sidebarBots) : '<p class="history-notice" role="status">Loading channel…</p>';
     if (channel) {
@@ -1503,8 +1522,17 @@ function renderTranscript(preservePosition = false): void {
   }
   const s = session();
   botThread.noteThread(s?.id ?? '');
-  if (!s) { transcript.innerHTML = `<div class="welcome"><span class="welcome-mark" aria-hidden="true">${icon('bamboo')}</span><h1>${project() ? 'No task selected' : 'Choose a project'}</h1><button class="primary-button" data-action="${project() ? 'new-task' : 'add-project'}">${icon('plus')}${project() ? 'Start a task' : 'Open a project'}</button></div>`; return; }
-  if ((state.messagesLoading || state.messagesError) && !state.streams.has(s.id) && !finishingStreams.has(s.id)) { transcript.innerHTML = `<p class="history-notice" role="status">${state.messagesError ? 'Unable to load this task. Select it again to retry.' : 'Loading conversation…'}</p>`; return; }
+  if (!s) { releaseTranscriptHold(transcript, false); transcript.innerHTML = `<div class="welcome"><span class="welcome-mark" aria-hidden="true">${icon('bamboo')}</span><h1>${project() ? 'No task selected' : 'Choose a project'}</h1><button class="primary-button" data-action="${project() ? 'new-task' : 'add-project'}">${icon('plus')}${project() ? 'Start a task' : 'Open a project'}</button></div>`; return; }
+  if ((state.messagesLoading || state.messagesError) && !state.streams.has(s.id) && !finishingStreams.has(s.id)) {
+    if (!state.messagesError && holdTranscript(transcript, s.id, heldRows)) return;
+    // After a hold the line shows at once (the 150 ms wait is spent); a line already up keeps its fade.
+    const afterHold = Boolean(transcriptHold?.expired);
+    releaseTranscriptHold(transcript, false);
+    if (state.messagesError) transcript.innerHTML = '<p class="history-notice" role="status">Unable to load this task. Select it again to retry.</p>';
+    else if (!(transcript.childElementCount === 1 && transcript.firstElementChild!.classList.contains('history-loading'))) transcript.innerHTML = `<p class="history-notice history-loading${afterHold ? ' after-hold' : ''}" role="status">Loading conversation…</p>`;
+    return;
+  }
+  releaseTranscriptHold(transcript, true);
   if (state.view === 'board' && newTaskView()) {
     transcript.innerHTML = '<p class="pending-comments">Start this task when you’re ready. Agent updates and your replies will appear here.</p><div id="stream-region"></div>';
     return;
@@ -1560,6 +1588,7 @@ function renderTranscript(preservePosition = false): void {
     botThread.decorateTranscript(transcript, bot, s.id, state.messages, botSwitches.get(s.id) ?? [], botMessages.get(s.id) ?? []);
     if (!botThreadMetaLoaded.has(s.id)) void refreshBotThreadMeta(bot, s.id);
   }
+  transcriptRows = s.id;
 }
 function savedActivityHtml(messages: Message[], expanded = activityExpanded()): string {
   return groupToolRuns(messages, message => message.role === 'tool' ? savedToolKey(message) : undefined)
@@ -2202,6 +2231,8 @@ function syncGithubHub(shown: boolean): void {
       chooseFolder, notify,
       projectsChanged: async () => { state.projects = await call<Project[]>('list_projects'); renderNavigation(); },
     });
+    // The hub fades in once it has drawn (opacity only: a transform would move its full-height repository list).
+    settleIn(host, 0);
   }).finally(() => { githubHubLoading = false; }));
 }
 /** A thread opened from GitHub opens beside it; GitHub stays where it was. */
@@ -2279,6 +2310,9 @@ function toggleSidebar(): void {
   try { localStorage.setItem('pandacode.sidebarCollapsed', String(state.sidebarCollapsed)); } catch { /* Keep the choice for this session. */ }
   renderSidebarVisibility();
   if (!state.sidebarCollapsed) glideIn(sidebar, 'left', 20);
+  // The pane's new width lands at once (layout is never animated); its content settles from 0.85 so the jump reads as one soft change.
+  // The content settles, never .main-pane itself: an opacity animation there would re-composite the header's and dock's backdrop blur.
+  settleIn($('.conversation-pane'), 0, undefined, 0.85);
   if (moveFocus) $('#sidebar-toggle').focus({ preventScroll: true });
   // Refits existing terminals and keeps floating menus/native browser bounds aligned.
   window.dispatchEvent(new Event('resize'));
@@ -2304,6 +2338,7 @@ function setWorkspaceView(view: WorkspaceView): void {
   if (view === 'board') { enterView($('#project-board'), 8); cascade($('#project-board').querySelectorAll<HTMLElement>('.board-card'), 18, 160); }
   // The GitHub view appears at once: a transform would move its full-height repository list.
   else if (view !== 'github') enterView($('.conversation-pane'), 8);
+
 }
 async function editBoardTask(): Promise<void> {
   const task = session(), generation = state.generation;
@@ -2583,6 +2618,10 @@ async function selectSession(id: string, focusComposer = false): Promise<void> {
   const requestedStream = state.streams.get(id), requestedFinishing = finishingStreams.get(id);
   stickToBottom = true; render();
   if (remembered) stickTranscript();
+  // A thread switch settles in once, after its real content draws: here for a remembered page,
+  // below once the page arrives (never on the loading placeholder).
+  const settle = changingTask && Boolean(previousTask);
+  if (settle && remembered) settleIn($('#transcript'));
   if (focusComposer) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
   let page: MessagePage, details: Session;
   try { [page, details] = await Promise.all([latestMessagePage(id), call<Session>('get_task', { sessionId: id }), loadTeam(id)]); }
@@ -2609,6 +2648,7 @@ async function selectSession(id: string, focusComposer = false): Promise<void> {
   // A remembered page that is still current is already on screen; leave it untouched.
   const changed = !remembered || pageSignature(state.messages) !== shown;
   renderHeader(); if (changed) renderTranscript(); renderComposer();
+  if (settle && !remembered && changed) settleIn($('#transcript'));
   // A saved team can select a harness whose catalog has not been opened this run.
   // Resolve its display name in place, without delaying the task or replacing input.
   if (provider(details.provider)?.installed) void loadModels(details.provider).catch(() => { /* Keep the exact model ID if discovery is unavailable. */ });
@@ -3857,15 +3897,23 @@ async function toggleFolder(path: string): Promise<void> {
   }
   render();
 }
+let inspectorDrawn = false, inspectorView: WorkspaceView | undefined;
 function renderInspector(): void {
   const diffEpoch = ++inspectorDiffEpoch;
   inspectorDiff?.dispose(); inspectorDiff = undefined;
   // A shared channel has no checkout of its own, so the inspector steps aside.
   const visible = state.inspector && !inspectorSuppressed && !state.sharedChannelId;
   const inspector = $('#inspector');
-  inspector.hidden = !visible;
-  // Keep the resize edge immediately interactive and native browser bounds stable.
-  $('.workspace').classList.toggle('inspector-closed', !visible);
+  // Opening: the column appears at once and the panel slides in. Closing: the panel fades in its
+  // column and the column snaps shut after (`inspector-closed`), so the thread never rewraps under a
+  // fading panel. state.inspector is the source of truth meanwhile; the leaving panel is inert and
+  // carries `data-leaving`. Nothing animates on the first, startup render.
+  // A view switch (Conversation, Board, GitHub) changes the layout once: the inspector then opens or
+  // closes at once with the view, never a fade and a second reflow after it.
+  const workspace = $('.workspace'), animate = inspectorDrawn && inspectorView === state.view;
+  if (visible) { showPanel(inspector, animate, ['browser', 'simulator', 'vm'].includes(state.inspectorTab)); workspace.classList.remove('inspector-closed'); }
+  else hidePanel(inspector, animate, () => { if (inspector.hidden) workspace.classList.add('inspector-closed'); }, $('#inspector-toggle'));
+  inspectorDrawn = true; inspectorView = state.view;
   $('#inspector-toggle').classList.toggle('active', visible);
   const pullTask = githubEnabled() && session()?.pullRequest ? session() : undefined;
   if (state.inspectorTab === 'pull' && !pullTask) { const shown = inspectorTabs.open.filter(view => view !== 'pull'); state.inspectorTab = shown.includes('changes') || !shown.length ? 'changes' : shown[0]; }
@@ -4649,6 +4697,9 @@ async function showSettings(section?: import('./settings').SettingsSection, inte
       },
       close: closeSettings,
     });
+    // Settings settles in once its content has drawn (opacity only).
+    const content = host.querySelector<HTMLElement>('.settings-content');
+    if (content) settleIn(content, 0);
   }).finally(() => { settingsOpening = undefined; });
   await settingsOpening;
 }
@@ -4658,6 +4709,8 @@ function closeSettings(): void {
   const host = $('#settings-page');
   host.hidden = true; host.replaceChildren();
   $('.workspace').classList.remove('settings-open');
+  // The thread underneath settles back in (opacity only), instead of a hard cut.
+  settleIn($('#transcript'), 0);
   (settingsReturnFocus?.isConnected ? settingsReturnFocus : $('#prompt'))?.focus({ preventScroll: true });
   settingsReturnFocus = null;
 }

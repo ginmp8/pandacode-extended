@@ -23,6 +23,7 @@ const previewProjectNames = (page: Page) => page.evaluate(async () => {
   const { invoke } = await import((window as any).__pandacodePreviewUrl);
   return (await invoke('list_projects', {})).map((project: { name: string }) => project.name);
 });
+/** Surface alphas of html, body, #app, .workspace (the inset shell's frame tone), .sidebar (no fill of its own) and .main-pane. */
 const appearanceSurfaces = (page: Page) => page.evaluate(() => {
   const channels = (color: string) => color.match(/[\d.]+/g)!.map(Number);
   const alpha = (color: string) => channels(color)[3] ?? 1;
@@ -413,7 +414,8 @@ test('defaults to dark mode and remembers explicit light and dark preferences af
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
   await expect(page.locator('.workspace')).toHaveAttribute('data-wallpaper');
-  await expect(page.locator('.main-pane')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  // Over a wallpaper the main pane is an inset panel: a dense translucent tint of the page colour.
+  await expect(page.locator('.main-pane')).toHaveCSS('background-color', 'color(srgb 1 1 1 / 0.78)');
   expect(await page.evaluate(() => localStorage.getItem('pandacode.theme'))).toBe('light');
   await toggle.focus();
   await page.keyboard.press('Space');
@@ -958,14 +960,14 @@ test('synchronizes dark mode with native appearance without wallpapers and respe
   await page.getByRole('button', { name: 'Dark mode', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__themeCalls.at(-1)?.darkMode)).toBe(true);
   const glass = (await appearanceSurfaces(page)).alphas;
-  expect([...glass.slice(0, 4), glass[4] < 1, glass[5]]).toEqual([0, 0, 0, 0, true, 1]);
+  expect([...glass.slice(0, 3), glass[3] > 0 && glass[3] < 1, glass[4], glass[5]]).toEqual([0, 0, 0, true, 0, 1]);
   const devtools = await page.context().newCDPSession(page);
   await devtools.send('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-reduced-transparency', value: 'reduce' }, { name: 'prefers-contrast', value: 'more' },
   ] });
   await expect(page.locator('html')).toHaveAttribute('data-native-material', 'solid');
   const surfaces = await appearanceSurfaces(page);
-  expect(surfaces.alphas).toEqual([1, 1, 1, 1, 1, 1]);
+  expect(surfaces.alphas).toEqual([1, 1, 1, 1, 0, 1]);
   expect(surfaces.mainContrast).toBeGreaterThanOrEqual(4.5);
   await projectFilter(page).click();
   const menu = page.getByRole('dialog', { name: 'Filter projects', exact: true });
@@ -1373,8 +1375,8 @@ for (const material of ['liquidGlass', 'vibrancy'] as const) {
     }, material);
     await expect(page.locator('html')).toHaveAttribute('data-native-material', material);
     const surfaces = await appearanceSurfaces(page);
-    // The sidebar keeps a flat translucent tint over the native material.
-    expect([...surfaces.alphas.slice(0, 4), surfaces.alphas[4] < 1, surfaces.alphas[5]]).toEqual([0, 0, 0, 0, true, 1]);
+    // The window frame keeps a flat translucent tint over the native material; the sidebar adds none.
+    expect([...surfaces.alphas.slice(0, 3), surfaces.alphas[3] > 0 && surfaces.alphas[3] < 1, surfaces.alphas[4], surfaces.alphas[5]]).toEqual([0, 0, 0, true, 0, 1]);
     expect(surfaces.sidebarBackdrop).toBe('none');
     expect(surfaces.mainContrast).toBeGreaterThanOrEqual(4.5);
     await expect(prompt(page)).toBeEnabled();
@@ -1388,13 +1390,13 @@ test('keeps preview, unsupported platforms, and unavailable native materials opa
   await disableWallpapers(page);
   await expect(page.getByText('Browser preview · sample data', { exact: true })).toBeVisible();
   await expect(page.locator('html')).not.toHaveAttribute('data-native-material');
-  expect((await appearanceSurfaces(page)).alphas.filter((_, index) => [0, 4, 5].includes(index))).toEqual([1, 1, 1]);
+  expect((await appearanceSurfaces(page)).alphas.filter((_, index) => [0, 3, 5].includes(index))).toEqual([1, 1, 1]);
   await page.evaluate(async () => {
     const { initializeNativeAppearance } = await import('/src/appearance.ts');
     (window as any).__pandacodeDisposeAppearance = initializeNativeAppearance(async () => ({ platform: 'other', material: 'liquidGlass' }));
   });
   await expect(page.locator('html')).toHaveAttribute('data-native-material', 'solid');
-  expect((await appearanceSurfaces(page)).alphas.filter((_, index) => [0, 4, 5].includes(index))).toEqual([1, 1, 1]);
+  expect((await appearanceSurfaces(page)).alphas.filter((_, index) => [0, 3, 5].includes(index))).toEqual([1, 1, 1]);
   await page.evaluate(async () => {
     (window as any).__pandacodeDisposeAppearance();
     const { initializeNativeAppearance } = await import('/src/appearance.ts');
@@ -1402,7 +1404,7 @@ test('keeps preview, unsupported platforms, and unavailable native materials opa
   });
   await expect(page.locator('html')).toHaveAttribute('data-native-material', 'solid');
   const fallback = await appearanceSurfaces(page);
-  expect(fallback.alphas.filter((_, index) => [0, 4, 5].includes(index))).toEqual([1, 1, 1]);
+  expect(fallback.alphas.filter((_, index) => [0, 3, 5].includes(index))).toEqual([1, 1, 1]);
   expect(fallback.mainContrast).toBeGreaterThanOrEqual(4.5);
   await page.evaluate(() => (window as any).__pandacodeDisposeAppearance());
 });
@@ -1448,7 +1450,7 @@ test('coalesces appearance preferences without restoring stale glass or losing t
   ] });
   await expect.poll(() => page.evaluate(() => (window as any).__pandacodeAppearance.observed)).toEqual({ reducedTransparency: true, increasedContrast: false });
   await expect(page.locator('html')).toHaveAttribute('data-native-material', 'solid');
-  expect((await appearanceSurfaces(page)).alphas).toEqual([1, 1, 1, 1, 1, 1]);
+  expect((await appearanceSurfaces(page)).alphas).toEqual([1, 1, 1, 1, 0, 1]);
   await page.evaluate(() => {
     const state = (window as any).__pandacodeAppearance;
     state.observer = new MutationObserver(() => state.materials.push(document.documentElement.dataset.nativeMaterial));
@@ -1473,7 +1475,7 @@ test('coalesces appearance preferences without restoring stale glass or losing t
     state.material = 'vibrancy';
   });
   await expect(page.locator('html')).toHaveAttribute('data-native-material', 'solid');
-  expect((await appearanceSurfaces(page)).alphas).toEqual([1, 1, 1, 1, 1, 1]);
+  expect((await appearanceSurfaces(page)).alphas).toEqual([1, 1, 1, 1, 0, 1]);
   await devtools.send('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-reduced-transparency', value: 'no-preference' }, { name: 'prefers-contrast', value: 'no-preference' },
   ] });
@@ -3357,6 +3359,65 @@ test('⌘F finds text in the thread, in your messages and the agent’s, and ste
   await expect(find).toHaveCount(0);
   expect(await page.evaluate(() => (CSS as any).highlights.has('thread-find'))).toBe(false);
   await expect(page.locator('#prompt')).toBeFocused();
+});
+
+test('the find bar rides in the header row, clear of the leading items, and drops to the pane top when narrow', async ({ page }) => {
+  await expect(page.locator('#transcript .user-message').first()).toBeVisible();
+  await page.locator('#sidebar-toggle').click();
+  await expect(page.locator('.header-leading>#sidebar-toggle')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+f');
+  const bar = page.locator('.thread-find');
+  await expect(bar).toBeVisible();
+  const place = () => page.evaluate(() => {
+    const bar = document.querySelector<HTMLElement>('.thread-find')!.getBoundingClientRect();
+    const header = document.querySelector<HTMLElement>('.main-pane>.workspace-header')!.getBoundingClientRect();
+    const leading = [...document.querySelectorAll<HTMLElement>('.main-pane>.workspace-header .header-leading>*')]
+      .filter(item => item.getClientRects().length && item.getBoundingClientRect().width > 0).map(item => item.getBoundingClientRect().right);
+    return { top: bar.top, bottom: bar.bottom, left: bar.left, headerTop: header.top, headerBottom: header.bottom, leading: Math.max(...leading), pane: document.querySelector<HTMLElement>('.conversation-pane')!.getBoundingClientRect().top };
+  });
+  await expect.poll(async () => { const at = await place(); return at.top >= at.headerTop && at.top < at.headerBottom; }).toBe(true);
+  const wide = await place();
+  expect(wide.left).toBeGreaterThanOrEqual(wide.leading + 8);
+  await page.setViewportSize({ width: 620, height: 800 });
+  await expect.poll(async () => { const at = await place(); return Math.abs(at.top - (at.pane + 10)); }).toBeLessThanOrEqual(1);
+});
+
+test('a first visit keeps the old rows (inert, briefly) until the page or the loading line takes over', async ({ page }) => {
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const marker = /case ["']get_messages["']: \{/;
+    expect(marker.test(source)).toBe(true);
+    await route.fulfill({ response, body: previewBody(source.replace(marker, match => `${match} if (window.__messageDelay) await new Promise(resolve => setTimeout(resolve, window.__messageDelay));`)) });
+  });
+  for (const [delay, target] of [[40, 'session-2'], [300, 'session-3']] as const) {
+    await page.reload();
+    await expect(page.locator('#transcript .message').first()).toBeVisible();
+    const frames = await page.evaluate(({ delay, target }) => new Promise<Array<{ t: number; kind: string }>>(resolve => {
+      (window as any).__messageDelay = delay;
+      const transcript = document.querySelector<HTMLElement>('#transcript')!;
+      const seen: Array<{ t: number; kind: string }> = [];
+      const start = performance.now();
+      const sample = () => seen.push({
+        t: Math.round(performance.now() - start),
+        kind: transcript.inert ? (transcript.querySelector('.message') ? 'old' : 'inert-empty')
+          : transcript.querySelector('.history-loading') ? 'loading'
+          : transcript.childElementCount ? 'new' : 'empty',
+      });
+      document.querySelector<HTMLElement>(`.task-item[data-id="${target}"]`)!.click();
+      sample();
+      const tick = () => { sample(); if (performance.now() - start < delay + 300) requestAnimationFrame(tick); else resolve(seen); };
+      requestAnimationFrame(tick);
+    }), { delay, target });
+    expect(frames[0].kind).toBe('old');
+    expect(frames.filter(frame => frame.kind === 'empty' || frame.kind === 'inert-empty')).toEqual([]);
+    // Old rows are never shown past the 150 ms hold (plus a frame), then the loading line or the page follows.
+    expect(Math.max(...frames.filter(frame => frame.kind === 'old').map(frame => frame.t))).toBeLessThan(150 + 40);
+    expect(frames.at(-1)!.kind).toBe('new');
+    expect(frames.some(frame => frame.kind === 'loading')).toBe(delay > 150);
+    await expect(page.locator('#transcript')).not.toHaveAttribute('inert');
+    expect(await page.locator('#transcript').evaluate(node => node.style.opacity)).toBe('');
+  }
 });
 
 test('the prompt sits in the same place in every thread', async ({ page }) => {

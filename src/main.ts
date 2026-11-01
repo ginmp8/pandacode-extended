@@ -1444,9 +1444,9 @@ function botCrumb(bot: import('./bots').Bot): string {
   return botThread.crumbHtml(bot, { where, status: bot.paused ? 'Paused' : working ? 'Working' : 'Ready', nextModel: s && next ? { running: modelLabel(s), next: next.label } : undefined });
 }
 /** Where a turn's spawned workers appear: right after what the architect said in that turn. */
-function workerSlot(turn: { user?: Message; coordination?: Message }): string {
+function workerSlot(turn: { user?: Message; coordination?: Message }, sessionId = state.sessionId): string {
   const start = turn.user?.createdAt ?? turn.coordination?.createdAt;
-  return teams.has(state.sessionId) && start !== undefined ? `<div class="team-progress-slot" data-turn-start="${start}" hidden></div>` : '';
+  return teams.has(sessionId) && start !== undefined ? `<div class="team-progress-slot" data-turn-start="${start}" hidden></div>` : '';
 }
 /** Each spawned worker shows in the turn it was spawned in; while that turn is still running,
  *  it follows the live activity at the end of the thread. */
@@ -1553,26 +1553,10 @@ function renderTranscript(preservePosition = false): void {
     transcript.innerHTML = `<div class="new-task-welcome"><span class="new-task-mark" aria-hidden="true">${icon('bamboo')}</span><h1 aria-label="What should we build in ${escape(name)}?">What should we build in <button id="welcome-project" class="welcome-project" data-action="change-task-project" aria-label="Change task project" aria-haspopup="dialog" aria-expanded="false" title="${escape(project()?.path)}" ${s.worktreePath ? 'disabled' : ''}>${escape(name)}</button>?</h1></div><div id="stream-region"></div>`;
     return;
   }
-  const turns = groupTurns(visibleMessages());
   const previousMarkdown = new Map([...transcript.querySelectorAll<HTMLElement>('[data-markdown]')]
     .map(node => [node.dataset.markdown!, node]));
-  transcript.innerHTML = `${state.messages.length === 0 && !bot ? '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>' : ''}${turns.map(turn => (turn.user ? messageHtml(turn.user) : '') + (turn.handoff ? messageHtml(turn.handoff) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity) : '') + turn.errors.map(message => messageHtml(message)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool')) : '') + workerSlot(turn) + changesRow(s.id, turn.changes)).join('')}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
-  const byId = new Map(state.messages.map(message => [String(message.id), message]));
-  transcript.querySelectorAll<HTMLElement>('[data-markdown]').forEach(el => {
-    const message = byId.get(el.dataset.markdown!);
-    if (!message) return;
-    const previous = previousMarkdown.get(el.dataset.markdown!);
-    if (previous && savedMarkdownSources.get(previous) === message.content) {
-      // Prepending history must not reparse responses the reader already loaded.
-      el.replaceWith(previous);
-      bindFileLinkContext(previous, workspaceContext());
-    } else {
-      savedMarkdownSources.set(el, message.content);
-      bindFileLinkContext(el, workspaceContext());
-      // Following skips the paint's own pin (the ResizeObserver pins before paint); pin now so no task sees the gap.
-      void markdown(el, message.content, transcript).then(followTranscript, report);
-    }
-  });
+  transcript.innerHTML = `${state.messages.length === 0 && !bot ? '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>' : ''}${turnRowsHtml(s.id, visibleMessages())}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
+  paintSavedMarkdown(transcript, state.messages, previousMarkdown, workspaceContext(), followTranscript);
   renderStream();
   refreshTeamProgress();
   restoreTurns(transcript, turnViews);
@@ -1590,18 +1574,41 @@ function renderTranscript(preservePosition = false): void {
   }
   transcriptRows = s.id;
 }
-function savedActivityHtml(messages: Message[], expanded = activityExpanded()): string {
+/** A thread's saved turns in transcript markup: the main transcript and the By the way panel draw them alike. */
+function turnRowsHtml(sessionId: string, visible: Message[], thread = openThread()): string {
+  return groupTurns(visible).map(turn => (turn.user ? messageHtml(turn.user, false, true, thread) : '') + (turn.handoff ? messageHtml(turn.handoff, false, true, thread) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '') + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity, thread) : '') + turn.errors.map(message => messageHtml(message, false, true, thread)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool'), true, thread) : '') + workerSlot(turn, sessionId) + changesRow(sessionId, turn.changes)).join('');
+}
+/** Formats saved answers, reusing nodes whose source is unchanged so nothing reparses. */
+function paintSavedMarkdown(root: HTMLElement, messages: Message[], previousMarkdown: Map<string, HTMLElement>, context: FileLinkContext, follow: () => void): void {
+  const byId = new Map(messages.map(message => [String(message.id), message]));
+  root.querySelectorAll<HTMLElement>('[data-markdown]').forEach(el => {
+    const message = byId.get(el.dataset.markdown!);
+    if (!message) return;
+    const previous = previousMarkdown.get(el.dataset.markdown!);
+    if (previous && savedMarkdownSources.get(previous) === message.content) {
+      // Prepending history must not reparse responses the reader already loaded.
+      el.replaceWith(previous);
+      bindFileLinkContext(previous, context);
+    } else {
+      savedMarkdownSources.set(el, message.content);
+      bindFileLinkContext(el, context);
+      // Following skips the paint's own pin (the ResizeObserver pins before paint); pin now so no task sees the gap.
+      void markdown(el, message.content, root).then(follow, report);
+    }
+  });
+}
+function savedActivityHtml(messages: Message[], expanded = activityExpanded(), thread = openThread()): string {
   return groupToolRuns(messages, message => message.role === 'tool' ? savedToolKey(message) : undefined)
     .map(run => run.kind === 'tools'
       ? renderToolGroup(run.items.map(message => ({ key: savedToolKey(message), content: message.content })), expanded)
-      : messageHtml(run.item, false, false)).join('');
+      : messageHtml(run.item, false, false, thread)).join('');
 }
 /** A turn of only tool calls folds to its summary sentence and mark stack (`Ran 2 searches and read 3 sources`),
  * opening onto the step rail; turns with narration keep `Worked for …` over their groups. */
-function savedTurnActivity(key: string, label: string, activity: Message[]): string {
+function savedTurnActivity(key: string, label: string, activity: Message[], thread = openThread()): string {
   const tools = activity.map(message => message.role === 'tool' ? decodeToolActivity(message.content) : undefined);
-  if (tools.some(tool => !tool)) return activityHtml(key, escape(label), savedActivityHtml(activity));
-  return activityHtml(key, foldedLabelHtml(tools as ToolActivity[]), savedActivityHtml(activity, true), { steps: true, title: label });
+  if (tools.some(tool => !tool)) return activityHtml(key, escape(label), savedActivityHtml(activity, activityExpanded(), thread));
+  return activityHtml(key, foldedLabelHtml(tools as ToolActivity[]), savedActivityHtml(activity, true, thread), { steps: true, title: label });
 }
 function foldedLabelHtml(tools: ToolActivity[]): string {
   const [sentence, failures] = summarizeTools(tools).split(' · ');
@@ -1663,7 +1670,10 @@ function restoreTurns(root: ParentNode, views: TurnView[]): void {
 }
 /** `afterTrace`: an answer that follows a tool trace sits flush under it without the avatar/name row (still read out). */
 /** `actions` is false for replies between tool calls: only the turn's last reply carries copy and fork. */
-function messageHtml(m: Message, afterTrace = false, actions = true): string {
+/** `thread`: the messages and harness a row belongs to (the open thread unless the By the way panel draws its side thread). */
+interface Thread { messages: Message[]; provider: ProviderId }
+const openThread = (): Thread => ({ messages: state.messages, provider: session()?.provider ?? state.defaultProvider });
+function messageHtml(m: Message, afterTrace = false, actions = true, thread = openThread()): string {
   if (m.role === 'handoff') {
     const handoff = decodeHandoff(m);
     if (!handoff) return '';
@@ -1677,7 +1687,7 @@ function messageHtml(m: Message, afterTrace = false, actions = true): string {
   if (m.role === 'status') return renderToolStatus(m.content);
   if (m.role === 'error') return `<div class="message-error">${icon('alert')}<span>${escape(m.content)}</span></div>`;
   const isUser = m.role === 'user';
-  const author = historicalProvider(m, state.messages, session()?.provider ?? state.defaultProvider);
+  const author = historicalProvider(m, thread.messages, thread.provider);
   return `<article class="message ${isUser ? 'user-message' : 'agent-message'}${afterTrace && !isUser ? ' after-trace' : ''}" data-message-id="${m.id}"><div class="message-meta"><span class="message-avatar ${isUser ? 'user-avatar' : ''}">${isUser ? 'Y' : providerLogo(author)}</span><strong>${isUser ? 'You' : escape(provider(author)?.name || 'Agent')}</strong><time>${formatTime(m.createdAt)}</time></div><div class="message-content ${isUser ? '' : 'markdown'}" ${isUser ? '' : `data-markdown="${m.id}"`}>${isUser ? scheduledMark(m.content) + userContent(m.content, m.id) : escape(m.content)}</div>${isUser && m.id < 0 ? steerStateHtml(m) : ''}${actions ? messageActionsHtml(m.sessionId, m.id, m.id > 0 && (isUser || m.role === 'assistant'), isUser && m.id > 0) : ''}</article>`;
 }
 // Context appended at send time (files, documents, folders, GitHub, browser, images) shows as
@@ -1758,45 +1768,50 @@ function restoreTools(root: ParentNode, views: Map<string, ToolView>): void {
     }
   });
 }
-function visibleMessages(): Message[] {
-  if (state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId)) {
-    let lastUser = -1; state.messages.forEach((m, i) => { if (m.role === 'user' || m.role === 'coordination' || m.role === 'changes') lastUser = i; });
-    return state.messages.slice(0, lastUser + 1);
+function visibleMessages(sessionId = state.sessionId, messages = state.messages): Message[] {
+  if (state.streams.has(sessionId) || finishingStreams.has(sessionId)) {
+    let lastUser = -1; messages.forEach((m, i) => { if (m.role === 'user' || m.role === 'coordination' || m.role === 'changes') lastUser = i; });
+    return messages.slice(0, lastUser + 1);
   }
-  return state.messages.slice();
+  return messages.slice();
 }
 function renderStream(): void {
   if (!transcriptVisible()) { updateWorkTimer(); return; }
   const region = document.getElementById('stream-region'); if (!region) return;
-  const finishing = finishingStreams.get(state.sessionId);
-  const current = state.streams.get(state.sessionId) ?? finishing?.stream;
+  // A bot's welcome is for an idle, empty thread; its first live event (an approval, say) replaces it.
+  if ((state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId)) && isRunning() && region.parentElement?.querySelector('.bot-welcome-setup')) { renderTranscript(); return; }
+  paintStream(region, state.sessionId, transcriptScroller, true);
+}
+/** Draws a thread's live turn into `region`: the main transcript's `#stream-region`, or the By the way
+ *  panel's (`main` false: no approval bar, bot chrome or team rows of the open thread). */
+function paintStream(region: HTMLElement, sessionId: string, transcript: HTMLElement, main = false): void {
+  const finishing = finishingStreams.get(sessionId);
+  const current = state.streams.get(sessionId) ?? finishing?.stream;
   // A final text frame can run while the saved transcript is loading. Retain
   // its tool controls until renderTranscript can transfer their reading state.
   if (!current) { updateWorkTimer(); return; }
-  // A bot's welcome is for an idle, empty thread; its first live event (an approval, say) replaces it.
-  if (isRunning() && region.parentElement?.querySelector('.bot-welcome-setup')) { renderTranscript(); return; }
-  const transcript = transcriptScroller;
+  const task = state.sessions.find(item => item.id === sessionId), harness = task?.provider ?? state.defaultProvider, context = workspaceContext(task);
   // The only layout read, and only while a tool is being read.
-  const readingTool = readingTranscriptTool(), scrollTop = readingTool ? transcript.scrollTop : 0;
+  const readingTool = readingTranscriptTool() && (main || transcript.contains(document.activeElement)), scrollTop = readingTool ? transcript.scrollTop : 0;
   let parts = streamParts.get(region);
-  if (region.dataset.sessionId !== state.sessionId || !parts || !region.contains(parts.output)) {
-    region.innerHTML = `<details class="thinking-block" hidden><summary class="tool-group-summary"><span class="tool-group-label">Thinking</span>${icon('chevron')}</summary><div class="tool-group-body thinking-text"></div></details>` + activityHtml(current.turnKey, '', '<div class="live-tools"></div><div class="live-status"></div>', { live: true }) + `<article class="message agent-message live-message" hidden><div class="message-meta"><span class="message-avatar">${providerLogo(session()?.provider ?? state.defaultProvider)}</span><strong>${escape(provider()?.name || 'Agent')}</strong><span class="streaming-label">Generating</span></div><div class="message-content streaming-content live-text"></div>${messageActionsHtml(state.sessionId, 'live', false)}</article><div class="live-errors"></div><div class="live-approvals"></div><div class="live-inputs"></div>`;
-    region.dataset.sessionId = state.sessionId; region.dataset.revision = '-1';
+  if (region.dataset.sessionId !== sessionId || !parts || !region.contains(parts.output)) {
+    region.innerHTML = `<details class="thinking-block" hidden><summary class="tool-group-summary"><span class="tool-group-label">Thinking</span>${icon('chevron')}</summary><div class="tool-group-body thinking-text"></div></details>` + activityHtml(current.turnKey, '', '<div class="live-tools"></div><div class="live-status"></div>', { live: true }) + `<article class="message agent-message live-message" hidden><div class="message-meta"><span class="message-avatar">${providerLogo(harness)}</span><strong>${escape(provider(harness)?.name || 'Agent')}</strong><span class="streaming-label">Generating</span></div><div class="message-content streaming-content live-text"></div>${messageActionsHtml(sessionId, 'live', false)}</article><div class="live-errors"></div><div class="live-approvals"></div><div class="live-inputs"></div>`;
+    region.dataset.sessionId = sessionId; region.dataset.revision = '-1';
     streamParts.set(region, parts = queryStreamParts(region));
   }
   const { activity, message, thinking, output, status } = parts;
   if (activity.dataset.turnKey !== current.turnKey) { activity.dataset.turnKey = current.turnKey; delete activity.dataset.folded; activity.open = true; }
   const answered = answerAge(current);
   paintLiveHeader(activity, current, finishing ? finishing.finishedAt - current.startedAt : undefined, answered);
-  scheduleAnswerFolds(answered);
+  scheduleAnswerFolds(answered, main ? 'main' : sessionId, main ? renderStream : () => paintStream(region, sessionId, transcript));
   if (region.dataset.revision !== String(current.revision)) {
-    paintLiveActivity(region, current, transcript);
+    paintLiveActivity(region, current, transcript, context);
     const errors = parts.errors;
     const errorHtml = current.tools.filter(tool => tool.statusOnly).map(tool => `<div class="message-error">${icon('alert')}<span>${escape(tool.content as string)}</span></div>`).join('') + (finishing?.error ? `<div class="message-error" role="alert"><span>Couldn't load the saved response. ${escape(finishing.error)}</span><button class="secondary-button" data-action="retry-response">Retry loading response</button></div>` : '');
     if (liveErrorHtml.get(errors) !== errorHtml) { errors.innerHTML = errorHtml; liveErrorHtml.set(errors, errorHtml); }
     // Approvals live in the bar above the prompt, not in the transcript.
     if (parts.approvals.firstChild) parts.approvals.replaceChildren();
-    renderApprovalBar();
+    if (main) renderApprovalBar();
     const inputs = parts.inputs;
     for (const input of current.inputs.values()) if (input.element.parentElement !== inputs) inputs.append(input.element);
     region.dataset.revision = String(current.revision);
@@ -1814,13 +1829,13 @@ function renderStream(): void {
   if (thinking.dataset.turnKey !== current.turnKey) { thinking.dataset.turnKey = current.turnKey; thinking.open = false; }
   setHidden(thinking, !thought);
   if (parts.thought.textContent !== thought) parts.thought.textContent = thought;
-  bindFileLinkContext(output, workspaceContext());
+  bindFileLinkContext(output, context);
   streamMarkdown(output, current.text, transcript);
   setHidden(parts.streaming, Boolean(finishing || current.retainedMessageKey));
   setHidden(message, !current.text);
   const label = current.status || 'Working…'; if (status.textContent !== label) status.textContent = label;
   setHidden(status, Boolean(finishing) || current.approvals.size > 0 || current.inputs.size > 0);
-  const bot = botForThread(), sessionId = state.sessionId;
+  const bot = main ? botForThread() : undefined;
   if (bot) botThread.paintWorking(region, bot, provider()?.name || 'the agent', () => state.streams.get(sessionId), Boolean(finishing));
   updateWorkTimer();
   // Following needs no pin here: Markdown paints pin after themselves, and the ResizeObserver after layout.
@@ -1845,7 +1860,7 @@ const setHidden = (node: HTMLElement, hidden: boolean): void => { if (node.hidde
 const liveGroupEntries = new WeakMap<HTMLElement, LiveTool[]>();
 const liveErrorHtml = new WeakMap<Element, string>();
 /** Patch only changed groups; text frames do not recreate tool controls or open details. */
-function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTMLElement): void {
+function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTMLElement, context: FileLinkContext): void {
   const host = region.querySelector<HTMLElement>('.live-tools')!;
   const liveMessage = region.querySelector<HTMLElement>('.live-message')!;
   const previous = new Map([...host.children].map(node => [(node as HTMLElement).dataset.streamKey, node as HTMLElement]));
@@ -1853,7 +1868,7 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
   const commentary: { node: HTMLElement; content: string }[] = [];
   // Live worker lines follow the call that spawned them, so later activity stays below them.
   // ponytail: anchors every live worker after the turn's first dispatch; a second dispatch's workers join them.
-  const tools = current.tools.filter(tool => !tool.statusOnly), workers = document.getElementById('team-progress-host');
+  const tools = current.tools.filter(tool => !tool.statusOnly), workers = region.parentElement?.querySelector<HTMLElement>(':scope > #team-progress-host') ?? null;
   const dispatch = workers ? tools.findIndex(tool => typeof tool.content !== 'string' && /dispatch_workers/.test(tool.content.name)) : -1;
   const toolRuns = (entries: LiveTool[]) => groupToolRuns(entries, tool => tool.commentary ? undefined : tool.key);
   const runs = dispatch < 0 ? toolRuns(tools) : [...toolRuns(tools.slice(0, dispatch + 1)), null, ...toolRuns(tools.slice(dispatch + 1))];
@@ -1908,7 +1923,7 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
     node.dataset.earlier = '';
     if (!liveTurnStaysOpen(node)) (node as HTMLDetailsElement).open = false;
   });
-  for (const entry of commentary) { bindFileLinkContext(entry.node, workspaceContext()); streamMarkdown(entry.node, entry.content, transcript); }
+  for (const entry of commentary) { bindFileLinkContext(entry.node, context); streamMarkdown(entry.node, entry.content, transcript); }
 }
 /** One changed call redraws its own row; the summary redraws only when a member's name or status changed. */
 function patchToolGroup(node: HTMLElement, items: LiveTool[], before: LiveTool[]): void {
@@ -1939,7 +1954,8 @@ function patchToolGroup(node: HTMLElement, items: LiveTool[], before: LiveTool[]
 const CARDS_FOLD_MS = 1050;
 const TURN_FOLD_MS = 2350;
 const answerStarts = new WeakMap<Stream, { at: number; tools: number }>();
-let answerTimer = 0;
+/** One fold timer per live region ('main', or a side thread's id). */
+const answerTimers = new Map<string, number>();
 /** Milliseconds since the answer began (text after the last tool finished), or -1 while tools still run.
  * A tool that starts after narration resets it, so the trace unfolds again for the new steps. */
 function answerAge(current: Stream): number {
@@ -1950,10 +1966,10 @@ function answerAge(current: Stream): number {
   return Date.now() - mark.at;
 }
 /** Text frames may stop before a threshold passes; repaint once when the next one is due. */
-function scheduleAnswerFolds(age: number): void {
-  clearTimeout(answerTimer); answerTimer = 0;
+function scheduleAnswerFolds(age: number, key: string, repaint: () => void): void {
+  clearTimeout(answerTimers.get(key)); answerTimers.delete(key);
   if (age < 0 || age >= TURN_FOLD_MS) return;
-  answerTimer = window.setTimeout(() => { answerTimer = 0; renderStream(); }, (age < CARDS_FOLD_MS ? CARDS_FOLD_MS : TURN_FOLD_MS) - age + 16);
+  answerTimers.set(key, window.setTimeout(() => { answerTimers.delete(key); repaint(); }, (age < CARDS_FOLD_MS ? CARDS_FOLD_MS : TURN_FOLD_MS) - age + 16));
 }
 const toolRecords = new WeakMap<Stream, { revision: number; records: ToolActivity[] }>();
 /** Every tool change bumps the stream's revision, so text frames reuse the last scan. */
@@ -2043,26 +2059,31 @@ function renderAttachmentBar(): void {
   if (s && bar) bar.innerHTML = attachmentBar(s); else renderComposer();
 }
 /** Pending approvals for the open task, in the bar directly above the prompt. */
-let approvalGroupOpen = false;
+/** Tasks whose grouped approval bar is expanded (the main bar and the By the way panel's are separate). */
+const approvalGroupsOpen = new Set<string>();
 const approvalDetails = new Set<string>();
 function renderApprovalBar(): void {
   const host = document.querySelector<HTMLElement>('#approval-bar');
   if (!host) return;
-  const sessionId = state.sessionId, approvals = [...state.streams.get(sessionId)?.approvals ?? []].map(([id, text]) => ({ id, text }));
-  const html = approvalBarHtml(approvals, { busy: id => pendingApprovals.has(sessionId + id), expanded: approvalGroupOpen, details: new Set([...approvalDetails].filter(item => item.startsWith(sessionId)).map(item => item.slice(sessionId.length))) });
+  const html = taskApprovalsHtml(state.sessionId);
   if (host.innerHTML === html) return;
   host.innerHTML = html;
-  if (!approvals.length) approvalGroupOpen = false;
+  if (!state.streams.get(state.sessionId)?.approvals.size) approvalGroupsOpen.delete(state.sessionId);
+}
+/** A task's pending approvals as the bar above its prompt. */
+function taskApprovalsHtml(sessionId: string): string {
+  const approvals = [...state.streams.get(sessionId)?.approvals ?? []].map(([id, text]) => ({ id, text }));
+  return approvalBarHtml(approvals, { busy: id => pendingApprovals.has(sessionId + id), expanded: approvalGroupsOpen.has(sessionId), details: new Set([...approvalDetails].filter(item => item.startsWith(sessionId)).map(item => item.slice(sessionId.length))) });
 }
 async function respondApproval(sessionId: string, id: string, approved: boolean): Promise<void> {
   const current = state.streams.get(sessionId), approvalKey = sessionId + id;
   if (!current?.approvals.has(id) || pendingApprovals.has(approvalKey)) return;
-  pendingApprovals.add(approvalKey); renderApprovalBar();
+  pendingApprovals.add(approvalKey); renderApprovalBar(); btwPanel.event(sessionId, 'approval');
   try {
     await call('respond_approval', { sessionId, requestId: id, approved });
     current.approvals.delete(id); approvalDetails.delete(approvalKey); current.revision++;
     if (!current.approvals.size && current.status === 'Waiting for approval') current.status = 'Continuing task';
-  } finally { pendingApprovals.delete(approvalKey); current.revision++; renderStream(); renderNavigation(); renderApprovalBar(); }
+  } finally { pendingApprovals.delete(approvalKey); current.revision++; renderStream(); renderNavigation(); renderApprovalBar(); btwPanel.event(sessionId, 'approval'); }
 }
 function renderComposer(): void {
   refreshTeamProgress();
@@ -2096,7 +2117,7 @@ function renderComposer(): void {
   syncOverlayContext({ projectId: s.projectId, provider: s.provider, model: s.model || 'default', mode: s.mode, reasoningEffort: s.reasoningEffort ?? null });
   if (taskStage(s) === 'completed') { $('#composer-area').innerHTML = `<div class="board-completed-note">This task is settled.${state.view === 'conversation' ? '<button type="button" class="secondary-button" data-action="board-reopen">Reopen task</button>' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
   const previous = state.drafts.get(s.id) ?? '';
-  const running = isRunning(), behavior = approvalMode(s.provider, s.mode);
+  const running = isRunning();
   // A bot's next model can be picked mid-turn; it applies from the next turn.
   const team = teams.get(s.id), togglingTeam = teamToggles.has(s.id), modelLocked = (running && !team && !botForThread()) || togglingTeam;
   const target = remoteTargetFor(s), offline = remoteOffline(s), checking = remoteChecks.has(s.id), retrying = target ? remoteRetries.has(target.deviceId) : false;
@@ -2105,7 +2126,7 @@ function renderComposer(): void {
     : checking ? '<button type="button" class="secondary-button remote-checking" aria-label="Checking…" disabled>Checking…</button>'
     : offline ? `<button type="button" class="secondary-button remote-composer-retry" data-action="remote-retry" aria-label="${retrying ? 'Reconnecting…' : 'Retry connection'}" ${retrying ? 'disabled' : ''}>${icon('refresh')}<span>${retrying ? 'Reconnecting…' : 'Retry'}</span></button>`
     : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam ? 'disabled' : ''}>${icon('arrow')}</button>`;
-  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}"><div id="attachments" class="attachments">${attachmentBar(s)}</div><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-toolbar"><div class="composer-tools">${button('attach', 'Attach files for context', 'plus', '', 'type="button"')}<button type="button" id="model-picker-trigger" class="model-picker" data-action="model" aria-label="Choose harness and model" aria-description="${escape([modelLabel(s), teamModelLabel(s)].filter(Boolean).join(' '))}" aria-haspopup="dialog" aria-expanded="false" title="${team && !team.config.auto ? 'Choose team profile and models' : 'Choose harness and model'}" ${modelLocked ? 'disabled' : ''}>${triggerLogo(s)}<span class="model-detail" data-model-label>${escape(modelLabel(s, false))}</span><span class="model-effort" data-effort-label ${effortLabel(s) ? '' : 'hidden'}>${escape(effortLabel(s))}</span><span class="team-model-count" data-team-model-label ${teamModelLabel(s) ? '' : 'hidden'}>${teamModelLabel(s)}</span>${icon('down')}</button><span class="composer-separator"></span><button type="button" id="mode-picker-trigger" class="mode-picker" data-action="mode" data-mode="${behavior.id}" title="${escape(behavior.description)}" aria-haspopup="dialog" aria-expanded="false" ${running || togglingTeam ? 'disabled' : ''}>${icon(behavior.icon)}<span>${escape(behavior.label)}</span>${icon('down')}</button>${teamButton(s)}${tokenSaver.button(s.id)}</div>${running && !team ? `<button type="button" class="steer-button" data-action="steer" title="Send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${icon('spark')}<span>Steer</span></button>` : ''}${sendControl}</div></form>`;
+  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}"><div id="attachments" class="attachments">${attachmentBar(s)}</div><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-toolbar"><div class="composer-tools">${button('attach', 'Attach files for context', 'plus', '', 'type="button"')}${modelTriggerHtml(s, modelLocked, true)}<span class="composer-separator"></span>${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}</div>${running && !team ? `<button type="button" class="steer-button" data-action="steer" title="Send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${icon('spark')}<span>Steer</span></button>` : ''}${sendControl}</div></form>`;
   $('#composer-area').insertAdjacentHTML('afterbegin', worktrees.contextBar(s, newTaskView()));
   // Approvals sit above everything that rides on the prompt, the context bar included.
   $('#composer-area').insertAdjacentHTML('afterbegin', '<div id="bot-failover-bar"></div>');
@@ -2159,6 +2180,15 @@ function renderComposer(): void {
   }
   syncRemoteConnection();
   renderedRemoteKey = remoteComposerKey(s);
+}
+/** The composer's harness/model trigger. `main` marks the open thread's (its id and the labels refreshModelLabels updates). */
+function modelTriggerHtml(s: Session, locked: boolean, main = false): string {
+  const team = teams.get(s.id), teamLabel = teamModelLabel(s), effort = effortLabel(s);
+  return `<button type="button" ${main ? 'id="model-picker-trigger" ' : ''}class="model-picker" data-action="model" aria-label="Choose harness and model" aria-description="${escape([modelLabel(s), teamLabel].filter(Boolean).join(' '))}" aria-haspopup="dialog" aria-expanded="false" title="${team && !team.config.auto ? 'Choose team profile and models' : 'Choose harness and model'}" ${locked ? 'disabled' : ''}>${triggerLogo(s)}<span class="model-detail"${main ? ' data-model-label' : ''}>${escape(modelLabel(s, false))}</span><span class="model-effort"${main ? ' data-effort-label' : ''} ${effort ? '' : 'hidden'}>${escape(effort)}</span><span class="team-model-count"${main ? ' data-team-model-label' : ''} ${teamLabel ? '' : 'hidden'}>${teamLabel}</span>${icon('down')}</button>`;
+}
+function modeTriggerHtml(s: Session, disabled: boolean, main = false): string {
+  const behavior = approvalMode(s.provider, s.mode);
+  return `<button type="button" ${main ? 'id="mode-picker-trigger" ' : ''}class="mode-picker" data-action="mode" data-mode="${behavior.id}" title="${escape(behavior.description)}"${main ? '' : ` aria-label="Permissions: ${escape(behavior.label)}"`} aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}>${icon(behavior.icon)}<span>${escape(behavior.label)}</span>${icon('down')}</button>`;
 }
 function renderBrowserAttachments(): void {
   const target = document.querySelector('.browser-context-attachments'); if (!target) return;
@@ -2743,6 +2773,32 @@ async function addProject(path: string): Promise<void> {
   closeModal(); render(); if (generation !== state.generation) return; await refreshInspector();
   notify(`Opened ${added.name}`);
 }
+const SLASH_INSTRUCTIONS: Record<string, string> = {
+  init: 'Inspect this repository and create or update AGENTS.md with concise, accurate project instructions: setup, development commands, tests, architecture, and conventions. Preserve existing useful guidance.',
+  recap: 'Summarize this conversation concisely: objective, changes, important decisions, validation, and remaining work.',
+};
+function slashInstruction(action: string, argumentsText: string): string { return SLASH_INSTRUCTIONS[action] + (argumentsText ? '\n' + argumentsText : ''); }
+/** App slash commands that act only on the task they are given, so the By the way panel can run them for its side thread. */
+const SIDE_SAFE_SLASH = new Set(['usage', 'hooks', 'preferences', 'imports', 'conversations', 'plugins', 'jobs', 'export', 'fast', 'settings', 'theme']);
+/** Runs an app slash command typed in the By the way panel on its side thread. Returns text to send to the side
+ *  agent instead (commands that become a prompt), true when handled, false when `text` is not an app command;
+ *  commands that would act on the open thread are refused with a notice. */
+async function btwSlash(side: Session, text: string, toolbar: HTMLElement | null): Promise<boolean | string> {
+  if (!/^\/(?:[\p{L}\p{N}_:.-]+|\?)(?:\s|$)/u.test(text)) return false;
+  const resolved = await call<{ action: string | null; arguments: string }>('resolve_slash_command', { sessionId: side.id, text });
+  const action = resolved.action, args = resolved.arguments;
+  if (!action || action === 'btw') return false;
+  if (action === 'init' || action === 'recap') return slashInstruction(action, args);
+  if (action === 'model' || action === 'permissions') {
+    const trigger = toolbar?.querySelector<HTMLElement>(action === 'model' ? '.model-picker' : '.mode-picker');
+    if (trigger) await (action === 'model' ? showModel(trigger, side) : showMode(trigger, side));
+    return true;
+  }
+  if (action === 'rename' && args) { await call('update_session', { sessionId: side.id, title: args }); side.title = args; renderNavigation(); btwPanel.refresh(); return true; }
+  if (SIDE_SAFE_SLASH.has(action) || (action === 'plan' && (!args || ['on', 'off'].includes(args)))) { await performSlashAction(action, args, side); return true; }
+  notify(`Open the side thread as a full thread to use ${text.split(/\s/)[0]}.`);
+  return true;
+}
 async function performSlashAction(action: string, argumentsText: string, task: Session): Promise<void> {
   if (action.startsWith('console:')) { await openHarnessConsole(task, `/${action.slice(8)}${argumentsText ? ' ' + argumentsText : ''}`); return; }
   switch (action) {
@@ -2780,8 +2836,7 @@ async function performSlashAction(action: string, argumentsText: string, task: S
       if (action === 'plan' && argumentsText && !['on', 'off'].includes(argumentsText)) await instruction(task, argumentsText);
       break;
     }
-    case 'init': await instruction(task, 'Inspect this repository and create or update AGENTS.md with concise, accurate project instructions: setup, development commands, tests, architecture, and conventions. Preserve existing useful guidance.' + (argumentsText ? '\n' + argumentsText : '')); break;
-    case 'recap': await instruction(task, 'Summarize this conversation concisely: objective, changes, important decisions, validation, and remaining work.' + (argumentsText ? '\n' + argumentsText : '')); break;
+    case 'init': case 'recap': await instruction(task, slashInstruction(action, argumentsText)); break;
     case 'new': await createTask(); break;
     case 'model': await showModel($('#model-picker-trigger')); break;
     case 'permissions': await showMode($('#mode-picker-trigger')); break;
@@ -2820,7 +2875,7 @@ const runEndings = new Map<string, 'failed' | 'stopped' | 'limited'>();
  * stopped is ending, `stopping` keeps the hold from before, so the stop does not pause the others. */
 const sendFirst = new Map<string, { id: string; stopping?: boolean; hold?: HoldReason }>();
 function queueOf(id: string): QueuedMessage[] { return state.queues.get(id) ?? []; }
-function setQueue(id: string, entries: QueuedMessage[]): void { if (entries.length) state.queues.set(id, entries); else state.queues.delete(id); }
+function setQueue(id: string, entries: QueuedMessage[]): void { if (entries.length) state.queues.set(id, entries); else state.queues.delete(id); btwPanel.event(id, 'queue'); }
 function composerPayload(s: Session): { text: string; items: QueuedMessage['attachments'] } {
   const text = document.querySelector<HTMLTextAreaElement>('#prompt')?.value.trim() ?? '';
   return { text, items: [...attachments.list(s.id), ...state.attachments.map(path => ({ kind: 'path' as const, path }))] as QueuedMessage['attachments'] };
@@ -2899,6 +2954,7 @@ const steeringQueued = new Set<string>();
 async function steer(s: Session, text: string): Promise<void> {
   const message = sentPrompt(s, text, Date.now());
   if (s.id === state.sessionId) { state.messages = [...state.messages, message]; renderTranscript(true); }
+  btwPanel.sent(s.id, message);
   try {
     const result = await call<{ id?: string; mode?: SteerMode } | null>('steer_task', { sessionId: s.id, text });
     const known = result?.id ? steers.get(result.id) : undefined;
@@ -2906,6 +2962,7 @@ async function steer(s: Session, text: string): Promise<void> {
   } catch (error) {
     dropMirrorPrompt(s.id, message);
     if (s.id === state.sessionId) { state.messages = state.messages.filter(item => item !== message); renderTranscript(true); }
+    btwPanel.unsent(s.id, message);
     throw error;
   }
 }
@@ -2923,6 +2980,7 @@ function steerEvent(event: AgentEvent): void {
   steers.set(data.id, { sessionId: event.sessionId, text: event.text, ...known, ...(shown !== undefined ? { messageId: shown } : {}), mode: data.mode ?? known?.mode ?? 'live', status: data.status });
   if (data.status === 'failed') void requeueSteer(event.sessionId, event.text || known?.text || '', (event.data as { reason?: string } | undefined)?.reason || 'The agent could not take it during this turn.');
   if (event.sessionId === state.sessionId && (known?.messageId !== undefined || shown !== undefined)) renderTranscript(true);
+  btwPanel.event(event.sessionId, 'steer');
 }
 /** Queued entries whose steer did not land, with the reason (the queue shows "Not steered"). */
 const notSteered = new Map<string, string>();
@@ -2960,27 +3018,31 @@ async function steerFromComposer(): Promise<void> {
     return enqueueFromComposer();
   }
   clearComposerNote(s); clearComposer(s); renderComposer();
+  await steerOrQueue(s, text);
+}
+/** Steers `text` into the running turn of `s`; whatever cannot steer is queued, or put back in its composer. */
+async function steerOrQueue(s: Session, text: string): Promise<void> {
   // A mirror whose start has not attached has no run to steer yet: the message waits in the queue.
   const starting = remoteStart(s.id);
   if (starting && starting.stage !== 'error') {
     const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: [] }).catch(() => null);
     if (entry) { setQueue(s.id, [...queueOf(s.id), entry]); notify(`${starting.device} is still starting this task; your message is queued for after it.`); }
     else restoreComposer(s, text, [], []);
-    if (s.id === state.sessionId) renderComposer();
+    refreshComposer(s);
     return;
   }
   try {
     await steer(s, text);
   } catch (error) {
     // A host that has not approved this device would refuse it queued too: say so, keep the text.
-    if (remoteRefusal(s, error)) { restoreComposer(s, text, [], []); if (s.id === state.sessionId) renderComposer(); return; }
+    if (remoteRefusal(s, error)) { restoreComposer(s, text, [], []); refreshComposer(s); return; }
     // Not taken mid-turn: keep it for after the run instead of losing it.
     const reason = error instanceof Error ? error.message : String(error);
     notify(/\bqueued\b/i.test(reason) ? reason : `${reason} Queued instead.`);
     const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: [] }).catch(() => null);
     if (entry) notSteered.set(entry.id, reason);
     if (entry) setQueue(s.id, [...queueOf(s.id), entry]); else restoreComposer(s, text, [], []);
-    if (s.id === state.sessionId) renderComposer();
+    refreshComposer(s);
   }
 }
 /** Steers a queued entry; it leaves the queue only once the running turn has taken it. */
@@ -2989,29 +3051,31 @@ async function steerQueued(s: Session, id: string): Promise<void> {
   if (entry.attachments.length) { notify('Queued messages with attachments are sent after the run.'); return; }
   const starting = remoteStart(s.id);
   if (starting && starting.stage !== 'error') { notify(`${starting.device} is still starting this task; the message stays queued.`); return; }
-  steeringQueued.add(id); renderComposer();
+  steeringQueued.add(id); refreshComposer(s);
   try {
     await steer(s, entry.text);
     await call('queue_remove', { id }); setQueue(s.id, queueOf(s.id).filter(item => item.id !== id));
-  } finally { steeringQueued.delete(id); if (s.id === state.sessionId) renderComposer(); }
+  } finally { steeringQueued.delete(id); refreshComposer(s); }
 }
-async function saveQueueEdit(): Promise<void> {
-  const s = session(); const entry = s && queueOf(s.id).find(item => item.id === state.queueEditing); if (!s || !entry) return;
+async function saveQueueEdit(s = session()): Promise<void> {
+  const entry = s && queueOf(s.id).find(item => item.id === state.queueEditing); if (!s || !entry) return;
   const text = document.querySelector<HTMLTextAreaElement>('.queue-edit')?.value.trim() ?? '';
   const updated = await call<QueuedMessage>('queue_update', { id: entry.id, text, attachments: entry.attachments });
-  setQueue(s.id, queueOf(s.id).map(item => item.id === entry.id ? updated : item)); state.queueEditing = ''; renderComposer();
+  setQueue(s.id, queueOf(s.id).map(item => item.id === entry.id ? updated : item)); state.queueEditing = ''; refreshComposer(s);
 }
+/** Redraws the composer that shows `s`: the main one, or the By the way panel's. */
+function refreshComposer(s: Session): void { if (s.id === state.sessionId) renderComposer(); else btwPanel.refresh(); }
 async function queueAction(action: string, element: HTMLElement): Promise<void> {
-  const s = session(); if (!s) return;
+  const s = actionTask(element); if (!s) return;
   const id = element.closest<HTMLElement>('[data-queue-id]')?.dataset.queueId ?? '';
   if (action === 'queue-steer') return steerQueued(s, id).catch(error => { if (remoteRefusal(s, error)) return; if (!isRunning(s.id)) run(dispatchQueue(s.id)); throw error; });
   if (action === 'queue-send-now') return sendQueuedNow(s, id);
-  if (action === 'queue-edit') { state.queueEditing = id; renderComposer(); document.querySelector<HTMLTextAreaElement>('.queue-edit')?.focus(); return; }
-  if (action === 'queue-cancel') { state.queueEditing = ''; renderComposer(); return; }
-  if (action === 'queue-save') return saveQueueEdit();
-  if (action === 'queue-remove') { await call('queue_remove', { id }); setQueue(s.id, queueOf(s.id).filter(item => item.id !== id)); renderComposer(); return; }
-  if (action === 'queue-up' || action === 'queue-down') { setQueue(s.id, await call<QueuedMessage[]>('queue_reorder', { sessionId: s.id, ids: moved(queueOf(s.id), id, action === 'queue-up' ? -1 : 1) })); renderComposer(); return; }
-  if (action === 'queue-resume') { state.queueHolds.delete(s.id); renderComposer(); await dispatchQueue(s.id); }
+  if (action === 'queue-edit') { state.queueEditing = id; refreshComposer(s); document.querySelector<HTMLTextAreaElement>('.queue-edit')?.focus(); return; }
+  if (action === 'queue-cancel') { state.queueEditing = ''; refreshComposer(s); return; }
+  if (action === 'queue-save') return saveQueueEdit(s);
+  if (action === 'queue-remove') { await call('queue_remove', { id }); setQueue(s.id, queueOf(s.id).filter(item => item.id !== id)); refreshComposer(s); return; }
+  if (action === 'queue-up' || action === 'queue-down') { setQueue(s.id, await call<QueuedMessage[]>('queue_reorder', { sessionId: s.id, ids: moved(queueOf(s.id), id, action === 'queue-up' ? -1 : 1) })); refreshComposer(s); return; }
+  if (action === 'queue-resume') { state.queueHolds.delete(s.id); refreshComposer(s); await dispatchQueue(s.id); }
 }
 /** Sends this entry now: right away when idle, into the running turn when it can steer, otherwise after stopping the run. */
 async function sendQueuedNow(s: Session, id: string): Promise<void> {
@@ -3072,13 +3136,18 @@ async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void>
   let sent: Message | undefined;
   try {
     const files = await Promise.all(paths.map(async path => { const content = await projectFileText(task, path); return `\n\nFile context: ${path}\n\`\`\`\n${content.slice(0, 32768)}\n\`\`\``; }));
-    const content = entry.text + files.join('') + attachments.contextFor(promptItems);
+    // A side thread's queued follow-up carries the main thread's news like any /btw message.
+    const btw = btwMainOf(task.id), context = btw ? await btwContext(btw.main, btw.link) : undefined;
+    const content = entry.text + files.join('') + attachments.contextFor(promptItems) + (context?.text ?? '');
     const sentAt = Date.now();
     task.lastPromptAt = sentAt; task.draft = false; pendingPromptActivity.set(task.id, sentAt);
     stream(task.id).lastPromptAt = sentAt; stream(task.id).status = 'Starting agent'; task.status = 'running'; task.taskStage = 'in_progress'; task.completedAt = null;
     sent = sentPrompt(task, content, sentAt);
     if (task.id === state.sessionId) { state.messages = [...state.messages, sent]; render(); } else renderNavigation();
+    btwPanel.sent(task.id, sent);
     await call(teams.get(task.id) && !task.remoteDevice ? 'architect_start' : 'send_message', { sessionId: task.id, text: content, imageIds: attachments.imageIds(promptItems), moodboardIds: [] });
+    // Recorded once sent, unless a New side thread replaced the link meanwhile.
+    if (btw && context && readLinks(localStorage)[btw.main.id]?.sideId === task.id) writeLink(localStorage, btw.main.id, { ...readLinks(localStorage)[btw.main.id], seenId: context.link.seenId });
   } catch (error) {
     // Put it back at the front and hold, so nothing is lost or sent out of order.
     pendingPromptActivity.delete(task.id); state.streams.delete(task.id); task.status = 'idle'; if (sent) dropMirrorPrompt(task.id, sent);
@@ -3328,14 +3397,72 @@ async function send(): Promise<void> {
 }
 // /btw side threads (docs/btw.md): a second task beside this one, fed what the main thread said.
 const btwPanel = new BtwPanel({
-  call, report, userHtml: (content, id) => userContent(content, id),
+  call, report,
   side: () => { const link = btwLink(state.sessionId), side = link && state.sessions.find(task => task.id === link.sideId); return side && { session: side, hiddenThrough: link.hiddenThrough ?? 0 }; },
-  live: sideId => {
+  running: sideId => isRunning(sideId),
+  streaming: sideId => state.streams.has(sideId) || finishingStreams.has(sideId),
+  waiting: sideId => {
     const live = state.streams.get(sideId), status = state.sessions.find(task => task.id === sideId)?.status;
-    return { text: live?.text ?? '', running: isRunning(sideId), waiting: Boolean(live?.approvals.size || live?.inputs.size) || status === 'waiting' || status === 'waiting_approval' };
+    return Boolean(live?.approvals.size || live?.inputs.size) || status === 'waiting' || status === 'waiting_approval';
   },
   mainRunning: () => isRunning(),
+  draft: sideId => state.drafts.get(sideId) ?? '',
+  setDraft: (sideId, text) => { if (text) state.drafts.set(sideId, text); else state.drafts.delete(sideId); },
+  visible: (sideId, messages) => visibleMessages(sideId, messages),
+  renderRows: (log, region, side, visible, all, follow) => {
+    const toolViews = captureTools(log), groupViews = captureToolGroups(log), turnViews = captureTurns(log), changeViews = captureChangeCards(log);
+    const previous = new Map([...log.querySelectorAll<HTMLElement>('[data-markdown]')].map(node => [node.dataset.markdown!, node]));
+    for (const row of [...log.children]) if (row !== region) row.remove();
+    region.insertAdjacentHTML('beforebegin', turnRowsHtml(side.id, visible, { messages: all, provider: side.provider }));
+    paintSavedMarkdown(log, all, previous, workspaceContext(side), follow);
+    restoreTurns(log, turnViews); restoreToolGroups(log, groupViews); restoreChangeCards(log, changeViews); restoreTools(log, toolViews);
+  },
+  paintStream: (region, sideId, log) => paintStream(region, sideId, log),
+  aboveHtml: side => {
+    const running = isRunning(side.id);
+    return `<div class="btw-approvals">${taskApprovalsHtml(side.id)}</div>` + queuePanel({ entries: state.queues.get(side.id) ?? [], hold: state.queueHolds.get(side.id) ?? null, running, steerable: !teams.get(side.id), sendable: true, editingId: state.queueEditing || null, busy: state.queueBusy.has(side.id), steering: steeringQueued, notSteered, agentName: provider(side.provider)?.name });
+  },
+  toolsHtml: shown => {
+    // Before the side thread exists, the choices apply to the one /btw creates (btwDraftTask).
+    const side = shown ?? btwDraftTask();
+    if (!side) return `<div class="composer-tools"></div><button type="submit" class="send-button btw-send" aria-label="Send to side thread" title="Send to side thread (${shortcut('Enter')})">${icon('arrow')}</button>`;
+    // A pick made while /btw creates the side thread could miss it, so the pickers wait.
+    const running = isRunning(side.id), busy = configuringSessions.has(side.id) || btwSending.has(state.sessionId);
+    const send = running
+      ? `${teams.get(side.id) ? '' : `<button type="button" class="steer-button" data-btw="steer" title="Send into the side thread's running turn (${shortcut('Enter')})" aria-label="Steer the side thread">${icon('spark')}<span>Steer</span></button>`}<button type="button" class="send-button stop-button" data-action="stop" title="Stop the side thread" aria-label="Stop side thread">${icon('stop')}</button>`
+      : `<button type="submit" class="send-button btw-send" aria-label="Send to side thread" title="Send to side thread (${shortcut('Enter')})" ${busy ? 'disabled' : ''}>${icon('arrow')}</button>`;
+    return `<div class="composer-tools">${modelTriggerHtml(side, running || busy)}<span class="composer-separator"></span>${modeTriggerHtml(side, running || busy)}</div>${send}`;
+  },
+  menuBusy: root => Boolean(root.querySelector('[aria-expanded="true"]') || (pendingMenuOpen && root.contains(pendingMenuOpen.anchor))),
+  mountPickers: (textarea, side) => {
+    const draft = () => state.drafts.set(side.id, textarea.value);
+    const slash = mountSlashCommands(textarea, {
+      contextKey: () => `${side.id}:${side.provider}:${workspacePath()}`,
+      provider: () => state.sessions.find(task => task.id === side.id)?.provider ?? side.provider,
+      snapshot: () => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: side.id, cachedOnly: true }),
+      load: force => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: side.id, force }),
+      select: draft,
+    });
+    const mentions = mountFileMentions(textarea, {
+      contextKey: () => `${side.id}:${workspacePath()}`,
+      search: query => call<MentionEntry[]>('search_files', { projectId: side.projectId, sessionId: side.id, query, limit: 40 }),
+      select: draft,
+    });
+    return () => { slash.dispose(); mentions.dispose(); };
+  },
+  bindActions: root => { bindMessageActions(root, {
+    content: (sessionId, key) => {
+      const live = state.streams.get(sessionId) ?? finishingStreams.get(sessionId)?.stream;
+      if (key === 'live') return live?.text;
+      const saved = btwPanel.message(Number(key));
+      return saved && saved.id > 0 && ['user', 'assistant'].includes(saved.role) ? call<string>('get_message_content', { sessionId, messageId: saved.id }) : saved?.content;
+    }, onFork: (sessionId, messageId) => forkAtMessage(sessionId, messageId), onEdit: editAtMessage, report,
+  }); },
   send: text => sendBtw(text),
+  queue: (side, text) => btwPanelQueue(side, text),
+  // A team takes messages between runs, as in the main composer.
+  steer: (side, text) => teams.get(side.id) ? btwPanelQueue(side, text) : steerOrQueue(side, text),
+  command: (side, text) => btwSlash(side, text, document.querySelector('.btw-panel .btw-toolbar')),
   openFull: sideId => run(selectSession(sideId, true)),
   newThread: () => { writeLink(localStorage, state.sessionId, null); renderInspector(); btwPanel.focus(); },
   close: () => { state.inspector = false; renderInspector(); },
@@ -3344,6 +3471,49 @@ const btwPanel = new BtwPanel({
     prompt.value = prompt.value.trim() ? `${prompt.value.trimEnd()}\n\n${text}` : text; state.drafts.set(state.sessionId, prompt.value); resizePrompt();
   },
 });
+async function btwPanelQueue(side: Session, text: string): Promise<void> {
+  const entry = await call<QueuedMessage>('queue_add', { sessionId: side.id, text, attachments: [] });
+  setQueue(side.id, [...queueOf(side.id), entry]);
+  // The run may have ended while this was saved: send it now.
+  if (!isRunning(side.id)) run(dispatchQueue(side.id));
+}
+/* Model, effort and permissions picked in the panel before a side thread exists: kept per main thread
+ * on a stand-in task and applied to the side thread createBtw makes, before its first message. */
+const BTW_DRAFT = 'btw-draft:';
+type BtwDraft = Session & { connection?: string | null };
+const btwDrafts = new Map<string, BtwDraft>();
+const isBtwDraft = (task: Session): boolean => task.id.startsWith(BTW_DRAFT);
+function btwDraftTask(): BtwDraft | undefined {
+  const main = session();
+  return main && (btwDrafts.get(main.id) ?? { ...main, id: BTW_DRAFT + main.id, status: 'idle', contextUsage: null, title: 'Side thread' });
+}
+/** Records a pick on the stand-in task; the next side thread starts with it. */
+function saveBtwDraft(task: Session, change: Partial<BtwDraft>): void {
+  const mainId = task.id.slice(BTW_DRAFT.length);
+  // createBtw is applying (then clearing) the picks; a late pick from a picker opened before the send would vanish.
+  if (btwSending.has(mainId)) throw new Error('The side thread is starting. Change it once it has started.');
+  btwDrafts.set(mainId, { ...(btwDrafts.get(mainId) ?? task), ...change });
+  btwPanel.refresh();
+}
+/** Gives a new side thread the choices made in the panel before it existed; an error names the setting that failed.
+ *  The draft stays until createBtw has finished, so a failure keeps the choices for another try. */
+async function applyBtwDraft(mainId: string, side: Session): Promise<Session> {
+  const draft = btwDrafts.get(mainId);
+  if (!draft) return side;
+  const step = async <T>(setting: string, work: () => Promise<T>): Promise<T> => {
+    try { return await work(); } catch (error) { throw new Error(`The side thread could not use the ${setting} you picked. ${errorText(error)}`); }
+  };
+  let current = side;
+  if (draft.provider !== current.provider || (draft.model || 'default') !== (current.model || 'default')) current = await step('model', () => call<Session>('configure_session', { sessionId: current.id, provider: draft.provider, model: draft.model }));
+  if (draft.connection !== undefined && draft.connection !== (namedConnections.tasks[current.id] ?? null)) namedConnections = await step('connection', () => call<typeof namedConnections>('connection_assign', { sessionId: current.id, connectionId: draft.connection }));
+  if ((draft.reasoningEffort ?? null) !== (current.reasoningEffort ?? null)) current = await step('reasoning effort', () => call<Session>('set_reasoning_effort', { sessionId: current.id, reasoningEffort: draft.reasoningEffort ?? null }));
+  if (draft.mode !== current.mode) { await step('permissions', () => call('update_session', { sessionId: current.id, mode: draft.mode })); current = { ...current, mode: draft.mode }; }
+  return current;
+}
+/** The side thread the By the way panel shows for the open thread. */
+function btwSideTask(): Session | undefined { const link = btwLink(state.sessionId); return link && state.sessions.find(task => task.id === link.sideId); }
+/** The task a composer control acts on: the By the way panel's side thread inside that panel, else the open thread. */
+function actionTask(element: Element): Session | undefined { return element.closest('.btw-panel') ? btwSideTask() ?? btwDraftTask() : session(); }
 /** The side thread linked to a main thread. An archived or unlisted one is not reused (the next /btw
  *  starts fresh); the link is never erased here, since a session list can briefly lag a new side thread. */
 function btwLink(mainId: string): BtwLink | undefined {
@@ -3387,14 +3557,27 @@ async function createBtw(main: Session, prompt: string): Promise<BtwLink> {
     const last = [...page.messages].reverse().find(m => m.id > 0 && (m.role === 'user' || m.role === 'assistant'));
     if (!last) throw new Error('Send a first message in this task before asking on the side.');
     side = await call<Session>('fork_session_at_message', { sessionId: main.id, messageId: last.id });
-    const copied = await call<MessagePage>('get_messages', { sessionId: side.id });
-    link = { sideId: side.id, seenId: last.id, hiddenThrough: Math.max(0, ...copied.messages.map(m => m.id)) };
+    link = { sideId: side.id, seenId: last.id, hiddenThrough: 0 };
   } else {
     side = await call<Session>('create_session', { projectId: main.projectId, provider: main.provider, model: main.model, mode: main.mode });
     link = { sideId: side.id, seenId: 0 };
   }
   const title = sideTitle(prompt);
-  await call('update_session', { sessionId: side.id, title });
+  try {
+    if (main.worktreePath) {
+      const copied = await call<MessagePage>('get_messages', { sessionId: side.id });
+      link = { ...link, hiddenThrough: Math.max(0, ...copied.messages.map(m => m.id)) };
+    }
+    side = await applyBtwDraft(main.id, side);
+    await call('update_session', { sessionId: side.id, title });
+  } catch (error) {
+    // Never leave a half-set-up task behind; the panel keeps its picks and the /btw text comes back.
+    const created = side;
+    await call('delete_session', { sessionId: created.id }).catch(() => undefined);
+    state.sessions = state.sessions.filter(task => task.id !== created.id);
+    throw error;
+  }
+  btwDrafts.delete(main.id);
   state.sessions = [{ ...side, title }, ...state.sessions.filter(task => task.id !== side.id)];
   writeLink(localStorage, main.id, link); renderNavigation();
   return link;
@@ -3406,8 +3589,8 @@ function sendBtw(text: string): Promise<void> {
   const refusal = btwRefusal(main);
   if (refusal) return Promise.reject(new Error(refusal));
   const next = (btwSending.get(main.id) ?? Promise.resolve()).catch(() => undefined).then(() => deliverBtw(main, text));
-  btwSending.set(main.id, next);
-  void next.catch(() => undefined).finally(() => { if (btwSending.get(main.id) === next) btwSending.delete(main.id); });
+  btwSending.set(main.id, next); btwPanel.refresh();
+  void next.catch(() => undefined).finally(() => { if (btwSending.get(main.id) === next) btwSending.delete(main.id); btwPanel.refresh(); });
   return next;
 }
 /** Sends to the side thread with the main thread's news since its last message. */
@@ -3421,16 +3604,11 @@ async function deliverBtw(main: Session, text: string): Promise<void> {
   if (showing()) renderInspector();
   let sentLink: BtwLink | undefined;
   try {
-    const page = await call<MessagePage>('get_messages', { sessionId: main.id });
-    const strip = (content: string) => { const index = content.search(CONTEXT_BOUNDARY); return index < 0 ? content : content.slice(0, index); };
-    // Only the newest page came back: older unseen history is reported as left out.
-    const gap = page.hasOlder && (page.messages[0]?.id ?? 0) > link.seenId;
-    const context = mainContext({ title: main.title, status: isRunning(main.id) ? 'running' : main.status },
-      page.messages.map(m => ({ ...m, content: m.role === 'user' ? strip(m.content) : m.content })), link.seenId, state.streams.get(main.id)?.text ?? '', CONTEXT_LIMIT, gap);
+    const context = await btwContext(main, link);
     const content = text + context.text;
-    sentLink = { ...link, seenId: context.seenId };
+    sentLink = context.link;
     writeLink(localStorage, main.id, sentLink);
-    if (showing()) btwPanel.sent(side.id, content);
+    if (showing()) btwPanel.sent(side.id, sentPrompt(side, content, Date.now()));
     await call('send_message', { sessionId: side.id, text: content, imageIds: [], moodboardIds: [] });
   } catch (error) {
     state.streams.delete(side.id); side.status = 'idle';
@@ -3440,6 +3618,24 @@ async function deliverBtw(main: Session, text: string): Promise<void> {
     if (showing()) { renderInspector(); void btwPanel.reload(); }
     throw error;
   }
+}
+/** The `Main thread context:` block for the side thread's next message, and the link that records it as seen. */
+async function btwContext(main: Session, link: BtwLink): Promise<{ text: string; link: BtwLink }> {
+  const page = await call<MessagePage>('get_messages', { sessionId: main.id });
+  const strip = (content: string) => { const index = content.search(CONTEXT_BOUNDARY); return index < 0 ? content : content.slice(0, index); };
+  // Only the newest page came back: older unseen history is reported as left out.
+  const gap = page.hasOlder && (page.messages[0]?.id ?? 0) > link.seenId;
+  const context = mainContext({ title: main.title, status: isRunning(main.id) ? 'running' : main.status },
+    page.messages.map(m => ({ ...m, content: m.role === 'user' ? strip(m.content) : m.content })), link.seenId, state.streams.get(main.id)?.text ?? '', CONTEXT_LIMIT, gap);
+  return { text: context.text, link: { ...link, seenId: context.seenId } };
+}
+/** The main thread a side thread was opened beside, with its link. */
+function btwMainOf(sideId: string): { main: Session; link: BtwLink } | undefined {
+  for (const [mainId, link] of Object.entries(readLinks(localStorage))) {
+    const main = link.sideId === sideId ? state.sessions.find(task => task.id === mainId) : undefined;
+    if (main) return { main, link };
+  }
+  return undefined;
 }
 async function finishResponse(sessionId: string, finishing: FinishingStream): Promise<void> {
   const current = () => finishingStreams.get(sessionId) === finishing && !state.streams.has(sessionId);
@@ -3621,6 +3817,7 @@ function onAgent(event: AgentEvent): void {
       current.inputs.get(requestId)?.dispose(); current.inputs.delete(requestId); current.revision++;
       if (!current.inputs.size && current.status === 'Waiting for your answer') updateStreamStatus(current, 'Continuing task');
       if (event.sessionId === state.sessionId) renderStream();
+      btwPanel.event(event.sessionId, 'input');
       scheduleNavigation();
     }, Boolean(s?.remoteDevice)));
     current.revision++; updateStreamStatus(current, 'Waiting for your answer');
@@ -4162,60 +4359,67 @@ function pickerTeamDetail(profile: TeamLibrary['profiles'][number]): string {
   const lead = provider(architect.provider)?.models.find(model => model.id === architect.model)?.name ?? (architect.model && architect.model !== 'default' ? architect.model : `${provider(architect.provider)?.name ?? architect.provider} default`);
   return `${lead} · ${config.workers.length} ${config.workers.length === 1 ? 'worker' : 'workers'}`;
 }
-async function showModel(anchor: HTMLElement): Promise<void> {
+/** `target`: the task whose composer holds `anchor` (the open thread's, or the By the way panel's side thread). */
+async function showModel(anchor: HTMLElement, target = session()): Promise<void> {
   if (pendingMenuOpen?.anchor === anchor) { cancelPendingMenu(); return; }
   if (modelPickerCleanup) { closeModelPicker(); return; }
-  const selected = session(); if (!selected || configuringSessions.has(selected.id)) return;
+  const selected = target; if (!selected || configuringSessions.has(selected.id)) return;
+  // A side thread's picker acts on the side thread only, and only while the panel still shows it.
+  const inPanel = selected.id !== state.sessionId, current = () => inPanel ? (btwSideTask() ?? btwDraftTask())?.id === selected.id : selected.id === state.sessionId;
   if (teams.get(selected.id) && !selected.remoteDevice && !teams.get(selected.id)?.config.auto) { await showArchitectSetup(anchor); return; }
-  const botNext = Boolean(botForThread());
-  if (isRunning() && !botNext) return;
+  const botNext = !inPanel && Boolean(botForThread());
+  if (isRunning(selected.id) && !botNext) return;
   closeProjectPicker();
   closeChoiceMenu();
   const { epoch, release } = beginMenuOpen(anchor);
   const generation = state.generation;
   const [{ openModelPicker }, library] = await Promise.all([import('./model-picker'), call<TeamLibrary>('architect_profiles').catch(() => null), call<import('./connections').ConnectionSnapshot>('connections_list').then(snapshot => { namedConnections = snapshot; }).catch(() => undefined)]).finally(release);
-  if (epoch !== menuEpoch || modelPickerCleanup || !anchor.isConnected || selected.id !== state.sessionId || generation !== state.generation || (isRunning() && !botNext)) return;
-  const device = composerDevice();
-  const named = library && !device ? namedTeams(library) : [];
+  if (epoch !== menuEpoch || modelPickerCleanup || !anchor.isConnected || !current() || generation !== state.generation || (isRunning(selected.id) && !botNext)) return;
+  const device = inPanel ? undefined : composerDevice();
+  // A side thread not created yet has no team to configure.
+  const named = library && !device && !isBtwDraft(selected) ? namedTeams(library) : [];
   modelPickerCleanup = openModelPicker({
     teams: named.map(profile => ({ id: profile.id, name: profile.name, detail: pickerTeamDetail(profile), provider: profile.setup.architect.provider, roster: [profile.setup.architect.provider, ...profile.setup.config.workers.map(worker => worker.provider)], selected: isTeam(teams.get(selected.id)?.config, profile) })),
     onTeamSelect: async id => {
       const profile = named.find(team => team.id === id);
       if (!profile) throw new Error('This agent team no longer exists.');
-      if (selected.id !== state.sessionId || generation !== state.generation || isRunning()) throw new Error('Select the task again to change its model.');
+      if (!current() || generation !== state.generation || isRunning(selected.id)) throw new Error('Select the task again to change its model.');
       configuringSessions.add(selected.id);
       try {
         const saved = await call<TeamSnapshot | null>('architect_configure', { sessionId: selected.id, config: profile.setup.config, architect: profile.setup.architect, profileId: profile.id });
         onArchitect(saved ?? { sessionId: selected.id, removed: true });
         await reloadSessions();
-        if (selected.id === state.sessionId) { renderComposer(); renderHeader(); }
+        if (inPanel) btwPanel.refresh(); else if (selected.id === state.sessionId) { renderComposer(); renderHeader(); }
       } finally { configuringSessions.delete(selected.id); }
     },
     anchor, providers: device ? [] : state.providers, current: { provider: selected.provider, model: selected.model || 'default', reasoningEffort: selected.reasoningEffort ?? null, contextUsage: selected.contextUsage },
     canSwitchProvider: true,
     // Connections are this computer's; a task on another computer uses that host's setup.
-    connections: device ? [] : namedConnections.connections, currentConnection: device ? null : taskConnection(selected)?.id ?? null,
+    connections: device ? [] : namedConnections.connections, currentConnection: device ? null : isBtwDraft(selected) ? (selected as BtwDraft).connection ?? null : taskConnection(selected)?.id ?? null,
     loadModels: device ? id => remoteModels(device, id) : loadModels, loadProviders: device ? () => remoteProviders(device) : undefined,
     recent: device ? undefined : recentModels, onClose: () => { modelPickerCleanup = undefined; },
     onEffortSelect: async reasoningEffort => {
-      if (selected.id !== state.sessionId || generation !== state.generation || isRunning()) throw new Error('Select the task again to change its reasoning effort.');
+      if (!current() || generation !== state.generation || isRunning(selected.id)) throw new Error('Select the task again to change its reasoning effort.');
+      if (isBtwDraft(selected)) { saveBtwDraft(selected, { reasoningEffort }); return; }
       configuringSessions.add(selected.id);
       try {
         const updated = await call<Session>('set_reasoning_effort', { sessionId: selected.id, reasoningEffort });
         const index = state.sessions.findIndex(s => s.id === selected.id); if (index >= 0) state.sessions[index] = updated;
-        if (selected.id === state.sessionId) {
+        if (inPanel) btwPanel.refresh();
+        else if (selected.id === state.sessionId) {
           refreshModelLabels();
           syncOverlayContext({ projectId: updated.projectId, provider: updated.provider, model: updated.model || 'default', mode: updated.mode, reasoningEffort: updated.reasoningEffort ?? null });
         }
       } finally { configuringSessions.delete(selected.id); }
     },
     onSelect: async (providerId, model, connection) => {
-      if (botNext && isRunning(selected.id) && selected.id === state.sessionId) {
+      if (botNext && isRunning(selected.id) && current()) {
         const changed = providerId !== selected.provider || (model || 'default') !== (selected.model || 'default');
         botThread.setNextModel(selected.id, changed ? { provider: providerId, model, label: model && model !== 'default' ? model : provider(providerId)?.name ?? providerId } : undefined);
         renderHeader(); return;
       }
-      if (selected.id !== state.sessionId || generation !== state.generation || isRunning()) throw new Error('Select the task again to change its model.');
+      if (!current() || generation !== state.generation || isRunning(selected.id)) throw new Error('Select the task again to change its model.');
+      if (isBtwDraft(selected)) { saveBtwDraft(selected, { provider: providerId, model, reasoningEffort: null, connection: connection ?? null }); return; }
       configuringSessions.add(selected.id);
       try {
         // A plain model leaves a named agent team, back to a single agent.
@@ -4236,7 +4440,8 @@ async function showModel(anchor: HTMLElement): Promise<void> {
           if (!localStorage.getItem('pandacode.defaultProvider')) state.defaultProvider = providerId;
           localStorage.setItem('pandacode.provider', providerId); localStorage.setItem('pandacode.model.' + providerId, model);
         } else localChoice = undefined;
-        if (selected.id === state.sessionId && generation === state.generation) {
+        if (inPanel) { if (current()) btwPanel.harnessChanged(); }
+        else if (selected.id === state.sessionId && generation === state.generation) {
           if (providerId !== selected.provider) {
             // The harness change is already durable; a transcript refresh error
             // must not report the selection itself as failed or restore stale controls.
@@ -4339,19 +4544,22 @@ async function showChoices(anchor: HTMLElement, options: ChoiceOptions): Promise
     options.afterClose?.();
   } });
 }
-async function showMode(anchor: HTMLElement): Promise<void> {
-  const s = session(); if (!s || isRunning() || configuringSessions.has(s.id)) return;
-  const generation = state.generation;
+async function showMode(anchor: HTMLElement, target = session()): Promise<void> {
+  const s = target; if (!s || isRunning(s.id) || configuringSessions.has(s.id)) return;
+  const generation = state.generation, inPanel = s.id !== state.sessionId;
+  const current = () => inPanel ? (btwSideTask() ?? btwDraftTask())?.id === s.id : s.id === state.sessionId;
   const modes = approvalModes(s.provider, s.mode);
   await showChoices(anchor, { title: 'Permissions', width: 320, items: modes.map(mode => ({ ...mode, selected: s.mode === mode.id })), onSelect: async id => {
-    if (s.id !== state.sessionId || generation !== state.generation || isRunning() || configuringSessions.has(s.id)) throw new Error('Select the task again to change its permissions.');
+    if (!current() || generation !== state.generation || isRunning(s.id) || configuringSessions.has(s.id)) throw new Error('Select the task again to change its permissions.');
     const chosen = modes.find(mode => mode.id === id); if (!chosen) throw new Error('Choose an available approval behavior.');
+    if (isBtwDraft(s)) { saveBtwDraft(s, { mode: id as Mode }); return; }
     configuringSessions.add(s.id);
     try {
       await call('update_session', { sessionId: s.id, mode: id as Mode });
-      const current = state.sessions.find(item => item.id === s.id); if (current) current.mode = id as Mode;
-      if (s.id === state.sessionId) {
-        if (current) syncOverlayContext({ projectId: current.projectId, provider: current.provider, model: current.model || 'default', mode: current.mode, reasoningEffort: current.reasoningEffort ?? null });
+      const saved = state.sessions.find(item => item.id === s.id); if (saved) saved.mode = id as Mode;
+      if (inPanel) btwPanel.refresh();
+      else if (s.id === state.sessionId) {
+        if (saved) syncOverlayContext({ projectId: saved.projectId, provider: saved.provider, model: saved.model || 'default', mode: saved.mode, reasoningEffort: saved.reasoningEffort ?? null });
         const trigger = document.querySelector<HTMLElement>('#mode-picker-trigger');
         if (trigger) {
           trigger.innerHTML = `${icon(chosen.icon)}<span>${escape(chosen.label)}</span>${icon('down')}`;
@@ -5103,7 +5311,7 @@ async function stopTask(s: Session): Promise<void> {
   if (starting && starting.stage !== 'error') return stopRemoteStart(s, starting);
   runEndings.set(s.id, 'stopped');
   const current = state.streams.get(s.id);
-  if (current) { current.status = 'Stopping agent'; current.revision++; clearAgentInputs(current); renderStream(); }
+  if (current) { current.status = 'Stopping agent'; current.revision++; clearAgentInputs(current); renderStream(); btwPanel.event(s.id, 'status'); }
   const team = teams.get(s.id) && !s.remoteDevice;
   await call(team ? 'architect_control' : 'stop_session', { sessionId: s.id, ...(team ? { action: 'stop' } : {}) });
 }
@@ -5710,7 +5918,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'ui-size-reset': setUiScale(1); break;
     case 'delete-task': showDeleteTask(); break;
     case 'search': showCommands(); break;
-    case 'retry-response': { const finishing = finishingStreams.get(state.sessionId); if (finishing) await finishResponse(state.sessionId, finishing); break; }
+    case 'retry-response': { const id = actionTask(element)?.id ?? state.sessionId, finishing = finishingStreams.get(id); if (finishing) await finishResponse(id, finishing); break; }
     case 'settings': case 'refresh-settings': await showSettings(); break;
     case 'wallpaper-settings': await showWallpaperSettings(); break;
     case 'provider-connections': await showProviderConnections(); break;
@@ -5750,9 +5958,9 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'branch-menu': await worktrees.showMenu(element); break;
     case 'open-url': if (element.dataset.url) await call('open_external_url', { url: element.dataset.url }); break;
     case 'board-import': github.showImport(state.projectFilter || project()?.id || state.projects[0]?.id || ''); break;
-    case 'model': await showModel(element); break;
+    case 'model': await showModel(element, actionTask(element)); break;
     case 'change-task-project': await showProjectPicker(element); break;
-    case 'mode': await showMode(element); break;
+    case 'mode': await showMode(element, actionTask(element)); break;
     case 'filter-projects': await showProjectFilter(element); break;
     case 'default-provider': await showDefaultProvider(element); break;
     case 'default-model': await showDefaultModel(element); break;
@@ -5808,11 +6016,11 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'team-menu': await showTeamMenu(element); break;
     case 'steer': await steerFromComposer(); break;
     case 'remote-retry': await retryRemoteConnection(); break;
-    case 'stop': if (session()) { notify('Stopping task…'); await stopTask(session()!); } break;
-    case 'approval-allow': case 'approval-deny': await respondApproval(state.sessionId, element.dataset.request!, name === 'approval-allow'); break;
-    case 'approval-allow-all': case 'approval-deny-all': { const sessionId = state.sessionId; for (const id of [...state.streams.get(sessionId)?.approvals.keys() ?? []]) await respondApproval(sessionId, id, name === 'approval-allow-all'); break; }
-    case 'approval-group': approvalGroupOpen = !approvalGroupOpen; renderApprovalBar(); break;
-    case 'approval-details': { const key = state.sessionId + element.dataset.request; if (!approvalDetails.delete(key)) approvalDetails.add(key); renderApprovalBar(); break; }
+    case 'stop': { const task = actionTask(element); if (task) { notify('Stopping task…'); await stopTask(task); } break; }
+    case 'approval-allow': case 'approval-deny': await respondApproval(actionTask(element)?.id ?? state.sessionId, element.dataset.request!, name === 'approval-allow'); break;
+    case 'approval-allow-all': case 'approval-deny-all': { const sessionId = actionTask(element)?.id ?? state.sessionId; for (const id of [...state.streams.get(sessionId)?.approvals.keys() ?? []]) await respondApproval(sessionId, id, name === 'approval-allow-all'); break; }
+    case 'approval-group': { const id = actionTask(element)?.id ?? state.sessionId; if (!approvalGroupsOpen.delete(id)) approvalGroupsOpen.add(id); renderApprovalBar(); btwPanel.refresh(); break; }
+    case 'approval-details': { const key = (actionTask(element)?.id ?? state.sessionId) + element.dataset.request; if (!approvalDetails.delete(key)) approvalDetails.add(key); renderApprovalBar(); btwPanel.refresh(); break; }
     case 'suggest': { const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'); if (prompt) { prompt.value = element.dataset.text!; prompt.focus(); } break; }
   }
 }
@@ -5955,7 +6163,7 @@ document.addEventListener('keydown', event => {
     else if (finishingStreams.has(state.sessionId)) run(enqueueFromComposer()); else run(send());
   }
   else if (event.key === 'Enter' && (event.target as HTMLElement).id === 'shared-channel-prompt' && !event.shiftKey && !event.isComposing) { event.preventDefault(); (event.target as HTMLTextAreaElement).form?.requestSubmit(); }
-  else if (event.key === 'Enter' && (event.target as HTMLElement).classList.contains('queue-edit') && (event.metaKey || event.ctrlKey)) { event.preventDefault(); run(saveQueueEdit()); }
+  else if (event.key === 'Enter' && (event.target as HTMLElement).classList.contains('queue-edit') && (event.metaKey || event.ctrlKey)) { event.preventDefault(); run(saveQueueEdit(actionTask(event.target as HTMLElement))); }
   else if (event.key === 'Escape' && settingsView && !event.defaultPrevented && !document.querySelector<HTMLDialogElement>('#dialog')?.open && !document.querySelector('.floating-menu')) { event.preventDefault(); closeSettings(); }
   else if (event.key === 'Escape' && state.view !== 'conversation' && state.boardPanel && !event.defaultPrevented) { event.preventDefault(); closeMenus(); state.boardPanel = false; renderBoardView(); }
   else if (event.key === 'Escape' && isRunning() && !terminalPanel.open && !event.defaultPrevented) { event.preventDefault(); if (session()) run(stopTask(session()!)); }

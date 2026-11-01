@@ -1,0 +1,12 @@
+{
+  "source_fork": "ginmp8/pandacode",
+  "version": "0.3.87",
+  "release_sha": "4579dd4f6b69219bd9975d6b1aa2c19e76cba7d1",
+  "tree_sha": "62c14bc51d962e3396c019259a3f8be1633cfff1",
+  "release_notes": {
+    "0.3.85": "2db11f899c9a797c3a5918c155db0326917307e9",
+    "0.3.86": "54f325723f1f8a5bbcf7842759e3ea96d060782c",
+    "0.3.87": "88b93def97fc77e8bc4c9c12de11e438dafc804e"
+  },
+  "release_dates_sha": "c28c49e9aba4491634034fc1895bfbf5de1f30f3"
+}

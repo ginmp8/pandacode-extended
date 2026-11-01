@@ -1,1 +1,4 @@
 tests/fixtures/*.pdf binary
+# Keep byte-verified upstream release history LF on Windows runners.
+releases/*.md text eol=lf
+website/src/data/release-dates.json text eol=lf

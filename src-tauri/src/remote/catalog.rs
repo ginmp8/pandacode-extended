@@ -251,6 +251,7 @@ mod tests {
         let key = "k".to_string();
         let mut inner = Inner { token: Some("t".into()), devices: vec![super::super::tests::device("studio", "Studio", &key)], ..Default::default() };
         inner.settings.device_id = "me".into();
+        inner.settings.connection_enabled = true;
         inner.settings.orchestration = true;
         inner.settings.links.insert("studio".into(), super::super::config::Link { access: super::super::config::Access::Ask, at: 1, key, name: String::new() });
         super::super::Remote { dir: std::env::temp_dir(), inner: std::sync::Mutex::new(inner), key: Default::default(), saving: Default::default() }

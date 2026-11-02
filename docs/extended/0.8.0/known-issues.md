@@ -12,6 +12,15 @@
 | EXT-070-KI-06 | Prior source remediation: mobile/Expo dependency advisories | Recheck dependency graph and mobile tests |
 | EXT-070-KI-07 | Prior source remediation: legacy Extended SQLite schema collision | Validate upgrade against a representative existing user database |
 
+## Newly inherited upstream 0.3.91 verification limits
+
+- Linux Wayland paste and composer undo/redo were reported as browser-tested upstream, not verified on real Linux desktop compositors.
+- Windows conversation import behavior was verified upstream using Windows-style paths on macOS, not an actual Windows desktop.
+- ACP mode fallback judges relative permission level by mode name; validate unusual provider mode names before calling that behavior fully proven.
+- New clipboard dependencies and existing Extended dependency remediations require fresh cargo test/Clippy and RustSec evidence on the final source-integrated commit.
+
+These are evidence limitations, not automatically confirmed vulnerabilities or disabled features.
+
 ## Other release-gate gaps
 
 - Real Windows, macOS and Linux native-app startup, onboarding and installer checks are not established merely by successful source CI.

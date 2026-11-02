@@ -15,6 +15,10 @@ PandaCode Extended must preserve upstream functionality and expose the existing 
 
 The detailed source behavior and historical evidence are in [0.7.0 feature controls](../0.7.0/feature-controls.md). The governing [upstream parity contract](../upstream/parity-contract.md) supersedes any shorthand here.
 
+## Additional inherited 0.3.91 flows
+
+The upstream cloud Settings screen now sorts connected providers first and adjusts the environment help/checkbox layout. These presentation changes must coexist with Extended's credential-transfer and cloud/VM-management opt-in controls; no control is intentionally relaxed. Confirm both allowed (On) and disallowed (Off) paths, including manual read-only flows, after this source integration.
+
 ## Required 0.8.0 verification
 
 - [ ] Verify every control On and Off on the final candidate SHA, including Rust enforcement, UI state, manual-path availability and failure/restart behavior.

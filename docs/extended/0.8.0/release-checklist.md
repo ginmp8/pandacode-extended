@@ -26,3 +26,7 @@
 - [ ] Obtain explicit release approval.
 
 **Prohibited by this preparation:** automatic merge, version tag, GitHub Release, npm publication, public installers, and deployment. Completion of this checklist must be evidenced by executed checks, not by declaration.
+
+## Code-level CI checkpoint
+
+On the source-integration commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`, [CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) completed six green jobs. This is a **CI checkpoint**, not satisfaction of the release-readiness checklist above: native installer, real-host, GUI Settings and release approval checks remain open.

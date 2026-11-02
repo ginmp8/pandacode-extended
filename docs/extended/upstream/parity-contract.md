@@ -58,3 +58,14 @@ This checkpoint is historical. For any later sync, compare fresh HEADs; do not h
 - Relative to the previously reviewed `0.3.90` source, 34 source paths were added or modified: 27 are eligible for verbatim blob integration, and seven require source-hunk/Extended-control reconciliation. No source path may be omitted, including the new original `releases/0.3.91.md`.
 - Source-introduced functionality includes project relinking/worktree repair, Linux clipboard and undo fallbacks, ACP mode behavior, Claude large catalog, DeepSeek slash commands, OpenCode MCP inventory, Windows conversation import and cloud Settings ordering.
 - Preserve Extended controls, patched dependencies and its independent `0.8.0` candidate documentation. Runtime parity of all Settings On/Off, native platform validation and two-device Connect are **not certified** by this source inventory. Verify CI against the exact resulting Extended commit.
+
+## Published source-integration evidence — 2026-11-02
+
+- Exact upstream source: [PandaCode `0.3.91` at `a9be2ced7bb594ad28a09fbd204cdad34770c750`](https://github.com/ginmp8/pandacode/commit/a9be2ced7bb594ad28a09fbd204cdad34770c750).
+- Direct Extended integration commit: [`083e764485f08ea1b5cabbf3b3d18ea9b426e89c`](https://github.com/ginmp8/pandacode-extended/commit/083e764485f08ea1b5cabbf3b3d18ea9b426e89c) on `base/development`.
+- [CI run #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) reported **success in all six jobs** on that exact code SHA: TypeScript/unit/website, Linux Rust test/Clippy, mobile/Expo, npm dependency audit, RustSec audit and macOS Panda Router ONNX.
+- Complete recursive Git-tree readback, neither truncated: 1,455 upstream blobs, zero missing source paths, 1,396 byte/mode-identical paths, 59 source-versus-Extended content differences, and 27 Extended-only paths. Seven of the 59 differences are the reviewed three-way application of source `0.3.91` hunks; the others are carried Extended-specific deviations that still need individual functional review.
+- The six application-version fields match upstream `0.3.91`. The independent Extended `0.8.0` remains an **unreleased documentation candidate**, with no public installer or distribution claim.
+- No local full repository checkout/build was possible because the sandbox could not resolve GitHub DNS; the integration used pinned GitHub API trees/blobs with exact SHA verification. Native Windows/Linux/macOS GUI checks, two-real-device Connect and complete Settings On/Off/runtime scenarios were **not executed**. GitHub CI success does not prove these behaviors.
+- Historical [PR #105](https://github.com/ginmp8/pandacode-extended/pull/105) was already merged from `base/hardened` to `main`, based on an earlier `0.3.90` Extended checkpoint; it does not include the new `base/development` `0.3.91` integration. This run created or changed no PR.
+

@@ -14,3 +14,9 @@
 - [Previous 0.7.0 candidate documentation](../0.7.0/README.md)
 
 **Version separation:** The PandaCode upstream application version comes from the source manifests. `0.8.0` is the separate **planned Extended release line**. Keep historical `0.7.0` evidence immutable unless correcting a verified error; do not silently re-label those results as 0.8.0 validation.
+
+## Current synchronization evidence
+
+- Code import: [Extended commit `083e7644`](https://github.com/ginmp8/pandacode-extended/commit/083e764485f08ea1b5cabbf3b3d18ea9b426e89c), mirrored from source `0.3.91` / `a9be2ced7bb594ad28a09fbd204cdad34770c750`.
+- [Six-job CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966): all `success` on the code SHA; native installers and full Settings On/Off acceptance remain unverified.
+- Earlier PR #105 is merged, but covers an older `base/hardened` integration and is not evidence of a `0.3.91` release.

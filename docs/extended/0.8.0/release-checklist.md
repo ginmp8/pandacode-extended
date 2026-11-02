@@ -15,6 +15,12 @@
 - [ ] Exercise OpenCode V2 ACP model/effort selection and key providers, bots/teams, `/btw`, and real two-device Connect/machine orchestration.
 - [ ] Recheck [known issues](known-issues.md), record actual severities and any necessary blocking mitigations.
 
+## Additional source 0.3.91 acceptance cases
+- [ ] Exercise Linux WebKitGTK undo/redo and Wayland clipboard-image paste on a native desktop, including large screenshot handling.
+- [ ] Exercise ACP mode fallback (including a provider without Plan/Accept edits), Claude model catalogs above 256 KiB, DeepSeek slash commands and OpenCode JSONC MCP discovery.
+- [ ] Exercise project-folder relinking, worktree repair and Windows conversation import on representative native platforms.
+- [ ] Confirm `arboard` and its new lockfile graph compile under the Extended remediated dependency versions without loosening Settings policy.
+
 ## Approval and distribution boundary
 - [ ] Review the completed source changes, test results, release notes, compatibility/migration guidance and any remaining risks.
 - [ ] Obtain explicit release approval.

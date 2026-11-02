@@ -11,6 +11,10 @@ The [0.7.0 dependency-security record](../0.7.0/dependency-security.md) contains
 - Rust TLS/certificate/Tokio/ZIP remediation and RustSec checks already documented for the earlier candidate.
 - Existing audit and compatibility tests without deleting upstream features or bypassing authentication, permission, or approval controls.
 
+## Imported upstream 0.3.91 dependency requirements
+
+Linux Wayland clipboard-image support requires upstream's `arboard` crate with `wayland-data-control` and its transitives. The Extended target retains its existing remediated TLS, archive and runtime dependency versions; the Cargo lockfile therefore must be reconciled rather than replaced with the upstream lockfile. A successful dependency-resolution or RustSec audit for the new candidate is **not yet asserted** here.
+
 ## Checks required for the 0.8.0 candidate
 
 - [ ] Recompute resolved dependency versions from the **current** root, website, mobile and other workspace lockfiles.

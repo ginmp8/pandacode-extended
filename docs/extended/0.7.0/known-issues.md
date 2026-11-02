@@ -1,28 +1,26 @@
-# PandaCode Extended 0.7.0 — Known issues and remediation status
+# PandaCode Extended 0.7.0 — Configuration behavior, open verification and confirmed fixes
 
-**Status:** Five non-dependency issues remain open; dependency **KI-06** and SQLite compatibility **KI-07** have source fixes pending release acceptance in the **unreleased** [Extended 0.7.0 source candidate](../../../releases/extended/0.7.0.md).  
-**Source reviewed:** [`2f21bb67`](https://github.com/ginmp8/pandacode-extended/commit/2f21bb67e3d59b5b01f794a8cc6d8b686f5a95eb), PR [#86](https://github.com/ginmp8/pandacode-extended/pull/86), reviewed 2026-10-31.  
-**Scope:** Findings observed in the candidate code and risks that require runtime reproduction. **Documented does not mean fixed, accepted, or verified at runtime.**
+**Source baseline:** Complete functional import through PandaCode `0.3.90` on Extended `base/development` (commit `d3980c0b`). The previously reviewed `0.3.85` candidate/PR #86 is historical evidence, not the current application version.  
+**Scope:** This register records implementation details, expected setting scope, verification gaps and confirmed bugs. **An unverified concern, an Off-by-default setting, or a non-retroactive toggle is not by itself a demonstrated security vulnerability or justification to remove an upstream feature.** See the [full parity contract](../upstream/parity-contract.md).  
+**CI checkpoint:** [41463892251](https://github.com/ginmp8/pandacode-extended/actions/runs/41463892251): npm and RustSec audits passed; the Linux Rust job had one failure in source-identical `remote/catalog.rs`. No full-CI success is asserted.
 
-## Summary
+## Evidence classes
 
-| ID | Severity | Confidence | Subject | Status |
-| --- | --- | --- | --- | --- |
-| [EXT-070-KI-01](#ext-070-ki-01--codex-mcp-isolation-may-not-be-enforced) | Blocker | Needs integration verification | Codex external MCP isolation | Open, deferred |
-| [EXT-070-KI-02](#ext-070-ki-02--cloud-machines-may-be-provisioned-before-the-credential-gate) | Major | Confirmed code order | Cloud provisioning before opt-in preflight | Open, deferred |
-| [EXT-070-KI-03](#ext-070-ki-03--credentials-already-sent-to-cloud-machines-are-not-revoked) | Major | Confirmed limitation | Previously transferred credentials | Open, deferred |
-| [EXT-070-KI-04](#ext-070-ki-04--failed-settings-reads-can-reactivate-bots-or-lan-routes) | Major | Confirmed fallback behavior | Inaccessible or corrupted settings | Open, deferred |
-| [EXT-070-KI-05](#ext-070-ki-05--running-agents-retain-launch-time-mcp-configuration) | Minor / policy-dependent | Confirmed launch-time behavior | Existing agent sessions | Open, deferred |
+| ID | Classification | Verified observation or open question |
+| --- | --- | --- |
+| [KI-01](#ext-070-ki-01--codex-mcp-isolation-may-not-be-enforced) | **Integration verification pending** | Codex effective external-MCP isolation when Off is untested; **not** a confirmed security exploit |
+| [KI-02](#ext-070-ki-02--cloud-machines-may-be-provisioned-before-the-credential-gate) | **Observed sequencing limitation** | Machine preparation precedes the credential-transfer check; review user-facing behavior and resource side effects |
+| [KI-03](#ext-070-ki-03--credentials-already-sent-to-cloud-machines-are-not-revoked) | **Expected setting scope** | Disabling new transfers does not retroactively revoke earlier credentials |
+| [KI-04](#ext-070-ki-04--failed-settings-reads-can-reactivate-bots-or-lan-routes) | **Recovery-path defect candidate** | Invalid preference reads use defaults; the corruption/restart impact requires a reproducible integration test |
+| [KI-05](#ext-070-ki-05--running-agents-retain-launch-time-mcp-configuration) | **Expected setting scope** | New-process configuration does not retroactively reconfigure running agents |
+| [KI-06](#ext-070-ki-06--mobile-expo-dependency-audit-remediated-in-source) | **Confirmed dependency finding remediated in source** | Patched versions, vendor workaround and passing npm audits; native release remains separate |
+| [KI-07](#ext-070-ki-07--legacy-extended-sqlite-schema-collision) | **Confirmed compatibility defect fixed in source** | Migration 37 and its test; actual upgrades still require native validation |
 
-| [EXT-070-KI-06](#ext-070-ki-06--mobile-expo-dependency-audit-remediated-in-source) | Major / original release gate | Audit + source regression + mobile checks | Mobile/Expo transitive dependency vulnerabilities | Resolved in source candidate (Extended fix) |
-
-| [EXT-070-KI-07](#ext-070-ki-07--legacy-extended-sqlite-schema-collision) | Major / upgrade blocker | Reproduced schema mismatch | Legacy Extended database lacks imported upstream columns | Fixed in source candidate; CI pending |
-
-Severities are provisional engineering priorities, not evidence of an exploited vulnerability. The owner may schedule remediation in a later revision, but merge/release risk acceptance requires a separate, explicit decision.
+**Interpretation:** Keep a verification task open where evidence is missing; do not assign speculative blocker/major security severities. Verified vulnerabilities may still require fixes, but **every fix must preserve source features and existing Settings controls**. The two documented setting-scope items (KI-03 and KI-05) are not unresolved bugs merely because they describe limits. The historical IDs and evidence below are retained for traceability.
 
 ## EXT-070-KI-01 — Codex MCP isolation may not be enforced
 
-**Severity:** Blocker (security-policy mismatch)  
+**Classification:** Integration verification pending; severity is **not established** without a tested behavior mismatch  
 **Confidence:** Potential defect; effective runtime behavior is **not yet established**.  
 **Evidence:** [`src-tauri/src/providers.rs`](../../../src-tauri/src/providers.rs) configures Codex with `-c "mcp_servers={}"` when `external_mcp_servers` is false. The intended isolation depends on how the installed Codex version merges that override with existing user/project MCP definitions.
 
@@ -36,7 +34,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## EXT-070-KI-02 — Cloud machines may be provisioned before the credential gate
 
-**Severity:** Major (unintended cloud cost / misleading failure)  
+**Classification:** Confirmed operation ordering, not a confirmed security vulnerability  
 **Confidence:** Confirmed source ordering.  
 **Evidence:** [`src-tauri/src/cloud_agents/tasks.rs`](../../../src-tauri/src/cloud_agents/tasks.rs) calls `prepare_machine` before `credentials::push`; the Off check currently runs inside [`credentials.rs`](../../../src-tauri/src/cloud_agents/credentials.rs). Creating/starting a machine and syncing a checkout can therefore precede the refusal.
 
@@ -50,7 +48,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## EXT-070-KI-03 — Credentials already sent to cloud machines are not revoked
 
-**Severity:** Major (credential lifetime / revocation clarity)  
+**Classification:** Documented setting scope, not a bug in the transfer opt-out  
 **Confidence:** Confirmed limitation by the control implementation and documentation.  
 **Evidence:** [`src-tauri/src/cloud_agents/credentials.rs`](../../../src-tauri/src/cloud_agents/credentials.rs) rejects **new** transfers while Off; no corresponding cleanup or token revocation is performed by the Feature controls setter.
 
@@ -64,7 +62,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## EXT-070-KI-04 — Failed settings reads can reactivate bots or LAN routes
 
-**Severity:** Major (unsafe fallback / persistence integrity)  
+**Classification:** Confirmed fallback code; actual restart/corruption behavior still needs reproduction  
 **Confidence:** Confirmed fallback behavior; real corruption/restart case remains untested.  
 **Evidence:** [`src-tauri/src/feature_controls.rs`](../../../src-tauri/src/feature_controls.rs) treats absent, unreadable and invalid stored JSON the same way by using `Settings::default()`, where `bots_paused=false`. [`src-tauri/src/remote/routes.rs`](../../../src-tauri/src/remote/routes.rs) also defaults `direct_routes=true` if route settings cannot be read.
 
@@ -78,7 +76,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## EXT-070-KI-05 — Running agents retain launch-time MCP configuration
 
-**Severity:** Minor for documented deferred application; Major if users expect immediate enforcement.  
+**Classification:** Expected launch-time application of a configuration preference; not a security defect by itself.  
 **Confidence:** Confirmed process-level design; individual harness behavior may differ.  
 **Evidence:** [`src-tauri/src/providers.rs`](../../../src-tauri/src/providers.rs) assembles MCP arguments before process spawn; [`src-tauri/src/providers/warm.rs`](../../../src-tauri/src/providers/warm.rs) includes the preference in the warm-process key. The preference setter does not forcibly restart existing processes.
 
@@ -92,7 +90,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## EXT-070-KI-06 — Mobile / Expo dependency audit remediated in source
 
-**Previous severity:** Major; originally a release gate.  
+**Historical classification:** Dependency advisory remediation and release compatibility gate.  
 **Resolution status:** **Resolved in the Extended source candidate**, subject to final CI and native-device release validation. This does **not** mean every upstream library has published an official fix.  
 **Initial evidence:** [CI run 41242276061](https://github.com/ginmp8/pandacode-extended/actions/runs/41242276061) reported 27 npm audit findings (3 high, 23 moderate, 1 low) in Expo mobile dependencies.  
 **Remediation source:** [Extended security commits](https://github.com/ginmp8/pandacode-extended/pull/86) and the [dependency security record](dependency-security.md).
@@ -109,7 +107,7 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## EXT-070-KI-07 — Legacy Extended SQLite schema collision
 
-**Previous severity:** Major / upgrade blocker. Task and Schedules pages can fail after switching from Extended main to upstream 0.3.85 source.  
+**Historical classification:** Reproduced database upgrade compatibility failure. Task and Schedules pages can fail when older Extended databases meet the imported upstream schema.  
 **Source status:** Fixed in the unreleased source candidate; final CI and native upgrade acceptance are distinct gates.  
 **Symptom:** The task-list query raises `no such column: cloud` while fetching sessions. The Schedules UI can surface the same error because it also loads the shared session list.  
 **Cause:** Extended main assigned schema versions 27–32 to different changes than upstream 0.3.85. In Extended, migration 27 created `github_issue_actions`, whereas upstream migration 27 added `sessions.cloud`. Upstream migration 32 added `sessions.remote_backfill_base`, and bot capability/table additions also diverged. An existing Extended v32 database skips these older-numbered upstream migrations.  
@@ -119,12 +117,12 @@ Severities are provisional engineering priorities, not evidence of an exploited 
 
 ## Release-readiness notes (separate from the five open application findings)
 
-- The planned Extended release number is `0.7.0`, but the imported app's package/Cargo version remains `0.3.85`. Version metadata, release assets and updater identity must be reconciled before tagging.
+- The planned Extended release number is `0.7.0`; the imported upstream app's package/Cargo version is now `0.3.90` on `base/development`. Extended release assets/updater identity and native acceptance remain separate from the source version.
 - The mobile npm dependency remediation is tracked as a source-level resolution, not a native binary release, and remains subject to final compatibility gates.
-- The upstream source replacement omitted some Extended-only release/documentation files present on the prior `main`, including `releases/extended/0.6.0.md`. Preserve the required history and revalidate Extended-exclusive behavior before merging.
+- Extended-specific history on other branches (including the older `releases/extended/0.6.0.md` on `main`) must not be conflated with upstream functional/source parity. Preserve relevant Extended history before any later branch merge; no upstream feature removal is justified.
 - [CI run #41224890859](https://github.com/ginmp8/pandacode-extended/actions/runs/41224890859) passed 3/3 checks at `2f21bb67`, but did **not** certify native Settings restart, effective Codex MCP isolation, cloud cost/preflight, or a two-device Connect scenario.
-- This register is **documentation only**. No corresponding code remediation, issue tracker items, merge, release or explicit risk acceptance was performed here.
+- This register explains code and validation evidence; it does not independently approve release, prove every runtime path, or authorize deletion/deactivation of upstream capabilities.
 
 ## Maintaining this register
 
-Keep the IDs stable. For each future fix, add the implementing PR/commit, the actual regression-test evidence, the affected release and the status change. Never mark an entry **Resolved** solely because a CI pipeline completed successfully or because the setting is visible in the interface.
+Keep the IDs stable. For each actual fix, add implementation and regression evidence. Distinguish verified defects, untested hypotheses and documented setting scope; do not escalate a theoretical concern to a confirmed security problem or mark a fix accepted solely because an audit passed.

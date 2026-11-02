@@ -8,6 +8,19 @@ user's other settings (including individual bots and connected cloud accounts) a
 reset. The controls work independently of the application's own update mode and the
 master **PandaCode Connect** switch.
 
+## Parity and availability
+
+These are **configuration options, not feature removals**. All upstream bot, MCP, cloud, VM, remote and agent capabilities remain in the Extended source. An option that defaults Off can be turned On through Settings to use the corresponding upstream capability, subject to ordinary upstream permissions, supported providers and platform requirements. Options apply only to the activities described below, not to unrelated manual features.
+
+- Agent and app update preferences control **automatic checking**; manual checks remain available.
+- Cloud-credential transfer controls whether local credentials are copied during a cloud-agent launch. Turning it On restores credential-dependent cloud launches. The cloud-provider integrations themselves are still present.
+- Agent VM/cloud management controls **agent-invoked** mutation/deployment, not the existence of machines, UI panels or manual cloud operations.
+- External MCP controls the MCP configuration of supported new harness processes. Turning it On retains user-configured servers; Off does not remove MCP support, built-in local tools or other harness integrations. Effective Codex isolation when Off remains an explicit **test gap**, not a proven vulnerability.
+- Global bot pause is **Off by default**; bots, messages and schedules are available under their normal controls. Turning the pause On temporarily suppresses those paths; turning it Off makes them available again.
+- Connect is separately Off by default; after enabling it, direct LAN/Tailscale routes follow their own switch and normal authenticated pairing.
+
+For the governing integration and evidence rules, see the [full upstream parity contract](../upstream/parity-contract.md).
+
 - **Check agent updates automatically:** off suppresses the initial eight-second
   check and subsequent six-hour checks; **Check updates** still works manually.
   Updating an installed CLI remains an explicit action.
@@ -39,4 +52,4 @@ master **PandaCode Connect** switch.
 Disable actions are enforced in Rust as well as reflected in the Settings UI; the
 frontend switch alone is not treated as an authorization boundary.
 
-This is an **Extended-owned** feature. The upstream PandaCode Settings documentation does not specify these opt-in defaults or guarantee Codex MCP isolation. Release-specific dependency security and status are tracked separately in [Extended 0.7.0](README.md).
+This is an **Extended-owned Settings improvement**, not permission to remove upstream capabilities. The upstream PandaCode Settings documentation does not specify these opt-in defaults or guarantee Codex MCP isolation. Release-specific dependency security and status are tracked separately in [Extended 0.7.0](README.md).

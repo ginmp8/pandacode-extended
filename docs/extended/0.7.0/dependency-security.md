@@ -1,9 +1,15 @@
 # PandaCode Extended 0.7.0 — Dependency security resolution
 
 **Ownership:** PandaCode Extended only. The upstream PandaCode fork is not patched by these commits.  
-**Candidate:** PR [#86](https://github.com/ginmp8/pandacode-extended/pull/86), source based on upstream PandaCode 0.3.85.  
+**Historical remediation:** PR [#86](https://github.com/ginmp8/pandacode-extended/pull/86) originally targeted PandaCode 0.3.85. The current `base/development` source integration is PandaCode **0.3.90**, with Extended's patched dependencies and security checks retained.  
 **Status:** **Resolved in Extended source** for the known npm advisories from the audited lockfiles; final CI/native release acceptance remains distinct.  
-**Security test evidence:** [GitHub Actions 41243766188](https://github.com/ginmp8/pandacode-extended/actions/runs/41243766188) (and subsequent CI as the PR evolves).
+**Security test evidence:** [Historical job 41243766188](https://github.com/ginmp8/pandacode-extended/actions/runs/41243766188); [0.3.90 integration CI 41463892251](https://github.com/ginmp8/pandacode-extended/actions/runs/41463892251) completed npm and RustSec audit jobs successfully. Its separate Linux Rust unit-test job failed one upstream-identical timeout test; full CI is therefore not green.
+
+## Functional parity boundary
+
+Dependency upgrades, the vendored `deepmerge` patch, audit gates and updater packaging adaptations are **limited Extended-owned remediations**, not authorization to remove upstream providers, bot/MCP/cloud/Connect features, network tools or user-initiated functions. Keep their APIs and enabled-path behavior compatible with upstream. Background behavior remains governed by the separate user-configurable [Feature controls](feature-controls.md) and [full upstream parity contract](../upstream/parity-contract.md).
+
+A dependency advisory or a test failure must be investigated on its actual affected path. It is not evidence that a distinct upstream capability should be removed. No claimed remediation supersedes functional regression verification.
 
 ## Dependency remediation
 

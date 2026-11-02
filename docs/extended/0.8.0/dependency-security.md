@@ -24,3 +24,7 @@ Linux Wayland clipboard-image support requires upstream's `arboard` crate with `
 - [ ] Record any advisory IDs, severity, exploitability assumptions, updates, test commands and outcome in this document.
 
 **No new vulnerability, new remediation, clean-audit result or release approval is asserted until fresh evidence is recorded.**
+
+## Executed audit evidence for upstream 0.3.91 integration
+
+On [Extended code commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`](https://github.com/ginmp8/pandacode-extended/commit/083e764485f08ea1b5cabbf3b3d18ea9b426e89c), [CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) completed its npm dependency audit and RustSec audit jobs with `success`. The same run also passed Linux Rust test/Clippy and the other four jobs. The lockfile retained Extended's remediated `zip` and `rustls` versions while adding the upstream `arboard` Wayland clipboard dependencies. This evidence establishes the configured CI result for that SHA, not absence of every vulnerability or native platform compatibility.

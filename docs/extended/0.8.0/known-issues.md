@@ -26,6 +26,10 @@ These are evidence limitations, not automatically confirmed vulnerabilities or d
 - Real Windows, macOS and Linux native-app startup, onboarding and installer checks are not established merely by successful source CI.
 - OpenCode V2 effort selection should be exercised with an installed CLI and a model advertising adjustable levels; unit/recorded-protocol tests do not replace this check.
 - Multi-machine orchestration and Connect need testing across **two real computers**, including pairing, access downgrades, offline behavior and stop semantics.
-- The independently planned Extended `0.8.0` version, installer naming and release artifacts are not established by upstream `0.3.90` manifests.
+- The independently planned Extended `0.8.0` version, installer naming and release artifacts are not established by upstream `0.3.91` manifests.
 
 See [release checklist](release-checklist.md) and [feature controls](feature-controls.md). Reclassify and remove a carried-forward concern only after recording verifiable evidence; never copy an old CI success to the new SHA.
+
+## CI status for current source integration
+
+[CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) completed six jobs successfully for the 0.3.91 import commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`. This does not close the native Linux Wayland/Windows GUI test gaps, unusual ACP mode-name behavior, real two-device Connect or full Extended control On/Off acceptance.

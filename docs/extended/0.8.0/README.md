@@ -2,7 +2,7 @@
 
 **Status:** planned, unreleased Extended release candidate. The current documentation baseline is PandaCode source `0.3.90` from [`348add18a63906bd8928a7cef547eeaf91429fa7`](https://github.com/ginmp8/pandacode/commit/348add18a63906bd8928a7cef547eeaf91429fa7), initially integrated in Extended at [`f653c8641e23746a4038cfebf1a8a3df90c478e7`](https://github.com/ginmp8/pandacode-extended/commit/f653c8641e23746a4038cfebf1a8a3df90c478e7). This is not a claim that the Extended product version has been published, or that a binary is available.
 
-**Latest targeted upstream parity:** PandaCode `0.3.91`, immutable fork commit [`a9be2ced7bb594ad28a09fbd204cdad34770c750`](https://github.com/ginmp8/pandacode/commit/a9be2ced7bb594ad28a09fbd204cdad34770c750), succeeding the original `0.3.90` documentation baseline. This remains a planned Extended `0.8.0` candidate, not a published product version. See [original upstream 0.3.91 release notes](../../../releases/0.3.91.md).
+**Latest targeted upstream parity:** PandaCode `0.3.92`, immutable fork commit [`28b835f8b8cb72dcda5506d4bcfff489ad9a98dc`](https://github.com/ginmp8/pandacode/commit/28b835f8b8cb72dcda5506d4bcfff489ad9a98dc). The Extended `0.8.0` candidate is still unreleased. The original source notes are [upstream 0.3.92](../../../releases/0.3.92.md); the previous 0.3.91 integration is historical evidence, not the current source HEAD.
 
 - [Extended 0.8.0 release notes and feature scope](../../../releases/extended/0.8.0.md)
 - [Release readiness and validation checklist](release-checklist.md)
@@ -20,3 +20,7 @@
 - Code import: [Extended commit `083e7644`](https://github.com/ginmp8/pandacode-extended/commit/083e764485f08ea1b5cabbf3b3d18ea9b426e89c), mirrored from source `0.3.91` / `a9be2ced7bb594ad28a09fbd204cdad34770c750`.
 - [Six-job CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966): all `success` on the code SHA; native installers and full Settings On/Off acceptance remain unverified.
 - Earlier PR #105 is merged, but covers an older `base/hardened` integration and is not evidence of a `0.3.91` release.
+
+## Latest source candidate: PandaCode 0.3.92
+
+The fork introduces its redesigned UI and Settings navigation, live thread scenes, turn cards, tiled conversations, updated test coverage and associated static resources. Extended's configurable Feature controls page is retained as its own Settings section, and the Connect master switch remains an additional gate around upstream remote operations. These are inherited upstream features, not newly invented Extended 0.8.0 functionality. Native GPU, multi-window, Connect and controls On/Off acceptance is pending; CI must be tied to the final commit SHA.

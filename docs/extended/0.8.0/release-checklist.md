@@ -44,3 +44,11 @@ On the source-integration commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`, [CI
 - [Release preparation #41523436756](https://github.com/ginmp8/pandacode-extended/actions/runs/41523436756): completed successfully with eight jobs successful (prepare, SBOM and six native OS/architecture builds); two publication jobs (`npm` and `publish`) were skipped. Neither a tag nor a public release was created by this documentation update.
 - Full recursive Git-tree inventories at the pinned SHAs, both `truncated=false`: 1,455 upstream blobs, 1,396 content/mode-identical, 59 differing, zero missing, plus 27 Extended-only files. The 59 differences still require complete functional acceptance, not automatic approval.
 - The checks above belong to the exact `3af810b` snapshot. A later documentation-only commit has a new SHA and requires separate CI status lookup. Native GUI/installer launch, complete Settings On/Off testing and real two-device Connect were **not** executed. The `0.8.0` documentation remains an unapproved release candidate.
+
+## Additional source 0.3.92 acceptance cases
+
+- [ ] Launch the redesigned Settings UI in an installed app and confirm the separate Extended Feature controls section mounts, saves and reopens correctly.
+- [ ] Exercise all Feature controls Off/On after redesign, including Connect sign-in, connection pause, manual/automatic paths and device pairing.
+- [ ] Check live scenes in dark/light themes, imported themes, time changes, visibility suspension, reduced motion and six tiled threads.
+- [ ] Verify turn cards, Read more, diff actions, active versus read-only tiles, focus navigation, approval and real agent streaming.
+- [ ] Validate platform-specific native browser/GPU behavior, release workflows and no automatic publication before release approval.

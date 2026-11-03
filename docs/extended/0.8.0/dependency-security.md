@@ -28,3 +28,7 @@ Linux Wayland clipboard-image support requires upstream's `arboard` crate with `
 ## Executed audit evidence for upstream 0.3.91 integration
 
 On [Extended code commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`](https://github.com/ginmp8/pandacode-extended/commit/083e764485f08ea1b5cabbf3b3d18ea9b426e89c), [CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) completed its npm dependency audit and RustSec audit jobs with `success`. The same run also passed Linux Rust test/Clippy and the other four jobs. The lockfile retained Extended's remediated `zip` and `rustls` versions while adding the upstream `arboard` Wayland clipboard dependencies. This evidence establishes the configured CI result for that SHA, not absence of every vulnerability or native platform compatibility.
+
+## Source 0.3.92 dependency reconciliation
+
+The upstream change from 0.3.91 to 0.3.92 updates application-version metadata in the root npm and Rust manifests/locks. The Extended-resolved dependency remediations and locally vendored mobile patch are retained. Fresh npm, RustSec, Rust build and mobile results for the 0.3.92-integrated SHA remain required; historical 0.3.91 CI is not proof for this candidate.

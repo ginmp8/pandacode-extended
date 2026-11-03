@@ -33,3 +33,7 @@ See [release checklist](release-checklist.md) and [feature controls](feature-con
 ## CI status for current source integration
 
 [CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) completed six jobs successfully for the 0.3.91 import commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`. This does not close the native Linux Wayland/Windows GUI test gaps, unusual ACP mode-name behavior, real two-device Connect or full Extended control On/Off acceptance.
+
+## Source 0.3.92 acceptance gaps
+
+The upstream redesign adds live GPU-backed thread scenes, one-card-per-turn rendering and up to six tiled thread views. Upstream's [0.3.92 release notes](../../../releases/0.3.92.md) report browser preview coverage but not native installed-app tiling/scene verification or real agent streaming into an unfocused tile. Extended additionally requires verification that the new Settings navigation still exposes working Feature controls, that Connect Off/On gates both relay and direct operations correctly, and that prior bot, MCP and cloud permissions still behave as configured. These are unverified scenarios, not proven regressions.

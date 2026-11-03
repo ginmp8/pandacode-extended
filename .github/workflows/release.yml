@@ -156,7 +156,8 @@ jobs:
 
   publish:
     needs: [prepare, build, sbom]
-    if: github.ref_type == 'tag' || inputs.publish
+    # Publishing is an explicit manual action; tag pushes only build artifacts.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -205,7 +206,8 @@ jobs:
 
   npm:
     needs: [prepare, publish]
-    if: github.ref_type == 'tag'
+    # npm publication also requires a manually dispatched run from an existing tag.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

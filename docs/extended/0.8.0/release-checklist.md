@@ -52,3 +52,10 @@ On the source-integration commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`, [CI
 - [ ] Check live scenes in dark/light themes, imported themes, time changes, visibility suspension, reduced motion and six tiled threads.
 - [ ] Verify turn cards, Read more, diff actions, active versus read-only tiles, focus navigation, approval and real agent streaming.
 - [ ] Validate platform-specific native browser/GPU behavior, release workflows and no automatic publication before release approval.
+
+## Verified 0.3.92 integration CI checkpoint — 2026-11-03
+
+- Pinned upstream application source: [`28b835f8b8cb72dcda5506d4bcfff489ad9a98dc`](https://github.com/ginmp8/pandacode/commit/28b835f8b8cb72dcda5506d4bcfff489ad9a98dc), declared version `0.3.92` in the source manifests. Extended **code** SHA: [`80c438b47e06d1df330564dc8a4cb17318230310`](https://github.com/ginmp8/pandacode-extended/commit/80c438b47e06d1df330564dc8a4cb17318230310).
+- [CI push #41692930559](https://github.com/ginmp8/pandacode-extended/actions/runs/41692930559): completed **success**, 6/6 jobs. [CI PR #41692943491](https://github.com/ginmp8/pandacode-extended/actions/runs/41692943491): completed **success**, 6/6 jobs.
+- Per run: `Typecheck, unit tests, website`; `Rust check and tests (Linux)`; `Mobile dependency and Expo compatibility`; `Dependency audit (npm lockfiles)`; `RustSec audit (Cargo.lock)`; `Panda Router ONNX parity (macOS)`. GitHub reports successful jobs, not proof of every native, provider or product behavior.
+- Both runs are bound to code SHA `80c438b47e06d1df330564dc8a4cb17318230310`. A later documentation-only commit has a different SHA, requiring a new check readback. No new native installer, real-GUI Settings On/Off, external MCP/cloud credentials or real two-computer Connect tests are claimed. Release preparation and approval remain outstanding.

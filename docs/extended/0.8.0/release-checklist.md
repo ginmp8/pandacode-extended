@@ -30,3 +30,11 @@
 ## Code-level CI checkpoint
 
 On the source-integration commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`, [CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) completed six green jobs. This is a **CI checkpoint**, not satisfaction of the release-readiness checklist above: native installer, real-host, GUI Settings and release approval checks remain open.
+
+## Latest verified CI/build evidence — 2026-11-02
+
+- Pinned fork source: [`a9be2ced7bb594ad28a09fbd204cdad34770c750`](https://github.com/ginmp8/pandacode/commit/a9be2ced7bb594ad28a09fbd204cdad34770c750), application version `0.3.91`. Extended source-integrated HEAD: [`3af810b18771485568e9199e7b603f4ef0ddf71f`](https://github.com/ginmp8/pandacode-extended/commit/3af810b18771485568e9199e7b603f4ef0ddf71f).
+- [CI #41523546088](https://github.com/ginmp8/pandacode-extended/actions/runs/41523546088): completed successfully, six of six jobs (TypeScript/unit/website, Rust check/tests, npm dependency audit, RustSec, Expo/mobile, ONNX macOS).
+- [Release preparation #41523436756](https://github.com/ginmp8/pandacode-extended/actions/runs/41523436756): completed successfully with eight jobs successful (prepare, SBOM and six native OS/architecture builds); two publication jobs (`npm` and `publish`) were skipped. Neither a tag nor a public release was created by this documentation update.
+- Full recursive Git-tree inventories at the pinned SHAs, both `truncated=false`: 1,455 upstream blobs, 1,396 content/mode-identical, 59 differing, zero missing, plus 27 Extended-only files. The 59 differences still require complete functional acceptance, not automatic approval.
+- The checks above belong to the exact `3af810b` snapshot. A later documentation-only commit has a new SHA and requires separate CI status lookup. Native GUI/installer launch, complete Settings On/Off testing and real two-device Connect were **not** executed. The `0.8.0` documentation remains an unapproved release candidate.

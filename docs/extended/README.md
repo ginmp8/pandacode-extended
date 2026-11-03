@@ -9,7 +9,7 @@ This directory defines the **complete upstream functional parity contract** and 
 - [Extended 0.8.0 release checklist](0.8.0/release-checklist.md)
 - [Extended 0.7.0 historical source-candidate documentation](0.7.0/README.md)
 - [Upstream 0.3.87 /btw side-thread parity candidate](upstream/0.3.87-btw-side-threads.md)
-- [Pinned upstream application source identity (0.3.90 checkpoint)](upstream/source-baseline.json)
+- [Current pinned upstream source identity (version and commit in JSON)](upstream/source-baseline.json)
 - [Original upstream 0.3.89 release notes, mirrored without edits](../../releases/0.3.89.md)
 - [Original upstream 0.3.90 release notes, mirrored without edits](../../releases/0.3.90.md)
 - [Original upstream 0.3.91 release notes, mirrored without edits](../../releases/0.3.91.md)

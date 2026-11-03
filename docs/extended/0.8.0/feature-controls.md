@@ -27,3 +27,7 @@ The upstream cloud Settings screen now sorts connected providers first and adjus
 - [ ] Reconcile any changes from a future upstream HEAD rather than overwriting Extended controls with raw upstream files.
 
 These are **planned checks**, not executed 0.8.0 acceptance results.
+
+## Source 0.3.92 Settings integration
+
+The redesigned upstream Settings navigation moves page definitions into `src/settings-sections.ts`. Extended retains a separate **Feature controls** section wired to `mountFeatureControls` and keeps the Connect master switch while adopting the new upstream remote Settings presentation. The controls are intended to restrict only their named operations; upstream manual actions remain available where permitted. The final candidate requires browser/native On/Off and restart verification; source inspection alone is not a runtime acceptance result.

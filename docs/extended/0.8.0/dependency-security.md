@@ -32,3 +32,7 @@ On [Extended code commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`](https://git
 ## Source 0.3.92 dependency reconciliation
 
 The upstream change from 0.3.91 to 0.3.92 updates application-version metadata in the root npm and Rust manifests/locks. The Extended-resolved dependency remediations and locally vendored mobile patch are retained. Fresh npm, RustSec, Rust build and mobile results for the 0.3.92-integrated SHA remain required; historical 0.3.91 CI is not proof for this candidate.
+
+## Verified 0.3.92 integration CI checkpoint — 2026-11-03
+
+For exact Extended code SHA [`80c438b47e06d1df330564dc8a4cb17318230310`](https://github.com/ginmp8/pandacode-extended/commit/80c438b47e06d1df330564dc8a4cb17318230310), both [push CI #41692930559](https://github.com/ginmp8/pandacode-extended/actions/runs/41692930559) and [PR CI #41692943491](https://github.com/ginmp8/pandacode-extended/actions/runs/41692943491) completed with successful npm dependency audit and RustSec audit jobs. Both also passed Linux Rust checks/tests and mobile/Expo compatibility. These results supersede the earlier *pending CI* observation for the source-0.3.92 integrated **code SHA**, without asserting that all possible advisories, native integrations or runtime policy behaviors were independently verified. No new dependency remediation is claimed by this evidence-only documentation update.

@@ -21,6 +21,12 @@
 - [ ] Exercise project-folder relinking, worktree repair and Windows conversation import on representative native platforms.
 - [ ] Confirm `arboard` and its new lockfile graph compile under the Extended remediated dependency versions without loosening Settings policy.
 
+## Explicit publication approval
+
+- A `v*` tag push may build installer artifacts, but must not create a GitHub Release or publish to npm.
+- Only a manually dispatched `Release` workflow with `publish: true` can create a GitHub Release; npm additionally requires that manual run to target a tag.
+- Preparing this candidate must not dispatch publishing, create tags, or treat a successful build as release approval.
+
 ## Approval and distribution boundary
 - [ ] Review the completed source changes, test results, release notes, compatibility/migration guidance and any remaining risks.
 - [ ] Obtain explicit release approval.

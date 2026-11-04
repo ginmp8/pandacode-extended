@@ -37,3 +37,12 @@ See [release checklist](release-checklist.md) and [feature controls](feature-con
 ## Source 0.3.92 acceptance gaps
 
 The upstream redesign adds live GPU-backed thread scenes, one-card-per-turn rendering and up to six tiled thread views. Upstream's [0.3.92 release notes](../../../releases/0.3.92.md) report browser preview coverage but not native installed-app tiling/scene verification or real agent streaming into an unfocused tile. Extended additionally requires verification that the new Settings navigation still exposes working Feature controls, that Connect Off/On gates both relay and direct operations correctly, and that prior bot, MCP and cloud permissions still behave as configured. These are unverified scenarios, not proven regressions.
+
+## Source 0.3.93 verification gaps
+
+- Verify nested/background subagents eventually report back to their lead, including concurrent completions and silent or empty turns; verify intentional limits documented in upstream [0.3.93 notes](../../../releases/0.3.93.md).
+- Exercise team persistence beyond the previous history/round/workload ceilings, delayed lead retries and interruption/resume paths; verify the new remote/mobile Resume affordance and paged worker history.
+- Verify Codex with and without a user-defined thread limit while Extended MCP isolation is Off and On; validate that disabling external MCP does not suppress the permitted authenticated per-run host.
+- Recheck Settings, bots, credential transfer and Connect with new upstream orchestration behavior. The source diff contains no evidence that native On/Off testing was executed for this candidate.
+
+These are release-gate tests, not a confirmed vulnerability or a reason to remove inherited functionality.

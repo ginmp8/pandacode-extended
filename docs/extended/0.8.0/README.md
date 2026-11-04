@@ -2,7 +2,7 @@
 
 **Status:** planned, unreleased Extended release candidate. The current documentation baseline is PandaCode source `0.3.90` from [`348add18a63906bd8928a7cef547eeaf91429fa7`](https://github.com/ginmp8/pandacode/commit/348add18a63906bd8928a7cef547eeaf91429fa7), initially integrated in Extended at [`f653c8641e23746a4038cfebf1a8a3df90c478e7`](https://github.com/ginmp8/pandacode-extended/commit/f653c8641e23746a4038cfebf1a8a3df90c478e7). This is not a claim that the Extended product version has been published, or that a binary is available.
 
-**Latest targeted upstream parity:** PandaCode `0.3.92`, immutable fork commit [`28b835f8b8cb72dcda5506d4bcfff489ad9a98dc`](https://github.com/ginmp8/pandacode/commit/28b835f8b8cb72dcda5506d4bcfff489ad9a98dc). The Extended `0.8.0` candidate is still unreleased. The original source notes are [upstream 0.3.92](../../../releases/0.3.92.md); the previous 0.3.91 integration is historical evidence, not the current source HEAD.
+**Latest targeted upstream parity:** PandaCode `0.3.93`, immutable fork commit [`e64505ea8ed66fc8ec8942da96451db56ff91455`](https://github.com/ginmp8/pandacode/commit/e64505ea8ed66fc8ec8942da96451db56ff91455). The Extended `0.8.0` candidate remains unreleased. The [original upstream 0.3.93 release notes](../../../releases/0.3.93.md) are mirrored byte-for-byte; 0.3.92 evidence remains historical.
 
 - [Extended 0.8.0 release notes and feature scope](../../../releases/extended/0.8.0.md)
 - [Release readiness and validation checklist](release-checklist.md)
@@ -21,10 +21,18 @@
 - [Six-job CI #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966): all `success` on the code SHA; native installers and full Settings On/Off acceptance remain unverified.
 - Earlier PR #105 is merged, but covers an older `base/hardened` integration and is not evidence of a `0.3.91` release.
 
-## Latest source candidate: PandaCode 0.3.92
+## Source candidate: PandaCode 0.3.92 (historical)
 
 The fork introduces its redesigned UI and Settings navigation, live thread scenes, turn cards, tiled conversations, updated test coverage and associated static resources. Extended's configurable Feature controls page is retained as its own Settings section, and the Connect master switch remains an additional gate around upstream remote operations. These are inherited upstream features, not newly invented Extended 0.8.0 functionality. Native GPU, multi-window, Connect and controls On/Off acceptance is pending; CI must be tied to the final commit SHA.
 
 ## Verified 0.3.92 integration CI checkpoint — 2026-11-03
 
 The exact Extended code commit [`80c438b47e06d1df330564dc8a4cb17318230310`](https://github.com/ginmp8/pandacode-extended/commit/80c438b47e06d1df330564dc8a4cb17318230310), based on [upstream source `28b835f8b8cb72dcda5506d4bcfff489ad9a98dc`](https://github.com/ginmp8/pandacode/commit/28b835f8b8cb72dcda5506d4bcfff489ad9a98dc), passed both [push CI #41692930559](https://github.com/ginmp8/pandacode-extended/actions/runs/41692930559) and [pull-request CI #41692943491](https://github.com/ginmp8/pandacode-extended/actions/runs/41692943491), six successful jobs per run. The checks cover TypeScript/unit/website, Linux Rust, Expo/mobile, npm dependency audit, RustSec and macOS ONNX. The status is tied to the **code SHA**, not this subsequent documentation commit or an approved Extended 0.8.0 release. Full native GUI/installer, settings On/Off and two-device Connect acceptance remain unverified; see the [release checklist](release-checklist.md).
+
+## Latest source candidate: PandaCode 0.3.93
+
+This import targets upstream commit [`e64505ea8ed66fc8ec8942da96451db56ff91455`](https://github.com/ginmp8/pandacode/commit/e64505ea8ed66fc8ec8942da96451db56ff91455) and preserves the existing Extended controls and dependency remediations. The upstream change adds reliable nested/background subagent reports, unlimited team-capacity operation, improved team state recovery, paged remote worker history, and Codex thread-limit handling that honors user configuration.
+
+A complete source-tree comparison before publication found 1,495 source blobs, zero missing paths in the staged Extended tree, 62 shared files intentionally divergent from upstream, and 28 Extended-only files. Of the 90 changed paths since upstream 0.3.92, 77 use exact source blobs, 12 require independent three-way reconciliation with Extended changes, and one is the unchanged new upstream release note. These are static integration checks, not an assertion of functional equivalence or passing CI for the resulting commit.
+
+Tests for resumed teams, subagents, remote pagination, Codex/MCP On/Off behavior, native installers and two-device Connect remain necessary. The CI verdict must be taken from the published Extended commit SHA, not a previous green run.

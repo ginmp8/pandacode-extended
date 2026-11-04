@@ -19,6 +19,7 @@ test.beforeEach(async ({ page }) => {
       if (command === 'send_message' && (args.sessionId === window.__mainId || window.__holdSide)) { session(args.sessionId).status = 'running'; (messages[args.sessionId] ??= []).push({ id: ++id, sessionId: args.sessionId, role: 'user', content: args.text, createdAt: Date.now() }); return; }
       if (command === 'configure_session' && window.__failConfigure) throw new Error('Model unavailable.');
       if (command === 'get_messages' && args.sessionId === window.__slowSide) await new Promise(resolve => setTimeout(resolve, 400));
+      if (command === 'resolve_slash_command' && window.__holdBtwSlash) await new Promise(resolve => { window.__releaseBtwSlash = resolve; });
       switch (command) {`);
     await route.fulfill({ response, body: body + `
 window.__btwEmit = emit; window.__btwSession = session; window.__btwSaveConnection = previewSaveConnection;
@@ -243,6 +244,40 @@ async function openSide(page: Page, question = 'first question'): Promise<string
   await expect(answers(page)).toHaveCount(1); await idle(page);
   return (await calls(page, 'send_message')).at(-1).args.sessionId;
 }
+test('side /recap stays on its originating task when navigation overtakes slash resolution', async ({ page }) => {
+  const originalSide = await openSide(page);
+  const before = (await calls(page, 'send_message')).length;
+  await page.evaluate(() => { (window as any).__holdBtwSlash = true; });
+  await side(page).fill('/recap');
+  await side(page).press('Enter');
+  await expect.poll(() => calls(page, 'resolve_slash_command').then(list => list.length)).toBe(1);
+  await page.getByRole('button', { name: 'Open side thread as a full thread', exact: true }).click();
+  await expect(page.locator(`.task-item[data-id="${originalSide}"]`)).toHaveAttribute('aria-current', 'page');
+  await page.evaluate(() => (window as any).__releaseBtwSlash());
+  await expect.poll(() => calls(page, 'send_message').then(list => list.length)).toBe(before + 1);
+  expect((await calls(page, 'send_message')).at(-1).args.sessionId).toBe(originalSide);
+  expect(await calls(page, 'create_session')).toHaveLength(1);
+});
+
+test('model picker on a side thread with a named team does not configure the main task', async ({ page }) => {
+  const sideId = await openSide(page), main = await mainId(page);
+  await page.evaluate(async id => {
+    const w = window as any, task = w.__btwSession(id);
+    await w.__TAURI_INTERNALS__.invoke('architect_configure', {
+      sessionId: id,
+      config: { auto: true, rosterOnly: true, name: 'Side crew',
+        workers: [{ id: 'side-worker', name: 'Side worker', provider: task.provider, model: task.model }],
+        maxParallel: 0, maxRounds: 8, maxAssignments: 24, workspace: 'shared', summaryLimit: 3072 },
+      architect: { provider: task.provider, model: task.model },
+    });
+  }, sideId);
+  await expect.poll(async () => Boolean(await page.evaluate(id =>
+    (window as any).__TAURI_INTERNALS__.invoke('architect_get', { sessionId: id }), sideId))).toBe(true);
+  await sideModel(page).click();
+  await expect(page.getByText('Open the side thread as a full thread to configure its team.')).toBeVisible();
+  expect((await calls(page, 'architect_configure')).some(call => call.args.sessionId === main)).toBe(false);
+});
+
 /** Each top-level transcript row, minus the panel's own Insert button and live/team hosts. */
 const rows = (page: Page, selector: string) => page.locator(selector).evaluate(root => [...root.children]
   .filter(row => !row.matches('#stream-region, .btw-stream-region, #team-progress-host, .team-progress-slot, .inspector-hint'))

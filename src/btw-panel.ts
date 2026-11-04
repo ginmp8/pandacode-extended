@@ -31,7 +31,7 @@ export interface BtwPanelHost {
   mountPickers(textarea: HTMLTextAreaElement, side: Session): () => void;
   bindActions(root: HTMLElement): void;
   /** Sends as a /btw message (with main-thread context), creating the side thread if needed. */
-  send(text: string): Promise<void>;
+  send(text: string, side?: Session): Promise<void>;
   queue(side: Session, text: string): Promise<void>;
   steer(side: Session, text: string): Promise<void>;
   /** Runs an app slash command on the side thread: false when `text` is not one, a string to send instead, else true. */
@@ -168,7 +168,7 @@ export class BtwPanel {
     input.value = ''; if (sideId) this.host.setDraft(sideId, '');
     const work = !side ? this.host.send(text)
       : running ? (steer ? this.host.steer(side, text) : this.host.queue(side, text))
-      : this.host.command(side, text).then(done => done === true ? undefined : this.host.send(done || text));
+      : this.host.command(side, text).then(done => done === true ? undefined : this.host.send(done || text, side));
     this.stick = true;
     work.catch(error => {
       // Put the text back in whichever composer is showing now, unless something new was typed.

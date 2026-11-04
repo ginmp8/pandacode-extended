@@ -3950,7 +3950,7 @@ const btwPanel = new BtwPanel({
       return saved && saved.id > 0 && ['user', 'assistant'].includes(saved.role) ? call<string>('get_message_content', { sessionId, messageId: saved.id }) : saved?.content;
     }, onFork: (sessionId, messageId) => forkAtMessage(sessionId, messageId), onEdit: editAtMessage, report,
   }); },
-  send: text => sendBtw(text),
+  send: (text, side) => sendBtw(text, side),
   queue: (side, text) => btwPanelQueue(side, text),
   // A team takes messages between runs, as in the main composer.
   steer: (side, text) => teams.get(side.id) ? btwPanelQueue(side, text) : steerOrQueue(side, text),
@@ -4076,18 +4076,22 @@ async function createBtw(main: Session, prompt: string): Promise<BtwLink> {
 }
 /** One create-or-send at a time per main thread, so two quick /btw prompts share one side thread. */
 const btwSending = new Map<string, Promise<void>>();
-function sendBtw(text: string): Promise<void> {
-  const main = session(); if (!main) return Promise.resolve();
+function sendBtw(text: string, targetSide?: Session): Promise<void> {
+  const main = targetSide ? btwMainOf(targetSide.id)?.main : session();
+  if (!main) return targetSide ? Promise.reject(new Error('This side thread is no longer linked to its original task.')) : Promise.resolve();
   const refusal = btwRefusal(main);
   if (refusal) return Promise.reject(new Error(refusal));
-  const next = (btwSending.get(main.id) ?? Promise.resolve()).catch(() => undefined).then(() => deliverBtw(main, text));
+  const next = (btwSending.get(main.id) ?? Promise.resolve()).catch(() => undefined).then(() => deliverBtw(main, text, targetSide?.id));
   btwSending.set(main.id, next); btwPanel.refresh();
   void next.catch(() => undefined).finally(() => { if (btwSending.get(main.id) === next) btwSending.delete(main.id); btwPanel.refresh(); });
   return next;
 }
 /** Sends to the side thread with the main thread's news since its last message. */
-async function deliverBtw(main: Session, text: string): Promise<void> {
-  const link = btwLink(main.id) ?? await createBtw(main, text);
+async function deliverBtw(main: Session, text: string, expectedSideId?: string): Promise<void> {
+  const linked = btwLink(main.id);
+  // A delayed slash command must never move to a newly selected/replaced side thread.
+  if (expectedSideId && linked?.sideId !== expectedSideId) throw new Error('This side thread changed before the message was sent. Retry in the current side thread.');
+  const link = linked ?? await createBtw(main, text);
   const side = state.sessions.find(task => task.id === link.sideId)!;
   if (isRunning(side.id)) throw new Error('The side thread is still answering. Send this when it finishes.');
   // Running from here on: no second send can pass the check above, and a failure below tears down only this run.
@@ -4932,7 +4936,11 @@ async function showModel(anchor: HTMLElement, target = session()): Promise<void>
   const selected = target; if (!selected || configuringSessions.has(selected.id)) return;
   // A side thread's picker acts on the side thread only, and only while the panel still shows it.
   const inPanel = selected.id !== state.sessionId, current = () => inPanel ? (btwSideTask() ?? btwDraftTask())?.id === selected.id : selected.id === state.sessionId;
-  if (teams.get(selected.id) && !selected.remoteDevice && !teams.get(selected.id)?.config.auto) { await showArchitectSetup(anchor); return; }
+  if (teams.get(selected.id) && !selected.remoteDevice && !teams.get(selected.id)?.config.auto) {
+    // The classic setup reads session(); never open it for a different task in the side panel.
+    if (inPanel) { notify('Open the side thread as a full thread to configure its team.'); return; }
+    await showArchitectSetup(anchor); return;
+  }
   const botNext = !inPanel && Boolean(botForThread());
   if (isRunning(selected.id) && !botNext) return;
   closeProjectPicker();

@@ -44,3 +44,8 @@ Upstream 0.3.93 changes the application's declared version and related npm/Cargo
 ## Source 0.3.94 dependencies
 
 The source release updates application version metadata; Extended's dependency overrides, lockfile remediations and vendored mobile patch were retained. No new advisory fix is claimed. Current-SHA npm audit, RustSec and build evidence is tracked in the release checklist.
+
+
+## Verified 0.3.94 dependency CI — 2026-11-04
+
+On [Extended `2b24c858`](https://github.com/ginmp8/pandacode-extended/commit/2b24c85867ff93372c4e54141c7c9fa4362dd536), [push CI #41780357920](https://github.com/ginmp8/pandacode-extended/actions/runs/41780357920) and [PR CI #41780361642](https://github.com/ginmp8/pandacode-extended/actions/runs/41780361642) completed successfully, including both the npm dependency audit and RustSec jobs. This demonstrates the configured audit checks on that SHA, not universal vulnerability absence, a new remediation, or native feature-control acceptance. Later documentation commits need fresh CI evidence.

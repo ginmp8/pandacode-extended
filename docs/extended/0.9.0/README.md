@@ -17,3 +17,7 @@
 The 0.9.0 cycle starts at `base/development` SHA `dbd4e3f39685603bff21069439edf5e5201e021d`, matching `base/hardened` at cycle opening. Source manifests inherit upstream PandaCode 0.3.94 at this checkpoint; they must continue to track the actual fork `main`, not this Extended release number.
 
 Current cycle documents track source-integrity, control, dependency, known-issue and readiness evidence; historical 0.8.0 links remain reference-only. References to 0.8.0 above are historical baselines and do not certify 0.9.0 behavior.
+
+## Latest source-integration checkpoint (2026-11-04)
+
+The tracked fork HEAD is [`fc32c3f`](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852) and declares **PandaCode 0.3.97**. The Extended distribution version remains **0.9.0 (development candidate)**. The starting 0.3.94 reference above is historical, not the current pinned source. See the [release-note checkpoint](../../../releases/extended/0.9.0.md) and [source-baseline JSON](../upstream/source-baseline.json).

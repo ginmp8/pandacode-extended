@@ -20,3 +20,12 @@
 - [ ] Obtain explicit release approval before any publication.
 
 **Limits:** Git checkout was unavailable due to DNS resolution of `github.com` in the current sandbox; no local product test or real-device control acceptance was run. Recursive tree and exact-SHA CI evidence were obtained from authenticated GitHub. These checklist facts describe the `e069ba4b` pre-documentation baseline, not a passing result for the new commit.
+
+## Updated source checkpoint — 2026-11-04
+
+- [x] Pinned latest inspected fork `main` to [`fc32c3f`](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852), application version 0.3.97, including unreleased commits.
+- [x] Created a complete staged source-reconciled tree `9f6f662464b94eb5b6798812d64f9c9c9eb713a6`: 1,501 upstream files, 0 absent, 74 exact imports, 13 reconciled source-changed paths, 65 remaining shared divergences, 34 Extended-only files.
+- [x] Reconciled root npm and Rust/Tauri application-version fields as 0.3.97 while retaining Extended-only dependency hardening; source 0.3.95–0.3.97 notes remain exact.
+- [ ] Check fresh CI for the **published source-integration commit SHA**, including Node/TS, Rust, mobile, dependency audits and release scripts; historical CI does not apply.
+- [ ] Validate all shared divergent hunks and native On/Off settings, Cline MCP, Connect, cloud/VM and prior-data upgrade paths.
+- [ ] Perform native installed-app/window/IME/drag/drop/iOS/Android runtime acceptance and publication approval. Candidate documentation is **not** a release.

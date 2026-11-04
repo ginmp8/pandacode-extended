@@ -13,8 +13,19 @@ If an upstream feature conflicts with an existing Extended control, **adapt the 
 1. **Extended Settings and opt-in defaults:** app and agent update preferences; the PandaCode Connect master switch and direct-route preference; cloud-credential transfer; agent-facing cloud/VM management; external MCP configuration; and the global bot pause. Preserve the enabled behavior, and keep scope and timing explicit (for example, a setting applied to newly launched processes does not retroactively change running processes). Details: [Feature controls](../0.7.0/feature-controls.md).
 2. **Dependency remediation:** use compatible versions with verified security fixes and the Extended-local `deepmerge` patch when appropriate. Keep every upstream capability that consumes those dependencies, and preserve the corresponding lockfiles and tests. Details: [Dependency security](../0.7.0/dependency-security.md).
 3. **Necessary integration glue:** tests, migrations, product/release identity, CI and documentation required to preserve the above controls or Extended-specific data compatibility. These are additions or bounded adaptations, **not exemptions to feature parity**. The historical Extended release number may differ from the upstream application/source version.
+4. **Temporary corrections to inherited source defects:** only narrow, test-backed fixes for observed source behavior; retain the upstream feature and its public contract. Record the exact changed paths, fork evidence and regression cases; re-evaluate on every fork update, replacing the local fix with an equivalent upstream correction when available. These must not become permanent forks of the feature.
 
 A deviation does **not** become acceptable merely because it is mentioned in security documentation, accepted by a model or accompanied by a passing audit. Every divergent production path must have a concrete, reviewed reason within this contract. A new deliberate product behavior difference requires a separate explicit decision.
+
+## Temporary inherited /btw isolation fixes — review checkpoint 2026-11-04
+
+**Upstream evidence:** `ginmp8/pandacode:main` at `e64505ea8ed66fc8ec8942da96451db56ff91455`; the originating source had the same async-side-send and classic-team-setup paths. These are **behavioral corrections**, not Extended-exclusive /btw features or a reason to omit new upstream functionality.
+
+- `src/btw-panel.ts` and `src/main.ts`: pass the original side session through deferred slash resolution; resolve its linked main task and reject delivery if the side link changed. Avoid sending a pending `/recap` or `/init` to whichever task happens to be selected later.
+- `src/main.ts`: when the side conversation has a configured non-auto team, instruct the user to open that side thread as a full task for classic team setup. The existing classic setup reads `session()` and cannot safely configure an unrelated side thread; this narrow guard prevents changing the main task.
+- `tests/btw.spec.ts`: cover delayed `/recap` resolution across task navigation and named-team isolation in the side model picker.
+
+**Future upstream synchronization:** compare these precise hunks and the regression scenarios against fresh fork `main` before applying changes. When upstream corrects either behavior equivalently, adopt the upstream implementation and drop only its redundant local hunk, keeping regression coverage. Otherwise retain the minimal local guard alongside *all* new upstream behavior. Do not use this checkpoint SHA as a permanent version pin. Playwright regression execution and final native acceptance are separate verification gates.
 
 ## Security evidence and terminology
 

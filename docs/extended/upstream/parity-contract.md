@@ -13,8 +13,19 @@ If an upstream feature conflicts with an existing Extended control, **adapt the 
 1. **Extended Settings and opt-in defaults:** app and agent update preferences; the PandaCode Connect master switch and direct-route preference; cloud-credential transfer; agent-facing cloud/VM management; external MCP configuration; and the global bot pause. Preserve the enabled behavior, and keep scope and timing explicit (for example, a setting applied to newly launched processes does not retroactively change running processes). Details: [Feature controls](../0.7.0/feature-controls.md).
 2. **Dependency remediation:** use compatible versions with verified security fixes and the Extended-local `deepmerge` patch when appropriate. Keep every upstream capability that consumes those dependencies, and preserve the corresponding lockfiles and tests. Details: [Dependency security](../0.7.0/dependency-security.md).
 3. **Necessary integration glue:** tests, migrations, product/release identity, CI and documentation required to preserve the above controls or Extended-specific data compatibility. These are additions or bounded adaptations, **not exemptions to feature parity**. The historical Extended release number may differ from the upstream application/source version.
+4. **Temporary corrections to inherited source defects:** only narrow, test-backed fixes for observed source behavior; retain the upstream feature and its public contract. Record the exact changed paths, fork evidence and regression cases; re-evaluate on every fork update, replacing the local fix with an equivalent upstream correction when available. These must not become permanent forks of the feature.
 
 A deviation does **not** become acceptable merely because it is mentioned in security documentation, accepted by a model or accompanied by a passing audit. Every divergent production path must have a concrete, reviewed reason within this contract. A new deliberate product behavior difference requires a separate explicit decision.
+
+## Temporary inherited /btw isolation fixes — review checkpoint 2026-11-04
+
+**Upstream evidence:** `ginmp8/pandacode:main` at `e64505ea8ed66fc8ec8942da96451db56ff91455`; the originating source had the same async-side-send and classic-team-setup paths. These are **behavioral corrections**, not Extended-exclusive /btw features or a reason to omit new upstream functionality.
+
+- `src/btw-panel.ts` and `src/main.ts`: pass the original side session through deferred slash resolution; resolve its linked main task and reject delivery if the side link changed. Avoid sending a pending `/recap` or `/init` to whichever task happens to be selected later.
+- `src/main.ts`: when the side conversation has a configured non-auto team, instruct the user to open that side thread as a full task for classic team setup. The existing classic setup reads `session()` and cannot safely configure an unrelated side thread; this narrow guard prevents changing the main task.
+- `tests/btw.spec.ts`: cover delayed `/recap` resolution across task navigation and named-team isolation in the side model picker.
+
+**Future upstream synchronization:** compare these precise hunks and the regression scenarios against fresh fork `main` before applying changes. When upstream corrects either behavior equivalently, adopt the upstream implementation and drop only its redundant local hunk, keeping regression coverage. Otherwise retain the minimal local guard alongside *all* new upstream behavior. Do not use this checkpoint SHA as a permanent version pin. Playwright regression execution and final native acceptance are separate verification gates.
 
 ## Security evidence and terminology
 
@@ -51,3 +62,21 @@ This checkpoint is historical. For any later sync, compare fresh HEADs; do not h
 - All six application-version fields in five manifest/lock/config files were read from both frozen SHAs and equal `0.3.90`; dependency versions and patches intentionally differ where Extended remediations are present.
 - [CI run 41478201907](https://github.com/ginmp8/pandacode-extended/actions/runs/41478201907) on `0504b1c25532e363b2508725984e654cea19a216`: all six jobs reported **success** (TypeScript/unit/website, Linux Rust check/tests, RustSec, npm audit, mobile/Expo and macOS ONNX). This is executed CI evidence for the mode-only code commit, not a native installer test.
 - No local full repository clone/build occurred because the sandbox could not resolve `github.com`. GitHub's authenticated commit/tree/blob APIs supplied untruncated source/destination inventory and verified the changed metadata. Native installer packaging, two-real-host Connect, and comprehensive On/Off UI/runtime scenarios were **not executed** here. Global functional parity remains **unverified** despite zero missing tracked upstream paths.
+
+## Upstream 0.3.91 source synchronization candidate — 2026-11-02
+
+- Pinned upstream fork HEAD: [`a9be2ced7bb594ad28a09fbd204cdad34770c750`](https://github.com/ginmp8/pandacode/commit/a9be2ced7bb594ad28a09fbd204cdad34770c750), tree `3f0d2d06ef3376033be6ee71b8e686f0a229a3fb`, application version `0.3.91`.
+- Relative to the previously reviewed `0.3.90` source, 34 source paths were added or modified: 27 are eligible for verbatim blob integration, and seven require source-hunk/Extended-control reconciliation. No source path may be omitted, including the new original `releases/0.3.91.md`.
+- Source-introduced functionality includes project relinking/worktree repair, Linux clipboard and undo fallbacks, ACP mode behavior, Claude large catalog, DeepSeek slash commands, OpenCode MCP inventory, Windows conversation import and cloud Settings ordering.
+- Preserve Extended controls, patched dependencies and its independent `0.8.0` candidate documentation. Runtime parity of all Settings On/Off, native platform validation and two-device Connect are **not certified** by this source inventory. Verify CI against the exact resulting Extended commit.
+
+## Published source-integration evidence — 2026-11-02
+
+- Exact upstream source: [PandaCode `0.3.91` at `a9be2ced7bb594ad28a09fbd204cdad34770c750`](https://github.com/ginmp8/pandacode/commit/a9be2ced7bb594ad28a09fbd204cdad34770c750).
+- Direct Extended integration commit: [`083e764485f08ea1b5cabbf3b3d18ea9b426e89c`](https://github.com/ginmp8/pandacode-extended/commit/083e764485f08ea1b5cabbf3b3d18ea9b426e89c) on `base/development`.
+- [CI run #41498498966](https://github.com/ginmp8/pandacode-extended/actions/runs/41498498966) reported **success in all six jobs** on that exact code SHA: TypeScript/unit/website, Linux Rust test/Clippy, mobile/Expo, npm dependency audit, RustSec audit and macOS Panda Router ONNX.
+- Complete recursive Git-tree readback, neither truncated: 1,455 upstream blobs, zero missing source paths, 1,396 byte/mode-identical paths, 59 source-versus-Extended content differences, and 27 Extended-only paths. Seven of the 59 differences are the reviewed three-way application of source `0.3.91` hunks; the others are carried Extended-specific deviations that still need individual functional review.
+- The six application-version fields match upstream `0.3.91`. The independent Extended `0.8.0` remains an **unreleased documentation candidate**, with no public installer or distribution claim.
+- No local full repository checkout/build was possible because the sandbox could not resolve GitHub DNS; the integration used pinned GitHub API trees/blobs with exact SHA verification. Native Windows/Linux/macOS GUI checks, two-real-device Connect and complete Settings On/Off/runtime scenarios were **not executed**. GitHub CI success does not prove these behaviors.
+- Historical [PR #105](https://github.com/ginmp8/pandacode-extended/pull/105) was already merged from `base/hardened` to `main`, based on an earlier `0.3.90` Extended checkpoint; it does not include the new `base/development` `0.3.91` integration. This run created or changed no PR.
+

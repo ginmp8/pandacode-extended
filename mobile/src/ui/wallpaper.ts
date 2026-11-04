@@ -26,7 +26,7 @@ export const sceneIds = wallpaperSets.flatMap(day => wallpaperPeriods.map(period
 export function normalizeWallpaperPreferences(value: unknown): WallpaperPreferences {
   const input = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   return {
-    enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : false,
     visibility: typeof input.visibility === 'number' && Number.isFinite(input.visibility)
       ? Math.max(0, Math.min(100, Math.round(input.visibility))) : 20,
     blur: typeof input.blur === 'number' && Number.isFinite(input.blur)
@@ -72,5 +72,10 @@ export function phoneWallpaperPreferences(stored: unknown): WallpaperPreferences
   const input: Record<string, unknown> = stored && typeof stored === 'object' ? { ...stored as Record<string, unknown> } : {};
   const untouched = input.version !== PHONE_PREFERENCES_VERSION && input.visibility === 20 && input.blur === 0;
   const { visibility, blur, ...rest } = input;
-  return normalizeWallpaperPreferences({ ...PHONE_DEFAULTS, ...(untouched ? rest : input) });
+  return normalizeWallpaperPreferences({
+    ...PHONE_DEFAULTS,
+    ...(untouched ? rest : input),
+    // Keep the phone's on-by-default behavior while matching desktop normalization.
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
+  });
 }

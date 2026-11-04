@@ -19,3 +19,7 @@ The 0.9.0 cycle inherits the existing Extended user-configurable behavior descri
 **Unverified 0.9.0 scenarios:** On/Off, manual/automatic, process restart and already-running process scope; real two-device Connect; bot pause/resume; authenticated MCP; real cloud provisioning/credential transfer and VM operation. No new control or stricter default was introduced by this documentation checkpoint.
 
 The current tracked-tree comparison found **zero absent upstream paths**, but 65 divergent shared blobs whose full hunk-by-hunk functional reconciliation is not certified. Presence of a file or a green CI job does not prove the user-visible On behavior. See [known issues](known-issues.md) and [release checklist](release-checklist.md).
+
+## 0.3.97 integration checkpoint (2026-11-04)
+
+Source [`fc32c3f`](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852) was reconciled into a staged Extended tree with no missing upstream files. Existing control paths and settings were retained, including the global bot pause, external MCP exposure, Connect restrictions, credential-transfer and agent-driven cloud/VM gates and manual update paths. Preservation by source reconciliation is **not** runtime validation: full enabled/disabled, restart and existing-agent integration cases remain untested. Upstream 0.3.97 Cline MCP configuration and provider executable settings require additional checks under the Extended MCP gate.

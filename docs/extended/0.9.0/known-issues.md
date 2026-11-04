@@ -13,3 +13,7 @@ The [0.8.0 register](../0.8.0/known-issues.md) is historical input; its observat
 | Dependency security | **CI-CHECKED, NOT FULLY CERTIFIED:** npm/RustSec jobs green at Extended `e069ba4b` | Review advisories/overrides and platform-specific integrations |
 
 No deletion of upstream functionality or new safety default is justified by these gaps alone. Any confirmed defect must be addressed narrowly, with a regression test, while preserving upstream features. See the [parity contract](../upstream/parity-contract.md) and [release checklist](release-checklist.md).
+
+## Updated evidence — 2026-11-04, upstream 0.3.97
+
+Source [`fc32c3f`](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852) and staged Extended tree `9f6f662464b94eb5b6798812d64f9c9c9eb713a6`: 1,501 upstream paths, 1,436 exact, 65 divergent shared, 0 missing, 34 Extended-only. Historical 0.3.94 rows above reflect an earlier comparison; this snapshot supersedes their counts. The 65 divergent paths still need full per-hunk certification; functional parity is **unverified**, not disproven. Prior CI success does not cover the new source changes. In particular, installed-window close/reopen, IME composition, macOS drag/drop, Cline MCP with Extended's gate, the Android emulator on Linux, credential sources, and iOS transcript rendering remain unverified locally or natively. Do not treat missing native test evidence as permission to remove inherited features.

@@ -55,6 +55,7 @@ fn key_with(config: &RunConfig, tools: &[Value], connection: &str) -> String {
         "environment": crate::provider_settings::environment_fingerprint(&config.provider),
         // So do the telemetry opt-outs (`privacy.rs`).
         "telemetryOff": super::privacy::telemetry_off(),
+        "executable": crate::provider_settings::executable_override(&config.provider),
         "externalMcpServers": crate::feature_controls::get().external_mcp_servers,
     })
     .to_string()

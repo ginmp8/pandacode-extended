@@ -1,8 +1,8 @@
 {
   "source_fork": "ginmp8/pandacode",
-  "version": "0.3.94",
-  "release_sha": "5ab09c5a4da4a819b30b20771ef768866fa4ef56",
-  "tree_sha": "7a66652ae5ddcbf22449451ec798a8d54eb36cad",
+  "version": "0.3.97",
+  "release_sha": "fc32c3f585db6a72fee967e8d91f2bb50fe67852",
+  "tree_sha": "c17d7ae66d47be2b642f1bcfa36a6e253f9e566b",
   "release_notes": {
     "0.3.85": "2db11f899c9a797c3a5918c155db0326917307e9",
     "0.3.86": "54f325723f1f8a5bbcf7842759e3ea96d060782c",
@@ -12,7 +12,10 @@
     "0.3.91": "861de85d1c7d3cca4d8d6117bfd55c3ae8aad0ce",
     "0.3.92": "796f3a85537b0befd9b5e92d6b4145d0f1864fef",
     "0.3.93": "024bc4e86a6c7e341db53d50c302c8d4390962d1",
-    "0.3.94": "0e49537a95cefad885a3bc7aade29f340c8739a7"
+    "0.3.94": "0e49537a95cefad885a3bc7aade29f340c8739a7",
+    "0.3.95": "925618e3d84071631ba239887c8b7bc877ee4fbd",
+    "0.3.96": "e4ce71589567e7b3e7483fdc0bae3956fd050697",
+    "0.3.97": "4436b8e5c3d6bba5157da43142df09252cb8c2dd"
   },
-  "release_dates_sha": "4e6946b3a2403739abf9bcbe60345207c21a1a74"
+  "release_dates_sha": "0d1e7692e215018ec99b811ff45283d5f365304f"
 }

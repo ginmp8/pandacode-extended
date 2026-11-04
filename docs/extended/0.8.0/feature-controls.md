@@ -37,3 +37,7 @@ The redesigned upstream Settings navigation moves page definitions into `src/set
 Codex now supports process-local thread-limit handling that respects an explicit user limit. Extended's existing `external_mcp_servers` switch must continue applying separately to newly launched Codex processes. Both command arguments are preserved together; verification must exercise MCP On and Off, an explicit Codex thread limit, and the no-limit default without editing user configuration. Team resume, remote worker pagination, and bot scheduling must continue honoring the existing Extended permissions and controls.
 
 This integration is based on source inspection and a nonoverlapping three-way merge; live control-toggle acceptance remains pending.
+
+## Source 0.3.94 control compatibility
+
+This upstream update primarily affects worker progress, live turn cards, and their tests. Extended opt-in switches remain independently configured. Confirm the changed worker UI with bots paused/resumed and Connect On/Off; no native toggle acceptance is claimed by this source copy.

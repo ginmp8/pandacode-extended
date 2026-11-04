@@ -46,3 +46,9 @@ The upstream redesign adds live GPU-backed thread scenes, one-card-per-turn rend
 - Recheck Settings, bots, credential transfer and Connect with new upstream orchestration behavior. The source diff contains no evidence that native On/Off testing was executed for this candidate.
 
 These are release-gate tests, not a confirmed vulnerability or a reason to remove inherited functionality.
+
+## Source 0.3.94 unverified behavior
+
+- Verify expanding/collapsing worker progress across streaming, redraw, error and completed states, including screen-reader state.
+- Verify shrinking/replacing live reply cards do not leave blank space or scroll jumps, including reduced motion.
+- Verify Extended controls, remote progress and bot pause work with the inherited UI update. No regression is asserted without reproduction.

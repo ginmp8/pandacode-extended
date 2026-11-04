@@ -40,3 +40,7 @@ For exact Extended code SHA [`80c438b47e06d1df330564dc8a4cb17318230310`](https:/
 ## Source 0.3.93 reconciliation
 
 Upstream 0.3.93 changes the application's declared version and related npm/Cargo lock metadata without requiring a rollback of Extended's resolved dependency remediations. The staged source update retains the Extended dependency overrides and vendored mobile fix. No fresh RustSec or npm audit for this new SHA has yet been observed, and this paragraph does not claim a new security remediation.
+
+## Source 0.3.94 dependencies
+
+The source release updates application version metadata; Extended's dependency overrides, lockfile remediations and vendored mobile patch were retained. No new advisory fix is claimed. Current-SHA npm audit, RustSec and build evidence is tracked in the release checklist.

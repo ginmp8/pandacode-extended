@@ -2,7 +2,7 @@
 
 **Status:** planned, unreleased Extended release candidate. The current documentation baseline is PandaCode source `0.3.90` from [`348add18a63906bd8928a7cef547eeaf91429fa7`](https://github.com/ginmp8/pandacode/commit/348add18a63906bd8928a7cef547eeaf91429fa7), initially integrated in Extended at [`f653c8641e23746a4038cfebf1a8a3df90c478e7`](https://github.com/ginmp8/pandacode-extended/commit/f653c8641e23746a4038cfebf1a8a3df90c478e7). This is not a claim that the Extended product version has been published, or that a binary is available.
 
-**Latest targeted upstream parity:** PandaCode `0.3.93`, immutable fork commit [`e64505ea8ed66fc8ec8942da96451db56ff91455`](https://github.com/ginmp8/pandacode/commit/e64505ea8ed66fc8ec8942da96451db56ff91455). The Extended `0.8.0` candidate remains unreleased. The [original upstream 0.3.93 release notes](../../../releases/0.3.93.md) are mirrored byte-for-byte; 0.3.92 evidence remains historical.
+**Latest targeted upstream parity:** PandaCode `0.3.94`, immutable fork commit [`5ab09c5a4da4a819b30b20771ef768866fa4ef56`](https://github.com/ginmp8/pandacode/commit/5ab09c5a4da4a819b30b20771ef768866fa4ef56). The Extended `0.8.0` candidate remains unreleased. The [original upstream 0.3.94 release notes](../../../releases/0.3.94.md) are mirrored byte-for-byte; earlier integration evidence remains historical.
 
 - [Extended 0.8.0 release notes and feature scope](../../../releases/extended/0.8.0.md)
 - [Release readiness and validation checklist](release-checklist.md)
@@ -36,3 +36,10 @@ This import targets upstream commit [`e64505ea8ed66fc8ec8942da96451db56ff91455`]
 A complete source-tree comparison before publication found 1,495 source blobs, zero missing paths in the staged Extended tree, 62 shared files intentionally divergent from upstream, and 28 Extended-only files. Of the 90 changed paths since upstream 0.3.92, 77 use exact source blobs, 12 require independent three-way reconciliation with Extended changes, and one is the unchanged new upstream release note. These are static integration checks, not an assertion of functional equivalence or passing CI for the resulting commit.
 
 Tests for resumed teams, subagents, remote pagination, Codex/MCP On/Off behavior, native installers and two-device Connect remain necessary. The CI verdict must be taken from the published Extended commit SHA, not a previous green run.
+
+## Upstream 0.3.94 synchronization — 2026-11-04
+
+- Pinned fork source: [PandaCode 0.3.94 `5ab09c5a`](https://github.com/ginmp8/pandacode/commit/5ab09c5a4da4a819b30b20771ef768866fa4ef56); original [upstream release notes](../../../releases/0.3.94.md).
+- Extended code integration: [`2b1b4cae`](https://github.com/ginmp8/pandacode-extended/commit/2b1b4cae5bae3dd170e13db985c8ab1fb7779687), importing 14 source-changed paths (9 exact copies and 5 reconciled for Extended controls/dependency changes). No upstream source path is missing in the initial whole-tree comparison.
+- [Push CI #41780208946](https://github.com/ginmp8/pandacode-extended/actions/runs/41780208946) and [PR CI #41780214009](https://github.com/ginmp8/pandacode-extended/actions/runs/41780214009) were pending at documentation preparation. Verify their completed status against the exact SHA before claiming success.
+- Source changes include expandable worker progress, live reply card height behavior, UI and regression tests. These are inherited upstream improvements, not new Extended-only features. Native control On/Off and real provider, cloud, bot and Connect integration remain unverified.

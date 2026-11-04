@@ -15,6 +15,7 @@ This directory defines the **complete upstream functional parity contract** and 
 - [Original upstream 0.3.91 release notes, mirrored without edits](../../releases/0.3.91.md)
 - [Original upstream 0.3.92 release notes, mirrored without edits](../../releases/0.3.92.md)
 - [Original upstream 0.3.93 release notes, mirrored without edits](../../releases/0.3.93.md)
+- [Original upstream 0.3.94 release notes, mirrored without edits](../../releases/0.3.94.md)
 - [Upstream 0.3.87 source fidelity and version repair](upstream/source-fidelity-0.3.87.md)
 - [Original upstream 0.3.86 release notes, mirrored without edits](../../releases/0.3.86.md)
 - [Original upstream 0.3.87 release notes, mirrored without edits](../../releases/0.3.87.md)

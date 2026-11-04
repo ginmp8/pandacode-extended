@@ -70,3 +70,10 @@ On the source-integration commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`, [CI
 - [ ] Reconfirm source and Extended HEAD after conditional publication; distinguish passing CI from native/Settings acceptance.
 
 The pre-publication recursive tree snapshot contained 1,495 source files, 0 missing source paths, 62 Extended-divergent shared files and 28 Extended-only files. CI status for the new commit is not established by the old 0.3.92 green runs.
+
+## Upstream 0.3.94 checkpoint — 2026-11-04
+
+The fork source is [`5ab09c5a`](https://github.com/ginmp8/pandacode/commit/5ab09c5a4da4a819b30b20771ef768866fa4ef56) (application version 0.3.94), integrated as Extended code commit [`2b1b4cae`](https://github.com/ginmp8/pandacode-extended/commit/2b1b4cae5bae3dd170e13db985c8ab1fb7779687). Expandable worker progress and reply-card layout improvements are inherited, not Extended-only. Exact-SHA CI [push #41780208946](https://github.com/ginmp8/pandacode-extended/actions/runs/41780208946) and [PR #41780214009](https://github.com/ginmp8/pandacode-extended/actions/runs/41780214009) were pending at this checkpoint; native behavior and Settings On/Off remain unverified.
+
+- [ ] Confirm source 0.3.94 UI tests and Rust checks pass on the final Extended SHA; the documentation commit has a separate SHA and CI result.
+- [ ] Confirm worker progress, reply card height behavior and existing Extended Settings On/Off against a native build.

@@ -36,3 +36,7 @@ The upstream change from 0.3.91 to 0.3.92 updates application-version metadata i
 ## Verified 0.3.92 integration CI checkpoint — 2026-11-03
 
 For exact Extended code SHA [`80c438b47e06d1df330564dc8a4cb17318230310`](https://github.com/ginmp8/pandacode-extended/commit/80c438b47e06d1df330564dc8a4cb17318230310), both [push CI #41692930559](https://github.com/ginmp8/pandacode-extended/actions/runs/41692930559) and [PR CI #41692943491](https://github.com/ginmp8/pandacode-extended/actions/runs/41692943491) completed with successful npm dependency audit and RustSec audit jobs. Both also passed Linux Rust checks/tests and mobile/Expo compatibility. These results supersede the earlier *pending CI* observation for the source-0.3.92 integrated **code SHA**, without asserting that all possible advisories, native integrations or runtime policy behaviors were independently verified. No new dependency remediation is claimed by this evidence-only documentation update.
+
+## Source 0.3.93 reconciliation
+
+Upstream 0.3.93 changes the application's declared version and related npm/Cargo lock metadata without requiring a rollback of Extended's resolved dependency remediations. The staged source update retains the Extended dependency overrides and vendored mobile fix. No fresh RustSec or npm audit for this new SHA has yet been observed, and this paragraph does not claim a new security remediation.

@@ -31,3 +31,9 @@ These are **planned checks**, not executed 0.8.0 acceptance results.
 ## Source 0.3.92 Settings integration
 
 The redesigned upstream Settings navigation moves page definitions into `src/settings-sections.ts`. Extended retains a separate **Feature controls** section wired to `mountFeatureControls` and keeps the Connect master switch while adopting the new upstream remote Settings presentation. The controls are intended to restrict only their named operations; upstream manual actions remain available where permitted. The final candidate requires browser/native On/Off and restart verification; source inspection alone is not a runtime acceptance result.
+
+## Source 0.3.93 integration
+
+Codex now supports process-local thread-limit handling that respects an explicit user limit. Extended's existing `external_mcp_servers` switch must continue applying separately to newly launched Codex processes. Both command arguments are preserved together; verification must exercise MCP On and Off, an explicit Codex thread limit, and the no-limit default without editing user configuration. Team resume, remote worker pagination, and bot scheduling must continue honoring the existing Extended permissions and controls.
+
+This integration is based on source inspection and a nonoverlapping three-way merge; live control-toggle acceptance remains pending.

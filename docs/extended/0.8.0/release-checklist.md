@@ -59,3 +59,14 @@ On the source-integration commit `083e764485f08ea1b5cabbf3b3d18ea9b426e89c`, [CI
 - [CI push #41692930559](https://github.com/ginmp8/pandacode-extended/actions/runs/41692930559): completed **success**, 6/6 jobs. [CI PR #41692943491](https://github.com/ginmp8/pandacode-extended/actions/runs/41692943491): completed **success**, 6/6 jobs.
 - Per run: `Typecheck, unit tests, website`; `Rust check and tests (Linux)`; `Mobile dependency and Expo compatibility`; `Dependency audit (npm lockfiles)`; `RustSec audit (Cargo.lock)`; `Panda Router ONNX parity (macOS)`. GitHub reports successful jobs, not proof of every native, provider or product behavior.
 - Both runs are bound to code SHA `80c438b47e06d1df330564dc8a4cb17318230310`. A later documentation-only commit has a different SHA, requiring a new check readback. No new native installer, real-GUI Settings On/Off, external MCP/cloud credentials or real two-computer Connect tests are claimed. Release preparation and approval remain outstanding.
+
+## Additional source 0.3.93 acceptance cases
+
+- [ ] Confirm all 90 upstream changed paths against source commit [`e64505ea8ed66fc8ec8942da96451db56ff91455`](https://github.com/ginmp8/pandacode/commit/e64505ea8ed66fc8ec8942da96451db56ff91455), including the 12 paths merged with Extended differences and the exact original release notes.
+- [ ] Test reports from nested/background subagents, concurrent workers, empty-turn retry, team saving, pause/error/retry recovery and formerly bounded team sizes.
+- [ ] Test remote/mobile team Resume, backward/forward worker-message pagination and truncated detail indicators on two actual devices.
+- [ ] Test Codex thread-limit default versus explicit user setting together with Extended external-MCP On/Off launch controls.
+- [ ] Check npm/TypeScript/build, cargo check/test/Clippy, mobile/Expo, npm/RustSec and applicable native/ONNX workflows on the exact new integration SHA.
+- [ ] Reconfirm source and Extended HEAD after conditional publication; distinguish passing CI from native/Settings acceptance.
+
+The pre-publication recursive tree snapshot contained 1,495 source files, 0 missing source paths, 62 Extended-divergent shared files and 28 Extended-only files. CI status for the new commit is not established by the old 0.3.92 green runs.

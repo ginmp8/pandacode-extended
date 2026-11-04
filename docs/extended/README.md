@@ -23,3 +23,9 @@ This directory defines the **complete upstream functional parity contract** and 
 - [Extended 0.7.0 canonical release notes](../../releases/extended/0.7.0.md)
 
 Do not copy these statements into upstream release notes or claim they apply to the upstream fork. A source candidate is not an installer release.
+
+- [Original upstream 0.3.95 release notes](../../releases/0.3.95.md)
+- [Original upstream 0.3.96 release notes](../../releases/0.3.96.md)
+- [Original upstream 0.3.97 release notes](../../releases/0.3.97.md)
+
+**Latest pinned source snapshot (2026-11-04):** [`fc32c3f` 0.3.97](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852). This supersedes the 0.3.94 checkpoints in earlier 0.9.0 planning material; the Extended distribution candidate remains 0.9.0 and is not published.

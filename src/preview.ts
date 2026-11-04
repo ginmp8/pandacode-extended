@@ -161,6 +161,7 @@ function previewProviderConfiguration(): Record<string, unknown> {
     globalEnvironment: previewEnvNames(previewEnvState.global),
     environment: Object.fromEntries(Object.entries(previewEnvState.providers).map(([provider, vars]) => [provider, previewEnvNames(vars)])),
     useGlobalEnvironment: previewEnvState.useGlobal,
+    providers: providers.map(provider => [provider.id, provider.name]),
     glmKeySaved: false, glmKeyFromEnvironment: false, deepseekKeySaved: false, deepseekKeyFromEnvironment: false, commandcodeKeySaved: false, commandcodeKeyFromEnvironment: false, mimoKeySaved: false, mimoKeyFromEnvironment: false, mimoEndpoint: previewMimoEndpoint, mimoEndpoints: previewMimoEndpoints, secureStorageAvailable: false,
   };
 }
@@ -1880,6 +1881,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     // matters to tests, which provide the base64 through the invoke hook.
     case 'read_clipboard_image': result = null; break;
     case 'reveal_path': if (!String(args.path ?? '').startsWith('/')) throw new Error('This attachment is no longer on this computer.'); break;
+    case 'dragged_file_paths': result = []; break;
     case 'read_document': {
       const path = String(args.path ?? ''), name = path.split('/').pop() || 'Document';
       if (!path.startsWith('/')) throw new Error('Choose the document with the picker or drop it onto the message.');

@@ -164,9 +164,15 @@ it, and the harness would lose all its API traffic. The harness's own
 credentials and endpoints still win over inherited variables, and mirroring a
 task to another computer stays untouched — that computer uses its own settings.
 
-The per-provider list and the opt-out switch live on each provider's card here,
-so harnesses without a card (Codex and Kimi Code) currently take only the
-global set.
+The per-provider list and the opt-out switch live on each provider's card here.
+Every harness has one: those with sign-in specifics are written by hand, and the
+rest of the roster (Codex and Kimi Code today) gets a generated card with an
+executable location and these environment settings.
+
+A saved executable location must be an absolute path to an existing executable
+file; it is started directly, never through a shell. GLM Coding Plan and MiMo
+Token Plan run the Claude executable, so they have no location of their own and
+use the one on the Claude Code card.
 
 ## GitHub Copilot CLI
 
@@ -535,9 +541,10 @@ written into argv or a settings file; it is resolved from PandaCode's secrets st
 subprocess credential scrubbing is enabled.
 
 Antigravity launches Google's official `agy_acp_server.par` (`agy_acp_server.exe`
-on Windows), which can be selected in Settings. The standalone `agy` terminal
-CLI is not misidentified as an ACP server. The executable and provider sign-in
-must already be installed. ACP initialization/session metadata supplies its model
+on Windows), which can be selected in Settings. When that server is not found,
+PandaCode falls back to the standalone `agy` CLI and starts its ACP server with
+`agy acp`; an executable override named `agy` starts the same way. The executable
+and provider sign-in must already be installed. ACP initialization/session metadata supplies its model
 labels and supported controls; image, HTTP MCP, resume, and planning support are
 checked explicitly. No private API, unofficial adapter, or browser-cookie
 authentication is used. Antigravity's own policy applies, with ACP approval
@@ -758,13 +765,31 @@ session only after it has received a prompt. It has no `session/resume`.
 **Not available from Cline's ACP server (3.0.73).** Images: `image: true` is
 advertised, but the prompt keeps only text blocks, so screenshots are sent as
 file paths that its `read_files` tool opens. Cline ignores the ACP `mcpServers`
-list and does not advertise HTTP MCP, so PandaCode tools (titles, run/preview,
-team tools) are unavailable, and a task that requires them fails at startup.
+list and does not advertise HTTP MCP, so PandaCode tools reach it another way (below).
 There are also no `available_commands_update` (slash commands), no `usage_update`
 (context meter) and no usage limits. Mid-turn messages stay queued.
 
+**PandaCode tools.** For a run that has PandaCode tools (titles, run/preview, team
+tools), PandaCode writes a per-run settings file and points `CLINE_MCP_SETTINGS_PATH`
+at it. The file holds your Cline MCP servers (read from where Cline looks, unchanged;
+a file that can't be parsed counts as empty, and those servers are then missing for
+that run) with PandaCode's own server over them, as direct HTTP to its loopback host
+(`http://127.0.0.1:<port>/mcp`). No package is downloaded. Your own settings file is
+never written, and anything Cline saves to its MCP settings during the run is
+discarded with the copy. The run's bearer token is only in that file: mode 0600, in
+a private `cline-mcp/<uuid>/` folder under PandaCode's app data, never in arguments
+or environment values. The folder is removed at run end; one a crash leaves behind
+is swept at a later startup once it is a day old, and its token died with the run.
+Cloud runs can't reach the loopback host, so they keep the startup error when they
+require the tools. Tools limited to the task's own state (titles, change tracking,
+team and schedule tools) skip Cline's permission prompt, as they do on Claude; others
+keep the normal approval. `CLINE_MCP_SETTINGS_PATH` is undocumented Cline behaviour:
+a Cline that stops reading it would run without PandaCode tools rather than fail at
+startup. To check it: `cargo test --lib live_cline_calls_pandacode_tools -- --ignored`
+(sends one short prompt on a free model).
+
 Verified against `cline` 3.0.73 on 2026-10-22 by driving `cline --acp`
-directly. The recorded frames back the unit tests in `providers/cline.rs`, and
+directly, and the tools route against 3.0.74 on 2026-11-04. The recorded frames back the unit tests in `providers/cline.rs`, and
 an ignored smoke test (`live_cline_lists_models`) reads the real catalog without
 spending tokens.
 
@@ -903,6 +928,25 @@ Verified against the CLI bundled with ZCode.app (user-agent `ZCode/3.16.3`) on
 a permission round-trip, mode/thought switches, usage and resume). The recorded
 frames back the unit tests in `providers/zcode.rs`, and an ignored smoke test
 (`installed_zcode_lists_models`) reads the real catalog without sending a prompt.
+
+Re-verified without a prompt against the CLI bundled with ZCode.app 3.17.2 on
+2026-11-03 (`installed_zcode_snapshot_capabilities`, also ignored): the create
+snapshot now also carries `slashCommands` (name, description, input hint,
+source; builtins include `/goal` and `/compact`), `todos` and a `projection`
+(live context use against the window, pending permissions, active tool calls).
+Catalog entries carry `description`, `maxOutputTokens`, a `disabledReason` and
+`properties.inputFormat` (`supportsText`/`supportsImage`/`supportsVideo`/
+`supportsAudio`/`supportsPdf`); image support is per model (GLM-5.3-Flash
+reports it, GLM-5.3 does not). The entry schema is strict and has no speed or
+service-tier field: the GLM Coding Plan sells speed per plan, never per model, so there is no
+ZCode equivalent of Codex's per-model speed tiers to select. `session/create`
+also accepts `mcpServers` (stdio or http/sse entries), `additionalDirectories`
+and tool allow/deny lists, and `session/usage` answers session token totals
+(input, output, reasoning, cache creation and read, request and error counts);
+a fresh deferred session may answer session-not-found there until its first
+send. Coding Plan quota itself is the desktop app's account state and is not
+exposed on this protocol. Event names during a real turn were not re-recorded
+(no prompt was sent), so streaming frames stay pinned to the 3.16.3 recordings.
 
 ## Hermes Agent
 

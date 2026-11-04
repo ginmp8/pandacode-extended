@@ -4427,9 +4427,12 @@ mod tests {
             configure_command(&mut command, &cfg);
             command.as_std().get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>()
         };
-        let plain = ["app-server", "--enable", "goals"];
+        let base = ["app-server", "--enable", "goals"];
+        // External MCP servers are opt-in in Extended; the disabled setting adds a process-local override.
+        let mcp_off = ["-c", "mcp_servers={}"];
+        let plain = [&base[..], &mcp_off].concat();
         // Checked by starting `codex app-server` with it on 0.141.0 to 0.162.1: the newer name stops 0.144.1 and older.
-        let lifted = [&plain[..], &["-c", "agents.max_threads=1024"]].concat();
+        let lifted = [&base[..], &["-c", "agents.max_threads=1024"], &mcp_off].concat();
         assert_eq!(args("model = \"x\"\n[agents]\nmax_depth = 2\n", ""), lifted);
         assert_eq!(args("not toml [", ""), lifted, "Codex reports a broken config itself");
         assert_eq!(args("[agents]\nmax_concurrent_threads_per_session = 3\n", ""), plain);

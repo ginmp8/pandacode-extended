@@ -28,3 +28,9 @@ Previous CI jobs and historic audit results are evidence for their original comm
 ## 2026-11-05 upstream documentation-only sync
 
 The newly pinned [upstream `78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2) changes no dependency manifests or lockfiles relative to its parent `fc32c3f`. The existing Extended ZIP 9.0.5 remediation and mobile `deepmerge` compatibility fix must remain intact. This docs-only delta does not constitute a fresh dependency audit, new security mitigation, or final native-build approval.
+
+## Application metadata alignment for inherited 0.3.98
+
+Upstream source [`0461e02`](https://github.com/ginmp8/pandacode/commit/0461e02b85c95f8a52e927382c5069d0799dfed8) changes the application version from **0.3.97** to **0.3.98** in root npm, root lockfile, Tauri Cargo manifests/lockfile and Tauri config. Retain Extended-only overrides, mobile `deepmerge` and the patched Rust `zip =9.0.5` dependency during reconciliation; do not substitute the planned distribution label **0.10.0** in application manifests.
+
+The upstream patch makes no unrelated dependency upgrade in those manifests beyond application-version metadata. The earlier security remediation is preserved, not claimed to be newly fixed by this import. Fresh `npm audit`, RustSec and exact-SHA platform builds remain separate evidence requirements.

@@ -21,3 +21,9 @@ Reference: [0.9.0 historical register](../0.9.0/known-issues.md), [0.10.0 depend
 ## 2026-11-05 screenshot-documentation verification gap
 
 [Upstream `78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2) updates the screenshot capture suite and visual evidence. The source changes were imported by exact blob identity, but the interactive Playwright screenshot recapture and native On/Off integrations were not executed in the restricted local environment. This is an **unverified test gap**, not a demonstrated product defect or a justification for disabling any upstream feature.
+
+## Inherited 0.3.98 behavior requiring acceptance
+
+[Source `0461e02`](https://github.com/ginmp8/pandacode/commit/0461e02b85c95f8a52e927382c5069d0799dfed8) adds Recommended Settings, UI pointer drag, queue ordering and team-lead response-card changes. The upstream [release notes](../../../releases/0.3.98.md) limit testing to previews and describe a possible brief duplicate wake card, a permission-menu timing hypothesis, and model-picker harness-list staleness. These are upstream-documented limitations or unverified hypotheses, **not newly demonstrated Extended vulnerabilities**.
+
+Validate Recommended and the Extended Feature controls together, the enabled/disabled capability paths, macOS native drag/drop and OS file drops, bot wake card consolidation and keyboard queue fallback in installed applications. Until executed, full behavioral parity cannot be certified.

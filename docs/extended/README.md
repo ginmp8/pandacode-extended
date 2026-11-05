@@ -33,4 +33,4 @@ Do not copy these statements into upstream release notes or claim they apply to 
 - [Original upstream 0.3.96 release notes](../../releases/0.3.96.md)
 - [Original upstream 0.3.97 release notes](../../releases/0.3.97.md)
 
-**Latest pinned source snapshot (2026-11-04):** [`fc32c3f` 0.3.97](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852). This supersedes the 0.3.94 checkpoints in earlier 0.9.0 planning material; the current Extended distribution documentation is the planned 0.10.0 cycle; the previous 0.9.0 cycle remains historical and has not been verified here as a binary release.
+**Latest pinned source snapshot (2026-11-05):** [`78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2), application **0.3.97**. The new source commit refreshes the README, screenshot capture tooling and screenshot assets without a new application-version bump; Extended 0.10.0 remains a documentation candidate, not an approved distribution.

@@ -24,3 +24,7 @@ Required before publishing:
 - [ ] Verify packaging, installer/update identity and provenance independently from source-manifest version parity.
 
 Previous CI jobs and historic audit results are evidence for their original commit only. No claim of vulnerability absence or native compatibility is made here.
+
+## 2026-11-05 upstream documentation-only sync
+
+The newly pinned [upstream `78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2) changes no dependency manifests or lockfiles relative to its parent `fc32c3f`. The existing Extended ZIP 9.0.5 remediation and mobile `deepmerge` compatibility fix must remain intact. This docs-only delta does not constitute a fresh dependency audit, new security mitigation, or final native-build approval.

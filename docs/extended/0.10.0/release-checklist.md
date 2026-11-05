@@ -42,3 +42,9 @@
 | Final release approval and published artifacts | Not present | **PENDING** |
 
 The next sync must refresh this log with real exact-SHA evidence. A documentation-only commit must not be described as passing native or end-to-end product acceptance.
+
+## 2026-11-05 inherited documentation source checkpoint
+
+- Source: [`78f77a0becee2029f4b89ef60fca0c97e48251e2`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2), tree `1181cf82a6cf33834d620746f2ef57f8c195b270`, application version 0.3.97; parent `fc32c3f`.
+- Source delta: 18 added/modified blobs (6 added screenshots, 8 replacement screenshots, README and 3 screenshot scripts), plus deletion of 1 obsolete screenshot. Previous destination contents of all modified/removed source paths matched the parent source blobs; no Extended runtime customization was overwritten.
+- Post-write inventory, exact-SHA CI, screenshot Playwright execution and native control acceptance are **pending independent verification**. This is not a final 0.10.0 release sign-off.

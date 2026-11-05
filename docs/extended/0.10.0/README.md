@@ -15,3 +15,5 @@
 - [Previous Extended 0.9.0 notes](../../../releases/extended/0.9.0.md)
 
 The 0.10.0 files start with the **previous-cycle evidence as historical context**, not as fresh test results. A later upstream change belongs in 0.10.0 only after source integration and recorded evidence. Do not rewrite upstream notes in `releases/*.md` or change upstream package/Cargo/Tauri application version fields to the Extended distribution label.
+
+**Latest integrated-source candidate (2026-11-05):** [`78f77a0becee2029f4b89ef60fca0c97e48251e2`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2) still declares source application version 0.3.97. Its new README, screenshots and screenshot-capture scripts are inherited upstream documentation tooling, not new Extended product features. See the [0.10.0 release candidate notes](../../../releases/extended/0.10.0.md) for inventory and verification limitations.

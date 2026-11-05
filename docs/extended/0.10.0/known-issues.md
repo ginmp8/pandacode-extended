@@ -5,7 +5,7 @@
 
 | Area | Classification at cycle opening | Required verification for 0.10.0 |
 | --- | --- | --- |
-| Shared upstream/Extended differences | **UNVERIFIED:** the previous 0.9.0 source inventory reported 65 divergent shared paths and zero missing upstream paths at its specific SHA; no fresh 0.10.0 full-tree comparison yet | Recompute complete inventory at final source/destination SHAs and justify all retained product hunks |
+| Shared upstream/Extended differences | **PARTIALLY VERIFIED (2026-11-05):** complete, nontruncated Git trees at upstream `fc32c3f585db6a72fee967e8d91f2bb50fe67852` and Extended `abe19dbde19bb2f44b3d61bdf8668941425725e0` show 1,501 upstream blobs: 1,436 exact, 65 shared-path differences, zero missing; 40 Extended-only blobs. Per-hunk and runtime parity are not certified | Recompute complete inventory at final source/destination SHAs and justify all retained product hunks |
 | Settings and remote capabilities | **UNVERIFIED:** native On/Off behaviors for Connect, bots, MCP, direct routes, cloud/VM, credential transfer and updates | Exercise enabled, disabled, manual, automatic, restart, existing-process and approval paths |
 | Desktop, model and UI behavior | **UNVERIFIED:** upstream 0.3.95–0.3.97 conversation folding, window restoration, IME, macOS drag/drop, Cline MCP and model configuration in installed apps | Native platform checks, provider compatibility and focused regressions |
 | Mobile and simulators | **UNVERIFIED:** iOS transcript fix, Linux Android emulator availability/boot and actual device behavior | Exercise relevant devices and simulator startup |

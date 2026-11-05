@@ -44,7 +44,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 webpki-roots = "0.26"
 des = "0.8"
 shell-words = "1"
-zip = { version = "=9.0.4", default-features = false, features = ["deflate"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
 # Disable the updater\u0027s optional legacy Windows ZIP extraction (zip ^4); keep TLS transport.
 # Signed direct-update paths remain available. Revalidate .nsis.zip/.msi.zip if shipping Windows bundles.
 tauri-plugin-updater = { version = ">=2, <2.10", default-features = false, features = ["rustls-tls"] }

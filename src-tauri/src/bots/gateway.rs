@@ -348,14 +348,29 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         // A failed launch puts the entry back first; no run ends, so the queue holds until the next turn.
         if let Err(error) = launched {
             super::failover::clear_images(session_id);
+            let mut restored = false;
             if let Ok(store) = state.store.lock() {
-                if let Err(lost) = message_queue::restore(&store, &entry) {
-                    eprintln!("bot {}: queued message lost after failed launch: {lost}", bot.id);
+                match message_queue::restore(&store, &entry) {
+                    Ok(_) => restored = true,
+                    Err(lost) => eprintln!("bot {}: queued message lost after failed launch: {lost}", bot.id),
                 }
                 if let Some(request) = &delivery { super::shared_channels::launch_failed(&store, session_id, request); }
                 let _ = super::log(&store, &bot.id, "error", &format!("Couldn't send a queued message: {}", error.chars().take(160).collect::<String>()), json!({"sessionId": session_id}));
             }
             let _ = app.emit("bots-changed", ());
+            // The native bot drain is not driven by the window's dispatchQueue.
+            // Reconcile its durable queue and report launch failure instead of
+            // leaving the UI's "Sending next" indicator spinning indefinitely.
+            let message = if restored {
+                "The bot could not start the next queued message. Check its Activity log."
+            } else {
+                "The bot could not start the next queued message and it could not be restored. Check its Activity log."
+            };
+            let _ = app.emit("queue-changed", json!({"sessionId": session_id, "delivery": "failed", "error": message}));
+        } else {
+            // The backend already removed the entry from SQLite; notify the
+            // window so it drops the stale queued row, without sending twice.
+            let _ = app.emit("queue-changed", json!({"sessionId": session_id, "delivery": "started"}));
         }
     }
     settled

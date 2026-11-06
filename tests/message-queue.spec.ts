@@ -99,6 +99,39 @@ test('keeps every message when typing quickly while the queue is being saved', a
   await expect(prompt(page)).toHaveValue('');
 });
 
+test('native bot queue reconciliation clears processed rows and displays launch failures', async ({ page }) => {
+  const { sessionId, firstId } = await page.evaluate(async () => {
+    const invoke = (window as any).__queueInvoke as (name: string, args: any) => Promise<any>;
+    const bot = await invoke('bot_create', { input: {
+      name: 'Queue bot', role: '', instructions: '', goals: '', avatar: 'panda:0',
+      provider: 'claude', model: 'default', mode: 'ask', heartbeatMinutes: 0,
+    } });
+    const sessionId = await invoke('bot_desktop_thread', { botId: bot.id });
+    const first = await invoke('queue_add', { sessionId, text: '5', attachments: [] });
+    await invoke('queue_add', { sessionId, text: '4', attachments: [] });
+    return { sessionId, firstId: first.id as string };
+  });
+  await page.locator('.sidebar-bots-bar').click();
+  await page.getByRole('region', { name: 'Bots', exact: true }).getByRole('button', { name: 'Chat with Queue bot' }).click();
+  await page.evaluate(id => (window as any).__queueEmit('queue-changed', { sessionId: id }), sessionId);
+  await expect(rows(page).locator('.queue-text')).toHaveText(['5', '4']);
+  await expect(panel(page)).toContainText('Queued for delivery');
+  await expect(panel(page)).not.toContainText('Sending next');
+
+  // This simulates a native bot drain: it changes SQLite, not the local UI state.
+  await page.evaluate(id => (window as any).__queueInvoke('queue_take', { id }), firstId);
+  await expect(rows(page)).toHaveCount(2);
+  await page.evaluate(id => (window as any).__queueEmit('queue-changed', { sessionId: id, delivery: 'started' }), sessionId);
+  await expect(rows(page).locator('.queue-text')).toHaveText(['4']);
+
+  await page.evaluate(id => (window as any).__queueEmit('queue-changed', {
+    sessionId: id, delivery: 'failed', error: 'The bot could not start the next queued message. Check its Activity log.',
+  }), sessionId);
+  await expect(panel(page)).toContainText('Paused after the run failed');
+  await expect(panel(page).getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0);
+  await expect(page.locator('#toast')).toContainText('The bot could not start the next queued message');
+});
+
 test('a follow-up queued by an agent for an idle task is sent right away', async ({ page }) => {
   await page.evaluate(async () => {
     // The app's own preview instance: a fresh import can load a second copy (Vite adds ?t= after an edit).

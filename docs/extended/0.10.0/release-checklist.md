@@ -60,3 +60,11 @@ The next sync must refresh this log with real exact-SHA evidence. A documentatio
 - **Source:** [`0461e02b`](https://github.com/ginmp8/pandacode/commit/0461e02b85c95f8a52e927382c5069d0799dfed8) (**0.3.98**); **integrated code:** [`1d549e2b`](https://github.com/ginmp8/pandacode-extended/commit/1d549e2b01357d813e72ead373565de199481520). Recursive trees (`truncated=false`) verify **1,512 upstream files: 1,447 exact, 65 shared differences, none missing; 40 Extended-only files**, with no file-mode mismatches. The 65 retained differences still require complete hunk and enabled/disabled behavior verification.
 - **Exact-code-SHA CI:** [Push #42101783450](https://github.com/ginmp8/pandacode-extended/actions/runs/42101783450) and [PR #42101794523](https://github.com/ginmp8/pandacode-extended/actions/runs/42101794523) completed successfully, **6/6 jobs each** (TypeScript/unit/website, Rust/Linux, RustSec, npm, mobile/Expo, macOS ONNX). This does **not** prove installed-app functionality or count as CI for subsequent documentation-only commits.
 - **Outstanding:** release-script and native acceptance; end-to-end Settings On/Off, Connect/MCP/cloud/VM/credentials; actual upgrades, release identity and approval. No tag, installer, publication, or release approval follows from this checkpoint.
+
+## Upstream 0.3.99 integration checkpoint — 2026-11-06
+
+Source [`6b94bf1d`](https://github.com/ginmp8/pandacode/commit/6b94bf1d8b579d08834578f6e24684ea0d3fccbd) declares application **0.3.99** and a 14-path delta (9 exact source copies, 5 adapted paths). The post-write full-tree comparison must verify **1,513 upstream files: 1,446 exact, 67 diverging, none missing; 40 Extended-only**. The remaining divergences require per-hunk and native behavior certification.
+
+- [ ] Validate the exact published Extended SHA, first parent, full recursive Git tree and source-mode parity.
+- [ ] Verify exact-SHA CI jobs for Node/TS, Rust/check/test/Clippy, audits, website, Expo/mobile, macOS ONNX and relevant build preparation; no final-SHA result was available at authoring.
+- [ ] Validate combined changes per-run diffs and review, native Settings On/Off, bot pause, Connect/MCP/cloud/VM/credentials, existing-data upgrade and separate Extended release identity before any approval.

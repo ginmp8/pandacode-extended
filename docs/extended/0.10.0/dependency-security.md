@@ -34,3 +34,9 @@ The newly pinned [upstream `78f77a0`](https://github.com/ginmp8/pandacode/commit
 Upstream source [`0461e02`](https://github.com/ginmp8/pandacode/commit/0461e02b85c95f8a52e927382c5069d0799dfed8) changes the application version from **0.3.97** to **0.3.98** in root npm, root lockfile, Tauri Cargo manifests/lockfile and Tauri config. Retain Extended-only overrides, mobile `deepmerge` and the patched Rust `zip =9.0.5` dependency during reconciliation; do not substitute the planned distribution label **0.10.0** in application manifests.
 
 The upstream patch makes no unrelated dependency upgrade in those manifests beyond application-version metadata. The earlier security remediation is preserved, not claimed to be newly fixed by this import. Fresh `npm audit`, RustSec and exact-SHA platform builds remain separate evidence requirements.
+
+## Upstream 0.3.99 integration checkpoint — 2026-11-06
+
+Source [`6b94bf1d`](https://github.com/ginmp8/pandacode/commit/6b94bf1d8b579d08834578f6e24684ea0d3fccbd) declares application **0.3.99** and a 14-path delta (9 exact source copies, 5 adapted paths). The post-write full-tree comparison must verify **1,513 upstream files: 1,446 exact, 67 diverging, none missing; 40 Extended-only**. The remaining divergences require per-hunk and native behavior certification.
+
+Only the application version changes in root npm and Tauri/Cargo manifests and lockfiles; no unrelated upstream dependency upgrade was included in this source delta. Preserve the Extended-local Rust `zip = { version = "=9.0.5" }` remediation and mobile `deepmerge` patch. The independent Extended distribution label remains 0.10.0. Final exact-SHA npm/RustSec audits and platform builds must be checked separately; this update does not establish a new vulnerability fix.

@@ -592,7 +592,7 @@ test('offers only reported reasoning efforts and remembers the selected effort f
   await expect(prompt(page)).toHaveValue('Keep this draft while choosing reasoning effort');
 });
 
-test('the effort thumb sits under the chosen segment in the neutral active fill', async ({ page }) => {
+test('the effort thumb sits under the chosen segment in the raised thumb fill', async ({ page }) => {
   await page.evaluate(async () => {
     const { openModelPicker } = await import('/src/model-picker.ts');
     (window as any).__colorEffortSaves = [];
@@ -604,7 +604,7 @@ test('the effort thumb sits under the chosen segment in the neutral active fill'
     });
   });
   const thumb = reasoningGroup(page).locator('.segment-thumb');
-  const fill = await thumb.evaluate(element => { const probe = document.createElement('span'); probe.style.backgroundColor = 'var(--fill-active)'; element.append(probe); const color = getComputedStyle(probe).backgroundColor; probe.remove(); return color; });
+  const fill = await thumb.evaluate(element => { const probe = document.createElement('span'); probe.style.backgroundColor = 'var(--ds-thumb)'; element.append(probe); const color = getComputedStyle(probe).backgroundColor; probe.remove(); return color; });
   await expect(thumb).toHaveCSS('background-color', fill);
   for (const name of ['Medium', 'Max']) {
     await effortRadio(page, name).click();
@@ -1840,6 +1840,7 @@ test('tool activity settings persist expanded and collapsed groups with compact 
   expect(first.height).toBeGreaterThanOrEqual(30);
   await prompt(page).fill('Keep my draft while changing activity.');
   await page.keyboard.press('Meta+,');
+  await page.getByRole('tab', { name: 'General', exact: true }).click();
   const expand = page.getByRole('checkbox', { name: 'Expand tool activity', exact: true });
   await expect(expand).not.toBeChecked();
   await expand.check();
@@ -1851,6 +1852,7 @@ test('tool activity settings persist expanded and collapsed groups with compact 
   await expect(turn).toHaveAttribute('open', '');
   await expect(turn.locator('.tool-group[open]')).toHaveCount(3);
   await page.keyboard.press('Meta+,');
+  await page.getByRole('tab', { name: 'General', exact: true }).click();
   await expand.uncheck();
   await page.getByRole('button', { name: 'Back to the workspace', exact: true }).click();
   await expect(turn).not.toHaveAttribute('open', '');

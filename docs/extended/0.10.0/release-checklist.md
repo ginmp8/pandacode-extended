@@ -48,3 +48,9 @@ The next sync must refresh this log with real exact-SHA evidence. A documentatio
 - Source: [`78f77a0becee2029f4b89ef60fca0c97e48251e2`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2), tree `1181cf82a6cf33834d620746f2ef57f8c195b270`, application version 0.3.97; parent `fc32c3f`.
 - Source delta: 18 added/modified blobs (6 added screenshots, 8 replacement screenshots, README and 3 screenshot scripts), plus deletion of 1 obsolete screenshot. Previous destination contents of all modified/removed source paths matched the parent source blobs; no Extended runtime customization was overwritten.
 - Post-write inventory, exact-SHA CI, screenshot Playwright execution and native control acceptance are **pending independent verification**. This is not a final 0.10.0 release sign-off.
+
+## Interim 0.3.98 source reconciliation checkpoint — 2026-11-05
+
+- Source `0461e02b85c95f8a52e927382c5069d0799dfed8` (tree `9cf46dc20979ea45a4e85c54bce83e52a86224f0`) declares application **0.3.98**. Previously integrated source: `78f77a0becee2029f4b89ef60fca0c97e48251e2`.
+- The source delta contains **56 changed files**: 45 exact source blob copies and 11 shared-file source-hunk reconciliations, including six new source paths and no upstream deletions. Extended Feature controls and remediated dependency versions must remain intact.
+- Final exact-SHA tree readback, CI, native builds, browser tests, On/Off Settings, Connect, cloud/VM, MCP, credential transfer, mobile/Expo, RustSec/npm audits and upgrade checks are **pending in this pre-publication record**. Update only with real evidence; do not mark final release gates complete.

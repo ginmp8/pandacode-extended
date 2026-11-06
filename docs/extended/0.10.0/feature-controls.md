@@ -21,3 +21,9 @@ See the [previous 0.9.0 evidence](../0.9.0/feature-controls.md), [parity contrac
 ## 2026-11-05 upstream documentation-only sync
 
 The pinned upstream [`78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2) changes documentation/screenshots and screenshot capture scripts, not production control paths. It does not establish any new Settings behavior. Existing On/Off, restart, process lifetime and remote integration acceptance requirements above remain open until executed on the final Extended commit.
+
+## Upstream 0.3.98 Settings coexistence — 2026-11-05
+
+The newly inherited **Recommended** section displays suggested configuration state and navigation only; it must not toggle or bypass Extended policy controls. **Feature controls** remains a distinct Extended section alongside the new upstream section. The upstream opt-in migration for the running-agent widget is independent from Connect, MCP, bots, cloud/VM, credentials and update-policy gates. Its default must not silently change those controls.
+
+The reconciled `src/settings-sections.ts`, `src/settings.ts` and affected tests retain both sections. Static source-merging checks are not proof of native On/Off behavior, persistence, restart semantics or upstream capability when enabled; perform those tests on the final exact SHA.

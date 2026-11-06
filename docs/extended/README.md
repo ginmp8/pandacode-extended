@@ -32,5 +32,6 @@ Do not copy these statements into upstream release notes or claim they apply to 
 - [Original upstream 0.3.95 release notes](../../releases/0.3.95.md)
 - [Original upstream 0.3.96 release notes](../../releases/0.3.96.md)
 - [Original upstream 0.3.97 release notes](../../releases/0.3.97.md)
+- [Original upstream 0.3.98 release notes](../../releases/0.3.98.md)
 
-**Latest pinned source snapshot (2026-11-05):** [`78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2), application **0.3.97**. The new source commit refreshes the README, screenshot capture tooling and screenshot assets without a new application-version bump; Extended 0.10.0 remains a documentation candidate, not an approved distribution.
+**Latest pinned source snapshot (2026-11-05):** [`0461e02`](https://github.com/ginmp8/pandacode/commit/0461e02b85c95f8a52e927382c5069d0799dfed8), application **0.3.98**. Inherited updates include Recommended Settings, native intra-window and queue drag, live wake/reply card consolidation, and revised model/design-iteration controls. Extended 0.10.0 remains a documentation candidate without native release approval.

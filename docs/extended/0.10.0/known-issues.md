@@ -17,3 +17,7 @@
 No upstream capability should be removed on the basis of unverified concerns. Confirm actual defects with source evidence and focused regression tests, and preserve Extended's existing security/permission controls.
 
 Reference: [0.9.0 historical register](../0.9.0/known-issues.md), [0.10.0 dependency evidence](dependency-security.md), and [release checklist](release-checklist.md).
+
+## 2026-11-05 screenshot-documentation verification gap
+
+[Upstream `78f77a0`](https://github.com/ginmp8/pandacode/commit/78f77a0becee2029f4b89ef60fca0c97e48251e2) updates the screenshot capture suite and visual evidence. The source changes were imported by exact blob identity, but the interactive Playwright screenshot recapture and native On/Off integrations were not executed in the restricted local environment. This is an **unverified test gap**, not a demonstrated product defect or a justification for disabling any upstream feature.

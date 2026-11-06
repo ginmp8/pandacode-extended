@@ -297,6 +297,14 @@ test.describe('bots', () => {
     await picker.getByRole('combobox', { name: 'Search harnesses and models', exact: true }).fill('bot-thread-model');
     await picker.getByRole('option', { name: 'Use "bot-thread-model" with Kimi Code', exact: true }).click();
     await expect(page.locator('#composer')).toContainText('bot-thread-model');
+    // Both consecutive bot messages must retain the selected harness. Native
+    // profile re-synchronization is covered independently by the Rust regression.
+    for (const text of ['First request', 'Follow-up request']) {
+      await page.locator('#prompt').fill(text);
+      await page.locator('#prompt').press('Enter');
+      await expect(page.locator('#transcript .agent-message').last()).toContainText('browser preview', { timeout: 15_000 });
+      await expect(page.locator('#composer')).toContainText('bot-thread-model');
+    }
     // Saved on the conversation itself: it is still chosen after leaving and coming back.
     await showTasksView(page);
     await page.locator('#navigation .task-item', { hasText: 'Explore the project' }).click();

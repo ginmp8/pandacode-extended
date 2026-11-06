@@ -601,16 +601,20 @@ pub(crate) fn update(store: &Store, id: &str, input: &BotInput) -> Result<Bot> {
     }
     log(store, id, "updated", "Settings changed", json!({}))?;
     let bot = get(store, id)?;
-    sync_thread_profiles(store, &bot)?;
+    // Editing the default harness/model in Settings intentionally updates all bot threads.
+    // Unrelated settings edits must not undo a model chosen in the desktop conversation.
+    let preserve_desktop_model = before.provider == bot.provider && before.model == bot.model;
+    sync_thread_profiles(store, &bot, preserve_desktop_model)?;
     Ok(bot)
 }
 
-/// Reuse the upstream synchronization when Settings or a bot chat changes bot policy.
-fn sync_thread_profiles(store: &Store, bot: &Bot) -> Result<()> {
-    let mut statement = store.db.prepare("SELECT session_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
-    let rows = statement.query_map([&bot.id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-    for session_id in rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())? {
-        sync_thread_profile(store, bot, &session_id)?;
+/// Reuse upstream profile synchronization, preserving a desktop-only harness choice
+/// unless the bot's default harness/model was explicitly changed in Settings.
+fn sync_thread_profiles(store: &Store, bot: &Bot, preserve_desktop_model: bool) -> Result<()> {
+    let mut statement = store.db.prepare("SELECT session_id,channel_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([&bot.id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
+    for (session_id, channel_id) in rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())? {
+        sync_thread_profile(store, bot, &session_id, !preserve_desktop_model || channel_id != DESKTOP)?;
     }
     Ok(())
 }
@@ -626,17 +630,17 @@ pub(crate) fn set_mode(store: &Store, id: &str, mode: &str) -> Result<Bot> {
         store.db.execute("UPDATE bots SET mode=?2,updated_at=?3 WHERE id=?1", params![id, mode, crate::storage::now()]).map_err(|e| e.to_string())?;
     }
     let bot = get(store, id)?;
-    sync_thread_profiles(store, &bot)?;
+    sync_thread_profiles(store, &bot, true)?;
     if before.mode != mode {
         log(store, id, "updated", "Permissions changed", json!({}))?;
     }
     Ok(bot)
 }
 
-fn sync_thread_profile(store: &Store, bot: &Bot, session_id: &str) -> Result<()> {
+fn sync_thread_profile(store: &Store, bot: &Bot, session_id: &str, sync_model: bool) -> Result<()> {
     let session = store.session(session_id)?;
     if matches!(session.status.as_str(), "running" | "waiting") { return Ok(()); }
-    if session.provider != bot.provider || session.model != bot.model {
+    if sync_model && (session.provider != bot.provider || session.model != bot.model) {
         store.configure(session_id, &bot.provider, &bot.model, None)?;
     }
     store.db.execute("UPDATE sessions SET mode=?2,reasoning_effort=?3 WHERE id=?1", params![session_id,bot.mode,(!bot.reasoning_effort.is_empty()).then_some(bot.reasoning_effort.as_str())]).map_err(|e| e.to_string())?;
@@ -779,7 +783,9 @@ pub(crate) fn thread_session(store: &Store, bot: &Bot, channel_id: &str, externa
         .map_err(|e| e.to_string())?;
     if let Some(session) = existing {
         if store.session(&session).is_ok() {
-            sync_thread_profile(store, bot, &session)?;
+            // A manual model pick in the bot's desktop conversation belongs to that
+            // conversation. Channel and scheduled threads still follow the bot profile.
+            sync_thread_profile(store, bot, &session, channel_id != DESKTOP)?;
             store.db.execute("UPDATE bot_threads SET updated_at=?2 WHERE session_id=?1", params![session, crate::storage::now()]).map_err(|e| e.to_string())?;
             return Ok((session, false));
         }

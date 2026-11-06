@@ -105,6 +105,65 @@ fn profile_changes_reconfigure_existing_idle_threads() {
 }
 
 #[test]
+fn desktop_model_pick_survives_followups_without_changing_channel_defaults() {
+    let f = fixture();
+    let scout = bot(&f);
+    let (desktop, _) = thread_session(&f.store, &scout, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    let (channel, _) = thread_session(&f.store, &scout, "web", "customer", "Scout · Customer").unwrap();
+
+    // The chat's model picker saves the selected harness on the session itself.
+    f.store.configure(&desktop, "kimi", "kimi-test-model", None).unwrap();
+    f.store.configure(&channel, "codex", "gpt-5", None).unwrap();
+    for _ in 0..3 {
+        // The gateway resolves the thread again before every incoming message.
+        let (same, created) = thread_session(&f.store, &scout, DESKTOP, DESKTOP, "Scout · You").unwrap();
+        assert_eq!((same.as_str(), created), (desktop.as_str(), false));
+        let selected = f.store.session(&desktop).unwrap();
+        assert_eq!((selected.provider.as_str(), selected.model.as_str()), ("kimi", "kimi-test-model"));
+    }
+    let (same, _) = thread_session(&f.store, &scout, "web", "customer", "Scout · Customer").unwrap();
+    assert_eq!(same, channel);
+    let external = f.store.session(&channel).unwrap();
+    assert_eq!((external.provider.as_str(), external.model.as_str()), ("claude", "default"));
+    assert_eq!((get(&f.store, &scout.id).unwrap().provider.as_str(), get(&f.store, &scout.id).unwrap().model.as_str()), ("claude", "default"), "a desktop pick does not change the bot's channel/schedule default");
+
+    // Changing access from the chat must not unexpectedly restore the first harness.
+    let changed = set_mode(&f.store, &scout.id, "full").unwrap();
+    assert_eq!(changed.mode, "full");
+    assert_eq!((f.store.session(&desktop).unwrap().provider.as_str(), f.store.session(&desktop).unwrap().model.as_str()), ("kimi", "kimi-test-model"));
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "full");
+
+    // Editing an unrelated profile field must also preserve the desktop pick.
+    let mut settings = input("Scout");
+    settings.role = "Updated role".into();
+    update(&f.store, &scout.id, &settings).unwrap();
+    assert_eq!(f.store.session(&desktop).unwrap().provider, "kimi");
+
+    // But changing the default harness in Settings intentionally updates all threads.
+    settings.provider = "codex".into();
+    settings.model = "gpt-5".into();
+    update(&f.store, &scout.id, &settings).unwrap();
+    let desktop_settings = f.store.session(&desktop).unwrap();
+    assert_eq!((desktop_settings.provider.as_str(), desktop_settings.model.as_str()), ("codex", "gpt-5"));
+    let channel_settings = f.store.session(&channel).unwrap();
+    assert_eq!((channel_settings.provider.as_str(), channel_settings.model.as_str()), ("codex", "gpt-5"));
+}
+
+#[test]
+fn deferred_desktop_model_change_is_not_reset_before_the_next_turn() {
+    let f = fixture();
+    let scout = bot(&f);
+    let (desktop, _) = thread_session(&f.store, &scout, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    f.store.status(&desktop, "running").unwrap();
+    thread_session(&f.store, &scout, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    // The model picker defers a mid-turn change until the current run finishes.
+    f.store.status(&desktop, "stopped").unwrap();
+    f.store.configure(&desktop, "codex", "gpt-5", None).unwrap();
+    thread_session(&f.store, &scout, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    assert_eq!((f.store.session(&desktop).unwrap().provider.as_str(), f.store.session(&desktop).unwrap().model.as_str()), ("codex", "gpt-5"));
+}
+
+#[test]
 fn chat_permission_change_updates_bot_policy_and_all_idle_threads() {
     let f = fixture();
     let bot = bot(&f);

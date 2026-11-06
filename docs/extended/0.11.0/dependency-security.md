@@ -17,3 +17,9 @@ The [0.10.0 security record](../0.10.0/dependency-security.md) is the preceding 
 | Opening prior cycle | [0.10.0 dependency-security](../0.10.0/dependency-security.md) |
 | New 0.11.0 remediation | None verified at cycle opening |
 | Final 0.11.0 audits and native acceptance | Pending |
+
+## Source 0.3.100 import — verified static evidence
+
+- [Upstream source `e0b65e51`](https://github.com/ginmp8/pandacode/commit/e0b65e51c4b6bc9c67982eaed08f7f13985fa01a) and [Extended integration `a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da). The upstream delta updated the root npm, Cargo and Tauri **application versions** to 0.3.100; it did not add a new third-party dependency in the inspected source delta.
+- Extended's Cargo.lock continues to pin `zip` **9.0.5**, rather than reverting to upstream's previous ZIP version. The npm/Cargo lockfile security differences remain Extended-specific.
+- All six root app-version fields were read from the proposed integration blobs and matched 0.3.100. RustSec, npm audit, native binary builds and full platform/security acceptance for this integration must be attributed to the exact final code SHA when completed; no green CI is asserted here.

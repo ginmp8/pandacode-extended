@@ -23,3 +23,12 @@ Extended `0.11.0` is the planned release-documentation cycle following [0.10.0](
 - [Previous 0.10.0 notes](../../../releases/extended/0.10.0.md)
 
 Initial Extended reference: `3eda289623850405893455e952ace45b6e0a4d89`; upstream source reference at opening: `6b94bf1d8b579d08834578f6e24684ea0d3fccbd` (application 0.3.99). These are **historical baselines**, not pins for future sync.
+
+## First imported upstream update — 2026-11-06
+
+- Source: [`ginmp8/pandacode:main` at `e0b65e51`](https://github.com/ginmp8/pandacode/commit/e0b65e51c4b6bc9c67982eaed08f7f13985fa01a), upstream app **0.3.100**.
+- Exact code integration: [`ginmp8/pandacode-extended:base/development` at `a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da); **7 added files** and **18 modified files**, including upstream release notes, account-pool runtime, connection UI, integration tests and six application-version fields.
+- The source's account pools and CLI sign-in are **inherited features**. No new Extended-only control or dependency remediation is claimed. Existing Extended controls remain present; end-to-end validation on actual accounts and both On/Off states is not established by static copying.
+- [Original 0.3.100 release notes](../../../releases/0.3.100.md) and [Extended 0.11.0 draft](../../../releases/extended/0.11.0.md).
+
+The whole-tree comparison after code integration found no missing source paths. The remaining shared changes must still be classified by hunk and exercised functionally; CI and native validation remain independent acceptance criteria.

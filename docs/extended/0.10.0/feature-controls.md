@@ -1,6 +1,6 @@
 # PandaCode Extended 0.10.0 — feature controls
 
-**Status:** Inherited control contract; no new 0.10.0 behavior or native On/Off verification claimed.
+**Status:** Existing Feature controls contract retained. The Extended-only bot-chat permission correction below is committed; native application and end-to-end On/Off verification are pending.
 **Opening reference:** [Extended `e8122223`](https://github.com/ginmp8/pandacode-extended/commit/e81222232314844d8fc52f65cb8e2dd37c5da2c8); upstream [source `fc32c3f`](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852) (source application 0.3.97).
 
 These existing Extended preferences restrict only the relevant automatic or remote operation when disabled. They must **not** remove the upstream feature, bypass required user approval when enabled, or silently change established defaults.

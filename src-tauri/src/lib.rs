@@ -4174,6 +4174,7 @@ pub fn run() {
                 bots::bot_detail,
                 bots::bot_create,
                 bots::bot_update,
+                bots::bot_set_mode,
                 bots::bot_set_paused,
                 bots::bot_reset,
                 bots::bot_delete,

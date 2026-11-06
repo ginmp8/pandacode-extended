@@ -36,6 +36,8 @@
 | Initial Extended branch at cycle opening | `e81222232314844d8fc52f65cb8e2dd37c5da2c8` | Starting reference only |
 | Initial upstream fork branch | `fc32c3f585db6a72fee967e8d91f2bb50fe67852` (application 0.3.97) | Starting source reference only |
 | Previous cycle's CI | See [0.9.0 notes](../../../releases/extended/0.9.0.md) | Historical, **not** 0.10.0 final validation |
+| 2026-11-05 interim complete-tree inventory | Upstream [`fc32c3f`](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852) vs Extended [`abe19dbd`](https://github.com/ginmp8/pandacode-extended/commit/abe19dbde19bb2f44b3d61bdf8668941425725e0): 1,501 upstream files; 1,436 exact; 65 different; zero missing; 40 Extended-only | File-presence and blob/mode comparison only; not complete per-hunk or functional certification |
+| CI on interim Extended `abe19dbd` | [Push run 41960799509](https://github.com/ginmp8/pandacode-extended/actions/runs/41960799509) and [PR run 41961034561](https://github.com/ginmp8/pandacode-extended/actions/runs/41961034561): both completed successfully, six jobs each | CI for this exact interim SHA only; not final 0.10.0 native, release, or upgrade acceptance |
 | Final 0.10.0 CI and native integration | Not yet executed/verified | **PENDING** |
 | Final release approval and published artifacts | Not present | **PENDING** |
 

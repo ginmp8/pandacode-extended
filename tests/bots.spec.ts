@@ -253,6 +253,42 @@ test.describe('bots', () => {
     await expect(panel(page).locator('.bots-items').first()).toContainText('This app');
   });
 
+  test('chat permissions change the bot policy, with explicit confirmation for full access', async ({ page }) => {
+    await newBot(page);
+    const trigger = page.locator('#mode-picker-trigger');
+    const menu = page.getByRole('dialog', { name: 'Permissions', exact: true });
+    await expect(trigger).toHaveAttribute('data-mode', 'ask');
+    await trigger.click();
+    await menu.getByRole('menuitemradio', { name: 'Full access', exact: true }).click();
+    const confirm = page.getByRole('dialog', { name: 'Allow full access for Scout?' });
+    await expect(confirm).toContainText('all of its conversations, including connected channels and scheduled work');
+    await confirm.getByRole('button', { name: 'Cancel' }).click();
+    await expect(trigger).toHaveAttribute('data-mode', 'ask');
+
+    await trigger.click();
+    await menu.getByRole('menuitemradio', { name: 'Full access', exact: true }).click();
+    await confirm.getByRole('button', { name: 'Allow full access' }).click();
+    await expect(trigger).toHaveAttribute('data-mode', 'full');
+    await openSettings(page);
+    await expect(panel(page).getByRole('radio', { name: 'Full access' })).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('Escape');
+
+    await page.locator('#prompt').fill('What can you do?');
+    await page.locator('#prompt').press('Enter');
+    await expect(page.locator('#transcript .agent-message').first()).toBeVisible();
+    await showTasksView(page);
+    await page.locator('#navigation .task-item', { hasText: 'Explore the project' }).click();
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Chat with Scout' }).click();
+    await expect(trigger).toHaveAttribute('data-mode', 'full');
+
+    await trigger.click();
+    await menu.getByRole('menuitemradio', { name: 'Standard', exact: true }).click();
+    await expect(trigger).toHaveAttribute('data-mode', 'ask');
+    await openSettings(page);
+    await expect(panel(page).getByRole('radio', { name: 'Ask first' })).toHaveAttribute('aria-checked', 'true');
+  });
+
   test('the model can be changed in a bot conversation', async ({ page }) => {
     await newBot(page);
     await page.getByRole('button', { name: /^Model: / }).click();

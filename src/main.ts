@@ -5313,7 +5313,17 @@ async function showMode(anchor: HTMLElement, target = session()): Promise<void> 
     if (isBtwDraft(s)) { saveBtwDraft(s, { mode: id as Mode }); return; }
     configuringSessions.add(s.id);
     try {
-      await call('update_session', { sessionId: s.id, mode: id as Mode });
+      // The bot gateway restores its profile mode before each run, so update the
+      // bot policy for its desktop chat instead of changing only the task row.
+      const chatBot = !inPanel ? botForThread() : undefined;
+      if (chatBot?.desktopSession === s.id) {
+        if (id === 'full' && chatBot.mode !== 'full' && !await confirmBotFullAccess(chatBot.name)) return;
+        if (!current() || generation !== state.generation || isRunning(s.id)) throw new Error('Select the bot chat again to change its permissions.');
+        const updated = await call<import('./bots').Bot>('bot_set_mode', { botId: chatBot.id, mode: id as Mode });
+        sidebarBots = sidebarBots.map(bot => bot.id === updated.id ? { ...bot, ...updated } : bot);
+      } else {
+        await call('update_session', { sessionId: s.id, mode: id as Mode });
+      }
       const saved = state.sessions.find(item => item.id === s.id); if (saved) saved.mode = id as Mode;
       if (inPanel) btwPanel.refresh();
       else if (s.id === state.sessionId) {
@@ -6512,6 +6522,16 @@ async function deleteBot(bot: import('./bots').Bot): Promise<void> {
   if (!session()) state.sessionId = '';
   render();
 }
+function confirmBotFullAccess(name: string): Promise<boolean> {
+  const dialog = modal(`Allow full access for ${name}?`, `<form id="bot-full-access-form"><p class="delete-task-description">This changes ${escape(name)}'s permission for all of its conversations, including connected channels and scheduled work. It can run commands and change files without asking you.</p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="primary-button">Allow full access</button></div></form>`);
+  const form = dialog.querySelector<HTMLFormElement>('#bot-full-access-form')!;
+  form.querySelector<HTMLButtonElement>('[data-action="close-dialog"]')!.focus();
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(false), { once: true });
+    form.addEventListener('submit', event => { event.preventDefault(); event.stopPropagation(); resolve(true); closeModal(); }, { once: true });
+  });
+}
+
 function confirmBotDelete(name: string): Promise<boolean> {
   const dialog = modal(`Delete ${name}?`, '<form id="delete-bot-form"><p class="delete-task-description">This removes the bot, its conversations and its channel connections. Its workspace folder stays on disk.</p><div class="dialog-footer"><button type="button" class="secondary-button" data-action="close-dialog">Cancel</button><button type="submit" class="secondary-button delete-task-confirm">Delete bot</button></div></form>', 'delete-task-dialog');
   const form = dialog.querySelector<HTMLFormElement>('#delete-bot-form')!;

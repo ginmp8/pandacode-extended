@@ -105,6 +105,53 @@ fn profile_changes_reconfigure_existing_idle_threads() {
 }
 
 #[test]
+fn chat_permission_change_updates_bot_policy_and_all_idle_threads() {
+    let f = fixture();
+    let bot = bot(&f);
+    let other = create(&f.store, &input("Other"), &f.root).unwrap();
+    let (desktop, _) = thread_session(&f.store, &bot, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    let (channel, _) = thread_session(&f.store, &bot, "web", "client", "Scout · Client").unwrap();
+    let (other_thread, _) = thread_session(&f.store, &other, DESKTOP, DESKTOP, "Other · You").unwrap();
+
+    f.store.update(&desktop, None, None, None, Some("full".into())).unwrap();
+    let (same, created) = thread_session(&f.store, &bot, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    assert_eq!((same, created), (desktop.clone(), false));
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "ask", "upstream resets task-only modes");
+
+    let changed = set_mode(&f.store, &bot.id, "full").unwrap();
+    assert_eq!(changed.mode, "full");
+    assert_eq!(changed.role, bot.role);
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "full");
+    assert_eq!(f.store.session(&channel).unwrap().mode, "full");
+    assert_eq!(f.store.session(&other_thread).unwrap().mode, "ask");
+    let (same, _) = thread_session(&f.store, &changed, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    assert_eq!(same, desktop);
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "full");
+
+    assert!(set_mode(&f.store, &bot.id, "unrestricted").is_err());
+    assert_eq!(get(&f.store, &bot.id).unwrap().mode, "full");
+    set_mode(&f.store, &bot.id, "ask").unwrap();
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "ask", "revocation also takes effect from chat");
+    assert_eq!(f.store.session(&channel).unwrap().mode, "ask");
+}
+
+#[test]
+fn active_bot_threads_pick_up_chat_permission_on_the_next_turn() {
+    let f = fixture();
+    let bot = bot(&f);
+    let (desktop, _) = thread_session(&f.store, &bot, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    f.store.status(&desktop, "running").unwrap();
+    set_mode(&f.store, &bot.id, "full").unwrap();
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "ask", "active turns are not reconfigured");
+    f.store.status(&desktop, "stopped").unwrap();
+    let changed = get(&f.store, &bot.id).unwrap();
+    thread_session(&f.store, &changed, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "full");
+    set_mode(&f.store, &bot.id, "plan").unwrap();
+    assert_eq!(f.store.session(&desktop).unwrap().mode, "plan");
+}
+
+#[test]
 fn startup_reconciles_active_bot_deliveries_as_failed() {
     let f = fixture();
     let source = bot(&f);

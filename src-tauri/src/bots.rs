@@ -601,12 +601,35 @@ pub(crate) fn update(store: &Store, id: &str, input: &BotInput) -> Result<Bot> {
     }
     log(store, id, "updated", "Settings changed", json!({}))?;
     let bot = get(store, id)?;
-    let session_ids = {
-        let mut statement = store.db.prepare("SELECT session_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
-        let rows = statement.query_map([id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
-    };
-    for session_id in session_ids { sync_thread_profile(store, &bot, &session_id)?; }
+    sync_thread_profiles(store, &bot)?;
+    Ok(bot)
+}
+
+/// Reuse the upstream synchronization when Settings or a bot chat changes bot policy.
+fn sync_thread_profiles(store: &Store, bot: &Bot) -> Result<()> {
+    let mut statement = store.db.prepare("SELECT session_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([&bot.id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    for session_id in rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())? {
+        sync_thread_profile(store, bot, &session_id)?;
+    }
+    Ok(())
+}
+
+/// A mode picked in the bot's own chat changes its policy for all conversations.
+/// Merely changing sessions.mode would be overwritten by sync_thread_profile on delivery.
+pub(crate) fn set_mode(store: &Store, id: &str, mode: &str) -> Result<Bot> {
+    if !crate::storage::valid_permission_mode(mode) {
+        return Err("Choose a permission mode for the bot.".into());
+    }
+    let before = get(store, id)?;
+    if before.mode != mode {
+        store.db.execute("UPDATE bots SET mode=?2,updated_at=?3 WHERE id=?1", params![id, mode, crate::storage::now()]).map_err(|e| e.to_string())?;
+    }
+    let bot = get(store, id)?;
+    sync_thread_profiles(store, &bot)?;
+    if before.mode != mode {
+        log(store, id, "updated", "Permissions changed", json!({}))?;
+    }
     Ok(bot)
 }
 
@@ -929,6 +952,15 @@ pub async fn bot_update(app: tauri::AppHandle, window: tauri::WebviewWindow, sta
     guard_main(&window)?;
     let bot = update(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &input)?;
     let _ = app.emit("bots-changed", ());
+    Ok(bot)
+}
+
+#[tauri::command]
+pub async fn bot_set_mode(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String, mode: String) -> Result<Bot> {
+    guard_main(&window)?;
+    let bot = set_mode(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &mode)?;
+    let _ = app.emit("bots-changed", ());
+    let _ = app.emit("sessions-changed", ());
     Ok(bot)
 }
 

@@ -16,7 +16,7 @@ let activityId = 1;
 /** Ordinary tasks started with a bot, and those that have had its brief. */
 const taskBots = new Map<string, string>(), taskBriefed = new Set<string>();
 const MINUTE = 60_000;
-const MODES = ['ask', 'auto', 'plan', 'full'];
+const MODES = ['ask', 'auto', 'review', 'plan', 'full'];
 
 function store(id: string): Store { const found = bots.get(id); if (!found) throw new Error('This bot no longer exists.'); return found; }
 function log(entry: Store, kind: string, summary: string): void { entry.activity.unshift({ id: activityId++, kind, summary, detail: {}, at: Date.now() }); }
@@ -234,6 +234,17 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const entry = store(args.botId); const input = validate(args.input);
       entry.bot = { ...entry.bot, ...input, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
       log(entry, 'updated', 'Settings changed'); result = structuredClone(entry.bot); changed(); break;
+    }
+    case 'bot_set_mode': {
+      const entry = store(args.botId), mode = String(args.mode ?? '');
+      if (!MODES.includes(mode)) throw new Error('Choose a permission mode for the bot.');
+      entry.bot = { ...entry.bot, mode, updatedAt: Date.now() };
+      for (const thread of entry.threads) {
+        const task = await host.invoke<Session>('get_task', { sessionId: thread.sessionId });
+        if (task.status !== 'running' && task.status !== 'waiting') await host.invoke('update_session', { sessionId: thread.sessionId, mode });
+      }
+      log(entry, 'updated', 'Permissions changed');
+      result = structuredClone(entry.bot); changed(); host.emit('sessions-changed', null); break;
     }
     case 'bot_set_paused': { const entry = store(args.botId); entry.bot = { ...entry.bot, paused: Boolean(args.paused), updatedAt: Date.now() }; log(entry, 'updated', args.paused ? 'Paused' : 'Resumed'); result = structuredClone(entry.bot); changed(); break; }
     case 'bot_reset': { const entry = store(args.botId); entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared'); result = structuredClone(entry.bot); changed(); break; }

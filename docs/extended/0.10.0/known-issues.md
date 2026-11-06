@@ -12,6 +12,7 @@
 | Upgrade/data compatibility | **UNVERIFIED:** existing SQLite data and real installer upgrades were not certified by historical CI | Restore a representative prior database, test migration/upgrade and recovery |
 | Release identity and publication | **BLOCKED:** source Tauri version and `releases/{version}.md` are used by the current release workflow, not the independent Extended label | Implement/validate a distinct 0.10.0 distribution identity and release-note mapping without breaking source-version parity |
 | Dependencies and security | **PENDING:** previous-cycle npm/RustSec success does not apply to the final 0.10.0 SHA | Re-run audits and review actual dependency/override deltas |
+| Rust ZIP advisory GHSA-m665-v7pm-7grj | **TARGETED PATCH, CI PENDING:** The direct `zip` pin and Cargo.lock entry were changed from 9.0.4 to 9.0.5 (minimum patched release). The VSIX import path uses `ZipArchive`, not a confirmed streaming extraction path; no full-app exploit claim | Verify `cargo check --locked`, VSIX tests, RustSec, platform builds and final-SHA CI; monitor `main` separately from this branch |
 
 No upstream capability should be removed on the basis of unverified concerns. Confirm actual defects with source evidence and focused regression tests, and preserve Extended's existing security/permission controls.
 

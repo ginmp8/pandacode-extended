@@ -3715,6 +3715,7 @@ async function dispatchQueue(id: string): Promise<void> {
   if (!task || !next || botProjects.has(task.projectId) || (state.queueHolds.has(id) && next.id !== first?.id) || state.queueBusy.has(id) || steeringQueued.has(next.id) || next.id === state.queueEditing || isRunning(id) || finishingStreams.has(id) || configuringSessions.has(id) || task.archived) return;
   if (limitActive(task)) { state.queueHolds.set(id, 'limited'); if (id === state.sessionId) renderComposer(); return; }
   state.queueBusy.add(id);
+  if (id === state.sessionId) renderComposer();
   try {
     if (next.id === first?.id) sendFirst.delete(id);
     const entry = await call<QueuedMessage>('queue_take', { id: next.id });
@@ -7072,8 +7073,14 @@ async function boot(): Promise<void> {
   // Agents can queue or remove follow-ups through their tools; an idle, unheld task sends right away.
   await subscribe('queue-changed', payload => run((async () => {
     const id = payload?.sessionId; if (!id) return;
-    setQueue(id, await call<QueuedMessage[]>('queue_list', { sessionId: id }));
+    // Bot conversations drain in Rust, not dispatchQueue. A native take
+    // or restore must reconcile the UI with SQLite, including launch errors.
+    const entries = await call<QueuedMessage[]>('queue_list', { sessionId: id });
+    if (payload.delivery === 'failed') state.queueHolds.set(id, 'failed');
+    else if (payload.delivery === 'started') state.queueHolds.delete(id);
+    setQueue(id, entries);
     if (id === state.sessionId) renderComposer();
+    if (payload.delivery === 'failed') notify(payload.error ?? 'The bot could not send the next queued message.');
     await dispatchQueue(id);
   })()));
   await subscribe('overlay-open-task', event => run((async () => {

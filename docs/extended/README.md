@@ -33,5 +33,6 @@ Do not copy these statements into upstream release notes or claim they apply to 
 - [Original upstream 0.3.96 release notes](../../releases/0.3.96.md)
 - [Original upstream 0.3.97 release notes](../../releases/0.3.97.md)
 - [Original upstream 0.3.98 release notes](../../releases/0.3.98.md)
+- [Original upstream 0.3.99 release notes](../../releases/0.3.99.md)
 
-**Latest pinned source snapshot (2026-11-05):** [`0461e02`](https://github.com/ginmp8/pandacode/commit/0461e02b85c95f8a52e927382c5069d0799dfed8), application **0.3.98**. Inherited updates include Recommended Settings, native intra-window and queue drag, live wake/reply card consolidation, and revised model/design-iteration controls. Extended 0.10.0 remains a documentation candidate without native release approval.
+**Latest pinned source snapshot (2026-11-06):** [`6b94bf1d`](https://github.com/ginmp8/pandacode/commit/6b94bf1d8b579d08834578f6e24684ea0d3fccbd), application **0.3.99**. Inherited team-lead changed-files UI aggregates runs into one row with per-run diff tabs; its line counts are summed rather than net. Extended **0.10.0** remains an unapproved documentation candidate pending native acceptance.

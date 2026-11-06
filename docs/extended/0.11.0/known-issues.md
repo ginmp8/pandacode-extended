@@ -13,3 +13,8 @@ The previous [0.10.0 known-issues register](../0.10.0/known-issues.md) and [rele
 | 0.11.0-specific defects | None confirmed by opening the documentation cycle | Minimal reproduction, affected commit and verified correction |
 
 Do not remove upstream features or tighten Extended defaults solely because an area remains untested.
+
+## Additional 0.3.100 integration validation gaps
+
+- **Account pools and sign-in:** The upstream implementation, tests, original release notes and UI were imported at [`a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da). No independent live two-account Claude/Codex switching, authentication, restart/hold recovery, input-queue preservation, or interaction with optional Extended controls has yet been recorded for this candidate. These are **unverified acceptance criteria**, not established failures.
+- **Inherited upstream limitations:** Only Claude Code and Codex subscription logins can join pools; cloud runs and goal operations are not pooled. The source reports incomplete live two-account Codex and complete one-click sign-in testing. See [original 0.3.100 notes](../../../releases/0.3.100.md).

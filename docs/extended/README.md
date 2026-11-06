@@ -3,8 +3,13 @@
 This directory defines the **complete upstream functional parity contract** and the bounded Extended-only configuration, dependency remediations, release validation and evidence-backed known behavior. It is intentionally separate from upstream PandaCode documentation in `docs/`; Extended release notes live under `releases/extended/`, distinct from upstream release files at `releases/*.md`.
 
 - **[Mandatory full upstream functional parity contract](upstream/parity-contract.md)** — complete copy, allowed Extended-only differences and verification gates
-**Current planned Extended release documentation:** **[0.10.0](0.10.0/README.md)** (development candidate, not a released installer or publication approval). This is the version selected for Extended-specific release-document maintenance; the upstream application version remains independent.
+**Current planned Extended release documentation:** **[0.11.0](0.11.0/README.md)** (incremental development candidate, not an approved, tagged or distributed release). The upstream application version is synchronized independently from the fork.
 
+- [Extended 0.11.0 draft release notes](../../releases/extended/0.11.0.md)
+- [Extended 0.11.0 feature controls](0.11.0/feature-controls.md)
+- [Extended 0.11.0 dependency and security tracking](0.11.0/dependency-security.md)
+- [Extended 0.11.0 known-issues register](0.11.0/known-issues.md)
+- [Extended 0.11.0 release checklist](0.11.0/release-checklist.md)
 - [Extended 0.10.0 draft release notes](../../releases/extended/0.10.0.md)
 - [Extended 0.10.0 feature controls](0.10.0/feature-controls.md)
 - [Extended 0.10.0 dependency and security evidence](0.10.0/dependency-security.md)
@@ -35,4 +40,4 @@ Do not copy these statements into upstream release notes or claim they apply to 
 - [Original upstream 0.3.98 release notes](../../releases/0.3.98.md)
 - [Original upstream 0.3.99 release notes](../../releases/0.3.99.md)
 
-**Latest pinned source snapshot (2026-11-06):** [`6b94bf1d`](https://github.com/ginmp8/pandacode/commit/6b94bf1d8b579d08834578f6e24684ea0d3fccbd), application **0.3.99**. Inherited team-lead changed-files UI aggregates runs into one row with per-run diff tabs; its line counts are summed rather than net. Extended **0.10.0** remains an unapproved documentation candidate pending native acceptance.
+**Latest pinned source snapshot (2026-11-06):** [`6b94bf1d`](https://github.com/ginmp8/pandacode/commit/6b94bf1d8b579d08834578f6e24684ea0d3fccbd), application **0.3.99**. Inherited team-lead changed-files UI aggregates runs into one row with per-run diff tabs; its line counts are summed rather than net. Extended **0.10.0** promotion was initiated via [PR #114](https://github.com/ginmp8/pandacode-extended/pull/114) and its conflict-free rebase equivalent [PR #115](https://github.com/ginmp8/pandacode-extended/pull/115); publication/native acceptance remains a separate gate. **0.11.0** is the next incremental documentation cycle.

@@ -3,9 +3,14 @@
 This directory defines the **complete upstream functional parity contract** and the bounded Extended-only configuration, dependency remediations, release validation and evidence-backed known behavior. It is intentionally separate from upstream PandaCode documentation in `docs/`; Extended release notes live under `releases/extended/`, distinct from upstream release files at `releases/*.md`.
 
 - **[Mandatory full upstream functional parity contract](upstream/parity-contract.md)** — complete copy, allowed Extended-only differences and verification gates
-**Current planned Extended release documentation:** **[0.9.0](0.9.0/README.md)** (development candidate, not a released installer or publication approval). This is the version selected for Extended-specific release-document maintenance; the upstream application version remains independent.
+**Current planned Extended release documentation:** **[0.10.0](0.10.0/README.md)** (development candidate, not a released installer or publication approval). This is the version selected for Extended-specific release-document maintenance; the upstream application version remains independent.
 
-- [Extended 0.9.0 draft release notes](../../releases/extended/0.9.0.md)
+- [Extended 0.10.0 draft release notes](../../releases/extended/0.10.0.md)
+- [Extended 0.10.0 feature controls](0.10.0/feature-controls.md)
+- [Extended 0.10.0 dependency and security evidence](0.10.0/dependency-security.md)
+- [Extended 0.10.0 known-issues register](0.10.0/known-issues.md)
+- [Extended 0.10.0 release checklist](0.10.0/release-checklist.md)
+- [Extended 0.9.0 historical candidate notes](../../releases/extended/0.9.0.md)
 - [Extended 0.8.0 previous-cycle release notes](../../releases/extended/0.8.0.md)
 - [Extended 0.8.0 release checklist](0.8.0/release-checklist.md)
 - [Extended 0.7.0 historical source-candidate documentation](0.7.0/README.md)
@@ -28,4 +33,4 @@ Do not copy these statements into upstream release notes or claim they apply to 
 - [Original upstream 0.3.96 release notes](../../releases/0.3.96.md)
 - [Original upstream 0.3.97 release notes](../../releases/0.3.97.md)
 
-**Latest pinned source snapshot (2026-11-04):** [`fc32c3f` 0.3.97](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852). This supersedes the 0.3.94 checkpoints in earlier 0.9.0 planning material; the Extended distribution candidate remains 0.9.0 and is not published.
+**Latest pinned source snapshot (2026-11-04):** [`fc32c3f` 0.3.97](https://github.com/ginmp8/pandacode/commit/fc32c3f585db6a72fee967e8d91f2bb50fe67852). This supersedes the 0.3.94 checkpoints in earlier 0.9.0 planning material; the current Extended distribution documentation is the planned 0.10.0 cycle; the previous 0.9.0 cycle remains historical and has not been verified here as a binary release.

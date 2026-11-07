@@ -1289,11 +1289,11 @@ fn dispatch_tool(child: bool) -> Value {
     let s = json!({"type":"string"});
     let mut item = json!({"key":id,"profileId":id,"provider":s,"model":s,"reasoningEffort":s,"name":s,"prompt":s,"dependsOn":{"type":"array","items":id},"files":files_schema(),"readOnly":{"type":"boolean"}});
     let description = if child {
-        "Sub-workers only for parallel work/other models; inherit parent scopes/access; dependsOn siblings; resume with results.".to_string()
+        "Sub-workers for parallel tasks/models; otherwise do it yourself. Inherit scopes/access; dependsOn siblings; resume with results.".to_string()
     } else {
         item["replaces"] = json!({"type":"string","description":"Replace failed worker or failed check; \"auto\" tries other/stronger models at most twice; retains changes."});
         item["replaceReason"] = json!({"type":"string","description":"Failed check."});
-        "Dispatch parallel assignments; returns IDs. profileId \"auto\" (or omitted with routing on) uses Panda Router; choose a model only if requested. files: repo-relative, [] reserves checkout. Disjoint writers and readOnly can overlap; dependsOn uses returned IDs.".into()
+        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" or omitted with routing on, Router picks models; select explicit models only when asked. files are repo-relative; [] reserves checkout. Disjoint writers/readOnly can overlap; dependsOn uses returned IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }

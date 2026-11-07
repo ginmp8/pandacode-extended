@@ -73,6 +73,41 @@ pub(crate) fn apply(store: &Store, root: &Path, doc: &Value, now: i64) -> Report
     report
 }
 
+/// Reject unsupported Extended fields before the native update can write the profile.
+/// Bot-level partial success must never turn a malformed preference into a saved mode change.
+fn validate_extended_preferences(entry: &Value) -> crate::Result<()> {
+    let Some(extended) = entry.get("extended").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let settings = extended.as_object().ok_or("extended must be an object or null")?;
+    for (key, value) in settings {
+        if value.is_null() { continue; }
+        match key.as_str() {
+            "freshContextEachMessage" | "includeSharedChannelHistory" => {
+                if !value.is_boolean() {
+                    return Err(format!("extended.{key} must be boolean or null"));
+                }
+            }
+            "sharedChannelHistoryOverrides" => {
+                let overrides = value.as_array()
+                    .ok_or("extended.sharedChannelHistoryOverrides must be an array or null.")?;
+                for override_entry in overrides {
+                    let channel = override_entry.get("channel").and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or("Every shared channel history override needs a channel name.")?;
+                    let mode = override_entry.get("mode").and_then(Value::as_str)
+                        .ok_or("Every shared channel history override needs a mode.")?;
+                    if !matches!(mode, "default" | "include" | "exclude") {
+                        return Err(format!("Invalid history preference for {channel}."));
+                    }
+                }
+            }
+            _ => return Err(format!("Unsupported extended preference: {key}")),
+        }
+    }
+    Ok(())
+}
+
 fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedChannel>, now: i64) -> crate::Result<Vec<String>> {
     let raw_name = match entry.get("name") {
         Some(Value::String(name)) => name.as_str(),
@@ -105,8 +140,15 @@ fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedCha
             }
         }
     }
+    validate_extended_preferences(entry)?;
     let input: bots::BotInput =
         serde_json::from_value(prepared).map_err(|error| format!("unreadable bot entry: {error}"))?;
+    // The provider's stable effort contract is a necessary precondition. Dynamic
+    // per-model catalogs are checked by the harness when a model is available.
+    crate::providers::validate_reasoning_effort(
+        &input.provider,
+        (!input.reasoning_effort.is_empty()).then_some(input.reasoning_effort.as_str()),
+    ).map_err(|error| format!("reasoningEffort: {error}"))?;
     let (name, mut lines) = match &existing {
         Some(bot) => {
             bots::update(store, &bot.id, &input)?;
@@ -751,6 +793,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+
+    #[test]
+    fn invalid_extended_settings_do_not_change_an_existing_bot() {
+        let store = store();
+        let root = root();
+        let original = json!({"bots":[{"name":"tester","provider":"claude","model":"sonnet","mode":"ask"}]});
+        assert_eq!(apply(&store, &root, &original, 1_000_000).failed, 0);
+        let before = bots::list(&store).unwrap().remove(0);
+        let invalid = json!({"bots":[{"name":"tester","provider":"claude","model":"sonnet",
+            "mode":"full","extended":{"unknownSetting":true}}]});
+        let report = apply(&store, &root, &invalid, 2_000_000);
+        assert_eq!(report.failed, 1);
+        assert!(report.lines.iter().any(|line| line.contains("Unsupported extended preference")));
+        let after = bots::list(&store).unwrap().remove(0);
+        assert_eq!(after, before, "the rejected entry must leave the profile untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_incompatible_reasoning_effort_is_rejected_before_creating_a_bot() {
+        let store = store();
+        let root = root();
+        let invalid = json!({"bots":[{"name":"copilot","provider":"github-copilot",
+            "model":"default","mode":"ask","reasoningEffort":"high"}]});
+        let report = apply(&store, &root, &invalid, 1_000_000);
+        assert_eq!(report.failed, 1);
+        assert!(report.lines.iter().any(|line| line.contains("reasoningEffort")));
+        assert!(bots::list(&store).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn optional_preferences_preserve_absent_null_and_explicit_false() {

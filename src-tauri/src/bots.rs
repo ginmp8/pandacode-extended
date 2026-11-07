@@ -844,6 +844,8 @@ pub struct BotDetail {
     fresh_context_each_message: bool,
     /// Extended-only; upstream local channels include their recent messages by default.
     include_shared_channel_history: bool,
+    /// Joined local channels and their Extended-only history preferences.
+    shared_channel_history: Vec<extended::SharedChannelHistoryPreference>,
     /// The local server's port, for web chat links and the WhatsApp webhook URL.
     server_port: u16,
 }
@@ -949,6 +951,7 @@ pub async fn bot_detail(state: State<'_, AppState>, bot_id: String) -> Result<Bo
         rules: guard::rules(&store, &bot_id)?,
         fresh_context_each_message: extended::enabled(&store, &bot_id)?,
         include_shared_channel_history: extended::include_shared_channel_history(&store, &bot_id)?,
+        shared_channel_history: extended::channel_history_preferences(&store, &bot_id)?,
         server_port: channels::http::port(),
     })
 }

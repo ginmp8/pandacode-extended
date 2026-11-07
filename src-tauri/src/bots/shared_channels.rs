@@ -152,13 +152,26 @@ pub(crate) fn update(store: &Store, id: &str, raw_name: &str, requested: &[Strin
     for (position, bot_id) in members.iter().enumerate() {
         tx.execute("INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,?3)", params![id,bot_id,position as i64]).map_err(|e| e.to_string())?;
     }
+    // Channel membership edits replace the join rows; preserve only continuing members' choices.
+    tx.execute(
+        "DELETE FROM extended_bot_channel_history_overrides
+         WHERE channel_id=?1 AND bot_id NOT IN
+         (SELECT bot_id FROM bot_shared_channel_members WHERE channel_id=?1)",
+        [id],
+    ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     shared_channel(store, id)
 }
 
 pub(crate) fn set_archived(store: &Store, id: &str, archived: bool) -> Result<()> {
-    let changed = store.db.execute("UPDATE bot_shared_channels SET archived=?2,updated_at=?3 WHERE id=?1", params![id,archived,crate::storage::now()]).map_err(|e| e.to_string())?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let changed = tx.execute("UPDATE bot_shared_channels SET archived=?2,updated_at=?3 WHERE id=?1", params![id,archived,crate::storage::now()]).map_err(|e| e.to_string())?;
     if changed == 0 { return Err("This channel no longer exists.".into()); }
+    if archived {
+        tx.execute("DELETE FROM extended_bot_channel_history_overrides WHERE channel_id=?1", [id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -271,12 +284,12 @@ fn text_for_assignment(channel: &SharedChannel, text: &str, history: &str) -> St
     format!("Work requested in #{}:\n\n{}\n\nRecent messages in #{} (context, oldest first):\n{}", channel.name, text, channel.name, history)
 }
 
-/// Apply the recipient's Extended-only opt-out at the shared-channel boundary.
+/// Apply the recipient's Extended-only effective history policy at the shared-channel boundary.
 /// The channel transcript is never deleted; ordinary recipients keep upstream context.
 pub(crate) fn assignment_text(
     store: &Store, channel: &SharedChannel, bot_id: &str, message_id: &str, text: &str,
 ) -> Result<String> {
-    let history = if super::extended::include_shared_channel_history(store, bot_id)? {
+    let history = if super::extended::channel_history_effective(store, bot_id, &channel.id)? {
         recent_history(store, &channel.id, message_id)?
     } else {
         String::new()

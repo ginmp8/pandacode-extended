@@ -10,6 +10,10 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS extended_bot_context(
             bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
             fresh_each_message INTEGER NOT NULL DEFAULT 0 CHECK(fresh_each_message IN (0,1))
+        );
+        CREATE TABLE IF NOT EXISTS extended_bot_channel_history(
+            bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+            include_history INTEGER NOT NULL DEFAULT 1 CHECK(include_history IN (0,1))
         );",
     ).map_err(|e| e.to_string())
 }
@@ -20,6 +24,32 @@ pub(crate) fn enabled(store: &Store, bot_id: &str) -> Result<bool> {
         [bot_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     Ok(value.unwrap_or(0) == 1)
+}
+
+/// Whether a bot receives the existing shared-channel history alongside a new assignment.
+/// This policy is independent of native harness context reuse and durable bot memories.
+/// A missing row preserves the upstream behavior of including recent messages.
+pub(crate) fn include_shared_channel_history(store: &Store, bot_id: &str) -> Result<bool> {
+    let value: Option<i64> = store.db.query_row(
+        "SELECT include_history FROM extended_bot_channel_history WHERE bot_id=?1",
+        [bot_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    Ok(value.unwrap_or(1) == 1)
+}
+
+pub(crate) fn set_channel_history(store: &Store, bot_id: &str, include: bool) -> Result<bool> {
+    super::get(store, bot_id)?;
+    if include {
+        store.db.execute("DELETE FROM extended_bot_channel_history WHERE bot_id=?1", [bot_id])
+            .map_err(|e| e.to_string())?;
+    } else {
+        store.db.execute(
+            "INSERT INTO extended_bot_channel_history(bot_id,include_history) VALUES(?1,0)
+             ON CONFLICT(bot_id) DO UPDATE SET include_history=0",
+            [bot_id],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(include)
 }
 
 /// Only bot-owned conversations are included; regular tasks linked to bots are unaffected.
@@ -78,6 +108,17 @@ pub async fn bot_set_fresh_context(app: tauri::AppHandle, window: tauri::Webview
     state: State<'_, AppState>, bot_id: String, enabled: bool) -> Result<bool> {
     if window.label() != "main" { return Err("Bots are managed from the main window.".into()); }
     let saved = set(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, enabled)?;
+    let _ = app.emit("bots-changed", ());
+    Ok(saved)
+}
+
+/// User-controlled setting for incoming context from local shared bot channels.
+/// It never deletes stored channel posts, bot memories or queued work.
+#[tauri::command]
+pub async fn bot_set_channel_history(app: tauri::AppHandle, window: tauri::WebviewWindow,
+    state: State<'_, AppState>, bot_id: String, enabled: bool) -> Result<bool> {
+    if window.label() != "main" { return Err("Bots are managed from the main window.".into()); }
+    let saved = set_channel_history(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, enabled)?;
     let _ = app.emit("bots-changed", ());
     Ok(saved)
 }
@@ -182,6 +223,62 @@ mod tests {
         assert_eq!(fresh.matches(brief::HEADER).count(), 1, "gateway and launch must not inject two briefs");
         assert_eq!(fresh, prompt);
     }
+    #[test]
+    fn shared_channel_history_can_be_disabled_per_bot_without_changing_fresh_context() {
+        let f = fixture();
+        let scout = bot(&f, "Scout");
+        let reviewer = bot(&f, "Reviewer");
+        let channel = super::super::shared_channels::create(
+            &f.store, "test", &[scout.id.clone(), reviewer.id.clone()]
+        ).unwrap();
+        f.store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+             VALUES('prior-post',?1,'user','my phone is blue','completed',1)",
+            [&channel.id],
+        ).unwrap();
+        f.store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+             VALUES('current-post',?1,'user','What color is my phone?','in_progress',2)",
+            [&channel.id],
+        ).unwrap();
+        let assign = |bot_id: &str| super::super::shared_channels::assignment_text(
+            &f.store, &channel, bot_id, "current-post", "What color is my phone?"
+        ).unwrap();
+
+        assert!(include_shared_channel_history(&f.store, &scout.id).unwrap());
+        assert!(assign(&scout.id).contains("my phone is blue"), "upstream history is on by default");
+
+        set(&f.store, &scout.id, true).unwrap();
+        assert!(assign(&scout.id).contains("my phone is blue"),
+            "fresh native harness context must not automatically remove shared-channel history");
+
+        assert!(!set_channel_history(&f.store, &scout.id, false).unwrap());
+        let prompt = assign(&scout.id);
+        assert_eq!(prompt, "Work requested in #test:\n\nWhat color is my phone?");
+        assert!(!prompt.contains("my phone is blue"));
+        assert!(assign(&reviewer.id).contains("my phone is blue"),
+            "the second bot retains normal channel context");
+        assert!(super::super::shared_channels::recent_history(
+            &f.store, &channel.id, "current-post"
+        ).unwrap().contains("my phone is blue"), "channel history is preserved");
+        assert!(enabled(&f.store, &scout.id).unwrap(),
+            "channel preference cannot change fresh native-context preference");
+        assert!(set_channel_history(&f.store, "nonexistent", false).is_err());
+
+        super::super::reset(&f.store, &scout.id).unwrap();
+        assert!(!include_shared_channel_history(&f.store, &scout.id).unwrap(),
+            "bot reset keeps the configuration just like other profile settings");
+        set_channel_history(&f.store, &scout.id, true).unwrap();
+        assert!(include_shared_channel_history(&f.store, &scout.id).unwrap());
+        set_channel_history(&f.store, &scout.id, false).unwrap();
+        super::super::delete(&f.store, &scout.id).unwrap();
+        let count: i64 = f.store.db.query_row(
+            "SELECT count(*) FROM extended_bot_channel_history WHERE bot_id=?1",
+            [&scout.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "deleting the bot cascades the preference");
+    }
+
     #[test]
     fn preference_survives_reset_and_is_removed_with_bot_deletion() {
         let f = fixture();

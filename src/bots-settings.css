@@ -94,6 +94,13 @@ dialog.bot-settings-dialog{width:min(880px,calc(100vw - 32px));max-height:88dvh}
 .bs-row-text{display:flex;align-items:baseline;gap:8px;min-width:0}
 .bs-row-text strong{flex:none;font-size:var(--text-sm);font-weight:520;line-height:1.4;color:var(--text)}
 .bs-row-text small{min-width:0;font-size:var(--text-xs);color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Rows with help keep the info mark beside the title and the description below it. */
+.bs-row.has-help{align-items:start}
+.bs-row.has-help .bs-row-text{flex-direction:column;align-items:flex-start;gap:3px}
+.bs-row-help-title{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0}
+.bs-row-help-title strong{min-width:0;flex:0 1 auto}
+.bs-row-help-title .info-mark{flex:none}
+.bs-row.has-help .bs-row-text>small{max-width:100%;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.4}
 .bots-detail .bs-row>:is(input,select){width:100%;min-height:var(--control-lg);padding:6px 10px}
 .bs-row textarea{width:100%;padding:8px 11px;font:inherit;line-height:1.45;resize:vertical}
 .bp-rules-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(16rem,1.4fr);gap:1rem;align-items:center;padding:1rem}
@@ -154,6 +161,7 @@ dialog.bot-settings-dialog{width:min(880px,calc(100vw - 32px));max-height:88dvh}
 .bs-advanced{margin-top:4px}
 .bs-advanced>summary{padding:.6rem 1rem;font-size:.84rem;color:var(--muted);cursor:pointer}
 .bots-detail .bs-row>.bots-switch{justify-self:end;min-height:0;padding:0}
+.bots-detail .bs-row.has-help>.bots-switch{align-self:start;margin-top:2px}
 @media(prefers-reduced-transparency:reduce),(prefers-contrast:more){.bp-avatar-pop{backdrop-filter:none;-webkit-backdrop-filter:none;background:var(--panel)}}
 .bots-soul-actions{display:flex;gap:.5rem;flex-wrap:wrap}
 .bots-soul-actions [hidden],.bots-soul-error[hidden]{display:none}

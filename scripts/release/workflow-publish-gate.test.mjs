@@ -17,5 +17,15 @@ function jobCondition(job) {
 
 test('publishing requires an explicit manual workflow dispatch', () => {
   assert.equal(jobCondition('publish'), "if: github.event_name == 'workflow_dispatch' && inputs.publish == true");
-  assert.equal(jobCondition('npm'), "if: github.event_name == 'workflow_dispatch' && inputs.publish == true && github.ref_type == 'tag'");
+  assert.doesNotMatch(workflow, /^  npm:\s*$/m, 'Extended release workflow must not contain an npm publish job');
+  assert.doesNotMatch(workflow, /\bnpm publish\b/, 'Extended release workflow must not publish packages to npm');
+});
+
+
+test('Extended and upstream release tag identities are resolved separately', () => {
+  assert.match(workflow, /node scripts\/release\/resolve-release-identity\.mjs/);
+  assert.match(workflow, /RELEASE_TAG: \$\{\{ needs\.prepare\.outputs\.release_tag \}\}/);
+  assert.match(workflow, /RELEASE_NOTES: \$\{\{ needs\.prepare\.outputs\.release_notes \}\}/);
+  assert.match(workflow, /gh release create "\$RELEASE_TAG"/);
+  assert.match(workflow, /updater-manifest\.mjs assets "\$VERSION" "\$RELEASE_NOTES" "\$RELEASE_TAG"/);
 });

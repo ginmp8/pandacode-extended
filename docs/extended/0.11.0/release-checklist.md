@@ -23,7 +23,9 @@
 ## Release approval
 
 - [ ] Resolve independently tracked issues affecting acceptance and review the 0.11.0 known-issues register.
+- [ ] Verify distinct Extended release tags against upstream application versions using `scripts/release/resolve-release-identity.mjs`, including the regression for [failed v0.10.0 run #42220490913](https://github.com/ginmp8/pandacode-extended/actions/runs/42220490913).
 - [ ] Verify packaging/version/tag, artifact names, updater, signing, checksums, SBOM and publication gating without changing upstream app versions to 0.11.0.
+- [ ] Confirm tag pushes produce build artifacts only; GitHub publishing needs explicit manual approval and **no npm publishing job exists**.
 - [ ] Obtain explicit approval before tag, GitHub Release, installer publication or deployment.
 
 ## Initial evidence log

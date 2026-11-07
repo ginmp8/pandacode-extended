@@ -2,7 +2,7 @@
 // per platform whose signed update file was built. The release workflow uploads it with
 // the installers, so .../releases/latest/download/latest.json names the newest version.
 //
-//   node scripts/release/updater-manifest.mjs <assets-dir> <version> <notes.md>
+//   node scripts/release/updater-manifest.mjs <assets-dir> <app-version> <notes.md> [release-tag]
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,9 +18,9 @@ export async function signaturesIn(directory) {
 }
 
 async function main() {
-  const [directory, releaseVersion, notesFile] = process.argv.slice(2);
+  const [directory, releaseVersion, notesFile, releaseTag] = process.argv.slice(2);
   if (!directory || !releaseVersion || !notesFile) throw new Error('Usage: updater-manifest.mjs <assets-dir> <version> <notes.md>');
-  const manifest = updaterManifest(releaseVersion, await readFile(notesFile, 'utf8'), await signaturesIn(directory));
+  const manifest = updaterManifest(releaseVersion, await readFile(notesFile, 'utf8'), await signaturesIn(directory), undefined, undefined, releaseTag);
   await writeFile(resolve(directory, 'latest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(`latest.json: ${manifest.version} for ${Object.keys(manifest.platforms).join(', ')}`);
 }

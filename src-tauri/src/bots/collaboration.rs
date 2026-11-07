@@ -64,7 +64,7 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
 }
 
 type CallbackInfo = (String, String, String, String, String, String);
-type CallbackRow = (String, String, String, String, String, String, String, String);
+type CallbackRow = (String, String, String, String, String, String, String, String, String);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Route {
@@ -442,7 +442,7 @@ fn callback_admitted(store: &Store, session_id: &str, text: &str) -> Result<bool
 /// interrupted 'sending' claim into 'failed' so it can be retried. The original
 /// callback result is preserved, even when the Rust task finished before restart.
 fn claim_callback(store: &Store, delivery_id: &str, reply: &str) -> Result<Option<CallbackInfo>> {
-    let item: Option<(String,String,String,String,String,String,String,String,String)> = store.db.query_row(
+    let item: Option<CallbackRow> = store.db.query_row(
         "SELECT a.origin_bot_id,a.origin_channel_id,a.origin_external_id,d.bot_id,
                 b.name,c.name,a.message_id,d.status,a.origin_session_id
          FROM extended_bot_channel_actions a

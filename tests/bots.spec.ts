@@ -242,6 +242,19 @@ test.describe('bots', () => {
     await expect(toggle).not.toBeChecked();
     const help = panel(page).getByRole('img', { name: 'About fresh context each message' });
     await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
+    // The title, tooltip and switch belong to the first row; the hint is a separate line.
+    const helpRow = panel(page).locator('.bs-row.has-help');
+    const titleBox = await helpRow.locator('.bs-row-help-title strong').boundingBox();
+    const tipBox = await help.boundingBox();
+    const hintBox = await helpRow.locator('.bs-row-text > small').boundingBox();
+    const switchBox = await toggle.boundingBox();
+    expect(titleBox && tipBox && hintBox && switchBox).toBeTruthy();
+    if (titleBox && tipBox && hintBox && switchBox) {
+      const titleCenter = titleBox.y + titleBox.height / 2;
+      expect(Math.abs(tipBox.y + tipBox.height / 2 - titleCenter)).toBeLessThan(10);
+      expect(hintBox.y).toBeGreaterThanOrEqual(titleBox.y + titleBox.height - 2);
+      expect(Math.abs(switchBox.y + switchBox.height / 2 - titleCenter)).toBeLessThan(12);
+    }
     await help.click();
     await expect(toggle).not.toBeChecked();
     await toggle.check();

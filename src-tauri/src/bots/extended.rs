@@ -59,7 +59,11 @@ pub(crate) fn prepare_turn(store: &Store, session_id: &str, text: &str) -> Resul
     };
     let sender = if thread.channel_id == DESKTOP { "You" } else { "" };
     let brief = brief::compose(&bot, &memories(store, &bot.id)?, &kind, sender);
-    let prompt = if text.contains(&brief) { text.to_owned() } else { format!("{text}{brief}") };
+    // A queued gateway message may name a different sender than the desktop
+    // fallback above. Match the stable brief before sender-specific etiquette,
+    // avoiding duplicate instructions while still refreshing outdated briefs.
+    let stable_brief = brief.split("\nThe message comes from ").next().unwrap_or(&brief);
+    let prompt = if text.contains(stable_brief) { text.to_owned() } else { format!("{text}{brief}") };
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     // An ordinary harness switch replays the transcript. A fresh bot turn must not.
     tx.execute("DELETE FROM context_recovery WHERE session_id=?1", [session_id]).map_err(|e| e.to_string())?;
@@ -165,6 +169,18 @@ mod tests {
         assert_eq!(crate::message_queue::list(&f.store, Some(&session)).unwrap()[0].text, queued);
         assert_eq!(prepare_turn(&f.store, &session, &prompt).unwrap().unwrap(), prompt,
             "current instructions are not injected twice");
+    }
+    #[test]
+    fn gateway_brief_with_a_different_sender_is_not_duplicated() {
+        let f = fixture();
+        let bot = bot(&f, "Scout");
+        let (session, _) = super::super::thread_session(&f.store, &bot, DESKTOP, DESKTOP, "Scout").unwrap();
+        set(&f.store, &bot.id, true).unwrap();
+        let attached = brief::compose(&bot, &[], "desktop", "Message from Partner");
+        let prompt = format!("Message from Partner:\n\nReview this{}", attached);
+        let fresh = prepare_turn(&f.store, &session, &prompt).unwrap().unwrap();
+        assert_eq!(fresh.matches(brief::HEADER).count(), 1, "gateway and launch must not inject two briefs");
+        assert_eq!(fresh, prompt);
     }
     #[test]
     fn preference_survives_reset_and_is_removed_with_bot_deletion() {

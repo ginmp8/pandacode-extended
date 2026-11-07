@@ -74,7 +74,11 @@ pub(crate) fn apply(store: &Store, root: &Path, doc: &Value, now: i64) -> Report
 }
 
 fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedChannel>, now: i64) -> crate::Result<Vec<String>> {
-    let raw_name = entry.get("name").and_then(Value::as_str).unwrap_or("");
+    let raw_name = match entry.get("name") {
+        Some(Value::String(name)) => name.as_str(),
+        Some(_) => return Err("unreadable bot entry: name must be a string.".into()),
+        None => "",
+    };
     if raw_name.trim().is_empty() {
         return Err("Every bot needs a name.".into());
     }
@@ -164,7 +168,10 @@ fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedCha
                     continue;
                 }
                 if !input.secrets.is_empty() {
-                    return Err(format!("  channel {} \"{label}\": existing credentials cannot be replaced by a manifest", input.kind));
+                    // A portable manifest may include env references for fresh machines.
+                    // Matched channels keep their existing OS-stored secrets; a manifest
+                    // must never rotate or erase them, even when an env var is unavailable.
+                    lines.push(format!("  channel {} \"{label}\": preserved existing credentials (secret bindings apply only to new channels)", input.kind));
                 }
                 let mut patch = serde_json::Map::new();
                 if let Some(config) = channel_entry.get("config").filter(|value| !value.is_null()) {
@@ -792,6 +799,27 @@ mod tests {
     }
 
     #[test]
+    fn existing_channel_ignores_missing_secret_bindings_during_reconciliation() {
+        let store = store();
+        let root = root();
+        let doc = json!({"bots":[{"name":"messenger","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"telegram","label":"primary","config":{},
+                "secrets":{"token":"123456:AAtesttokenvalueaaaaaaaaaaaaaaaaa"}}]}]});
+        assert_eq!(apply(&store, &root, &doc, 1_000_000).failed, 0);
+        let bot = bots::list(&store).unwrap().remove(0);
+        let original = channels::list(&store, &bot.id).unwrap().remove(0);
+        let credential = secret_store::get("app.pandacode.bots", &format!("{}:token", original.id));
+        let updated = json!({"bots":[{"name":"messenger","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"telegram","label":"primary","config":{},"enabled":false,
+                "reconcile":true,"secrets":{"token":"env:NOT_DEFINED_FOR_RECONCILE"}}]}]});
+        let report = apply(&store, &root, &updated, 2_000_000);
+        assert_eq!(report.failed, 0, "{:?}", report.lines);
+        assert!(!channels::get(&store, &original.id).unwrap().enabled);
+        assert_eq!(secret_store::get("app.pandacode.bots", &format!("{}:token", original.id)), credential);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn external_channel_reconciliation_is_opt_in_and_preserves_identity() {
         let store = store();
         let root = root();
@@ -804,7 +832,7 @@ mod tests {
         let legacy = json!({"bots":[{"name":"web","provider":"claude","model":"sonnet","mode":"auto",
             "channels":[{"kind":"web","label":"local","config":{"remote":true},"enabled":false}]}]});
         assert_eq!(apply(&store, &root, &legacy, 1_000_000).failed, 0);
-        assert_eq!(channels::get(&store, &before.id).unwrap().enabled, true);
+        assert!(channels::get(&store, &before.id).unwrap().enabled);
         let modern = json!({"bots":[{"name":"web","provider":"claude","model":"sonnet","mode":"auto",
             "channels":[{"kind":"web","label":"local","reconcile":true,
                 "config":{"remote":true},"enabled":false}]}]});

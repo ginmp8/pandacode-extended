@@ -11,6 +11,7 @@ use tauri::{Emitter, Manager};
 const MAX_SOURCES: usize = 16;
 const MAX_FILES: usize = 32;
 const MAX_SOURCE_BYTES: usize = 512 * 1024;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // Base64 adds ~34% before JSON wrapping.
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,11 +148,11 @@ async fn get_api(client: &reqwest::Client, url: tauri::Url) -> Result<Value> {
     if !status.is_success() {
         return Err(format!("GitHub HTTP {status}. Check the source repository, ref, path, rate limits and GH_TOKEN/GITHUB_TOKEN access."));
     }
-    if response.content_length().is_some_and(|size| size as usize > MAX_SOURCE_BYTES) {
-        return Err("GitHub manifest response exceeds the file-size limit.".into());
+    if response.content_length().is_some_and(|size| size > MAX_RESPONSE_BYTES as u64) {
+        return Err("GitHub API response exceeds the 1 MB limit.".into());
     }
     let bytes = response.bytes().await.map_err(|_| "Could not read the GitHub response.")?;
-    if bytes.len() > MAX_SOURCE_BYTES { return Err("GitHub response is too large.".into()); }
+    if bytes.len() > MAX_RESPONSE_BYTES { return Err("GitHub API response exceeds the 1 MB limit.".into()); }
     serde_json::from_slice(&bytes).map_err(|_| "GitHub did not return valid JSON.".into())
 }
 
@@ -233,6 +234,7 @@ fn aggregate(
 /// Each mutable Git ref is resolved once; all manifest files are read at that exact commit.
 async fn fetch_batch(registry: &SourceRegistry) -> Result<(Value, Vec<SourceReceipt>)> {
     validate_registry(registry)?;
+    if registry.sources.is_empty() { return Err("Configure at least one Git source before syncing.".into()); }
     let client = client()?;
     let mut documents = Vec::new();
     let mut receipts = Vec::new();
@@ -281,6 +283,26 @@ fn read_registry(path: &Path) -> Result<SourceRegistry> {
     let registry: SourceRegistry = serde_json::from_slice(&bytes).map_err(|error| format!("Invalid source registry: {error}"))?;
     validate_registry(&registry)?;
     Ok(registry)
+}
+
+// Serialize registry mutation and remote sync across async Desktop commands.
+fn registry_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Only the native backend can advance source provenance. Frontend edits to a source
+/// cannot manufacture a "last applied" revision, even when the source ID is reused.
+fn preserve_receipts(previous: &SourceRegistry, updated: &mut SourceRegistry) {
+    for source in &mut updated.sources {
+        let matching = previous.sources.iter().find(|saved| saved.id == source.id
+            && saved.repository == source.repository
+            && saved.reference == source.reference
+            && saved.manifests == source.manifests);
+        source.last_checked_sha = matching.and_then(|old| old.last_checked_sha.clone());
+        source.last_applied_sha = matching.and_then(|old| old.last_applied_sha.clone());
+        source.last_applied_hash = matching.and_then(|old| old.last_applied_hash.clone());
+    }
 }
 
 fn save_registry(path: &Path, registry: &SourceRegistry) -> Result<()> {
@@ -372,8 +394,13 @@ pub async fn bot_manifest_sources_save(
     app: tauri::AppHandle, window: tauri::WebviewWindow, registry: SourceRegistry,
 ) -> Result<SourceRegistry> {
     check_main(&window)?;
-    save_registry(&registry_path(&app)?, &registry)?;
-    Ok(registry)
+    let _operation = registry_lock().lock().await;
+    let path = registry_path(&app)?;
+    let previous = read_registry(&path)?;
+    let mut updated_registry = registry;
+    preserve_receipts(&previous, &mut updated_registry);
+    save_registry(&path, &updated_registry)?;
+    Ok(updated_registry)
 }
 
 #[tauri::command]
@@ -381,6 +408,7 @@ pub async fn bot_manifest_sources_check(
     app: tauri::AppHandle, window: tauri::WebviewWindow,
 ) -> Result<SyncOutcome> {
     check_main(&window)?;
+    let _operation = registry_lock().lock().await;
     let path = registry_path(&app)?;
     let mut registry = read_registry(&path)?;
     let receipt = check_sources(&mut registry).await?;
@@ -393,6 +421,7 @@ pub async fn bot_manifest_sources_sync(
     app: tauri::AppHandle, window: tauri::WebviewWindow,
 ) -> Result<SyncOutcome> {
     check_main(&window)?;
+    let _operation = registry_lock().lock().await;
     let path = registry_path(&app)?;
     let mut registry = read_registry(&path)?;
     let result = sync(&app, &mut registry).await?;
@@ -403,6 +432,25 @@ pub async fn bot_manifest_sources_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registry_edits_cannot_forge_or_carry_stale_apply_receipts() {
+        let saved = SourceRegistry { version: 1, sources: vec![ManifestSource {
+            id: "source".into(), repository: "https://github.com/team/config".into(),
+            reference: "main".into(), manifests: vec!["bots.json".into()], auto_sync: false,
+            last_checked_sha: Some("trusted-checked".into()),
+            last_applied_sha: Some("trusted-applied".into()),
+            last_applied_hash: Some("trusted-hash".into()),
+        }] };
+        let mut forged = saved.clone();
+        forged.sources[0].last_applied_sha = Some("forged".into());
+        preserve_receipts(&saved, &mut forged);
+        assert_eq!(forged.sources[0].last_applied_sha.as_deref(), Some("trusted-applied"));
+        forged.sources[0].manifests = vec!["different.json".into()];
+        preserve_receipts(&saved, &mut forged);
+        assert_eq!(forged.sources[0].last_applied_sha, None);
+        assert_eq!(forged.sources[0].last_checked_sha, None);
+    }
+
     #[test]
     fn rejects_unsafe_remote_identity_and_paths() {
         for repo in ["https://user:token@github.com/acme/repo", "http://github.com/a/b",

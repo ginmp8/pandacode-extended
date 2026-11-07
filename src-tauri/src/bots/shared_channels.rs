@@ -1,7 +1,7 @@
 //! Local group conversations shared by bots. Channel records stay in the bot database;
 //! assignments use each member's ordinary desktop task and the existing gateway queue.
 
-use super::{gateway, Bot, DESKTOP};
+use super::{collaboration, gateway, Bot, DESKTOP};
 use crate::{message_queue, storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -32,6 +32,7 @@ pub struct SharedChannelMessage {
     pub text: String,
     pub status: Option<String>,
     pub created_at: i64,
+    pub recipient_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,20 +182,32 @@ pub(crate) fn detail(store: &Store, id: &str, limit: usize) -> Result<SharedChan
     let channel = shared_channel(store, id)?;
     let mut messages = Vec::new();
     {
-        let mut statement = store.db.prepare("SELECT id,kind,author_bot_id,text,status,created_at FROM bot_shared_channel_messages WHERE channel_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2").map_err(|e| e.to_string())?;
-        let rows = statement.query_map(params![id,limit as i64+1], |r| Ok(SharedChannelMessage { id:r.get(0)?, kind:r.get(1)?, author_bot_id:r.get(2)?, text:r.get(3)?, status:r.get::<_,Option<String>>(4)?.map(status_label), created_at:r.get(5)? })).map_err(|e| e.to_string())?;
+        let mut statement = store.db.prepare("SELECT m.id,CASE a.kind WHEN 'post' THEN 'bot_post' WHEN 'assignment' THEN 'bot_request' ELSE m.kind END,m.author_bot_id,m.text,m.status,m.created_at,COALESCE(a.recipients,'[]') FROM bot_shared_channel_messages m LEFT JOIN extended_bot_channel_actions a ON a.message_id=m.id WHERE m.channel_id=?1 ORDER BY m.created_at DESC,m.id DESC LIMIT ?2").map_err(|e| e.to_string())?;
+        let rows = statement.query_map(params![id,limit as i64+1], |r| Ok(SharedChannelMessage { id:r.get(0)?, kind:r.get(1)?, author_bot_id:r.get(2)?, text:r.get(3)?, status:r.get::<_,Option<String>>(4)?.map(status_label), created_at:r.get(5)?, recipient_ids:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default() })).map_err(|e| e.to_string())?;
         messages.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
     }
     {
         let mut statement = store.db.prepare("SELECT d.id,d.bot_id,b.name,d.status,d.created_at FROM bot_shared_channel_deliveries d JOIN bots b ON b.id=d.bot_id WHERE d.channel_id=?1 ORDER BY d.created_at DESC,d.id DESC LIMIT ?2").map_err(|e| e.to_string())?;
         let rows = statement.query_map(params![id,limit as i64+1], |r| {
             let bot_id: String = r.get(1)?; let bot_name: String = r.get(2)?;
-            Ok(SharedChannelMessage { id:r.get(0)?, kind:"assigned".into(), author_bot_id:Some(bot_id), text:format!("Assigned to {bot_name}"), status:Some(status_label(r.get::<_,String>(3)?)), created_at:r.get(4)? })
+            Ok(SharedChannelMessage { id:r.get(0)?, kind:"assigned".into(), author_bot_id:Some(bot_id), text:format!("Assigned to {bot_name}"), status:Some(status_label(r.get::<_,String>(3)?)), created_at:r.get(4)?, recipient_ids:Vec::new() })
         }).map_err(|e| e.to_string())?;
         messages.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
     }
+    // Direct delegations started by a channel assignee appear as compact status rows only;
+    // the private bot-to-bot request body and response never enter the channel transcript.
+    {
+        let mut statement = store.db.prepare("SELECT m.id,m.source_bot_id,b.name,m.status,m.created_at,m.target_bot_id FROM bot_messages m JOIN extended_bot_direct_routes r ON r.message_id=m.id JOIN bot_shared_channel_deliveries d ON d.id=r.source_delivery_id JOIN bots b ON b.id=m.target_bot_id WHERE d.channel_id=?1 ORDER BY m.created_at DESC,m.id DESC LIMIT ?2").map_err(|e| e.to_string())?;
+        let rows = statement.query_map(params![id,limit as i64+1], |r| Ok(SharedChannelMessage {
+            id:r.get(0)?, kind:"direct_delegation".into(), author_bot_id:Some(r.get(1)?),
+            text:format!("Direct request to {}",r.get::<_,String>(2)?),
+            status:Some(status_label(r.get(3)?)),created_at:r.get(4)?,
+            recipient_ids:vec![r.get(5)?],
+        })).map_err(|e| e.to_string())?;
+        messages.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
+    }
     messages.sort_by(|a,b| a.created_at.cmp(&b.created_at).then_with(|| {
-        let rank = |kind: &str| match kind { "user" => 0, "assigned" => 1, "reply" => 2, _ => 3 };
+        let rank = |kind: &str| match kind { "user" | "bot_request" => 0, "assigned" => 1, "reply" | "bot_post" => 2, _ => 3 };
         rank(&a.kind).cmp(&rank(&b.kind))
     }).then_with(|| a.id.cmp(&b.id)));
     let has_more = messages.len() > limit;
@@ -214,7 +227,7 @@ fn status_label(status: String) -> String {
 /// A post's status from its deliveries. A stop or failure is superseded by any attempt made
 /// after it (Continue or Reassign), and a post left with no deliveries (its bot was deleted) is
 /// stopped, so it can be continued.
-fn message_status(store: &Store, message_id: &str) -> Result<String> {
+pub(crate) fn message_status(store: &Store, message_id: &str) -> Result<String> {
     let rows: Vec<(String, i64, i64)> = {
         let mut statement = store.db.prepare("SELECT status,created_at,updated_at FROM bot_shared_channel_deliveries WHERE message_id=?1 ORDER BY created_at,id").map_err(|e| e.to_string())?;
         let rows=statement.query_map([message_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
@@ -232,7 +245,7 @@ fn message_status(store: &Store, message_id: &str) -> Result<String> {
     Ok(status.into())
 }
 
-fn update_message_status(store: &Store, message_id: &str) -> Result<()> {
+pub(crate) fn update_message_status(store: &Store, message_id: &str) -> Result<()> {
     let status = message_status(store, message_id)?;
     store.db.execute("UPDATE bot_shared_channel_messages SET status=?2 WHERE id=?1", params![message_id,status]).map_err(|e| e.to_string())?;
     Ok(())
@@ -321,7 +334,7 @@ fn prompt_matches(content: &str, sender_prefix: &str, text: &str) -> bool {
 
 /// `created_at` is shared by every delivery of one post or retry, so a failure early in a
 /// post's fan-out never counts as superseded by its sibling (see `message_status`).
-async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, message_id: &str, bot_id: &str, text: &str, created_at: i64) -> Result<()> {
+pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, message_id: &str, bot_id: &str, text: &str, created_at: i64, depth: u8) -> Result<()> {
     let state = app.state::<AppState>();
     // The delivery starts queued; the gateway marks it in progress when its turn launches
     // (`promote_taken`), so a finished run is credited only to the work it actually ran.
@@ -331,11 +344,18 @@ async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, messa
         let channel = shared_channel(&store, channel_id)?;
         if channel.archived { return Err("This channel is deleted.".into()); }
         if !channel.member_ids.iter().any(|id| id == bot_id) { return Err("Choose a bot that belongs to this channel.".into()); }
+        let origin: Option<String> = store.db.query_row(
+            "SELECT origin_bot_id FROM extended_bot_channel_actions WHERE message_id=?1",
+            [message_id], |r| r.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        if origin.is_some_and(|origin| !channel.member_ids.contains(&origin)) {
+            return Err("The sending bot is no longer a channel member.".into());
+        }
         let bot = super::get(&store, bot_id)?;
         if bot.paused { return Err(format!("{} is paused.", bot.name)); }
         let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, DESKTOP, &format!("{} · You", bot.name))?;
         let prompt = assignment_text(&store, &channel, &bot.id, message_id, text)?;
-        store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?6)", params![delivery_id,channel_id,message_id,bot_id,session_id,created_at]).map_err(|e| e.to_string())?;
+        store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7)", params![delivery_id,channel_id,message_id,bot_id,session_id,depth as i64,created_at]).map_err(|e| e.to_string())?;
         (channel, bot, prompt)
     };
     let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
@@ -374,7 +394,7 @@ pub(crate) fn bot_message_target(store: &Store, source: &Bot, target: &Bot, mess
     Ok((session_id, thread))
 }
 
-pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, source_thread: &super::Thread, target: &Bot, text: &str, depth: u8, fresh_context: bool) -> Result<String> {
+pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, source_thread: &super::Thread, target: &Bot, text: &str, depth: u8, fresh_context: bool, route: &collaboration::Route) -> Result<String> {
     let text = text.trim();
     if text.is_empty() { return Err("Write a message for the other bot.".into()); }
     if text.chars().count() > MAX_TEXT { return Err("Keep bot messages under 16,384 characters.".into()); }
@@ -388,6 +408,7 @@ pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, so
     {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.db.execute("INSERT INTO bot_messages(id,source_bot_id,target_bot_id,source_session_id,target_session_id,source_channel_id,source_external_id,text,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'queued',?9,?10,?10)", params![id,source.id,target.id,source_thread.session_id,session_id,source_thread.channel_id,source_thread.external_id,text,depth as i64,crate::storage::now()]).map_err(|e| e.to_string())?;
+        collaboration::record_direct_route(&store, &id, &source_thread.session_id, route)?;
     }
     let inbound = gateway::Inbound { bot_id: target.id.clone(), channel_id: DESKTOP.into(), thread: target_thread, sender_id: format!("bot:{}", source.id), sender_name: format!("Message from {}", source.name), text: format!("Message from {}:\n\n{}", source.name, text), trusted: true, image_ids: None, moodboard_ids: None };
     if let Err(error) = gateway::deliver(app, inbound).await {
@@ -471,6 +492,8 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         }
         let _=update_message_status(&store,&message_id);
         let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
+        drop(store);
+        collaboration::finish_delivery(app, &delivery_id, reply).await;
     }
     // The window may have sent the next queued entry itself; credit it to its request.
     let running=state.agents.lock().map(|agents|agents.contains_key(session_id)).unwrap_or(false);
@@ -543,7 +566,7 @@ pub async fn bot_shared_channel_post(app:tauri::AppHandle,state:State<'_,AppStat
     };
     let posted_at=crate::storage::now();
     for bot_id in recipients {
-        if let Err(error)=send_channel_assignment(&app,&channel_id,&message_id,&bot_id,&text,posted_at).await {
+        if let Err(error)=send_channel_assignment(&app,&channel_id,&message_id,&bot_id,&text,posted_at,0).await {
             if let Ok(store)=state.store.lock() {
                 // send_channel_assignment already recorded the failure once it had a delivery row.
                 let _=store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,created_at,updated_at) SELECT ?1,?2,?3,?4,session_id,'failed',?5,?5 FROM bot_threads WHERE bot_id=?4 AND channel_id=?6 AND NOT EXISTS (SELECT 1 FROM bot_shared_channel_deliveries WHERE message_id=?3 AND bot_id=?4) LIMIT 1",params![crate::storage::id(),channel_id,message_id,bot_id,posted_at,DESKTOP]);
@@ -566,7 +589,7 @@ pub async fn bot_shared_channel_post(app:tauri::AppHandle,state:State<'_,AppStat
 async fn stop_pending(app:&tauri::AppHandle,channel_id:&str,bots:Option<&[String]>) -> Result<()> {
     let state=app.state::<AppState>();
     let mut cancelled_holds=false;
-    let stop_sessions: HashSet<String>={
+    let (stop_sessions, stopped_deliveries): (HashSet<String>, Vec<String>)={
         let running: HashSet<String> = state.agents.lock().map_err(|e|e.to_string())?.keys().cloned().collect();
         let store=state.store.lock().map_err(|e|e.to_string())?;
         let channel=shared_channel(&store,channel_id)?;
@@ -577,6 +600,7 @@ async fn stop_pending(app:&tauri::AppHandle,channel_id:&str,bots:Option<&[String
         };
         let assignment_prefix=format!("Work requested in #{}:",channel.name);
         let mut stop_sessions=HashSet::new();
+        let mut stopped_deliveries=Vec::new();
         let mut stopped_messages=HashSet::new();
         for (delivery_id,message_id,session_id,status,text,bot_id) in deliveries {
             if bots.is_some_and(|bots| !bots.contains(&bot_id)) { continue; }
@@ -599,11 +623,13 @@ async fn stop_pending(app:&tauri::AppHandle,channel_id:&str,bots:Option<&[String
             }
             store.db.execute("UPDATE bot_shared_channel_deliveries SET status='stopped',updated_at=?2 WHERE id=?1",params![delivery_id,crate::storage::now()]).map_err(|e|e.to_string())?;
             stopped_messages.insert(message_id);
+            stopped_deliveries.push(delivery_id);
         }
         for message_id in &stopped_messages { update_message_status(&store,message_id)?; }
-        stop_sessions
+        (stop_sessions, stopped_deliveries)
     };
     for id in stop_sessions { let _=crate::stop_session(app.clone(),app.state::<AppState>(),id).await; }
+    for id in stopped_deliveries { collaboration::finish_delivery(app, &id, "").await; }
     if cancelled_holds { let _=app.emit("bot-messages-changed",()); let _=app.emit("sessions-changed",()); }
     Ok(())
 }
@@ -698,7 +724,7 @@ async fn continue_message(app:&tauri::AppHandle,state:&tauri::State<'_,AppState>
         store.db.execute("UPDATE bot_shared_channel_messages SET status='in_progress' WHERE id=?1",[message_id]).map_err(|e|e.to_string())?;
         (channel,text,bot_id)
     };
-    if let Err(error)=send_channel_assignment(app,channel_id,message_id,&bot_id,&text,crate::storage::now()).await {
+    if let Err(error)=send_channel_assignment(app,channel_id,message_id,&bot_id,&text,crate::storage::now(),0).await {
         // Recompute, so a retry that failed before its delivery existed keeps the post recoverable.
         if let Ok(store)=state.store.lock() { let _=update_message_status(&store,message_id); }
         let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));

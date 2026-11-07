@@ -2,7 +2,7 @@
 //! memory, schedules it can set for itself, and proactive messages to the user.
 //! They only exist in tasks that belong to a bot, and only touch that bot.
 
-use super::{gateway, schedule, shared_channels, owner_of};
+use super::{collaboration, gateway, schedule, shared_channels, owner_of};
 use crate::agent_tools::{spec, validate_spec};
 use crate::providers::ToolHost;
 use crate::{AppState, Result};
@@ -23,6 +23,8 @@ pub(crate) fn catalog() -> Vec<Value> {
         spec("bot_cancel_schedule", "Delete one of this bot's schedules by ID (from bot_list_schedules).", json!({"scheduleId": id}), &["scheduleId"]),
         spec("bot_notify", "Message the user now, on the channel they last used (and the desktop app). Use for results, reminders, or decisions they need to make; do not use it to chat.", json!({"text": {"type":"string","maxLength":4000}}), &["text"]),
         spec("bot_message_bot", "Send a short work request to another bot by exact name or ID. The other bot sends an update back here. Set freshContext: true to give this assignment a new conversation instead of reusing the recipient's desktop context; previous work and queues remain untouched. Do not message yourself; collaboration chains stop after three bot-to-bot hops.", json!({"to":{"type":"string","maxLength":80},"text":{"type":"string","maxLength":8000},"freshContext":{"type":"boolean"}}), &["to","text"]),
+        spec("bot_post_channel", "Post an informational update as yourself to a local Shared Channel you belong to. No bots are activated, even if the text contains @mentions. Use idempotencyKey again when retrying an uncertain invocation.", json!({"channel":{"type":"string","maxLength":80},"text":{"type":"string","maxLength":16384},"idempotencyKey":{"type":"string","maxLength":128}}), &["channel","text"]),
+        spec("bot_request_channel", "Explicitly assign work in a local Shared Channel to one or two distinct other members, using their exact names or IDs. The assigned bots run through their own queues; their results return to this bot conversation, not to unrelated channels. No implicit lead or broadcast. Self/cyclic routing and chains beyond three hops are rejected. Reuse idempotencyKey for safe retries.", json!({"channel":{"type":"string","maxLength":80},"recipients":{"type":"array","items":{"type":"string","maxLength":80},"minItems":1,"maxItems":2},"text":{"type":"string","maxLength":16384},"idempotencyKey":{"type":"string","maxLength":128}}), &["channel","recipients","text"]),
     ]
 }
 
@@ -70,6 +72,21 @@ pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &st
     let state = app.state::<AppState>();
     let (bot, source_thread) = owner_of(&*state.store.lock().map_err(|e| e.to_string())?, session_id)?.ok_or("This task no longer belongs to a bot.")?;
     let string = |key: &str| args[key].as_str().unwrap_or_default().to_owned();
+    if name == "pandacode_bot_post_channel" {
+        let posted = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            collaboration::post(&store, &bot, &source_thread, &string("channel"),
+                &string("text"), args["idempotencyKey"].as_str())?
+        };
+        let _ = app.emit("bot-shared-channel-changed", json!({"channelId":posted["channelId"]}));
+        return Ok(posted);
+    }
+    if name == "pandacode_bot_request_channel" {
+        let recipients = args["recipients"].as_array().ok_or("Choose one or two channel recipients.")?
+            .iter().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+        return collaboration::request(app, &bot, &source_thread, &string("channel"),
+            &recipients, &string("text"), args["idempotencyKey"].as_str()).await;
+    }
     if name == "pandacode_bot_message_bot" {
         let requested = string("to").trim().to_owned();
         let text = string("text");
@@ -88,12 +105,16 @@ pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &st
                 return Err("More than one bot has that name. Use its ID.".into());
             }
         };
-        let depth = {
+        let path = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
-            shared_channels::current_hop_depth(&store, session_id)?
+            let inherited = collaboration::route(&store, session_id, &bot.id)?;
+            let depth = next_message_hop(&bot.id, &target.id, inherited.depth)?;
+            let path = inherited.to(&bot.id, &target.id)?;
+            debug_assert_eq!(path.depth, depth);
+            path
         };
-        let depth = next_message_hop(&bot.id, &target.id, depth)?;
-        let id = shared_channels::deliver_bot_message(app, &bot, &source_thread, &target, &text, depth, args["freshContext"].as_bool().unwrap_or(false)).await?;
+        let id = shared_channels::deliver_bot_message(app, &bot, &source_thread, &target,
+            &text, path.depth, args["freshContext"].as_bool().unwrap_or(false), &path).await?;
         let _ = app.emit("bot-messages-changed", ());
         return Ok(json!({"messageId":id,"to":target.name,"status":"sent"}));
     }
@@ -166,6 +187,17 @@ mod tests {
     fn bot_message_tool_is_self_scoped_and_registered() {
         assert!(catalog().iter().any(|item| item["name"].as_str().is_some_and(|name| name.ends_with("bot_message_bot"))));
         assert!(self_scoped("pandacode_bot_message_bot"));
+    }
+
+    #[test]
+    fn channel_tools_require_explicit_recipients_and_preserve_direct_message_validation() {
+        let tools = catalog();
+        assert!(self_scoped("pandacode_bot_post_channel"));
+        assert!(self_scoped("pandacode_bot_request_channel"));
+        assert!(validate_spec(&tools, "pandacode_bot_post_channel", &json!({"channel":"#launch","text":"FYI @Writer"})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_request_channel", &json!({"channel":"launch","recipients":["Writer"],"text":"Review"})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_request_channel", &json!({"channel":"launch","text":"Review"})).is_err());
+        assert!(validate_spec(&tools, "pandacode_bot_request_channel", &json!({"channel":"launch","recipients":"Writer","text":"Review"})).is_err());
     }
 
     #[test]

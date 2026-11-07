@@ -468,6 +468,25 @@ test.describe('bots', () => {
     await expect(choice).toHaveAttribute('aria-current', 'true');
   });
 
+  test('Instructions explain explicit channel communication without changing the saved instructions', async ({ page }) => {
+    await newBot(page);
+    await openSettings(page, 'Profile');
+    const settings = panel(page);
+    const instructions = settings.getByRole('textbox', { name: 'Instructions' });
+    const original = await instructions.inputValue();
+    const help = settings.getByRole('img', { name: 'About communication tools' });
+    await expect(help).toBeVisible();
+    const examples = settings.locator('.bs-communication-examples');
+    await expect(examples).toHaveCount(1);
+    await expect(examples).not.toHaveAttribute('open', '');
+    await examples.locator('summary').click();
+    await expect(examples).toContainText('pandacode_bot_post_channel');
+    await expect(examples).toContainText('pandacode_bot_request_channel');
+    await expect(examples).toContainText('pandacode_bot_message_bot');
+    await expect(examples).toContainText('explicit recipients');
+    await expect(instructions).toHaveValue(original);
+  });
+
   test('the header pauses the bot and opens the right settings', async ({ page }) => {
     await newBot(page);
     await page.locator('#breadcrumb').getByRole('button', { name: 'Pause Scout' }).click();

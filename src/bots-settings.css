@@ -172,3 +172,11 @@ dialog.bot-settings-dialog{width:min(880px,calc(100vw - 32px));max-height:88dvh}
 /* Extended: local channel history settings stay separate from external Connections. */
 .bs-history-explanation{margin:8px 2px 12px;font-size:var(--text-sm);line-height:1.5;color:var(--muted)}
 .bs-channel-history-empty{padding:16px;margin:0;font-size:var(--text-sm);color:var(--muted)}
+
+/* Extended: optional channel communication guidance under Instructions. */
+.bs-communication-examples{margin:12px 0 0;padding:10px 12px;border:1px solid var(--ds-border, var(--border));border-radius:var(--radius-md)}
+.bs-communication-examples summary{cursor:pointer;font-weight:600;color:var(--text)}
+.bs-communication-examples[open] summary{margin-bottom:8px}
+.bs-communication-examples p{margin:10px 0 4px;font-size:var(--text-sm);color:var(--muted)}
+.bs-communication-examples code{display:block;overflow-wrap:anywhere;white-space:pre-wrap;font-size:12px;color:var(--text);padding:8px;background:var(--ds-fill);border-radius:var(--radius-sm)}
+.bs-communication-examples small{display:block;margin-top:12px;line-height:1.5;color:var(--muted)}

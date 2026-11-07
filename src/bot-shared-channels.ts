@@ -13,8 +13,9 @@ export interface SharedChannelSummary {
 }
 export interface SharedChannelMessage {
   id: string;
-  kind: 'user' | 'reply' | 'assigned';
+  kind: 'user' | 'reply' | 'assigned' | 'bot_post' | 'bot_request' | 'direct_delegation';
   authorBotId: string | null;
+  recipientIds?: string[];
   text: string;
   status: 'Queued' | 'In progress' | 'Completed' | 'Failed' | 'Stopped' | null;
   createdAt: number;
@@ -71,14 +72,20 @@ export function openCreateChannel(options: SharedChannelUiOptions): void {
 }
 
 function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
-  if (message.kind === 'assigned') {
+  if (message.kind === 'assigned' || message.kind === 'direct_delegation') {
     const bot = bots.find(item => item.id === message.authorBotId);
-    return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>Assigned to ${escape(bot?.name ?? 'bot')}</span>${message.status ? `<small>${escape(message.status)}</small>` : ''}</div>`;
+    const description = message.kind === "direct_delegation"
+      ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
+    return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
   const name = bot?.name ?? (message.kind === 'user' ? 'You' : 'Bot');
-  // Assignment rows and the working row already show progress; a post only flags what needs the user.
-  const marker = message.status === 'Failed' || message.status === 'Stopped' ? `<small class="bc-message-status">${escape(message.status)}</small>` : '';
+  const targets = (message.recipientIds ?? []).map(id => bots.find(item => item.id === id)?.name ?? 'Bot');
+  const label = message.kind === 'bot_request' ? `Requested ${targets.join(' and ')}`
+    : message.kind === 'bot_post' ? 'Channel update' : '';
+  const marker = message.kind === 'bot_request' ? `<small class="bc-message-status">${escape([label, message.status].filter(Boolean).join(' · '))}</small>`
+    : label ? `<small class="bc-message-status">${escape(label)}</small>`
+    : message.status === 'Failed' || message.status === 'Stopped' ? `<small class="bc-message-status">${escape(message.status)}</small>` : '';
   return `<article class="bc-message ${message.kind === 'user' ? 'from-user' : 'from-bot'}" data-message-id="${escape(message.id)}" ${bot?.color ? `style="--bot-color:${escape(bot.color)}"` : ''}>
     ${bot ? botAvatarHtml(bot.avatar, bot.name, 'bc-message-avatar', bot.color) : ''}<div class="bc-message-main"><header><strong>${escape(name)}</strong>${marker}</header><div class="bc-message-text" data-message-id="${escape(message.id)}"></div></div></article>`;
 }

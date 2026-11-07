@@ -5,6 +5,7 @@
 
 mod brief;
 pub(crate) mod channels;
+pub(crate) mod collaboration;
 pub(crate) mod failover;
 pub(crate) mod extended;
 pub(crate) mod gateway;
@@ -196,6 +197,7 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
         }
     }
     extended::upgrade(db)?;
+    collaboration::upgrade(db)?;
     Ok(())
 }
 
@@ -1097,8 +1099,13 @@ pub async fn bot_task_brief(app: tauri::AppHandle, state: State<'_, AppState>, s
 pub(crate) fn start(app: &tauri::AppHandle) {
     // Before the scheduler or any window reads a bot, so older databases have the profile columns.
     let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| { upgrade(&store.db)?; shared_channels::reconcile_in_progress(&store) });
+    let is_upgraded = upgraded.is_ok();
     if let Err(error) = upgraded {
         eprintln!("Could not upgrade the bots table: {error}");
+    }
+    if is_upgraded {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move { collaboration::resume_callbacks(&app).await });
     }
     schedule::start(app.clone());
     channels::start_all(app.clone());

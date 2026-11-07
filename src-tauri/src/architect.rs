@@ -1280,7 +1280,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     json!({"type":"function","name":format!("pandacode_{name}"),"description":description,"inputSchema":schema})
 }
 fn files_schema() -> Value {
-    json!({"type":"array","items":{"type":"string"}})
+    json!({"type":"array","description":"Repository-relative file or directory scopes (e.g. [\"src\", \"tests/unit.rs\"]). Use '/' separators; do not use absolute paths, '.' or '..' components, or glob patterns (*, ?). An empty array [] reserves the whole checkout.","items":{"type":"string"}})
 }
 /// The dispatch tool. A direct worker's copy is scoped to its own sub-workers and has no
 /// escalation fields.
@@ -1293,7 +1293,7 @@ fn dispatch_tool(child: bool) -> Value {
     } else {
         item["replaces"] = json!({"type":"string","description":"A worker that failed or failed your check, to replace (abandoned). \"auto\" tries another harness or a stronger model; max 2 retries, then report. Starts from its changes."});
         item["replaceReason"] = json!({"type":"string","description":"The failed check."});
-        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" (or none while routing is on) Panda Router picks the model; name a profile, or provider and model in auto teams, only if the user names models. files: disjoint write scopes run in parallel, [] reserves the checkout; readOnly may overlap. dependsOn: returned IDs.".into()
+        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" (or none while routing is on) Panda Router picks the model; name a profile, or provider and model in auto teams, only if the user names models. files: use repository-relative paths with '/' (e.g. [\"src\", \"tests/unit.rs\"]), no absolute, './', '..' or glob paths; [] reserves the checkout. Disjoint write scopes run in parallel; readOnly may overlap. dependsOn: returned IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }
@@ -1444,6 +1444,13 @@ struct Assignment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replace_reason: Option<String>,
 }
+/// Canonicalize only equivalent relative spellings before scope validation and reservation.
+fn normalize_file_scopes(files: &mut [String]) {
+    for file in files {
+        let normalized = file.replace('\\', "/");
+        *file = normalized.trim_start_matches("./").to_owned();
+    }
+}
 fn validate_files(files: &[String]) -> Result<()> {
     for file in files {
         // `src/` is how people and models write a directory.
@@ -1452,13 +1459,14 @@ fn validate_files(files: &[String]) -> Result<()> {
             || file.starts_with('/')
             || file.contains('\\')
             || file.contains('\0')
+            || (file.as_bytes().get(1) == Some(&b':') && file.as_bytes()[0].is_ascii_alphabetic())
             || file.split('/').any(|c| matches!(c, ".." | "" | "."))
         {
-            return Err("File scopes must be normalized relative paths without wildcards.".into());
+            return Err(format!("Invalid file scope {file:?}: use a repository-relative path without empty, '.' or '..' components (e.g. 'src/main.rs')."));
         }
         // Brackets are literal: `app/blog/[slug]/page.tsx` is a real path, and scopes compare as text.
         if file.contains(['*', '?']) {
-            return Err("Use relative file or directory scopes, not glob patterns.".into());
+            return Err(format!("Invalid file scope {file:?}: glob characters '*' and '?' are not allowed; name a file or directory."));
         }
     }
     Ok(())
@@ -1760,11 +1768,12 @@ fn dispatch_as(
             let mut routed = Vec::new();
             for raw in batch.assignments {
                 let has_files = raw.get("files").is_some();
-                let assignment: Assignment = serde_json::from_value(raw)
+                let mut assignment: Assignment = serde_json::from_value(raw)
                     .map_err(|e| format!("Invalid assignments: {e}"))?;
                 if !valid_id(&assignment.key) {
                     return Err("Use a short alphanumeric assignment key.".into());
                 }
+                normalize_file_scopes(&mut assignment.files);
                 let request = serde_json::to_string(&assignment).map_err(|e| e.to_string())?;
                 if let Some(id) =
                     request_duplicate(&store, sid, &request_key(&assignment.key), "dispatch", &request)?
@@ -1780,7 +1789,7 @@ fn dispatch_as(
                 }
                 text(&assignment.name, "Name")?;
                 text(&assignment.prompt, "Prompt")?;
-                validate_files(&assignment.files)?;
+                validate_files(&assignment.files).map_err(|e| format!("Assignment {:?} (key {:?}): {e}", assignment.name, assignment.key))?;
                 if let Some(me) = &me {
                     within(me, &assignment.files, assignment.read_only)?;
                 }
@@ -1960,11 +1969,14 @@ fn dispatch_as(
                 #[serde(default, skip_serializing_if = "Option::is_none")]
                 read_only: Option<bool>,
             }
-            let follow: Follow = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            let mut follow: Follow = serde_json::from_value(args).map_err(|e| e.to_string())?;
             if !valid_id(&follow.key) {
                 return Err("Invalid follow-up key.".into());
             }
             text(&follow.prompt, "Follow-up")?;
+            if let Some(files) = &mut follow.files {
+                normalize_file_scopes(files);
+            }
             let request = serde_json::to_string(&follow).map_err(|e| e.to_string())?;
             if let Some(id) = request_duplicate(&store, sid, &request_key(&follow.key), "followup", &request)? {
                 json!({"workerId":id,"duplicate":true})
@@ -1978,7 +1990,7 @@ fn dispatch_as(
                     return Err("Wait for this worker to settle before following up.".into());
                 }
                 if let Some(files) = &follow.files {
-                    validate_files(files)?;
+                    validate_files(files).map_err(|e| format!("Follow-up {:?}: {e}", follow.key))?;
                 }
                 if let Some(me) = &me {
                     within(me, follow.files.as_ref().unwrap_or(&worker.files), follow.read_only.unwrap_or(worker.read_only))?;

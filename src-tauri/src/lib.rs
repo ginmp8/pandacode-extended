@@ -1587,7 +1587,7 @@ fn prepare_task_run_in_project(
     } else {
         architect::validate_admission(&store, &session_id, admission.team.as_ref())?;
     }
-    let session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    let mut session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
     if admission.cloud_attach {
         return prepare_cloud_attach(&store, &mut agents, session, tx, stopped);
     }
@@ -1628,6 +1628,22 @@ fn prepare_task_run_in_project(
         })
         .trim()
         .to_string();
+    // Extended bot-only hook after execution admission and before history handoff.
+    // All non-bot tasks and special maintenance/Architect turns retain upstream behavior.
+    let text = if admission.team.is_none() && admission.goal.is_none()
+        && admission.kind.is_none() && admission.command.is_none()
+        && slash_commands::split_command(&text).is_none()
+    {
+        if let Some(fresh) = bots::extended::prepare_turn(&store, &session_id, &text)? {
+            session.resume_id = None;
+            session.context_usage = None;
+            fresh
+        } else {
+            text
+        }
+    } else {
+        text
+    };
     if text.is_empty() {
         return Err("Write a message first.".into());
     }
@@ -4185,6 +4201,7 @@ pub fn run() {
                 bots::bot_detail,
                 bots::bot_create,
                 bots::bot_update,
+                bots::extended::bot_set_fresh_context,
                 bots::bot_set_mode,
                 bots::bot_set_paused,
                 bots::bot_reset,

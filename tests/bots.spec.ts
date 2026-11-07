@@ -235,6 +235,30 @@ test.describe('bots', () => {
     expect(await page.evaluate(() => (window as any).__botTaskBriefs.filter((item: any) => item.brief).length)).toBe(1);
   });
 
+  test('per-bot fresh context setting is opt-in, explained and independent', async ({ page }) => {
+    await newBot(page, 'Scout');
+    await openSettings(page);
+    const toggle = panel(page).getByRole('checkbox', { name: 'Fresh context each message' });
+    await expect(toggle).not.toBeChecked();
+    const help = panel(page).getByRole('img', { name: 'About fresh context each message' });
+    await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
+    await toggle.check();
+    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
+    await page.keyboard.press('Escape');
+    await openSettings(page);
+    await expect(toggle).toBeChecked();
+    await page.keyboard.press('Escape');
+
+    await newBot(page, 'Writer');
+    await openSettings(page, undefined, 'Writer');
+    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
+    await page.keyboard.press('Escape');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Chat with Scout' }).click();
+    await openSettings(page);
+    await expect(toggle).toBeChecked();
+  });
+
   test('chatting with a bot streams like any task and keeps its brief out of the transcript', async ({ page }) => {
     await newBot(page);
     await page.locator('#prompt').fill('What can you help me with?');

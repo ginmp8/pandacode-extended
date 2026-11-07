@@ -8,7 +8,7 @@ export interface PreviewBotsHost {
   emit(name: string, event: unknown): void;
   addProject(name: string): Project;
 }
-interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; activity: Activity[] }
+interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; activity: Activity[]; freshContextEachMessage: boolean }
 const bots = new Map<string, Store>();
 const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
@@ -38,7 +38,7 @@ function nextRun(input: Pick<Schedule, 'kind' | 'intervalMinutes' | 'timeOfDay'>
   return next.getTime();
 }
 function detail(entry: Store): BotDetail {
-  return structuredClone({ bot: entry.bot, memories: entry.memories, schedules: entry.schedules, channels: entry.channels, pairings: entry.pairings, threads: entry.threads, rules: entry.rules, serverPort: 47321 });
+  return structuredClone({ bot: entry.bot, memories: entry.memories, schedules: entry.schedules, channels: entry.channels, pairings: entry.pairings, threads: entry.threads, rules: entry.rules, freshContextEachMessage: entry.freshContextEachMessage, serverPort: 47321 });
 }
 function channelOf(id: string): [Store, Channel] {
   for (const entry of bots.values()) { const channel = entry.channels.find(item => item.id === id); if (channel) return [entry, channel]; }
@@ -226,7 +226,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const id = crypto.randomUUID(), now = Date.now();
       const project = host.addProject(input.name);
       const bot: Bot = { ...input, soul: input.soul ?? '', skills: [], mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
-      const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [] };
+      const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [], freshContextEachMessage: false };
       log(entry, 'created', `Created ${bot.name}`);
       bots.set(id, entry); result = structuredClone(bot); changed(); break;
     }
@@ -234,6 +234,11 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const entry = store(args.botId); const input = validate(args.input);
       entry.bot = { ...entry.bot, ...input, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
       log(entry, 'updated', 'Settings changed'); result = structuredClone(entry.bot); changed(); break;
+    }
+    case 'bot_set_fresh_context': {
+      const entry = store(args.botId);
+      entry.freshContextEachMessage = args.enabled === true;
+      result = entry.freshContextEachMessage; changed(); break;
     }
     case 'bot_set_mode': {
       const entry = store(args.botId), mode = String(args.mode ?? '');
@@ -267,7 +272,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       thread.updatedAt = Date.now();
       log(entry, 'inbound', `You (desktop): ${text.slice(0, 160)}`);
       // Like the native gateway, the first message of a thread carries the bot's brief; the transcript folds it.
-      const brief = briefed.has(thread.sessionId) ? '' : `\n\nBot brief:\nYou are ${entry.bot.name}. ${entry.bot.instructions}${entry.bot.soul ? `\n\nPersonality (soul, from the user):\n${entry.bot.soul}` : ''}`.trimEnd();
+      const brief = briefed.has(thread.sessionId) && !entry.freshContextEachMessage ? '' : `\n\nBot brief:\nYou are ${entry.bot.name}. ${entry.bot.instructions}${entry.bot.soul ? `\n\nPersonality (soul, from the user):\n${entry.bot.soul}` : ''}`.trimEnd();
       briefed.add(thread.sessionId);
       const prompt = text + brief, images = (args.imageIds ?? []).map((id: string) => ({ kind: 'image', id, name: 'Attached image' }));
       const task = await host.invoke<Session>('get_task', { sessionId: thread.sessionId });
@@ -275,7 +280,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
         if (args.forceQueue === true) {
           await host.invoke('queue_add', { sessionId: thread.sessionId, text: prompt, attachments: images });
           host.emit('queue-changed', { sessionId: thread.sessionId });
-        } else if (entry.bot.whileWorking === 'steer' && !images.length && await host.invoke('steer_task', { sessionId: thread.sessionId, text: prompt }).then(() => true, () => false)) { /* Steered. */ }
+        } else if (entry.bot.whileWorking === 'steer' && !entry.freshContextEachMessage && !images.length && await host.invoke('steer_task', { sessionId: thread.sessionId, text: prompt }).then(() => true, () => false)) { /* Steered. */ }
         else {
           await host.invoke('queue_add', { sessionId: thread.sessionId, text: prompt, attachments: images });
           host.emit('queue-changed', { sessionId: thread.sessionId });

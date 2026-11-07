@@ -28,3 +28,7 @@ Do not remove upstream features or tighten Extended defaults solely because an a
 ## 2026-11-07 — mobile redesign acceptance gaps
 
 The unreleased upstream mobile [`61b03bf2`](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102) substantially changes screen navigation, cards, splash animation, sign-out and push-notification state. The old wallpaper assets/settings were deleted by upstream. Static file/mode inventory is complete, but real iOS/Android launches, notification permission/registration, account handoffs, state recovery and mobile UI screenshots are **not tested** here. Seventy-seven pre-existing shared divergences outside the three newly reconciled mobile files still require hunk-level verification. These are acceptance gaps, not confirmed runtime failures.
+
+## 2026-11-07 — iPhone beta documentation
+
+The upstream README now links to [iPhone TestFlight](https://testflight.apple.com/join/TpY9PjJe) ([source change](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a)). This is an inherited documentation link, not evidence that the invite accepts participants or that the iOS app, device authorization, Connect and push notifications have passed native tests. No new runtime defect is asserted.

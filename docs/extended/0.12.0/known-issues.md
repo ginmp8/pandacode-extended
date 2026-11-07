@@ -1,6 +1,6 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
-**Status:** Initial register inherited from [0.11.0](../0.11.0/known-issues.md). An unverified scenario is **not** a confirmed bug. Do not silently declare prior gaps fixed or regressions present.
+**Status:** The initial register was inherited from [0.11.0](../0.11.0/known-issues.md); 0.12.0 Extended-only acceptance gaps are now recorded below. Unverified scenarios are **not** confirmed defects.
 
 | Area | Opening classification | Evidence needed before 0.12.0 release |
 | --- | --- | --- |
@@ -12,6 +12,16 @@
 | Existing installations / data migrations | Acceptance pending | Representative SQLite upgrades, backup/recovery, rollback and native platform installation |
 | Independent Extended packaging | Tag/version workflow patched in 0.11.0, but runtime auto-update behavior has limitations | Real installers, updater manifest, signing and differing Extended tag vs upstream app-version behavior |
 | Confirmed 0.12.0-specific defects | None at cycle opening | Reproduction, impacted SHA, fix and regression evidence |
+
+## 0.12.0 Extended feature gaps and known limits
+
+| Feature | Current source evidence | Pending native evidence / limitation |
+| --- | --- | --- |
+| [#121 — History preferences](../../extended-bot-context.md) | Per-bot defaults, member-scoped per-channel overrides and focused tests are present on `extended/development`. | Validate migration, retained preferences, restart, UI precedence, membership removal, archived channels, queued work and native context. **History exclusion is not complete context or memory isolation.** |
+| [#122 — Cross-channel collaboration](../../extended-bot-collaboration.md) | Bot post/request tools, attributed timelines, tracking and recovery logic exist in source. | Validate actual multi-channel interactions, no accidental work or broadcast, idempotency, stop/restart, loop limits and private direct requests. **Callbacks are at-most-once attempts:** interruption between claim and persistence may leave a callback incomplete without rerunning recipients. |
+| [#123 — Portable manifests](../../extended-bot-manifests.md) | Desktop/headless adapters, pre-import backup gate and SHA-pinned GitHub reads exist in source. | Verify cross-machine round-trips, partial import, backup failure, safe external-channel settings, source integrity and access. **No automatic Git polling**; configuration backups cannot restore credentials, messages, workspaces, memories, pairing or live work. |
+
+No new confirmed defect is inferred from these source or acceptance limitations. See the [0.12.0 checklist](release-checklist.md) for the required evidence.
 
 ## Baseline provenance
 

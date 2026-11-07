@@ -93,6 +93,12 @@ In **Bot Settings → Profile → Brain**, **Fresh context each message** defaul
 
 The preference is held in the Extended-owned additive `extended_bot_context` table; upstream bot profile storage remains unchanged. See [Extended-only feature ownership and synchronization contract](extended-bot-context.md).
 
+## Extended-only portable bot configuration
+
+On `extended/development`, **Bots → + → Import / Sync bots…** accepts local JSON and explicit GitHub manifest sources, while **Bots → + → Export bots…** exports selected configurations as one file or separate files. Imports verify a secret-free local backup before changing saved bots. Optional native and Extended preferences, Shared Channel membership/lead and per-channel history overrides can be transferred; conversations, memories, credentials, workspaces and running tasks cannot. GitHub sources are applied **manually**, never through automatic polling.
+
+See [portable bot manifests, backups and Git synchronization](extended-bot-manifests.md) for JSON examples, compatibility rules, Desktop and headless commands, import failure behavior and limitations.
+
 ## Where things live
 
 | Area | Files |

@@ -6,6 +6,16 @@ This directory defines the **complete upstream functional parity contract** and 
 - **[Extended release-tag and publication workflow](releasing.md)** — source app version, Extended tags, manual GitHub release gating, and no npm publishing
 **Current planned Extended release documentation:** **[0.12.0](0.12.0/README.md)** (incremental development cycle; not tagged, approved or distributed). The upstream application/build version is synchronized separately with the fork.
 
+## Extended-only bot features on `extended/development`
+
+Three features have source implementations in [draft PR #120](https://github.com/ginmp8/pandacode-extended/pull/120). They are **not** evidence of a released 0.12.0 build or completed native acceptance.
+
+- [#121 — Shared Channel history preferences](../extended-bot-context.md): **Bot Settings → Shared Channels** adds per-channel `Use default` / `Include` / `Exclude` settings under an include-by-default bot policy. These control new assignment prompts, not stored transcripts or native context.
+- [#122 — Multi-channel bot collaboration](../extended-bot-collaboration.md): Explicit `pandacode_bot_post_channel` and `pandacode_bot_request_channel` tools address selected local channels and members. No channel-wide or cross-channel implicit broadcast.
+- [#123 — Portable bot manifests and Git sync](../extended-bot-manifests.md): Desktop and headless configuration import/export, selected-bot export, optional Extended fields, Shared Channel topology, verified pre-import backups and manual SHA-pinned GitHub synchronization.
+
+The [0.12.0 development index](0.12.0/README.md) and [draft release notes](../../releases/extended/0.12.0.md) track scope and pending acceptance. Upstream synchronization is a separate `base/development` workflow.
+
 - [Extended 0.12.0 draft release notes](../../releases/extended/0.12.0.md)
 - [Extended 0.12.0 feature controls](0.12.0/feature-controls.md)
 - [Extended 0.12.0 dependency and security tracking](0.12.0/dependency-security.md)

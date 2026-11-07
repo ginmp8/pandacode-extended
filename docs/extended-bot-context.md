@@ -1,6 +1,6 @@
 # Extended-only bot context and upstream integration contract
 
-This document describes the Extended-owned bot context features relative to `aicodeking/pandacode:main` (mirrored via `ginmp8/pandacode:main`). They remain opt-in, and the origin's current and future bot functionality must be preserved when the branches synchronize.
+This document describes the Extended-owned bot context features relative to `aicodeking/pandacode:main` (mirrored via `ginmp8/pandacode:main`), including [issue #121's per-channel history settings](https://github.com/ginmp8/pandacode-extended/issues/121). Fresh native context remains opt-in; channel history defaults to inclusion unless explicitly disabled. The origin's current and future bot functionality must be preserved when the branches synchronize.
 
 ## Features
 

@@ -484,15 +484,16 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         let _=app.emit("bot-messages-changed",());
     }
     if let Some((delivery_id,channel_id,message_id,bot_id)) = channel {
-        let store = match state.store.lock() { Ok(store)=>store, Err(_)=>return };
+        {
+            let store = match state.store.lock() { Ok(store)=>store, Err(_)=>return };
         let status=if successful {"completed"} else {"failed"};
         let _=store.db.execute("UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3 WHERE id=?1",params![delivery_id,status,crate::storage::now()]);
         if successful && !reply.trim().is_empty() {
             let _=store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at) VALUES(?1,?2,'reply',?3,?4,?5)",params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()]);
         }
         let _=update_message_status(&store,&message_id);
-        let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
-        drop(store);
+            let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
+        }
         collaboration::finish_delivery(app, &delivery_id, reply).await;
     }
     // The window may have sent the next queued entry itself; credit it to its request.

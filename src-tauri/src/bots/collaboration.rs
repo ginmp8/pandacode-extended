@@ -421,12 +421,12 @@ pub(crate) async fn finish_delivery(app: &tauri::AppHandle, delivery_id: &str, r
         Ok(Some((origin,source_channel,external,message_id,text,delivery_id.to_owned())))
     })();
     let Ok(Some((origin,source_channel,external,message_id,text,id))) = pending else { return };
-    let delivered = gateway::deliver(app, gateway::Inbound {
+    let delivered = gateway::deliver_with_queue(app, gateway::Inbound {
         bot_id: origin.clone(), channel_id: source_channel, thread: external,
         sender_id: format!("bot-channel-update:{message_id}:{id}"),
         sender_name: "Bot channel update".into(), text,
         trusted: true, image_ids: None, moodboard_ids: None,
-    }).await;
+    }, true).await;
     if let Ok(store) = state.store.lock() {
         let new_status = if delivered.is_ok() { "sent" } else { "failed" };
         let _ = store.db.execute(

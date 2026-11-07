@@ -43,8 +43,16 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
             route TEXT NOT NULL CHECK(json_valid(route))
         );",
     ).map_err(|e| e.to_string())?;
+    // Some legacy bot-profile upgrade tests construct only the bots table, without
+    // a sessions table. Preserve the session FK and defer sidecar cleanup until
+    // the complete application database is available; never weaken that fixture.
+    let has_sessions: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !has_sessions { return Ok(()); }
     // The app can reconstruct upstream channel tables while migrating older databases.
-    // Avoid cross-table foreign keys here, then prune metadata when upstream rows vanish.
+    // Avoid cross-table foreign keys to replaceable upstream tables, then prune orphans.
     db.execute_batch(
         "DELETE FROM extended_bot_channel_results WHERE delivery_id NOT IN
            (SELECT id FROM bot_shared_channel_deliveries);

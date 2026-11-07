@@ -70,3 +70,7 @@ A triage of a long competitor feature list (October 2026) against PandaCode. Eac
 ## Skip
 
 Mobile clients and mobile-only behavior; Pi and Cursor SDK integrations; Devin; the ACP agent registry and checksum onboarding; OpenCode 2 server runtime; multi-client synchronization, client and server version negotiation, and the separate v2 database migration. These depend on harnesses or a client and server split that PandaCode does not have. They can be revisited if those harnesses are added.
+
+## Extended-owned bot context compatibility
+
+Fresh-context delegation and per-message fresh native context remain Extension-owned, opt-in features. At each upstream sync, compare the original bot settings, routing, session resume, context recovery, queues, scheduling and collaboration. Preserve the original's full functionality when importing and carry the minimal Extended hooks forward. If origin implements equivalent behavior, prefer its implementation after migration, contract and regression checks, rather than executing duplicate paths. See [Extended bot context compatibility](extended-bot-context.md).

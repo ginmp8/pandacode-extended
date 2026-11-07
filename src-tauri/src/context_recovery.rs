@@ -12,6 +12,11 @@ const HISTORY_MESSAGES: usize = 200;
 pub(crate) const RECOVERY_REQUIRED: &str = "This task's earlier conversation needs to be restored. Send a normal message in the conversation first, then retry this command.";
 
 pub(crate) fn pending(store: &Store, session: &Session) -> Result<bool> {
+    // Extended-only opt-in: this bot starts a new native context without
+    // replaying the transcript that remains visible in PandaCode.
+    if crate::bots::extended::enabled_for_session(store, &session.id)? {
+        return Ok(false);
+    }
     store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM context_recovery WHERE session_id=?1) OR (?2 AND EXISTS(SELECT 1 FROM messages WHERE session_id=?1 AND role IN ('user','assistant','coordination') AND content<>''))",
         params![session.id, session.resume_id.as_deref().is_none_or(|id| id.trim().is_empty())],

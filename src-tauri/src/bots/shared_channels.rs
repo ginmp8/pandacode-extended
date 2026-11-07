@@ -339,23 +339,31 @@ async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, messa
     Ok(())
 }
 
-pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, source_thread: &super::Thread, target: &Bot, text: &str, depth: u8) -> Result<String> {
+/// An opt-in delegation gets its own bot conversation; the ordinary desktop task
+/// (including its native harness history and durable queue) is never reset.
+pub(crate) fn bot_message_target(store: &Store, source: &Bot, target: &Bot, message_id: &str, fresh_context: bool) -> Result<(String, String)> {
+    let thread = if fresh_context { format!("delegation:{message_id}") } else { DESKTOP.to_owned() };
+    let title = if fresh_context { format!("{} · From {}", target.name, source.name) } else { format!("{} · You", target.name) };
+    let (session_id, _) = super::thread_session(store, target, DESKTOP, &thread, &title)?;
+    Ok((session_id, thread))
+}
+
+pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, source_thread: &super::Thread, target: &Bot, text: &str, depth: u8, fresh_context: bool) -> Result<String> {
     let text = text.trim();
     if text.is_empty() { return Err("Write a message for the other bot.".into()); }
     if text.chars().count() > MAX_TEXT { return Err("Keep bot messages under 16,384 characters.".into()); }
     let state = app.state::<AppState>();
-    let session_id = {
+    let id = crate::storage::id();
+    let (session_id, target_thread) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let (session, _) = super::thread_session(&store, target, DESKTOP, DESKTOP, &format!("{} · You", target.name))?;
-        session
+        bot_message_target(&store, source, target, &id, fresh_context)?
     };
     // Queued until the gateway launches its turn (`promote_taken`).
-    let id = crate::storage::id();
     {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.db.execute("INSERT INTO bot_messages(id,source_bot_id,target_bot_id,source_session_id,target_session_id,source_channel_id,source_external_id,text,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'queued',?9,?10,?10)", params![id,source.id,target.id,source_thread.session_id,session_id,source_thread.channel_id,source_thread.external_id,text,depth as i64,crate::storage::now()]).map_err(|e| e.to_string())?;
     }
-    let inbound = gateway::Inbound { bot_id: target.id.clone(), channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: format!("bot:{}", source.id), sender_name: format!("Message from {}", source.name), text: format!("Message from {}:\n\n{}", source.name, text), trusted: true, image_ids: None, moodboard_ids: None };
+    let inbound = gateway::Inbound { bot_id: target.id.clone(), channel_id: DESKTOP.into(), thread: target_thread, sender_id: format!("bot:{}", source.id), sender_name: format!("Message from {}", source.name), text: format!("Message from {}:\n\n{}", source.name, text), trusted: true, image_ids: None, moodboard_ids: None };
     if let Err(error) = gateway::deliver(app, inbound).await {
         if let Ok(store) = state.store.lock() { let _ = store.db.execute("UPDATE bot_messages SET status='failed',updated_at=?2 WHERE id=?1", params![id,crate::storage::now()]); }
         let _=app.emit("bot-messages-changed", ());

@@ -283,6 +283,7 @@ test.describe('bots', () => {
     await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
+    await expect(bots(page)).toBeHidden();
     await openSettings(page, undefined, 'Writer');
     await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
     await panel(page, 'Writer').getByRole('tab', { name: 'Shared Channels' }).click();

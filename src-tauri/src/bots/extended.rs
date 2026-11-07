@@ -61,7 +61,7 @@ pub(crate) fn set_channel_history(store: &Store, bot_id: &str, include: bool) ->
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SharedChannelHistoryPreference {
+pub struct SharedChannelHistoryPreference {
     channel_id: String,
     name: String,
     mode: String,

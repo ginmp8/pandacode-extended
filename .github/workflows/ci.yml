@@ -91,6 +91,24 @@ jobs:
       - run: npm run test:release
       - run: npm run site:build
 
+  bot-workflow-browser:
+    name: Bot manifest and collaboration UI (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise Extended bot manifest, collaboration and history UI
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts tests/bots.spec.ts \
+            --grep "bot manifests|bot collaboration|fresh context stays|joined channels" --workers=2
+
   rust:
     name: Rust check and tests (Linux)
     runs-on: ubuntu-22.04

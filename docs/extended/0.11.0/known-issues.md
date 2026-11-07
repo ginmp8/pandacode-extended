@@ -18,3 +18,9 @@ Do not remove upstream features or tighten Extended defaults solely because an a
 
 - **Account pools and sign-in:** The upstream implementation, tests, original release notes and UI were imported at [`a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da). No independent live two-account Claude/Codex switching, authentication, restart/hold recovery, input-queue preservation, or interaction with optional Extended controls has yet been recorded for this candidate. These are **unverified acceptance criteria**, not established failures.
 - **Inherited upstream limitations:** Only Claude Code and Codex subscription logins can join pools; cloud runs and goal operations are not pooled. The source reports incomplete live two-account Codex and complete one-click sign-in testing. See [original 0.3.100 notes](../../../releases/0.3.100.md).
+
+## PandaCode 0.3.101 acceptance gaps
+
+- **Unverified, not confirmed defects:** native multi-account Claude/Codex sign-in, identity reads, cache invalidation after login change, account usage refresh and cross-panel state consistency after the [upstream import](https://github.com/ginmp8/pandacode-extended/commit/d7cf15467bf8f25563db253e7b35a1efeb2e5b5e).
+- **Unverified, not confirmed defects:** operation of Extended-specific Settings controls in both states alongside the new account-provider screens; comparison of all 80 shared divergent files by hunk.
+- Original upstream [0.3.101 notes](../../../releases/0.3.101.md) document incomplete installed-app testing with several real accounts. No feature is disabled on this basis.

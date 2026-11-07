@@ -49,3 +49,15 @@
 | CI for imported code checkpoint `7fbcb5582e835a0ea3c607cb6ba3be8790f01117` | [Push CI #42223802536](https://github.com/ginmp8/pandacode-extended/actions/runs/42223802536) and [PR CI #42223813242](https://github.com/ginmp8/pandacode-extended/actions/runs/42223813242) both completed successfully (6/6 jobs each): TypeScript/unit/website, Rust check/tests, RustSec, npm audit, mobile/Expo and ONNX/macOS. This validates that SHA only; native account-pool/Settings behavior, upgrades and a complete 0.11.0 release build are not certified. |
 
 This is a draft readiness record only. An imported code tree and a green CI run, if one is later recorded, do not alone approve Extended 0.11.0 for distribution.
+
+## 2026-11-06 — upstream 0.3.101 source and integration checkpoint
+
+| Evidence | Verified observation / outstanding gate |
+| --- | --- |
+| Source | [`008017de3316aea56af9294d4d3f8556b52174bb`](https://github.com/ginmp8/pandacode/commit/008017de3316aea56af9294d4d3f8556b52174bb), application 0.3.101, source tree `170cbf5939773846c2fc5e02f8d3a4fd831a8e7a` |
+| Code import | [`d7cf15467bf8f25563db253e7b35a1efeb2e5b5e`](https://github.com/ginmp8/pandacode-extended/commit/d7cf15467bf8f25563db253e7b35a1efeb2e5b5e), parent `92c8b116498dba4cf2bdbc5ecb3de9858f12b876`; 3 added + 24 patched source paths |
+| Recursive tree | Source 1,523 blobs, Extended 1,574 blobs; zero missing, 1,443 exact shared, 80 differing shared, 51 Extended-only; no mode divergence. The remaining 80 shared differences require hunk-level classification and functional verification. |
+| Integration CI | [`#42325893564`](https://github.com/ginmp8/pandacode-extended/actions/runs/42325893564) was still in progress at documentation preparation; do not claim a passing result until read back. |
+| Native gates | Real Claude/Codex account-pool identity/usage, multi-login, restart, Settings On/Off, mobile/native packaging, Connect/MCP/cloud and credential paths remain unverified. |
+
+A green CI run, if confirmed, does not independently approve the 0.11.0 release.

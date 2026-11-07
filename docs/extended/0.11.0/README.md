@@ -1,8 +1,8 @@
-# PandaCode Extended 0.11.0 — incremental development cycle
+# PandaCode Extended 0.11.0 — release documentation
 
-**Status:** Open for incremental changes; not released or approved.
+**Status (2026-11-07):** Release notes finalized for promotion to `main`; `v0.11.0` tagging, GitHub publication and native distribution remain separate steps.
 
-Extended `0.11.0` is the planned release-documentation cycle following [0.10.0](../0.10.0/README.md). The [release notes](../../../releases/extended/0.11.0.md) start as a draft, and actual scope will grow with verified PandaCode fork `main` changes and Extended-only corrections.
+Extended `0.11.0` is the current source-release cycle following [0.10.0](../0.10.0/README.md). Its [release notes](../../../releases/extended/0.11.0.md) now summarize the changes prepared for promotion. Do not silently append newer upstream changes after the source version is frozen for tagging.
 
 ## Operating rules
 
@@ -14,7 +14,7 @@ Extended `0.11.0` is the planned release-documentation cycle following [0.10.0](
 
 ## Current records
 
-- [Draft release notes](../../../releases/extended/0.11.0.md)
+- [Release notes](../../../releases/extended/0.11.0.md)
 - [Feature controls](feature-controls.md)
 - [Dependency/security evidence](dependency-security.md)
 - [Known issues and unverified risks](known-issues.md)
@@ -29,7 +29,7 @@ Initial Extended reference: `3eda289623850405893455e952ace45b6e0a4d89`; upstream
 - Source: [`ginmp8/pandacode:main` at `e0b65e51`](https://github.com/ginmp8/pandacode/commit/e0b65e51c4b6bc9c67982eaed08f7f13985fa01a), upstream app **0.3.100**.
 - Exact code integration: [`ginmp8/pandacode-extended:base/development` at `a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da); **7 added files** and **18 modified files**, including upstream release notes, account-pool runtime, connection UI, integration tests and six application-version fields.
 - The source's account pools and CLI sign-in are **inherited features**. No new Extended-only control or dependency remediation is claimed. Existing Extended controls remain present; end-to-end validation on actual accounts and both On/Off states is not established by static copying.
-- [Original 0.3.100 release notes](../../../releases/0.3.100.md) and [Extended 0.11.0 draft](../../../releases/extended/0.11.0.md).
+- [Original 0.3.100 release notes](../../../releases/0.3.100.md) and [Extended 0.11.0 release notes](../../../releases/extended/0.11.0.md).
 
 The whole-tree comparison after code integration found no missing source paths. The remaining shared changes must still be classified by hunk and exercised functionally; CI and native validation remain independent acceptance criteria.
 
@@ -48,9 +48,9 @@ The whole-tree comparison after code integration found no missing source paths. 
 
 ## 2026-11-07 — complete-tree integration of unreleased upstream mobile design
 
-The pinned source advanced to [`61b03bf2`](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102), while the application remains 0.3.101. Its 65 new, 71 modified and 47 deleted files were reconciled; new visuals, navigation, mobile notification state and tests are inherited, not Extended-only. Two new splash PNGs were copied by exact blob hash. The 3 source/customized paths preserve the Extended npm overrides and Expo notification enum compatibility workaround. Final staging: 0 missing source paths and 80 divergent shared paths (77 still to be assessed by hunk). CI for the publishing SHA and device execution are required; 0.11.0 stays a draft.
+The pinned source advanced to [`61b03bf2`](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102), while the application remains 0.3.101. Its 65 new, 71 modified and 47 deleted files were reconciled; new visuals, navigation, mobile notification state and tests are inherited, not Extended-only. Two new splash PNGs were copied by exact blob hash. The 3 source/customized paths preserve the Extended npm overrides and Expo notification enum compatibility workaround. Final staging: 0 missing source paths and 80 divergent shared paths (77 still to be assessed by hunk). CI for the publishing SHA and device execution are required; 0.11.0 was still a draft at this historical integration checkpoint; the release notes have since been finalized for source promotion.
 
 ## 2026-11-07 — upstream iPhone beta link
 
 - Source [`13a7cb68`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a) adds the official iPhone TestFlight beta link to the download row and mobile instructions in the upstream README. The root README was mirrored byte for byte.
-- Inherited documentation change only, not a new Extended feature or independently tested beta distribution. App `0.3.101`, Extended candidate `0.11.0` (DRAFT). Native iPhone enrollment, launch and remote-control checks remain unverified.
+- Inherited documentation change only, not a new Extended feature or independently tested beta distribution. App `0.3.101`, Extended source-release cycle `0.11.0` (then DRAFT). Native iPhone enrollment, launch and remote-control checks remain unverified.

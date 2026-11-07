@@ -1,8 +1,9 @@
 name: Release
-# Pushing a tag vX.Y.Z builds macOS (Apple silicon and Intel), Windows x64 and arm64, Linux x64 and Linux arm64
-# installers and publishes them on a GitHub Release whose notes come from
-# releases/X.Y.Z.md. A manual run builds the installers as workflow artifacts
-# and publishes only when `publish` is checked. See docs/releasing.md.
+# Tags vX.Y.Z build the native PandaCode app without changing its upstream version.
+# Extended tags use releases/extended/X.Y.Z.md; original app tags use releases/X.Y.Z.md.
+# Tag pushes upload workflow artifacts only. A GitHub Release requires explicit manual
+# approval via workflow_dispatch. This Extended workflow never publishes to npm.
+# See docs/extended/releasing.md.
 on:
   push:
     tags: ['v*']
@@ -23,23 +24,17 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_version: ${{ steps.version.outputs.release_version }}
+      release_notes: ${{ steps.version.outputs.release_notes }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      release_title: ${{ steps.version.outputs.release_title }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
       - name: Verify pinned upstream source release identity
         run: node --test scripts/release/version-identity.test.mjs
-      - name: Read and check the version
+      - name: Resolve application and release identities
         id: version
-        run: |
-          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match the app version $version. Run npm run release:version first."
-            exit 1
-          fi
-          if [ ! -s "releases/$version.md" ]; then
-            echo "::error::releases/$version.md is missing or empty."
-            exit 1
-          fi
+        run: node scripts/release/resolve-release-identity.mjs >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -164,6 +159,10 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      RELEASE_NOTES: ${{ needs.prepare.outputs.release_notes }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      RELEASE_TITLE: ${{ needs.prepare.outputs.release_title }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
@@ -185,47 +184,22 @@ jobs:
           SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' }}
         run: |
           {
-            cat "releases/$VERSION.md"
+            cat "$RELEASE_NOTES"
             printf '\n\n'
             if [ "$SIGNED" = "true" ]; then node scripts/release/install-notes.mjs --signed; else node scripts/release/install-notes.mjs; fi
           } > "$RUNNER_TEMP/notes.md"
       - name: Write the updater manifest
         run: |
           if ls assets/*.sig >/dev/null 2>&1; then
-            node scripts/release/updater-manifest.mjs assets "$VERSION" "releases/$VERSION.md"
+            node scripts/release/updater-manifest.mjs assets "$VERSION" "$RELEASE_NOTES" "$RELEASE_TAG"
           else
             echo "::warning::No signed update files; this release will not update installed apps."
           fi
       - name: Create GitHub Release
         run: |
           ls -l assets
-          gh release create "v$VERSION" assets/* \
-            --title "PandaCode $VERSION" \
+          gh release create "$RELEASE_TAG" assets/* \
+            --title "$RELEASE_TITLE" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --target "$GITHUB_SHA"
 
-  npm:
-    needs: [prepare, publish]
-    # npm publication also requires a manually dispatched run from an existing tag.
-    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
-        with: { node-version: '22', registry-url: 'https://registry.npmjs.org' }
-      - name: Publish npx pandacode
-        working-directory: packages/npx
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::warning::NPM_TOKEN is not set; skipping the npm publish of pandacode."
-            exit 0
-          fi
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm publish --provenance --access public

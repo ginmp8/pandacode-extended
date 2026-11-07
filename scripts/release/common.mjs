@@ -83,14 +83,16 @@ export function releaseDirectory(releaseVersion) {
  * its signature. `signatures` maps release targets to the contents of their `.sig` files.
  * Files are on the repository that publishes the release (GITHUB_REPOSITORY in Actions),
  * so a fork's release points at its own assets. */
-export function updaterManifest(releaseVersion, notes, signatures, pubDate = new Date().toISOString(), repository = process.env.GITHUB_REPOSITORY || 'aicodeking/pandacode') {
+export function updaterManifest(releaseVersion, notes, signatures, pubDate = new Date().toISOString(), repository = process.env.GITHUB_REPOSITORY || 'aicodeking/pandacode', releaseTag) {
   const v = version(releaseVersion);
+  const tag = releaseTag === undefined ? `v${v}` : releaseTag;
+  if (typeof tag !== 'string' || !tag.startsWith('v') || tag !== `v${version(tag.slice(1))}`) throw new Error('Release tag must be vX.Y.Z.');
   if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repository)) throw new Error(`Not a GitHub repository: ${repository}`);
   const platforms = {};
   for (const [target, signature] of Object.entries(signatures)) {
     const config = targetConfig(target);
     if (typeof signature !== 'string' || !signature.trim()) throw new Error(`Missing updater signature for ${target}.`);
-    platforms[target] = { signature: signature.trim(), url: `https://github.com/${repository}/releases/download/v${v}/${config.updaterAsset}` };
+    platforms[target] = { signature: signature.trim(), url: `https://github.com/${repository}/releases/download/${tag}/${config.updaterAsset}` };
   }
   if (!Object.keys(platforms).length) throw new Error('No signed updater files to publish.');
   return { version: v, notes: String(notes ?? '').trim(), pub_date: pubDate, platforms };

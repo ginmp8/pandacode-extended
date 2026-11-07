@@ -32,3 +32,9 @@ Initial Extended reference: `3eda289623850405893455e952ace45b6e0a4d89`; upstream
 - [Original 0.3.100 release notes](../../../releases/0.3.100.md) and [Extended 0.11.0 draft](../../../releases/extended/0.11.0.md).
 
 The whole-tree comparison after code integration found no missing source paths. The remaining shared changes must still be classified by hunk and exercised functionally; CI and native validation remain independent acceptance criteria.
+
+## Next inherited upstream integration — PandaCode 0.3.101
+
+- [Source `008017de`](https://github.com/ginmp8/pandacode/commit/008017de3316aea56af9294d4d3f8556b52174bb) → [Extended code integration `d7cf1546`](https://github.com/ginmp8/pandacode-extended/commit/d7cf15467bf8f25563db253e7b35a1efeb2e5b5e).
+- 3 source-exact files added and 24 existing paths patched; upstream Providers account cards and Usage panel now share account-status UI, identity metadata and usage-meter behavior. See [original upstream notes](../../../releases/0.3.101.md).
+- The nontruncated recursive tree comparison found 0 missing source paths and 80 shared divergences. Existing Extended-only paths and feature-control modules remain; native functional parity and release approval are still pending.

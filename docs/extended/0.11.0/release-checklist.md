@@ -1,6 +1,6 @@
 # PandaCode Extended 0.11.0 — release readiness
 
-**Status:** Incremental documentation cycle. No 0.11.0 tag, installer, release approval, or publication.
+**Status (2026-11-07):** 0.11.0 release notes finalized for source promotion. The tag, GitHub Release and installers remain unpublished; native acceptance requirements are open.
 **Opening Extended SHA:** `3eda289623850405893455e952ace45b6e0a4d89` on `base/development`.
 **Opening upstream fork SHA:** `6b94bf1d8b579d08834578f6e24684ea0d3fccbd` (application 0.3.99).
 

@@ -4204,6 +4204,7 @@ pub fn run() {
                 bots::bot_update,
                 bots::extended::bot_set_fresh_context,
                 bots::extended::bot_set_channel_history,
+                bots::extended::bot_set_shared_channel_history_override,
                 bots::bot_set_mode,
                 bots::bot_set_paused,
                 bots::bot_reset,

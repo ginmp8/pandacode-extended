@@ -14,6 +14,12 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS extended_bot_channel_history(
             bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
             include_history INTEGER NOT NULL DEFAULT 1 CHECK(include_history IN (0,1))
+        );
+        CREATE TABLE IF NOT EXISTS extended_bot_channel_history_overrides(
+            bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+            channel_id TEXT NOT NULL REFERENCES bot_shared_channels(id) ON DELETE CASCADE,
+            mode TEXT NOT NULL CHECK(mode IN ('include','exclude')),
+            PRIMARY KEY(bot_id,channel_id)
         );",
     ).map_err(|e| e.to_string())
 }
@@ -50,6 +56,81 @@ pub(crate) fn set_channel_history(store: &Store, bot_id: &str, include: bool) ->
         ).map_err(|e| e.to_string())?;
     }
     Ok(include)
+}
+
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SharedChannelHistoryPreference {
+    channel_id: String,
+    name: String,
+    mode: String,
+    effective: bool,
+}
+
+/// Only current members of active local shared channels may have an override.
+pub(crate) fn channel_history_effective(store: &Store, bot_id: &str, channel_id: &str) -> Result<bool> {
+    let mode: Option<String> = store.db.query_row(
+        "SELECT o.mode FROM bot_shared_channel_members m
+         JOIN bot_shared_channels c ON c.id=m.channel_id AND c.archived=0
+         LEFT JOIN extended_bot_channel_history_overrides o
+           ON o.bot_id=m.bot_id AND o.channel_id=m.channel_id
+         WHERE m.bot_id=?1 AND m.channel_id=?2",
+        rusqlite::params![bot_id, channel_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("Choose a bot that belongs to this channel.")?;
+    match mode.as_deref() {
+        Some("include") => Ok(true),
+        Some("exclude") => Ok(false),
+        _ => include_shared_channel_history(store, bot_id),
+    }
+}
+
+/// Extended-only detail view; external Connections and upstream bot profiles are unchanged.
+pub(crate) fn channel_history_preferences(store: &Store, bot_id: &str) -> Result<Vec<SharedChannelHistoryPreference>> {
+    super::get(store, bot_id)?;
+    let default = include_shared_channel_history(store, bot_id)?;
+    let mut statement = store.db.prepare(
+        "SELECT c.id,c.name,COALESCE(o.mode,'default')
+         FROM bot_shared_channels c
+         JOIN bot_shared_channel_members m ON m.channel_id=c.id
+         LEFT JOIN extended_bot_channel_history_overrides o
+           ON o.channel_id=c.id AND o.bot_id=m.bot_id
+         WHERE m.bot_id=?1 AND c.archived=0 ORDER BY c.name COLLATE NOCASE,c.id",
+    ).map_err(|e| e.to_string())?;
+    let rows = statement.query_map([bot_id], |row| Ok((
+        row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?,
+    ))).map_err(|e| e.to_string())?;
+    rows.map(|row| {
+        let (channel_id, name, mode) = row.map_err(|e| e.to_string())?;
+        let effective = match mode.as_str() { "include" => true, "exclude" => false, _ => default };
+        Ok(SharedChannelHistoryPreference { channel_id, name, mode, effective })
+    }).collect()
+}
+
+pub(crate) fn set_channel_history_override(
+    store: &Store, bot_id: &str, channel_id: &str, mode: &str,
+) -> Result<SharedChannelHistoryPreference> {
+    if !matches!(mode, "default" | "include" | "exclude") {
+        return Err("Choose Use default, Include or Exclude.".into());
+    }
+    // Validating before writing rejects unknown, archived and non-member channels.
+    channel_history_effective(store, bot_id, channel_id)?;
+    if mode == "default" {
+        store.db.execute(
+            "DELETE FROM extended_bot_channel_history_overrides WHERE bot_id=?1 AND channel_id=?2",
+            rusqlite::params![bot_id, channel_id],
+        ).map_err(|e| e.to_string())?;
+    } else {
+        store.db.execute(
+            "INSERT INTO extended_bot_channel_history_overrides(bot_id,channel_id,mode)
+             VALUES(?1,?2,?3) ON CONFLICT(bot_id,channel_id) DO UPDATE SET mode=excluded.mode",
+            rusqlite::params![bot_id, channel_id, mode],
+        ).map_err(|e| e.to_string())?;
+    }
+    channel_history_preferences(store, bot_id)?.into_iter()
+        .find(|item| item.channel_id == channel_id)
+        .ok_or_else(|| "This channel is no longer available.".into())
 }
 
 /// Only bot-owned conversations are included; regular tasks linked to bots are unaffected.
@@ -119,6 +200,20 @@ pub async fn bot_set_channel_history(app: tauri::AppHandle, window: tauri::Webvi
     state: State<'_, AppState>, bot_id: String, enabled: bool) -> Result<bool> {
     if window.label() != "main" { return Err("Bots are managed from the main window.".into()); }
     let saved = set_channel_history(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, enabled)?;
+    let _ = app.emit("bots-changed", ());
+    Ok(saved)
+}
+
+
+#[tauri::command]
+pub async fn bot_set_shared_channel_history_override(
+    app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>,
+    bot_id: String, channel_id: String, mode: String,
+) -> Result<SharedChannelHistoryPreference> {
+    if window.label() != "main" { return Err("Bots are managed from the main window.".into()); }
+    let saved = set_channel_history_override(
+        &*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &channel_id, &mode,
+    )?;
     let _ = app.emit("bots-changed", ());
     Ok(saved)
 }
@@ -277,6 +372,110 @@ mod tests {
             [&scout.id], |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 0, "deleting the bot cascades the preference");
+    }
+
+
+    #[test]
+    fn channel_history_overrides_keep_global_defaults_and_only_change_new_prompts() {
+        let f = fixture();
+        let scout = bot(&f, "Scout");
+        let writer = bot(&f, "Writer");
+        let first = super::super::shared_channels::create(
+            &f.store, "first", &[scout.id.clone(), writer.id.clone()],
+        ).unwrap();
+        let second = super::super::shared_channels::create(
+            &f.store, "second", std::slice::from_ref(&scout.id),
+        ).unwrap();
+        for channel in [&first, &second] {
+            f.store.db.execute(
+                "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+                 VALUES(?1,?2,'user','previous context','completed',1)",
+                rusqlite::params![format!("previous-{}", channel.id), channel.id],
+            ).unwrap();
+        }
+        let prompt = |channel: &super::super::shared_channels::SharedChannel| {
+            super::super::shared_channels::assignment_text(
+                &f.store, channel, &scout.id, "current", "new work",
+            ).unwrap()
+        };
+        let original = prompt(&first);
+        assert!(original.contains("previous context"), "absent settings inherit include");
+        let initial = channel_history_preferences(&f.store, &scout.id).unwrap();
+        assert_eq!(initial.len(), 2);
+        assert!(initial.iter().all(|item| item.mode == "default" && item.effective));
+
+        set_channel_history(&f.store, &scout.id, false).unwrap();
+        assert!(!prompt(&first).contains("previous context"));
+        let included = set_channel_history_override(&f.store, &scout.id, &first.id, "include").unwrap();
+        assert_eq!((included.mode.as_str(), included.effective), ("include", true));
+        assert!(prompt(&first).contains("previous context"));
+        assert!(!prompt(&second).contains("previous context"));
+        assert!(original.contains("previous context"), "already-composed payloads stay unchanged");
+        assert!(!include_shared_channel_history(&f.store, &scout.id).unwrap());
+        assert!(include_shared_channel_history(&f.store, &writer.id).unwrap());
+
+        set_channel_history(&f.store, &scout.id, true).unwrap();
+        let excluded = set_channel_history_override(&f.store, &scout.id, &second.id, "exclude").unwrap();
+        assert_eq!((excluded.mode.as_str(), excluded.effective), ("exclude", false));
+        assert!(!prompt(&second).contains("previous context"));
+        assert!(prompt(&first).contains("previous context"));
+        upgrade(&f.store.db).unwrap();
+        upgrade(&f.store.db).unwrap();
+        assert_eq!(channel_history_preferences(&f.store, &scout.id).unwrap().len(), 2);
+        assert_eq!(set_channel_history_override(&f.store, &scout.id, &first.id, "default").unwrap().mode, "default");
+        assert!(prompt(&first).contains("previous context"));
+        let records: i64 = f.store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_messages", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(records, 2, "preferences never modify channel messages");
+    }
+
+    #[test]
+    fn channel_history_overrides_require_membership_and_clear_on_removal_or_archive() {
+        let f = fixture();
+        let scout = bot(&f, "Scout");
+        let writer = bot(&f, "Writer");
+        let channel = super::super::shared_channels::create(
+            &f.store, "launch", &[scout.id.clone(), writer.id.clone()],
+        ).unwrap();
+        let other = super::super::shared_channels::create(
+            &f.store, "other", std::slice::from_ref(&writer.id),
+        ).unwrap();
+        assert!(set_channel_history_override(&f.store, &scout.id, &other.id, "include").is_err());
+        assert!(set_channel_history_override(&f.store, "missing", &channel.id, "include").is_err());
+        assert!(set_channel_history_override(&f.store, &scout.id, "missing", "exclude").is_err());
+        assert!(set_channel_history_override(&f.store, &scout.id, &channel.id, "invalid").is_err());
+        assert!(set_channel_history_override(&f.store, &scout.id, &channel.id, "default").is_ok());
+        set_channel_history_override(&f.store, &scout.id, &channel.id, "exclude").unwrap();
+
+        super::super::shared_channels::update(
+            &f.store, &channel.id, "launch", &[scout.id.clone(), writer.id.clone()], None,
+        ).unwrap();
+        assert_eq!(channel_history_preferences(&f.store, &scout.id).unwrap()[0].mode, "exclude",
+            "editing a channel must preserve overrides for continuing members");
+        super::super::shared_channels::update(
+            &f.store, &channel.id, "launch", std::slice::from_ref(&writer.id), None,
+        ).unwrap();
+        assert!(channel_history_effective(&f.store, &scout.id, &channel.id).is_err());
+        assert!(channel_history_preferences(&f.store, &scout.id).unwrap().is_empty());
+        super::super::shared_channels::update(
+            &f.store, &channel.id, "launch", &[scout.id.clone(), writer.id.clone()], None,
+        ).unwrap();
+        assert_eq!(channel_history_preferences(&f.store, &scout.id).unwrap()[0].mode, "default",
+            "rejoining must not reactivate a stale override");
+        set_channel_history_override(&f.store, &scout.id, &channel.id, "exclude").unwrap();
+        super::super::shared_channels::set_archived(&f.store, &channel.id, true).unwrap();
+        assert!(channel_history_preferences(&f.store, &scout.id).unwrap().is_empty());
+        assert!(set_channel_history_override(&f.store, &scout.id, &channel.id, "include").is_err());
+        super::super::shared_channels::set_archived(&f.store, &channel.id, false).unwrap();
+        assert_eq!(channel_history_preferences(&f.store, &scout.id).unwrap()[0].mode, "default");
+        set_channel_history_override(&f.store, &scout.id, &channel.id, "exclude").unwrap();
+        super::super::delete(&f.store, &scout.id).unwrap();
+        let rows: i64 = f.store.db.query_row(
+            "SELECT COUNT(*) FROM extended_bot_channel_history_overrides WHERE bot_id=?1",
+            [&scout.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]

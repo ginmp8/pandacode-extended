@@ -360,8 +360,16 @@ pub(crate) async fn request(app: &tauri::AppHandle, bot: &Bot, source: &Thread,
     }
     let status = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let _ = shared_channels::update_message_status(&store, &message_id);
-        shared_channels::message_status(&store, &message_id)?
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_deliveries WHERE message_id=?1",
+            [&message_id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        // Another identical invocation may observe a persisted request before its first
+        // delivery is enqueued. Do not report that accepted work was stopped.
+        if count == 0 { "queued".to_owned() } else {
+            shared_channels::update_message_status(&store, &message_id)?;
+            shared_channels::message_status(&store, &message_id)?
+        }
     };
     let _ = app.emit("bot-shared-channel-changed", json!({"channelId":channel_id}));
     Ok(json!({"requestId":message_id,"channelId":channel_id,
@@ -370,6 +378,14 @@ pub(crate) async fn request(app: &tauri::AppHandle, bot: &Bot, source: &Thread,
 
 fn record_failed_delivery(store: &Store, channel_id: &str, message_id: &str,
     recipient: &str, depth: u8, now: i64) -> Result<String> {
+    // The gateway may already have persisted a failed delivery before returning an error.
+    // Reuse it instead of creating a second result/callback for the same recipient.
+    let prior: Option<String> = store.db.query_row(
+        "SELECT id FROM bot_shared_channel_deliveries WHERE message_id=?1 AND bot_id=?2
+         ORDER BY created_at DESC,id DESC LIMIT 1",
+        params![message_id,recipient], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(id) = prior { return Ok(id); }
     let target = super::get(store, recipient)?;
     let (session, _) = super::thread_session(store, &target, DESKTOP, DESKTOP, &format!("{} · You",target.name))?;
     let id = crate::storage::id();
@@ -439,6 +455,46 @@ pub(crate) async fn finish_delivery(app: &tauri::AppHandle, delivery_id: &str, r
             json!({"requestId":message_id,"deliveryId":id}));
     }
     let _ = app.emit("bot-messages-changed", ());
+}
+
+/// A process can stop between committing a request and creating its first delivery.
+/// Record missing recipients as failed, then let normal callback recovery report them.
+/// Never auto-run work after an uncertain crash, or duplicate an existing recipient.
+pub(crate) fn reconcile_unsent_requests(store: &Store) -> Result<()> {
+    let requests: Vec<(String,String,String,i64,i64)> = {
+        let mut statement = store.db.prepare(
+            "SELECT a.message_id,m.channel_id,a.recipients,a.depth,m.created_at
+             FROM extended_bot_channel_actions a
+             JOIN bot_shared_channel_messages m ON m.id=a.message_id
+             WHERE a.kind='assignment' AND EXISTS (
+               SELECT 1 FROM json_each(a.recipients) r
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM bot_shared_channel_deliveries d
+                 WHERE d.message_id=a.message_id AND d.bot_id=r.value
+               )
+             )",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())?
+    };
+    for (message_id,channel_id,recipients,depth,created) in requests {
+        let mut lost_recipient = false;
+        for recipient in parse_trace(&recipients) {
+            if let Err(error) = record_failed_delivery(store, &channel_id, &message_id,
+                &recipient, (depth + 1).clamp(1,3) as u8, created) {
+                lost_recipient = true;
+                eprintln!("Could not recover a missing channel recipient for {message_id}: {error}");
+            }
+        }
+        if lost_recipient {
+            store.db.execute("UPDATE bot_shared_channel_messages SET status='failed' WHERE id=?1",
+                [&message_id]).map_err(|e| e.to_string())?;
+        } else {
+            shared_channels::update_message_status(store, &message_id)?;
+        }
+    }
+    Ok(())
 }
 
 /// Interrupted work is marked failed by the upstream startup reconciliation first.
@@ -515,6 +571,39 @@ mod tests {
         let two=one.to(&reviewer.id,&duplicate.id).unwrap();
         let three=two.to(&duplicate.id,"fourth").unwrap();
         assert!(three.to("fourth","fifth").is_err());
+    }
+
+    #[test]
+    fn failed_dispatch_reuses_the_existing_delivery_and_startup_records_missing_work() {
+        let f = fixture();
+        let author = bot(&f, "Author");
+        let reviewer = bot(&f, "Reviewer");
+        let channel = shared_channels::create(&f.store, "launch", &[author.id.clone(), reviewer.id.clone()]).unwrap();
+        let (session, _) = super::super::thread_session(&f.store, &author, DESKTOP, DESKTOP, "Author").unwrap();
+        let id = crate::storage::id();
+        let now = crate::storage::now();
+        f.store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,status,created_at)
+             VALUES(?1,?2,'user',?3,'Review this','queued',?4)",
+            params![id,channel.id,author.id,now],
+        ).unwrap();
+        f.store.db.execute(
+            "INSERT INTO extended_bot_channel_actions(message_id,kind,origin_bot_id,origin_session_id,origin_channel_id,
+             origin_external_id,recipients,depth,route,idempotency_key,created_at)
+             VALUES(?1,'assignment',?2,?3,'desktop','desktop',?4,0,?5,'test-recovery',?6)",
+            params![id,author.id,session,json!([reviewer.id]).to_string(),json!([author.id]).to_string(),now],
+        ).unwrap();
+        reconcile_unsent_requests(&f.store).unwrap();
+        let first = record_failed_delivery(&f.store, &channel.id, &id, &reviewer.id, 1, now).unwrap();
+        let again = record_failed_delivery(&f.store, &channel.id, &id, &reviewer.id, 1, now).unwrap();
+        assert_eq!(first, again);
+        reconcile_unsent_requests(&f.store).unwrap();
+        let count: i64 = f.store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_deliveries WHERE message_id=?1",
+            [&id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(shared_channels::message_status(&f.store, &id).unwrap(), "failed");
     }
 
     #[test]

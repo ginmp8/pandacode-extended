@@ -1098,7 +1098,11 @@ pub async fn bot_task_brief(app: tauri::AppHandle, state: State<'_, AppState>, s
 /// Starts the scheduler and channel connections once the app is ready.
 pub(crate) fn start(app: &tauri::AppHandle) {
     // Before the scheduler or any window reads a bot, so older databases have the profile columns.
-    let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| { upgrade(&store.db)?; shared_channels::reconcile_in_progress(&store) });
+    let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| {
+        upgrade(&store.db)?;
+        shared_channels::reconcile_in_progress(&store)?;
+        collaboration::reconcile_unsent_requests(&store)
+    });
     let is_upgraded = upgraded.is_ok();
     if let Err(error) = upgraded {
         eprintln!("Could not upgrade the bots table: {error}");

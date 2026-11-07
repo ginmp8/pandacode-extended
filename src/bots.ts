@@ -569,6 +569,10 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
 
   const click = (event: MouseEvent) => {
     if (handleAvatarPicker(event)) return;
+    if (event.target instanceof Element && event.target.closest('.bs-row .info-mark')) {
+      event.preventDefault(); // Clicking the tooltip must not toggle its surrounding label.
+      return;
+    }
     // A click anywhere outside the More menu or the icon popover closes it, like any menu.
     const inside = (selector: string) => event.target instanceof Element && event.target.closest(selector);
     if (moreOpen && !inside('.bp-more')) { moreOpen = false; render(); }

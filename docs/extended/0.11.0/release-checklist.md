@@ -46,6 +46,6 @@
 | Whole-tree parity | Proposed code tree `0fef289e712f9d8616ccfd54fc5518a1974693ff`: 1,520 source paths, 1,569 Extended paths, 0 missing, 71 shared divergent, 49 Extended-only; all modes preserved. Differences still require complete hunk/behavior classification |
 | Application version | Root npm, npm lock root/package entry, Cargo manifest, Cargo.lock app package and Tauri config all verified as **0.3.100**; Extended Rust ZIP remains **9.0.5** |
 | Source functionality | Claude/Codex account pooling, usage-limit rollover, account sign-in, UI and tests imported from upstream; independently validated native behavior **pending** |
-| Exact-SHA CI | Must be checked for the final published documentation SHA; pending until full workflow completion |
+| CI for imported code checkpoint `7fbcb5582e835a0ea3c607cb6ba3be8790f01117` | [Push CI #42223802536](https://github.com/ginmp8/pandacode-extended/actions/runs/42223802536) and [PR CI #42223813242](https://github.com/ginmp8/pandacode-extended/actions/runs/42223813242) both completed successfully (6/6 jobs each): TypeScript/unit/website, Rust check/tests, RustSec, npm audit, mobile/Expo and ONNX/macOS. This validates that SHA only; native account-pool/Settings behavior, upgrades and a complete 0.11.0 release build are not certified. |
 
 This is a draft readiness record only. An imported code tree and a green CI run, if one is later recorded, do not alone approve Extended 0.11.0 for distribution.

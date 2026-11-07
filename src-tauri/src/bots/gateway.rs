@@ -74,7 +74,8 @@ fn channel_kind(store: &Store, channel_id: &str) -> String {
 fn compose(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str, kind: &str, sender: &str, text: &str) -> Result<String> {
     let (skills, skipped) = workspace_skills(app, store, bot, session_id);
     let seen = super::brief_version_of(store, session_id)?;
-    if seen == bot.memory_version && !handoff_pending(store, session_id)? {
+    if !super::extended::enabled_for_session(store, session_id)?
+        && seen == bot.memory_version && !handoff_pending(store, session_id)? {
         return Ok(text.to_owned());
     }
     for error in &skipped {
@@ -108,8 +109,8 @@ fn workspace_skills(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id
 }
 
 /// Starts a turn, or queues the message when the task is already working.
-fn steer_while_busy(bot: &Bot, image_ids: &[String], sender_id: &str) -> bool {
-    bot.while_working == "steer" && image_ids.is_empty()
+fn steer_while_busy(bot: &Bot, image_ids: &[String], sender_id: &str, fresh: bool) -> bool {
+    !fresh && bot.while_working == "steer" && image_ids.is_empty()
         && !sender_id.starts_with("bot:") && !sender_id.starts_with("channel:")
 }
 
@@ -128,7 +129,11 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
     }
     let busy = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
     if busy {
-        if !force_queue && steer_while_busy(bot, &image_ids, sender_id)
+        let fresh = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            super::extended::enabled_for_session(&store, session_id)?
+        };
+        if !force_queue && steer_while_busy(bot, &image_ids, sender_id, fresh)
             && crate::message_queue::steer_task(app.clone(), app.state::<AppState>(), session_id.to_owned(), text.clone()).await.is_ok()
         {
             return Ok(());
@@ -535,11 +540,13 @@ mod tests {
 
     #[test]
     fn busy_steering_obeys_the_bot_setting_without_losing_images() {
-        assert!(steer_while_busy(&bot("steer"), &[], "desktop"));
-        assert!(!steer_while_busy(&bot("queue"), &[], "desktop"));
-        assert!(!steer_while_busy(&bot("steer"), &["image-id".into()], "desktop"));
-        assert!(!steer_while_busy(&bot("steer"), &[], "bot:scout"));
-        assert!(!steer_while_busy(&bot("steer"), &[], "channel:launch"));
+        assert!(steer_while_busy(&bot("steer"), &[], "desktop", false));
+        assert!(!steer_while_busy(&bot("queue"), &[], "desktop", false));
+        assert!(!steer_while_busy(&bot("steer"), &["image-id".into()], "desktop", false));
+        assert!(!steer_while_busy(&bot("steer"), &[], "bot:scout", false));
+        assert!(!steer_while_busy(&bot("steer"), &[], "channel:launch", false));
+        assert!(!steer_while_busy(&bot("steer"), &[], "desktop", true),
+            "fresh-context messages must queue instead of steering an active run");
     }
 
     #[test]

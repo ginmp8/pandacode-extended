@@ -6,6 +6,7 @@
 mod brief;
 pub(crate) mod channels;
 pub(crate) mod failover;
+pub(crate) mod extended;
 pub(crate) mod gateway;
 pub(crate) mod guard;
 pub(crate) mod schedule;
@@ -194,6 +195,7 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
             db.execute_batch(&format!("ALTER TABLE bots ADD COLUMN {name} {definition};")).map_err(|e| e.to_string())?;
         }
     }
+    extended::upgrade(db)?;
     Ok(())
 }
 
@@ -838,6 +840,8 @@ pub struct BotDetail {
     pairings: Vec<channels::Pairing>,
     threads: Vec<Thread>,
     rules: Vec<guard::Rule>,
+    /// Extended-only setting, kept out of the upstream Bot profile.
+    fresh_context_each_message: bool,
     /// The local server's port, for web chat links and the WhatsApp webhook URL.
     server_port: u16,
 }
@@ -941,6 +945,7 @@ pub async fn bot_detail(state: State<'_, AppState>, bot_id: String) -> Result<Bo
         pairings: channels::pairings(&store, &bot_id)?,
         threads: threads(&store, &bot_id)?,
         rules: guard::rules(&store, &bot_id)?,
+        fresh_context_each_message: extended::enabled(&store, &bot_id)?,
         server_port: channels::http::port(),
     })
 }

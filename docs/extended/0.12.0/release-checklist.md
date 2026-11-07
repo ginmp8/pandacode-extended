@@ -23,10 +23,11 @@
 - [ ] **#121:** Test **Bot Settings → Shared Channels** with inherited, explicit include and explicit exclude preferences; verify prior saved values, migration, restart, non-member rejection and membership/archive cleanup.
 - [ ] Confirm the eight-post context boundary, unchanged stored conversations, separate fresh-context policy and no rewrite/interruption of queued or active work.
 - [ ] **#122:** Test informational posts (including `@mentions`) without triggering work, explicit one/two-recipient requests, attribution, channel isolation and direct bot conversations without transcript broadcast.
-- [ ] Verify membership, self/ambiguous target and cycle rejection, combined three-hop limit, retry idempotency, per-recipient state, callback updates, stop and restart recovery; record the at-most-once callback limitation.
+- [ ] Verify membership, self/ambiguous target and cycle rejection, combined three-hop limit, retry idempotency, per-recipient state, callback updates, stop and restart recovery; verify interrupted callback recovery and avoid duplicate native admission.
 - [ ] **#123:** Round-trip selected/all bots, optional native and Extended settings, local Shared Channel members/lead and overrides; retain legacy `{"bots":[...]}` compatibility and safe external-channel configuration.
 - [ ] Test verified pre-import backups, backup failure-before-mutation, partial failures, no-clobber Desktop export, no-secret manifest content and the limits of configuration-only recovery.
 - [ ] Exercise the Desktop local JSON/Git source UI and existing headless import/export plus `pandacode serve --sync-bots`; verify read-only SHA-pinned GitHub sync, unsafe/invalid source refusal, private-source credentials and manual-only operation.
+- [ ] Run the new Playwright CI job for bot selection/export, malformed/successful import, Git source UI, attributed collaboration messages and #121 history controls. Distinguish mocked UI fixtures from native import/queue execution.
 - [ ] Cross-check the [#121 context guide](../../extended-bot-context.md), [#122 collaboration guide](../../extended-bot-collaboration.md), [#123 manifest guide](../../extended-bot-manifests.md) and release notes against the final candidate SHA.
 
 These checks remain unchecked until directly executed. Code presence, existing unit tests and this documentation do not establish native or cross-machine acceptance.

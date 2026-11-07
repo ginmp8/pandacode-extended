@@ -213,7 +213,10 @@ pub async fn bot_manifest_export_file(
 ) -> Result<ExportOutcome> {
     check_main(&window)?;
     if !path.ends_with(".json") { return Err("Choose a .json destination.".into()); }
-    let outcome = export_selection(&state.store.lock().map_err(|error| error.to_string())?, &bot_ids)?;
+    let outcome = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        export_selection(&store, &bot_ids)?
+    };
     atomic_write_new(Path::new(&path), &document_bytes(&outcome.document)?)?;
     Ok(outcome)
 }

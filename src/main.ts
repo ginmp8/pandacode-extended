@@ -5858,10 +5858,14 @@ async function showBotManifestDialog(mode: 'import' | 'export'): Promise<void> {
     const { mountBotManifests } = await import('./bot-manifests');
     if (!dialog.open || !host.isConnected) return;
     await mountBotManifests(host, mode, { call, onApplied: async () => {
-      await reloadBotProjects();
-      await reloadSessions();
-      botsView?.refresh();
-      renderBots();
+      try {
+        await reloadBotProjects();
+        await reloadSessions();
+        botsView?.refresh();
+        renderBots();
+      } catch (error) {
+        notify('Bot configuration changed, but the live refresh failed. Reopen Bots to reload the view.');
+      }
     } });
   } catch (error) {
     if (dialog.open && host.isConnected) {

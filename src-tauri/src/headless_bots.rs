@@ -374,6 +374,19 @@ fn apply_history_overrides(store: &Store, name: &str, overrides: &Value) -> crat
 
 /// Portable channel configuration is allowlisted: the native record also contains
 /// machine identity, connection state and WhatsApp verification tokens.
+pub(crate) fn validate_public_url(text: &str) -> crate::Result<()> {
+    if text.trim().is_empty() { return Ok(()); }
+    let url = tauri::Url::parse(text)
+        .map_err(|_| "Public channel URLs must be valid HTTPS addresses.".to_owned())?;
+    if url.scheme() != "https" || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+        || url.path() != "/" {
+        return Err("Public channel URLs must be plain HTTPS origins without credentials, paths, queries or fragments.".into());
+    }
+    Ok(())
+}
+
 fn portable_channel_config(kind: &str, source: &Value) -> crate::Result<Value> {
     let object = source.as_object().ok_or("Saved channel config must be an object.")?;
     let mut config = serde_json::Map::new();
@@ -381,7 +394,9 @@ fn portable_channel_config(kind: &str, source: &Value) -> crate::Result<Value> {
         if matches!(key.as_str(), "identity" | "verifyToken") { continue; }
         match (kind, key.as_str()) {
             ("web", "remote") if value.is_boolean() => {},
-            ("web" | "whatsapp", "publicUrl") if value.is_string() => {},
+            ("web" | "whatsapp", "publicUrl") if value.is_string() => {
+                validate_public_url(value.as_str().unwrap_or_default())?;
+            },
             ("whatsapp", "phoneNumberId") if value.as_str().is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())) => {},
             _ => return Err(format!("Unsupported or sensitive {kind} channel config property: {key}")),
         }
@@ -690,6 +705,17 @@ mod tests {
         assert_eq!(bots.len(), 1);
         assert_eq!(bots[0].name, "good");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_urls_cannot_export_auth_tokens() {
+        assert!(validate_public_url("https://example.com").is_ok());
+        assert!(validate_public_url("").is_ok());
+        for url in ["http://example.com", "https://user:secret@example.com",
+            "https://example.com/sensitive", "https://example.com/?token=abc",
+            "https://example.com/#private"] {
+            assert!(validate_public_url(url).is_err(), "{url}");
+        }
     }
 
     #[test]

@@ -391,15 +391,15 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             help()
         ));
     }
+    if matches!(command, Command::SyncBots { .. }) && name.is_some() {
+        return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
+    }
     // Built at the end, so flags work in any order.
     if sign_in {
         command = Command::SignIn { name };
     }
     // An import composes only with serving (or a first-run sign-in): the exiting ops
     // would silently ignore the file.
-    if matches!(command, Command::SyncBots { .. }) && name.is_some() {
-        return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
-    }
     if import.is_some() && !matches!(command, Command::Serve | Command::SignIn { .. }) {
         return Err(format!("--import-bots only works with serve or --sign-in.\n\n{}", help()));
     }

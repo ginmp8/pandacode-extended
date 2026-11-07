@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::Path};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager};
 
 const MAX_SOURCES: usize = 16;
 const MAX_FILES: usize = 32;
@@ -178,6 +178,13 @@ fn secret_reference_only(document: &Value) -> Result<()> {
                         && !matches!((kind, key.as_str()), ("web" | "whatsapp", "publicUrl") if value.is_string())
                         && !matches!((kind, key.as_str()), ("whatsapp", "phoneNumberId") if value.is_string()) {
                         return Err(format!("Git manifest has unsupported or sensitive channel config key: {key}"));
+                    }
+                    if key == "publicUrl" {
+                        crate::headless_bots::validate_public_url(value.as_str().unwrap_or_default())?;
+                    }
+                    if key == "phoneNumberId" && !value.as_str()
+                        .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_digit())) {
+                        return Err("WhatsApp phoneNumberId must contain only digits.".into());
                     }
                 }
             }

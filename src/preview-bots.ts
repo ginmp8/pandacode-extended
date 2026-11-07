@@ -8,7 +8,7 @@ export interface PreviewBotsHost {
   emit(name: string, event: unknown): void;
   addProject(name: string): Project;
 }
-interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; activity: Activity[]; freshContextEachMessage: boolean }
+interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; activity: Activity[]; freshContextEachMessage: boolean; includeSharedChannelHistory: boolean }
 const bots = new Map<string, Store>();
 const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
@@ -38,7 +38,7 @@ function nextRun(input: Pick<Schedule, 'kind' | 'intervalMinutes' | 'timeOfDay'>
   return next.getTime();
 }
 function detail(entry: Store): BotDetail {
-  return structuredClone({ bot: entry.bot, memories: entry.memories, schedules: entry.schedules, channels: entry.channels, pairings: entry.pairings, threads: entry.threads, rules: entry.rules, freshContextEachMessage: entry.freshContextEachMessage, serverPort: 47321 });
+  return structuredClone({ bot: entry.bot, memories: entry.memories, schedules: entry.schedules, channels: entry.channels, pairings: entry.pairings, threads: entry.threads, rules: entry.rules, freshContextEachMessage: entry.freshContextEachMessage, includeSharedChannelHistory: entry.includeSharedChannelHistory, serverPort: 47321 });
 }
 function channelOf(id: string): [Store, Channel] {
   for (const entry of bots.values()) { const channel = entry.channels.find(item => item.id === id); if (channel) return [entry, channel]; }
@@ -226,7 +226,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const id = crypto.randomUUID(), now = Date.now();
       const project = host.addProject(input.name);
       const bot: Bot = { ...input, soul: input.soul ?? '', skills: [], mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
-      const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [], freshContextEachMessage: false };
+      const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [], freshContextEachMessage: false, includeSharedChannelHistory: true };
       log(entry, 'created', `Created ${bot.name}`);
       bots.set(id, entry); result = structuredClone(bot); changed(); break;
     }
@@ -239,6 +239,11 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const entry = store(args.botId);
       entry.freshContextEachMessage = args.enabled === true;
       result = entry.freshContextEachMessage; changed(); break;
+    }
+    case 'bot_set_channel_history': {
+      const entry = store(args.botId);
+      entry.includeSharedChannelHistory = args.enabled === true;
+      result = entry.includeSharedChannelHistory; changed(); break;
     }
     case 'bot_set_mode': {
       const entry = store(args.botId), mode = String(args.mode ?? '');

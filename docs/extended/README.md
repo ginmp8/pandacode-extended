@@ -4,8 +4,13 @@ This directory defines the **complete upstream functional parity contract** and 
 
 - **[Mandatory full upstream functional parity contract](upstream/parity-contract.md)** — complete copy, allowed Extended-only differences and verification gates
 - **[Extended release-tag and publication workflow](releasing.md)** — source app version, Extended tags, manual GitHub release gating, and no npm publishing
-**Current Extended source release:** **[0.11.0](0.11.0/README.md)** (release notes finalized for branch promotion; tag, GitHub Release and installer publication remain separate manual steps). The upstream application version remains synchronized independently from the fork.
+**Current planned Extended release documentation:** **[0.12.0](0.12.0/README.md)** (incremental development cycle; not tagged, approved or distributed). The upstream application/build version is synchronized separately with the fork.
 
+- [Extended 0.12.0 draft release notes](../../releases/extended/0.12.0.md)
+- [Extended 0.12.0 feature controls](0.12.0/feature-controls.md)
+- [Extended 0.12.0 dependency and security tracking](0.12.0/dependency-security.md)
+- [Extended 0.12.0 known-issues register](0.12.0/known-issues.md)
+- [Extended 0.12.0 release checklist](0.12.0/release-checklist.md)
 - [Extended 0.11.0 release notes](../../releases/extended/0.11.0.md)
 - [Extended 0.11.0 feature controls](0.11.0/feature-controls.md)
 - [Extended 0.11.0 dependency and security tracking](0.11.0/dependency-security.md)

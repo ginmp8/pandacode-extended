@@ -10,7 +10,7 @@
 - [ ] Re-read latest upstream fork `main` HEAD at each incremental import; include all unreleased source commits.
 - [ ] Compare **complete, nontruncated** upstream/Extended recursive trees, missing paths, modes, binaries and all shared modified hunks.
 - [ ] Attribute each new behavior/change to upstream and Extended commit SHAs; separate earlier-cycle inherited features from 0.11.0-specific changes.
-- [ ] Maintain a single incremental `base/development` → `base/hardened` PR; no automatic promotion into release branches.
+- [ ] Keep synchronization changes limited to direct, SHA-verified commits on `base/development`; PR management and release promotion are outside the synchronization workflow.
 
 ## Validation on final exact candidate SHA
 
@@ -61,3 +61,10 @@ This is a draft readiness record only. An imported code tree and a green CI run,
 | Native gates | Real Claude/Codex account-pool identity/usage, multi-login, restart, Settings On/Off, mobile/native packaging, Connect/MCP/cloud and credential paths remain unverified. |
 
 A green CI run, if confirmed, does not independently approve the 0.11.0 release.
+
+## 2026-11-07 — verification after 0.3.101 baseline correction
+
+- Pinned fork: [`008017de3316aea56af9294d4d3f8556b52174bb`](https://github.com/ginmp8/pandacode/commit/008017de3316aea56af9294d4d3f8556b52174bb), application 0.3.101. Previous Extended baseline-correction commit: [`b7bd4af0`](https://github.com/ginmp8/pandacode-extended/commit/b7bd4af07b02bf2cb783b8fd1b6fd6025866c04e). The subsequent [`d38df20e`](https://github.com/ginmp8/pandacode-extended/commit/d38df20e316724a495aad7ccfdee8dc0f66f1185) is an Extended bot-settings adjustment, not a newer upstream import.
+- Nontruncated recursive trees at `d38df20e316724a495aad7ccfdee8dc0f66f1185`: 1523 upstream blobs, 1574 Extended blobs, 1442 identical shared, 81 modified shared, 51 Extended-only, 0 missing upstream paths and 0 mode differences. Divergent code still needs hunk-level attribution and runtime acceptance.
+- [Push CI #42327608080](https://github.com/ginmp8/pandacode-extended/actions/runs/42327608080) and [PR-triggered CI #42327611710](https://github.com/ginmp8/pandacode-extended/actions/runs/42327611710) both completed successfully with **6/6 jobs** at `b7bd4af0`. [Release workflow #42328625919](https://github.com/ginmp8/pandacode-extended/actions/runs/42328625919) passed its six OS/architecture build jobs, prepare and SBOM, with publication **skipped** at that same SHA. The newer `d38df20e` CI [#42332206411](https://github.com/ginmp8/pandacode-extended/actions/runs/42332206411) and [#42332211752](https://github.com/ginmp8/pandacode-extended/actions/runs/42332211752) were **in progress** at inspection; documentation-only commits require their own exact-SHA check.
+- No native Settings On/Off, real Claude/Codex account, Connect, cloud/VM, installed-app or full divergent-hunk verification was performed. Green CI and zero missing source paths do **not** establish functional parity or approve Extended 0.11.0.

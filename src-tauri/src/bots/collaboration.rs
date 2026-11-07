@@ -423,41 +423,85 @@ fn callback_text(target: &str, channel: &str, request: &str, result: &str) -> St
     format!("Update from {target} in #{channel} (request {request}):\n\n{result}")
 }
 
-/// Exactly one callback attempt per completed/failed/stopped delivery. Claiming the attempt
-/// before dispatch prevents duplicate work on an uncertain crash; a failed delivery is recorded.
-pub(crate) async fn finish_delivery(app: &tauri::AppHandle, delivery_id: &str, reply: &str) {
-    let state = app.state::<AppState>();
-    let pending = (|| -> Result<Option<CallbackInfo>> {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
-        let item: Option<CallbackRow> = store.db.query_row(
-            "SELECT a.origin_bot_id,a.origin_channel_id,a.origin_external_id,d.bot_id,
-                    b.name,c.name,a.message_id,d.status
-             FROM extended_bot_channel_actions a
-             JOIN bot_shared_channel_deliveries d ON d.message_id=a.message_id
-             JOIN bots b ON b.id=d.bot_id
-             JOIN bot_shared_channels c ON c.id=d.channel_id
-             WHERE d.id=?1 AND a.kind='assignment'",
-            [delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,
-                r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
-        ).optional().map_err(|e| e.to_string())?;
-        let Some((origin, source_channel, external, _, name, channel, message_id, status)) = item else { return Ok(None); };
-        if !matches!(status.as_str(), "completed" | "failed" | "stopped") { return Ok(None); }
-        let result = match status.as_str() {
-            "completed" if !reply.trim().is_empty() => reply.trim().to_owned(),
-            "completed" => "The assigned bot finished without a text reply.".to_owned(),
-            "stopped" => "The assignment was stopped.".to_owned(),
-            _ if !reply.trim().is_empty() => reply.trim().to_owned(),
-            _ => "The assignment failed or was interrupted.".to_owned(),
-        };
-        let claimed = store.db.execute(
+/// Native admission is durable: a callback accepted for execution appears in the
+/// destination bot's queued messages or its recorded user turn. Briefs may follow
+/// the unique callback prefix; a previously admitted callback is never replayed.
+fn callback_admitted(store: &Store, session_id: &str, text: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM queued_messages WHERE session_id=?1 AND substr(text,1,length(?2))=?2
+           UNION ALL
+           SELECT 1 FROM messages WHERE session_id=?1 AND role='user'
+             AND substr(content,1,length(?2))=?2
+         )",
+        params![session_id, text], |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
+/// A normal completion may claim one send. Only startup recovery turns an
+/// interrupted 'sending' claim into 'failed' so it can be retried. The original
+/// callback result is preserved, even when the Rust task finished before restart.
+fn claim_callback(store: &Store, delivery_id: &str, reply: &str) -> Result<Option<CallbackInfo>> {
+    let item: Option<(String,String,String,String,String,String,String,String,String)> = store.db.query_row(
+        "SELECT a.origin_bot_id,a.origin_channel_id,a.origin_external_id,d.bot_id,
+                b.name,c.name,a.message_id,d.status,a.origin_session_id
+         FROM extended_bot_channel_actions a
+         JOIN bot_shared_channel_deliveries d ON d.message_id=a.message_id
+         JOIN bots b ON b.id=d.bot_id
+         JOIN bot_shared_channels c ON c.id=d.channel_id
+         WHERE d.id=?1 AND a.kind='assignment'",
+        [delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,
+            r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((origin, source_channel, external, _, name, channel, message_id, status, session_id)) = item else {
+        return Ok(None);
+    };
+    if !matches!(status.as_str(), "completed" | "failed" | "stopped") { return Ok(None); }
+    let fresh = match status.as_str() {
+        "completed" if !reply.trim().is_empty() => reply.trim().to_owned(),
+        "completed" => "The assigned bot finished without a text reply.".to_owned(),
+        "stopped" => "The assignment was stopped.".to_owned(),
+        _ if !reply.trim().is_empty() => reply.trim().to_owned(),
+        _ => "The assignment failed or was interrupted.".to_owned(),
+    };
+    let saved: Option<(String,String)> = store.db.query_row(
+        "SELECT result,state FROM extended_bot_channel_results WHERE delivery_id=?1",
+        [delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let (result, prior) = saved.unwrap_or((fresh, String::new()));
+    if prior == "sent" { return Ok(None); }
+    let text = callback_text(&name, &channel, &message_id, &result);
+    if !prior.is_empty() && callback_admitted(store, &session_id, &text)? {
+        store.db.execute(
+            "UPDATE extended_bot_channel_results SET state='sent',updated_at=?2 WHERE delivery_id=?1",
+            params![delivery_id,crate::storage::now()],
+        ).map_err(|error| error.to_string())?;
+        return Ok(None);
+    }
+    let claimed = if prior.is_empty() {
+        store.db.execute(
             "INSERT OR IGNORE INTO extended_bot_channel_results(delivery_id,result,state,updated_at)
              VALUES(?1,?2,'sending',?3)",
             params![delivery_id,result,crate::storage::now()],
-        ).map_err(|e| e.to_string())?;
-        if claimed == 0 { return Ok(None); }
-        let text = callback_text(&name, &channel, &message_id, &result);
-        Ok(Some((origin,source_channel,external,message_id,text,delivery_id.to_owned())))
-    })();
+        ).map_err(|error| error.to_string())?
+    } else if prior == "failed" {
+        store.db.execute(
+            "UPDATE extended_bot_channel_results SET state='sending',updated_at=?2
+             WHERE delivery_id=?1 AND state='failed'",
+            params![delivery_id,crate::storage::now()],
+        ).map_err(|error| error.to_string())?
+    } else { 0 };
+    if claimed == 0 { return Ok(None); }
+    Ok(Some((origin,source_channel,external,message_id,text,delivery_id.to_owned())))
+}
+
+/// Resume only callbacks not already admitted by the native bot gateway.
+/// A failed gateway admission is recoverable after restart; completed work is
+/// never re-executed simply because its callback confirmation was interrupted.
+pub(crate) async fn finish_delivery(app: &tauri::AppHandle, delivery_id: &str, reply: &str) {
+    let state = app.state::<AppState>();
+    let pending = state.store.lock().map_err(|error| error.to_string())
+        .and_then(|store| claim_callback(&store, delivery_id, reply));
     let Ok(Some((origin,source_channel,external,message_id,text,id))) = pending else { return };
     let delivered = gateway::deliver_with_queue(app, gateway::Inbound {
         bot_id: origin.clone(), channel_id: source_channel, thread: external,
@@ -466,10 +510,10 @@ pub(crate) async fn finish_delivery(app: &tauri::AppHandle, delivery_id: &str, r
         trusted: true, image_ids: None, moodboard_ids: None,
     }, true).await;
     if let Ok(store) = state.store.lock() {
-        let new_status = if delivered.is_ok() { "sent" } else { "failed" };
+        let next = if delivered.is_ok() { "sent" } else { "failed" };
         let _ = store.db.execute(
             "UPDATE extended_bot_channel_results SET state=?2,updated_at=?3 WHERE delivery_id=?1",
-            params![id,new_status,crate::storage::now()],
+            params![id,next,crate::storage::now()],
         );
     }
     if let Err(error) = delivered {
@@ -519,16 +563,21 @@ pub(crate) fn reconcile_unsent_requests(store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Interrupted work is marked failed by the upstream startup reconciliation first.
-/// Never re-execute a recipient just because its callback was interrupted.
+/// Startup alone reclaims interrupted sends. The admission check above distinguishes
+/// a callback already queued/launched from one lost before gateway admission.
 pub(crate) async fn resume_callbacks(app: &tauri::AppHandle) {
     let ids: Vec<String> = app.state::<AppState>().store.lock().ok().and_then(|store| {
+        store.db.execute(
+            "UPDATE extended_bot_channel_results SET state='failed',updated_at=?1 WHERE state='sending'",
+            [crate::storage::now()],
+        ).ok()?;
         let mut query = store.db.prepare(
             "SELECT d.id FROM bot_shared_channel_deliveries d
              JOIN extended_bot_channel_actions a ON a.message_id=d.message_id
              LEFT JOIN extended_bot_channel_results r ON r.delivery_id=d.id
              WHERE a.kind='assignment' AND d.status IN ('completed','failed','stopped')
-               AND r.delivery_id IS NULL ORDER BY d.created_at,d.id",
+               AND (r.delivery_id IS NULL OR r.state='failed')
+             ORDER BY d.created_at,d.id",
         ).ok()?;
         let rows = query.query_map([], |r| r.get::<_,String>(0)).ok()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().ok()
@@ -626,6 +675,58 @@ mod tests {
         ).unwrap();
         assert_eq!(count, 1);
         assert_eq!(shared_channels::message_status(&f.store, &id).unwrap(), "failed");
+    }
+
+    #[test]
+    fn interrupted_callbacks_recover_only_when_gateway_did_not_admit_them() {
+        let f=fixture();
+        let author=bot(&f,"Author");
+        let reviewer=bot(&f,"Reviewer");
+        let channel=shared_channels::create(&f.store,"quality",
+            &[author.id.clone(),reviewer.id.clone()]).unwrap();
+        let (session,_)=super::super::thread_session(&f.store,&author,DESKTOP,DESKTOP,"Author").unwrap();
+        let request_id=crate::storage::id();
+        let delivery_id=crate::storage::id();
+        let now=crate::storage::now();
+        f.store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,status,created_at)
+             VALUES(?1,?2,'user',?3,'Review','completed',?4)",
+            params![request_id,channel.id,author.id,now],
+        ).unwrap();
+        f.store.db.execute(
+            "INSERT INTO extended_bot_channel_actions(message_id,kind,origin_bot_id,origin_session_id,
+             origin_channel_id,origin_external_id,recipients,depth,route,idempotency_key,created_at)
+             VALUES(?1,'assignment',?2,?3,'desktop','desktop',?4,0,?5,'callback-test',?6)",
+            params![request_id,author.id,session,json!([reviewer.id]).to_string(),
+                json!([author.id]).to_string(),now],
+        ).unwrap();
+        f.store.db.execute(
+            "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,'completed',1,?6,?6)",
+            params![delivery_id,channel.id,request_id,reviewer.id,session,now],
+        ).unwrap();
+        let first=claim_callback(&f.store,&delivery_id,"Review completed").unwrap().unwrap();
+        assert!(claim_callback(&f.store,&delivery_id,"Review completed").unwrap().is_none(),
+            "two overlapping callbacks must not execute");
+        f.store.db.execute(
+            "UPDATE extended_bot_channel_results SET state='failed' WHERE delivery_id=?1",
+            [&delivery_id],
+        ).unwrap();
+        let retry=claim_callback(&f.store,&delivery_id,"").unwrap().unwrap();
+        assert_eq!(first.4,retry.4,"restart retains the original result");
+        f.store.db.execute(
+            "UPDATE extended_bot_channel_results SET state='failed' WHERE delivery_id=?1",
+            [&delivery_id],
+        ).unwrap();
+        crate::message_queue::add(&f.store,&session,&retry.4,&json!([])).unwrap();
+        assert!(claim_callback(&f.store,&delivery_id,"").unwrap().is_none(),
+            "a queued callback must not execute a second time");
+        let state:String=f.store.db.query_row(
+            "SELECT state FROM extended_bot_channel_results WHERE delivery_id=?1",
+            [&delivery_id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(state,"sent");
+        assert_eq!(crate::message_queue::list(&f.store,Some(&session)).unwrap().len(),1);
     }
 
     #[test]

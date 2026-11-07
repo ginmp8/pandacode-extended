@@ -38,7 +38,7 @@ export interface Pairing { channelId: string; senderId: string; senderName: stri
 export interface Thread { channelId: string; externalId: string; sessionId: string; updatedAt: number; }
 export interface Rule { id: string; pattern: string; decision: 'allow' | 'ask' | 'deny'; createdAt: number; }
 export interface Activity { id: number; kind: string; summary: string; detail: Record<string, unknown>; at: number; }
-export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; }
+export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; freshContextEachMessage?: boolean; }
 
 /** A message held by `ask` failover (`bot-failover` event, `bot_failover_pending`); answer with `bot_failover_decide`. */
 export interface FailoverAsk { botId: string; sessionId: string; cause: 'limit' | 'provider-error'; provider: ProviderId; model: string; target: BackupModel; resetsAt: number | null; }
@@ -109,7 +109,7 @@ const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
 ];
 const navFor = (section: Section): Nav => section === 'conversations' || section === 'rules' ? 'activity' : section;
 /** One labelled row, like a Settings row: title and hint on the left, the control on the right. */
-const row = (title: string, hint: string, control: string, stacked = false) => `<label class="bs-row ${stacked ? 'stacked' : ''}"><span class="bs-row-text"><strong>${title}</strong>${hint ? `<small>${escape(hint)}</small>` : ''}</span>${control}</label>`;
+const row = (title: string, hint: string, control: string, stacked = false, help = '') => `<label class="bs-row ${stacked ? 'stacked' : ''}"><span class="bs-row-text"><strong>${title}</strong>${help ? infoMark(help, `About ${title.toLowerCase()}`) : ''}${hint ? `<small>${escape(hint)}</small>` : ''}</span>${control}</label>`;
 const heading = (title: string, more = '') => `<h3 class="bs-heading">${escape(title)}${more}</h3>`;
 /** One outer card: its section head, then the inner card of rows (as in the design system's `.ds-card`). */
 const card = (title: string, body: string, more = '') => `<section class="bs-card">${heading(title, more)}<div class="bs-group">${body}</div></section>`;
@@ -360,6 +360,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         </div>`, infoMark('Optional. Tone, values and conversational style, kept apart from the instructions. Importing copies the file once; later changes to the file do not change the bot. Personality never grants tools or permissions.', 'About personality'))}
       ${card('Brain', `
         ${row('Harness', '', harness)}${row('Model', '', model)}${row('Reasoning', '', provider ? effortSelect(provider.id, bot.model, bot.reasoningEffort ?? '') : '')}
+        ${row('Fresh context each message', 'New native context for every turn', toggle('freshContextEachMessage', detail?.freshContextEachMessage === true, 'Fresh context each message'), false, 'Every new bot message starts a native harness context without replaying earlier chat turns. Current instructions, skills and saved memories are still supplied. The visible transcript, schedules, active work and queued messages remain intact. Messages arriving during a run are queued rather than steered into it. Separate context does not isolate workspace files.')}
         ${backupsRow(bot)}`)}
       ${card('Rules', `
         <input type="hidden" name="mode" value="${escape(mode)}">
@@ -670,6 +671,25 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     if (form?.matches('.bc-form')) { readDraft(form); return; }
     if (form && detail) {
       const bot = detail.bot;
+      if (target.matches('input[name=freshContextEachMessage]')) {
+        const checkbox = target as HTMLInputElement;
+        const botId = bot.id, enabled = checkbox.checked;
+        checkbox.disabled = true;
+        setSaved('saving');
+        void options.call<boolean>('bot_set_fresh_context', { botId, enabled }).then(saved => {
+          if (detail?.bot.id === botId) {
+            detail.freshContextEachMessage = saved;
+            setSaved('saved');
+          }
+        }).catch(cause => {
+          if (detail?.bot.id === botId) {
+            error = message(cause);
+            setSaved('error');
+            render();
+          }
+        }).finally(() => { if (checkbox.isConnected) checkbox.disabled = false; });
+        return;
+      }
       if (target.matches('[data-backup-add]')) {
         const value = (target as HTMLSelectElement).value;
         if (value) patchBot({ backupModels: [...(bot.backupModels ?? []), JSON.parse(value) as BackupModel] });

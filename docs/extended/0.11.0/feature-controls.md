@@ -15,3 +15,7 @@ The existing Extended controls include optional restrictions on automatic update
 - [ ] Record real regressions and fixes with commit/CI links; do not disable features to hide failures.
 
 No 0.11.0 functional acceptance evidence is established merely by opening this cycle.
+
+## Upstream 0.3.100 account pool integration
+
+Source: [`e0b65e51`](https://github.com/ginmp8/pandacode/commit/e0b65e51c4b6bc9c67982eaed08f7f13985fa01a); imported code: [`a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da). The provider account-pool option and one-click CLI sign-in are inherited upstream features, **not** new Extended-only security controls. The original provider toggle and account selection must remain functional while the existing Extended controls independently govern their own operations. Static import preserved the separate Extended control paths and dependency remediations; real On/Off, restart, multi-account and queued-message acceptance is still pending.

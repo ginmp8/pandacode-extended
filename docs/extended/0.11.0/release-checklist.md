@@ -36,3 +36,16 @@
 | 0.10.0 main promotion | [PR #114](https://github.com/ginmp8/pandacode-extended/pull/114) and [linear-rebase alternative #115](https://github.com/ginmp8/pandacode-extended/pull/115) at cycle opening |
 | First 0.11.0 documentation commit | This record; inspect actual published SHA after the commit |
 | 0.11.0 new upstream delta and final acceptance | Not yet collected |
+
+## 2026-11-06 — integrated upstream 0.3.100 evidence
+
+| Evidence | Verified observation |
+| --- | --- |
+| Source | [`ginmp8/pandacode:main` `e0b65e51`](https://github.com/ginmp8/pandacode/commit/e0b65e51c4b6bc9c67982eaed08f7f13985fa01a), 0.3.100, recursive source tree `5254ba8539430d29f4128318206321e6060c530d`, not truncated |
+| Code integration | [`a28ce807`](https://github.com/ginmp8/pandacode-extended/commit/a28ce807a9bcc3a8583440ff6035deb1fd0854da), parent `5c38850e5f289e8b159d605cb386fec140db2d97`; 7 exact added blobs + 18 patched shared files; 25 path updates total |
+| Whole-tree parity | Proposed code tree `0fef289e712f9d8616ccfd54fc5518a1974693ff`: 1,520 source paths, 1,569 Extended paths, 0 missing, 71 shared divergent, 49 Extended-only; all modes preserved. Differences still require complete hunk/behavior classification |
+| Application version | Root npm, npm lock root/package entry, Cargo manifest, Cargo.lock app package and Tauri config all verified as **0.3.100**; Extended Rust ZIP remains **9.0.5** |
+| Source functionality | Claude/Codex account pooling, usage-limit rollover, account sign-in, UI and tests imported from upstream; independently validated native behavior **pending** |
+| Exact-SHA CI | Must be checked for the final published documentation SHA; pending until full workflow completion |
+
+This is a draft readiness record only. An imported code tree and a green CI run, if one is later recorded, do not alone approve Extended 0.11.0 for distribution.

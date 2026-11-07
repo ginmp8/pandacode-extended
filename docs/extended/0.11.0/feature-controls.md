@@ -23,3 +23,7 @@ Source: [`e0b65e51`](https://github.com/ginmp8/pandacode/commit/e0b65e51c4b6bc9c
 ## PandaCode 0.3.101 compatibility checkpoint
 
 The upstream [0.3.101 import](https://github.com/ginmp8/pandacode-extended/commit/d7cf15467bf8f25563db253e7b35a1efeb2e5b5e) patched 24 shared files and added three upstream source files. Existing Extended control modules were retained in the resulting Git tree. Static hunk application does **not** demonstrate that On/Off settings or delegated accounts work at runtime. Test real-account sign-in/refresh, account-pool eligibility and usage display alongside optional bot/Connect/MCP/cloud controls before acceptance.
+
+## 2026-11-07 — unreleased upstream mobile rework
+
+Upstream mobile UI and push-notification changes from [`61b03bf2`](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102) were incorporated, including the registration-status/badge path. The Extended's existing named enum import compatibility was preserved in `mobile/src/ui/push.ts`. No new Extended setting was introduced. Mobile sign-in, notifications permission/registration, navigation and on-device interaction remain unverified; app and bot/Connect/MCP/cloud controls still require On/Off native regression tests.

@@ -31,3 +31,7 @@ Source: [`008017de`](https://github.com/ginmp8/pandacode/commit/008017de3316aea5
 ## 2026-11-07 — verified security checks at baseline commit
 
 At [`b7bd4af0`](https://github.com/ginmp8/pandacode-extended/commit/b7bd4af07b02bf2cb783b8fd1b6fd6025866c04e), both [push CI #42327608080](https://github.com/ginmp8/pandacode-extended/actions/runs/42327608080) and [PR-triggered CI #42327611710](https://github.com/ginmp8/pandacode-extended/actions/runs/42327611710) completed successfully, including the npm lockfile and RustSec Cargo.lock security audit jobs. These results are specific to that SHA; the following bot-settings commit `d38df20e` had CI pending at inspection. This does not establish that all dependencies are free of vulnerabilities or represent a new remediation.
+
+## 2026-11-07 — mobile lock reconciliation
+
+The upstream unreleased [mobile redesign commit](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102) introduces `react-native-keyboard-controller@1.22.7` in `mobile/package.json` and its lockfile. The Extended mobile manifest retains the existing `deepmerge`, `glob`, `minimatch`, `node-forge`, and `zod` overrides; the previous lock entries/remediations remain in place while the new upstream package metadata is added. This is an inherited dependency, not a new Extended-specific fix. npm/Expo CI and vulnerability checks must be confirmed against the published commit SHA.

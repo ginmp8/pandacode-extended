@@ -49,3 +49,8 @@ The whole-tree comparison after code integration found no missing source paths. 
 ## 2026-11-07 — complete-tree integration of unreleased upstream mobile design
 
 The pinned source advanced to [`61b03bf2`](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102), while the application remains 0.3.101. Its 65 new, 71 modified and 47 deleted files were reconciled; new visuals, navigation, mobile notification state and tests are inherited, not Extended-only. Two new splash PNGs were copied by exact blob hash. The 3 source/customized paths preserve the Extended npm overrides and Expo notification enum compatibility workaround. Final staging: 0 missing source paths and 80 divergent shared paths (77 still to be assessed by hunk). CI for the publishing SHA and device execution are required; 0.11.0 stays a draft.
+
+## 2026-11-07 — upstream iPhone beta link
+
+- Source [`13a7cb68`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a) adds the official iPhone TestFlight beta link to the download row and mobile instructions in the upstream README. The root README was mirrored byte for byte.
+- Inherited documentation change only, not a new Extended feature or independently tested beta distribution. App `0.3.101`, Extended candidate `0.11.0` (DRAFT). Native iPhone enrollment, launch and remote-control checks remain unverified.

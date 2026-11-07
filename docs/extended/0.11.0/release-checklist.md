@@ -75,3 +75,11 @@ A green CI run, if confirmed, does not independently approve the 0.11.0 release.
 - [x] Stage source delta: 65 added, 71 modified (3 reconciled with Extended), 47 deleted; exact source modes and binary splash hashes retained; 0 source paths missing, 0 mode mismatches, 80 differing shared files and 51 Extended-only paths.
 - [ ] Complete hunk-level assessment of 77 other differing shared files, native app/iOS/Android tests and Extended control On/Off acceptance.
 - [ ] Verify exact-SHA CI Node/TS, npm/RustSec, Expo/mobile, platform builds and workflow gating for the integration commit. **Pending publication and CI readback.** No release approval.
+
+## 2026-11-07 — upstream iPhone TestFlight README update
+
+- [x] Verify complete nontruncated source/Extended trees and pin source commit [`13a7cb68`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a) (app 0.3.101).
+- [x] Copy the only new upstream `README.md` blob exactly, including the TestFlight beta URL, and retain all Extended-only paths and prior dependency controls.
+- [ ] Independently test the live TestFlight enrollment, iOS installation, device authorization, Connect and push notifications.
+- [ ] Confirm CI against the exact newly published Extended commit (prior `ab977cfa` push/PR runs passed, but do not validate the new commit).
+- [ ] Finish 80 pre-existing shared-file hunk justifications and native Settings On/Off acceptance.

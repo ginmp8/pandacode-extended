@@ -1,6 +1,6 @@
 //! GitHub-backed, SHA-pinned bot manifest sources. No repository code is executed.
 //! Source content is validated before the shared import+backup gate is entered.
-use crate::{bots, extended_bot_manifest, storage::Store, AppState, Result};
+use crate::{bots, extended_bot_manifest, headless_bots, storage::Store, AppState, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -29,6 +29,10 @@ pub(crate) struct ManifestSource {
     pub last_applied_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_applied_hash: Option<String>,
+    /// Fingerprint of the local portable configuration at the last successful apply.
+    /// An unchanged Git document must still be reapplied when a user changed a local bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied_local_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -41,10 +45,13 @@ impl Default for SourceRegistry {
     fn default() -> Self { Self { version: 1, sources: Vec::new() } }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SourceReceipt {
     pub id: String,
+    pub repository: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
     pub commit: String,
     pub paths: Vec<String>,
     pub hashes: Vec<String>,
@@ -57,7 +64,13 @@ pub(crate) struct SyncOutcome {
     pub backup_path: Option<String>,
     pub lines: Vec<String>,
     pub failed: usize,
+    pub created: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+    pub started_at: i64,
+    pub finished_at: i64,
     pub applied: bool,
+    pub no_changes: bool,
 }
 
 fn valid_component(value: &str) -> bool {
@@ -267,7 +280,8 @@ async fn fetch_batch(registry: &SourceRegistry) -> Result<(Value, Vec<SourceRece
             hashes.push(read_hash(&bytes));
             documents.push((source.id.clone(), path.clone(), doc));
         }
-        receipts.push(SourceReceipt { id: source.id.clone(), commit: sha, paths: source.manifests.clone(), hashes });
+        receipts.push(SourceReceipt { id: source.id.clone(), repository: source.repository.clone(),
+            reference: source.reference.clone(), commit: sha, paths: source.manifests.clone(), hashes });
     }
     Ok((aggregate(documents)?, receipts))
 }
@@ -302,6 +316,7 @@ fn preserve_receipts(previous: &SourceRegistry, updated: &mut SourceRegistry) {
         source.last_checked_sha = matching.and_then(|old| old.last_checked_sha.clone());
         source.last_applied_sha = matching.and_then(|old| old.last_applied_sha.clone());
         source.last_applied_hash = matching.and_then(|old| old.last_applied_hash.clone());
+        source.last_applied_local_hash = matching.and_then(|old| old.last_applied_local_hash.clone());
     }
 }
 
@@ -320,32 +335,95 @@ fn save_registry(path: &Path, registry: &SourceRegistry) -> Result<()> {
     result
 }
 
+/// Hash exported portable configuration, not transient process state or credentials.
+fn local_state_hash(store: &Store) -> Result<String> {
+    let current = headless_bots::export(store)?;
+    Ok(read_hash(&serde_json::to_vec(&current).map_err(|error| error.to_string())?))
+}
+
+fn receipt_hash(receipt: &SourceReceipt) -> String {
+    read_hash(receipt.hashes.join("\n").as_bytes())
+}
+
+fn same_applied_content(registry: &SourceRegistry, receipts: &[SourceReceipt], local_hash: &str) -> bool {
+    !registry.sources.is_empty() && registry.sources.len() == receipts.len()
+        && registry.sources.iter().all(|source| receipts.iter().any(|receipt|
+            source.id == receipt.id
+                && source.last_applied_hash.as_deref() == Some(receipt_hash(receipt).as_str())
+                && source.last_applied_local_hash.as_deref() == Some(local_hash)))
+}
+
+/// Count actual portable-config deltas, not attempted SQL updates or log messages.
+fn bot_delta_counts(doc: &Value, before: &Value, after: &Value) -> (usize, usize, usize) {
+    let indexed = |root: &Value| -> BTreeMap<String, Value> {
+        root["bots"].as_array().into_iter().flatten()
+            .filter_map(|item| item.get("name").and_then(Value::as_str)
+                .map(|name| (bots::clean(name, 60), item.clone())))
+            .collect()
+    };
+    let old = indexed(before);
+    let new = indexed(after);
+    let mut created = 0;
+    let mut updated = 0;
+    let mut unchanged = 0;
+    let requested = indexed(doc);
+    for name in requested.keys() {
+        match (old.get(name), new.get(name)) {
+            (None, Some(_)) => created += 1,
+            (Some(before), Some(after)) if before != after => updated += 1,
+            (Some(_), Some(_)) => unchanged += 1,
+            _ => {},
+        }
+    }
+    (created, updated, unchanged)
+}
+
 async fn check_sources(registry: &mut SourceRegistry) -> Result<SyncOutcome> {
+    let started_at = crate::storage::now();
     let (_, receipts) = fetch_batch(registry).await?;
     for source in &mut registry.sources {
         source.last_checked_sha = receipts.iter().find(|item| item.id == source.id).map(|item| item.commit.clone());
     }
     Ok(SyncOutcome {
         sources: receipts, backup_path: None, lines: vec!["All selected Git manifests were validated without changing bots.".into()],
-        failed: 0, applied: false,
+        failed: 0, created: 0, updated: 0, unchanged: 0,
+        started_at, finished_at: crate::storage::now(), applied: false, no_changes: false,
     })
 }
 
 pub(crate) async fn sync(
     app: &tauri::AppHandle, registry: &mut SourceRegistry,
 ) -> Result<SyncOutcome> {
+    let started_at = crate::storage::now();
     let (document, receipts) = fetch_batch(registry).await?;
     let dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let state = app.state::<AppState>();
-    let (report, backup) = {
+    let (result, local_hash, added_channels) = {
         let store: std::sync::MutexGuard<'_, Store> = state.store.lock().map_err(|error| error.to_string())?;
-        extended_bot_manifest::apply_with_backup(&store, &dir, &document, crate::storage::now())?
+        let current_hash = local_state_hash(&store)?;
+        if same_applied_content(registry, &receipts, &current_hash) {
+            let unchanged = document["bots"].as_array().map_or(0, Vec::len);
+            (SyncOutcome { sources: receipts, backup_path: None,
+                lines: vec!["Git manifest content and local bot configuration are unchanged; no import was necessary.".into()],
+                failed: 0, created: 0, updated: 0, unchanged,
+                started_at, finished_at: crate::storage::now(), applied: true, no_changes: true,
+            }, current_hash, Vec::new())
+        } else {
+            let before = headless_bots::export(&store)?;
+            let (report, backup) = extended_bot_manifest::apply_with_backup(
+                &store, &dir, &document, crate::storage::now())?;
+            let after = headless_bots::export(&store)?;
+            let (created, updated, unchanged) = bot_delta_counts(&document, &before, &after);
+            let local_hash = read_hash(&serde_json::to_vec(&after).map_err(|error| error.to_string())?);
+            (SyncOutcome { sources: receipts, backup_path: Some(backup.display().to_string()),
+                lines: report.lines, failed: report.failed, created, updated, unchanged,
+                started_at, finished_at: crate::storage::now(),
+                applied: report.failed == 0, no_changes: false,
+            }, local_hash, report.added_channels)
+        }
     };
-    let mut result = SyncOutcome {
-        sources: receipts, backup_path: Some(backup.display().to_string()),
-        lines: report.lines, failed: report.failed, applied: report.failed == 0,
-    };
-    for added in &report.added_channels {
+    let mut result = result;
+    for added in &added_channels {
         let channel = {
             let store = state.store.lock().map_err(|error| error.to_string())?;
             bots::channels::get(&store, &added.id)?
@@ -357,15 +435,18 @@ pub(crate) async fn sync(
             source.last_checked_sha = Some(receipt.commit.clone());
             if result.applied {
                 source.last_applied_sha = Some(receipt.commit.clone());
-                source.last_applied_hash = Some(read_hash(receipt.hashes.join("\n").as_bytes()));
+                source.last_applied_hash = Some(receipt_hash(receipt));
+                source.last_applied_local_hash = Some(local_hash.clone());
             }
         }
     }
-    if report.failed > 0 {
+    if result.failed > 0 {
         result.lines.push("The batch was only partially applied; last-applied revisions were not advanced.".into());
     }
-    let _ = app.emit("bots-changed", ());
-    let _ = app.emit("bot-shared-channel-changed", json!({}));
+    if !result.no_changes {
+        let _ = app.emit("bots-changed", ());
+        let _ = app.emit("bot-shared-channel-changed", json!({}));
+    }
     Ok(result)
 }
 
@@ -433,6 +514,45 @@ pub async fn bot_manifest_sources_sync(
 mod tests {
     use super::*;
     #[test]
+    fn unchanged_source_content_can_skip_import_only_when_local_config_has_not_drifted() {
+        let receipt = SourceReceipt {
+            id: "source".into(), repository: "https://github.com/team/config".into(),
+            reference: "main".into(), commit: "new-pinned-sha".into(),
+            paths: vec!["bots.json".into()], hashes: vec!["same-content".into()],
+        };
+        let registry = SourceRegistry { version: 1, sources: vec![ManifestSource {
+            id: receipt.id.clone(), repository: receipt.repository.clone(),
+            reference: receipt.reference.clone(), manifests: receipt.paths.clone(), auto_sync: false,
+            last_checked_sha: Some("older-commit".into()),
+            last_applied_sha: Some("older-commit".into()),
+            last_applied_hash: Some(receipt_hash(&receipt)),
+            last_applied_local_hash: Some("local-state".into()),
+        }] };
+        assert!(same_applied_content(&registry, std::slice::from_ref(&receipt), "local-state"));
+        assert!(!same_applied_content(&registry, std::slice::from_ref(&receipt), "changed-locally"));
+        let mut changed = receipt.clone();
+        changed.hashes = vec!["changed-content".into()];
+        assert!(!same_applied_content(&registry, &[changed], "local-state"));
+        let output = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(output["repository"], receipt.repository);
+        assert_eq!(output["ref"], receipt.reference);
+        assert_eq!(output["paths"], json!(["bots.json"]));
+    }
+
+    #[test]
+    fn sync_counts_actual_portable_configuration_changes() {
+        let prior = json!({"bots":[
+            {"name":"existing","mode":"ask"},
+            {"name":"same","mode":"ask"}]});
+        let after = json!({"bots":[
+            {"name":"existing","mode":"full"},
+            {"name":"same","mode":"ask"},
+            {"name":"new","mode":"ask"}]});
+        let request = json!({"bots":[{"name":"existing"},{"name":"same"},{"name":"new"}]});
+        assert_eq!(bot_delta_counts(&request, &prior, &after), (1, 1, 1));
+    }
+
+    #[test]
     fn registry_edits_cannot_forge_or_carry_stale_apply_receipts() {
         let saved = SourceRegistry { version: 1, sources: vec![ManifestSource {
             id: "source".into(), repository: "https://github.com/team/config".into(),
@@ -440,15 +560,18 @@ mod tests {
             last_checked_sha: Some("trusted-checked".into()),
             last_applied_sha: Some("trusted-applied".into()),
             last_applied_hash: Some("trusted-hash".into()),
+            last_applied_local_hash: Some("trusted-local".into()),
         }] };
         let mut forged = saved.clone();
         forged.sources[0].last_applied_sha = Some("forged".into());
         preserve_receipts(&saved, &mut forged);
         assert_eq!(forged.sources[0].last_applied_sha.as_deref(), Some("trusted-applied"));
+        assert_eq!(forged.sources[0].last_applied_local_hash.as_deref(), Some("trusted-local"));
         forged.sources[0].manifests = vec!["different.json".into()];
         preserve_receipts(&saved, &mut forged);
         assert_eq!(forged.sources[0].last_applied_sha, None);
         assert_eq!(forged.sources[0].last_checked_sha, None);
+        assert_eq!(forged.sources[0].last_applied_local_hash, None);
     }
 
     #[test]
@@ -462,6 +585,7 @@ mod tests {
             id:"team".into(), repository:"https://github.com/acme/config".into(),
             reference:"main".into(), manifests:vec!["bots/one.json".into()], auto_sync:false,
             last_checked_sha:None, last_applied_sha:None, last_applied_hash:None,
+            last_applied_local_hash:None,
         }] };
         assert!(validate_registry(&good).is_ok());
         for bad in ["../secrets.json", "/abs.json", "bots/../secret.json", "bots\\secret.json"] {

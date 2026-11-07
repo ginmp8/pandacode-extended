@@ -11,8 +11,9 @@ export function resolveReleaseIdentity({ appVersion, refType, refName, hasNotes 
   const releaseTag = refType === 'tag' ? refName : `v${app}`;
   if (typeof releaseTag !== 'string' || !releaseTag.startsWith('v')) throw new Error('Release tag must be vX.Y.Z.');
   const release = version(releaseTag.slice(1));
-  const extended = release !== app;
-  const notes = extended ? `releases/extended/${release}.md` : `releases/${release}.md`;
+  const extendedNotes = `releases/extended/${release}.md`;
+  const extended = refType === 'tag' && (release !== app || hasNotes(extendedNotes));
+  const notes = extended ? extendedNotes : `releases/${release}.md`;
   if (!hasNotes(notes)) throw new Error(`Release notes ${notes} are missing or empty.`);
   return {
     version: app,

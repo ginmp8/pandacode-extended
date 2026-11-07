@@ -1014,6 +1014,62 @@ fn independent_workers_are_eligible_but_dependencies_and_overlaps_wait() {
     assert!(eligible(&team, 3));
 }
 #[test]
+fn normalize_relative_scopes_without_allowing_path_escapes() {
+    let mut scopes = vec!["./src\\components".into(), ".\\tests\\unit.rs".into(), "src/".into()];
+    normalize_file_scopes(&mut scopes);
+    assert_eq!(scopes, vec!["src/components", "tests/unit.rs", "src/"]);
+    validate_files(&scopes).unwrap();
+    for invalid in [
+        "../secret", "./../secret", "C:\\Users\\secret", "C:secret", "\\\\server\\share",
+        "/etc/shadow", "src\\..\\secret", "src\\\\name", "src\\*.rs",
+    ] {
+        let mut scopes = vec![invalid.into()];
+        normalize_file_scopes(&mut scopes);
+        assert!(validate_files(&scopes).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn dispatch_normalizes_scopes_and_identifies_invalid_assignments() {
+    let (state, sid) = state_fixture();
+    let mut safe = assignment("safe", "fast", "src");
+    safe["files"] = json!([".\\src\\components", "./tests/unit.rs"]);
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments": [safe]})).unwrap();
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(team.workers[0].files, vec!["src/components", "tests/unit.rs"]);
+    drop(store);
+
+    let (state, sid) = state_fixture();
+    let mut bad = assignment("bad-path", "fast", "src");
+    bad["files"] = json!(["C:\\private\\file.rs"]);
+    let err = call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [assignment("valid", "fast", "tests"), bad]
+    })).unwrap_err();
+    assert!(err.contains("bad-path") && err.contains("C:/private/file.rs"), "{err}");
+    let store = state.store.lock().unwrap();
+    assert!(load(&store, &sid).unwrap().unwrap().workers.is_empty(), "an invalid batch must be atomic");
+}
+
+#[test]
+fn followup_normalizes_scopes_before_reserving_files() {
+    let (state, sid) = state_fixture();
+    let ids = call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [assignment("first", "fast", "src")]
+    })).unwrap();
+    let worker_id = ids["workerIds"][0].clone();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (run, _rx) = claim(&state, action);
+    finish(&state, &run, "Done", true);
+    call(&state, &sid, "pandacode_followup_worker", json!({
+        "workerId": worker_id, "key": "more", "prompt": "Update code",
+        "files": [".\\src\\updated.rs"]
+    })).unwrap();
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert_eq!(team.workers[0].files, vec!["src/updated.rs"]);
+}
+
+#[test]
 fn scope_validation_rejects_escapes_and_globs() {
     for path in [
         "../secret",

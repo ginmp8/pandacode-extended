@@ -211,6 +211,72 @@ fn active_bot_threads_pick_up_chat_permission_on_the_next_turn() {
 }
 
 #[test]
+fn bot_message_without_fresh_context_reuses_the_desktop_conversation() {
+    let f = fixture();
+    let source = bot(&f);
+    let target = create(&f.store, &input("Partner"), &f.root).unwrap();
+    let (desktop, _) = thread_session(&f.store, &target, DESKTOP, DESKTOP, "Partner · You").unwrap();
+    let (same, thread) = shared_channels::bot_message_target(&f.store, &source, &target, "first", false).unwrap();
+    let (also_same, _) = shared_channels::bot_message_target(&f.store, &source, &target, "second", false).unwrap();
+    assert_eq!(thread, DESKTOP);
+    assert_eq!(same, desktop);
+    assert_eq!(also_same, desktop);
+    assert_eq!(threads(&f.store, &target.id).unwrap().len(), 1);
+}
+
+#[test]
+fn fresh_bot_message_keeps_active_desktop_queue_memory_and_schedules() {
+    let f = fixture();
+    let source = bot(&f);
+    let target = create(&f.store, &input("Partner"), &f.root).unwrap();
+    let (source_session, _) = thread_session(&f.store, &source, DESKTOP, DESKTOP, "Scout · You").unwrap();
+    let (desktop, _) = thread_session(&f.store, &target, DESKTOP, DESKTOP, "Partner · You").unwrap();
+    f.store.status(&desktop, "running").unwrap();
+    crate::message_queue::add(&f.store, &desktop, "Keep this queued message", &json!([])).unwrap();
+    let memory = remember(&f.store, &target.id, "Use the project glossary", "user").unwrap();
+    schedule::create(&f.store, &target.id, &schedule::ScheduleInput {
+        prompt: "Check status later".into(),
+        kind: "interval".into(),
+        interval_minutes: Some(60),
+        ..Default::default()
+    }, "bot", 0).unwrap();
+    let target = get(&f.store, &target.id).unwrap();
+
+    let (fresh, thread) = shared_channels::bot_message_target(&f.store, &source, &target, "fresh-request", true).unwrap();
+    assert_eq!(thread, "delegation:fresh-request");
+    assert_ne!(fresh, desktop);
+    let new_task = f.store.session(&fresh).unwrap();
+    assert!(new_task.resume_id.is_none());
+    assert_eq!(new_task.project_id, target.project_id);
+    assert_eq!(new_task.provider, target.provider);
+    assert_eq!(new_task.model, target.model);
+    assert_eq!(brief_version_of(&f.store, &fresh).unwrap(), -1, "the recipient receives current instructions and memories on its first turn");
+    assert_eq!(owner_of(&f.store, &fresh).unwrap().unwrap().0.id, target.id);
+
+    assert_eq!(f.store.session(&desktop).unwrap().status, "running");
+    let queued = crate::message_queue::list(&f.store, Some(&desktop)).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "Keep this queued message");
+    assert!(crate::message_queue::list(&f.store, Some(&fresh)).unwrap().is_empty());
+    assert!(memories(&f.store, &target.id).unwrap().iter().any(|item| item.id == memory.id));
+    assert_eq!(schedule::list(&f.store, &target.id).unwrap().len(), 1);
+
+    let (same, _) = shared_channels::bot_message_target(&f.store, &source, &target, "fresh-request", true).unwrap();
+    let (another, _) = shared_channels::bot_message_target(&f.store, &source, &target, "next-request", true).unwrap();
+    assert_eq!(same, fresh, "reopening one delegation must not create a duplicate session");
+    assert_ne!(another, fresh, "separate delegations must have separate contexts");
+
+    f.store.db.execute("INSERT INTO bot_messages(id,source_bot_id,target_bot_id,source_session_id,target_session_id,source_channel_id,source_external_id,text,status,depth,created_at,updated_at) VALUES('fresh-request',?1,?2,?3,?4,'desktop','desktop','Review this task','queued',1,1,1)", params![source.id,target.id,source_session,fresh]).unwrap();
+    let running = shared_channels::promote_taken(&f.store, &fresh, "Message from Scout:\n\nReview this task").unwrap();
+    assert_eq!(running, Running::Message("fresh-request".into()));
+    let status = |id: &str| f.store.db.query_row("SELECT status FROM bot_messages WHERE id=?1", [id], |r| r.get::<_, String>(0)).unwrap();
+    assert_eq!(status("fresh-request"), "in_progress");
+    shared_channels::launch_failed(&f.store, &fresh, &running);
+    assert_eq!(status("fresh-request"), "queued", "a failed launch must leave the request recoverable");
+    assert_eq!(crate::message_queue::list(&f.store, Some(&desktop)).unwrap().len(), 1);
+}
+
+#[test]
 fn startup_reconciles_active_bot_deliveries_as_failed() {
     let f = fixture();
     let source = bot(&f);

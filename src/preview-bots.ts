@@ -1,5 +1,5 @@
 /** Browser preview for bots: in-memory sample data, no network, no channels. Native builds use src-tauri/src/bots. */
-import type { Activity, Bot, BotDetail, BotInput, Channel, FailoverAsk, Memory, Pairing, Rule, Schedule, Thread } from './bots';
+import type { Activity, Bot, BotDetail, BotInput, Channel, FailoverAsk, Memory, Pairing, Rule, Schedule, SharedChannelHistoryMode, SharedChannelHistoryPreference, Thread } from './bots';
 import type { Project, Session } from './types';
 import type { SharedChannelDetail, SharedChannelMessage, SharedChannelSummary } from './bot-shared-channels';
 
@@ -12,6 +12,7 @@ interface Store { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels:
 const bots = new Map<string, Store>();
 const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
+const channelHistoryOverrides = new Map<string, Map<string, 'include' | 'exclude'>>();
 let activityId = 1;
 /** Ordinary tasks started with a bot, and those that have had its brief. */
 const taskBots = new Map<string, string>(), taskBriefed = new Set<string>();
@@ -37,8 +38,19 @@ function nextRun(input: Pick<Schedule, 'kind' | 'intervalMinutes' | 'timeOfDay'>
   while (next.getTime() <= now || input.kind === 'weekdays' && [0, 6].includes(next.getDay())) next.setDate(next.getDate() + 1);
   return next.getTime();
 }
+function historyPreferences(entry: Store): SharedChannelHistoryPreference[] {
+  const overrides = channelHistoryOverrides.get(entry.bot.id);
+  return [...sharedChannels.values()]
+    .filter(channel => !channel.archived && channel.memberIds.includes(entry.bot.id))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+    .map(channel => {
+      const mode: SharedChannelHistoryMode = overrides?.get(channel.id) ?? 'default';
+      return { channelId: channel.id, name: channel.name, mode,
+        effective: mode === 'include' || (mode === 'default' && entry.includeSharedChannelHistory) };
+    });
+}
 function detail(entry: Store): BotDetail {
-  return structuredClone({ bot: entry.bot, memories: entry.memories, schedules: entry.schedules, channels: entry.channels, pairings: entry.pairings, threads: entry.threads, rules: entry.rules, freshContextEachMessage: entry.freshContextEachMessage, includeSharedChannelHistory: entry.includeSharedChannelHistory, serverPort: 47321 });
+  return structuredClone({ bot: entry.bot, memories: entry.memories, schedules: entry.schedules, channels: entry.channels, pairings: entry.pairings, threads: entry.threads, rules: entry.rules, freshContextEachMessage: entry.freshContextEachMessage, includeSharedChannelHistory: entry.includeSharedChannelHistory, sharedChannelHistory: historyPreferences(entry), serverPort: 47321 });
 }
 function channelOf(id: string): [Store, Channel] {
   for (const entry of bots.values()) { const channel = entry.channels.find(item => item.id === id); if (channel) return [entry, channel]; }
@@ -174,14 +186,20 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       const requested = String(args.leadBotId ?? '');
       channel.name = String(args.name ?? channel.name).trim().replace(/^#+/, '').slice(0, 48) || channel.name;
       const removed = channel.memberIds.filter(id => !memberIds.includes(id));
-      if (removed.length) stopChannelWork(channel, removed);
+      if (removed.length) {
+        stopChannelWork(channel, removed);
+        for (const id of removed) channelHistoryOverrides.get(id)?.delete(channel.id);
+      }
       channel.memberIds = memberIds; channel.leadBotId = memberIds.includes(requested) ? requested : memberIds[0] ?? null; channel.updatedAt = Date.now();
       result = structuredClone(channel); host.emit('bot-shared-channel-changed', { channelId: channel.id }); break;
     }
     case 'bot_shared_channel_archive': {
       const channel = sharedChannels.get(String(args.channelId));
       if (!channel) throw new Error('This channel no longer exists.');
-      if (args.archived) stopChannelWork(channel);
+      if (args.archived) {
+        stopChannelWork(channel);
+        for (const overrides of channelHistoryOverrides.values()) overrides.delete(channel.id);
+      }
       channel.archived = Boolean(args.archived); channel.updatedAt = Date.now(); result = structuredClone(channel); host.emit('bot-shared-channel-changed', { channelId: channel.id }); break;
     }
     case 'bot_shared_channel_post': {
@@ -245,6 +263,21 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       entry.includeSharedChannelHistory = args.enabled === true;
       result = entry.includeSharedChannelHistory; changed(); break;
     }
+    case 'bot_set_shared_channel_history_override': {
+      const entry = store(args.botId);
+      const mode = String(args.mode ?? '');
+      if (!['default', 'include', 'exclude'].includes(mode)) throw new Error('Choose Use default, Include or Exclude.');
+      const channel = sharedChannels.get(String(args.channelId));
+      if (!channel || channel.archived || !channel.memberIds.includes(entry.bot.id)) {
+        throw new Error('Choose a bot that belongs to this channel.');
+      }
+      let overrides = channelHistoryOverrides.get(entry.bot.id);
+      if (!overrides) { overrides = new Map(); channelHistoryOverrides.set(entry.bot.id, overrides); }
+      if (mode === 'default') overrides.delete(channel.id);
+      else overrides.set(channel.id, mode as 'include' | 'exclude');
+      result = historyPreferences(entry).find(item => item.channelId === channel.id);
+      changed(); break;
+    }
     case 'bot_set_mode': {
       const entry = store(args.botId), mode = String(args.mode ?? '');
       if (!MODES.includes(mode)) throw new Error('Choose a permission mode for the bot.');
@@ -258,7 +291,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     }
     case 'bot_set_paused': { const entry = store(args.botId); entry.bot = { ...entry.bot, paused: Boolean(args.paused), updatedAt: Date.now() }; log(entry, 'updated', args.paused ? 'Paused' : 'Resumed'); result = structuredClone(entry.bot); changed(); break; }
     case 'bot_reset': { const entry = store(args.botId); entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared'); result = structuredClone(entry.bot); changed(); break; }
-    case 'bot_delete': store(args.botId); bots.delete(args.botId); changed(); break;
+    case 'bot_delete': store(args.botId); bots.delete(args.botId); channelHistoryOverrides.delete(String(args.botId)); changed(); break;
     case 'bot_remember': {
       const entry = store(args.botId); const content = String(args.content ?? '').trim().slice(0, 2000);
       if (!content) throw new Error('A memory needs some text.');

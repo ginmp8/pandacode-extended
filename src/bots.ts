@@ -38,7 +38,11 @@ export interface Pairing { channelId: string; senderId: string; senderName: stri
 export interface Thread { channelId: string; externalId: string; sessionId: string; updatedAt: number; }
 export interface Rule { id: string; pattern: string; decision: 'allow' | 'ask' | 'deny'; createdAt: number; }
 export interface Activity { id: number; kind: string; summary: string; detail: Record<string, unknown>; at: number; }
-export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; freshContextEachMessage?: boolean; includeSharedChannelHistory?: boolean; }
+export type SharedChannelHistoryMode = 'default' | 'include' | 'exclude';
+export interface SharedChannelHistoryPreference {
+  channelId: string; name: string; mode: SharedChannelHistoryMode; effective: boolean;
+}
+export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; freshContextEachMessage?: boolean; includeSharedChannelHistory?: boolean; sharedChannelHistory?: SharedChannelHistoryPreference[]; }
 
 /** A message held by `ask` failover (`bot-failover` event, `bot_failover_pending`); answer with `bot_failover_decide`. */
 export interface FailoverAsk { botId: string; sessionId: string; cause: 'limit' | 'provider-error'; provider: ProviderId; model: string; target: BackupModel; resetsAt: number | null; }
@@ -95,13 +99,14 @@ export interface BotsOptions {
   onDeleted?(): void;
 }
 export interface BotsView { dispose(): void; refresh(): void; agent(sessionId: string, kind: string): void; }
-export type Section = Tab | 'profile';
+export type Section = Tab | 'profile' | 'shared-channels';
 
 /** The settings nav, like the app's own Settings. Activity also holds conversations and rules. */
-type Nav = 'profile' | 'skills' | 'channels' | 'schedules' | 'memory' | 'activity';
+type Nav = 'profile' | 'skills' | 'channels' | 'shared-channels' | 'schedules' | 'memory' | 'activity';
 const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
   { id: 'profile', label: 'Profile', icon: 'bot', text: 'Who the bot is, how it works and what runs it.' },
   { id: 'channels', label: 'Connections', icon: 'globe', text: 'Talk to it from a browser, Telegram, Slack, Discord or WhatsApp.' },
+  { id: 'shared-channels', label: 'Shared Channels', icon: 'users', text: 'Choose how much local channel history is added to this bot\'s assignments.' },
   { id: 'schedules', label: 'Schedules', icon: 'refresh', text: 'Recurring or one-off work the bot starts on its own.' },
   { id: 'memory', label: 'Memory', icon: 'leaf', text: 'Kept across conversations. The bot adds its own as it learns.' },
   { id: 'skills', label: 'Skills', icon: 'widget', text: 'Library skills and MCP servers this bot uses, by reference. Nothing is copied.' },
@@ -343,6 +348,26 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       <select name="fallbackMode" aria-label="Switching to a backup"><option value="ask" ${bot.fallbackMode !== 'auto' ? 'selected' : ''}>Ask first</option><option value="auto" ${bot.fallbackMode === 'auto' ? 'selected' : ''}>Automatic</option></select></div></div>`;
   }
 
+
+  /** Extended-only channel context policy, separate from external Connections and native memory. */
+  function renderSharedChannelSettings(value: BotDetail): string {
+    const enabled = value.includeSharedChannelHistory !== false;
+    const toggle = `<input type="checkbox" class="bots-switch" name="includeSharedChannelHistory" ${enabled ? 'checked' : ''} aria-label="Include channel history by default">`;
+    const entries = (value.sharedChannelHistory ?? []).map(channel => {
+      const status = channel.effective ? 'Included' : 'Excluded';
+      const source = channel.mode === 'default' ? 'bot default' : 'channel override';
+      const select = `<select name="sharedChannelHistoryMode" data-channel-history-id="${escape(channel.channelId)}" aria-label="History for #${escape(channel.name)}">
+        <option value="default" ${channel.mode === 'default' ? 'selected' : ''}>Use default</option>
+        <option value="include" ${channel.mode === 'include' ? 'selected' : ''}>Include</option>
+        <option value="exclude" ${channel.mode === 'exclude' ? 'selected' : ''}>Exclude</option>
+      </select>`;
+      return row(`#${channel.name}`, `${status} via ${source}`, select);
+    }).join('');
+    return `<p class="bs-history-explanation">These preferences only control automatic prompt-context injection into new local shared-channel assignments. They never delete or hide stored messages, change native harness history or bot memory, or rewrite queued or active work.</p>
+      ${card('Default history', row('Include channel history by default', 'Add up to eight recent posts and replies to assignments', toggle, false, 'The default applies to each joined local shared channel unless that channel has an explicit Include or Exclude override. Saved channel messages, bot memory and fresh native context are independent.'))}
+      ${card('Per-channel history', entries || '<p class="bs-channel-history-empty">This bot is not a member of an active shared channel.</p>')}`;
+  }
+
   /** Settings → Profile, saved as you go: identity, the brain behind the bot, and its rules. */
   function renderProfile(bot: Bot): string {
     const { provider, harness, model } = harnessControls(bot.provider, bot.model, false);
@@ -367,7 +392,6 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       ${card('Brain', `
         ${row('Harness', '', harness)}${row('Model', '', model)}${row('Reasoning', '', provider ? effortSelect(provider.id, bot.model, bot.reasoningEffort ?? '') : '')}
         ${row('Fresh context each message', 'New native context for every turn', toggle('freshContextEachMessage', detail?.freshContextEachMessage === true, 'Fresh context each message'), false, 'Every new bot message starts a native harness context without replaying earlier chat turns. Current instructions, skills and saved memories are still supplied. Shared-channel history and durable memories are separate sources of context. The visible transcript, schedules, active work and queued messages remain intact. Messages arriving during a run are queued rather than steered into it. Separate context does not isolate workspace files.')}
-        ${row('Include shared channel history', 'Provide recent channel messages with assignments', toggle('includeSharedChannelHistory', detail?.includeSharedChannelHistory !== false, 'Include shared channel history'), false, 'By default each shared-channel assignment includes up to eight earlier posts and bot replies. Turn off to provide only the new assignment to this bot. Channel messages remain visible, and other bots keep their own settings. This is independent of fresh harness context and saved memories. Already-queued assignments keep their existing prompt.')}
         ${backupsRow(bot)}`)}
       ${card('Rules', `
         <input type="hidden" name="mode" value="${escape(mode)}">
@@ -514,9 +538,10 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       const nav = `<div class="bs-nav" role="tablist" aria-orientation="vertical" aria-label="Bot settings">${SECTIONS.map(item => `<button type="button" role="tab" id="bs-tab-${item.id}" data-section="${item.id}" aria-controls="bs-panel" aria-selected="${item.id === section}" tabindex="${item.id === section ? 0 : -1}">${icon(item.icon)}<span>${item.label}</span>${badge(item.id)}</button>`).join('')}</div>`;
       const current = SECTIONS.find(item => item.id === section)!;
       const body = section === 'profile' ? renderProfile(detail.bot)
+        : section === 'shared-channels' ? renderSharedChannelSettings(detail)
         : section === 'activity' ? `${heading('Conversations')}${renderPanel('conversations', detail, context)}${heading('Rules', infoMark('Answer the bot\'s requests for you. Deny wins over allow, and * matches anything, as in npm test*. Risky actions such as sudo, force pushes, deleting files or anything about passwords always ask, whatever the rules say.', 'About rules'))}${renderPanel('rules', detail, context)}${heading('Activity log')}${renderPanel('activity', detail, context)}`
         : renderPanel(section, detail, context);
-      const saved = section === 'profile' ? `<span class="bs-saved" role="status" aria-live="polite" data-state="${saveState}"></span>` : '';
+      const saved = (section === 'profile' || section === 'shared-channels') ? `<span class="bs-saved" role="status" aria-live="polite" data-state="${saveState}"></span>` : '';
       morph(pane, `${renderHeader(detail.bot)}${confirm}${alert}<div class="bs-body">${nav}<div class="bots-panel" id="bs-panel" role="tabpanel" aria-labelledby="bs-tab-${section}"><div class="bs-panel-head"><h2>${current.label}${saved}</h2><p>${escape(current.text)}</p></div>${body}</div></div>`, 9);
       resetFields(pane);
       setSaved(saveState);
@@ -628,7 +653,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     else if (action === 'delete' && bot) context.confirm(`Delete ${bot.name}?`, 'This removes the bot, its conversations and its channel connections. Its workspace folder stays on disk.', 'Delete', async () => { await options.call('bot_delete', { botId: bot.id }); selected = ''; options.notify(`${bot.name} was deleted`); if (single) { options.onDeleted?.(); return; } await load(); });
     else if (action === 'confirm-cancel') { confirming = null; render(); }
     else if (action === 'confirm-run' && confirming) { const run = confirming.action; confirming = null; render(); void work(run); }
-    else if (section !== 'profile') panelClick(target, section, context);
+    else if (section !== 'profile' && section !== 'shared-channels') panelClick(target, section, context);
   };
   const submit = (event: SubmitEvent) => {
     const form = event.target as HTMLFormElement;
@@ -636,7 +661,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     event.preventDefault();
     if (form.matches('.bc-form')) createBot(form);
     else if (form.matches('.bots-profile')) queueSave();
-    else if (section !== 'profile') panelSubmit(form, section, context);
+    else if (section !== 'profile' && section !== 'shared-channels') panelSubmit(form, section, context);
   };
   /** A new harness brings its own models, permissions and reasoning levels. */
   function providerChanged(form: HTMLFormElement, providerId: ProviderId): void {
@@ -675,6 +700,42 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       input.value = '';
       if (file) void readSoulFile(file).then(text => setSoul(text), (failure: Error) => setSoul('', failure.message));
       return;
+    }
+    if (detail && section === 'shared-channels') {
+      const botId = detail.bot.id;
+      if (target.matches('input[name=includeSharedChannelHistory]')) {
+        const checkbox = target as HTMLInputElement;
+        checkbox.disabled = true;
+        setSaved('saving');
+        void options.call<boolean>('bot_set_channel_history', { botId, enabled: checkbox.checked }).then(saved => {
+          if (detail?.bot.id !== botId) return;
+          detail.includeSharedChannelHistory = saved;
+          detail.sharedChannelHistory = (detail.sharedChannelHistory ?? []).map(item =>
+            item.mode === 'default' ? { ...item, effective: saved } : item);
+          setSaved('saved');
+          render();
+        }).catch(cause => {
+          if (detail?.bot.id === botId) { error = message(cause); setSaved('error'); render(); }
+        }).finally(() => { if (checkbox.isConnected) checkbox.disabled = false; });
+        return;
+      }
+      if (target.matches('select[name=sharedChannelHistoryMode]')) {
+        const input = target as HTMLSelectElement;
+        const channelId = input.dataset.channelHistoryId ?? '';
+        input.disabled = true;
+        setSaved('saving');
+        void options.call<SharedChannelHistoryPreference>('bot_set_shared_channel_history_override',
+          { botId, channelId, mode: input.value }).then(saved => {
+          if (detail?.bot.id !== botId) return;
+          detail.sharedChannelHistory = (detail.sharedChannelHistory ?? []).map(item =>
+            item.channelId === saved.channelId ? saved : item);
+          setSaved('saved');
+          render();
+        }).catch(cause => {
+          if (detail?.bot.id === botId) { error = message(cause); setSaved('error'); render(); }
+        }).finally(() => { if (input.isConnected) input.disabled = false; });
+        return;
+      }
     }
     const form = target.closest<HTMLFormElement>('.bc-form,.bots-profile');
     if (form && target.matches('select[name=provider]')) providerChanged(form, (target as HTMLSelectElement).value as ProviderId);
@@ -716,7 +777,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       queueSave();
       return;
     }
-    if (section !== 'profile') panelChange(target, section, context);
+    if (section !== 'profile' && section !== 'shared-channels') panelChange(target, section, context);
   };
   const typed = (event: Event) => {
     const target = event.target as HTMLElement;

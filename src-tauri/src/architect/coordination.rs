@@ -66,14 +66,14 @@ impl Actor {
 
 pub(super) fn tools(worker: bool) -> Vec<Value> {
     let mut tools = vec![
-        tool("send_team_message", "Message \"architect\", a teammate ID or \"all\"; replyTo threads. urgent only if it blocks them now (steers a worker, wakes an idle architect).", json!({"recipient":{"type":"string"},"key":{"type":"string"},"message":{"type":"string"},"replyTo":{"type":"integer"},"urgent":{"type":"boolean"}}), &["recipient", "key", "message"]),
-        tool("read_team_mailbox", "Read messages (marks read): afterId = nextCursor; if cut, offset = nextOffset, offsetId.", json!({"afterId":{"type":"integer"},"limit":{"type":"integer"},"offset":{"type":"integer"},"offsetId":{"type":"integer"}}), &[]),
-        tool("team_notes", "Shared durable facts: set (empty deletes), get (offset pages), list (cursor).", json!({"action":{"type":"string","enum":["set","get","list"]},"key":{"type":"string"},"value":{"type":"string"},"cursor":{"type":"string"},"offset":{"type":"integer"}}), &["action"]),
+        tool("send_team_message", "Message architect, teammate ID, or all; replyTo threads. urgent only for blockers (steers/wakes).", json!({"recipient":{"type":"string"},"key":{"type":"string"},"message":{"type":"string"},"replyTo":{"type":"integer"},"urgent":{"type":"boolean"}}), &["recipient", "key", "message"]),
+        tool("read_team_mailbox", "Read+mark messages; afterId=nextCursor; cut text needs nextOffset+offsetId.", json!({"afterId":{"type":"integer"},"limit":{"type":"integer"},"offset":{"type":"integer"},"offsetId":{"type":"integer"}}), &[]),
+        tool("team_notes", "Shared notes: set (empty deletes), get(offset), list(cursor).", json!({"action":{"type":"string","enum":["set","get","list"]},"key":{"type":"string"},"value":{"type":"string"},"cursor":{"type":"string"},"offset":{"type":"integer"}}), &["action"]),
     ];
     // The architect's list_workers already shows every worker's ID, status and files.
     if worker {
-        tools.insert(0, tool("team_directory", "Teammates: ID, name, status, files; offset pages.", json!({"offset":{"type":"integer"}}), &[]));
-        tools.push(tool("checkpoint_worker", "Save progress: work and checks, nextSteps, blocker (wakes the architect; null clears). Not a finish.", json!({"key":{"type":"string"},"summary":{"type":"string"},"nextSteps":{"type":"string"},"blocker":{"type":["string","null"]}}), &["key","summary","nextSteps"]));
+        tools.insert(0, tool("team_directory", "Teammates: ID, status, files; offset pages.", json!({"offset":{"type":"integer"}}), &[]));
+        tools.push(tool("checkpoint_worker", "Checkpoint work/checks and nextSteps; blocker wakes lead (null clears). Not finish.", json!({"key":{"type":"string"},"summary":{"type":"string"},"nextSteps":{"type":"string"},"blocker":{"type":["string","null"]}}), &["key","summary","nextSteps"]));
     }
     tools
 }

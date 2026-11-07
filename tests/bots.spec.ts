@@ -242,6 +242,8 @@ test.describe('bots', () => {
     await expect(toggle).not.toBeChecked();
     const help = panel(page).getByRole('img', { name: 'About fresh context each message' });
     await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
+    await help.click();
+    await expect(toggle).not.toBeChecked();
     await toggle.check();
     await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
     await page.keyboard.press('Escape');
@@ -249,7 +251,12 @@ test.describe('bots', () => {
     await expect(toggle).toBeChecked();
     await page.keyboard.press('Escape');
 
-    await newBot(page, 'Writer');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
+    await bots(page).getByRole('button', { name: 'Create bot' }).click();
+    await expect(bots(page)).toBeHidden();
     await openSettings(page, undefined, 'Writer');
     await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
     await page.keyboard.press('Escape');

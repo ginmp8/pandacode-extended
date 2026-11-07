@@ -73,7 +73,7 @@ pub(crate) fn prepare_turn(store: &Store, session_id: &str, text: &str) -> Resul
 pub async fn bot_set_fresh_context(app: tauri::AppHandle, window: tauri::WebviewWindow,
     state: State<'_, AppState>, bot_id: String, enabled: bool) -> Result<bool> {
     if window.label() != "main" { return Err("Bots are managed from the main window.".into()); }
-    let saved = set(&state.store.lock().map_err(|e| e.to_string())?, &bot_id, enabled)?;
+    let saved = set(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, enabled)?;
     let _ = app.emit("bots-changed", ());
     Ok(saved)
 }

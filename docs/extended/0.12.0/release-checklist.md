@@ -9,7 +9,7 @@
 - [x] Prior `main` `e0e807dd265e0ff3ee4260585a7767caa6965b40` has an identical Git tree; histories differ due to the prior rebase.
 - [x] Capture the prior `base/development` tip `1a84a19a3a964dcc83dd40f326635952c6e5e04a`. Its one unpromoted change was a 0.11.0 documentation-index status marker; the 0.12.0 index replaces it.
 - [x] Open fresh 0.12.0 release notes, controls, dependency/security, known-issues and readiness files without editing 0.11.0 history.
-- [ ] Confirm the first 0.12.0 documentation commit and its exact-SHA CI after publication.
+- [x] Confirm the first 0.12.0 documentation commit [`99206f1c`](https://github.com/ginmp8/pandacode-extended/commit/99206f1c0a9f1f6753227a6e33bb8df0bd6f8d45): [push CI #42394967107](https://github.com/ginmp8/pandacode-extended/actions/runs/42394967107) and [PR CI #42395013636](https://github.com/ginmp8/pandacode-extended/actions/runs/42395013636) passed 6/6 jobs each. This verifies the opening documentation commit, not the final release or native feature controls.
 
 ## Continuous upstream synchronization
 
@@ -43,6 +43,6 @@
 | `main` | [`e0e807dd265e0ff3ee4260585a7767caa6965b40`](https://github.com/ginmp8/pandacode-extended/commit/e0e807dd265e0ff3ee4260585a7767caa6965b40), same Git tree |
 | Prior exact-main CI | [#42392453324](https://github.com/ginmp8/pandacode-extended/actions/runs/42392453324): 6/6 passed; only validates 0.11.0 source |
 | Fork at opening | [`13a7cb68583cf77ac6c4ec351abc3ebc020ff62a`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a), app `0.3.101` |
-| 0.12.0 native / integration CI | Pending; no runtime result implied by scaffolding |
+| First 0.12.0 documentation SHA CI | [`99206f1c`](https://github.com/ginmp8/pandacode-extended/commit/99206f1c0a9f1f6753227a6e33bb8df0bd6f8d45): [push #42394967107](https://github.com/ginmp8/pandacode-extended/actions/runs/42394967107) and [PR #42395013636](https://github.com/ginmp8/pandacode-extended/actions/runs/42395013636), 6/6 jobs successful each. Final exact-SHA CI and native integration acceptance remain pending. |
 
 This checklist records a plan and observed historical facts; unchecked items do not constitute executed verification.

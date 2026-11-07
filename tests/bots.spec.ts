@@ -33,8 +33,8 @@ async function showTasksView(page: Page): Promise<void> {
 async function openBots(page: Page): Promise<void> {
   await page.goto('/');
   await showBotsView(page);
-  await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
-  await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+  await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+  await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
   await expect(bots(page)).toBeVisible();
 }
 
@@ -189,8 +189,8 @@ test.describe('bots', () => {
     await expect(panel(page)).toBeHidden();
     // A second bot on the same harness keeps its own, empty selection (same page: preview bots live in memory).
     await showBotsView(page);
-    await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
     await bots(page).getByRole('region', { name: 'Suggestions' }).getByRole('button', { name: /Researcher/ }).click();
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
@@ -279,8 +279,8 @@ test.describe('bots', () => {
     await page.keyboard.press('Escape');
 
     await showBotsView(page);
-    await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
     await expect(bots(page)).toBeHidden();
@@ -871,7 +871,7 @@ test.describe('bots', () => {
     await expect(sidebar(page).getByText('No bots yet')).toBeVisible({ timeout: 10_000 });
     await expect(sidebar(page).locator('.bot-row-skeleton')).toHaveCount(0);
     await sidebar(page).getByRole('button', { name: 'New bot or channel' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
     await expect(bots(page)).toBeVisible();
   });
 });

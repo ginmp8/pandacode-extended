@@ -4,9 +4,16 @@ import { expect, test, type Page } from '@playwright/test';
 async function mount(page: Page, mode: 'import' | 'export') {
   await page.evaluate(async requestedMode => {
     const w = window as any;
+    // Match the real app: a modal dialog owns the UI. A detached body child
+    // is inert while PandaCode has another modal in the top layer.
+    const dialog = document.createElement('dialog');
+    dialog.className = 'bot-manifest-dialog';
+    dialog.style.cssText = 'max-width:900px;width:85vw;max-height:90vh;overflow:auto;padding:0;';
     const host = document.createElement('section');
     host.id = 'manifest-test-host';
-    document.body.append(host);
+    dialog.append(host);
+    document.body.append(dialog);
+    dialog.showModal();
     w.__manifestCalls = [];
     w.__manifestApplied = 0;
     w.__manifestRegistry = { version: 1, sources: [] };

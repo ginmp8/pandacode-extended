@@ -24,11 +24,11 @@ test.describe('bot collaboration', () => {
       document.body.append(host);
     });
     const channel = page.locator('#bot-collaboration-fixture');
-    await expect(channel.locator('[data-message-id="post"]')).toContainText('Author');
-    await expect(channel.locator('[data-message-id="post"]')).toContainText('Channel update');
-    await expect(channel.locator('[data-message-id="request"]')).toContainText('Requested Reviewer · Queued');
-    await expect(channel.locator('[data-message-id="direct"]')).toContainText('Direct review was requested');
-    await expect(channel.locator('[data-message-id="direct"]')).toContainText('In progress');
+    await expect(channel.locator('article.bc-message[data-message-id="post"]')).toContainText('Author');
+    await expect(channel.locator('article.bc-message[data-message-id="post"]')).toContainText('Channel update');
+    await expect(channel.locator('article.bc-message[data-message-id="request"]')).toContainText('Requested Reviewer · Queued');
+    await expect(channel.locator('.bc-assigned[data-message-id="direct"]')).toContainText('Direct review was requested');
+    await expect(channel.locator('.bc-assigned[data-message-id="direct"]')).toContainText('In progress');
     await expect(channel.locator('.bc-message')).toHaveCount(2);
     await expect(channel.locator('.bc-assigned')).toHaveCount(1);
   });

@@ -239,7 +239,9 @@ test.describe('bots', () => {
     await newBot(page, 'Scout');
     await openSettings(page);
     const toggle = panel(page).getByRole('checkbox', { name: 'Fresh context each message' });
+    const channelHistory = panel(page).getByRole('checkbox', { name: 'Include shared channel history' });
     await expect(toggle).not.toBeChecked();
+    await expect(channelHistory).toBeChecked();
     const help = panel(page).getByRole('img', { name: 'About fresh context each message' });
     await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
     // The title, tooltip and switch belong to the first row; the hint is a separate line.
@@ -257,11 +259,18 @@ test.describe('bots', () => {
     }
     await help.click();
     await expect(toggle).not.toBeChecked();
+    const historyHelp = panel(page).getByRole('img', { name: 'About include shared channel history' });
+    await expect(historyHelp).toHaveAttribute('data-tip', /up to eight earlier posts and bot replies/i);
+    await historyHelp.click();
+    await expect(channelHistory).toBeChecked();
+    await channelHistory.uncheck();
+    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
     await toggle.check();
     await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
     await page.keyboard.press('Escape');
     await openSettings(page);
     await expect(toggle).toBeChecked();
+    await expect(channelHistory).not.toBeChecked();
     await page.keyboard.press('Escape');
 
     await showBotsView(page);
@@ -272,11 +281,18 @@ test.describe('bots', () => {
     await expect(bots(page)).toBeHidden();
     await openSettings(page, undefined, 'Writer');
     await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
+    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Include shared channel history' })).toBeChecked();
     await page.keyboard.press('Escape');
     await showBotsView(page);
     await sidebar(page).getByRole('button', { name: 'Chat with Scout' }).click();
     await openSettings(page);
     await expect(toggle).toBeChecked();
+    await expect(channelHistory).not.toBeChecked();
+    await channelHistory.check();
+    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
+    await page.keyboard.press('Escape');
+    await openSettings(page);
+    await expect(channelHistory).toBeChecked();
   });
 
   test('chatting with a bot streams like any task and keeps its brief out of the transcript', async ({ page }) => {

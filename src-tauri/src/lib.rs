@@ -4203,6 +4203,7 @@ pub fn run() {
                 bots::bot_create,
                 bots::bot_update,
                 bots::extended::bot_set_fresh_context,
+                bots::extended::bot_set_channel_history,
                 bots::bot_set_mode,
                 bots::bot_set_paused,
                 bots::bot_reset,

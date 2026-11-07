@@ -15,7 +15,7 @@ const MAX_TEXT: usize = 16 * 1024;
 pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS extended_bot_channel_actions(
-            message_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_messages(id) ON DELETE CASCADE,
+            message_id TEXT PRIMARY KEY,
             kind TEXT NOT NULL CHECK(kind IN ('post','assignment')),
             origin_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
             origin_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -31,19 +31,32 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS extended_bot_channel_origin
             ON extended_bot_channel_actions(origin_session_id,created_at,message_id);
         CREATE TABLE IF NOT EXISTS extended_bot_channel_results(
-            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            delivery_id TEXT PRIMARY KEY,
             result TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN ('sending','sent','failed')),
             updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS extended_bot_direct_routes(
-            message_id TEXT PRIMARY KEY REFERENCES bot_messages(id) ON DELETE CASCADE,
-            source_delivery_id TEXT REFERENCES bot_shared_channel_deliveries(id) ON DELETE SET NULL,
+            message_id TEXT PRIMARY KEY,
+            source_delivery_id TEXT,
             parent_request_id TEXT,
             route TEXT NOT NULL CHECK(json_valid(route))
         );",
+    ).map_err(|e| e.to_string())?;
+    // The app can reconstruct upstream channel tables while migrating older databases.
+    // Avoid cross-table foreign keys here, then prune metadata when upstream rows vanish.
+    db.execute_batch(
+        "DELETE FROM extended_bot_channel_results WHERE delivery_id NOT IN
+           (SELECT id FROM bot_shared_channel_deliveries);
+         DELETE FROM extended_bot_direct_routes WHERE message_id NOT IN
+           (SELECT id FROM bot_messages);
+         DELETE FROM extended_bot_channel_actions WHERE message_id NOT IN
+           (SELECT id FROM bot_shared_channel_messages);",
     ).map_err(|e| e.to_string())
 }
+
+type CallbackInfo = (String, String, String, String, String, String);
+type CallbackRow = (String, String, String, String, String, String, String, String);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Route {
@@ -238,8 +251,9 @@ fn resolve_recipients(store: &Store, channel: &shared_channels::SharedChannel, s
     Ok(recipients)
 }
 
-fn identity(store: &Store, source: &Thread, bot: &Bot, kind: &str, channel_id: &str,
+fn identity(store: &Store, source: &Thread, bot: &Bot, target: (&str, &str),
     text: &str, recipients: &[String], explicit: Option<&str>) -> Result<String> {
+    let (kind, channel_id) = target;
     if let Some(key) = explicit {
         if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
             return Err("The idempotency key must contain 1 to 128 printable characters.".into());
@@ -278,7 +292,7 @@ pub(crate) fn post(store: &Store, bot: &Bot, source: &Thread, target: &str,
     require_member(&channel, &bot.id)?;
     let text = clean_text(raw)?;
     let route = route(store, &source.session_id, &bot.id)?;
-    let key = identity(store, source, bot, "post", &channel.id, &text, &[], key)?;
+    let key = identity(store, source, bot, ("post", &channel.id), &text, &[], key)?;
     if let Some(id) = existing(store, &key, "post", &channel.id, &bot.id, &text, &[])? {
         return Ok(json!({"postId":id,"channelId":channel.id,"status":"posted","replayed":true}));
     }
@@ -312,7 +326,7 @@ pub(crate) async fn request(app: &tauri::AppHandle, bot: &Bot, source: &Thread,
         let text = clean_text(raw)?;
         let route = route(&store, &source.session_id, &bot.id)?;
         let recipients = resolve_recipients(&store, &channel, bot, names, &route)?;
-        let key = identity(&store, source, bot, "assignment", &channel.id, &text, &recipients, key)?;
+        let key = identity(&store, source, bot, ("assignment", &channel.id), &text, &recipients, key)?;
         if let Some(id) = existing(&store, &key, "assignment", &channel.id, &bot.id, &text, &recipients)? {
             (channel.id, id, recipients, route.depth+1, crate::storage::now(), false)
         } else {
@@ -405,9 +419,9 @@ fn callback_text(target: &str, channel: &str, request: &str, result: &str) -> St
 /// before dispatch prevents duplicate work on an uncertain crash; a failed delivery is recorded.
 pub(crate) async fn finish_delivery(app: &tauri::AppHandle, delivery_id: &str, reply: &str) {
     let state = app.state::<AppState>();
-    let pending = (|| -> Result<Option<(String,String,String,String,String,String)>> {
+    let pending = (|| -> Result<Option<CallbackInfo>> {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let item: Option<(String,String,String,String,String,String,String,String)> = store.db.query_row(
+        let item: Option<CallbackRow> = store.db.query_row(
             "SELECT a.origin_bot_id,a.origin_channel_id,a.origin_external_id,d.bot_id,
                     b.name,c.name,a.message_id,d.status
              FROM extended_bot_channel_actions a
@@ -536,7 +550,7 @@ mod tests {
         let author=bot(&f,"Author");
         let reviewer=bot(&f,"Reviewer");
         let launch=shared_channels::create(&f.store,"launch",&[author.id.clone(),reviewer.id.clone()]).unwrap();
-        let other=shared_channels::create(&f.store,"other",&[author.id.clone()]).unwrap();
+        let other=shared_channels::create(&f.store,"other",std::slice::from_ref(&author.id)).unwrap();
         let (_,session)=("unused",super::super::thread_session(&f.store,&author,DESKTOP,DESKTOP,"Author").unwrap().0);
         let thread=super::super::owner_of(&f.store,&session).unwrap().unwrap().1;
         let sent=post(&f.store,&author,&thread,&launch.id,"@Reviewer Build is ready.",Some("milestone")).unwrap();
@@ -562,10 +576,10 @@ mod tests {
             &[author.id.clone(),reviewer.id.clone(),duplicate.id.clone()]).unwrap();
         let route=Route::initial(&author.id,0);
         assert!(resolve_recipients(&f.store,&channel,&author,&[],&route).is_err());
-        assert!(resolve_recipients(&f.store,&channel,&author,&[author.id.clone()],&route).is_err());
+        assert!(resolve_recipients(&f.store,&channel,&author,std::slice::from_ref(&author.id),&route).is_err());
         assert!(resolve_recipients(&f.store,&channel,&author,&["reviewer".into()],&route).is_err());
         assert!(resolve_recipients(&f.store,&channel,&author,&[reviewer.id.clone(),reviewer.id.clone()],&route).is_err());
-        assert_eq!(resolve_recipients(&f.store,&channel,&author,&[reviewer.id.clone()],&route).unwrap(),vec![reviewer.id.clone()]);
+        assert_eq!(resolve_recipients(&f.store,&channel,&author,std::slice::from_ref(&reviewer.id),&route).unwrap(),vec![reviewer.id.clone()]);
         let one=route.to(&author.id,&reviewer.id).unwrap();
         assert!(one.to(&reviewer.id,&author.id).is_err());
         let two=one.to(&reviewer.id,&duplicate.id).unwrap();
@@ -610,7 +624,7 @@ mod tests {
     fn idempotency_keys_are_scoped_to_source_and_payload() {
         let f=fixture();
         let author=bot(&f,"Author");
-        let channel=shared_channels::create(&f.store,"release",&[author.id.clone()]).unwrap();
+        let channel=shared_channels::create(&f.store,"release",std::slice::from_ref(&author.id)).unwrap();
         let (session,_)=super::super::thread_session(&f.store,&author,DESKTOP,DESKTOP,"Author").unwrap();
         let thread=super::super::owner_of(&f.store,&session).unwrap().unwrap().1;
         let saved=post(&f.store,&author,&thread,&channel.id,"One update",Some("run-123")).unwrap();

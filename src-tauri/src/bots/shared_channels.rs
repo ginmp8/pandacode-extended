@@ -394,7 +394,7 @@ pub(crate) fn bot_message_target(store: &Store, source: &Bot, target: &Bot, mess
     Ok((session_id, thread))
 }
 
-pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, source_thread: &super::Thread, target: &Bot, text: &str, depth: u8, fresh_context: bool, route: &collaboration::Route) -> Result<String> {
+pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, source_thread: &super::Thread, target: &Bot, text: &str, fresh_context: bool, route: &collaboration::Route) -> Result<String> {
     let text = text.trim();
     if text.is_empty() { return Err("Write a message for the other bot.".into()); }
     if text.chars().count() > MAX_TEXT { return Err("Keep bot messages under 16,384 characters.".into()); }
@@ -407,7 +407,7 @@ pub(crate) async fn deliver_bot_message(app: &tauri::AppHandle, source: &Bot, so
     // Queued until the gateway launches its turn (`promote_taken`).
     {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        store.db.execute("INSERT INTO bot_messages(id,source_bot_id,target_bot_id,source_session_id,target_session_id,source_channel_id,source_external_id,text,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'queued',?9,?10,?10)", params![id,source.id,target.id,source_thread.session_id,session_id,source_thread.channel_id,source_thread.external_id,text,depth as i64,crate::storage::now()]).map_err(|e| e.to_string())?;
+        store.db.execute("INSERT INTO bot_messages(id,source_bot_id,target_bot_id,source_session_id,target_session_id,source_channel_id,source_external_id,text,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'queued',?9,?10,?10)", params![id,source.id,target.id,source_thread.session_id,session_id,source_thread.channel_id,source_thread.external_id,text,route.depth as i64,crate::storage::now()]).map_err(|e| e.to_string())?;
         collaboration::record_direct_route(&store, &id, &source_thread.session_id, route)?;
     }
     let inbound = gateway::Inbound { bot_id: target.id.clone(), channel_id: DESKTOP.into(), thread: target_thread, sender_id: format!("bot:{}", source.id), sender_name: format!("Message from {}", source.name), text: format!("Message from {}:\n\n{}", source.name, text), trusted: true, image_ids: None, moodboard_ids: None };

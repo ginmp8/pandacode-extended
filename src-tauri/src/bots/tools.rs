@@ -114,7 +114,7 @@ pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &st
             path
         };
         let id = shared_channels::deliver_bot_message(app, &bot, &source_thread, &target,
-            &text, path.depth, args["freshContext"].as_bool().unwrap_or(false), &path).await?;
+            &text, args["freshContext"].as_bool().unwrap_or(false), &path).await?;
         let _ = app.emit("bot-messages-changed", ());
         return Ok(json!({"messageId":id,"to":target.name,"status":"sent"}));
     }

@@ -78,6 +78,8 @@ mod jj;
 mod tray;
 mod headless;
 mod headless_bots;
+mod extended_bot_manifest;
+mod extended_bot_git;
 
 pub use usage_keychain::handle_usage_keychain_helper;
 pub use cloud_agents::handle_cloud_bridge;
@@ -4197,6 +4199,14 @@ pub fn run() {
                 message_queue::queue_take,
                 message_queue::queue_restore,
                 message_queue::steer_task,
+                extended_bot_manifest::bot_manifest_import,
+                extended_bot_manifest::bot_manifest_export,
+                extended_bot_manifest::bot_manifest_export_file,
+                extended_bot_manifest::bot_manifest_export_folder,
+                extended_bot_git::bot_manifest_sources_list,
+                extended_bot_git::bot_manifest_sources_save,
+                extended_bot_git::bot_manifest_sources_check,
+                extended_bot_git::bot_manifest_sources_sync,
                 bots::bots_list,
                 bots::bot_desktop_thread,
                 bots::bot_detail,

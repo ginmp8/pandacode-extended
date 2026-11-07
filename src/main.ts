@@ -5850,6 +5850,26 @@ async function openJevTests(url?: string, anchor?: HTMLElement): Promise<void> {
   if (!dialog.open || dialog.firstElementChild !== loading) return;
   await showJevTests(dialog, context);
 }
+async function showBotManifestDialog(mode: 'import' | 'export'): Promise<void> {
+  const title = mode === 'import' ? 'Import / Sync bots' : 'Export bots';
+  const dialog = modal(title, '<div id="bot-manifest-host"><p role="status">Loading bot manifests…</p></div>', 'bot-manifest-dialog');
+  const host = dialog.querySelector<HTMLElement>('#bot-manifest-host')!;
+  try {
+    const { mountBotManifests } = await import('./bot-manifests');
+    if (!dialog.open || !host.isConnected) return;
+    await mountBotManifests(host, mode, { call, onApplied: async () => {
+      await reloadBotProjects();
+      await reloadSessions();
+      botsView?.refresh();
+      renderBots();
+    } });
+  } catch (error) {
+    if (dialog.open && host.isConnected) {
+      host.textContent = 'Cannot open bot manifests: ' + (error instanceof Error ? error.message : String(error));
+      host.setAttribute('role', 'alert');
+    }
+  }
+}
 async function showConversationImport(): Promise<void> {
   const dialog = modal('Import conversations', '<div id="conversation-import-host"><p role="status">Loading…</p></div>', 'conversation-import-dialog');
   const host = dialog.querySelector<HTMLElement>('#conversation-import-host')!;
@@ -6739,6 +6759,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'new-bot': hideCreateBotMenu(); await showBots({ startNew: true }); break;
     case 'new-bot-menu': await showCreateBotMenu(element); break;
     case 'new-channel': hideCreateBotMenu(); await createSharedChannel(); break;
+    case 'import-sync-bots': hideCreateBotMenu(); await showBotManifestDialog('import'); break;
+    case 'export-bots': hideCreateBotMenu(); await showBotManifestDialog('export'); break;
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
     case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;

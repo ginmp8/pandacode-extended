@@ -25,6 +25,7 @@ enum Command {
     SignOut,
     FullAccess { enabled: bool },
     ExportBots { path: PathBuf },
+    SyncBots { path: PathBuf },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -75,6 +76,25 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 /// Per-command startup, run from setup.
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
+        Command::SyncBots { path } => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::extended_bot_git::run_headless(&app, &path).await {
+                    Ok(result) => {
+                        for source in &result.sources {
+                            println!("Source {} pinned at {} ({} manifest files).", source.id, source.commit, source.paths.len());
+                        }
+                        if let Some(backup) = &result.backup_path { println!("Bot configuration backup: {backup}"); }
+                        for line in &result.lines { println!("{line}"); }
+                        std::process::exit(if result.failed == 0 { 0 } else { 1 });
+                    }
+                    Err(error) => {
+                        eprintln!("Git bot sync failed before apply: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
         Command::ExportBots { path } => match crate::headless_bots::run_export(app, &path) {
             Ok(()) => {
                 println!("Bot configuration written to {}.", path.display());
@@ -340,6 +360,13 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--sync-bots" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--sync-bots needs a source registry path.\n\n{}", help()))?;
+                command = Command::SyncBots { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
             "--import-bots" => {
                 let value = args
                     .get(index + 1)
@@ -360,7 +387,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     }
     if ops > 1 {
         return Err(format!(
-            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots.\n\n{}",
+            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots, --sync-bots.\n\n{}",
             help()
         ));
     }
@@ -370,6 +397,9 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     }
     // An import composes only with serving (or a first-run sign-in): the exiting ops
     // would silently ignore the file.
+    if matches!(command, Command::SyncBots { .. }) && name.is_some() {
+        return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
+    }
     if import.is_some() && !matches!(command, Command::Serve | Command::SignIn { .. }) {
         return Err(format!("--import-bots only works with serve or --sign-in.\n\n{}", help()));
     }
@@ -379,7 +409,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -392,7 +422,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --device-name <name>   Name shown to your devices when signing in (default: the hostname).
   --import-bots <file>   Create/update bots, channels, schedules and rules from a JSON file
                          (docs/headless.md), then serve. Re-applying a file converges.
-  --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit."
+  --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit.
+  --sync-bots <file>     Fetch pinned GitHub manifests from a source registry, back up,
+                         import once, report results and exit (does not start serving)."
         .into()
 }
 
@@ -431,6 +463,10 @@ mod tests {
         assert!(parsed("--wat").is_err());
         assert!(parsed("--device-name").is_err());
         assert!(parsed("--export-bots").is_err());
+        assert_eq!(parsed("--sync-bots sources.json"), Ok(Command::SyncBots { path: PathBuf::from("sources.json") }));
+        assert!(parsed("--sync-bots").is_err());
+        assert!(parsed("--sync-bots sources.json --import-bots bots.json").is_err());
+        assert!(parsed("--sync-bots sources.json --sign-in").is_err());
     }
 
     #[test]
@@ -455,6 +491,7 @@ mod tests {
             "--device-name",
             "--import-bots",
             "--export-bots",
+            "--sync-bots",
             "xvfb-run",
         ] {
             assert!(text.contains(flag), "{flag}");

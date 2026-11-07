@@ -118,6 +118,11 @@ No xvfb, no `PANDACODE_SECRETS_FILE` (macOS already uses the 0600 file). Try pla
 
 ## Bots
 
+For the Extended desktop import/export workflow, source registry, SHA-pinned Git sync,
+optional settings, external channels and verified pre-import backups, see
+[Portable bot manifests and Git synchronization](extended-bot-manifests.md).
+
+
 Bots (channels, schedules, approval rules, their whole profile) are configured with one
 JSON file applied inside the serve process — no UI, and channels come up live:
 
@@ -161,6 +166,12 @@ pandacode serve --import-bots bots.json
   list `secretsNeeded` names; web tokens are excluded — a re-import mints a fresh link;
   already-fired once-schedules are omitted, since their run time is gone). Use it to
   snapshot or move a server's setup; put the tokens back before re-importing.
+
+Each `--import-bots` run now creates and verifies a secret-free configuration backup
+before changing any bots. The backup path is printed, and a backup failure prevents
+all imports. The new one-shot `--sync-bots bot-sources.json` command reads GitHub source
+registries and exits after one sync attempt, without starting a Connect host. It
+does not automatically poll; the original serve and sign-in flows are unchanged.
 
 Schedules, rules, profiles and secrets are read fresh by a running serve; channels added
 by hand (not through the import) need a restart to connect.

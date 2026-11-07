@@ -22,7 +22,7 @@ pub(crate) fn catalog() -> Vec<Value> {
         spec("bot_list_schedules", "List this bot's schedules with IDs, timing and whether they are on.", json!({}), &[]),
         spec("bot_cancel_schedule", "Delete one of this bot's schedules by ID (from bot_list_schedules).", json!({"scheduleId": id}), &["scheduleId"]),
         spec("bot_notify", "Message the user now, on the channel they last used (and the desktop app). Use for results, reminders, or decisions they need to make; do not use it to chat.", json!({"text": {"type":"string","maxLength":4000}}), &["text"]),
-        spec("bot_message_bot", "Send a short work request to another bot by exact name or ID. The other bot works in its own desktop conversation and sends an update back here. Do not message yourself; collaboration chains stop after three bot-to-bot hops.", json!({"to":{"type":"string","maxLength":80},"text":{"type":"string","maxLength":8000}}), &["to","text"]),
+        spec("bot_message_bot", "Send a short work request to another bot by exact name or ID. The other bot sends an update back here. Set freshContext: true to give this assignment a new conversation instead of reusing the recipient's desktop context; previous work and queues remain untouched. Do not message yourself; collaboration chains stop after three bot-to-bot hops.", json!({"to":{"type":"string","maxLength":80},"text":{"type":"string","maxLength":8000},"freshContext":{"type":"boolean"}}), &["to","text"]),
     ]
 }
 
@@ -93,7 +93,7 @@ pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &st
             shared_channels::current_hop_depth(&store, session_id)?
         };
         let depth = next_message_hop(&bot.id, &target.id, depth)?;
-        let id = shared_channels::deliver_bot_message(app, &bot, &source_thread, &target, &text, depth).await?;
+        let id = shared_channels::deliver_bot_message(app, &bot, &source_thread, &target, &text, depth, args["freshContext"].as_bool().unwrap_or(false)).await?;
         let _ = app.emit("bot-messages-changed", ());
         return Ok(json!({"messageId":id,"to":target.name,"status":"sent"}));
     }
@@ -166,5 +166,17 @@ mod tests {
     fn bot_message_tool_is_self_scoped_and_registered() {
         assert!(catalog().iter().any(|item| item["name"].as_str().is_some_and(|name| name.ends_with("bot_message_bot"))));
         assert!(self_scoped("pandacode_bot_message_bot"));
+    }
+
+    #[test]
+    fn fresh_context_is_opt_in_and_validated_by_the_bot_message_tool() {
+        let tools = catalog();
+        let tool = tools.iter().find(|tool| tool["name"] == "pandacode_bot_message_bot").unwrap();
+        assert_eq!(tool["inputSchema"]["properties"]["freshContext"]["type"], "boolean");
+        assert!(!tool["inputSchema"]["required"].as_array().unwrap().contains(&json!("freshContext")));
+        let original = json!({"to": "Partner", "text": "Review this task"});
+        assert!(validate_spec(&tools, "pandacode_bot_message_bot", &original).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_message_bot", &json!({"to": "Partner", "text": "Review this task", "freshContext": true})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_message_bot", &json!({"to": "Partner", "text": "Review this task", "freshContext": "true"})).is_err());
     }
 }

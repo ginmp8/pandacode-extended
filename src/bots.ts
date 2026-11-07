@@ -38,7 +38,7 @@ export interface Pairing { channelId: string; senderId: string; senderName: stri
 export interface Thread { channelId: string; externalId: string; sessionId: string; updatedAt: number; }
 export interface Rule { id: string; pattern: string; decision: 'allow' | 'ask' | 'deny'; createdAt: number; }
 export interface Activity { id: number; kind: string; summary: string; detail: Record<string, unknown>; at: number; }
-export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; freshContextEachMessage?: boolean; }
+export interface BotDetail { bot: Bot; memories: Memory[]; schedules: Schedule[]; channels: Channel[]; pairings: Pairing[]; threads: Thread[]; rules: Rule[]; serverPort: number; freshContextEachMessage?: boolean; includeSharedChannelHistory?: boolean; }
 
 /** A message held by `ask` failover (`bot-failover` event, `bot_failover_pending`); answer with `bot_failover_decide`. */
 export interface FailoverAsk { botId: string; sessionId: string; cause: 'limit' | 'provider-error'; provider: ProviderId; model: string; target: BackupModel; resetsAt: number | null; }
@@ -366,8 +366,9 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         </div>`, infoMark('Optional. Tone, values and conversational style, kept apart from the instructions. Importing copies the file once; later changes to the file do not change the bot. Personality never grants tools or permissions.', 'About personality'))}
       ${card('Brain', `
         ${row('Harness', '', harness)}${row('Model', '', model)}${row('Reasoning', '', provider ? effortSelect(provider.id, bot.model, bot.reasoningEffort ?? '') : '')}
-        ${row('Fresh context each message', 'New native context for every turn', toggle('freshContextEachMessage', detail?.freshContextEachMessage === true, 'Fresh context each message'), false, 'Every new bot message starts a native harness context without replaying earlier chat turns. Current instructions, skills and saved memories are still supplied. The visible transcript, schedules, active work and queued messages remain intact. Messages arriving during a run are queued rather than steered into it. Separate context does not isolate workspace files.')}
-        ${backupsRow(bot)}`)}
+        ${row('Fresh context each message', 'New native context for every turn', toggle('freshContextEachMessage', detail?.freshContextEachMessage === true, 'Fresh context each message'), false, 'Every new bot message starts a native harness context without replaying earlier chat turns. Current instructions, skills and saved memories are still supplied. Shared-channel history and durable memories are separate sources of context. The visible transcript, schedules, active work and queued messages remain intact. Messages arriving during a run are queued rather than steered into it. Separate context does not isolate workspace files.')}
+        ${row('Include shared channel history', 'Provide recent channel messages with assignments', toggle('includeSharedChannelHistory', detail?.includeSharedChannelHistory !== false, 'Include shared channel history'), false, 'By default each shared-channel assignment includes up to eight earlier posts and bot replies. Turn off to provide only the new assignment to this bot. Channel messages remain visible, and other bots keep their own settings. This is independent of fresh harness context and saved memories. Already-queued assignments keep their existing prompt.')}
+        ${backupsRow(bot)`)}
       ${card('Rules', `
         <input type="hidden" name="mode" value="${escape(mode)}">
         <div class="bp-rules-row"><div class="bs-row-text"><strong>How it can work</strong><small>Choose when PandaCode asks before a change.</small></div><div class="bp-rule-options" role="radiogroup" aria-label="Rules">${permissionOptions(bot.provider, mode)}</div></div>
@@ -681,14 +682,16 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     if (form?.matches('.bc-form')) { readDraft(form); return; }
     if (form && detail) {
       const bot = detail.bot;
-      if (target.matches('input[name=freshContextEachMessage]')) {
+      if (target.matches('input[name=freshContextEachMessage],input[name=includeSharedChannelHistory]')) {
         const checkbox = target as HTMLInputElement;
         const botId = bot.id, enabled = checkbox.checked;
+        const isFresh = checkbox.name === 'freshContextEachMessage';
         checkbox.disabled = true;
         setSaved('saving');
-        void options.call<boolean>('bot_set_fresh_context', { botId, enabled }).then(saved => {
+        void options.call<boolean>(isFresh ? 'bot_set_fresh_context' : 'bot_set_channel_history', { botId, enabled }).then(saved => {
           if (detail?.bot.id === botId) {
-            detail.freshContextEachMessage = saved;
+            if (isFresh) detail.freshContextEachMessage = saved;
+            else detail.includeSharedChannelHistory = saved;
             setSaved('saved');
           }
         }).catch(cause => {

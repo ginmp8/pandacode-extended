@@ -271,6 +271,19 @@ fn text_for_assignment(channel: &SharedChannel, text: &str, history: &str) -> St
     format!("Work requested in #{}:\n\n{}\n\nRecent messages in #{} (context, oldest first):\n{}", channel.name, text, channel.name, history)
 }
 
+/// Apply the recipient's Extended-only opt-out at the shared-channel boundary.
+/// The channel transcript is never deleted; ordinary recipients keep upstream context.
+pub(crate) fn assignment_text(
+    store: &Store, channel: &SharedChannel, bot_id: &str, message_id: &str, text: &str,
+) -> Result<String> {
+    let history = if super::extended::include_shared_channel_history(store, bot_id)? {
+        recent_history(store, &channel.id, message_id)?
+    } else {
+        String::new()
+    };
+    Ok(text_for_assignment(channel, text, &history))
+}
+
 const HISTORY_CONTEXT: usize = 8;
 const HISTORY_CHARS: usize = 600;
 
@@ -300,7 +313,7 @@ async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, messa
     // The delivery starts queued; the gateway marks it in progress when its turn launches
     // (`promote_taken`), so a finished run is credited only to the work it actually ran.
     let delivery_id = crate::storage::id();
-    let (channel, bot, history) = {
+    let (channel, bot, prompt) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let channel = shared_channel(&store, channel_id)?;
         if channel.archived { return Err("This channel is deleted.".into()); }
@@ -308,11 +321,11 @@ async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, messa
         let bot = super::get(&store, bot_id)?;
         if bot.paused { return Err(format!("{} is paused.", bot.name)); }
         let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, DESKTOP, &format!("{} · You", bot.name))?;
-        let history = recent_history(&store, channel_id, message_id)?;
+        let prompt = assignment_text(&store, &channel, &bot.id, message_id, text)?;
         store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?6)", params![delivery_id,channel_id,message_id,bot_id,session_id,created_at]).map_err(|e| e.to_string())?;
-        (channel, bot, history)
+        (channel, bot, prompt)
     };
-    let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: text_for_assignment(&channel, text, &history), trusted: true, image_ids: None, moodboard_ids: None };
+    let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
     if let Err(error) = gateway::deliver(app, inbound).await {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.db.execute("UPDATE bot_shared_channel_deliveries SET status='failed',updated_at=?2 WHERE id=?1 AND status IN ('queued','in_progress')", params![delivery_id,crate::storage::now()]).map_err(|e|e.to_string())?;

@@ -40,3 +40,13 @@ test('Extended updater keeps app SemVer but downloads from the Extended GitHub t
   assert.equal(manifest.platforms['windows-x86_64'].url, 'https://github.com/ginmp8/pandacode-extended/releases/download/v0.10.0/PandaCode-Windows-x64-setup.exe');
   assert.throws(() => updaterManifest('0.3.99', '', { 'windows-x86_64': 'sig' }, undefined, undefined, 'v0.10.0; rm -rf /'), /SemVer/);
 });
+
+test('Extended release notes take precedence when tag and app versions happen to match', () => {
+  const paths = new Set(['releases/extended/0.10.0.md', 'releases/0.10.0.md']);
+  const inputs = { appVersion: '0.10.0', refName: 'v0.10.0', hasNotes: path => paths.has(path) };
+  const tagged = resolveReleaseIdentity({ ...inputs, refType: 'tag' });
+  assert.equal(tagged.release_notes, 'releases/extended/0.10.0.md');
+  assert.equal(tagged.release_title, 'PandaCode Extended 0.10.0');
+  const dispatched = resolveReleaseIdentity({ ...inputs, refType: 'branch' });
+  assert.equal(dispatched.release_notes, 'releases/0.10.0.md');
+});

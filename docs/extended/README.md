@@ -4,8 +4,13 @@ This directory defines the **complete upstream functional parity contract** and 
 
 - **[Mandatory full upstream functional parity contract](upstream/parity-contract.md)** — complete copy, allowed Extended-only differences and verification gates
 - **[Extended release-tag and publication workflow](releasing.md)** — source app version, Extended tags, manual GitHub release gating, and no npm publishing
-**Current Extended source release:** **[0.11.0](0.11.0/README.md)** (release notes finalized for branch promotion; tag, GitHub Release and installer publication remain separate manual steps). The upstream application version remains synchronized independently from the fork.
+**Current planned Extended release documentation:** **[0.12.0](0.12.0/README.md)** (incremental development cycle; not tagged, approved or distributed). The upstream application/build version is synchronized separately with the fork.
 
+- [Extended 0.12.0 draft release notes](../../releases/extended/0.12.0.md)
+- [Extended 0.12.0 feature controls](0.12.0/feature-controls.md)
+- [Extended 0.12.0 dependency and security tracking](0.12.0/dependency-security.md)
+- [Extended 0.12.0 known-issues register](0.12.0/known-issues.md)
+- [Extended 0.12.0 release checklist](0.12.0/release-checklist.md)
 - [Extended 0.11.0 release notes](../../releases/extended/0.11.0.md)
 - [Extended 0.11.0 feature controls](0.11.0/feature-controls.md)
 - [Extended 0.11.0 dependency and security tracking](0.11.0/dependency-security.md)
@@ -43,4 +48,4 @@ Do not copy these statements into upstream release notes or claim they apply to 
 - [Original upstream 0.3.100 release notes](../../releases/0.3.100.md)
 - [Original upstream 0.3.101 release notes](../../releases/0.3.101.md)
 
-**Latest pinned source snapshot (2026-11-07):** [`13a7cb68`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a), still application **0.3.101** (no upstream version bump). The latest upstream README adds the iPhone [TestFlight beta](https://testflight.apple.com/join/TpY9PjJe) download/instructions links; this is inherited documentation, not independent iOS validation. The earlier mobile redesign remains inherited. Source paths missing: **0**; 80 pre-existing modified shared paths and 51 Extended-only paths remain. Native functional parity and exact-SHA CI for this documentation update are not yet proven. Extended **0.11.0 release notes are finalized for source promotion**. This does not certify native acceptance or mean that a tag, GitHub Release or installer has already been published.
+**Latest pinned source snapshot (2026-11-07):** [`13a7cb68`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a), still application **0.3.101** (no upstream version bump). The latest upstream README adds the iPhone [TestFlight beta](https://testflight.apple.com/join/TpY9PjJe) download/instructions links; this is inherited documentation, not independent iOS validation. The earlier mobile redesign remains inherited. Source paths missing: **0**; 80 pre-existing modified shared paths and 51 Extended-only paths remain. Native functional parity remains unverified. CI is commit-specific: the latest GitHub Actions results must be checked against the exact candidate SHA, and this documentation index is not release approval. Extended **0.11.0 release notes are finalized for source promotion**. This does not certify native acceptance or mean that a tag, GitHub Release or installer has already been published.

@@ -19,3 +19,6 @@ website/.astro/
 *.p8
 *.key
 *.pem
+
+# Visual progress screenshots (PandaCode)
+.pandacode/progress-shots/

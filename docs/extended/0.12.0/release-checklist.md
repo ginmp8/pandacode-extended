@@ -11,6 +11,8 @@
 - [x] Open fresh 0.12.0 release notes, controls, dependency/security, known-issues and readiness files without editing 0.11.0 history.
 - [x] Confirm the first 0.12.0 documentation commit [`99206f1c`](https://github.com/ginmp8/pandacode-extended/commit/99206f1c0a9f1f6753227a6e33bb8df0bd6f8d45): [push CI #42394967107](https://github.com/ginmp8/pandacode-extended/actions/runs/42394967107) and [PR CI #42395013636](https://github.com/ginmp8/pandacode-extended/actions/runs/42395013636) passed 6/6 jobs each. This verifies the opening documentation commit, not the final release or native feature controls.
 
+- [x] Verify the next 0.12.0 documentation-only SHA [`d925f820`](https://github.com/ginmp8/pandacode-extended/commit/d925f8201b3c3c46dad174d3d0ec2b7ed63899e5): [push #42399278195](https://github.com/ginmp8/pandacode-extended/actions/runs/42399278195) and [PR #42399283071](https://github.com/ginmp8/pandacode-extended/actions/runs/42399283071) both passed 6/6 jobs. This is a historical checkpoint, not approval of the next commit, native integration, or final 0.12.0 release.
+
 ## Continuous upstream synchronization
 
 - [ ] Read the live `ginmp8/pandacode:main` SHA each time; import every relevant source change, including unreleased commits, without version ceilings.

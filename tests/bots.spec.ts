@@ -242,13 +242,32 @@ test.describe('bots', () => {
     const fresh = profile.getByRole('checkbox', { name: 'Fresh context each message' });
     await expect(fresh).not.toBeChecked();
     await expect(profile.getByRole('checkbox', { name: 'Include channel history by default' })).toHaveCount(0);
+    // Preserve the existing fresh-context tooltip and alignment regression checks.
+    const help = profile.getByRole('img', { name: 'About fresh context each message' });
+    await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
+    const helpRow = profile.locator('.bs-row.has-help', { has: fresh });
+    const titleBox = await helpRow.locator('.bs-row-help-title strong').boundingBox();
+    const tipBox = await help.boundingBox();
+    const hintBox = await helpRow.locator('.bs-row-text > small').boundingBox();
+    const switchBox = await fresh.boundingBox();
+    expect(titleBox && tipBox && hintBox && switchBox).toBeTruthy();
+    if (titleBox && tipBox && hintBox && switchBox) {
+      const titleCenter = titleBox.y + titleBox.height / 2;
+      expect(Math.abs(tipBox.y + tipBox.height / 2 - titleCenter)).toBeLessThan(10);
+      expect(hintBox.y).toBeGreaterThanOrEqual(titleBox.y + titleBox.height - 2);
+      expect(Math.abs(switchBox.y + switchBox.height / 2 - titleCenter)).toBeLessThan(12);
+    }
+    await help.click();
+    await expect(fresh).not.toBeChecked();
     await fresh.check();
     await expect(profile.locator('.bs-saved')).toContainText('Saved');
     await tab(page, 'Shared Channels').click();
     const history = profile.getByRole('checkbox', { name: 'Include channel history by default' });
     await expect(history).toBeChecked();
-    await expect(profile.getByRole('img', { name: 'About include channel history by default' }))
-      .toHaveAttribute('data-tip', /eight recent posts and replies/);
+    const historyHelp = profile.getByRole('img', { name: 'About include channel history by default' });
+    await expect(historyHelp).toHaveAttribute('data-tip', /eight recent posts and replies/);
+    await historyHelp.click();
+    await expect(history).toBeChecked();
     await expect(profile.getByText('This bot is not a member of an active shared channel.')).toBeVisible();
     await history.uncheck();
     await expect(profile.locator('.bs-saved')).toContainText('Saved');
@@ -265,6 +284,7 @@ test.describe('bots', () => {
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
     await openSettings(page, undefined, 'Writer');
+    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
     await panel(page, 'Writer').getByRole('tab', { name: 'Shared Channels' }).click();
     await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Include channel history by default' })).toBeChecked();
     await page.keyboard.press('Escape');
@@ -272,6 +292,11 @@ test.describe('bots', () => {
     await sidebar(page).getByRole('button', { name: 'Chat with Scout' }).click();
     await openSettings(page, 'Shared Channels');
     await expect(history).not.toBeChecked();
+    await history.check();
+    await expect(profile.locator('.bs-saved')).toContainText('Saved');
+    await page.keyboard.press('Escape');
+    await openSettings(page, 'Shared Channels');
+    await expect(history).toBeChecked();
   });
 
   test('joined channels can override the default independently and clear stale choices', async ({ page }) => {

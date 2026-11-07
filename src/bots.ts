@@ -109,7 +109,13 @@ const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
 ];
 const navFor = (section: Section): Nav => section === 'conversations' || section === 'rules' ? 'activity' : section;
 /** One labelled row, like a Settings row: title and hint on the left, the control on the right. */
-const row = (title: string, hint: string, control: string, stacked = false, help = '') => `<label class="bs-row ${stacked ? 'stacked' : ''}"><span class="bs-row-text"><strong>${title}</strong>${help ? infoMark(help, `About ${title.toLowerCase()}`) : ''}${hint ? `<small>${escape(hint)}</small>` : ''}</span>${control}</label>`;
+const row = (title: string, hint: string, control: string, stacked = false, help = '') => {
+  // Help rows use a two-line label: title + tooltip together, hint underneath.
+  const label = help
+    ? `<span class="bs-row-help-title"><strong>${escape(title)}</strong>${infoMark(help, `About ${title.toLowerCase()}`)}</span>`
+    : `<strong>${escape(title)}</strong>`;
+  return `<label class="bs-row ${stacked ? 'stacked' : ''} ${help ? 'has-help' : ''}"><span class="bs-row-text">${label}${hint ? `<small>${escape(hint)}</small>` : ''}</span>${control}</label>`;
+};
 const heading = (title: string, more = '') => `<h3 class="bs-heading">${escape(title)}${more}</h3>`;
 /** One outer card: its section head, then the inner card of rows (as in the design system's `.ds-card`). */
 const card = (title: string, body: string, more = '') => `<section class="bs-card">${heading(title, more)}<div class="bs-group">${body}</div></section>`;

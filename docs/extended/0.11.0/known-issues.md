@@ -24,3 +24,7 @@ Do not remove upstream features or tighten Extended defaults solely because an a
 - **Unverified, not confirmed defects:** native multi-account Claude/Codex sign-in, identity reads, cache invalidation after login change, account usage refresh and cross-panel state consistency after the [upstream import](https://github.com/ginmp8/pandacode-extended/commit/d7cf15467bf8f25563db253e7b35a1efeb2e5b5e).
 - **Unverified, not confirmed defects:** operation of Extended-specific Settings controls in both states alongside the new account-provider screens; comparison of all 80 shared divergent files by hunk.
 - Original upstream [0.3.101 notes](../../../releases/0.3.101.md) document incomplete installed-app testing with several real accounts. No feature is disabled on this basis.
+
+## 2026-11-07 — mobile redesign acceptance gaps
+
+The unreleased upstream mobile [`61b03bf2`](https://github.com/ginmp8/pandacode/commit/61b03bf2dc9f83b645088273af0b4dee05563102) substantially changes screen navigation, cards, splash animation, sign-out and push-notification state. The old wallpaper assets/settings were deleted by upstream. Static file/mode inventory is complete, but real iOS/Android launches, notification permission/registration, account handoffs, state recovery and mobile UI screenshots are **not tested** here. Seventy-seven pre-existing shared divergences outside the three newly reconciled mobile files still require hunk-level verification. These are acceptance gaps, not confirmed runtime failures.

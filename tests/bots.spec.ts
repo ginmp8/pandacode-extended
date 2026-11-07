@@ -245,7 +245,7 @@ test.describe('bots', () => {
     const help = panel(page).getByRole('img', { name: 'About fresh context each message' });
     await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
     // The title, tooltip and switch belong to the first row; the hint is a separate line.
-    const helpRow = panel(page).locator('.bs-row.has-help');
+    const helpRow = panel(page).locator('.bs-row.has-help', { has: toggle });
     const titleBox = await helpRow.locator('.bs-row-help-title strong').boundingBox();
     const tipBox = await help.boundingBox();
     const hintBox = await helpRow.locator('.bs-row-text > small').boundingBox();

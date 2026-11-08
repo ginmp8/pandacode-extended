@@ -10,6 +10,27 @@ async function showBots(page: Page): Promise<void> {
 }
 
 test.describe('shared bot channels', () => {
+  test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
+    await showBots(page);
+    const channel = sidebar(page).getByRole('button', { name: '#launch' });
+    await channel.click();
+    await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
+
+    // Leaving a channel must show the selected bot immediately, without its Back button.
+    const channelPrompt = page.getByRole('textbox', { name: 'Message channel' });
+    await channelPrompt.fill('Unsent channel draft');
+    await sidebar(page).getByRole('button', { name: /^Chat with Scout/ }).click();
+    await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
+    await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
+    await expect(page.locator('#transcript .bc-channel')).toHaveCount(0);
+    await expect(page.locator('#composer #prompt')).toBeVisible();
+    await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);
+
+    // Switching away does not delete the channel's unsent draft.
+    await channel.click();
+    await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveValue('Unsent channel draft');
+  });
+
   test('creates a channel from the sidebar and opens its settings', async ({ page }) => {
     await showBots(page);
     await page.getByRole('button', { name: 'Add bot or channel' }).click();

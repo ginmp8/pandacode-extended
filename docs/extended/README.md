@@ -2,6 +2,8 @@
 
 This directory defines the **complete upstream functional parity contract** and the bounded Extended-only configuration, dependency remediations, release validation and evidence-backed known behavior. It is intentionally separate from upstream PandaCode documentation in `docs/`; Extended release notes live under `releases/extended/`, distinct from upstream release files at `releases/*.md`.
 
+- **[Ownership, licensing and attribution](attribution-and-licensing.md)** — inherited PandaCode rights, independently maintained Extended additions and third-party skill distribution obligations
+- **[RhapsodIA public skills integration](rhapsodia-skills.md)** — current GitHub CLI capabilities and the proposed pinned release pack in [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125)
 - **[Mandatory full upstream functional parity contract](upstream/parity-contract.md)** — complete copy, allowed Extended-only differences and verification gates
 - **[Extended release-tag and publication workflow](releasing.md)** — source app version, Extended tags, manual GitHub release gating, and no npm publishing
 **Current planned Extended release documentation:** **[0.12.0](0.12.0/README.md)** (incremental development cycle; not tagged, approved or distributed). The upstream application/build version is synchronized separately with the fork.

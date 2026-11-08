@@ -1,4 +1,16 @@
-# PandaCode
+# PandaCode Extended
+
+**PandaCode Extended** is an independently maintained derivative of [PandaCode](https://github.com/aicodeking/pandacode). **This is a fork of PandaCode.** The original project and its contributors retain the rights and attribution for inherited code. Extended-specific additions are maintained in [ginmp8/pandacode-extended](https://github.com/ginmp8/pandacode-extended); derivative maintenance does not imply exclusive ownership of the upstream source.
+
+**Extended downloads:** [PandaCode Extended releases](https://github.com/ginmp8/pandacode-extended/releases). Release availability and supported platforms depend on published Extended artifacts. The download links in the upstream reference below point to **original PandaCode releases**, not Extended installers.
+
+**Licensing:** The [inherited PandaCode license](LICENSE) remains in effect and includes an attribution requirement beyond standard MIT wording. See [Extended attribution and licensing](docs/extended/attribution-and-licensing.md).
+
+**Public Agent Skills:** The existing Skills Library imports GitHub-hosted skills through the authenticated GitHub CLI. [RhapsodIA](https://github.com/ginmp8/rhapsodia) is an optional public skill source. [Issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) plans enhanced repository-path import and verified offline release bundles; those changes are **not yet shipped**. See [Skills Library](docs/skills-library.md) and [RhapsodIA integration plan](docs/extended/rhapsodia-skills.md).
+
+---
+
+## Original PandaCode feature reference
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding
@@ -10,7 +22,7 @@ terminal and a browser in one window.
 
 PandaCode is free and open source under the [PandaCode License](LICENSE), the MIT
 License with one addition: forks that are used commercially or released publicly
-must say "This is a fork of PandaCode" and link to this repository. There is no
+must say "This is a fork of PandaCode" and link to the original repository at https://github.com/aicodeking/pandacode. There is no
 account, no license key and no telemetry.
 
 Built with Tauri 2, Rust, SQLite and plain TypeScript. It uses the operating
@@ -18,14 +30,14 @@ system's webview: no bundled Chromium, resident Node server, React runtime or
 embedded editor engine.
 
 <p align="center">
-  <b>Download:</b>
+  <b>Original PandaCode downloads (not Extended builds):</b>
   <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-macOS-arm64.dmg">macOS (Apple silicon)</a> ·
   <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-macOS-x64.dmg">macOS (Intel)</a> ·
   <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Windows-x64-setup.exe">Windows x64</a> ·
   <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Windows-arm64-setup.exe">Windows arm64</a> ·
   <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-x86_64.AppImage">Linux x64</a> ·
   <a href="https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-aarch64.AppImage">Linux arm64</a> ·
-  <a href="https://github.com/aicodeking/pandacode/releases">All releases</a> ·
+  <a href="https://github.com/aicodeking/pandacode/releases">Original PandaCode releases</a> ·
   <a href="https://testflight.apple.com/join/TpY9PjJe">iPhone (TestFlight)</a>
 </p>
 

@@ -77,9 +77,11 @@ test.describe('bots', () => {
   });
 
   test('resized bot settings textareas retain their size across a background refresh', async ({ page }) => {
-    await newBot(page, 'Scout');
-    await openSettings(page);
+    await page.goto('/?bots=sample');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Scout settings', exact: true }).click();
     const settings = panel(page);
+    await expect(settings).toBeVisible();
     const instructions = settings.getByRole('textbox', { name: 'Instructions' });
     const goals = settings.getByRole('textbox', { name: 'Standing goals' });
     await expect(instructions).toBeVisible();

@@ -117,6 +117,11 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
             serde_json::Value::Array(entries) => entries,
             single => vec![single],
         };
+        // A nested SKILL.md starts a distinct package: do not download or copy
+        // any of its files into a selected parent skill (including root skills).
+        if current != path && entries.iter().any(|entry| entry["type"] == "file" && entry["name"] == "SKILL.md") {
+            continue;
+        }
         for entry in entries {
             let entry_path = entry["path"].as_str().unwrap_or_default().to_string();
             let name = entry["name"].as_str().unwrap_or_default();
@@ -176,6 +181,33 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn a_parent_skill_does_not_fetch_or_install_nested_skill_packages() {
+        use std::cell::RefCell;
+        let requests = RefCell::new(Vec::<String>::new());
+        let api = |endpoint: &str| -> Result<serde_json::Value, String> {
+            requests.borrow_mut().push(endpoint.to_string());
+            match endpoint {
+                "repos/me/kit/commits/HEAD" => Ok(serde_json::json!({"sha":"abc"})),
+                "repos/me/kit/contents/?ref=abc" => Ok(serde_json::json!([
+                    {"path":"SKILL.md","name":"SKILL.md","type":"file","size":4,"encoding":"base64","content":"dGVzdA=="},
+                    {"path":"child","name":"child","type":"dir"}
+                ])),
+                "repos/me/kit/contents/child?ref=abc" => Ok(serde_json::json!([
+                    {"path":"child/SKILL.md","name":"SKILL.md","type":"file","size":4,"encoding":"base64","content":"dGVzdA=="},
+                    {"path":"child/guide.md","name":"guide.md","type":"file","size":4,"encoding":"base64","content":"dGVzdA=="}
+                ])),
+                _ => Err(format!("Unexpected GitHub endpoint: {endpoint}")),
+            }
+        };
+        let (files, commit) = fetch_using("me/kit", "", None, &api).unwrap();
+        assert_eq!(commit, "abc");
+        assert_eq!(files.len(), 1, "nested SKILL.md must remain a separate package");
+        assert_eq!(files[0].0, "SKILL.md");
+        assert_eq!(requests.borrow().len(), 3, "nested package files must not be downloaded");
+    }
 
     #[test]
     fn validates_repository_input() {

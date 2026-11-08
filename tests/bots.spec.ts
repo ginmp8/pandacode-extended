@@ -57,6 +57,25 @@ async function openSettings(page: Page, section?: string, name = 'Scout'): Promi
 }
 
 test.describe('bots', () => {
+  test('bot actions menu aligns icons and labels to the left', async ({ page }) => {
+    await page.goto('/');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    const items = sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem');
+    await expect(items).toHaveCount(4);
+    const positions = await items.evaluateAll(elements => elements.map(element => {
+      const icon = element.querySelector('.icon');
+      if (!icon) throw new Error('Bot action is missing its icon.');
+      return {
+        justification: getComputedStyle(element).justifyContent,
+        iconLeft: icon.getBoundingClientRect().left,
+      };
+    }));
+    expect(positions.every(position => position.justification === 'flex-start')).toBe(true);
+    expect(Math.max(...positions.map(position => position.iconLeft)) -
+      Math.min(...positions.map(position => position.iconLeft))).toBeLessThan(1);
+  });
+
   test('a new bot keeps its draft and caret through background refreshes', async ({ page }) => {
     await openBots(page);
     const form = bots(page).getByRole('form', { name: 'New bot' });

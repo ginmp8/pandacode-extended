@@ -45,7 +45,7 @@ test('GitHub Add has only URL and optional ref, then imports only selected skill
   await form.getByRole('button', {name:'Scan repository'}).click();
   await expect(page.getByRole('region',{name:'Discovered GitHub skills'})).toContainText('Found 3 skills');
   await expect(page.getByRole('button', {name:'Import selected (0)'})).toBeDisabled();
-  await page.getByRole('checkbox').first().check();
+  await page.getByRole('region', {name:'Discovered GitHub skills'}).getByRole('checkbox').nth(1).check();
   await expect(page.getByRole('button', {name:'Import selected (1)'})).toBeEnabled();
   await page.getByRole('button', {name:'Import selected (1)'}).click();
   await expect(page.getByRole('region', {name:'Skill operation status'})).toContainText('Completed successfully');
@@ -75,4 +75,17 @@ test('Preview is read-only, supports raw text and local packaged files', async (
   await expect(detail.locator('#customize-preview-content pre')).toBeVisible();
   await detail.getByRole('button',{name:'Rendered'}).click();
   await expect(detail.locator('#customize-preview-content')).toContainText('Release notes');
+});
+
+test('a conflicting installed skill requires explicit replacement approval', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button', {name:'Add',exact:true}).click();
+  await page.getByRole('menuitem', {name:'GitHub link'}).click();
+  await page.getByRole('textbox', {name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button', {name:'Scan repository'}).click();
+  const found = page.getByRole('region', {name:'Discovered GitHub skills'});
+  await found.getByRole('checkbox').first().check();
+  await expect(found.getByRole('button', {name:'Import selected (1)'})).toBeDisabled();
+  await found.getByRole('checkbox', {name:'I approve replacing conflicting installed skills'}).check();
+  await expect(found.getByRole('button', {name:'Import selected (1)'})).toBeEnabled();
 });

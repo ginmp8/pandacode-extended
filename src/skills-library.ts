@@ -33,6 +33,46 @@ export type SkillSyncReport = {
   checkedAt: number; updated: string[]; skipped: string[];
   events: { id: string; status: string; oldCommit: string | null; newCommit: string | null; impactedHarnesses: string[]; detail: string }[];
 };
+/** A named branch containing slashes needs a separate, exact ref; never guess a path split. */
+function githubSelection(input: string, pathInput = '', refInput = ''): { repo: string; path: string; gitRef: string | null } {
+  let repo = input.trim();
+  let path = pathInput.trim().replace(/^\/+|\/+$/g, '');
+  let gitRef = refInput.trim() || null;
+  if (repo.startsWith('https://')) {
+    let url: URL;
+    try { url = new URL(repo); } catch { throw new Error('Enter a valid GitHub URL.'); }
+    if (url.hostname !== 'github.com' || url.username || url.password || url.port || url.search || url.hash)
+      throw new Error('Only github.com URLs without credentials, query or fragment are supported.');
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) throw new Error('Enter a GitHub repository URL.');
+    repo = [parts[0], parts[1].replace(/\.git$/, '')].join('/');
+    if (parts.length > 2) {
+      if (!['tree', 'blob'].includes(parts[2]) || parts.length < 4)
+        throw new Error('Use a repository URL or tree/ref/path or blob/ref/SKILL.md URL.');
+      const ref = gitRef || (parts[3] === 'main' || parts[3] === 'master' || /^[a-fA-F0-9]{40}$/.test(parts[3]) ? parts[3] : '');
+      if (!ref) throw new Error('Enter the exact ref separately to disambiguate the GitHub URL.');
+      const tail = parts.slice(3).join('/');
+      if (tail !== ref && !tail.startsWith(ref + '/')) throw new Error('The URL does not match the explicit ref.');
+      const urlPath = tail === ref ? '' : tail.slice(ref.length + 1);
+      if (path && path !== urlPath) throw new Error('The URL and path fields refer to different locations.');
+      path = urlPath;
+      gitRef = ref;
+      if (parts[2] === 'blob' && !path.endsWith('/SKILL.md') && path !== 'SKILL.md')
+        throw new Error('A skill-file URL must end in SKILL.md.');
+    }
+  } else if (repo.includes('://')) {
+    throw new Error('Only https://github.com URLs are supported.');
+  }
+  path = path.replace(/\/SKILL\.md$/, '').replace(/^SKILL\.md$/, '');
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo) || repo.split('/').some(x => x.startsWith('-') || x.startsWith('.')))
+    throw new Error('Enter the repository as owner/name.');
+  if (path && path.split('/').some(x => !x || x === '..' || x === '.' || x.startsWith('.')))
+    throw new Error('Unsafe GitHub path.');
+  if (gitRef && (!/^[a-zA-Z0-9_./-]+$/.test(gitRef) || gitRef.includes('..') || gitRef.startsWith('-')))
+    throw new Error('Invalid Git reference.');
+  return { repo, path, gitRef };
+}
+
 export type SkillsLibraryHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   /** Projects offered for project scope. */
@@ -56,6 +96,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   /** Catalog skills chosen for import, as `repo\npath`. */
   let selected = new Set<string>();
   let recommendedSelected = new Set<string>();
+  const catalogScopes = new Map<string, string>();
   let view: 'library' | 'recommended' | 'sync' = 'library';
   let projectId = '';
   let source: 'folder' | 'github' = 'folder';
@@ -137,7 +178,9 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const at = source.commit ? ` @ ${escape(source.commit.slice(0, 7))}${source.gitRef ? ` (${escape(source.gitRef)})` : ''}` : '';
     const button = (action: string, label: string, extra = '', name = `${label} ${source.repo}`) =>
       `<button type="button" class="secondary-button" data-action="${action}" data-repo="${repo}" ${extra} aria-label="${escape(name)}" ${busy ? 'disabled' : ''}>${label}</button>`;
-    const body = enabled ? `<ul class="skills-catalog-skills" aria-label="${escape(`Skills in ${source.repo}`)}">${source.skills.map(skill => catalogSkillHtml(source, skill)).join('')}</ul>
+    const scope = catalogScopes.get(source.repo) || '';
+    const visibleSkills = source.skills.filter(skill => !scope || skill.path === scope || skill.path.startsWith(scope + '/'));
+    const body = enabled ? `<p class="skills-note">${scope ? `Browsing ${escape(scope)} · ${plural(visibleSkills.length, 'skill')}` : 'Browsing all indexed skills.'}</p><ul class="skills-catalog-skills" aria-label="${escape(`Skills in ${source.repo}`)}">${visibleSkills.map(skill => catalogSkillHtml(source, skill)).join('')}</ul>
       <div class="skills-confirm">${button('catalog-import', 'Import selected', '', `Import selected from ${source.repo}`)}${button('catalog-import-all', 'Import all', '', `Import all from ${source.repo}`)}</div>` : '';
     return `<li class="skills-item skills-catalog" data-repo="${repo}">
       <div class="skills-item-head"><div><strong>${repo}</strong>${tags}<small>${plural(source.skills.length, 'skill')}${at}</small></div>
@@ -151,7 +194,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const summary = found ? `<p class="skills-note">Checked ${found.checked} ${found.checked === 1 ? 'repository' : 'repositories'} you own.${found.failures.length ? ` Could not read ${found.failures.map(escape).join('; ')}.` : ''}${found.note ? ` ${escape(found.note)}` : ''}</p>` : '';
     return `<div class="settings-group">
       <form class="skills-import skills-catalog-add" aria-label="Add a skill catalog" novalidate>
-        <div class="skills-import-row"><input name="catalogRepo" aria-label="Catalog repository" placeholder="owner/name" spellcheck="false" autocomplete="off"><input name="catalogRef" aria-label="Catalog branch, tag or commit" placeholder="Default branch" spellcheck="false" autocomplete="off"><button type="submit" class="secondary-button" ${busy ? 'disabled' : ''}>Scan</button></div>
+        <div class="skills-import-row"><input name="catalogRepo" aria-label="Catalog repository" placeholder="owner/name or github.com/owner/repo/tree/main/skills" spellcheck="false" autocomplete="off"><input name="catalogRef" aria-label="Catalog branch, tag or commit" placeholder="Default branch" spellcheck="false" autocomplete="off"><button type="submit" class="secondary-button" ${busy ? 'disabled' : ''}>Scan</button></div>
         <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="discover" ${busy ? 'disabled' : ''}>Find my skill repositories</button></div>
       </form>
       ${shown.length ? '' : '<p class="skills-empty">No catalogs yet. Scan a repository, or find the skill repositories in your GitHub account.</p>'}
@@ -294,10 +337,33 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const text = (name: string) => String(data.get(name) ?? '').trim();
     if (source === 'folder' && !text('path')) { error = 'Enter a folder or file path.'; draw(); return; }
     if (source === 'github' && !text('repo')) { error = 'Enter the repository as owner/name.'; draw(); return; }
+    let selection: ReturnType<typeof githubSelection> | null = null;
+    if (source === 'github') {
+      try { selection = githubSelection(text('repo'), text('repoPath'), text('ref')); }
+      catch (cause) { error = message(cause); draw(); return; }
+    }
+    const github = selection;
     void run(async () => {
+      const indexCollection = github && kind === 'skill' && (
+        text('repo').startsWith('https://') || !github.path || github.path === 'skills');
+      if (github && indexCollection) {
+        const catalog = await options.call<SkillCatalogs>('skills_catalog_add', { repo: github.repo, gitRef: github.gitRef });
+        catalogs = catalog;
+        const sourceIndex = catalog.sources.find(item => item.repo.toLowerCase() === github.repo.toLowerCase());
+        const exact = sourceIndex?.skills.find(skill => skill.path === github.path);
+        clearFields = true;
+        if (exact) {
+          const imported = await options.call<CatalogImport>('skills_catalog_import', { repo: github.repo, paths: [exact.path] });
+          return `Imported ${plural(imported.imported.length, 'skill')}.${imported.skipped.length ? ' ' + imported.skipped.map(item => item.reason).join('; ') : ''}`;
+        }
+        catalogScopes.set(github.repo, github.path);
+        const inScope = sourceIndex?.skills.filter(skill => !github.path || skill.path.startsWith(github.path + '/')) ?? [];
+        if (!inScope.length) throw new Error(`No valid SKILL.md packages under ${github.repo}/${github.path}.`);
+        return `Found ${plural(inScope.length, 'skill')} in ${github.repo}/${github.path}. Use catalog selection or Import all.`;
+      }
       const item = source === 'folder'
         ? await options.call<SkillItem>('skills_import_folder', { path: text('path'), kind })
-        : await options.call<SkillItem>('skills_import_github', { repo: text('repo'), path: text('repoPath'), gitRef: text('ref') || null, kind });
+        : await options.call<SkillItem>('skills_import_github', { repo: github!.repo, path: github!.path, gitRef: github!.gitRef, kind });
       clearFields = true;
       return `Imported ${item.name}.${item.findings.length ? ` ${item.findings.length} safety finding${item.findings.length === 1 ? '' : 's'} to review.` : ''}`;
     });
@@ -305,15 +371,21 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
 
   function addCatalog(form: HTMLFormElement): void {
     const data = new FormData(form);
-    const repo = String(data.get('catalogRepo') ?? '').trim();
-    if (!repo) { error = 'Enter the repository as owner/name.'; draw(); return; }
+    const raw = String(data.get('catalogRepo') ?? '').trim();
+    if (!raw) { error = 'Enter the repository as owner/name.'; draw(); return; }
+    let selection: ReturnType<typeof githubSelection>;
+    try { selection = githubSelection(raw, '', String(data.get('catalogRef') ?? '')); }
+    catch (cause) { error = message(cause); draw(); return; }
     void run(async () => {
-      catalogs = await options.call<SkillCatalogs>('skills_catalog_add', { repo, gitRef: String(data.get('catalogRef') ?? '').trim() || null });
+      catalogs = await options.call<SkillCatalogs>('skills_catalog_add', { repo: selection.repo, gitRef: selection.gitRef });
+      catalogScopes.set(selection.repo, selection.path);
       clearFields = true;
-      const source = catalogs.sources.find(s => s.repo.toLowerCase() === repo.replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '').toLowerCase());
-      return `Found ${plural(source?.skills.length ?? 0, 'skill')} in ${source?.repo ?? repo}.`;
+      const source = catalogs.sources.find(s => s.repo.toLowerCase() === selection.repo.toLowerCase());
+      const inScope = source?.skills.filter(skill => !selection.path || skill.path === selection.path || skill.path.startsWith(selection.path + '/')) ?? [];
+      return `Found ${plural(inScope.length, 'skill')} in ${selection.repo}${selection.path ? '/' + selection.path : ''}. Select packages below to import.`;
     });
   }
+
   function catalogAction(action: string, repo: string, state?: string): void {
     if (action === 'catalog-refresh') void run(async () => { await options.call('skills_catalog_refresh', { repo }); return `Refreshed ${repo}. Library copies stay as imported.`; });
     if (action === 'catalog-state' && state) void run(async () => {
@@ -322,7 +394,11 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     });
     if (action === 'catalog-import' || action === 'catalog-import-all') {
       const prefix = `${repo}\n`;
-      const paths = action === 'catalog-import' ? [...selected].filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length)) : null;
+      const scope = catalogScopes.get(repo) || '';
+      const scoped = (path: string) => !scope || path === scope || path.startsWith(scope + '/');
+      const paths = action === 'catalog-import'
+        ? [...selected].filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length)).filter(scoped)
+        : scope ? catalogs.sources.find(source => source.repo === repo)?.skills.filter(item => scoped(item.path)).map(item => item.path) ?? [] : null;
       if (paths && !paths.length) { error = 'Select skills to import, or choose Import all.'; draw(); return; }
       void run(async () => {
         const result = await options.call<CatalogImport>('skills_catalog_import', { repo, paths });

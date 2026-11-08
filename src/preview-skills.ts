@@ -1,5 +1,6 @@
 /* Browser preview of the skills library (src-tauri/src/skills.rs): an in-memory library, a
  * pretend Claude Code and Codex install, and the same refusals the native side gives. */
+import recommendations from './recommended-skills.v1.json';
 import type { CatalogImport, CatalogSkill, CatalogSource, SkillActivation, SkillCatalogs, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 
 const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'omp', 'muse', 'devin', 'zcode', 'hermes']);
@@ -27,6 +28,7 @@ const REPOS: Record<string, FixtureRepo> = {
   'you/dotfiles': { commit: '0d0d0d0d0d', skills: [] },
   'you/skills-wishlist': { commit: '1a1a1a1a1a', skills: [] },
   'acme/pstack': { commit: 'c0ffee1234', skills: Array.from({ length: 40 }, (_, i) => catalogSkill(`skills/pstack-${String(i + 1).padStart(2, '0')}`, `pstack ${String(i + 1).padStart(2, '0')}`, 4)) },
+  'ginmp8/rhapsodia': { commit: 'abcdef123456', skills: recommendations.templates.filter(entry => entry.available).map(entry => catalogSkill(entry.path, entry.id)) },
 };
 const OWNED = ['you/agent-skills', 'you/dotfiles', 'you/skills-wishlist'];
 const at = (repo: string, path: string) => path ? `${repo}/${path}` : repo;
@@ -224,6 +226,8 @@ export function createPreviewSkills() {
         case 'skills_catalog_state': { const source = findSource(args.repo); upsert({ ...source, state: args.state }); return catalogs(); }
         case 'skills_catalog_import': return importCatalog(args.repo, args.paths);
         case 'skills_discover': return discover();
+        case 'skills_sync_item': { const entry = find(args.id); return { updated: [], skipped: [`${entry.item.id}: already at the current ref`] }; }
+        case 'skills_sync_all': return { updated: [], skipped: list().filter(item => item.source.kind === 'github').map(item => `${item.id}: already at the current ref`) };
         default: throw new Error(`Unknown preview command: ${command}`);
       }
     },

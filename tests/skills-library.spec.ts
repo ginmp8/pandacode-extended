@@ -145,6 +145,28 @@ test('discovery registers only skill repositories, shows name conflicts, and imp
   await expect(page.getByRole('button', { name: 'Import all from you/agent-skills' })).toHaveCount(0);
 });
 
+test('recommended RhapsodIA templates install only selected available skills', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Recommended skills', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Select recommended agent-systems-best-practices' })).toBeDisabled();
+  await page.getByRole('checkbox', { name: 'Select recommended software-improvement-loop' }).check();
+  await page.getByRole('button', { name: 'Install selected', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('Imported 1 recommended skill. Activation is separate.');
+  await page.getByRole('button', { name: 'Library & activation' }).click();
+  await expect(item(page, 'software-improvement-loop')).toContainText('ginmp8/rhapsodia/skills/software-improvement-loop');
+  await expect(page.getByRole('checkbox', { name: 'software-improvement-loop: Claude Code · User' })).not.toBeChecked();
+});
+
+test('synchronization page offers per-skill and bulk manual sync', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Synchronization' }).click();
+  await expect(page.getByRole('list', { name: 'Skill synchronization' })).toContainText('Release notes');
+  await page.getByRole('button', { name: 'Sync this skill' }).click();
+  await expect(page.getByRole('status')).toContainText('already at the current ref');
+  await page.getByRole('button', { name: 'Sync all installed skills' }).click();
+  await expect(page.getByRole('status')).toContainText('Updated 0 skills.');
+});
+
 test('a pstack-sized collection is scanned as a catalog and imports past 64 files in total', async ({ page }) => {
   await open(page);
   await page.getByRole('textbox', { name: 'Catalog repository' }).fill('acme/nope');

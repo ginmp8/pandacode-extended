@@ -46,8 +46,20 @@ pub struct SourceImport {
     pub skipped: Vec<catalog::Skipped>,
 }
 
-fn id_for(repo: &str, path: &str) -> String {
-    let digest = sha256_hex(format!("{}\n{path}", repo.to_ascii_lowercase()).as_bytes());
+/// Incremental progress for one package in a frozen GitHub import batch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceProgress {
+    pub path: String,
+    pub name: String,
+    pub phase: String,
+    pub completed: usize,
+    pub total: usize,
+    pub detail: Option<String>,
+}
+
+fn id_for(repo: &str, path: &str, git_ref: Option<&str>) -> String {
+    let digest = sha256_hex(format!("{}\n{path}\n{}", repo.to_ascii_lowercase(), git_ref.unwrap_or("")).as_bytes());
     digest[..16].to_string()
 }
 
@@ -117,6 +129,14 @@ impl Library {
         &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
         commit: &str, selected_paths: Vec<String>,
     ) -> Result<SourceImport, String> {
+        self.import_skill_source_progress(api, repo, path, git_ref, commit, selected_paths, |_| {})
+    }
+
+    /// Same importer used by the legacy command; a caller may observe real package events.
+    pub fn import_skill_source_progress(
+        &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
+        commit: &str, selected_paths: Vec<String>, mut progress: impl FnMut(SourceProgress),
+    ) -> Result<SourceImport, String> {
         let (repo, path, git_ref) = github::selection(repo, path, git_ref)?;
         if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Rescan this source: the selected commit is not a full Git SHA.".into());
@@ -125,7 +145,7 @@ impl Library {
         if chosen.is_empty() || chosen.len() > catalog::MAX_SKILLS {
             return Err("Select between one and 300 skills from the scanned collection.".into());
         }
-        let id = id_for(&repo, &path);
+        let id = id_for(&repo, &path, git_ref.as_deref());
         {
             let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
             let existing = self.read_sources()?;
@@ -151,19 +171,33 @@ impl Library {
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
         let mut successful_paths = Vec::new();
+        let total = chosen.len();
+        let mut completed = 0usize;
         for skill_path in &chosen {
             let skill = &indexed[skill_path];
             let skip = |reason: String| catalog::Skipped {
                 path: skill_path.clone(), name: skill.name.clone(), reason,
             };
+            let mut report = |phase: &str, current: usize, detail: Option<String>| {
+                progress(SourceProgress {
+                    path: skill_path.clone(), name: skill.name.clone(), phase: phase.into(),
+                    completed: current, total, detail,
+                });
+            };
             if skill.files > MAX_FILES || skill.bytes > MAX_BYTES as u64 {
-                skipped.push(skip(format!("{} exceeds the validated package size or file limit.", skill.name)));
+                let reason = format!("{} exceeds the validated package size or file limit.", skill.name);
+                skipped.push(skip(reason.clone()));
+                completed += 1;
+                report("skipped", completed, Some(reason));
                 continue;
             }
+            report("fetching", completed, None);
             let result = (|| -> Result<(), String> {
                 let (files, actual_commit) = github::fetch_using(&repo, skill_path, Some(commit), api)
                     .map_err(|e| catalog::explain(&e))?;
                 if actual_commit != commit { return Err("The fetched commit does not match the selected revision.".into()); }
+                report("validating", completed, None);
+                report("installing", completed, None);
                 self.import_as(Kind::Skill, files, &skill.name, Source {
                     kind: "github".into(),
                     location: catalog::location(&repo, skill_path),
@@ -172,9 +206,16 @@ impl Library {
                 }, true)?;
                 Ok(())
             })();
+            completed += 1;
             match result {
-                Ok(()) => { imported.push(skill.name.clone()); successful_paths.push(skill_path.clone()); }
-                Err(error) => skipped.push(skip(error)),
+                Ok(()) => {
+                    imported.push(skill.name.clone()); successful_paths.push(skill_path.clone());
+                    report("installed", completed, None);
+                }
+                Err(error) => {
+                    report("failed", completed, Some(error.clone()));
+                    skipped.push(skip(error));
+                }
             }
         }
         if successful_paths.is_empty() {
@@ -182,9 +223,14 @@ impl Library {
         }
         let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
         let mut store = self.read_sources()?;
+        // A retry must never discard successful selections from the preceding batch.
+        let mut combined: BTreeSet<String> = successful_paths.into_iter().collect();
+        if let Some(previous) = store.sources.iter().find(|s| s.id == id) {
+            combined.extend(previous.selected_paths.iter().cloned());
+        }
         let source = SavedSource {
             id: id.clone(), repo, path, git_ref,
-            commit: commit.to_string(), selected_paths: successful_paths, saved_at: now_ms(),
+            commit: commit.to_string(), selected_paths: combined.into_iter().collect(), saved_at: now_ms(),
         };
         if let Some(existing) = store.sources.iter_mut().find(|s| s.id == id) {
             *existing = source.clone();
@@ -214,15 +260,15 @@ impl Library {
 
     /// A configured source synchronizes only the paths the user previously imported.
     pub fn selected_skill_ids(&self, id: &str) -> Result<Vec<String>, String> {
-        let locations: BTreeSet<String> = {
+        let (locations, reference): (BTreeSet<String>, Option<String>) = {
             let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
             let store = self.read_sources()?;
             let source = store.sources.iter().find(|s| s.id == id).ok_or("Saved source not found.")?;
-            source.selected_paths.iter().map(|path| catalog::location(&source.repo, path)).collect()
+            (source.selected_paths.iter().map(|path| catalog::location(&source.repo, path)).collect(), source.git_ref.clone())
         };
         Ok(self.list()?.into_iter()
             .filter(|item| item.meta.kind == Kind::Skill && item.meta.source.kind == "github"
-                && locations.contains(&item.meta.source.location))
+                && locations.contains(&item.meta.source.location) && item.meta.source.git_ref == reference)
             .map(|item| item.meta.id).collect())
     }
 }

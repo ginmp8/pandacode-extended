@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 use adapter::Surface;
@@ -797,6 +797,35 @@ pub async fn skills_source_import(
     crate::blocking(move || library(&app)?.import_skill_source(
         &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths,
     )).await
+}
+
+/// Streams package phases through the regular Tauri event bus, scoped to a UI operation.
+#[tauri::command]
+pub async fn skills_source_import_tracked(
+    app: AppHandle, repo: String, path: String, git_ref: Option<String>,
+    commit: String, selected_paths: Vec<String>, operation_id: String,
+) -> crate::Result<sources::SourceImport> {
+    if operation_id.is_empty() || operation_id.len() > 80
+        || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        return Err("Invalid skill operation identifier.".into());
+    }
+    crate::blocking(move || {
+        let event_app = app.clone();
+        library(&app)?.import_skill_source_progress(
+            &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths,
+            |progress| {
+                let _ = event_app.emit("skills-operation-progress", serde_json::json!({
+                    "operationId": operation_id,
+                    "path": progress.path,
+                    "name": progress.name,
+                    "phase": progress.phase,
+                    "completed": progress.completed,
+                    "total": progress.total,
+                    "detail": progress.detail,
+                }));
+            },
+        )
+    }).await
 }
 
 #[tauri::command]

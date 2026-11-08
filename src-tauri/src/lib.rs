@@ -4452,6 +4452,7 @@ pub fn run() {
                 skills::skills_source_preview,
                 skills::skills_source_list,
                 skills::skills_source_import,
+                skills::skills_source_import_tracked,
                 skills::skills_source_remove,
                 skills::skills_import_zip,
                 skills::skills_preview_file,

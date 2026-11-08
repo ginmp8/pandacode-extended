@@ -76,6 +76,30 @@ test.describe('bots', () => {
       Math.min(...positions.map(position => position.iconLeft))).toBeLessThan(1);
   });
 
+  test('resized bot settings textareas retain their size across a background refresh', async ({ page }) => {
+    await newBot(page, 'Scout');
+    await openSettings(page);
+    const settings = panel(page);
+    const instructions = settings.getByRole('textbox', { name: 'Instructions' });
+    const goals = settings.getByRole('textbox', { name: 'Standing goals' });
+    await expect(instructions).toBeVisible();
+    await instructions.evaluate(field => { (field as HTMLTextAreaElement).style.height = '280px'; });
+    await goals.evaluate(field => { (field as HTMLTextAreaElement).style.height = '175px'; });
+    // Unfocus the textareas: restoring only the active input does not preserve all resizes.
+    await settings.getByRole('button', { name: 'More', exact: true }).click();
+    const heights = await settings.evaluate(root =>
+      Object.fromEntries(['instructions', 'goals'].map(name => {
+        const field = root.querySelector<HTMLTextAreaElement>(`textarea[name="${name}"]`)!;
+        return [name, field.getBoundingClientRect().height];
+      })));
+    expect(heights.instructions).toBeGreaterThan(270);
+    expect(heights.goals).toBeGreaterThan(165);
+
+    await page.evaluate(() => (window as any).__previewEmit('bots-changed', {}));
+    await expect.poll(async () => instructions.evaluate(field => field.getBoundingClientRect().height)).toBeGreaterThan(270);
+    await expect.poll(async () => goals.evaluate(field => field.getBoundingClientRect().height)).toBeGreaterThan(165);
+  });
+
   test('a new bot keeps its draft and caret through background refreshes', async ({ page }) => {
     await openBots(page);
     const form = bots(page).getByRole('form', { name: 'New bot' });

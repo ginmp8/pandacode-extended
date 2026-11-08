@@ -50,6 +50,18 @@ pub struct SyncReport {
     pub events: Vec<SyncEvent>,
 }
 
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub id: String,
+    pub name: String,
+    pub phase: String,
+    pub completed: usize,
+    pub total: usize,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Selection {
     All,
@@ -180,16 +192,21 @@ impl Library {
     /// One writer for all skill sync operations. When busy, return an in-progress report rather
     /// than race. Errors are isolated per skill; the old complete package remains available.
     pub fn synchronize(&self, api: catalog::Api, selection: Selection, automatic: bool) -> Result<SyncReport, String> {
+        self.synchronize_progress(api, selection, automatic, |_| {})
+    }
+
+    pub fn synchronize_progress(
+        &self, api: catalog::Api, selection: Selection, automatic: bool,
+        mut progress: impl FnMut(SyncProgress),
+    ) -> Result<SyncReport, String> {
         let Ok(_guard) = SYNC.try_lock() else {
             return Ok(SyncReport { checked_at: now_ms(), skipped: vec!["A skill synchronization is already running.".into()], ..SyncReport::default() });
         };
         let policy = self.sync_policy()?;
         let mut report = SyncReport { checked_at: now_ms(), ..SyncReport::default() };
-        let items = self.list()?;
-        for item in items {
-            let meta = item.meta;
-            if meta.source.kind != "github" || meta.kind != Kind::Skill { continue; }
-            let Some((repo, path)) = split_location(&meta.source.location) else { continue; };
+        let targets: Vec<Meta> = self.list()?.into_iter().map(|item| item.meta).filter(|meta| {
+            if meta.source.kind != "github" || meta.kind != Kind::Skill { return false; }
+            let Some((repo, path)) = split_location(&meta.source.location) else { return false; };
             let selected = match &selection {
                 Selection::All => true,
                 Selection::One(id) => &meta.id == id,
@@ -197,12 +214,12 @@ impl Library {
                     && (scope.is_empty() || path == *scope || path.strip_prefix(scope.as_str()).is_some_and(|p| p.starts_with('/'))),
                 Selection::Ids(ids) => ids.contains(&meta.id),
             };
-            if !selected { continue; }
-            // Global switch is the master opt-in; per-skill Disabled can narrow it.
-            // Do not scan trusted directories or silently import newly added skills.
-            if automatic && (!policy.auto_on_start || meta.auto_update == Some(false)) {
-                continue;
-            }
+            selected && (!automatic || (policy.auto_on_start && meta.auto_update != Some(false)))
+        }).collect();
+        let total = targets.len();
+        for (index, meta) in targets.into_iter().enumerate() {
+            progress(SyncProgress { id:meta.id.clone(), name:meta.name.clone(), phase:"fetching".into(),
+                completed:index, total, detail:None });
             let event = match self.sync_one(api, &meta, automatic) {
                 Ok(event) => event,
                 Err(error) => SyncEvent { id: meta.id.clone(), status: "error".into(), old_commit: meta.source.commit.clone(),
@@ -211,6 +228,12 @@ impl Library {
             };
             if event.status == "updated" { report.updated.push(meta.id.clone()); }
             else { report.skipped.push(format!("{}: {}", meta.id, event.detail)); }
+            let phase = if event.status == "updated" { "updated" }
+                else if event.status == "error" { "failed" }
+                else if event.detail.starts_with("Already at") { "unchanged" }
+                else { "skipped" };
+            progress(SyncProgress { id:meta.id.clone(), name:meta.name.clone(), phase:phase.into(),
+                completed:index + 1, total, detail:Some(event.detail.clone()) });
             report.events.push(event);
         }
         self.save_sync_file(".sync-report.json", &report)?;

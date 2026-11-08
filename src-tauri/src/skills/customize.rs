@@ -121,10 +121,15 @@ fn read_zip(path: &std::path::Path) -> Result<super::Files, String> {
 }
 
 pub fn import_zip(app: &AppHandle, path: &str) -> Result<ZipInstall, String> {
+    import_zip_progress(app, path, |_| {})
+}
+
+pub fn import_zip_progress(app: &AppHandle, path: &str, mut progress: impl FnMut(&str)) -> Result<ZipInstall, String> {
     let path = PathBuf::from(path);
     if !path.is_absolute() || path.extension().and_then(|ext| ext.to_str()).is_none_or(|ext| !ext.eq_ignore_ascii_case("zip")) {
         return Err("Choose an absolute path to a .zip skill package.".into());
     }
+    progress("validating");
     let files = read_zip(&path)?;
     let main = files.iter().find(|(name, _)| name == "SKILL.md").ok_or("Missing SKILL.md.")?;
     let content = std::str::from_utf8(&main.1).map_err(|_| "Invalid SKILL.md.")?;
@@ -136,9 +141,11 @@ pub fn import_zip(app: &AppHandle, path: &str) -> Result<ZipInstall, String> {
     let impacted_harnesses = previous.as_ref().map(|item| item.meta.activations.iter()
         .map(|activation| activation.harness.clone()).collect()).unwrap_or_default();
     let location = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    progress("installing");
     let item = library.import(Kind::Skill, files, &name, Source {
         kind: "zip".into(), location, git_ref: None, commit: None,
     })?;
+    progress("installed");
     Ok(ZipInstall { item, replaced: previous.is_some(), previous_source, impacted_harnesses })
 }
 

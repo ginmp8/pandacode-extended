@@ -91,7 +91,7 @@ export function createPreviewSkills() {
     for(const skill of source.skills.filter(skill=>selected.has(skill.path))) {
       const location=at(source.repo,skill.path);
       const previous=entries.get(skill.id);
-      if(previous&&previous.item.source.location!==location) {
+      if(previous&&previous.item.source.location!==location&&!args.allowReplace) {
         skipped.push({path:skill.path,name:skill.name,reason:'Skill ID is installed from a different source.'});continue;
       }
       add('skill',skill.name,`---
@@ -280,6 +280,11 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
         case 'skills_source_preview': return previewSource(args.repo,args.path,args.gitRef);
         case 'skills_source_list': return structuredClone(savedSources);
         case 'skills_source_import': case 'skills_source_import_tracked': return sourceImport(args);
+        case 'skills_source_set_selection': {
+          const source=savedSources.find(s=>s.id===args.id);
+          if(!source)throw new Error('Saved source not found.');
+          source.selectedPaths=[...new Set<string>(args.selectedPaths??[])];return structuredClone(source);
+        }
         case 'skills_source_remove': {
           if(!savedSources.some(s=>s.id===args.id))throw new Error('Saved source not found.');
           savedSources=savedSources.filter(s=>s.id!==args.id);return structuredClone(savedSources);
@@ -287,8 +292,8 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
         case 'skills_sync_policy': return {autoOnStart,trustedScopes:[]};
         case 'skills_sync_set_global': autoOnStart=Boolean(args.enabled);return {autoOnStart,trustedScopes:[]};
         case 'skills_sync_report': return {checkedAt:0,installed:[],updated:[],skipped:[],events:[]};
-        case 'skills_sync_item': case 'skills_sync_saved_source': case 'skills_sync_all': {
-          const ids=command==='skills_sync_item'?[args.id]:command==='skills_sync_saved_source'
+        case 'skills_sync_item': case 'skills_sync_saved_source': case 'skills_sync_all': case 'skills_sync_tracked': {
+          const ids=(command==='skills_sync_item'||(command==='skills_sync_tracked'&&args.scope==='skill'))?[args.id]:(command==='skills_sync_saved_source'||(command==='skills_sync_tracked'&&args.scope==='source'))
             ?(savedSources.find(s=>s.id===args.id)?.selectedPaths??[]).map(path=>[...entries.values()].find(x=>x.item.source.location.endsWith('/'+path))?.item.id).filter(Boolean)
             :[...entries.values()].filter(x=>x.item.source.kind==='github').map(x=>x.item.id);
           return {checkedAt:Date.now(),installed:[],updated:[],skipped:[],events:ids.map(id=>({id,status:'skipped',oldCommit:null,newCommit:null,impactedHarnesses:[],detail:'Already at the selected source commit.'}))};
@@ -302,7 +307,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
           const text=`# ${skill?.name??'Skill'}\n\nRead-only GitHub preview.`;
           return {path:args.file,text,size:text.length,binary:false};
         }
-        case 'skills_import_zip': {
+        case 'skills_import_zip': case 'skills_import_zip_tracked': {
           const previous=entries.get('zip-sample');
           const item=add('skill','ZIP sample','---\nname: ZIP sample\ndescription: Sample ZIP package\n---\n# ZIP sample',
             {kind:'zip',location:'skill.zip',gitRef:null,commit:null},['SKILL.md','references/sample.md']);

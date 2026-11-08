@@ -803,7 +803,7 @@ pub async fn skills_source_import(
 #[tauri::command]
 pub async fn skills_source_import_tracked(
     app: AppHandle, repo: String, path: String, git_ref: Option<String>,
-    commit: String, selected_paths: Vec<String>, operation_id: String,
+    commit: String, selected_paths: Vec<String>, operation_id: String, allow_replace: Option<bool>,
 ) -> crate::Result<sources::SourceImport> {
     if operation_id.is_empty() || operation_id.len() > 80
         || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
@@ -811,8 +811,8 @@ pub async fn skills_source_import_tracked(
     }
     crate::blocking(move || {
         let event_app = app.clone();
-        library(&app)?.import_skill_source_progress(
-            &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths,
+        library(&app)?.import_skill_source_progress_with_replace(
+            &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths, allow_replace.unwrap_or(false),
             |progress| {
                 let _ = event_app.emit("skills-operation-progress", serde_json::json!({
                     "operationId": operation_id,
@@ -826,6 +826,11 @@ pub async fn skills_source_import_tracked(
             },
         )
     }).await
+}
+
+#[tauri::command]
+pub async fn skills_source_set_selection(app: AppHandle, id: String, selected_paths: Vec<String>) -> crate::Result<sources::SavedSource> {
+    crate::blocking(move || library(&app)?.set_saved_source_paths(&id, selected_paths)).await
 }
 
 #[tauri::command]
@@ -912,8 +917,15 @@ pub async fn skills_sync_report(app: AppHandle) -> crate::Result<sync::SyncRepor
 pub fn begin_startup_sync(app: AppHandle) {
     std::thread::spawn(move || {
         if let Ok(library) = library(&app) {
-            if let Ok(report) = library.synchronize(&github::api, sync::Selection::All, true) {
-                refresh_bot_briefs_if_changed(&app, &report);
+            if let Ok(sources) = library.saved_skill_sources() {
+                let ids: Vec<String> = sources.iter()
+                    .flat_map(|source| library.selected_skill_ids(&source.id).unwrap_or_default())
+                    .collect();
+                if !ids.is_empty() {
+                    if let Ok(report) = library.synchronize(&github::api, sync::Selection::Ids(ids), true) {
+                        refresh_bot_briefs_if_changed(&app, &report);
+                    }
+                }
             }
         }
     });
@@ -923,6 +935,61 @@ pub fn begin_startup_sync(app: AppHandle) {
 mod tests;
 #[cfg(test)]
 mod catalog_tests;
+
+/// ZIP and manual sync share the same operation-scoped package progress event.
+#[tauri::command]
+pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_id: String) -> crate::Result<customize::ZipInstall> {
+    if operation_id.is_empty() || operation_id.len() > 80
+        || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        return Err("Invalid skill operation identifier.".into());
+    }
+    crate::blocking(move || {
+        let name = std::path::Path::new(&path).file_name()
+            .unwrap_or_default().to_string_lossy().into_owned();
+        let event_app = app.clone();
+        let result = customize::import_zip_progress(&app, &path, |phase| {
+            let _ = event_app.emit("skills-operation-progress", serde_json::json!({
+                "operationId": operation_id, "path": name, "name": name,
+                "phase": phase, "completed": if phase == "installed" { 1 } else { 0 },
+                "total": 1, "detail": null,
+            }));
+        });
+        if let Err(error) = &result {
+            let _ = app.emit("skills-operation-progress", serde_json::json!({
+                "operationId":operation_id, "path":name, "name":name,
+                "phase":"failed","completed":1,"total":1,"detail":error,
+            }));
+        }
+        result
+    }).await
+}
+
+#[tauri::command]
+pub async fn skills_sync_tracked(app: AppHandle, scope: String, id: Option<String>, operation_id: String) -> crate::Result<sync::SyncReport> {
+    if operation_id.is_empty() || operation_id.len() > 80
+        || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        return Err("Invalid skill operation identifier.".into());
+    }
+    crate::blocking(move || {
+        let library = library(&app)?;
+        let selection = match scope.as_str() {
+            "all" => sync::Selection::All,
+            "skill" => sync::Selection::One(id.ok_or("Choose a skill ID to synchronize.")?),
+            "source" => sync::Selection::Ids(library.selected_skill_ids(&id.ok_or("Choose a saved source.")?)?),
+            _ => return Err("Unknown skill synchronization scope.".into()),
+        };
+        let events_app = app.clone();
+        let report = library.synchronize_progress(&github::api, selection, false, |progress| {
+            let _ = events_app.emit("skills-operation-progress", serde_json::json!({
+                "operationId":operation_id, "path":progress.id,"name":progress.name,
+                "phase":progress.phase,"completed":progress.completed,
+                "total":progress.total,"detail":progress.detail,
+            }));
+        })?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
 
 #[tauri::command]
 pub async fn skills_import_zip(app: AppHandle, path: String) -> crate::Result<customize::ZipInstall> {

@@ -132,10 +132,17 @@ impl Library {
         self.import_skill_source_progress(api, repo, path, git_ref, commit, selected_paths, |_| {})
     }
 
-    /// Same importer used by the legacy command; a caller may observe real package events.
     pub fn import_skill_source_progress(
         &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
-        commit: &str, selected_paths: Vec<String>, mut progress: impl FnMut(SourceProgress),
+        commit: &str, selected_paths: Vec<String>, progress: impl FnMut(SourceProgress),
+    ) -> Result<SourceImport, String> {
+        self.import_skill_source_progress_with_replace(api, repo, path, git_ref, commit, selected_paths, false, progress)
+    }
+
+    /// An explicit user choice may replace a different GitHub/ZIP origin, never implicitly.
+    pub fn import_skill_source_progress_with_replace(
+        &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
+        commit: &str, selected_paths: Vec<String>, allow_replace: bool, mut progress: impl FnMut(SourceProgress),
     ) -> Result<SourceImport, String> {
         let (repo, path, git_ref) = github::selection(repo, path, git_ref)?;
         if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -203,7 +210,7 @@ impl Library {
                     location: catalog::location(&repo, skill_path),
                     git_ref: git_ref.clone(),
                     commit: Some(commit.to_string()),
-                }, true)?;
+                }, !allow_replace)?;
                 Ok(())
             })();
             completed += 1;
@@ -243,6 +250,35 @@ impl Library {
         store.sources.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.path.cmp(&b.path)));
         self.save_sources(&store)?;
         Ok(SourceImport { source, imported, skipped })
+    }
+
+
+    /// Change only future synchronization tracking; unselected installed packages remain.
+    /// Paths cannot enroll an uninstalled package without a fresh explicit import.
+    pub fn set_saved_source_paths(&self, id: &str, paths: Vec<String>) -> Result<SavedSource, String> {
+        let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+        let mut store = self.read_sources()?;
+        let source = store.sources.iter_mut().find(|s| s.id == id)
+            .ok_or("Saved GitHub source not found.")?;
+        let normalized: BTreeSet<String> = paths.into_iter().collect();
+        let installed: BTreeSet<String> = self.list()?.into_iter()
+            .filter(|item| item.meta.kind == Kind::Skill && item.meta.source.kind == "github"
+                && item.meta.source.git_ref == source.git_ref
+                && item.meta.source.location.starts_with(&format!("{}/", source.repo)))
+            .map(|item| item.meta.source.location)
+            .collect();
+        if normalized.iter().any(|path| {
+            (!source.path.is_empty() && path != &source.path
+                && !path.starts_with(&format!("{}/", source.path)))
+                || !installed.contains(&catalog::location(&source.repo, path))
+        }) {
+            return Err("Track only skills already installed from this GitHub source; import additions first.".into());
+        }
+        source.selected_paths = normalized.into_iter().collect();
+        source.saved_at = now_ms();
+        let result = source.clone();
+        self.save_sources(&store)?;
+        Ok(result)
     }
 
     /// Removes only the source configuration, not imported files or harness state.

@@ -860,6 +860,54 @@ mod tests {
 
 
     #[test]
+    fn portable_manifest_restores_nonsecret_configuration_into_a_fresh_store() {
+        let source = store();
+        let destination = store();
+        let source_root = root();
+        let destination_root = root();
+        let manifest = json!({
+            "bots": [
+                {
+                    "name": "Author", "provider": "claude", "model": "sonnet", "mode": "ask",
+                    "notify": false, "showPlan": true,
+                    "extended": {
+                        "freshContextEachMessage": true,
+                        "includeSharedChannelHistory": false
+                    },
+                    "channels": [{
+                        "kind": "web", "label": "local", "config": {"remote": false},
+                        "enabled": false
+                    }]
+                },
+                {"name": "Reviewer", "provider": "claude", "model": "sonnet", "mode": "ask"}
+            ],
+            "sharedChannels": [{
+                "name": "quality", "members": ["Author", "Reviewer"],
+                "lead": "Reviewer", "archived": false
+            }]
+        });
+        let created = apply(&source, &source_root, &manifest, 1_000_000);
+        assert_eq!(created.failed, 0, "{:?}", created.lines);
+        let exported = export(&source).unwrap();
+        let restored = apply(&destination, &destination_root, &exported, 2_000_000);
+        assert_eq!(restored.failed, 0, "{:?}", restored.lines);
+        let imported = export(&destination).unwrap();
+        assert_eq!(imported["sharedChannels"], exported["sharedChannels"]);
+        for original in exported["bots"].as_array().unwrap() {
+            let name = original["name"].as_str().unwrap();
+            let copy = imported["bots"].as_array().unwrap().iter()
+                .find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(copy, original, "Configuration differs for {name}");
+        }
+        let author = bots::list(&destination).unwrap().into_iter()
+            .find(|bot| bot.name == "Author").unwrap();
+        assert!(!channels::list(&destination, &author.id).unwrap()[0].enabled,
+            "Disabled integrations must remain disabled on a fresh installation");
+        let _ = std::fs::remove_dir_all(source_root);
+        let _ = std::fs::remove_dir_all(destination_root);
+    }
+
+    #[test]
     fn invalid_extended_settings_do_not_change_an_existing_bot() {
         let store = store();
         let root = root();

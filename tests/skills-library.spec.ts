@@ -109,7 +109,7 @@ test('project-scope rules and safety findings need acknowledgement before activa
   await expect(page.getByRole('status')).toHaveText('Active for Codex.');
 
   await page.getByRole('textbox', { name: 'Folder or file path' }).fill('/Users/you/skills/setup');
-  await page.getByRole('button', { name: 'Import' }).click();
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('Imported setup. 1 safety finding to review.');
   await expect(page.getByRole('list', { name: 'Safety findings for setup' })).toContainText('Download piped into a shell');
   const toggle = page.getByRole('checkbox', { name: 'setup: Claude Code · User' });
@@ -122,11 +122,11 @@ test('project-scope rules and safety findings need acknowledgement before activa
 test('GitHub import validates the repository and records the commit', async ({ page }) => {
   await open(page);
   await page.getByRole('combobox', { name: 'Source' }).selectOption('github');
-  await page.getByRole('button', { name: 'Import' }).click();
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'owner/name' })).toBeVisible();
   await page.getByRole('textbox', { name: 'Repository', exact: true }).fill('acme/skills');
   await page.getByRole('textbox', { name: 'Path in repository' }).fill('skills/pdf');
-  await page.getByRole('button', { name: 'Import' }).click();
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
   await expect(item(page, 'pdf')).toContainText('GitHub · acme/skills/skills/pdf @ a1b2c3d');
   await expect(page.getByRole('textbox', { name: 'Repository', exact: true })).toHaveValue('');
 });

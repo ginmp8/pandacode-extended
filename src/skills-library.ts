@@ -587,10 +587,13 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
         gitRef: form.querySelector<HTMLInputElement>('[name="sourceRef"]')?.value || '',
       };
       if (sourcePreview) {
-        // A changed query must be rescanned before its previous selection can be imported.
+        // Invalidate the previous selection without replacing the form during blur: doing
+        // so would cancel a pending click on "List skills" in the same user action.
         sourcePreview = null;
         sourceSelected = new Set();
-        draw();
+        const results = host.querySelector('.skills-source-results');
+        if (results?.previousElementSibling?.matches('.settings-heading')) results.previousElementSibling.remove();
+        results?.remove();
       }
     }
     if (target instanceof HTMLInputElement && target.hasAttribute('data-source-select')) {

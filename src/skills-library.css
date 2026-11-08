@@ -54,7 +54,7 @@
 
 /* Extended Skills Library views follow the Settings card/row rhythm. Keep these
    rules scoped: the existing import, catalog and harness activation rows are unchanged. */
-.settings-page-root .skills-view-tabs{width:max-content;max-width:100%;margin:0 0 var(--ds-section-gap);justify-content:flex-start;flex-wrap:wrap}
+.settings-page-root .skills-view-tabs{box-sizing:border-box;width:max-content;max-width:100%;margin:0 0 var(--ds-section-gap);justify-content:flex-start;flex-wrap:wrap}
 .settings-page-root .skills-view-tabs>button{flex:0 1 auto;min-height:var(--ds-btn-h);height:auto;padding:6px var(--ds-row-pad-x);font-size:var(--ds-text-ui);line-height:1.3;white-space:normal}
 .settings-page-root .skills-source-controls>:is(.skills-note,.skills-message,.skills-error){margin:0;padding:var(--ds-row-pad-y) var(--ds-row-pad-x)}
 .settings-page-root .skills-source-form{display:flex;flex-direction:column;gap:var(--ds-row-gap);padding:var(--ds-row-pad-y) var(--ds-row-pad-x)}

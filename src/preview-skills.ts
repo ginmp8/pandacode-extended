@@ -58,6 +58,59 @@ export function createPreviewSkills() {
   add('skill', 'Release notes', '# Release notes\nWrites release notes from merged pull requests.', { kind: 'github', location: 'anthropics/skills/release-notes', gitRef: null, commit: '9f3c2a1b7e' }, ['SKILL.md', 'templates/short.md']);
   add('rule', 'No force push', 'Never force-push to main or release branches.', { kind: 'folder', location: '/Users/you/rules/no-force-push.md', gitRef: null, commit: null });
 
+  let savedSources: {id:string;repo:string;path:string;gitRef:string|null;commit:string;selectedPaths:string[];savedAt:number}[] = [];
+  let autoOnStart = false;
+  const fullSha = (text:string) => text.padEnd(40, '0').slice(0,40);
+  function previewSource(input:unknown, selectedPath:unknown, selectedRef:unknown) {
+    let repo=String(input??'').replace(/^https:\/\/github\.com\//,'').replace(/\/$/,'');
+    let path=String(selectedPath??'').replace(/^\/+|\/+$/g,'');
+    let ref=String(selectedRef??'')||null;
+    const tail=repo.split('/');
+    if(tail.length>2) {
+      if(tail[2]!=='tree'||tail.length<4) throw new Error('Enter a repository URL or a valid tree URL.');
+      const resolved=ref||tail[3];
+      const rest=tail.slice(3).join('/');
+      if(rest!==resolved&&!rest.startsWith(resolved+'/'))throw new Error('Specify the exact Git ref.');
+      path=rest===resolved?'':rest.slice(resolved.length+1);
+      ref=resolved;
+      repo=tail.slice(0,2).join('/');
+    }
+    const fixture=REPOS[repo];
+    if(!fixture)throw new Error('GitHub repository not found or not accessible.');
+    const skills=fixture.skills.filter(item=>!path||item.path===path||item.path.startsWith(path+'/'))
+      .map(item=>({...item,id:slug(item.name),bytes:item.files*400,imported:null,conflicts:[]}));
+    if(!skills.length)throw new Error('No SKILL.md packages found in this repository.');
+    return {repo,path,gitRef:ref,commit:fullSha(fixture.commit),skills};
+  }
+
+  function sourceImport(args:Record<string,any>) {
+    const source=previewSource(args.repo,args.path,args.gitRef);
+    const selected=new Set<string>(args.selectedPaths??[]);
+    const successful:string[]=[];
+    const skipped:{path:string;name:string;reason:string}[]=[];
+    for(const skill of source.skills.filter(skill=>selected.has(skill.path))) {
+      const location=at(source.repo,skill.path);
+      const previous=entries.get(skill.id);
+      if(previous&&previous.item.source.location!==location) {
+        skipped.push({path:skill.path,name:skill.name,reason:'Skill ID is installed from a different source.'});continue;
+      }
+      add('skill',skill.name,`---
+name: ${skill.name}
+description: ${skill.description}
+---
+# ${skill.name}
+${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source.commit},['SKILL.md','references/guide.md']);
+      successful.push(skill.path);
+    }
+    if(!successful.length)throw new Error('No selected skill was imported.');
+    const id=hash(source.repo+'\\n'+source.path+'\\n'+(source.gitRef??'')).slice(0,16);
+    const previous=savedSources.find(value=>value.id===id);
+    const saved={id,repo:source.repo,path:source.path,gitRef:source.gitRef,commit:source.commit,
+      selectedPaths:[...new Set([...(previous?.selectedPaths??[]),...successful])],savedAt:Date.now()};
+    savedSources=[...savedSources.filter(value=>value.id!==id),saved];
+    return {source:saved,imported:successful.map(path=>source.skills.find(skill=>skill.path===path)!.name),skipped};
+  }
+
   let sources: CatalogSource[] = [];
   let discovery: SkillCatalogs['discovery'] = null;
   let failure: string | null = null;
@@ -224,6 +277,37 @@ export function createPreviewSkills() {
         case 'skills_catalog_state': { const source = findSource(args.repo); upsert({ ...source, state: args.state }); return catalogs(); }
         case 'skills_catalog_import': return importCatalog(args.repo, args.paths);
         case 'skills_discover': return discover();
+        case 'skills_source_preview': return previewSource(args.repo,args.path,args.gitRef);
+        case 'skills_source_list': return structuredClone(savedSources);
+        case 'skills_source_import': case 'skills_source_import_tracked': return sourceImport(args);
+        case 'skills_source_remove': {
+          if(!savedSources.some(s=>s.id===args.id))throw new Error('Saved source not found.');
+          savedSources=savedSources.filter(s=>s.id!==args.id);return structuredClone(savedSources);
+        }
+        case 'skills_sync_policy': return {autoOnStart,trustedScopes:[]};
+        case 'skills_sync_set_global': autoOnStart=Boolean(args.enabled);return {autoOnStart,trustedScopes:[]};
+        case 'skills_sync_report': return {checkedAt:0,installed:[],updated:[],skipped:[],events:[]};
+        case 'skills_sync_item': case 'skills_sync_saved_source': case 'skills_sync_all': {
+          const ids=command==='skills_sync_item'?[args.id]:command==='skills_sync_saved_source'
+            ?(savedSources.find(s=>s.id===args.id)?.selectedPaths??[]).map(path=>[...entries.values()].find(x=>x.item.source.location.endsWith('/'+path))?.item.id).filter(Boolean)
+            :[...entries.values()].filter(x=>x.item.source.kind==='github').map(x=>x.item.id);
+          return {checkedAt:Date.now(),installed:[],updated:[],skipped:[],events:ids.map(id=>({id,status:'skipped',oldCommit:null,newCommit:null,impactedHarnesses:[],detail:'Already at the selected source commit.'}))};
+        }
+        case 'skills_preview_file': {
+          const entry=find(args.id);
+          return {path:args.file,text:entry.text,size:entry.text.length,binary:false};
+        }
+        case 'skills_github_preview_file': {
+          const skill=previewSource(args.repo,args.path,args.commit).skills.find(x=>x.path===args.path);
+          const text=`# ${skill?.name??'Skill'}\n\nRead-only GitHub preview.`;
+          return {path:args.file,text,size:text.length,binary:false};
+        }
+        case 'skills_import_zip': {
+          const previous=entries.get('zip-sample');
+          const item=add('skill','ZIP sample','---\nname: ZIP sample\ndescription: Sample ZIP package\n---\n# ZIP sample',
+            {kind:'zip',location:'skill.zip',gitRef:null,commit:null},['SKILL.md','references/sample.md']);
+          return {item,replaced:!!previous,previousSource:previous?.item.source??null,impactedHarnesses:previous?.item.activations.map(a=>a.harness)??[]};
+        }
         default: throw new Error(`Unknown preview command: ${command}`);
       }
     },

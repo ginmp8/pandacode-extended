@@ -5,7 +5,6 @@
 import './skills-library.css';
 import { escape } from './dom';
 import { infoMark } from './tooltip';
-import recommendations from './recommended-skills.v1.json';
 
 export type SkillKind = 'skill' | 'rule';
 export type SkillScope = 'user' | 'project';
@@ -73,6 +72,17 @@ function githubSelection(input: string, pathInput = '', refInput = ''): { repo: 
   return { repo, path, gitRef };
 }
 
+export type SavedSkillSource = {
+  id: string; repo: string; path: string; gitRef: string | null;
+  commit: string; selectedPaths: string[]; savedAt: number;
+};
+export type GitHubSourcePreview = {
+  repo: string; path: string; gitRef: string | null; commit: string; skills: CatalogSkill[];
+};
+export type ImportedSkillSource = {
+  source: SavedSkillSource; imported: string[];
+  skipped: { path: string; name: string; reason: string }[];
+};
 export type SkillsLibraryHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   /** Projects offered for project scope. */
@@ -93,11 +103,15 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   let catalogs: SkillCatalogs = { sources: [], discovery: null };
   let syncPolicy: SkillSyncPolicy = { autoOnStart: false, trustedScopes: [] };
   let syncReport: SkillSyncReport = { checkedAt: 0, updated: [], skipped: [], events: [] };
+  let savedSources: SavedSkillSource[] = [];
+  let sourcePreview: GitHubSourcePreview | null = null;
+  let sourceQuery = { repo: '', path: '', gitRef: '' };
+  let sourceSelected = new Set<string>();
+  let pendingSourceRemoval: string | null = null;
   /** Catalog skills chosen for import, as `repo\npath`. */
   let selected = new Set<string>();
-  let recommendedSelected = new Set<string>();
   const catalogScopes = new Map<string, string>();
-  let view: 'library' | 'recommended' | 'sync' = 'library';
+  let view: 'library' | 'import' | 'sync' = 'library';
   let projectId = '';
   let source: 'folder' | 'github' = 'folder';
   let pending: { id: string; harness: string; scope: SkillScope } | null = null;
@@ -107,12 +121,13 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
 
   async function refresh(): Promise<void> {
     try {
-      [items, matrix, catalogs, syncPolicy, syncReport] = await Promise.all([
+      [items, matrix, catalogs, syncPolicy, syncReport, savedSources] = await Promise.all([
         options.call<SkillItem[]>('skills_list'),
         options.call<SkillMatrix>('skills_matrix', projectId ? { projectId } : {}),
         options.call<SkillCatalogs>('skills_catalogs'),
         options.call<SkillSyncPolicy>('skills_sync_policy'),
         options.call<SkillSyncReport>('skills_sync_report'),
+        options.call<SavedSkillSource[]>('skills_source_list'),
       ]);
     } catch (failure) { error = message(failure); }
     if (!disposed) draw();
@@ -204,61 +219,79 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   }
 
 
-  function recommendedHtml(): string {
-    const groups = [...new Set(recommendations.templates.map(entry => entry.group))];
-    const source = catalogs.sources.find(entry => entry.repo === 'ginmp8/rhapsodia');
-    const groupHtml = groups.map(group => {
-      const entries = recommendations.templates.filter(entry => entry.group === group);
-      return `<h3 class="settings-heading">${escape(group)}</h3><section class="settings-group skills-recommended-group">
-        <ul class="skills-catalog-skills">${entries.map(entry => {
-          const path = `ginmp8/rhapsodia/${entry.path}`;
-          const installed = items.find(item => item.source.location.toLowerCase() === path.toLowerCase());
-          const newest = source?.skills.find(skill => skill.path === entry.path);
-          const status = !entry.available ? 'Unavailable in the current RhapsodIA source' : installed
-            ? (newest && newest.imported !== source?.commit ? 'An update may be available' : 'Installed') : 'Not installed';
-          return `<li class="skills-catalog-skill"><label class="skills-toggle">
-            <input type="checkbox" data-recommended="${escape(entry.id)}" ${recommendedSelected.has(entry.id) ? 'checked' : ''} ${!entry.available || busy ? 'disabled' : ''}
-              aria-label="${escape(`Select recommended ${entry.id}`)}">
-            <span><strong>${escape(entry.id)}</strong> ${entry.optional ? '<span class="skills-kind">Optional</span>' : ''}<code>${escape(entry.path)}</code></span></label>
-            <small>${escape(status)}</small></li>`;
-        }).join('')}</ul></section>`;
+  function sourceImportHtml(): string {
+    const previews = sourcePreview?.skills ?? [];
+    const previewsHtml = previews.map(skill => `<li class="skills-catalog-skill">
+      <label class="skills-toggle"><input type="checkbox" data-source-select="${escape(skill.path)}"
+        aria-label="${escape(`Select ${skill.name} from ${sourcePreview!.repo}`)}" ${sourceSelected.has(skill.path) ? 'checked' : ''} ${busy ? 'disabled' : ''}>
+        <span><strong>${escape(skill.name)}</strong> <code>${escape(skill.path || '(root)')}</code></span></label>
+      <small>${escape(skill.description)}</small>
+      <small>${plural(skill.files, 'file')} · ${Math.ceil(skill.bytes / 1024)} KiB</small>
+    </li>`).join('');
+    const cards = savedSources.map(source => {
+      const link = `https://github.com/${source.repo}/tree/${source.commit}${source.path ? '/' + source.path : ''}`;
+      const removing = pendingSourceRemoval === source.id;
+      return `<li class="skills-item" data-source-id="${escape(source.id)}">
+        <div class="skills-item-head"><div>
+          <strong>${escape(source.repo)}</strong><small><code>${escape(source.path || '(repository root)')}</code></small>
+          <small>Ref: ${escape(source.gitRef || 'default branch')} · ${plural(source.selectedPaths.length, 'selected skill')} · ${escape(source.commit.slice(0, 12))}</small>
+          <small><a href="${escape(link)}" target="_blank" rel="noopener noreferrer">View saved GitHub path</a></small>
+        </div></div>
+        <div class="skills-import-row skills-source-actions">
+          <button type="button" class="secondary-button" data-action="source-edit" ${busy ? 'disabled' : ''}>Edit selection</button>
+          <button type="button" class="secondary-button" data-action="${removing ? 'source-confirm-remove' : 'source-remove'}" ${busy ? 'disabled' : ''}>${removing ? 'Confirm removal' : 'Remove source config'}</button>
+          ${removing ? '<button type="button" class="secondary-button" data-action="source-cancel-remove">Cancel</button>' : ''}
+        </div>
+        ${removing ? '<small>Removing the configuration does not delete imported skills or native harness files.</small>' : ''}
+      </li>`;
     }).join('');
-    return `<div class="settings-group skills-recommended-controls"><p class="skills-note">These are metadata references to public RhapsodIA skills, not preinstalled packages. Import requires the GitHub CLI. No scripts run on import and no bot is activated automatically.</p>
-      <label>Git ref (branch, tag, or immutable full commit SHA)
-        <input name="recommendedRef" aria-label="Recommended source ref" value="main" spellcheck="false" autocomplete="off">
-      </label><div class="skills-import-row skills-import-actions">
-        <button type="button" class="secondary-button" data-action="recommend-import" ${busy ? 'disabled' : ''}>Install selected</button>
-        <button type="button" class="secondary-button" data-action="recommend-all" ${busy ? 'disabled' : ''}>Install all primary skills</button>
-      </div><p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p><p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p></div>
-      ${groupHtml}`;
+    return `<div class="settings-group skills-source-controls">
+      <p class="skills-note">Enter a GitHub repository and its skills folder. PandaCode uses the signed-in GitHub CLI to list available skills without cloning or storing unselected repositories. Importing does not activate skills or run scripts.</p>
+      <form class="skills-source-form" aria-label="Scan a GitHub skills source" novalidate>
+        <label>GitHub repository URL or owner/name
+          <input name="sourceRepo" aria-label="Source repository" value="${escape(sourceQuery.repo)}" placeholder="owner/repo" spellcheck="false" autocomplete="off" required>
+        </label>
+        <label>Skills folder path (optional for repository root)
+          <input name="sourcePath" aria-label="Skills folder path" value="${escape(sourceQuery.path)}" placeholder="skills" spellcheck="false" autocomplete="off">
+        </label>
+        <label>Git ref (branch, tag, or full commit SHA)
+          <input name="sourceRef" aria-label="Source Git ref" value="${escape(sourceQuery.gitRef)}" placeholder="Default branch" spellcheck="false" autocomplete="off">
+        </label>
+        <div class="skills-import-row skills-source-actions">
+          <button type="submit" class="secondary-button" ${busy ? 'disabled' : ''}>List skills</button>
+        </div>
+      </form>
+      <p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p>
+      <p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p>
+    </div>
+    ${sourcePreview ? `<h3 class="settings-heading">Available skills</h3>
+      <section class="settings-group skills-source-results" aria-label="Available GitHub skills">
+        <div class="skills-source-summary"><span>${plural(previews.length, 'skill')} at ${escape(sourcePreview.repo)}/${escape(sourcePreview.path || '(root)')} · ${escape(sourcePreview.commit.slice(0, 12))}</span>
+          <strong>${plural(sourceSelected.size, 'selected')}</strong></div>
+        <div class="skills-import-row skills-source-actions">
+          <button type="button" class="secondary-button" data-action="source-select-all" ${busy ? 'disabled' : ''}>Select all</button>
+          <button type="button" class="secondary-button" data-action="source-clear" ${busy ? 'disabled' : ''}>Clear selection</button>
+        </div>
+        <ul class="skills-catalog-skills" aria-label="Select GitHub skills">${previewsHtml}</ul>
+        <div class="skills-import-row skills-source-actions">
+          <button type="button" class="secondary-button" data-action="source-save-import" ${!sourceSelected.size || busy ? 'disabled' : ''}>Import selected and save source</button>
+        </div>
+      </section>` : ''}
+    <h3 class="settings-heading">Saved sources</h3>
+    ${savedSources.length ? `<ul class="settings-group skills-list" aria-label="Saved GitHub skill sources">${cards}</ul>` :
+    '<div class="settings-group skills-empty-group"><p class="skills-empty">No saved GitHub skill sources. Scan, select and import a collection to save it.</p></div>'}`;
   }
 
   function syncHtml(): string {
     const githubItems = items.filter(item => item.kind === 'skill' && item.source.kind === 'github');
-    const sources = [...new Set([
-      ...githubItems.map(item => item.source.location.split('/').slice(0, 2).join('/')),
-      ...syncPolicy.trustedScopes.map(scope => scope.repo),
-    ])].sort();
-    const sourceHtml = sources.map(repo => {
-      const scopes = syncPolicy.trustedScopes.filter(scope => scope.repo.toLowerCase() === repo.toLowerCase());
-      const rootTrusted = scopes.some(scope => !scope.path);
-      const partial = scopes.some(scope => !!scope.path);
-      const ref = catalogs.sources.find(source => source.repo.toLowerCase() === repo.toLowerCase())?.gitRef
-        || githubItems.find(item => item.source.location.startsWith(repo + '/'))?.source.gitRef || '';
-      const scopeLines = scopes.map(scope => `<li><code>${escape(scope.path || '(repository root)')}</code> @ ${escape(scope.gitRef || 'default branch')}
-        <button type="button" class="secondary-button" data-action="revoke-path" data-repo="${escape(repo)}" data-path="${escape(scope.path)}" ${busy ? 'disabled' : ''}>Revoke collection trust</button></li>`).join('');
-      return `<li class="skills-item" data-repo="${escape(repo)}"><strong>${escape(repo)}</strong>
-        <small>${rootTrusted ? 'Repository root trusted' : partial ? 'Only selected collection paths trusted' : 'No startup trust'}</small>
-        <div class="skills-import-row skills-import-actions">
-          <button type="button" class="secondary-button" data-action="sync-source" data-repo="${escape(repo)}" ${busy ? 'disabled' : ''}>Sync this source</button>
-          <button type="button" class="secondary-button" data-action="trust-source" data-repo="${escape(repo)}" data-git-ref="${escape(ref)}" data-trusted="${rootTrusted ? 'false' : 'true'}" ${busy ? 'disabled' : ''}>${rootTrusted ? 'Revoke root trust' : 'Trust repository root'}</button>
-        </div>
-        <label>Authorize a collection path (empty means root)
-          <input data-trust-path aria-label="${escape(`Authorized collection path for ${repo}`)}" placeholder="skills/engineering" spellcheck="false">
-        </label>
-        <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="trust-path" data-repo="${escape(repo)}" data-git-ref="${escape(ref)}" ${busy ? 'disabled' : ''}>Trust collection</button></div>
-        ${scopeLines ? `<ul class="skills-unmanaged" aria-label="${escape(`Trusted paths in ${repo}`)}">${scopeLines}</ul>` : ''}
-      </li>`;
+    const sourceHtml = savedSources.map(source => {
+      const link = `https://github.com/${source.repo}/tree/${source.commit}${source.path ? '/' + source.path : ''}`;
+      return `<li class="skills-item" data-source-id="${escape(source.id)}"><strong>${escape(source.repo)}</strong>
+        <small>${escape(source.path || '(repository root)')} · ${plural(source.selectedPaths.length, 'selected skill')} · ${escape(source.gitRef || 'default branch')}</small>
+        <div class="skills-import-row skills-source-actions">
+          <a href="${escape(link)}" target="_blank" rel="noopener noreferrer">View GitHub path</a>
+          <button type="button" class="secondary-button" data-action="sync-saved-source" ${busy ? 'disabled' : ''}>Sync selected skills</button>
+        </div></li>`;
     }).join('');
     const entries = githubItems.map(item => {
       const report = syncReport.events.find(event => event.id === item.id);
@@ -272,20 +305,20 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
         <label>Startup updates for ${escape(item.name)}
           <select data-skill-auto="${escape(item.id)}" aria-label="${escape(`Startup updates for ${item.name}`)}" ${busy ? 'disabled' : ''}>
             <option value="inherit" ${item.autoUpdate === null || item.autoUpdate === undefined ? 'selected' : ''}>Inherit global</option>
-            <option value="yes" ${item.autoUpdate === true ? 'selected' : ''}>Enabled (trusted sources only)</option>
+            <option value="yes" ${item.autoUpdate === true ? 'selected' : ''}>Enabled (when global sync is on)</option>
             <option value="no" ${item.autoUpdate === false ? 'selected' : ''}>Disabled</option>
           </select></label>
         <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-item" ${busy ? 'disabled' : ''}>Sync this skill</button></div>
         ${report ? `<small>${escape(report.status)} · ${escape(report.detail)}${report.newCommit ? ` · ${escape(report.newCommit.slice(0, 12))}` : ''}</small>` : ''}</li>`;
     }).join('');
     return `<div class="settings-group skills-sync-controls">
-      <p class="skills-note">Startup checks run without blocking the application. Updates and discovery are off by default. Explicitly trusting a repository or collection authorizes the automatic installation of new valid, unflagged skills in that exact scope the next time startup checks are enabled. Check your trust scope carefully; use a full commit SHA to pin source content.  Automatic checks do not move full-SHA pins. Synchronization overwrites local PandaCode library edits without a backup; it never silently overwrites harness-managed or manual files. Later updates to previously acknowledged skills may add new warnings.</p>
-      <label class="skills-toggle"><input type="checkbox" data-global-sync ${syncPolicy.autoOnStart ? 'checked' : ''} ${busy ? 'disabled' : ''}><span>Automatically check trusted skills when PandaCode starts</span></label>
+      <p class="skills-note">Synchronization updates only skills already imported into the PandaCode library. Startup synchronization is off by default and never installs newly discovered skills. Full commit-SHA pins do not move automatically. Updates replace edited library copies without backups; native harness files remain unchanged.</p>
+      <label class="skills-toggle"><input type="checkbox" data-global-sync ${syncPolicy.autoOnStart ? 'checked' : ''} ${busy ? 'disabled' : ''}><span>Automatically synchronize imported skills when PandaCode starts</span></label>
       <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-all" ${busy ? 'disabled' : ''}>Sync all installed skills</button></div>
       <p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p><p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p>
       ${syncReport.checkedAt ? `<small>Last synchronization report: ${escape(new Date(syncReport.checkedAt).toLocaleString())} · ${plural(syncReport.installed?.length ?? 0, 'new skill')} installed · ${plural(syncReport.updated.length, 'skill')} updated</small>` : ''}
     </div><h3 class="settings-heading">Sources</h3>
-    ${sources.length ? `<ul class="settings-group skills-list" aria-label="Synchronization sources">${sourceHtml}</ul>` : '<div class="settings-group skills-empty-group"><p class="skills-empty">No GitHub sources installed.</p></div>'}
+    ${savedSources.length ? `<ul class="settings-group skills-list" aria-label="Synchronization sources">${sourceHtml}</ul>` : '<div class="settings-group skills-empty-group"><p class="skills-empty">No saved GitHub skill sources.</p></div>'}
     <h3 class="settings-heading">Installed skills</h3>
     ${githubItems.length ? `<ul class="settings-group skills-list" aria-label="Skill synchronization">${entries}</ul>` : '<div class="settings-group skills-empty-group"><p class="skills-empty">No GitHub skills installed yet.</p></div>'}`;
   }
@@ -295,9 +328,9 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const values = clearFields ? {} : Object.fromEntries([...host.querySelectorAll<HTMLInputElement | HTMLSelectElement>('form [name]')].map(field => [field.name, field.value]));
     host.innerHTML = `<nav class="ds-seg skills-view-tabs" aria-label="Skills Library pages">
       <button type="button" data-action="view" data-view="library" aria-current="${view === 'library' ? 'page' : 'false'}" aria-pressed="${view === 'library' ? 'true' : 'false'}">Library &amp; activation</button>
-      <button type="button" data-action="view" data-view="recommended" aria-current="${view === 'recommended' ? 'page' : 'false'}" aria-pressed="${view === 'recommended' ? 'true' : 'false'}">Recommended skills</button>
+      <button type="button" data-action="view" data-view="import" aria-current="${view === 'import' ? 'page' : 'false'}" aria-pressed="${view === 'import' ? 'true' : 'false'}">Import from GitHub</button>
       <button type="button" data-action="view" data-view="sync" aria-current="${view === 'sync' ? 'page' : 'false'}" aria-pressed="${view === 'sync' ? 'true' : 'false'}">Synchronization</button>
-    </nav>${view === 'recommended' ? recommendedHtml() : view === 'sync' ? syncHtml() : `<h3 class="settings-heading">Import</h3><div class="settings-group skills-library" aria-label="Skills and rules">
+    </nav>${view === 'import' ? sourceImportHtml() : view === 'sync' ? syncHtml() : `<h3 class="settings-heading">Import</h3><div class="settings-group skills-library" aria-label="Skills and rules">
       <form class="skills-import" aria-label="Import a skill or rule" novalidate>
         <div class="skills-import-row">
           <select name="kind" aria-label="Kind"><option value="skill">Skill</option><option value="rule">Rule</option></select>
@@ -401,6 +434,27 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     });
   }
 
+  function scanSource(form: HTMLFormElement): void {
+    const formData = new FormData(form);
+    const input = (name: string) => String(formData.get(name) || '').trim();
+    let query: ReturnType<typeof githubSelection>;
+    try {
+      query = githubSelection(input('sourceRepo'), input('sourcePath'), input('sourceRef'));
+    } catch (cause) { error = message(cause); draw(); return; }
+    sourceQuery = { repo: query.repo, path: query.path, gitRef: query.gitRef || '' };
+    sourcePreview = null;
+    sourceSelected = new Set();
+    void run(async () => {
+      const preview = await options.call<GitHubSourcePreview>('skills_source_preview', {
+        repo: query.repo, path: query.path, gitRef: query.gitRef,
+      });
+      sourcePreview = preview;
+      const saved = savedSources.find(source => source.repo.toLowerCase() === preview.repo.toLowerCase() && source.path === preview.path);
+      sourceSelected = new Set((saved?.selectedPaths || []).filter(path => preview.skills.some(skill => skill.path === path)));
+      return `Found ${plural(preview.skills.length, 'skill')} in ${preview.repo}/${preview.path || '(root)'}. Select the ones to import.`;
+    });
+  }
+
   function catalogAction(action: string, repo: string, state?: string): void {
     if (action === 'catalog-refresh') void run(async () => { await options.call('skills_catalog_refresh', { repo }); return `Refreshed ${repo}. Library copies stay as imported.`; });
     if (action === 'catalog-state' && state) void run(async () => {
@@ -430,18 +484,56 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     if (button.dataset.action === 'view') {
       view = button.dataset.view as typeof view; note = ''; error = ''; draw(); return;
     }
-    if (button.dataset.action === 'recommend-import' || button.dataset.action === 'recommend-all') {
-      const gitRef = host.querySelector<HTMLInputElement>('[name="recommendedRef"]')?.value.trim() || 'main';
-      const paths = recommendations.templates.filter(entry => entry.available &&
-        (button.dataset.action === 'recommend-all' ? !entry.optional : recommendedSelected.has(entry.id))).map(entry => entry.path);
-      if (!paths.length) { error = 'Select at least one available recommended skill.'; draw(); return; }
+    if (button.dataset.action === 'source-select-all' && sourcePreview) {
+      sourceSelected = new Set(sourcePreview.skills.map(skill => skill.path));
+      draw(); return;
+    }
+    if (button.dataset.action === 'source-clear') {
+      sourceSelected = new Set(); draw(); return;
+    }
+    if (button.dataset.action === 'source-save-import' && sourcePreview) {
+      const preview = sourcePreview;
+      const paths = [...sourceSelected];
+      if (!paths.length) { error = 'Select at least one skill before importing.'; draw(); return; }
       void run(async () => {
-        await options.call('skills_catalog_add', { repo: 'ginmp8/rhapsodia', gitRef });
-        const result = await options.call<CatalogImport>('skills_catalog_import', { repo: 'ginmp8/rhapsodia', paths });
-        recommendedSelected = new Set();
-        return `Imported ${plural(result.imported.length, 'recommended skill')}.${result.skipped.length ? ` Skipped: ${result.skipped.map(entry => entry.reason).join('; ')}` : ''} Activation is separate.`;
-      });
-      return;
+        const result = await options.call<ImportedSkillSource>('skills_source_import', {
+          repo: preview.repo, path: preview.path, gitRef: preview.gitRef,
+          commit: preview.commit, selectedPaths: paths,
+        });
+        sourceSelected = new Set(result.source.selectedPaths);
+        return `Imported ${plural(result.imported.length, 'skill')} and saved ${result.source.repo}/${result.source.path || '(root)'}.${result.skipped.length ? ` Skipped: ${result.skipped.map(s => s.reason).join('; ')}` : ''} Activation is separate.`;
+      }); return;
+    }
+    const sourceId = button.closest<HTMLElement>('[data-source-id]')?.dataset.sourceId;
+    if (button.dataset.action === 'sync-saved-source' && sourceId) {
+      void run(async () => {
+        const report = await options.call<SkillSyncReport>('skills_sync_saved_source', { id: sourceId });
+        return `Updated ${plural(report.updated.length, 'skill')} from saved source.${report.skipped.length ? ` Skipped: ${report.skipped.join('; ')}` : ''}`;
+      }); return;
+    }
+    if (button.dataset.action === 'source-edit' && sourceId) {
+      const saved = savedSources.find(s => s.id === sourceId);
+      if (!saved) return;
+      sourceQuery = { repo: saved.repo, path: saved.path, gitRef: saved.gitRef || '' };
+      pendingSourceRemoval = null;
+      void run(async () => {
+        sourcePreview = await options.call<GitHubSourcePreview>('skills_source_preview', sourceQuery);
+        sourceSelected = new Set(saved.selectedPaths.filter(path => sourcePreview!.skills.some(skill => skill.path === path)));
+        return `Editing selection for ${saved.repo}/${saved.path || '(root)'}.`;
+      }); return;
+    }
+    if (button.dataset.action === 'source-remove' && sourceId) {
+      pendingSourceRemoval = sourceId; draw(); return;
+    }
+    if (button.dataset.action === 'source-cancel-remove') {
+      pendingSourceRemoval = null; draw(); return;
+    }
+    if (button.dataset.action === 'source-confirm-remove' && sourceId && pendingSourceRemoval === sourceId) {
+      void run(async () => {
+        await options.call('skills_source_remove', { id: sourceId });
+        pendingSourceRemoval = null;
+        return 'Saved configuration removed. Previously imported library skills remain installed.';
+      }); return;
     }
     if (button.dataset.action === 'sync-item' || button.dataset.action === 'sync-all') {
       const id = button.closest<HTMLElement>('[data-id]')?.dataset.id;
@@ -452,32 +544,6 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
         return `Updated ${plural(report.updated.length, 'skill')}.${report.skipped.length ? ` Skipped: ${report.skipped.join('; ')}` : ''}`;
       });
       return;
-    }
-    if (button.dataset.action === 'sync-source' && button.dataset.repo) {
-      void run(async () => {
-        const result = await options.call<SkillSyncReport>('skills_sync_source', { repo: button.dataset.repo });
-        return `Updated ${plural(result.updated.length, 'skill')}. ${result.skipped.join('; ')}`;
-      }); return;
-    }
-    if (button.dataset.action === 'trust-source' && button.dataset.repo) {
-      void run(async () => {
-        await options.call('skills_sync_trust', { repo: button.dataset.repo, path: '', gitRef: button.dataset.gitRef || null, trusted: button.dataset.trusted === 'true' });
-        return button.dataset.trusted === 'true' ? 'Repository root explicitly trusted for startup checks.' : 'Repository root trust revoked.';
-      }); return;
-    }
-    if (button.dataset.action === 'trust-path' && button.dataset.repo) {
-      const sourceRow = button.closest<HTMLElement>('li[data-repo]');
-      const path = sourceRow?.querySelector<HTMLInputElement>('[data-trust-path]')?.value.trim() || '';
-      void run(async () => {
-        await options.call('skills_sync_trust', { repo: button.dataset.repo, path, gitRef: button.dataset.gitRef || null, trusted: true });
-        return `Authorized ${button.dataset.repo}/${path || '(root)'} for startup discovery.`;
-      }); return;
-    }
-    if (button.dataset.action === 'revoke-path' && button.dataset.repo) {
-      void run(async () => {
-        await options.call('skills_sync_trust', { repo: button.dataset.repo, path: button.dataset.path || '', trusted: false });
-        return 'Collection trust revoked.';
-      }); return;
     }
     if (button.dataset.action === 'set-ref') {
       const row = button.closest<HTMLElement>('[data-id]');
@@ -506,16 +572,31 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const target = event.target as HTMLElement;
     if (target instanceof HTMLInputElement && target.dataset.harness) toggle(target);
     if (target instanceof HTMLInputElement && target.hasAttribute('data-global-sync')) {
-      void run(async () => { await options.call('skills_sync_set_global', { enabled: target.checked }); return target.checked ? 'Startup checks enabled for trusted sources.' : 'Startup checks disabled globally.'; });
+      void run(async () => { await options.call('skills_sync_set_global', { enabled: target.checked }); return target.checked ? 'Automatic synchronization enabled for imported skills.' : 'Automatic synchronization disabled.'; });
     }
     if (target instanceof HTMLSelectElement && target.dataset.skillAuto) {
       const id = target.dataset.skillAuto;
       const choice = target.value === 'inherit' ? null : target.value === 'yes';
       void run(async () => { await options.call('skills_sync_override', { id, autoUpdate: choice }); return `Updated startup policy for ${id}.`; });
     }
-    if (target instanceof HTMLInputElement && target.dataset.recommended) {
-      const id = target.dataset.recommended;
-      recommendedSelected = target.checked ? new Set([...recommendedSelected, id]) : new Set([...recommendedSelected].filter(value => value !== id));
+    if (target instanceof HTMLInputElement && target.closest('.skills-source-form')) {
+      const form = target.closest<HTMLFormElement>('form')!;
+      sourceQuery = {
+        repo: form.querySelector<HTMLInputElement>('[name="sourceRepo"]')?.value || '',
+        path: form.querySelector<HTMLInputElement>('[name="sourcePath"]')?.value || '',
+        gitRef: form.querySelector<HTMLInputElement>('[name="sourceRef"]')?.value || '',
+      };
+      if (sourcePreview) {
+        // A changed query must be rescanned before its previous selection can be imported.
+        sourcePreview = null;
+        sourceSelected = new Set();
+        draw();
+      }
+    }
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-source-select')) {
+      const path = target.dataset.sourceSelect!;
+      if (target.checked) sourceSelected.add(path); else sourceSelected.delete(path);
+      draw();
     }
     if (target instanceof HTMLInputElement && target.dataset.select) {
       const key = target.dataset.select;
@@ -527,7 +608,8 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   const onSubmit = (event: Event) => {
     event.preventDefault();
     const form = event.target as HTMLFormElement;
-    if (form.classList.contains('skills-catalog-add')) addCatalog(form); else importItem(form);
+    if (form.classList.contains('skills-source-form')) scanSource(form);
+    else if (form.classList.contains('skills-catalog-add')) addCatalog(form); else importItem(form);
   };
   host.addEventListener('click', onClick);
   host.addEventListener('change', onChange);

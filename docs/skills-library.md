@@ -1,62 +1,48 @@
 # Skills Library and rules registry
 
-PandaCode Extended's **Settings → Tools → Skills & rules** reuses the original file-backed Skills Library (issues #15, #45, #114 and #115). The additions tracked in [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) are under development in [PR #127](https://github.com/ginmp8/pandacode-extended/pull/127); do not assume they are available in a released installer.
+PandaCode Extended's **Settings → Tools → Skills & rules** contains a file-backed library and import, source configuration and synchronization views. The new configuration-based import is developed on `feat/125-configured-github-skill-sources`, based on [PR #127](https://github.com/ginmp8/pandacode-extended/pull/127). It has not been released.
 
-## The three Settings views
+## Settings views
 
-- **Library & activation:** inspect imports and source commits, review safety findings, manually activate/deactivate each skill for supported harness and user/project scopes, and inspect installed-versus-actual harness drift.
-- **Recommended skills:** a versioned, bundled **JSON metadata catalog** lists 15 primary and four optional references from [RhapsodIA](https://github.com/ginmp8/rhapsodia/tree/main/skills). No skill content is bundled or automatically installed by a recommendation. **Install selected** chooses checked packages; **Install all primary skills** excludes optional entries. A listed but unavailable source package is disabled.
-- **Synchronization:** manually sync a library skill, installed source repository or all installed GitHub skills. Edit an installed skill's branch, tag or immutable full SHA; choose inherited, enabled or disabled startup updates. Global startup checking starts **off**. Trusting a source is separate from enabling startup checks. Each result reports changes or skipped/errors; prior source commits and impacted harnesses are recorded.
+- **Library & activation:** import local skills and rules, inspect the library and safety findings, manually enable or disable installed items for supported harnesses and user/project scopes, and check native-harness drift. Legacy single-package GitHub import and repository catalogs remain supported.
+- **Import from GitHub:** supply a repository (`owner/repo` or `https://github.com/owner/repo`), optional skills folder path (for example `skills`), and optional branch, tag or full commit SHA. Choose **List skills**. The signed-in GitHub CLI reads the repository's Git tree and matching `SKILL.md` metadata without a local clone. Use checkboxes to select any subset, then **Import selected and save source**. No packages are imported by merely listing them.
+- **Synchronization:** sync all installed GitHub skills, one installed skill, or the selected paths in an individual saved source. Turn on **Automatically synchronize imported skills when PandaCode starts** to opt into nonblocking startup checks. This does not discover or install new packages.
 
-The available implementation is **not a guarantee of per-bot isolation**: native harnesses can load the same shared filesystem folders for multiple bot sessions. An excluded skill may remain visible through the underlying harness.
+No recommendation or bundled skill list is provided. Any accessible GitHub repository with valid skill packages can be used; RhapsodIA is one possible source, not a required or privileged source.
 
-## GitHub import and source provenance
+## Source configuration lifecycle
 
-Install and authenticate the [GitHub CLI](https://cli.github.com/) in the OS account running PandaCode: `gh auth login`, `gh auth status`. The desktop importer uses `gh api`; importing private sources requires existing read authorization. It does not store GitHub tokens or install executable dependencies. **No skill script executes on import.**
+Each saved configuration identifies a **repository + folder path**, the Git ref, the scanned commit and only the successfully selected/imported skill paths. Separate folders in one repository may be stored independently. **Edit selection** rescans that configuration and permits a different selection; it does not silently remove previously imported copies. **Remove source config** only removes its metadata, after confirmation. Previously imported skills remain in the library until removed through normal library controls.
 
-Single-skill import accepts `owner/repo` with an exact path and optional ref. The Extended parser also accepts `https://github.com/owner/repo`, `/tree/main/skills/id`, or `/blob/<full-40-character-SHA>/skills/id/SKILL.md` URLs. When branch names contain slashes, provide the exact ref explicitly; the parser refuses ambiguous tree URLs rather than guessing. A repository root or collection must be indexed and packages chosen through the catalog; the individual importer does not recursively treat an arbitrary repository as one skill.
+Only explicitly confirmed configurations are written to `<app data>/skills/.skill-sources.json`. Scanning a source produces a transient index, not a persistent catalog, clone, Git checkout or package cache. The system limits this configuration store to **64 sources**. It does not create disposable Git repositories or retain unchecked/unused skill packages.
 
-Each import resolves the chosen ref to a commit and acquires source files at that immutable revision. Source metadata includes the original ref, resolved commit and SHA-256 content hashes. Paths must be structurally safe and unique on case-insensitive filesystems. Package limits on this branch are **256 files / 24 MiB per skill**, raised to accommodate real RhapsodIA packages such as Archify, but still bounded. A GitHub repository may have up to 20,000 tree entries and 300 detected skills for catalog indexing; a truncated tree is rejected.
+The legacy Catalogs panel (from upstream functionality) retains its own independent `.catalogs.json` metadata and is not converted automatically. Existing imports, configurations and native harness folders are preserved.
 
-GitHub skill imports do not fetch executable dependencies, change application permissions or automatically enable an imported skill. An imported package may be incomplete if its declared peer skills or runtime dependencies are not installed; inspect those requirements before activation.
+## GitHub CLI, provenance and trust
 
-## Library storage and legacy compatibility
+Install and authenticate the [GitHub CLI](https://cli.github.com/): `gh auth login` and `gh auth status`. PandaCode invokes `gh api` to resolve commits and read tree/blob data at an immutable commit SHA. An accessible private repository requires authentication. GitHub tokens are not persisted in source configurations. **No imported script is executed during listing, download or installation.** Import never activates a skill automatically.
 
-Everything remains in the app data directory, with no new database migration:
+The selected path must be inside the scanned source folder, present at the selected commit, and contain valid skill frontmatter. A selection with two paths having the same effective skill ID is rejected; a skill already installed from another source is not silently overwritten. Imports preserve package supporting files and reject unsafe names, filesystem collisions, oversized files and invalid content. The per-package bounds are **256 files and 24 MiB**; source enumeration is bounded at **20,000 tree entries** and **300 indexed skills**. GitHub tree results marked truncated are rejected. If the source is larger, choose a smaller repository or reduce its indexed content; there is no hidden full-clone fallback.
+
+A SHA-locked ref will remain fixed on automatic sync. The source records the branch/tag (if selected) and resolved commit; library metadata contains per-file hashes. Importing a skill doesn't grant additional permissions or guarantee that its declared dependencies are present.
+
+## Storage and backward compatibility
 
 ```text
-<app data>/skills/<id>/SKILL.md         skill and its supporting files
-<app data>/skills/<id>.json             source, immutable commit, content hashes,
-                                        safety acceptance, activation and sync override
-<app data>/skills/.catalogs.json        discovered and configured repository indexes
-<app data>/skills/.sync-policy.json     opt-in startup and trusted repository/path scopes
-<app data>/skills/.sync-report.json     previous sync outcome by skill
+<app data>/skills/<id>/SKILL.md          installed skill and supporting files
+<app data>/skills/<id>.json              source, hash, activations, safety and sync metadata
+<app data>/skills/.skill-sources.json    explicitly saved GitHub repo/path/selection configs
+<app data>/skills/.catalogs.json         pre-existing legacy repository catalog
+<app data>/skills/.sync-policy.json      global opt-in, legacy trust fields, per-skill overrides elsewhere
+<app data>/skills/.sync-report.json      last manual/automatic sync report
 ```
 
-Missing sync metadata in older installs means startup sync **disabled** and per-skill policy **inherited**; existing copies, activations, edited harness files and source receipts remain in place. A sync replaces the **central library copy** including local edits, without keeping a backup (a deliberate behavior). Package writes use staging and a rollback folder to recover an interruption. Successful library imports do **not** overwrite a manually edited or external native harness file; an older harness copy can remain active until user action. Sync cannot undo changes made by executing a skill.
+Existing metadata is read without a migration. Missing sync state means **disabled**. Old trusted-source entries may remain in `.sync-policy.json` for backward compatibility, but **do not authorize startup discovery or installation** in this workflow.
 
-Native adapter surfaces are:
+Synchronization updates the central library only and preserves the previous complete package on a fetch/validation failure. When successful, it **can replace locally edited library files without keeping a backup**; native harness copies are not silently overwritten. Sync errors are isolated per skill and reported. Only one synchronization is allowed to write at a time; overlapping requests may return a busy report.
 
-| Harness | User skill folder | Project skill folder |
-| --- | --- | --- |
-| Claude Code | `~/.claude/skills/<id>/` | `<checkout>/.claude/skills/<id>/` |
-| Codex | `~/.codex/skills/<id>/` | `<checkout>/.agents/skills/<id>/` |
-| Other supported harnesses | Managed prompt surface | Managed prompt surface |
+The global automatic-sync toggle is the master switch. Per-skill **Disabled** suppresses startup updates for that skill, regardless of the global setting. When the global switch is off, a per-skill **Enabled** override does not initiate network requests. Manual synchronization remains available. Newly added skills in a repository require **another explicit scan, selection and import**.
 
-PandaCode tracks the hash of its managed files and refuses accidental replacement of drifted native files. Project writes may be excluded in `.git/info/exclude`.
+The pre-existing skill adapters and per-bot prompt behavior are not redesigned by this change. Native harnesses can expose shared skill folders across bot sessions: the library does not claim per-bot security isolation. Some issue #125 acceptance criteria, including independent active-source choice for duplicate IDs and one-time native harness overwrites, remain outside this feature branch.
 
-## Manual and startup synchronization
-
-Manual buttons are explicit network requests. On application startup, checks run on a separate thread without blocking the UI. A startup check of an existing skill requires the applicable global/per-skill policy **and** trusted repository/path scope; installing newly discovered skills additionally requires the global startup setting enabled. Adding trusted scopes is an explicit user choice and may permit installation of future skills within those scopes. Full SHA refs are immutable and are never silently moved by startup synchronization. Other refs can resolve to a newer commit.
-
-An update always targets the library copy; already-running bots keep their existing execution context. Newly imported content may change subsequent prompts or require a user to refresh an existing harness activation. Acknowledged safety findings from the same source are not repeatedly demanded for later versions, although new warnings are still visible. Source read errors, path validation errors, size violations and renamed packages are reported per item rather than deleting the previous installed files. The current implementation serializes sync operations; a concurrent request can report that another sync is running rather than running an overlapping write.
-
-## Current limitations on this feature branch
-
-The current branch implements optional `skill-dependencies.json` with a `requiredSkills` array. Missing listed peer skills block direct activation and prompt inheritance. The manifest is a user-authored dependency hint; the app does not infer every peer requirement from unstructured prose in `SKILL.md`.
-
-On startup **only when enabled**, each explicitly trusted repository/path is scanned. New valid skills under that path are installed into the central library and marked auto-available to future bot prompt briefs if they have no new safety findings and their declared peer skills are present. Unsafe or incomplete skills remain installed but inactive. The installed skill can be automatically inherited by compatible bots without creating a managed copy in the native harness folder. A native skill from a file-based harness retains precedence. Project bot turns receive refreshed briefs after a source update; existing running work does not switch content mid-turn.
-
-**Acceptance gaps that remain:** duplicate skill IDs from different origins are not retained as independent selectable candidates (the second origin is skipped), and no explicit active-source selection is offered. Bot-specific exclusions from auto-inheritance are not persisted in exported manifests. The one-time **overwrite harness copy without management ownership** action is not yet available. Concurrent sync requests are serialized but not coalesced into a shared completed result. The UI reports installed skills on this machine, but missing peer references on another machine do not yet have a guided conflict-resolution experience. These parts of #125 must not be represented as completed. The original bot manifest stores portable skill **IDs** without serializing contents; a missing ID on another machine must be installed separately.
-
-For the scope and validation gates, see [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) and [the RhapsodIA integration notes](extended/rhapsodia-skills.md).
+See [source notes](extended/rhapsodia-skills.md) and [attribution and licensing](extended/attribution-and-licensing.md).

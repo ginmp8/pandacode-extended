@@ -53,9 +53,20 @@ fn id_for(repo: &str, path: &str) -> String {
 
 impl Library {
     fn sources_path(&self) -> std::path::PathBuf { self.dir.join(".skill-sources.json") }
+    fn sources_backup_path(&self) -> std::path::PathBuf { self.dir.join(".skill-sources.json.rollback") }
 
+    /// Recover an interrupted file replacement on Windows and Unix.
     fn read_sources(&self) -> Result<SourceStore, String> {
-        match fs::read(self.sources_path()) {
+        let current = self.sources_path();
+        let backup = self.sources_backup_path();
+        if backup.exists() {
+            if current.exists() {
+                fs::remove_file(&backup).map_err(|e| format!("Could not finish source state recovery: {e}"))?;
+            } else {
+                fs::rename(&backup, &current).map_err(|e| format!("Could not restore saved source state: {e}"))?;
+            }
+        }
+        match fs::read(current) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("Saved skill sources are unreadable: {e}")),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SourceStore::default()),
             Err(error) => Err(error.to_string()),
@@ -66,12 +77,26 @@ impl Library {
         fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
         let temporary = self.dir.join(".skill-sources.json.tmp");
-        fs::write(&temporary, bytes)
-            .and_then(|_| fs::rename(&temporary, self.sources_path()))
-            .map_err(|e| format!("Could not save selected skill sources: {e}"))
+        let target = self.sources_path();
+        let backup = self.sources_backup_path();
+        fs::write(&temporary, bytes).map_err(|e| format!("Could not stage selected skill sources: {e}"))?;
+        if target.exists() {
+            if let Err(error) = fs::rename(&target, &backup) {
+                let _ = fs::remove_file(&temporary);
+                return Err(format!("Could not stage the previous source configuration: {error}"));
+            }
+        }
+        if let Err(error) = fs::rename(&temporary, &target) {
+            if backup.exists() { let _ = fs::rename(&backup, &target); }
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("Could not save selected skill sources: {error}"));
+        }
+        if backup.exists() { let _ = fs::remove_file(&backup); }
+        Ok(())
     }
 
     pub fn saved_skill_sources(&self) -> Result<Vec<SavedSource>, String> {
+        let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
         Ok(self.read_sources()?.sources)
     }
 
@@ -189,10 +214,12 @@ impl Library {
 
     /// A configured source synchronizes only the paths the user previously imported.
     pub fn selected_skill_ids(&self, id: &str) -> Result<Vec<String>, String> {
-        let store = self.read_sources()?;
-        let source = store.sources.iter().find(|s| s.id == id).ok_or("Saved source not found.")?;
-        let locations: BTreeSet<String> = source.selected_paths.iter()
-            .map(|path| catalog::location(&source.repo, path)).collect();
+        let locations: BTreeSet<String> = {
+            let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+            let store = self.read_sources()?;
+            let source = store.sources.iter().find(|s| s.id == id).ok_or("Saved source not found.")?;
+            source.selected_paths.iter().map(|path| catalog::location(&source.repo, path)).collect()
+        };
         Ok(self.list()?.into_iter()
             .filter(|item| item.meta.kind == Kind::Skill && item.meta.source.kind == "github"
                 && locations.contains(&item.meta.source.location))

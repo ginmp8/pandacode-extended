@@ -1920,6 +1920,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import': case 'skills_discover':
     case 'skills_sync_item': case 'skills_sync_all': case 'skills_sync_source': case 'skills_sync_policy': case 'skills_sync_set_global':
     case 'skills_sync_trust': case 'skills_sync_override': case 'skills_sync_set_ref': case 'skills_sync_report':
+    case 'skills_source_preview': case 'skills_source_list': case 'skills_source_import': case 'skills_source_remove': case 'skills_sync_saved_source':
       result = previewSkills.call(command, args); break;
     case 'simulator_status': result = previewSimulator.status(); break;
     case 'simulator_pose': result = await previewSimulator.pose(args.udid, args.pose); break;

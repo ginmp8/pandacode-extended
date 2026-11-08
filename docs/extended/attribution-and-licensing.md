@@ -18,7 +18,7 @@ Extended-only features and release materials are documented under [`docs/extende
 
 [RhapsodIA](https://github.com/ginmp8/rhapsodia) is a separate publicly available skill source, **not** the upstream author of PandaCode. Its root [`LICENSE`](https://github.com/ginmp8/rhapsodia/blob/main/LICENSE) states Apache License 2.0. Every skill and its bundled assets, scripts and dependencies must be inspected independently for package-level `LICENSE`, `NOTICE` and third-party obligations before redistribution.
 
-Importing a skill does not transfer copyright, change the PandaCode license, grant the skill new tool permissions, or authorize execution. RhapsodIA packages are optional, user-initiated imports; the installer contains recommendation metadata only. When importing or redistributing a package, preserve applicable individual notices and distinguish installed content from activated behavior.
+Importing a skill does not transfer copyright, change the PandaCode license, grant the skill new tool permissions, or authorize execution. RhapsodIA packages are optional, user-initiated imports; the installer contains no RhapsodIA skill packages or recommendation catalog. When importing or redistributing a package, preserve applicable individual notices and distinguish installed content from activated behavior.
 
 The [RhapsodIA import and synchronization specification](rhapsodia-skills.md) is tracked in [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125). No offline RhapsodIA package bundling is planned or shipped.
 

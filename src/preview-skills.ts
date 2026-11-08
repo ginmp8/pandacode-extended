@@ -1,7 +1,6 @@
 /* Browser preview of the skills library (src-tauri/src/skills.rs): an in-memory library, a
  * pretend Claude Code and Codex install, and the same refusals the native side gives. */
-import recommendations from './recommended-skills.v1.json';
-import type { CatalogImport, CatalogSkill, CatalogSource, SkillActivation, SkillCatalogs, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
+import type { CatalogImport, CatalogSkill, CatalogSource, SavedSkillSource, GitHubSourcePreview, ImportedSkillSource, SkillActivation, SkillCatalogs, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 
 const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'omp', 'muse', 'devin', 'zcode', 'hermes']);
 const FILES = ['claude', 'codex'];
@@ -28,7 +27,12 @@ const REPOS: Record<string, FixtureRepo> = {
   'you/dotfiles': { commit: '0d0d0d0d0d', skills: [] },
   'you/skills-wishlist': { commit: '1a1a1a1a1a', skills: [] },
   'acme/pstack': { commit: 'c0ffee1234', skills: Array.from({ length: 40 }, (_, i) => catalogSkill(`skills/pstack-${String(i + 1).padStart(2, '0')}`, `pstack ${String(i + 1).padStart(2, '0')}`, 4)) },
-  'ginmp8/rhapsodia': { commit: 'abcdef123456', skills: recommendations.templates.filter(entry => entry.available).map(entry => catalogSkill(entry.path, entry.id)) },
+  'ginmp8/rhapsodia': { commit: 'abcdef123456abcdef123456abcdef123456abcd', skills: [
+    catalogSkill('skills/software-improvement-loop', 'software-improvement-loop', 4),
+    catalogSkill('skills/systematic-debugging', 'systematic-debugging', 3),
+    catalogSkill('skills/archify', 'archify', 8),
+    catalogSkill('skills/archify-review', 'archify-review', 4),
+  ] },
 };
 const OWNED = ['you/agent-skills', 'you/dotfiles', 'you/skills-wishlist'];
 const at = (repo: string, path: string) => path ? `${repo}/${path}` : repo;
@@ -61,6 +65,7 @@ export function createPreviewSkills() {
   add('rule', 'No force push', 'Never force-push to main or release branches.', { kind: 'folder', location: '/Users/you/rules/no-force-push.md', gitRef: null, commit: null });
 
   let sources: CatalogSource[] = [];
+  let savedSources: SavedSkillSource[] = [];
   let discovery: SkillCatalogs['discovery'] = null;
   let failure: string | null = null;
   let syncPolicy = { autoOnStart: false, trustedScopes: [] as { repo: string; path: string }[] };
@@ -133,6 +138,51 @@ export function createPreviewSkills() {
       result.imported.push(skill.name);
     }
     return { ...result, items: list() };
+  }
+
+  function previewSource(repo: unknown, path: unknown, gitRef: unknown): GitHubSourcePreview {
+    failIfAsked();
+    const name = String(repo || '').trim();
+    const root = String(path || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(name)) throw new Error('Enter a valid owner/name.');
+    if (!REPOS[name]) throw new Error('That repository was not found, or your GitHub login cannot read it.');
+    const source = scanned(name, 'manual', String(gitRef || '') || null);
+    const skills = source.skills.filter(skill => !root || skill.path === root || skill.path.startsWith(root + '/'));
+    if (!skills.length) throw new Error(`No valid SKILL.md packages found in ${name}/${root || '(root)'}.`);
+    return { repo: name, path: root, gitRef: source.gitRef, commit: source.commit!, skills };
+  }
+
+  function saveImportedSource(args: Record<string, any>): ImportedSkillSource {
+    const preview = previewSource(args.repo, args.path, args.gitRef);
+    if (preview.commit !== args.commit) throw new Error('Rescan this source before importing.');
+    const paths = [...new Set((args.selectedPaths || []) as string[])];
+    if (!paths.length) throw new Error('Select at least one skill to import.');
+    if (paths.some(path => !preview.skills.some(skill => skill.path === path))) throw new Error('Selected path is outside this collection.');
+    const imported: string[] = [];
+    const skipped: ImportedSkillSource['skipped'] = [];
+    const savedPaths: string[] = [];
+    for (const path of paths) {
+      const skill = preview.skills.find(skill => skill.path === path)!;
+      const location = at(preview.repo, skill.path);
+      const existing = entries.get(skill.id)?.item;
+      if (existing && existing.source.location !== location) {
+        skipped.push({ name: skill.name, path: skill.path, reason: `${skill.id} already exists from ${existing.source.location}.` });
+        continue;
+      }
+      add('skill', skill.name, `# ${skill.name}\n${skill.description}`, {
+        kind: 'github', location, gitRef: preview.gitRef, commit: preview.commit,
+      }, ['SKILL.md', ...Array.from({ length: skill.files - 1 }, (_, i) => `reference-${i}.md`)]);
+      imported.push(skill.name); savedPaths.push(skill.path);
+    }
+    if (!savedPaths.length) throw new Error('No selected skill could be imported.');
+    const id = `${preview.repo.toLowerCase()}::${preview.path}`;
+    const source: SavedSkillSource = {
+      id, repo: preview.repo, path: preview.path, gitRef: preview.gitRef,
+      commit: preview.commit, selectedPaths: savedPaths, savedAt: Date.now(),
+    };
+    savedSources = [...savedSources.filter(existing => existing.id !== id), source]
+      .sort((a, b) => a.repo.localeCompare(b.repo) || a.path.localeCompare(b.path));
+    return { source, imported, skipped };
   }
 
   function cell(entry: Entry, harness: string, scope: SkillScope): SkillCell {
@@ -228,6 +278,20 @@ export function createPreviewSkills() {
         case 'skills_catalog_state': { const source = findSource(args.repo); upsert({ ...source, state: args.state }); return catalogs(); }
         case 'skills_catalog_import': return importCatalog(args.repo, args.paths);
         case 'skills_discover': return discover();
+        case 'skills_source_list': return structuredClone(savedSources);
+        case 'skills_source_preview': return previewSource(args.repo, args.path, args.gitRef);
+        case 'skills_source_import': return saveImportedSource(args);
+        case 'skills_source_remove': {
+          if (!savedSources.some(source => source.id === args.id)) throw new Error('Saved skill source not found.');
+          savedSources = savedSources.filter(source => source.id !== args.id);
+          return structuredClone(savedSources);
+        }
+        case 'skills_sync_saved_source': {
+          const saved = savedSources.find(source => source.id === args.id);
+          if (!saved) throw new Error('Saved skill source not found.');
+          syncReport = { checkedAt: Date.now(), updated: [], skipped: saved.selectedPaths.map(path => `${path}: already at current ref`), events: [] };
+          return syncReport;
+        }
         case 'skills_sync_item': { const entry = find(args.id); syncReport = { checkedAt: Date.now(), updated: [], skipped: [`${entry.item.id}: already at the current ref`], events: [] }; return syncReport; }
         case 'skills_sync_all': { syncReport = { checkedAt: Date.now(), updated: [], skipped: list().filter(item => item.source.kind === 'github').map(item => `${item.id}: already at the current ref`), events: [] }; return syncReport; }
         case 'skills_sync_source': { syncReport = { checkedAt: Date.now(), updated: [], skipped: [`Already synced ${args.repo}.`], events: [] }; return syncReport; }

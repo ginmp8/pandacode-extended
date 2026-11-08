@@ -1,23 +1,13 @@
-# Optional public RhapsodIA skills for PandaCode Extended
+# GitHub-based skill sources (RhapsodIA example)
 
-[Issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) is the source specification. [PR #127](https://github.com/ginmp8/pandacode-extended/pull/127) contains an in-development implementation against `extended/development`.
+The **Import from GitHub** view is source-neutral. Users enter their own repository, folder and optional Git ref; PandaCode does not bundle or suggest a fixed list of skills.
 
-## Distribution and licensing
+For example, the public [RhapsodIA repository](https://github.com/ginmp8/rhapsodia) may be scanned with repository `ginmp8/rhapsodia`, path `skills` and ref `main`. The application uses the authenticated GitHub CLI (`gh api`) to list valid `SKILL.md` packages. Users select the desired entries in a multi-select list and confirm installation. One source configuration records that repository, path, ref, imported commit and chosen paths, without cloning the repository.
 
-[RhapsodIA](https://github.com/ginmp8/rhapsodia/tree/main/skills) is an optional external repository, **not** the upstream PandaCode author. PandaCode Extended is a derivative of [the original PandaCode project](https://github.com/aicodeking/pandacode) and preserves its inherited [LICENSE](../../LICENSE). RhapsodIA's root Apache-2.0 notice does not override individual skill licenses, asset rights or required third-party notices.
+The same workflow works with other authorized GitHub repositories. Multiple folder paths within the same repository may be saved separately. Removing a saved configuration does not remove skills already installed locally.
 
-**Installers never embed RhapsodIA skill packages.** The app includes only a versioned JSON recommendation list. Prior plans for release-time SHA-locked downloads and offline bundled packages were superseded by the final #125 specification. Do not add CI retrieval, release packaging or skill payload export for this capability.
+**No RhapsodIA skills are embedded in release artifacts, sourced during CI builds, auto-selected, or installed without confirmation.** Skills remain governed by their own licenses, notices and runtime dependencies. RhapsodIA is not the original author of PandaCode Extended and its licenses do not supersede the project's [LICENSE](../../LICENSE).
 
-## Recommendations
+Automatic synchronization is disabled by default. Enabling it updates **only already imported skills**; a newly published skill must be explicitly selected and imported. Successful source sync changes the central library copy, not an edited native harness folder.
 
-`src/recommended-skills.v1.json` provides 15 primary references, grouped into core engineering, diagrams, spec conformance and audit specialists, plus four optional entries. Repository paths identify each skill without relying on local runtime-specific identifiers. The initial catalog explicitly excludes `mago`, `magia` and `nomia` from recommendations. Source availability is checked against the public Git tree: `agent-systems-best-practices` was absent when this branch was authored, so its optional recommendation is displayed as unavailable instead of claiming that it can be imported.
-
-Install the [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login`. In **Settings → Skills & rules → Recommended skills**, choose individual available packages or **Install all primary skills**. The catalog is an opt-in import, **not** automatic activation. The importer stores the full package (within bounded limits), source path, selected ref, resolved commit and file hashes. A user may select a full commit SHA instead of the moving `main` branch.
-
-## Synchronization
-
-In **Synchronization**, manual buttons act on one installed skill, one installed source or all installed GitHub skills. The optional **on startup** policy is off by default and requires source trust. A full-SHA pin never auto-moves. Updates are atomic at package level and can overwrite locally edited **library** files without a backup. Native harness copies remain separate and are not silently overwritten. Source errors and changes are reported to the user.
-
-Explicitly trusted root/collection discovery and installation of newly added, safe packages are implemented behind the off-by-default startup setting. Duplicate-ID source choices, persistent per-bot auto-inheritance exclusions, coalesced overlapping synchronizations, and explicit one-time native harness replacement remain acceptance gaps on this draft PR. The current application does **not** guarantee per-bot filesystem isolation. No imported content is executed merely by installation.
-
-See [Skills Library](../skills-library.md), [Extended attribution](attribution-and-licensing.md), and [the current issue acceptance checklist](https://github.com/ginmp8/pandacode-extended/issues/125).
+See [Skills Library](../skills-library.md), [attribution](attribution-and-licensing.md), [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) and the parent [PR #127](https://github.com/ginmp8/pandacode-extended/pull/127).

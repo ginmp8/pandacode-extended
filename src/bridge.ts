@@ -64,3 +64,13 @@ export async function chooseAttachmentFolder(): Promise<string | null> {
   const result = await (await import('@tauri-apps/plugin-dialog')).open({ directory: true, multiple: false, title: 'Attach a folder to your message' });
   return typeof result === 'string' ? result : null;
 }
+
+/** One skill archive, selected through the platform picker; no archive bytes enter the webview. */
+export async function chooseSkillZip(): Promise<string | null> {
+  if (preview) return '/Users/you/Downloads/skill.zip';
+  const result = await (await import('@tauri-apps/plugin-dialog')).open({
+    multiple: false, title: 'Import skill ZIP',
+    filters: [{ name: 'ZIP skill archive', extensions: ['zip'] }],
+  });
+  return typeof result === 'string' ? result : null;
+}

@@ -71,8 +71,8 @@ fn is_full_sha(reference: Option<&str>) -> bool {
     reference.is_some_and(|value| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-fn scope_contains(trusted: &TrustedScope, repo: &str, path: &str) -> bool {
-    trusted.repo.eq_ignore_ascii_case(repo)
+fn scope_contains(trusted: &TrustedScope, repo: &str, path: &str, git_ref: Option<&str>) -> bool {
+    trusted.repo.eq_ignore_ascii_case(repo) && trusted.git_ref.as_deref() == git_ref
         && (trusted.path.is_empty() || path == trusted.path
             || path.strip_prefix(trusted.path.as_str()).is_some_and(|part| part.starts_with('/')))
 }
@@ -102,10 +102,6 @@ impl Library {
         policy.auto_on_start = enabled;
         self.save_sync_file(".sync-policy.json", &policy)?;
         Ok(policy)
-    }
-
-    pub fn sync_trust_scope(&self, repo: &str, path: &str, trusted: bool) -> Result<SyncPolicy, String> {
-        self.sync_trust_scope_ref(repo, path, None, trusted)
     }
 
     pub fn sync_trust_scope_ref(&self, repo: &str, path: &str, git_ref: Option<&str>, trusted: bool) -> Result<SyncPolicy, String> {
@@ -188,10 +184,24 @@ impl Library {
     /// active; the catalog's SHA-pinned scan enforces identity and rejects symlinks.
     fn discover_scope(&self, api: catalog::Api<'_>, scope: &TrustedScope, report: &mut SyncReport) -> Result<(), String> {
         let (commit, indexed) = catalog::scan(api, &scope.repo, scope.git_ref.as_deref())?;
+        let inside = |path: &str| scope.path.is_empty() || path == scope.path
+            || path.strip_prefix(scope.path.as_str()).is_some_and(|rest| rest.starts_with('/'));
+        let mut seen = std::collections::HashSet::new();
+        let mut ambiguous = std::collections::HashSet::new();
+        for candidate in &indexed {
+            if inside(&candidate.path) && !seen.insert(candidate.id.clone()) {
+                ambiguous.insert(candidate.id.clone());
+            }
+        }
+        let mut collision_reported = std::collections::HashSet::new();
         for candidate in indexed {
-            let inside = scope.path.is_empty() || candidate.path == scope.path
-                || candidate.path.strip_prefix(scope.path.as_str()).is_some_and(|rest| rest.starts_with('/'));
-            if !inside { continue; }
+            if !inside(&candidate.path) { continue; }
+            if ambiguous.contains(&candidate.id) {
+                if collision_reported.insert(candidate.id.clone()) {
+                    report.skipped.push(format!("{}: multiple source paths have the same skill ID; no automatic source was chosen.", candidate.id));
+                }
+                continue;
+            }
             let source_location = catalog::location(&scope.repo, &candidate.path);
             if let Ok(existing) = self.load(&candidate.id) {
                 if existing.source.location.eq_ignore_ascii_case(&source_location) {
@@ -265,7 +275,7 @@ impl Library {
             };
             if !selected { continue; }
             if automatic && (!meta.auto_update.unwrap_or(policy.auto_on_start)
-                || !policy.trusted_scopes.iter().any(|trusted| scope_contains(trusted, &repo, &path))) {
+                || !policy.trusted_scopes.iter().any(|trusted| scope_contains(trusted, &repo, &path, meta.source.git_ref.as_deref()))) {
                 continue;
             }
             let event = match self.sync_one(api, &meta, automatic) {
@@ -318,9 +328,11 @@ mod tests {
     #[test]
     fn scope_trust_never_expands_to_sibling_directories() {
         let trusted = TrustedScope { repo: "ginmp8/rhapsodia".into(), path: "skills/engineering".into(), git_ref: Some("main".into()) };
-        assert!(scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build"));
-        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/security/check"));
-        assert!(!scope_contains(&trusted, "evil/rhapsodia", "skills/engineering/build"));
+        assert!(scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build", Some("main")));
+        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/security/check", Some("main")));
+        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build", Some("feature/untrusted")));
+        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build", None));
+        assert!(!scope_contains(&trusted, "evil/rhapsodia", "skills/engineering/build", Some("main")));
         assert!(is_full_sha(Some(&"a".repeat(40))));
         assert!(!is_full_sha(Some("main")));
     }
@@ -331,10 +343,10 @@ mod tests {
         let library = Library::new(root.join("library"), root.join("home"));
         assert!(!library.sync_policy().unwrap().auto_on_start);
         assert!(library.sync_policy().unwrap().trusted_scopes.is_empty());
-        library.sync_trust_scope("ginmp8/rhapsodia", "skills/review", true).unwrap();
-        library.sync_trust_scope("ginmp8/rhapsodia", "skills/review", true).unwrap();
+        library.sync_trust_scope_ref("ginmp8/rhapsodia", "skills/review", None, true).unwrap();
+        library.sync_trust_scope_ref("ginmp8/rhapsodia", "skills/review", None, true).unwrap();
         assert_eq!(library.sync_policy().unwrap().trusted_scopes.len(), 1);
-        library.sync_trust_scope("ginmp8/rhapsodia", "skills/review", false).unwrap();
+        library.sync_trust_scope_ref("ginmp8/rhapsodia", "skills/review", None, false).unwrap();
         assert!(library.sync_policy().unwrap().trusted_scopes.is_empty());
         let _ = fs::remove_dir_all(root);
     }

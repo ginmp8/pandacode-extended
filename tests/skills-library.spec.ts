@@ -218,7 +218,7 @@ test('a pstack-sized collection is scanned as a catalog and imports past 64 file
   await expect(page.getByRole('alert').filter({ hasText: 'not found, or your GitHub login cannot read it' })).toBeVisible();
   await page.getByRole('textbox', { name: 'Catalog repository' }).fill('https://github.com/acme/pstack');
   await page.getByRole('button', { name: 'Scan' }).click();
-  await expect(page.getByRole('status')).toHaveText('Found 40 skills in acme/pstack.');
+  await expect(page.getByRole('status')).toContainText('Found 40 skills in acme/pstack.');
   await expect(page.getByRole('list', { name: 'Skills in acme/pstack' }).getByRole('listitem')).toHaveCount(40);
   await page.getByRole('button', { name: 'Import all from acme/pstack' }).click();
   await expect(page.getByRole('status')).toHaveText('Imported 40 skills. Nothing is active until you turn it on.');

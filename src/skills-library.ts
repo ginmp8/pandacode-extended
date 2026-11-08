@@ -466,7 +466,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
       }); return;
     }
     if (button.dataset.action === 'trust-path' && button.dataset.repo) {
-      const sourceRow = button.closest<HTMLElement>('[data-repo]');
+      const sourceRow = button.closest<HTMLElement>('li[data-repo]');
       const path = sourceRow?.querySelector<HTMLInputElement>('[data-trust-path]')?.value.trim() || '';
       void run(async () => {
         await options.call('skills_sync_trust', { repo: button.dataset.repo, path, gitRef: button.dataset.gitRef || null, trusted: true });

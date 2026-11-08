@@ -36,13 +36,13 @@ impl Fake {
             for depth in 0..parts.len().saturating_sub(1) {
                 let parent = parts[..depth].join("/");
                 let folder = parts[..=depth].join("/");
-                let entries = directories.entry(parent).or_insert_with(Vec::new);
+                let entries = directories.entry(parent).or_default();
                 if !entries.iter().any(|entry: &Value| entry["path"].as_str() == Some(folder.as_str())) {
                     entries.push(json!({ "path": folder, "name": parts[depth], "type": "dir" }));
                 }
             }
             let parent = parts[..parts.len() - 1].join("/");
-            directories.entry(parent).or_insert_with(Vec::new).push(json!({
+            directories.entry(parent).or_default().push(json!({
                 "path": path, "name": parts[parts.len() - 1], "type": "file",
                 "sha": sha, "size": text.len(),
             }));
@@ -352,4 +352,21 @@ fn required_peer_metadata_blocks_manual_activation_and_legacy_metadata_stays_opt
     });
     let old: Meta = serde_json::from_value(legacy).unwrap();
     assert!(!old.auto_available && old.auto_update.is_none() && old.required_skills.is_empty());
+}
+
+#[test]
+fn startup_discovery_never_picks_an_implicit_winner_for_duplicate_skill_ids() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    fake.repo("me/duplicate", "v1", &files(&[
+        ("skills/first/SKILL.md", &skill("Duplicate")),
+        ("skills/second/SKILL.md", &skill("Duplicate")),
+    ]));
+    fake.responses.insert("repos/me/duplicate/commits/main".into(), json!({"sha":"v1"}));
+    fx.library.sync_set_global(true).unwrap();
+    fx.library.sync_trust_scope_ref("me/duplicate", "skills", Some("main"), true).unwrap();
+    let report = fx.library.synchronize(&fake.api(), super::sync::Selection::All, true).unwrap();
+    assert!(report.installed.is_empty());
+    assert!(report.skipped.iter().any(|reason| reason.contains("no automatic source was chosen")), "{report:?}");
+    assert!(fx.library.list().unwrap().is_empty(), "manual source precedence must be resolved first");
 }

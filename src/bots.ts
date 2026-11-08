@@ -530,7 +530,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     // Restrict them to the same bot and section; another bot's form starts at its default sizes.
     const previousProfile = pane.querySelector<HTMLFormElement>('.bots-profile');
     const textareaHeights = new Map<string, number>();
-    if (section === 'profile' && previousProfile?.dataset.botId === detail?.bot.id) {
+    if (section === 'profile' && previousProfile && previousProfile.dataset.botId === detail?.bot.id) {
       for (const field of previousProfile.querySelectorAll<HTMLTextAreaElement>('textarea[name]')) {
         const height = field.getBoundingClientRect().height;
         if (height > 0) textareaHeights.set(field.name, height);

@@ -3195,6 +3195,8 @@ function selectSession(id: string, focusComposer = false): Promise<void> {
 async function openThread(id: string, focusComposer: boolean): Promise<void> {
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
+  // A channel is a separate conversation view, not an overlay on the selected task.
+  leaveSharedChannel();
   closeMenus();
   if (document.querySelector('#dialog')?.classList.contains('change-review-dialog')) closeModal();
   const previousTask = session(), changingTask = previousTask?.id !== id;
@@ -6487,10 +6489,17 @@ function activateSharedChannel(channelId: string): void {
   render(); renderInspector(); renderBots();
   void refreshSharedChannel(channelId);
 }
-function closeSharedChannel(): void {
+/** Leave the channel before showing any task, preserving its draft and discarding late refreshes. */
+function leaveSharedChannel(): void {
+  if (!state.sharedChannelId) return;
+  const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+  if (prompt) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
   state.sharedChannelId = ''; state.sharedChannelDetail = null;
   state.sharedChannelRequest++;
   syncChannelWorkingLabel();
+}
+function closeSharedChannel(): void {
+  leaveSharedChannel();
   render(); renderInspector(); renderBots();
 }
 function sharedChannelUi(): SharedChannelUiOptions {

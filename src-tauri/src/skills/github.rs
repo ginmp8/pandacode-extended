@@ -129,14 +129,33 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
                     if files.len() >= MAX_FILES {
                         return Err(format!("That path holds more than {MAX_FILES} files."));
                     }
-                    let content = match entry["content"].as_str() {
-                        Some(content) => content.to_string(),
-                        None => api(&format!("repos/{repo}/contents/{entry_path}?ref={commit}"))?["content"].as_str().unwrap_or_default().to_string(),
+                    let declared_size = entry["size"].as_u64().unwrap_or(0) as usize;
+                    if declared_size > MAX_BYTES || declared_size > MAX_BYTES.saturating_sub(total) {
+                        return Err(format!("That path is larger than {} MiB.", MAX_BYTES >> 20));
+                    }
+                    // Directory listing results usually omit content. Request the immutable Git
+                    // blob rather than trusting a truncated Contents response (which may return
+                    // encoding=none for large files), and fail closed on unsupported encoding.
+                    let detail = if entry["encoding"] == "base64" && entry["content"].is_string() {
+                        entry.clone()
+                    } else {
+                        let sha = entry["sha"].as_str().ok_or("GitHub did not return the file object ID.")?;
+                        if !sha.bytes().all(|b| b.is_ascii_hexdigit()) || sha.len() != 40 {
+                            return Err(format!("Invalid file object ID for {entry_path}."));
+                        }
+                        api(&format!("repos/{repo}/git/blobs/{sha}"))?
                     };
+                    if detail["encoding"] != "base64" {
+                        return Err(format!("GitHub did not provide Base64 file contents for {entry_path}."));
+                    }
+                    let content = detail["content"].as_str().ok_or_else(|| format!("Missing file contents for {entry_path}."))?;
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(content.replace(['\n', '\r'], ""))
                         .map_err(|_| format!("GitHub returned unreadable content for {entry_path}."))?;
-                    total += bytes.len();
+                    if declared_size != 0 && declared_size != bytes.len() {
+                        return Err(format!("GitHub file size mismatch for {entry_path}."));
+                    }
+                    total = total.checked_add(bytes.len()).ok_or("GitHub file size overflow.")?;
                     if total > MAX_BYTES {
                         return Err(format!("That path is larger than {} MiB.", MAX_BYTES >> 20));
                     }

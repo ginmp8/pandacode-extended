@@ -12,36 +12,28 @@ async function showBots(page: Page): Promise<void> {
 test.describe('shared bot channels', () => {
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
     await showBots(page);
-    // The sidebar is painted before asynchronous application boot finishes.
-    // Wait for the first conversation composer before navigating between views.
+    // The sample channel is seeded during asynchronous startup.
     await expect(page.locator('#composer-area #composer')).toBeVisible();
     const pageErrors: string[] = [];
     page.on('pageerror', error => pageErrors.push(error.message));
-    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Bot actions' })
-      .getByRole('menuitem', { name: 'New channel' }).click();
-    const create = page.getByRole('dialog', { name: 'New channel' });
-    await create.getByRole('textbox', { name: 'Channel name' }).fill('navigation-regression');
-    await create.getByRole('checkbox', { name: 'Scout' }).check();
-    await create.getByRole('button', { name: 'Create channel' }).click();
-    await expect(create).toBeHidden();
-    const channel = sidebar(page).getByRole('button', { name: '#navigation-regression' });
+    const channel = sidebar(page).getByRole('button', { name: '#launch' });
     await expect(channel).toBeVisible();
+    await channel.click();
     await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
 
-    // A selected bot must replace the channel view without first clicking Back.
+    // The new bot conversation must replace the channel without clicking Back.
     await page.getByRole('textbox', { name: 'Message channel' }).fill('Unsent channel draft');
     const bot = sidebar(page).getByRole('button', { name: /^Chat with Scout/ });
     await expect(bot).toBeVisible();
-    await bot.click({ noWaitAfter: true });
+    await bot.click();
     await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
     await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
     await expect(page.locator('#transcript .bc-channel')).toHaveCount(0);
     await expect(page.locator('#composer #prompt')).toBeVisible();
     await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);
 
-    // An unsent message belongs to its channel and survives a return visit.
-    await channel.click({ noWaitAfter: true });
+    // The channel keeps a draft that was not sent before the switch.
+    await channel.click();
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveValue('Unsent channel draft');
     expect(pageErrors).toEqual([]);
   });

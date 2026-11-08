@@ -68,7 +68,7 @@ fn is_full_sha(reference: Option<&str>) -> bool {
 fn scope_contains(trusted: &TrustedScope, repo: &str, path: &str) -> bool {
     trusted.repo.eq_ignore_ascii_case(repo)
         && (trusted.path.is_empty() || path == trusted.path
-            || path.strip_prefix(&trusted.path).is_some_and(|part| part.starts_with('/')))
+            || path.strip_prefix(trusted.path.as_str()).is_some_and(|part| part.starts_with('/')))
 }
 
 impl Library {
@@ -154,7 +154,7 @@ impl Library {
         let (files, commit) = github::fetch_using(&repo, &path, meta.source.git_ref.as_deref(), api)?;
         let current = self.files(&meta.id)?;
         let edited = content_hash(&current) != meta.sha256;
-        if meta.source.commit.as_deref() == Some(&commit) && !edited {
+        if meta.source.commit.as_deref() == Some(commit.as_str()) && !edited {
             return Ok(SyncEvent { id: meta.id.clone(), status: "skipped".into(), old_commit: old_commit.clone(), new_commit: old_commit,
                 impacted_harnesses, detail: "Already at the selected source commit.".into() });
         }
@@ -191,7 +191,7 @@ impl Library {
                 Selection::All => true,
                 Selection::One(id) => &meta.id == id,
                 Selection::Source(source_repo, scope) => source_repo.eq_ignore_ascii_case(&repo)
-                    && (scope.is_empty() || path == *scope || path.strip_prefix(scope).is_some_and(|p| p.starts_with('/'))),
+                    && (scope.is_empty() || path == *scope || path.strip_prefix(scope.as_str()).is_some_and(|p| p.starts_with('/'))),
             };
             if !selected { continue; }
             if automatic && (!meta.auto_update.unwrap_or(policy.auto_on_start)

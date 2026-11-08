@@ -30,7 +30,7 @@ pub(super) fn selection(input: &str, path: &str, git_ref: Option<&str>) -> Resul
     let input = input.trim().trim_end_matches('/');
     let explicit_path = path.trim_matches('/');
     let explicit_ref = git_ref.map(str::trim).filter(|r| !r.is_empty());
-    let mut repository = input.to_string();
+    let repository: String;
     let mut resolved_path = String::new();
     let mut resolved_ref = explicit_ref.map(str::to_string);
     if let Some(url) = input.strip_prefix("https://github.com/") {

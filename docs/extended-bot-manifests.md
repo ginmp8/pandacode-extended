@@ -7,7 +7,7 @@ Issue: [#123](https://github.com/ginmp8/pandacode-extended/issues/123). These fe
 Open **Bots → +**. The existing **New bot** and **New channel** actions remain available.
 
 - **Import / Sync bots… → Local JSON file** reads a UTF-8 `{"bots":[...]}` manifest and imports it immediately after a verified local backup. No dry-run is required. A partial import reports errors and keeps the successfully imported entries.
-- **Import / Sync bots… → Git sources** manages one or more `https://github.com/owner/repo` repositories, refs and explicit JSON file paths. Choose **Save sources**, **Check for updates** (read-only), or **Sync now** (validates every selected manifest, backs up locally, then applies).
+- **Import / Sync bots… → Git sources** manages one or more `https://github.com/owner/repo` repositories, refs and explicit JSON file paths. Choose **Save sources**, **Check for updates** (read-only across all sources), **Sync source** beside an individual source's **Remove source** control, or **Sync all sources** at the bottom. The individual action validates and imports only the selected source's manifest files; the global action validates and imports the combined set as before. Both operations create a verified local backup before mutation.
 - **Export bots…** selects one or many bots. Save a combined JSON file or choose a directory for individual per-bot JSON files. Existing destination files are not overwritten by Desktop exports. A combined file includes a shared channel only when all its members are selected; each individual bot file includes only channels whose full membership fits that file. Channels involving selected bots but omitted due to missing members are named in the export result and displayed in the dialog, including individual-file exports. Unrelated channels are not reported as omissions.
 
 The existing Bots view refreshes after import or sync. The manifest contains configuration only, not conversation posts, runtime state, memories, workspace files, pending assignments, pairing decisions, credentials or application/database backups.
@@ -56,7 +56,7 @@ Only direct GitHub-hosted repositories are supported by the current source trans
 
 **Troubleshooting Git source imports:** Run `gh auth status` and `gh api repos/OWNER/REPO` in the same user session as PandaCode. Confirm the repository, ref, and JSON path exactly. Errors now identify whether ref resolution or the SHA-pinned file request failed; an HTTP 404 for a public source does not by itself mean a token is required. `gh api` uses the CLI's existing credential store, not a new PandaCode credential. Git sync remains read-only and never executes repository content.
 
-**Automatic polling is not enabled in this implementation.** Source registry entries default to `autoSync: false`. Periodic application of security-sensitive configuration requires a separately reviewed opt-in and privilege gate; use explicit **Sync now** or the one-shot headless command in the meantime.
+**Automatic polling is not enabled in this implementation.** Source registry entries default to `autoSync: false`. Periodic application of security-sensitive configuration requires a separately reviewed opt-in and privilege gate; use explicit **Sync source**, **Sync all sources**, or the one-shot headless command in the meantime.
 
 ## Portable bot envelope
 

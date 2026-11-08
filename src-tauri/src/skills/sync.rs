@@ -216,11 +216,11 @@ impl Library {
                 let safe = imported.findings.is_empty() && self.missing_required(&imported.meta).is_empty();
                 if safe {
                     let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
-                    let mut meta = self.load(&imported.id)?;
+                    let mut meta = self.load(&imported.meta.id)?;
                     meta.auto_available = true;
                     self.save(&meta)?;
                 }
-                Ok((imported.id, safe))
+                Ok((imported.meta.id, safe))
             })();
             match result {
                 Ok((id, safe)) => {

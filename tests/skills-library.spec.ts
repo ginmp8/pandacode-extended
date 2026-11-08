@@ -173,6 +173,44 @@ test('synchronization page offers per-skill and bulk manual sync', async ({ page
   await expect(page.getByRole('status')).toHaveText('Updated startup policy for release-notes.');
 });
 
+test('an exact GitHub tree URL imports one complete recommended skill by reference', async ({ page }) => {
+  await open(page);
+  await page.getByRole('combobox', { name: 'Source' }).selectOption('github');
+  await page.getByRole('textbox', { name: 'Repository', exact: true }).fill('https://github.com/ginmp8/rhapsodia/tree/main/skills/archify');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('Imported 1 skill.');
+  await expect(item(page, 'archify')).toContainText('ginmp8/rhapsodia/skills/archify');
+  await expect(page.getByRole('checkbox', { name: 'archify: Claude Code · User' })).not.toBeChecked();
+});
+
+test('collection browsing is scoped and refuses an ambiguous tree ref without a ref field', async ({ page }) => {
+  await open(page);
+  await page.getByRole('combobox', { name: 'Source' }).selectOption('github');
+  const repo = page.getByRole('textbox', { name: 'Repository', exact: true });
+  await repo.fill('https://github.com/ginmp8/rhapsodia/tree/feature/custom/skills');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('exact ref separately');
+  await repo.fill('https://github.com/ginmp8/rhapsodia/tree/main/skills');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Use catalog selection or Import all');
+  const catalog = page.getByRole('list', { name: 'Catalog sources' });
+  await expect(catalog).toContainText('software-improvement-loop');
+  await catalog.getByRole('button', { name: 'Import all from ginmp8/rhapsodia' }).click();
+  await expect(page.getByRole('status')).toContainText('Nothing is active until you turn it on.');
+});
+
+test('trusting a collection can be revoked without granting repository-root trust', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Synchronization' }).click();
+  const collection = page.getByRole('textbox', { name: 'Authorized collection path for anthropics/skills' });
+  await collection.fill('skills/engineering');
+  await page.getByRole('button', { name: 'Trust collection' }).click();
+  await expect(page.getByRole('list', { name: 'Trusted paths in anthropics/skills' })).toContainText('skills/engineering');
+  await expect(page.getByText('Only selected collection paths trusted')).toBeVisible();
+  await page.getByRole('button', { name: 'Revoke collection trust' }).click();
+  await expect(page.getByRole('list', { name: 'Trusted paths in anthropics/skills' })).toHaveCount(0);
+});
+
 test('a pstack-sized collection is scanned as a catalog and imports past 64 files in total', async ({ page }) => {
   await open(page);
   await page.getByRole('textbox', { name: 'Catalog repository' }).fill('acme/nope');

@@ -781,8 +781,9 @@ pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs>
 
 fn refresh_bot_briefs_if_changed(app: &AppHandle, report: &sync::SyncReport) {
     if report.updated.is_empty() && report.installed.is_empty() { return; }
-    let store = app.state::<AppState>();
-    if let Ok(store) = store.store.lock() {
+    let app_state = app.state::<AppState>();
+    let result = app_state.store.lock();
+    if let Ok(store) = result {
         // Next bot message sees the new library state, not a mid-run mutation.
         let _ = store.db.execute("UPDATE bots SET memory_version=memory_version+1", []);
     }

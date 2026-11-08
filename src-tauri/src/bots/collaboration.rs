@@ -5,7 +5,6 @@ use super::{gateway, shared_channels, Bot, Thread, DESKTOP};
 use crate::{storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use tauri::{Emitter, Manager};
 
@@ -259,22 +258,18 @@ fn resolve_recipients(store: &Store, channel: &shared_channels::SharedChannel, s
     Ok(recipients)
 }
 
-fn identity(store: &Store, source: &Thread, bot: &Bot, target: (&str, &str),
-    text: &str, recipients: &[String], explicit: Option<&str>) -> Result<String> {
-    let (kind, channel_id) = target;
+/// A supplied key identifies an operation across retries. An unkeyed call is a new
+/// operation, even when the source turn and payload are identical.
+fn identity(source: &Thread, bot: &Bot, explicit: Option<&str>) -> Result<String> {
     if let Some(key) = explicit {
         if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
             return Err("The idempotency key must contain 1 to 128 printable characters.".into());
         }
         return Ok(format!("provided:{}:{}:{}", bot.id, source.session_id, key));
     }
-    let turn: i64 = store.db.query_row(
-        "SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role='user'",
-        [&source.session_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
-    let body = json!([bot.id,source.session_id,turn,kind,channel_id,text,recipients]).to_string();
-    let hash = Sha256::digest(body.as_bytes());
-    Ok(format!("turn:{hash:x}"))
+    // Content-derived keys incorrectly collapse distinct intentional calls in one turn.
+    // Retrying an uncertain result requires reusing a caller-provided key.
+    Ok(format!("invocation:{}:{}:{}", bot.id, source.session_id, crate::storage::id()))
 }
 
 fn existing(store: &Store, key: &str, kind: &str, channel: &str, sender: &str,
@@ -300,7 +295,7 @@ pub(crate) fn post(store: &Store, bot: &Bot, source: &Thread, target: &str,
     require_member(&channel, &bot.id)?;
     let text = clean_text(raw)?;
     let route = route(store, &source.session_id, &bot.id)?;
-    let key = identity(store, source, bot, ("post", &channel.id), &text, &[], key)?;
+    let key = identity(source, bot, key)?;
     if let Some(id) = existing(store, &key, "post", &channel.id, &bot.id, &text, &[])? {
         return Ok(json!({"postId":id,"channelId":channel.id,"status":"posted","replayed":true}));
     }
@@ -334,7 +329,7 @@ pub(crate) async fn request(app: &tauri::AppHandle, bot: &Bot, source: &Thread,
         let text = clean_text(raw)?;
         let route = route(&store, &source.session_id, &bot.id)?;
         let recipients = resolve_recipients(&store, &channel, bot, names, &route)?;
-        let key = identity(&store, source, bot, ("assignment", &channel.id), &text, &recipients, key)?;
+        let key = identity(source, bot, key)?;
         if let Some(id) = existing(&store, &key, "assignment", &channel.id, &bot.id, &text, &recipients)? {
             (channel.id, id, recipients, route.depth+1, crate::storage::now(), false)
         } else {
@@ -727,6 +722,27 @@ mod tests {
         ).unwrap();
         assert_eq!(state,"sent");
         assert_eq!(crate::message_queue::list(&f.store,Some(&session)).unwrap().len(),1);
+    }
+
+    #[test]
+    fn identical_unkeyed_calls_are_distinct_while_explicit_retries_replay() {
+        let f = fixture();
+        let author = bot(&f, "Author");
+        let channel = shared_channels::create(&f.store, "release", std::slice::from_ref(&author.id)).unwrap();
+        let (session, _) = super::super::thread_session(&f.store, &author, DESKTOP, DESKTOP, "Author").unwrap();
+        let thread = super::super::owner_of(&f.store, &session).unwrap().unwrap().1;
+        let first = post(&f.store, &author, &thread, &channel.id, "Same update", None).unwrap();
+        let second = post(&f.store, &author, &thread, &channel.id, "Same update", None).unwrap();
+        assert_ne!(first["postId"], second["postId"], "two distinct tool calls must not collapse");
+        assert!(second.get("replayed").is_none());
+        let keyed = post(&f.store, &author, &thread, &channel.id, "Same update", Some("send-1")).unwrap();
+        let retry = post(&f.store, &author, &thread, &channel.id, "Same update", Some("send-1")).unwrap();
+        assert_eq!(keyed["postId"], retry["postId"]);
+        assert_eq!(retry["replayed"], true);
+        assert_eq!(shared_channels::detail(&f.store, &channel.id, 50).unwrap().messages.len(), 3);
+        assert_ne!(identity(&thread, &author, None).unwrap(), identity(&thread, &author, None).unwrap());
+        assert_eq!(identity(&thread, &author, Some("request-1")).unwrap(),
+                   identity(&thread, &author, Some("request-1")).unwrap());
     }
 
     #[test]

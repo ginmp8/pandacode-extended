@@ -491,7 +491,7 @@ impl Library {
         if chosen.is_empty() {
             return Err("Choose at least one skill to import.".into());
         }
-        let tree = tree(api, &source.repo, Some(&commit)).map_err(|e| explain(&e))?;
+        let tree = tree(api, &source.repo, "", Some(&commit)).map_err(|e| explain(&e))?;
         let (mut imported, mut skipped) = (Vec::new(), Vec::new());
         'skills: for skill in chosen {
             let here = location(&source.repo, &skill.path);

@@ -1078,7 +1078,13 @@ pub(crate) fn task_brief(store: &Store, library: Option<&crate::skills::Library>
     let task = store.session(session_id)?;
     let root = store.workspace_root(&task.project_id, Some(session_id))?;
     let project = library.map(|l| l.project_active(&task.provider, &root)).unwrap_or_default();
-    let resolved = crate::skills::scoped::resolve(&bot.skills, &project);
+    let mut bot_selected = bot.skills.clone();
+    if let Some(library) = library {
+        let inherited: Vec<String> = library.bot_auto_for(&task.provider, &root).into_iter()
+            .filter(|id| !bot_selected.contains(id)).collect();
+        bot_selected.extend(inherited);
+    }
+    let resolved = crate::skills::scoped::resolve(&bot_selected, &project);
     let files = crate::skills::scoped::has_skill_folder(&task.provider);
     // Harnesses with skill folders already read the project's; the rest get every skill as text.
     let inline: Vec<String> = resolved.iter().filter(|r| !files || r.provenance == "bot").map(|r| r.id.clone()).collect();

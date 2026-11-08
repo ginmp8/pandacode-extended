@@ -22,6 +22,9 @@ pub struct TrustedScope {
     pub repo: String,
     /// Empty means the entire repository, otherwise a bounded collection path.
     pub path: String,
+    /// A user-approved branch, tag, or immutable SHA for newly discovered packages.
+    #[serde(default)]
+    pub git_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +42,9 @@ pub struct SyncEvent {
 #[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub checked_at: u64,
+    /// Newly imported packages under the user's explicitly trusted source scope.
+    #[serde(default)]
+    pub installed: Vec<String>,
     pub updated: Vec<String>,
     pub skipped: Vec<String>,
     pub events: Vec<SyncEvent>,
@@ -99,11 +105,15 @@ impl Library {
     }
 
     pub fn sync_trust_scope(&self, repo: &str, path: &str, trusted: bool) -> Result<SyncPolicy, String> {
-        let (repo, path, _) = github::selection(repo, path, None)?;
+        self.sync_trust_scope_ref(repo, path, None, trusted)
+    }
+
+    pub fn sync_trust_scope_ref(&self, repo: &str, path: &str, git_ref: Option<&str>, trusted: bool) -> Result<SyncPolicy, String> {
+        let (repo, path, git_ref) = github::selection(repo, path, git_ref)?;
         let mut policy = self.sync_policy()?;
         policy.trusted_scopes.retain(|s| !(s.repo.eq_ignore_ascii_case(&repo) && s.path == path));
         if trusted {
-            policy.trusted_scopes.push(TrustedScope { repo, path });
+            policy.trusted_scopes.push(TrustedScope { repo, path, git_ref });
         }
         self.save_sync_file(".sync-policy.json", &policy)?;
         Ok(policy)
@@ -174,6 +184,66 @@ impl Library {
         })
     }
 
+    /// Index one explicitly authorized scope. Incomplete or untrusted entries cannot become
+    /// active; the catalog's SHA-pinned scan enforces identity and rejects symlinks.
+    fn discover_scope(&self, api: catalog::Api<'_>, scope: &TrustedScope, report: &mut SyncReport) -> Result<(), String> {
+        let (commit, indexed) = catalog::scan(api, &scope.repo, scope.git_ref.as_deref())?;
+        for candidate in indexed {
+            let inside = scope.path.is_empty() || candidate.path == scope.path
+                || candidate.path.strip_prefix(scope.path.as_str()).is_some_and(|rest| rest.starts_with('/'));
+            if !inside { continue; }
+            let source_location = catalog::location(&scope.repo, &candidate.path);
+            if let Ok(existing) = self.load(&candidate.id) {
+                if existing.source.location.eq_ignore_ascii_case(&source_location) {
+                    continue;
+                }
+                // Do not implicitly decide between conflicting origins.
+                report.skipped.push(format!("{}: another origin already uses this skill ID; explicitly choose a source before activating.", candidate.id));
+                continue;
+            }
+            let result = (|| -> Result<(String, bool), String> {
+                if candidate.files > super::MAX_FILES || candidate.bytes as usize > super::MAX_BYTES {
+                    return Err("Package exceeds the validated file or size budget.".into());
+                }
+                let (files, observed_commit) = github::fetch_using(&scope.repo, &candidate.path, Some(&commit), api)?;
+                if observed_commit != commit {
+                    return Err("The selected Git revision changed during the transaction.".into());
+                }
+                let imported = self.import_as(super::Kind::Skill, files, &candidate.name, Source {
+                    kind: "github".into(), location: source_location.clone(),
+                    git_ref: scope.git_ref.clone(), commit: Some(commit.clone()),
+                }, true)?;
+                let safe = imported.findings.is_empty() && self.missing_required(&imported.meta).is_empty();
+                if safe {
+                    let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
+                    let mut meta = self.load(&imported.id)?;
+                    meta.auto_available = true;
+                    self.save(&meta)?;
+                }
+                Ok((imported.id, safe))
+            })();
+            match result {
+                Ok((id, safe)) => {
+                    report.installed.push(id.clone());
+                    report.events.push(SyncEvent {
+                        id, status: if safe { "installed".into() } else { "needs-approval".into() },
+                        old_commit: None, new_commit: Some(commit.clone()), impacted_harnesses: Vec::new(),
+                        detail: if safe { "Installed into the central library and available on the next bot brief.".into() }
+                            else { "Installed but activation is blocked pending safety acknowledgement or required peer skills.".into() },
+                    });
+                }
+                Err(error) => {
+                    report.skipped.push(format!("{}: {}", candidate.id, catalog::explain(&error)));
+                    report.events.push(SyncEvent {
+                        id: candidate.id, status: "error".into(), old_commit: None,
+                        new_commit: None, impacted_harnesses: Vec::new(), detail: catalog::explain(&error),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// One writer for all skill sync operations. When busy, return an in-progress report rather
     /// than race. Errors are isolated per skill; the old complete package remains available.
     pub fn synchronize(&self, api: catalog::Api, selection: Selection, automatic: bool) -> Result<SyncReport, String> {
@@ -208,6 +278,34 @@ impl Library {
             else { report.skipped.push(format!("{}: {}", meta.id, event.detail)); }
             report.events.push(event);
         }
+        // New packages are never discovered from the bundled recommendation list itself.
+        // Only explicit user-trusted source/path scopes are eligible, and global startup
+        // discovery must be on. An individual per-skill override cannot grant repository trust.
+        if automatic && policy.auto_on_start {
+            for scope in &policy.trusted_scopes {
+                if let Err(error) = self.discover_scope(api, scope, &mut report) {
+                    let description = catalog::explain(&error);
+                    report.skipped.push(format!("{}/{}: {description}", scope.repo, scope.path));
+                    report.events.push(SyncEvent {
+                        id: format!("{}/{}", scope.repo, scope.path), status: "error".into(),
+                        old_commit: None, new_commit: None, impacted_harnesses: Vec::new(), detail: description,
+                    });
+                }
+            }
+            // A required peer can arrive after its dependent package in the same batch.
+            // Enable inheritance only after checking the complete installed set.
+            for id in &report.installed {
+                if let Ok(item) = self.load(id).and_then(|meta| self.item(meta)) {
+                    if item.meta.auto_available || !item.findings.is_empty() || !self.missing_required(&item.meta).is_empty() {
+                        continue;
+                    }
+                    let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
+                    let mut meta = self.load(id)?;
+                    meta.auto_available = true;
+                    self.save(&meta)?;
+                }
+            }
+        }
         self.save_sync_file(".sync-report.json", &report)?;
         Ok(report)
     }
@@ -219,7 +317,7 @@ mod tests {
 
     #[test]
     fn scope_trust_never_expands_to_sibling_directories() {
-        let trusted = TrustedScope { repo: "ginmp8/rhapsodia".into(), path: "skills/engineering".into() };
+        let trusted = TrustedScope { repo: "ginmp8/rhapsodia".into(), path: "skills/engineering".into(), git_ref: Some("main".into()) };
         assert!(scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build"));
         assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/security/check"));
         assert!(!scope_contains(&trusted, "evil/rhapsodia", "skills/engineering/build"));

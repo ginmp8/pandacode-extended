@@ -98,12 +98,20 @@ fn handoff_pending(store: &Store, session_id: &str) -> Result<bool> {
 fn workspace_skills(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str) -> (String, Vec<String>) {
     let (Ok(task), Ok(root), Ok(library)) = (store.session(session_id), store.workspace_root(&bot.project_id, None), crate::skills::library(app)) else { return Default::default() };
     let harness = task.provider;
+    let inherited = library.bot_auto_for(&harness, &root).into_iter()
+        .filter(|id| !bot.skills.contains(id)).collect::<Vec<_>>();
     let mut skipped = library.sync_project(&harness, &root, &bot.skills);
     if crate::skills::scoped::has_skill_folder(&harness) {
         let installed = library.project_active(&harness, &root).into_iter().filter(|id| bot.skills.contains(id)).collect::<Vec<_>>();
-        return (brief::skills("", &installed, &skipped), skipped);
+        // Newly discovered trusted content is inherited in the next bot brief without
+        // writing another per-bot copy or taking ownership of native harness skills.
+        let (text, more) = library.prompt_text(&inherited);
+        skipped.extend(more);
+        return (brief::skills(&text, &installed, &skipped), skipped);
     }
-    let (text, more) = library.prompt_text(&bot.skills);
+    let mut selected = bot.skills.clone();
+    selected.extend(inherited);
+    let (text, more) = library.prompt_text(&selected);
     skipped.extend(more);
     (brief::skills(&text, &[], &skipped), skipped)
 }

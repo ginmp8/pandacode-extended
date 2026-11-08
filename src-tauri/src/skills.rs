@@ -90,6 +90,12 @@ pub struct Meta {
     /// None inherits the application startup sync setting; legacy installs default to None.
     #[serde(default)]
     pub auto_update: Option<bool>,
+    /// True only after a user-trusted scoped discovery installed an unflagged, complete skill.
+    #[serde(default)]
+    pub auto_available: bool,
+    /// Required library peers declared in skill-dependencies.json (when present).
+    #[serde(default)]
+    pub required_skills: Vec<String>,
     /// Exact imported file digests; old metadata remains valid without this map.
     #[serde(default)]
     pub file_hashes: std::collections::BTreeMap<String, String>,
@@ -143,6 +149,26 @@ pub struct HarnessRow {
 pub struct Matrix {
     pub project: Option<String>,
     pub harnesses: Vec<HarnessRow>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PeerDependencies {
+    #[serde(default)]
+    required_skills: Vec<String>,
+}
+fn peer_dependencies(files: &Files) -> Result<Vec<String>, String> {
+    let Some((_, bytes)) = files.iter().find(|(path, _)| path == "skill-dependencies.json") else { return Ok(Vec::new()) };
+    let parsed: PeerDependencies = serde_json::from_slice(bytes)
+        .map_err(|e| format!("Invalid skill-dependencies.json: {e}"))?;
+    let mut peers = Vec::new();
+    for id in parsed.required_skills {
+        if !valid_id(&id) || id.len() > 80 {
+            return Err(format!("Invalid required skill ID in skill-dependencies.json: {id}"));
+        }
+        if !peers.contains(&id) { peers.push(id); }
+    }
+    Ok(peers)
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -401,12 +427,17 @@ impl Library {
             .and_then(|p| p.acknowledged.clone());
         let file_hashes = files.iter().map(|(path, content)| (path.clone(), sha256_hex(content))).collect();
         let auto_update = previous.as_ref().and_then(|p| p.auto_update);
+        let auto_available = previous.as_ref().filter(|p| p.source.location.eq_ignore_ascii_case(&source.location))
+            .is_some_and(|p| p.auto_available);
+        let required_skills = peer_dependencies(&files)?;
         let meta = Meta {
             acknowledged: accepted,
             auto_update,
+            auto_available,
+            required_skills,
             file_hashes,
             activations: previous.map(|p| p.activations).unwrap_or_default(),
-            id, name, kind, description, source, sha256, imported_at: now_ms(),
+            id: id.clone(), name, kind, description, source, sha256, imported_at: now_ms(),
         };
         if folder.exists() {
             if let Err(error) = fs::rename(&folder, &rollback) {
@@ -432,6 +463,20 @@ impl Library {
         Ok(self.item(self.load(id)?)?.findings)
     }
 
+    fn missing_required(&self, meta: &Meta) -> Vec<String> {
+        meta.required_skills.iter().filter(|id| self.load(id).is_err()).cloned().collect()
+    }
+
+    /// Opted-in auto-installed skills can be inherited by bot prompt-surface consumers.
+    /// Existing library items are NOT migrated to this state automatically.
+    pub(crate) fn bot_auto_skills(&self) -> Vec<String> {
+        self.list().unwrap_or_default().into_iter()
+            .filter(|item| item.meta.kind == Kind::Skill && item.meta.auto_available
+                && (item.findings.is_empty() || item.meta.acknowledged.is_some())
+                && self.missing_required(&item.meta).is_empty())
+            .map(|item| item.meta.id).collect()
+    }
+
     fn base<'a>(&'a self, scope: Scope, root: Option<&'a Path>) -> Result<&'a Path, String> {
         match scope {
             Scope::User => Ok(&self.home),
@@ -447,6 +492,10 @@ impl Library {
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         let item = self.item(self.load(id)?)?;
         let meta = item.meta;
+        let missing = self.missing_required(&meta);
+        if !missing.is_empty() {
+            return Err(format!("Install required peer skills before activating {}: {}.", meta.name, missing.join(", ")));
+        }
         let acknowledged = if item.findings.is_empty() || meta.acknowledged.is_some() {
             meta.acknowledged.clone()
         } else if acknowledge {
@@ -730,19 +779,38 @@ pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs>
 }
 
 
+fn refresh_bot_briefs_if_changed(app: &AppHandle, report: &sync::SyncReport) {
+    if report.updated.is_empty() && report.installed.is_empty() { return; }
+    let store = app.state::<AppState>();
+    if let Ok(store) = store.store.lock() {
+        // Next bot message sees the new library state, not a mid-run mutation.
+        let _ = store.db.execute("UPDATE bots SET memory_version=memory_version+1", []);
+    }
+}
+
 #[tauri::command]
 pub async fn skills_sync_item(app: AppHandle, id: String) -> crate::Result<sync::SyncReport> {
-    crate::blocking(move || library(&app)?.synchronize(&github::api, sync::Selection::One(id), false)).await
+    crate::blocking(move || {
+        let report = library(&app)?.synchronize(&github::api, sync::Selection::One(id), false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
 }
 #[tauri::command]
 pub async fn skills_sync_all(app: AppHandle) -> crate::Result<sync::SyncReport> {
-    crate::blocking(move || library(&app)?.synchronize(&github::api, sync::Selection::All, false)).await
+    crate::blocking(move || {
+        let report = library(&app)?.synchronize(&github::api, sync::Selection::All, false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
 }
 #[tauri::command]
 pub async fn skills_sync_source(app: AppHandle, repo: String, path: Option<String>) -> crate::Result<sync::SyncReport> {
     crate::blocking(move || {
         let (repo, path, _) = github::selection(&repo, path.as_deref().unwrap_or(""), None)?;
-        library(&app)?.synchronize(&github::api, sync::Selection::Source(repo, path), false)
+        let report = library(&app)?.synchronize(&github::api, sync::Selection::Source(repo, path), false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
     }).await
 }
 #[tauri::command]
@@ -754,8 +822,8 @@ pub async fn skills_sync_set_global(app: AppHandle, enabled: bool) -> crate::Res
     crate::blocking(move || library(&app)?.sync_set_global(enabled)).await
 }
 #[tauri::command]
-pub async fn skills_sync_trust(app: AppHandle, repo: String, path: Option<String>, trusted: bool) -> crate::Result<sync::SyncPolicy> {
-    crate::blocking(move || library(&app)?.sync_trust_scope(&repo, path.as_deref().unwrap_or(""), trusted)).await
+pub async fn skills_sync_trust(app: AppHandle, repo: String, path: Option<String>, git_ref: Option<String>, trusted: bool) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_trust_scope_ref(&repo, path.as_deref().unwrap_or(""), git_ref.as_deref(), trusted)).await
 }
 #[tauri::command]
 pub async fn skills_sync_override(app: AppHandle, id: String, auto_update: Option<bool>) -> crate::Result<Item> {
@@ -774,7 +842,9 @@ pub async fn skills_sync_report(app: AppHandle) -> crate::Result<sync::SyncRepor
 pub fn begin_startup_sync(app: AppHandle) {
     std::thread::spawn(move || {
         if let Ok(library) = library(&app) {
-            let _ = library.synchronize(&github::api, sync::Selection::All, true);
+            if let Ok(report) = library.synchronize(&github::api, sync::Selection::All, true) {
+                refresh_bot_briefs_if_changed(&app, &report);
+            }
         }
     });
 }

@@ -14,7 +14,7 @@ export type SkillActivation = { harness: string; scope: SkillScope; project: str
 export type SkillItem = {
   id: string; name: string; kind: SkillKind; description: string; sha256: string; importedAt: number;
   source: { kind: 'folder' | 'github'; location: string; gitRef: string | null; commit: string | null };
-  acknowledged: string | null; autoUpdate: boolean | null; fileHashes: Record<string, string>; activations: SkillActivation[]; files: string[]; findings: SkillFinding[];
+  acknowledged: string | null; autoUpdate: boolean | null; autoAvailable?: boolean; requiredSkills?: string[]; fileHashes: Record<string, string>; activations: SkillActivation[]; files: string[]; findings: SkillFinding[];
 };
 export type SkillCell = { id: string; scope: SkillScope; status: 'active' | 'outdated' | 'drifted' | 'missing' | 'prompt' | 'off'; surface: string };
 export type SkillMatrix = {
@@ -28,9 +28,9 @@ export type CatalogSource = {
 };
 export type SkillCatalogs = { sources: CatalogSource[]; discovery: { at: number; checked: number; registered: string[]; failures: string[]; note: string | null } | null };
 export type CatalogImport = { items: SkillItem[]; imported: string[]; skipped: { path: string; name: string; reason: string }[] };
-export type SkillSyncPolicy = { autoOnStart: boolean; trustedScopes: { repo: string; path: string }[] };
+export type SkillSyncPolicy = { autoOnStart: boolean; trustedScopes: { repo: string; path: string; gitRef?: string | null }[] };
 export type SkillSyncReport = {
-  checkedAt: number; updated: string[]; skipped: string[];
+  checkedAt: number; installed?: string[]; updated: string[]; skipped: string[];
   events: { id: string; status: string; oldCommit: string | null; newCommit: string | null; impactedHarnesses: string[]; detail: string }[];
 };
 /** A named branch containing slashes needs a separate, exact ref; never guess a path split. */
@@ -235,23 +235,38 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
 
   function syncHtml(): string {
     const githubItems = items.filter(item => item.kind === 'skill' && item.source.kind === 'github');
-    const sources = [...new Set(githubItems.map(item => item.source.location.split('/').slice(0, 2).join('/')))].sort();
+    const sources = [...new Set([
+      ...githubItems.map(item => item.source.location.split('/').slice(0, 2).join('/')),
+      ...syncPolicy.trustedScopes.map(scope => scope.repo),
+    ])].sort();
     const sourceHtml = sources.map(repo => {
-      const trusted = syncPolicy.trustedScopes.some(scope => scope.repo.toLowerCase() === repo.toLowerCase() && !scope.path);
-      const partial = syncPolicy.trustedScopes.some(scope => scope.repo.toLowerCase() === repo.toLowerCase() && !!scope.path);
-      return `<li class="skills-item"><strong>${escape(repo)}</strong>
-        <small>${trusted ? 'Explicitly trusted for startup updates' : partial ? 'Only selected source paths trusted' : 'No startup trust'}</small>
+      const scopes = syncPolicy.trustedScopes.filter(scope => scope.repo.toLowerCase() === repo.toLowerCase());
+      const rootTrusted = scopes.some(scope => !scope.path);
+      const partial = scopes.some(scope => !!scope.path);
+      const ref = catalogs.sources.find(source => source.repo.toLowerCase() === repo.toLowerCase())?.gitRef
+        || githubItems.find(item => item.source.location.startsWith(repo + '/'))?.source.gitRef || '';
+      const scopeLines = scopes.map(scope => `<li><code>${escape(scope.path || '(repository root)')}</code> @ ${escape(scope.gitRef || 'default branch')}
+        <button type="button" class="secondary-button" data-action="revoke-path" data-repo="${escape(repo)}" data-path="${escape(scope.path)}" ${busy ? 'disabled' : ''}>Revoke collection trust</button></li>`).join('');
+      return `<li class="skills-item" data-repo="${escape(repo)}"><strong>${escape(repo)}</strong>
+        <small>${rootTrusted ? 'Repository root trusted' : partial ? 'Only selected collection paths trusted' : 'No startup trust'}</small>
         <div class="skills-import-row skills-import-actions">
           <button type="button" class="secondary-button" data-action="sync-source" data-repo="${escape(repo)}" ${busy ? 'disabled' : ''}>Sync this source</button>
-          <button type="button" class="secondary-button" data-action="trust-source" data-repo="${escape(repo)}" data-trusted="${trusted ? 'false' : 'true'}" ${busy ? 'disabled' : ''}>${trusted ? 'Revoke root trust' : 'Trust repository root'}</button>
-        </div></li>`;
+          <button type="button" class="secondary-button" data-action="trust-source" data-repo="${escape(repo)}" data-git-ref="${escape(ref)}" data-trusted="${rootTrusted ? 'false' : 'true'}" ${busy ? 'disabled' : ''}>${rootTrusted ? 'Revoke root trust' : 'Trust repository root'}</button>
+        </div>
+        <label>Authorize a collection path (empty means root)
+          <input data-trust-path aria-label="${escape(`Authorized collection path for ${repo}`)}" placeholder="skills/engineering" spellcheck="false">
+        </label>
+        <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="trust-path" data-repo="${escape(repo)}" data-git-ref="${escape(ref)}" ${busy ? 'disabled' : ''}>Trust collection</button></div>
+        ${scopeLines ? `<ul class="skills-unmanaged" aria-label="${escape(`Trusted paths in ${repo}`)}">${scopeLines}</ul>` : ''}
+      </li>`;
     }).join('');
     const entries = githubItems.map(item => {
       const report = syncReport.events.find(event => event.id === item.id);
       const reference = item.source.gitRef || '';
       const refName = `Git ref for ${item.name}`;
       return `<li class="skills-item" data-id="${escape(item.id)}"><strong>${escape(item.name)}</strong>
-        <small>${escape(item.source.location)} @ ${escape(item.source.commit?.slice(0, 12) || 'unknown')}</small>
+        <small>${escape(item.source.location)} @ ${escape(item.source.commit?.slice(0, 12) || 'unknown')}${item.autoAvailable ? ' · Auto-available on compatible bot turns' : ''}</small>
+        ${item.requiredSkills?.length ? `<small>Required library peers: ${escape(item.requiredSkills.join(', '))}</small>` : ''}
         <div class="skills-import-row"><label>${escape(refName)}<input data-ref-input aria-label="${escape(refName)}" value="${escape(reference)}" placeholder="Default branch" spellcheck="false"></label>
           <button type="button" class="secondary-button" data-action="set-ref" ${busy ? 'disabled' : ''}>Save ref</button></div>
         <label>Startup updates for ${escape(item.name)}
@@ -264,11 +279,11 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
         ${report ? `<small>${escape(report.status)} · ${escape(report.detail)}${report.newCommit ? ` · ${escape(report.newCommit.slice(0, 12))}` : ''}</small>` : ''}</li>`;
     }).join('');
     return `<div class="settings-group">
-      <p class="skills-note">Startup checks run without blocking the application. Updates are off by default and require explicit repository/path trust. Automatic checks do not move full-SHA pins. Synchronization overwrites local PandaCode library edits without a backup; it never silently overwrites harness-managed or manual files. Later updates to previously acknowledged skills may add new warnings.</p>
+      <p class="skills-note">Startup checks run without blocking the application. Updates and discovery are off by default. Explicitly trusting a repository or collection authorizes the automatic installation of new valid, unflagged skills in that exact scope the next time startup checks are enabled. Check your trust scope carefully; use a full commit SHA to pin source content.  Automatic checks do not move full-SHA pins. Synchronization overwrites local PandaCode library edits without a backup; it never silently overwrites harness-managed or manual files. Later updates to previously acknowledged skills may add new warnings.</p>
       <label class="skills-toggle"><input type="checkbox" data-global-sync ${syncPolicy.autoOnStart ? 'checked' : ''} ${busy ? 'disabled' : ''}><span>Automatically check trusted skills when PandaCode starts</span></label>
       <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-all" ${busy ? 'disabled' : ''}>Sync all installed skills</button></div>
       <p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p><p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p>
-      ${syncReport.checkedAt ? `<small>Last synchronization report: ${escape(new Date(syncReport.checkedAt).toLocaleString())}</small>` : ''}
+      ${syncReport.checkedAt ? `<small>Last synchronization report: ${escape(new Date(syncReport.checkedAt).toLocaleString())} · ${plural(syncReport.installed?.length ?? 0, 'new skill')} installed · ${plural(syncReport.updated.length, 'skill')} updated</small>` : ''}
     </div><h4 class="skills-subheading">Sources</h4>
     ${sources.length ? `<ul class="settings-group skills-list" aria-label="Synchronization sources">${sourceHtml}</ul>` : '<p class="skills-empty">No GitHub sources installed.</p>'}
     <h4 class="skills-subheading">Installed skills</h4>
@@ -446,8 +461,22 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     }
     if (button.dataset.action === 'trust-source' && button.dataset.repo) {
       void run(async () => {
-        await options.call('skills_sync_trust', { repo: button.dataset.repo, path: '', trusted: button.dataset.trusted === 'true' });
+        await options.call('skills_sync_trust', { repo: button.dataset.repo, path: '', gitRef: button.dataset.gitRef || null, trusted: button.dataset.trusted === 'true' });
         return button.dataset.trusted === 'true' ? 'Repository root explicitly trusted for startup checks.' : 'Repository root trust revoked.';
+      }); return;
+    }
+    if (button.dataset.action === 'trust-path' && button.dataset.repo) {
+      const sourceRow = button.closest<HTMLElement>('[data-repo]');
+      const path = sourceRow?.querySelector<HTMLInputElement>('[data-trust-path]')?.value.trim() || '';
+      void run(async () => {
+        await options.call('skills_sync_trust', { repo: button.dataset.repo, path, gitRef: button.dataset.gitRef || null, trusted: true });
+        return `Authorized ${button.dataset.repo}/${path || '(root)'} for startup discovery.`;
+      }); return;
+    }
+    if (button.dataset.action === 'revoke-path' && button.dataset.repo) {
+      void run(async () => {
+        await options.call('skills_sync_trust', { repo: button.dataset.repo, path: button.dataset.path || '', trusted: false });
+        return 'Collection trust revoked.';
       }); return;
     }
     if (button.dataset.action === 'set-ref') {

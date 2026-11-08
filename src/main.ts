@@ -5,6 +5,7 @@ import { COLLAPSED_SECTIONS_KEY, COMPLETED_OPEN_KEY, UNREVIEWED_KEY, readOpen, s
 import { PER_PROJECT, PROJECT_ORDER_KEY, SORT_KEY, compareManual, matchesFilter, readProjectOrder, readSort, taskComparator, type SidebarSort } from './sidebar-sort';
 import './styles.css';
 import './design-system.css';
+import './customize-skills.css';
 import './model-picker.css';
 import './smooth.css';
 import './wallpapers.css';

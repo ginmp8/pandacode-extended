@@ -108,6 +108,10 @@ jobs:
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
             npx playwright test tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts tests/bots.spec.ts tests/bots-channels.spec.ts \
             --grep "bot manifests|bot collaboration|bot actions menu aligns|switches directly from a shared channel to a bot conversation|resized bot settings textareas" --workers=1
+      - name: Exercise Customize Skills and ZIP/GitHub UI
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/customize-skills.spec.ts --workers=1
 
   rust:
     name: Rust check and tests (Linux)

@@ -79,6 +79,47 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('bot manifests', () => {
+  test('keeps export checkboxes and radios beside their labels with global app styles', async ({ page }) => {
+    // The production stylesheet gives all inputs width: 100%; the fixture alone
+    // does not include it, so explicitly load it to catch dialog regressions.
+    await page.addStyleTag({ url: '/src/styles.css' });
+    const host = await mount(page, 'export');
+    const choices = host.locator('.bm-bots .bm-choice, .bm-formats label');
+    await expect(choices).toHaveCount(4);
+    const positions = await choices.evaluateAll(labels => labels.map(label => {
+      const input = label.querySelector('input');
+      const caption = Array.from(label.childNodes).find(
+        node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim(),
+      );
+      if (!input || !caption) throw new Error('Export choice is missing its control or label.');
+      const range = document.createRange();
+      range.selectNodeContents(caption);
+      const control = input.getBoundingClientRect();
+      const text = range.getClientRects()[0];
+      const row = label.getBoundingClientRect();
+      if (!text) throw new Error('Export choice label is not visible.');
+      return {
+        name: input.type,
+        controlWidth: control.width,
+        controlHeight: control.height,
+        controlOffset: control.left - row.left,
+        textGap: text.left - control.right,
+        firstLineCenter: text.top + text.height / 2,
+        controlCenter: control.top + control.height / 2,
+      };
+    }));
+    for (const position of positions) {
+      expect(position.controlWidth, position.name).toBeGreaterThanOrEqual(14);
+      expect(position.controlWidth, position.name).toBeLessThanOrEqual(24);
+      expect(position.controlHeight, position.name).toBeLessThanOrEqual(24);
+      expect(position.controlOffset, position.name).toBeGreaterThanOrEqual(0);
+      expect(position.controlOffset, position.name).toBeLessThanOrEqual(4);
+      expect(position.textGap, position.name).toBeGreaterThanOrEqual(6);
+      expect(position.textGap, position.name).toBeLessThanOrEqual(20);
+      expect(Math.abs(position.firstLineCenter - position.controlCenter), position.name).toBeLessThanOrEqual(12);
+    }
+  });
+
   test('selects one, multiple, and separate bot JSON exports with no state mutation', async ({ page }) => {
     const host = await mount(page, 'export');
     await expect(host.getByRole('checkbox', { name: /Select all/ })).toBeChecked();

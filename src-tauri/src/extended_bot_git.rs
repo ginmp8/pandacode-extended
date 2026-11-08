@@ -471,17 +471,31 @@ async fn check_sources(registry: &mut SourceRegistry) -> Result<SyncOutcome> {
     })
 }
 
+/// Select a single configured source without modifying the stored registry or other receipts.
+fn sync_scope(registry: &SourceRegistry, source_id: Option<&str>) -> Result<SourceRegistry> {
+    validate_registry(registry)?;
+    match source_id {
+        None => Ok(registry.clone()),
+        Some(id) => {
+            let source = registry.sources.iter().find(|source| source.id == id)
+                .ok_or_else(|| format!("Git source {id:?} is not configured."))?;
+            Ok(SourceRegistry { version: registry.version, sources: vec![source.clone()] })
+        }
+    }
+}
+
 pub(crate) async fn sync(
-    app: &tauri::AppHandle, registry: &mut SourceRegistry,
+    app: &tauri::AppHandle, registry: &mut SourceRegistry, source_id: Option<&str>,
 ) -> Result<SyncOutcome> {
     let started_at = crate::storage::now();
-    let (document, receipts) = fetch_batch(registry).await?;
+    let selected = sync_scope(registry, source_id)?;
+    let (document, receipts) = fetch_batch(&selected).await?;
     let dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let state = app.state::<AppState>();
     let (result, local_hash, added_channels) = {
         let store: std::sync::MutexGuard<'_, Store> = state.store.lock().map_err(|error| error.to_string())?;
         let current_hash = local_state_hash(&store)?;
-        if same_applied_content(registry, &receipts, &current_hash) {
+        if same_applied_content(&selected, &receipts, &current_hash) {
             let unchanged = document["bots"].as_array().map_or(0, Vec::len);
             (SyncOutcome { sources: receipts, backup_path: None,
                 lines: vec!["Git manifest content and local bot configuration are unchanged; no import was necessary.".into()],
@@ -557,7 +571,7 @@ pub(crate) async fn run_headless(
     let receipts = headless_receipts_path(&data_dir, path)?;
     let mut registry = read_headless_registry(path, &receipts)?;
     if registry.sources.is_empty() { return Err("The Git source registry has no sources.".into()); }
-    let outcome = sync(app, &mut registry).await?;
+    let outcome = sync(app, &mut registry, None).await?;
     // Persist successful receipts and partial-failure check results before reporting
     // completion; a later one-shot run must not repeatedly import unchanged content.
     save_registry(&receipts, &registry)?;
@@ -604,13 +618,13 @@ pub async fn bot_manifest_sources_check(
 
 #[tauri::command]
 pub async fn bot_manifest_sources_sync(
-    app: tauri::AppHandle, window: tauri::WebviewWindow,
+    app: tauri::AppHandle, window: tauri::WebviewWindow, source_id: Option<String>,
 ) -> Result<SyncOutcome> {
     check_main(&window)?;
     let _operation = registry_lock().lock().await;
     let path = registry_path(&app)?;
     let mut registry = read_registry(&path)?;
-    let result = sync(&app, &mut registry).await?;
+    let result = sync(&app, &mut registry, source_id.as_deref()).await?;
     save_registry(&path, &registry)?;
     Ok(result)
 }
@@ -670,6 +684,28 @@ printf '%s' '{"sha":"0123456789abcdef0123456789abcdef01234567"}'
         assert!(matches!(get_api_via_gh(executable.to_str().unwrap(), &url).await,
             Err(GhApiError::Failed(error)) if error.contains("404") && !error.contains("token")));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_scope_selects_exact_source_without_changing_other_receipts() {
+        let make = |id: &str| ManifestSource {
+            id: id.into(), repository: "https://github.com/team/config".into(),
+            reference: "main".into(), manifests: vec![format!("{id}.json")],
+            auto_sync: false, last_checked_sha: None,
+            last_applied_sha: Some(format!("applied-{id}")),
+            last_applied_hash: None, last_applied_local_hash: None,
+        };
+        let registry = SourceRegistry { version: 1, sources: vec![make("team"), make("release")] };
+        let mut selected = sync_scope(&registry, Some("release")).unwrap();
+        assert_eq!(selected.sources.len(), 1);
+        assert_eq!(selected.sources[0].id, "release");
+        assert_eq!(selected.sources[0].last_applied_sha.as_deref(), Some("applied-release"));
+        selected.sources[0].last_applied_sha = Some("new-receipt".into());
+        assert_eq!(registry.sources[0].last_applied_sha.as_deref(), Some("applied-team"));
+        assert_eq!(registry.sources[1].last_applied_sha.as_deref(), Some("applied-release"));
+        assert_eq!(sync_scope(&registry, None).unwrap().sources.len(), 2);
+        assert!(sync_scope(&registry, Some("missing")).is_err());
+        assert!(sync_scope(&registry, Some("")).is_err());
     }
 
     #[test]

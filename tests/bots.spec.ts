@@ -76,6 +76,38 @@ test.describe('bots', () => {
       Math.min(...positions.map(position => position.iconLeft))).toBeLessThan(1);
   });
 
+  test('shared history controls persist in the preview bot settings', async ({ page }) => {
+    await newBot(page, 'Scout');
+    const call = (command: string, args: Record<string, unknown> = {}) => page.evaluate(async ([command, args]) =>
+      (await import('/src/bridge.ts')).call(command, args), [command, args] as const);
+    const scout = (await call('bots_list') as { id: string; name: string }[]).find(bot => bot.name === 'Scout')!;
+    await call('bot_shared_channel_create', { name: 'review', memberIds: [scout.id] });
+    const openHistory = async () => {
+      await page.locator('#breadcrumb').getByRole('button', { name: 'Scout settings' })
+        .evaluate(element => (element as HTMLElement).click());
+      const settings = panel(page);
+      await expect(settings).toBeVisible();
+      await settings.getByRole('tab', { name: 'Shared Channels' })
+        .evaluate(element => (element as HTMLElement).click());
+      await expect(settings.getByRole('checkbox', { name: 'Include channel history by default' })).toBeVisible();
+      return settings;
+    };
+    let settings = await openHistory();
+    const history = settings.getByRole('checkbox', { name: 'Include channel history by default' });
+    const override = settings.getByRole('combobox', { name: 'History for #review' });
+    await expect(history).toBeChecked();
+    await expect(override).toHaveValue('default');
+    await history.evaluate(element => (element as HTMLInputElement).click());
+    await expect(history).not.toBeChecked();
+    await override.selectOption('include');
+    await expect(settings.getByText('Included via channel override')).toBeVisible();
+    await expect(settings.locator('.bs-saved')).toContainText('Saved');
+    await page.keyboard.press('Escape');
+    settings = await openHistory();
+    await expect(settings.getByRole('checkbox', { name: 'Include channel history by default' })).not.toBeChecked();
+    await expect(settings.getByRole('combobox', { name: 'History for #review' })).toHaveValue('include');
+  });
+
   test('a new bot keeps its draft and caret through background refreshes', async ({ page }) => {
     await openBots(page);
     const form = bots(page).getByRole('form', { name: 'New bot' });

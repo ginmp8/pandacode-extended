@@ -5,6 +5,7 @@
 import './skills-library.css';
 import { escape } from './dom';
 import { infoMark } from './tooltip';
+import recommendations from './recommended-skills.v1.json';
 
 export type SkillKind = 'skill' | 'rule';
 export type SkillScope = 'user' | 'project';
@@ -47,6 +48,8 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   let catalogs: SkillCatalogs = { sources: [], discovery: null };
   /** Catalog skills chosen for import, as `repo\npath`. */
   let selected = new Set<string>();
+  let recommendedSelected = new Set<string>();
+  let view: 'library' | 'recommended' | 'sync' = 'library';
   let projectId = '';
   let source: 'folder' | 'github' = 'folder';
   let pending: { id: string; harness: string; scope: SkillScope } | null = null;
@@ -148,10 +151,57 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     ${ignored.length ? `<ul class="skills-unmanaged" aria-label="Ignored sources">${ignored.map(s => `<li><code>${escape(s.repo)}</code> <button type="button" class="secondary-button" data-action="catalog-state" data-state="enabled" data-repo="${escape(s.repo)}" aria-label="${escape(`Stop ignoring ${s.repo}`)}" ${busy ? 'disabled' : ''}>Stop ignoring</button></li>`).join('')}</ul>` : ''}`;
   }
 
+
+  function recommendedHtml(): string {
+    const groups = [...new Set(recommendations.templates.map(entry => entry.group))];
+    const source = catalogs.sources.find(entry => entry.repo === 'ginmp8/rhapsodia');
+    const groupHtml = groups.map(group => {
+      const entries = recommendations.templates.filter(entry => entry.group === group);
+      return `<section class="settings-group"><h4 class="skills-subheading">${escape(group)}</h4>
+        <ul class="skills-catalog-skills">${entries.map(entry => {
+          const path = `ginmp8/rhapsodia/${entry.path}`;
+          const installed = items.find(item => item.source.location.toLowerCase() === path.toLowerCase());
+          const newest = source?.skills.find(skill => skill.path === entry.path);
+          const status = !entry.available ? 'Unavailable in the current RhapsodIA source' : installed
+            ? (newest && newest.imported !== source?.commit ? 'An update may be available' : 'Installed') : 'Not installed';
+          return `<li class="skills-catalog-skill"><label class="skills-toggle">
+            <input type="checkbox" data-recommended="${escape(entry.id)}" ${recommendedSelected.has(entry.id) ? 'checked' : ''} ${!entry.available || busy ? 'disabled' : ''}
+              aria-label="${escape(`Select recommended ${entry.id}`)}">
+            <span><strong>${escape(entry.id)}</strong> ${entry.optional ? '<span class="skills-kind">Optional</span>' : ''}<code>${escape(entry.path)}</code></span></label>
+            <small>${escape(status)}</small></li>`;
+        }).join('')}</ul></section>`;
+    }).join('');
+    return `<div class="settings-group"><p class="skills-note">These are metadata references to public RhapsodIA skills, not preinstalled packages. Import requires the GitHub CLI. No scripts run on import and no bot is activated automatically.</p>
+      <label>Git ref (branch, tag, or immutable full commit SHA)
+        <input name="recommendedRef" aria-label="Recommended source ref" value="main" spellcheck="false" autocomplete="off">
+      </label><div class="skills-import-row skills-import-actions">
+        <button type="button" class="secondary-button" data-action="recommend-import" ${busy ? 'disabled' : ''}>Install selected</button>
+        <button type="button" class="secondary-button" data-action="recommend-all" ${busy ? 'disabled' : ''}>Install all primary skills</button>
+      </div><p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p><p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p></div>
+      ${groupHtml}`;
+  }
+
+  function syncHtml(): string {
+    const githubItems = items.filter(item => item.source.kind === 'github');
+    return `<div class="settings-group">
+      <p class="skills-note">Synchronization updates the PandaCode library copy only. Existing native harness folders are never silently overwritten. Full commit-SHA refs remain pinned.</p>
+      <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-all" ${busy ? 'disabled' : ''}>Sync all installed skills</button></div>
+      <p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p><p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p>
+    </div>
+    <ul class="settings-group skills-list" aria-label="Skill synchronization">${githubItems.map(item => `<li class="skills-item" data-id="${escape(item.id)}"><strong>${escape(item.name)}</strong>
+      <small>${escape(item.source.location)} @ ${escape(item.source.commit?.slice(0, 12) || 'unknown')}</small>
+      <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-item" ${busy ? 'disabled' : ''}>Sync this skill</button></div></li>`).join('')}</ul>
+    ${githubItems.length ? '' : '<p class="skills-empty">No GitHub skills installed yet.</p>'}`;
+  }
+
   function draw(): void {
     const list = projects();
     const values = clearFields ? {} : Object.fromEntries([...host.querySelectorAll<HTMLInputElement | HTMLSelectElement>('form [name]')].map(field => [field.name, field.value]));
-    host.innerHTML = `<h3 class="settings-heading">Import</h3><div class="settings-group skills-library" aria-label="Skills and rules">
+    host.innerHTML = `<nav class="skills-import-row skills-import-actions" aria-label="Skills Library pages">
+      <button type="button" class="secondary-button" data-action="view" data-view="library" aria-current="${view === 'library' ? 'page' : 'false'}">Library &amp; activation</button>
+      <button type="button" class="secondary-button" data-action="view" data-view="recommended" aria-current="${view === 'recommended' ? 'page' : 'false'}">Recommended skills</button>
+      <button type="button" class="secondary-button" data-action="view" data-view="sync" aria-current="${view === 'sync' ? 'page' : 'false'}">Synchronization</button>
+    </nav>${view === 'recommended' ? recommendedHtml() : view === 'sync' ? syncHtml() : `<h3 class="settings-heading">Import</h3><div class="settings-group skills-library" aria-label="Skills and rules">
       <form class="skills-import" aria-label="Import a skill or rule" novalidate>
         <div class="skills-import-row">
           <select name="kind" aria-label="Kind"><option value="skill">Skill</option><option value="rule">Rule</option></select>
@@ -168,7 +218,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     <div class="settings-heading"><h3>Catalogs</h3>${infoMark(CATALOGS_HELP, 'About catalogs')}<span class="sr-only">${CATALOGS_HELP}</span></div>${catalogsHtml()}
     <h3 class="settings-heading">Library</h3>
     ${items.length ? `<ul class="settings-group skills-list" aria-label="Library">${items.map(itemHtml).join('')}</ul>` : '<p class="skills-empty">The library is empty. Import a skill folder (with a SKILL.md) or a rule (one Markdown file).</p>'}
-    <h3 class="settings-heading">By harness</h3>${matrixHtml()}`;
+    <h3 class="settings-heading">By harness</h3>${matrixHtml()}`}`;
     for (const [name, value] of Object.entries(values)) {
       const field = host.querySelector<HTMLInputElement | HTMLSelectElement>(`form [name="${name}"]`);
       if (field && name !== 'source' && name !== 'project') field.value = value;
@@ -248,6 +298,32 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   const onClick = (event: Event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
     if (!button) return;
+    if (button.dataset.action === 'view') {
+      view = button.dataset.view as typeof view; note = ''; error = ''; draw(); return;
+    }
+    if (button.dataset.action === 'recommend-import' || button.dataset.action === 'recommend-all') {
+      const gitRef = host.querySelector<HTMLInputElement>('[name="recommendedRef"]')?.value.trim() || 'main';
+      const paths = recommendations.templates.filter(entry => entry.available &&
+        (button.dataset.action === 'recommend-all' ? !entry.optional : recommendedSelected.has(entry.id))).map(entry => entry.path);
+      if (!paths.length) { error = 'Select at least one available recommended skill.'; draw(); return; }
+      void run(async () => {
+        await options.call('skills_catalog_add', { repo: 'ginmp8/rhapsodia', gitRef });
+        const result = await options.call<CatalogImport>('skills_catalog_import', { repo: 'ginmp8/rhapsodia', paths });
+        recommendedSelected = new Set();
+        return `Imported ${plural(result.imported.length, 'recommended skill')}.${result.skipped.length ? ` Skipped: ${result.skipped.map(entry => entry.reason).join('; ')}` : ''} Activation is separate.`;
+      });
+      return;
+    }
+    if (button.dataset.action === 'sync-item' || button.dataset.action === 'sync-all') {
+      const id = button.closest<HTMLElement>('[data-id]')?.dataset.id;
+      if (button.dataset.action === 'sync-item' && !id) return;
+      void run(async () => {
+        const report = await options.call<{ updated: string[]; skipped: string[] }>(
+          button.dataset.action === 'sync-item' ? 'skills_sync_item' : 'skills_sync_all', id ? { id } : {});
+        return `Updated ${plural(report.updated.length, 'skill')}.${report.skipped.length ? ` Skipped: ${report.skipped.join('; ')}` : ''}`;
+      });
+      return;
+    }
     if (button.dataset.action === 'discover') {
       void run(async () => {
         const found = (await options.call<SkillCatalogs>('skills_discover')).discovery;
@@ -264,6 +340,10 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
   const onChange = (event: Event) => {
     const target = event.target as HTMLElement;
     if (target instanceof HTMLInputElement && target.dataset.harness) toggle(target);
+    if (target instanceof HTMLInputElement && target.dataset.recommended) {
+      const id = target.dataset.recommended;
+      recommendedSelected = target.checked ? new Set([...recommendedSelected, id]) : new Set([...recommendedSelected].filter(value => value !== id));
+    }
     if (target instanceof HTMLInputElement && target.dataset.select) {
       const key = target.dataset.select;
       selected = target.checked ? new Set([...selected, key]) : new Set([...selected].filter(k => k !== key));

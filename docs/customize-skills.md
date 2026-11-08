@@ -14,7 +14,7 @@ Choose **Add → ZIP archive** and select one local archive with the system file
 
 The reader enforces a 32 MiB archive limit, the central library's per-skill 256-file/24 MiB uncompressed limits, bounded entry counts and decompression ratios, safe relative paths, Windows reserved and case-colliding names, and rejection of symlinks/special files. A ZIP containing multiple skill roots is rejected. Archive scripts are never executed; no clone or accumulated temporary archive is retained.
 
-Installing a ZIP with an existing canonical skill ID intentionally **replaces the central library package atomically**. The persistent result shows the previous origin and existing harness activations that may require reconciliation. ZIP replacement detaches the installed entry from automatic GitHub updates until the user deliberately reimports the GitHub origin. No native harness file is silently overwritten.
+Installing a ZIP with an existing canonical skill ID first **requires a separate explicit confirmation**. Only after confirmation may PandaCode **replace the central library package atomically**. The persistent result shows the previous origin and existing harness activations that may require reconciliation. ZIP replacement detaches the installed entry from automatic GitHub updates until the user deliberately reimports the GitHub origin. No native harness file is silently overwritten.
 
 ## Add skills from GitHub
 

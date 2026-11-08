@@ -12,7 +12,7 @@ export type SkillFinding = { rule: 'secret' | 'approvals' | 'pipe-to-shell'; fil
 export type SkillActivation = { harness: string; scope: SkillScope; project: string | null; surface: 'folder' | 'block' | 'prompt'; sha256: string; files: { path: string; sha256: string }[] };
 export type SkillItem = {
   id: string; name: string; kind: SkillKind; description: string; sha256: string; importedAt: number;
-  source: { kind: 'folder' | 'github'; location: string; gitRef: string | null; commit: string | null };
+  source: { kind: 'folder' | 'github' | 'zip'; location: string; gitRef: string | null; commit: string | null };
   acknowledged: string | null; activations: SkillActivation[]; files: string[]; findings: SkillFinding[];
 };
 export type SkillCell = { id: string; scope: SkillScope; status: 'active' | 'outdated' | 'drifted' | 'missing' | 'prompt' | 'off'; surface: string };

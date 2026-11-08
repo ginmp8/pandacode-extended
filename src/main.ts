@@ -51,7 +51,7 @@ import { mountThreadTiles } from './thread-tiles';
 import { parseSkyTime } from './sky-math';
 import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, ToolActivity, TurnChanges, TurnChangeDiff } from './types';
 import type { BrowserPanel } from './browser';
-import { call, chooseFolder, preview, subscribe } from './bridge';
+import { call, chooseFolder, chooseSkillZip, preview, subscribe } from './bridge';
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, isImeKey, markdown, markdownCache, markdownHtml, morph, showsHtml } from './dom';
 import { botAvatarHtml } from './bot-avatars';
@@ -510,6 +510,7 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
     <div class="sidebar-projects"><button id="project-filter" class="project-filter" data-action="filter-projects" aria-label="Filter projects" aria-haspopup="dialog" aria-expanded="false"><span data-filter-label>All projects</span>${icon('down')}</button><button id="sidebar-sort" class="icon-button sidebar-sort" data-action="sidebar-sort" aria-label="Sort and view" title="Sort and view" aria-haspopup="menu" aria-expanded="false">${SORT_ICON}</button>${button('import-conversations', 'Import conversations', 'download', 'import-trigger')}${button('add-project', 'Open project', 'plus')}</div>
     <div class="sidebar-search">${icon('search')}<input id="sidebar-filter" type="search" aria-label="Filter tasks" placeholder="Filter tasks" autocomplete="off" spellcheck="false" maxlength="200" aria-keyshortcuts="/"><button type="button" class="sidebar-search-clear" data-action="clear-sidebar-filter" tabindex="-1" aria-label="Clear filter" title="Clear filter">${icon('close')}</button></div>
     <div class="navigation-frame"><div id="navigation" class="navigation"></div></div>
+    <div class="sidebar-customize"><button type="button" data-action="toggle-customize" aria-label="Customize" aria-pressed="false" title="Customize">${icon('spark')}<span>Customize</span>${icon('chevron')}</button></div>
     <section id="sidebar-bots-panel" class="bots-panel" aria-label="Bots"></section>
     <div id="sidebar-bots" class="sidebar-bots"></div>
     <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}<button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button>${starPanda()}<button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
@@ -518,6 +519,7 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
     <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
     <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
+    <section id="customize-hub" aria-label="Customize skills" hidden></section>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
   <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" role="tablist" aria-label="Panel views"><div class="inspector-tab file-panel-tab" data-view="file" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="tab-open-files" aria-label="Open files" title="Open files">${icon('file')}<span class="inspector-tab-label">Open files</span></button>${button('close-inspector-tab', 'Close open files', 'close', 'inspector-tab-close', 'data-view="file" tabindex="-1"')}</div>${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}" tabindex="-1"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section><section id="file-panel" class="file-panel" aria-label="Open files" hidden><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section></section></aside>
@@ -2948,6 +2950,7 @@ async function showViewMenu(anchor: HTMLElement): Promise<void> {
   await showChoices(anchor, { title: 'Workspace view', width, point, items: WORKSPACE_VIEWS.filter(view => view.id !== 'github' || githubEnabled()).map(view => ({ id: view.id, label: view.label, icon: view.icon, selected: view.id === state.view })), onSelect: id => setWorkspaceView(id as WorkspaceView) });
 }
 function setWorkspaceView(view: WorkspaceView): void {
+  if (customizeShown) closeCustomize();
   if (state.view === view) return;
   closeMenus();
   state.view = view; localStorage.setItem('pandacode.view', view);
@@ -3220,6 +3223,7 @@ function selectSession(id: string, focusComposer = false): Promise<void> {
   return id === state.sessionId ? openThread(id, focusComposer) : snapDockDuring(() => openThread(id, focusComposer));
 }
 async function openThread(id: string, focusComposer: boolean): Promise<void> {
+  if (customizeShown) closeCustomize();
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
   // A channel is a separate conversation view, not an overlay on the selected task.
@@ -5698,6 +5702,40 @@ async function discoverSettingsProviders(): Promise<Provider[]> {
   state.providers = providers;
   return providers;
 }
+/* Customize remains mounted when hidden so an in-flight import keeps its operation state.
+ * It never re-initializes chats, bots or native harnesses. */
+let customizeShown = false;
+let customizeMount: {dispose(): void} | undefined;
+let customizeOpening: Promise<void> | undefined;
+let customizeReturnFocus: HTMLElement | null = null;
+async function toggleCustomize(): Promise<void> {
+  if (customizeShown) { closeCustomize(); return; }
+  closeMenus();
+  if (document.querySelector<HTMLDialogElement>('#dialog')?.open) closeModal();
+  if ($('#settings-page').hidden === false) closeSettings();
+  customizeReturnFocus = document.activeElement as HTMLElement | null;
+  customizeShown = true;
+  $('#customize-hub').hidden = false;
+  $('.workspace').classList.add('customize-open');
+  document.querySelector<HTMLElement>('.sidebar-customize > button')?.setAttribute('aria-pressed', 'true');
+  customizeOpening ??= import('./customize-skills').then(({mountCustomizeSkills}) => {
+    if (!customizeMount) customizeMount = mountCustomizeSkills($('#customize-hub'), {
+      call, subscribe: (name, listener) => subscribe(name, listener),
+      chooseZip: chooseSkillZip, close: closeCustomize,
+    });
+  }).catch(cause => { closeCustomize(); report(cause); }).finally(() => { customizeOpening = undefined; });
+  await customizeOpening;
+}
+function closeCustomize(): void {
+  if (!customizeShown) return;
+  customizeShown = false;
+  $('#customize-hub').hidden = true;
+  $('.workspace').classList.remove('customize-open');
+  document.querySelector<HTMLElement>('.sidebar-customize > button')?.setAttribute('aria-pressed', 'false');
+  if (customizeReturnFocus?.isConnected) customizeReturnFocus.focus({preventScroll:true});
+  customizeReturnFocus = null;
+}
+
 /** Settings is a full page over the workspace; Back or Escape returns to where you were. */
 let settingsView: import('./settings').SettingsView | undefined;
 let settingsOpening: Promise<void> | undefined;
@@ -6729,7 +6767,7 @@ const settingsPageCommands = () => SECTIONS.flatMap(section => section.pages.map
 /** Every whitespace-separated word of the query appears somewhere in the text (case-insensitive). */
 const matchesWords = (text: string, query: string): boolean => { const hay = text.toLowerCase(); return query.toLowerCase().split(/\s+/).filter(Boolean).every(word => hay.includes(word)); };
 function renderCommands(query: string): void {
-  const commands = [{ action: 'new-task', label: 'New task', icon: 'plus', shortcut: shortcut('N') }, { action: 'new-chat', label: 'New chat (no project)', icon: 'chat', shortcut: '' }, { action: 'add-project', label: 'Open project', icon: 'folder', shortcut: '' }, { action: 'browser', label: 'Open browser', icon: 'globe', shortcut: '' }, { action: 'terminal', label: 'Toggle terminal', icon: 'terminal', shortcut: shortcut('J') }, { action: 'settings', label: 'Settings', icon: 'settings', shortcut: shortcut(',') }, { action: 'agent-usage', label: 'Agent usage', icon: 'activity', shortcut: '' }, { action: 'bots', label: 'Bots', icon: 'bot', shortcut: '' }, { action: 'import-conversations', label: 'Import conversations', icon: 'download', shortcut: '' }, { action: 'worktree', label: 'Create worktree', icon: 'branch', shortcut: '' }, { action: 'conversation-view', label: 'Conversation', icon: 'thread', shortcut: '' }, { action: 'board-view', label: 'Board', icon: 'kanban', shortcut: '' }, ...(session() && !session()!.archived ? [{ action: 'wake-later', label: 'Schedule a wake-up…', icon: 'clock', shortcut: '' }] : []), ...(githubEnabled() ? [{ action: 'github-view', label: 'GitHub', icon: 'github', shortcut: '' }] : []), ...(query ? settingsPageCommands() : [])].filter(c => matchesWords(`${c.label} ${'keywords' in c ? c.keywords : ''}`, query));
+  const commands = [{ action: 'new-task', label: 'New task', icon: 'plus', shortcut: shortcut('N') }, { action: 'new-chat', label: 'New chat (no project)', icon: 'chat', shortcut: '' }, { action: 'add-project', label: 'Open project', icon: 'folder', shortcut: '' }, { action: 'browser', label: 'Open browser', icon: 'globe', shortcut: '' }, { action: 'terminal', label: 'Toggle terminal', icon: 'terminal', shortcut: shortcut('J') }, { action: 'settings', label: 'Settings', icon: 'settings', shortcut: shortcut(',') }, { action: 'agent-usage', label: 'Agent usage', icon: 'activity', shortcut: '' }, { action: 'bots', label: 'Bots', icon: 'bot', shortcut: '' }, { action: 'toggle-customize', label: 'Customize skills', icon: 'spark', shortcut: '' }, { action: 'import-conversations', label: 'Import conversations', icon: 'download', shortcut: '' }, { action: 'worktree', label: 'Create worktree', icon: 'branch', shortcut: '' }, { action: 'conversation-view', label: 'Conversation', icon: 'thread', shortcut: '' }, { action: 'board-view', label: 'Board', icon: 'kanban', shortcut: '' }, ...(session() && !session()!.archived ? [{ action: 'wake-later', label: 'Schedule a wake-up…', icon: 'clock', shortcut: '' }] : []), ...(githubEnabled() ? [{ action: 'github-view', label: 'GitHub', icon: 'github', shortcut: '' }] : []), ...(query ? settingsPageCommands() : [])].filter(c => matchesWords(`${c.label} ${'keywords' in c ? c.keywords : ''}`, query));
   const tasks = listedSessions().filter(s => matchesWords(s.title, query)).slice(0, 12);
   $('#command-results').innerHTML = `${commands.length ? '<div class="command-section">Commands</div>' : ''}${commands.map(c => `<button data-action="${c.action}"${'page' in c ? ` data-id="${c.page}"` : ''} data-command="true">${icon(c.icon)}<span>${c.label}</span><kbd>${c.shortcut}</kbd></button>`).join('')}${tasks.length ? '<div class="command-section">Tasks</div>' : ''}${tasks.map(s => `<button data-action="select-task" data-id="${escape(s.id)}" data-command="true">${providerLogo(s.provider)}<span>${escape(s.title)}<small>${escape(state.projects.find(p => p.id === s.projectId)?.name)} · ${shortProvider(s.provider)}</small></span></button>`).join('')}${!commands.length && !tasks.length ? '<div class="inspector-empty">No matching tasks or commands.</div>' : ''}`;
   $('#command-results').querySelector('button')?.classList.add('command-selected');
@@ -6805,7 +6843,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'delete-task': showDeleteTask(); break;
     case 'search': showCommands(); break;
     case 'retry-response': { const id = actionTask(element)?.id ?? state.sessionId, finishing = finishingStreams.get(id); if (finishing) await finishResponse(id, finishing); break; }
-    case 'settings': case 'refresh-settings': await showSettings(); break;
+    case 'settings': case 'refresh-settings': if (customizeShown) closeCustomize(); await showSettings(); break;
     case 'settings-page': await showSettings(element.dataset.id as import('./settings').SettingsSection); break;
     case 'wallpaper-settings': await showWallpaperSettings(); break;
     case 'provider-connections': await showProviderConnections(); break;
@@ -6835,7 +6873,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'remote-choose-computer': { const chip = document.querySelector<HTMLElement>('#composer-computer'); if (chip) await showComputerMenu(chip); break; }
     case 'bot-task-menu': await showBotTaskMenu(element); break;
     case 'cloud-menu': await showCloudMenu(element); break;
-    case 'toggle-bots-view': setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
+    case 'toggle-customize': await toggleCustomize(); break;
+    case 'toggle-bots-view': if (customizeShown) closeCustomize(); setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
     case 'import-conversations': await showConversationImport(); break;
     case 'agent-updates': await agentUpdates.show(); break;
     case 'goal': case 'jobs': case 'usage': if (session()) await performSlashAction(name, '', session()!); break;

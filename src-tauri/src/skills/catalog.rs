@@ -144,36 +144,114 @@ impl Tree {
     }
 }
 
-fn tree(api: Api, repo: &str, git_ref: Option<&str>) -> Result<Tree, String> {
+/// Resolve a subtree before listing its contents. If GitHub truncates the recursive
+/// response, switch to a bounded, cycle-safe walk. Never report partial results.
+fn tree(api: Api, repo: &str, requested_path: &str, git_ref: Option<&str>) -> Result<Tree, String> {
+    use std::time::{Duration, Instant};
+    const MAX_API_CALLS: usize = 96;
+    const MAX_DISCOVERY_TIME: Duration = Duration::from_secs(120);
+
     if !github::valid_repo(repo) {
         return Err("Enter the repository as owner/name.".into());
     }
     if git_ref.is_some_and(|r| !github::valid_ref(r)) {
-        return Err("That branch, tag or commit is not valid.".into());
+        return Err("That branch or commit is not valid.".into());
     }
-    let commit = api(&format!("repos/{repo}/commits/{}", git_ref.unwrap_or("HEAD")))?["sha"].as_str().ok_or("GitHub did not return a commit for that ref.")?.to_string();
-    let value = api(&format!("repos/{repo}/git/trees/{commit}?recursive=1"))?;
-    if value["truncated"].as_bool() == Some(true) {
-        return Err(format!("{repo} is too large for GitHub to list at once. Import a path from it instead."));
-    }
-    let entries = value["tree"].as_array().ok_or("GitHub returned an unexpected tree.")?;
-    if entries.len() > MAX_TREE_ENTRIES {
-        return Err(format!("{repo} has more than {MAX_TREE_ENTRIES} files and folders. Import a path from it instead."));
-    }
-    let blobs: Vec<Blob> = entries
-        .iter()
-        .filter(|e| e["type"] == "blob")
-        .filter_map(|e| {
-            let path = e["path"].as_str()?;
-            if !github::valid_path(path) || path.split('/').any(|p| p.starts_with('.')) || e["mode"] == "120000" {
-                return None;
+    let started = Instant::now();
+    let commit_info = api(&format!("repos/{repo}/commits/{}", git_ref.unwrap_or("HEAD")))?;
+    let commit = commit_info["sha"].as_str()
+        .ok_or("GitHub did not return a commit for that ref.")?.to_string();
+
+    // GitHub supplies the root tree SHA in real commit responses. Older API
+    // adapters which only expose the commit SHA keep the original scan behavior.
+    let mut sha = commit_info["commit"]["tree"]["sha"].as_str()
+        .unwrap_or(&commit).to_string();
+    let targeted = !requested_path.is_empty() && commit_info["commit"]["tree"]["sha"].is_string();
+    let prefix = if targeted {
+        for segment in requested_path.split('/') {
+            let value = api(&format!("repos/{repo}/git/trees/{sha}"))?;
+            let entries = value["tree"].as_array().ok_or("GitHub returned an invalid parent tree.")?;
+            let child = entries.iter().find(|entry| entry["type"] == "tree"
+                && entry["path"].as_str() == Some(segment))
+                .and_then(|entry| entry["sha"].as_str())
+                .ok_or("The selected GitHub directory does not exist at that commit.")?;
+            sha = child.to_string();
+            if started.elapsed() > MAX_DISCOVERY_TIME {
+                return Err("GitHub subtree discovery exceeded the 120-second limit.".into());
             }
-            Some(Blob { path: path.into(), sha: e["sha"].as_str()?.into(), size: e["size"].as_u64().unwrap_or(0) })
-        })
+        }
+        requested_path.to_string()
+    } else { String::new() };
+
+    let recursive = api(&format!("repos/{repo}/git/trees/{sha}?recursive=1"))?;
+    let mut blobs: Vec<Blob> = Vec::new();
+    let oversized = recursive["truncated"].as_bool() == Some(true);
+    if !oversized {
+        let entries = recursive["tree"].as_array().ok_or("GitHub returned an unexpected tree.")?;
+        if entries.len() > MAX_TREE_ENTRIES {
+            return Err(format!("{repo} has more than {MAX_TREE_ENTRIES} files and folders. Use a narrower tree URL."));
+        }
+        for entry in entries.iter().filter(|entry| entry["type"] == "blob") {
+            let Some(relative) = entry["path"].as_str() else { continue };
+            let path = if prefix.is_empty() { relative.to_string() } else { format!("{prefix}/{relative}") };
+            if !github::valid_path(&path) || path.split('/').any(|part| part.starts_with('.')) || entry["mode"] == "120000" {
+                continue;
+            }
+            if let Some(file_sha) = entry["sha"].as_str() {
+                blobs.push(Blob { path, sha: file_sha.into(), size: entry["size"].as_u64().unwrap_or(0) });
+            }
+        }
+    } else {
+        // The recursive API may omit objects when truncated. Re-read each direct
+        // tree instead, with explicit request/entry/time budgets and ancestor SHA
+        // tracking so malicious or malformed tree data cannot loop forever.
+        let mut pending = vec![(sha, prefix, Vec::<String>::new())];
+        let mut calls = 0usize;
+        let mut entries_seen = 0usize;
+        while let Some((tree_sha, folder, parents)) = pending.pop() {
+            if calls >= MAX_API_CALLS || started.elapsed() > MAX_DISCOVERY_TIME {
+                return Err(format!("{repo} is too large to enumerate completely. Use a narrower GitHub tree URL."));
+            }
+            if parents.contains(&tree_sha) {
+                return Err("GitHub returned a cyclic Git tree; discovery stopped.".into());
+            }
+            let value = api(&format!("repos/{repo}/git/trees/{tree_sha}"))
+                .map_err(|_| format!("{repo} is too large to enumerate completely. Use a narrower GitHub tree URL."))?;
+            calls += 1;
+            let children = value["tree"].as_array().ok_or("GitHub returned an unexpected non-recursive tree.")?;
+            if value["truncated"].as_bool() == Some(true) {
+                return Err("GitHub truncated a direct tree listing. Use a narrower tree URL.".into());
+            }
+            entries_seen += children.len();
+            if entries_seen > MAX_TREE_ENTRIES {
+                return Err(format!("{repo} exceeds {MAX_TREE_ENTRIES} entries. Use a narrower GitHub tree URL."));
+            }
+            let mut ancestors = parents;
+            ancestors.push(tree_sha);
+            for entry in children {
+                let Some(relative) = entry["path"].as_str() else { continue };
+                let absolute = if folder.is_empty() { relative.to_string() } else { format!("{folder}/{relative}") };
+                if !github::valid_path(&absolute) || absolute.split('/').any(|part| part.starts_with('.')) {
+                    continue;
+                }
+                if entry["type"] == "tree" {
+                    if let Some(child_sha) = entry["sha"].as_str() {
+                        pending.push((child_sha.into(), absolute, ancestors.clone()));
+                    }
+                } else if entry["type"] == "blob" && entry["mode"] != "120000" {
+                    if let Some(blob_sha) = entry["sha"].as_str() {
+                        blobs.push(Blob { path:absolute, sha:blob_sha.into(), size:entry["size"].as_u64().unwrap_or(0) });
+                    }
+                }
+            }
+        }
+    }
+    let dirs: Vec<String> = blobs.iter()
+        .filter(|blob| blob.path == "SKILL.md" || blob.path.ends_with("/SKILL.md"))
+        .map(|blob| blob.path.rsplit_once('/').map(|(dir,_)| dir).unwrap_or("").to_string())
         .collect();
-    let dirs: Vec<String> = blobs.iter().filter(|b| b.path == "SKILL.md" || b.path.ends_with("/SKILL.md")).map(|b| b.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string()).collect();
     if dirs.len() > MAX_SKILLS {
-        return Err(format!("{repo} has more than {MAX_SKILLS} SKILL.md files. Import a path from it instead."));
+        return Err(format!("{repo} has more than {MAX_SKILLS} SKILL.md files. Use a narrower tree URL."));
     }
     Ok(Tree { commit, blobs, dirs })
 }
@@ -195,13 +273,14 @@ pub fn scan_path(api: Api, repo: &str, path: &str, git_ref: Option<&str>) -> Res
     if !path.is_empty() && (!github::valid_path(path) || path.split('/').any(|p| p.starts_with('.'))) {
         return Err("Choose a safe skills directory path.".into());
     }
-    let tree = tree(api, repo, git_ref)?;
+    let tree = tree(api, repo, path, git_ref)?;
     let mut skills = Vec::new();
     for dir in &tree.dirs {
         if !path.is_empty() && dir != path && !under(dir, path) { continue; }
         let main = if dir.is_empty() { "SKILL.md".to_string() } else { format!("{dir}/SKILL.md") };
         let Some(entry) = tree.blobs.iter().find(|b| b.path == main) else { continue };
-        if entry.size as usize > MAX_BYTES {
+        // Metadata previews never download an oversized SKILL.md just to discover its title.
+        if entry.size > (512 << 10) {
             continue;
         }
         let text = String::from_utf8(blob(api, repo, &entry.sha)?).unwrap_or_default();

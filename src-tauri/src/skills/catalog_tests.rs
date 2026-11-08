@@ -437,3 +437,56 @@ fn auto_sync_master_switch_never_downloads_when_off_even_for_per_skill_enabled()
     fx.library.synchronize(&fake.api(), super::sync::Selection::All, true).unwrap();
     assert!(fake.count("repos/me/kit/") > before);
 }
+
+
+#[test]
+fn targeted_source_scan_resolves_immutable_directory_before_recursing() {
+    let mut fake = Fake::default();
+    fake.repo("me/scoped", "c1", &files(&[
+        ("README.md", "readme"),
+        ("projects/demo/SKILL.md", &skill("Scoped")),
+        ("projects/demo/guide.md", "guide"),
+        ("other/SKILL.md", &skill("Other")),
+    ]));
+    fake.responses.insert("repos/me/scoped/commits/HEAD".into(), json!({
+        "sha": "c1", "commit": {"tree": {"sha": "root-tree"}}
+    }));
+    fake.responses.insert("repos/me/scoped/git/trees/root-tree".into(), json!({
+        "tree": [{"path":"projects","type":"tree","sha":"projects-tree"}]
+    }));
+    fake.responses.insert("repos/me/scoped/git/trees/projects-tree".into(), json!({
+        "tree": [{"path":"demo","type":"tree","sha":"demo-tree"}]
+    }));
+    fake.responses.insert("repos/me/scoped/git/trees/demo-tree?recursive=1".into(), json!({
+        "truncated":false,"tree":[
+            {"path":"SKILL.md","type":"blob","sha":format!("{:040x}",2),"size":skill("Scoped").len()},
+            {"path":"guide.md","type":"blob","sha":format!("{:040x}",3),"size":5}
+        ]
+    }));
+    let (revision, found) = catalog::scan_path(&fake.api(), "me/scoped", "projects/demo", None).unwrap();
+    assert_eq!(revision,"c1");
+    assert_eq!(found.len(),1);
+    assert_eq!(found[0].path,"projects/demo");
+    assert_eq!(found[0].files,2);
+    assert!(!fake.calls.borrow().iter().any(|call| call == "repos/me/scoped/git/trees/c1?recursive=1"));
+}
+
+#[test]
+fn truncated_recursive_trees_fall_back_to_bounded_nonrecursive_walk() {
+    let mut fake=Fake::default();
+    fake.repo("me/walk", "c1", &files(&[("skills/demo/SKILL.md",&skill("Walked"))]));
+    fake.responses.insert("repos/me/walk/git/trees/c1?recursive=1".into(),json!({"truncated":true,"tree":[]}));
+    fake.responses.insert("repos/me/walk/git/trees/c1".into(),json!({
+        "truncated":false,"tree":[{"path":"skills","type":"tree","sha":"dir1"}]
+    }));
+    fake.responses.insert("repos/me/walk/git/trees/dir1".into(),json!({
+        "truncated":false,"tree":[{"path":"demo","type":"tree","sha":"dir2"}]
+    }));
+    fake.responses.insert("repos/me/walk/git/trees/dir2".into(),json!({
+        "truncated":false,"tree":[{"path":"SKILL.md","type":"blob","sha":format!("{:040x}",1),"size":skill("Walked").len()}]
+    }));
+    let (_,found)=catalog::scan(&fake.api(),"me/walk",None).unwrap();
+    assert_eq!(found.len(),1);
+    assert_eq!(found[0].path,"skills/demo");
+    assert_eq!(fake.count("repos/me/walk/git/trees/"),4);
+}

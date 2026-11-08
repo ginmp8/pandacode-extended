@@ -20,7 +20,7 @@ type Policy = { autoOnStart: boolean };
 type PreviewFile = { path: string; text: string | null; size: number; binary: boolean };
 type Phase = 'queued' | 'fetching' | 'validating' | 'installing' | 'installed' | 'updated' | 'unchanged' | 'skipped' | 'failed' | 'cancelled';
 type PackageProgress = { path: string; name: string; phase: Phase; detail: string | null };
-type ImportSnapshot = { repo: string; path: string; gitRef: string | null; commit: string; paths: string[] };
+type ImportSnapshot = { repo: string; path: string; gitRef: string | null; commit: string; paths: string[]; allowReplace?: boolean };
 type Operation = {
   id: string; kind: 'github' | 'zip' | 'sync'; label: string; source: string; revision: string | null;
   state: 'running' | 'success' | 'partial' | 'failed';
@@ -50,6 +50,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let githubUrl = '', githubRef = '', search = '', discoverySearch = '';
   let scan: SourcePreview | null = null;
   let chosen = new Set<string>();
+  let editingSource: string | null = null, replaceConflicts = false;
   let detail: Detail | null = null;
   let markdownMode: 'rendered' | 'raw' = 'rendered';
   let previewText: PreviewFile | null = null;
@@ -154,11 +155,19 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       </div>
       <div class="customize-discovery-scroll"><ul class="customize-discovery-list">${shown.map(entry => {
         const installedItem = installed.find(item => item.id === entry.id);
-        const conflict = installedItem && installedItem.source.location !== (scan!.path ? `${scan!.repo}/${entry.path}` : `${scan!.repo}/${entry.path}`);
+        const conflict = installedItem && (installedItem.source.location !== `${scan!.repo}/${entry.path}` || installedItem.source.gitRef !== scan!.gitRef);
         return `<li><label class="customize-discovery-choice"><input type="checkbox" data-select-skill="${esc(entry.path)}" ${chosen.has(entry.path) ? 'checked' : ''} ${busy ? 'disabled' : ''}><span><strong>${esc(entry.name)}</strong><small>${esc(entry.description)}</small><code>${esc(entry.path || '(repository root)')}</code>${conflict ? `<small class="customize-warning">Installed from another source; import requires a deliberate replacement.</small>` : ''}</span></label>
           <button type="button" class="secondary-button" data-customize="inspect-remote" data-path="${esc(entry.path)}">Preview</button></li>`;
       }).join('')}</ul></div>
-      <div class="customize-discovery-footer"><span>${plural(chosen.size, 'skill')} selected</span><button type="button" class="customize-primary" data-customize="import-selected" ${!chosen.size || busy || operation?.state === 'running' ? 'disabled' : ''}>Import selected (${chosen.size})</button></div>
+      <div class="customize-discovery-footer"><span>${plural(chosen.size, 'skill')} selected</span>
+        <div class="customize-discovery-actions">
+          ${scan.skills.some(item => chosen.has(item.path) && installed.some(current => current.id === item.id &&
+            (current.source.location !== `${scan!.repo}/${item.path}` || current.source.gitRef !== scan!.gitRef))) ?
+            `<label class="customize-confirm-replace"><input type="checkbox" name="replace-conflicts" ${replaceConflicts ? 'checked' : ''}>I approve replacing conflicting installed skills</label>` : ''}
+          ${editingSource ? `<button type="button" class="secondary-button" data-customize="save-source-selection" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Save tracked selection</button>` : ''}
+          <button type="button" class="customize-primary" data-customize="import-selected" ${!chosen.size || busy || operation?.state === 'running' ? 'disabled' : ''}>Import selected (${chosen.size})</button>
+        </div>
+      </div>
     </section>`;
   }
 
@@ -297,7 +306,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     try {
       const result = await options.call<SourceImport>('skills_source_import_tracked',{
         repo:snapshot.repo,path:snapshot.path,gitRef:snapshot.gitRef,commit:snapshot.commit,
-        selectedPaths:[...snapshot.paths],operationId:op.id,
+        selectedPaths:[...snapshot.paths],operationId:op.id,allowReplace:!!snapshot.allowReplace,
       });
       for (const fail of result.skipped) {
         const item = op.packages.get(fail.path);
@@ -325,7 +334,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const op = beginOperation('zip','Importing ZIP package',filename,null,[{path:filename,name:filename}]);
     busy = true;
     try {
-      const result = await options.call<{item:SkillItem;replaced:boolean;previousSource:SkillItem['source']|null;impactedHarnesses:string[]}>('skills_import_zip',{path});
+      const result = await options.call<{item:SkillItem;replaced:boolean;previousSource:SkillItem['source']|null;impactedHarnesses:string[]}>('skills_import_zip_tracked',{path,operationId:op.id});
       const item = op.packages.get(filename)!;
       item.phase = 'installed'; item.name = result.item.name;
       op.completed = 1; op.state = 'success';
@@ -346,19 +355,20 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (kind === 'skill') { const item=installed.find(x=>x.id===id); if (!item) return; entries=[{path:item.id,name:item.name}];label='Synchronizing skill'; }
     if (kind === 'source') {
       const source=sources.find(x=>x.id===id); if (!source) return;
-      entries=source.selectedPaths.map(path=>({path,name:installed.find(item=>item.source.location===`${source.repo}/${path}`)?.name??path}));
+      entries=installed.filter(item=>item.source.kind==='github' && item.source.gitRef===source.gitRef &&
+        source.selectedPaths.some(path=>item.source.location===`${source.repo}/${path}`)).map(item=>({path:item.id,name:item.name}));
       label='Synchronizing saved source';
     }
     if (kind === 'all') {entries=installed.filter(x=>x.kind==='skill'&&x.source.kind==='github').map(x=>({path:x.id,name:x.name}));label='Synchronizing GitHub skills';}
     const op=beginOperation('sync',label,kind==='source'?sources.find(x=>x.id===id)?.repo??'Saved source': 'Installed GitHub skills',null,entries);
     busy=true;
     try {
-      const command=kind==='skill'?'skills_sync_item':kind==='source'?'skills_sync_saved_source':'skills_sync_all';
-      const report=await options.call<SyncReport>(command,kind==='all'?{}:{id});
+      const command='skills_sync_tracked';
+      const report=await options.call<SyncReport>(command,{scope:kind,id:id??null,operationId:op.id});
       for (const result of report.events) {
         const item=[...op.packages.values()].find(entry=>entry.path===result.id || installed.find(x=>x.id===result.id)?.source.location.endsWith('/'+entry.path));
         if(!item) continue;
-        item.phase=result.status==='updated'?'updated':result.status==='error'?'failed':'unchanged';
+        item.phase=result.status==='updated'?'updated':result.status==='error'?'failed':result.detail.startsWith('Already at')?'unchanged':'skipped';
         item.detail=result.detail;
       }
       for(const item of op.packages.values()) if(!isTerminal(item.phase)) item.phase='skipped';
@@ -378,7 +388,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     busy=true;error='';note='Scanning repository for SKILL.md packages…';draw();
     try {
       const result=await options.call<SourcePreview>('skills_source_preview',{repo:githubUrl.trim(),path:'',gitRef:githubRef.trim()||null});
-      scan=result;chosen=new Set();discoverySearch='';githubForm=false;note=`Found ${plural(result.skills.length,'skill')} at ${shaShort(result.commit)}. Select packages to import.`;
+      scan=result;chosen=new Set();editingSource=null;replaceConflicts=false;discoverySearch='';githubForm=false;note=`Found ${plural(result.skills.length,'skill')} at ${shaShort(result.commit)}. Select packages to import.`;
     } catch(cause){error=message(cause);note='';}
     finally{busy=false;draw();}
   }
@@ -389,13 +399,13 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     githubRef=source.gitRef??'';busy=true;error='';note='Scanning saved source…';draw();
     try {
       scan=await options.call<SourcePreview>('skills_source_preview',{repo:source.repo,path:source.path,gitRef:source.gitRef});
-      chosen=new Set(source.selectedPaths);discoverySearch='';note='Review selected paths and import only additions or selected updates.';
+      chosen=new Set(source.selectedPaths);editingSource=id;replaceConflicts=false;discoverySearch='';note='Save tracked selection to change automatic update scope without uninstalling packages.';
     } catch(cause){error=message(cause);}
     finally{busy=false;draw();}
   }
 
   function handleProgress(value:any):void {
-    if (!operation || operation.state !== 'running' || operation.kind !== 'github' || value.operationId !== operation.id) return;
+    if (!operation || operation.state !== 'running' || value.operationId !== operation.id) return;
     const item=operation.packages.get(value.path);
     if(!item || value.total!==operation.total || typeof value.completed!=='number' || value.completed < operation.completed || value.completed>operation.total) return;
     if(isTerminal(item.phase)) return;
@@ -420,7 +430,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'close': options.close();break;
       case 'toggle-add':addOpen=!addOpen;draw();break;
       case 'add-zip':void importZip();break;
-      case 'add-github':addOpen=false;githubForm=true;scan=null;detail=null;draw();break;
+      case 'add-github':addOpen=false;githubForm=true;scan=null;editingSource=null;replaceConflicts=false;detail=null;draw();break;
       case 'close-github-form':githubForm=false;draw();break;
       case 'tab-installed':tab='installed';pendingRemove=null;draw();break;
       case 'tab-sources':tab='sources';pendingRemove=null;draw();break;
@@ -430,10 +440,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'close-detail':detail=null;previewSerial++;draw();break;
       case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;
       case 'preview-mode':markdownMode=button.dataset.mode==='raw'?'raw':'rendered';draw();break;
-      case 'hide-discovery':scan=null;chosen.clear();draw();break;
+      case 'hide-discovery':scan=null;chosen.clear();editingSource=null;draw();break;
       case 'select-all':if(scan)for(const entry of scan.skills)if([entry.name,entry.path,entry.description].some(s=>s.toLowerCase().includes(discoverySearch.toLowerCase())))chosen.add(entry.path);draw();break;
       case 'select-none':chosen.clear();draw();break;
-      case 'import-selected':if(scan&&chosen.size){const snap={repo:scan.repo,path:scan.path,gitRef:scan.gitRef,commit:scan.commit,paths:[...chosen]};void importSelected(snap);}break;
+      case 'import-selected':if(scan&&chosen.size){const snap={repo:scan.repo,path:scan.path,gitRef:scan.gitRef,commit:scan.commit,paths:[...chosen],allowReplace:replaceConflicts};void importSelected(snap);}break;
+      case 'save-source-selection':
+        if(editingSource)void (async()=>{try{
+          const source=await options.call<SavedSource>('skills_source_set_selection',{id:editingSource,selectedPaths:[...chosen]});
+          note=`Tracking updated for ${source.repo}; installed packages were not deleted.`;
+          error='';await refresh();
+        }catch(cause){error=message(cause);draw();}})();break;
       case 'retry-failed':if(operation?.snapshot){const snap={...operation.snapshot,paths:[...operation.packages.values()].filter(entry=>entry.phase==='failed'||entry.phase==='skipped').map(entry=>entry.path)};void importSelected(snap);}break;
       case 'view-installed':tab='installed';search='';draw();break;
       case 'sync-skill':void synchronize('skill',id);break;
@@ -449,12 +465,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const target=event.target as HTMLInputElement;
     if(target.name==='installed-search'){search=target.value;draw();}
     if(target.name==='discovery-search'){discoverySearch=target.value;draw();}
+    if(target.name==='replace-conflicts')replaceConflicts=target.checked;
     if(target.name==='github-url')githubUrl=target.value;
     if(target.name==='github-ref')githubRef=target.value;
   };
   const change=(event:Event)=>{
     const target=event.target as HTMLInputElement;
     if(target.dataset.selectSkill!==undefined){selectSkillPath(target.dataset.selectSkill,target.checked);return;}
+    if(target.name==='replace-conflicts'){replaceConflicts=target.checked;return;}
     if(target.dataset.customizeToggle==='startup-sync'){
       const current=target.checked;
       void (async()=>{try{policy=await options.call<Policy>('skills_sync_set_global',{enabled:current});note=current?'Startup sync enabled for previously imported skills.':'Startup sync disabled.';error='';}

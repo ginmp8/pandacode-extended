@@ -1919,9 +1919,9 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
     case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import': case 'skills_discover':
     case 'skills_source_preview': case 'skills_source_list': case 'skills_source_import': case 'skills_source_import_tracked':
-    case 'skills_source_remove': case 'skills_sync_policy': case 'skills_sync_report': case 'skills_sync_all':
-    case 'skills_sync_saved_source': case 'skills_sync_item': case 'skills_sync_set_global':
-    case 'skills_preview_file': case 'skills_github_preview_file': case 'skills_import_zip':
+    case 'skills_source_remove': case 'skills_source_set_selection': case 'skills_sync_policy': case 'skills_sync_report': case 'skills_sync_all':
+    case 'skills_sync_saved_source': case 'skills_sync_item': case 'skills_sync_tracked': case 'skills_sync_set_global':
+    case 'skills_preview_file': case 'skills_github_preview_file': case 'skills_import_zip': case 'skills_import_zip_tracked':
       result = previewSkills.call(command, args); break;
     case 'simulator_status': result = previewSimulator.status(); break;
     case 'simulator_pose': result = await previewSimulator.pose(args.udid, args.pose); break;

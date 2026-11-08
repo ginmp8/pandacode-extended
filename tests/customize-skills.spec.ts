@@ -62,6 +62,8 @@ test('ZIP import reports replacement without changing harness activation', async
   await expect(page.getByText('ZIP sample',{exact:true}).first()).toBeVisible();
   await page.getByRole('button', {name:'Add',exact:true}).click();
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('ZIP replacement requires confirmation');
+  await page.getByRole('button',{name:'Confirm ZIP replacement'}).click();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Replaced previous central library source');
 });
 

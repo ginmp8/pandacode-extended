@@ -58,6 +58,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let pendingRemove: string | null = null;
   let busy = false, error = '', note = '', disposed = false;
   let operation: Operation | null = null;
+  let pendingZipReplacement: string | null = null;
   let unsub: (() => void) | undefined;
   const esc = (s: unknown) => escape(s);
 
@@ -72,6 +73,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       : op.state === 'success' ? 'Completed successfully'
       : op.state === 'partial' ? 'Completed with errors' : 'Operation failed';
     const processing = values.find(entry => !isTerminal(entry.phase));
+    const canConfirmZip = op.kind === 'zip' && op.state === 'failed' && !!pendingZipReplacement;
     const canRetry = op.kind === 'github' && op.state !== 'running' && op.snapshot
       && values.some(entry => entry.phase === 'failed' || entry.phase === 'skipped');
     return `<section class="customize-operation ds-card" aria-label="Skill operation status" aria-live="off">
@@ -85,6 +87,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       <ul class="customize-operation-packages" aria-label="Per-package results">${values.map(item => `<li><span class="customize-package-state" data-phase="${item.phase}">${esc(stateLabel(item.phase))}</span><span class="customize-package-name"><strong>${esc(item.name)}</strong><small>${esc(item.path)}${item.detail ? ` · ${esc(item.detail)}` : ''}</small></span></li>`).join('')}</ul>
       <div class="customize-operation-actions">
         <button type="button" class="secondary-button" data-customize="view-installed">View installed skills</button>
+        ${canConfirmZip ? '<button type="button" class="customize-primary" data-customize="confirm-zip-replace">Confirm ZIP replacement</button>' : ''}
         ${canRetry ? `<button type="button" class="secondary-button" data-customize="retry-failed">Retry failed (${failures + skipped})</button>` : ''}
       </div>
     </section>`;
@@ -323,18 +326,19 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     } finally { busy = false; await refresh(); }
   }
 
-  async function importZip(): Promise<void> {
+  async function importZip(selectedPath?: string, confirmed = false): Promise<void> {
     if (busy || operation?.state === 'running') return;
     addOpen = false;
     let path: string | null;
-    try { path = await options.chooseZip(); }
+    try { path = selectedPath ?? await options.chooseZip(); }
     catch (cause) { error = message(cause); draw(); return; }
     if (!path) { draw(); return; }
+    pendingZipReplacement = null;
     const filename = path.split(/[\\/]/).pop() || 'Skill archive';
     const op = beginOperation('zip','Importing ZIP package',filename,null,[{path:filename,name:filename}]);
     busy = true;
     try {
-      const result = await options.call<{item:SkillItem;replaced:boolean;previousSource:SkillItem['source']|null;impactedHarnesses:string[]}>('skills_import_zip_tracked',{path,operationId:op.id});
+      const result = await options.call<{item:SkillItem;replaced:boolean;previousSource:SkillItem['source']|null;impactedHarnesses:string[]}>('skills_import_zip_tracked',{path,operationId:op.id,allowReplace:confirmed});
       const item = op.packages.get(filename)!;
       item.phase = 'installed'; item.name = result.item.name;
       op.completed = 1; op.state = 'success';
@@ -345,6 +349,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       detail = {kind:'installed',id:result.item.id,file:'SKILL.md'}; tab='installed';
     } catch (cause) {
       op.completed = 1; op.state = 'failed'; op.detail = message(cause);
+      if(op.detail.startsWith('ZIP replacement requires confirmation:')) pendingZipReplacement = path;
       const item = op.packages.get(filename)!; item.phase = 'failed'; item.detail = op.detail;
     } finally { busy=false; await refresh(); }
   }
@@ -430,6 +435,9 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'close': options.close();break;
       case 'toggle-add':addOpen=!addOpen;draw();break;
       case 'add-zip':void importZip();break;
+      case 'confirm-zip-replace':
+        if(pendingZipReplacement) {const selected=pendingZipReplacement;pendingZipReplacement=null;void importZip(selected,true);}
+        break;
       case 'add-github':addOpen=false;githubForm=true;scan=null;editingSource=null;replaceConflicts=false;detail=null;draw();break;
       case 'close-github-form':githubForm=false;draw();break;
       case 'tab-installed':tab='installed';pendingRemove=null;draw();break;

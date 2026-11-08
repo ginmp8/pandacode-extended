@@ -383,6 +383,14 @@ impl Library {
     /// `import`, refusing (under the library lock, so a concurrent import cannot slip in
     /// between a check and the write) to replace an item that came from another source.
     pub(crate) fn import_as(&self, kind: Kind, files: Files, fallback_name: &str, source: Source, same_source_only: bool) -> Result<Item, String> {
+        self.import_as_guarded(kind, files, fallback_name, source, same_source_only, false)
+    }
+
+    /// Reject an unexpected existing package while holding the library's write lock.
+    pub(crate) fn import_as_guarded(
+        &self, kind: Kind, files: Files, fallback_name: &str, source: Source,
+        same_source_only: bool, require_absent: bool,
+    ) -> Result<Item, String> {
         let files = normalize(kind, files)?;
         let main = files.iter().find(|(p, _)| p == main_file(kind)).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
         let (name, description, body) = frontmatter(&main);
@@ -396,6 +404,9 @@ impl Library {
         fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         self.recover_interrupted()?;
         let previous = self.load(&id).ok();
+        if require_absent && previous.is_some() {
+            return Err("ZIP replacement requires confirmation: the skill ID already exists in the central library.".into());
+        }
         if previous.as_ref().is_some_and(|p| p.kind != kind) {
             return Err(format!("A {} named {id} is already in the library.", if kind == Kind::Skill { "rule" } else { "skill" }));
         }
@@ -940,7 +951,7 @@ mod catalog_tests;
 
 /// ZIP and manual sync share the same operation-scoped package progress event.
 #[tauri::command]
-pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_id: String) -> crate::Result<customize::ZipInstall> {
+pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_id: String, allow_replace: Option<bool>) -> crate::Result<customize::ZipInstall> {
     if operation_id.is_empty() || operation_id.len() > 80
         || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
         return Err("Invalid skill operation identifier.".into());
@@ -949,7 +960,7 @@ pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_i
         let name = std::path::Path::new(&path).file_name()
             .unwrap_or_default().to_string_lossy().into_owned();
         let event_app = app.clone();
-        let result = customize::import_zip_progress(&app, &path, |phase| {
+        let result = customize::import_zip_progress(&app, &path, allow_replace.unwrap_or(false), |phase| {
             let _ = event_app.emit("skills-operation-progress", serde_json::json!({
                 "operationId": operation_id, "path": name, "name": name,
                 "phase": phase, "completed": if phase == "installed" { 1 } else { 0 },

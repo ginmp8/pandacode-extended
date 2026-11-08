@@ -122,10 +122,10 @@ fn read_zip(path: &std::path::Path) -> Result<super::Files, String> {
 }
 
 pub fn import_zip(app: &AppHandle, path: &str) -> Result<ZipInstall, String> {
-    import_zip_progress(app, path, |_| {})
+    import_zip_progress(app, path, false, |_| {})
 }
 
-pub fn import_zip_progress(app: &AppHandle, path: &str, mut progress: impl FnMut(&str)) -> Result<ZipInstall, String> {
+pub fn import_zip_progress(app: &AppHandle, path: &str, allow_replace: bool, mut progress: impl FnMut(&str)) -> Result<ZipInstall, String> {
     let path = PathBuf::from(path);
     if !path.is_absolute() || path.extension().and_then(|ext| ext.to_str()).is_none_or(|ext| !ext.eq_ignore_ascii_case("zip")) {
         return Err("Choose an absolute path to a .zip skill package.".into());
@@ -138,14 +138,20 @@ pub fn import_zip_progress(app: &AppHandle, path: &str, mut progress: impl FnMut
     let id = slug(&name);
     let library = library(app)?;
     let previous = library.list()?.into_iter().find(|entry| entry.meta.id == id);
+    if let Some(existing) = previous.as_ref().filter(|_| !allow_replace) {
+        return Err(format!(
+            "ZIP replacement requires confirmation: {name} is already installed from {} ({} harness activations). Installing this ZIP would replace the central library package but not native harness files.",
+            existing.meta.source.location, existing.meta.activations.len()
+        ));
+    }
     let previous_source = previous.as_ref().map(|item| item.meta.source.clone());
     let impacted_harnesses = previous.as_ref().map(|item| item.meta.activations.iter()
         .map(|activation| activation.harness.clone()).collect()).unwrap_or_default();
     let location = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     progress("installing");
-    let item = library.import(Kind::Skill, files, &name, Source {
+    let item = library.import_as_guarded(Kind::Skill, files, &name, Source {
         kind: "zip".into(), location, git_ref: None, commit: None,
-    })?;
+    }, false, !allow_replace)?;
     progress("installed");
     Ok(ZipInstall { item, replaced: previous.is_some(), previous_source, impacted_harnesses })
 }

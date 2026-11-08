@@ -309,6 +309,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
         }
         case 'skills_import_zip': case 'skills_import_zip_tracked': {
           const previous=entries.get('zip-sample');
+          if(previous&&!args.allowReplace) throw new Error('ZIP replacement requires confirmation: ZIP sample is installed from '+previous.item.source.location+' (0 harness activations).');
           const item=add('skill','ZIP sample','---\nname: ZIP sample\ndescription: Sample ZIP package\n---\n# ZIP sample',
             {kind:'zip',location:'skill.zip',gitRef:null,commit:null},['SKILL.md','references/sample.md']);
           return {item,replaced:!!previous,previousSource:previous?.item.source??null,impactedHarnesses:previous?.item.activations.map(a=>a.harness)??[]};

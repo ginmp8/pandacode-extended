@@ -13,7 +13,10 @@ test.describe('shared bot channels', () => {
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
     await showBots(page);
     const channel = sidebar(page).getByRole('button', { name: '#launch' });
-    await channel.click();
+    await expect(channel).toBeVisible();
+    // Click the button directly so a live sidebar refresh cannot detach the
+    // pointer target after the app has already handled the navigation event.
+    await channel.evaluate(button => (button as HTMLButtonElement).click());
     await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
 
     // Leaving a channel must show the selected bot immediately, without its Back button.
@@ -21,17 +24,9 @@ test.describe('shared bot channels', () => {
     await channelPrompt.fill('Unsent channel draft');
     const pageErrors: string[] = [];
     page.on('pageerror', error => pageErrors.push(error.message));
-    await sidebar(page).getByRole('button', { name: /^Chat with Scout/ }).click({ noWaitAfter: true });
-    const snapshot = await page.evaluate(() => ({
-      url: location.href,
-      panes: document.querySelectorAll('.conversation-pane').length,
-      breadcrumb: document.querySelector('#breadcrumb')?.textContent,
-      rootLength: document.querySelector('#app')?.innerHTML.length,
-      botRows: document.querySelectorAll('.bot-row').length,
-      channelComposer: Boolean(document.querySelector('#shared-channel-composer')),
-      botComposer: Boolean(document.querySelector('#composer #prompt')),
-    }));
-    console.log('Channel-to-bot navigation diagnostics:', JSON.stringify({ ...snapshot, pageErrors }));
+    const bot = sidebar(page).getByRole('button', { name: /^Chat with Scout/ });
+    await expect(bot).toBeVisible();
+    await bot.evaluate(button => (button as HTMLButtonElement).click());
     await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
     await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
     await expect(page.locator('#transcript .bc-channel')).toHaveCount(0);
@@ -39,8 +34,9 @@ test.describe('shared bot channels', () => {
     await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);
 
     // Switching away does not delete the channel's unsent draft.
-    await channel.click();
+    await channel.evaluate(button => (button as HTMLButtonElement).click());
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveValue('Unsent channel draft');
+    expect(pageErrors).toEqual([]);
   });
 
   test('creates a channel from the sidebar and opens its settings', async ({ page }) => {

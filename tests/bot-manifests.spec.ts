@@ -85,7 +85,7 @@ test.describe('bot manifests', () => {
     await page.addStyleTag({ url: '/src/styles.css' });
     const host = await mount(page, 'export');
     const choices = host.locator('.bm-bots .bm-choice, .bm-formats label');
-    await expect(choices).toHaveCount(4);
+    await expect(choices).toHaveCount(5);
     const positions = await choices.evaluateAll(labels => labels.map(label => {
       const input = label.querySelector('input');
       const caption = Array.from(label.childNodes).find(

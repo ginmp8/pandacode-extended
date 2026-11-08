@@ -168,6 +168,8 @@ async fn get_api_via_gh(executable: &str, url: &tauri::Url) -> std::result::Resu
         "api", "--hostname", "github.com", "--method", "GET",
         "--header", "Accept: application/vnd.github+json", &endpoint,
     ])
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
         .env("GH_PROMPT_DISABLED", "1")
         .env_remove("GH_FORCE_TTY")
         .stdin(Stdio::null())
@@ -650,7 +652,8 @@ mod tests {
 [ "$5" = "GET" ] &&
 [ "$6" = "--header" ] &&
 [ "$7" = "Accept: application/vnd.github+json" ] &&
-[ "$8" = "repos/acme/bots/commits?sha=feature%2Ftest&per_page=1" ] || exit 9
+[ "$8" = "repos/acme/bots/commits?sha=feature%2Ftest&per_page=1" ] &&
+[ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] || exit 9
 printf '%s' '{"sha":"0123456789abcdef0123456789abcdef01234567"}'
 "#).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();

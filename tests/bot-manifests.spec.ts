@@ -197,7 +197,7 @@ test.describe('bot manifests', () => {
     await expect(host.getByRole('status')).toContainText('saved');
     await host.getByRole('button', { name: 'Check for updates' }).click();
     await expect(host.getByRole('status')).toContainText('Checked: team');
-    await host.getByRole('button', { name: 'Sync now' }).click();
+    await host.getByRole('button', { name: 'Sync all sources' }).click();
     await expect(host.getByRole('status')).toContainText('Synced: team');
     await expect(host.getByRole('status')).toContainText('/app-data/bot-backups/sync.json');
     await expect(rows).toHaveCount(2);

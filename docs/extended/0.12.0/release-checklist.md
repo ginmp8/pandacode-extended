@@ -9,7 +9,9 @@
 - [x] Prior `main` `e0e807dd265e0ff3ee4260585a7767caa6965b40` has an identical Git tree; histories differ due to the prior rebase.
 - [x] Capture the prior `base/development` tip `1a84a19a3a964dcc83dd40f326635952c6e5e04a`. Its one unpromoted change was a 0.11.0 documentation-index status marker; the 0.12.0 index replaces it.
 - [x] Open fresh 0.12.0 release notes, controls, dependency/security, known-issues and readiness files without editing 0.11.0 history.
-- [ ] Confirm the first 0.12.0 documentation commit and its exact-SHA CI after publication.
+- [x] Confirm the first 0.12.0 documentation commit [`99206f1c`](https://github.com/ginmp8/pandacode-extended/commit/99206f1c0a9f1f6753227a6e33bb8df0bd6f8d45): [push CI #42394967107](https://github.com/ginmp8/pandacode-extended/actions/runs/42394967107) and [PR CI #42395013636](https://github.com/ginmp8/pandacode-extended/actions/runs/42395013636) passed 6/6 jobs each. This verifies the opening documentation commit, not the final release or native feature controls.
+
+- [x] Verify the next 0.12.0 documentation-only SHA [`d925f820`](https://github.com/ginmp8/pandacode-extended/commit/d925f8201b3c3c46dad174d3d0ec2b7ed63899e5): [push #42399278195](https://github.com/ginmp8/pandacode-extended/actions/runs/42399278195) and [PR #42399283071](https://github.com/ginmp8/pandacode-extended/actions/runs/42399283071) both passed 6/6 jobs. This is a historical checkpoint, not approval of the next commit, native integration, or final 0.12.0 release.
 
 ## Continuous upstream synchronization
 
@@ -17,6 +19,8 @@
 - [ ] Verify complete nontruncated upstream/Extended recursive trees, file modes, binaries, missing paths and modified shared-file hunks.
 - [ ] Preserve Extended-only features, optional controls, security remediations and data/build compatibility; retain upstream functionality.
 - [ ] Record upstream/integration SHAs, code changes, exceptions, tests and limitations in the 0.12.0 release notes.
+
+- [x] **2026-11-08 source checkpoint:** imported fork [`7134edf5`](https://github.com/ginmp8/pandacode/commit/7134edf501d31acc8bec28ff74be9d1dba171669) (app 0.3.102) as Extended [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): 12 upstream paths applied, including original `releases/0.3.102.md`; 0 upstream paths missing, all file modes preserved. Existing 80 modified shared paths still require full hunk-by-hunk acceptance. This checkbox verifies this source integration, **not** full functional parity.
 
 ## Extended-only feature acceptance — draft PR #120
 
@@ -59,6 +63,18 @@ These checks remain unchecked until directly executed. Code presence, existing u
 | `main` | [`e0e807dd265e0ff3ee4260585a7767caa6965b40`](https://github.com/ginmp8/pandacode-extended/commit/e0e807dd265e0ff3ee4260585a7767caa6965b40), same Git tree |
 | Prior exact-main CI | [#42392453324](https://github.com/ginmp8/pandacode-extended/actions/runs/42392453324): 6/6 passed; only validates 0.11.0 source |
 | Fork at opening | [`13a7cb68583cf77ac6c4ec351abc3ebc020ff62a`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a), app `0.3.101` |
-| 0.12.0 native / integration CI | Pending; no runtime result implied by scaffolding |
+| First 0.12.0 documentation SHA CI | [`99206f1c`](https://github.com/ginmp8/pandacode-extended/commit/99206f1c0a9f1f6753227a6e33bb8df0bd6f8d45): [push #42394967107](https://github.com/ginmp8/pandacode-extended/actions/runs/42394967107) and [PR #42395013636](https://github.com/ginmp8/pandacode-extended/actions/runs/42395013636), 6/6 jobs successful each. Final exact-SHA CI and native integration acceptance remain pending. |
+
+CI for source integration [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): [push #42449497421](https://github.com/ginmp8/pandacode-extended/actions/runs/42449497421) and [PR #42449500801](https://github.com/ginmp8/pandacode-extended/actions/runs/42449500801) were **queued when first inspected**. Do not classify as passed until exact-SHA results are read. No local Node/Rust or native Settings/Connect/MCP/cloud checks were executed.
 
 This checklist records a plan and observed historical facts; unchecked items do not constitute executed verification.
+
+## PandaCode 0.3.103 integration checkpoint
+
+- [x] Freeze [fork main `174f0c0b17ae`](https://github.com/ginmp8/pandacode/commit/174f0c0b17ae1b036210cbc5dddf45f0701cd8b0) and import all **41 changed paths** into [Extended `3f95db516e60`](https://github.com/ginmp8/pandacode-extended/commit/3f95db516e607cbe6fee5585e61d09ab2c118a71): 23 exact upstream replacements, 9 new files, 9 three-way adaptations. Preserve the original [release notes](../../../releases/0.3.103.md).
+- [x] Reconcile source (1,551 blobs) and Extended (1,608 blobs) recursive nontruncated trees: 1,471 matching shared files, 80 pre-existing customized shared files, 57 Extended-only, zero missing source files, no type/mode mismatches.
+- [x] Align the six native application-version fields to **0.3.103** without changing the planned Extended **0.12.0** documentation cycle.
+- [ ] Classify all existing 80 shared divergences semantically and verify both Settings On/Off, real Council model runs, Connect/MCP/cloud/VM and native installers.
+- [ ] Verify exact-SHA CI on the final documentation commit and review all jobs, including skipped or pending states. No local Node/Rust/native tests were executed here.
+
+Council's review loop and imported test files establish source coverage, not release approval. No tag, PR, installer, release or npm publication was made.

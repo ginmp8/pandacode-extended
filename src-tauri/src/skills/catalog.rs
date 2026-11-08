@@ -186,9 +186,19 @@ fn blob(api: Api, repo: &str, sha: &str) -> Result<Vec<u8>, String> {
 
 /// The commit and the valid skill packages of `repo` at `git_ref` (default branch when `None`).
 pub fn scan(api: Api, repo: &str, git_ref: Option<&str>) -> Result<(String, Vec<CatalogSkill>), String> {
+    scan_path(api, repo, "", git_ref)
+}
+
+/// Read only skill metadata under the requested repository path. Never clone a repository,
+/// cache a scanned tree, or fetch SKILL.md blobs outside the selected directory.
+pub fn scan_path(api: Api, repo: &str, path: &str, git_ref: Option<&str>) -> Result<(String, Vec<CatalogSkill>), String> {
+    if !path.is_empty() && (!github::valid_path(path) || path.split('/').any(|p| p.starts_with('.'))) {
+        return Err("Choose a safe skills directory path.".into());
+    }
     let tree = tree(api, repo, git_ref)?;
     let mut skills = Vec::new();
     for dir in &tree.dirs {
+        if !path.is_empty() && dir != path && !under(dir, path) { continue; }
         let main = if dir.is_empty() { "SKILL.md".to_string() } else { format!("{dir}/SKILL.md") };
         let Some(entry) = tree.blobs.iter().find(|b| b.path == main) else { continue };
         if entry.size as usize > MAX_BYTES {

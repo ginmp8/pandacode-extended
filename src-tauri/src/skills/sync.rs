@@ -55,6 +55,8 @@ pub enum Selection {
     All,
     One(String),
     Source(String, String),
+    /// Exact installed library IDs belonging to one saved source configuration.
+    Ids(Vec<String>),
 }
 
 fn split_location(location: &str) -> Option<(String, String)> {
@@ -71,11 +73,6 @@ fn is_full_sha(reference: Option<&str>) -> bool {
     reference.is_some_and(|value| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-fn scope_contains(trusted: &TrustedScope, repo: &str, path: &str, git_ref: Option<&str>) -> bool {
-    trusted.repo.eq_ignore_ascii_case(repo) && trusted.git_ref.as_deref() == git_ref
-        && (trusted.path.is_empty() || path == trusted.path
-            || path.strip_prefix(trusted.path.as_str()).is_some_and(|part| part.starts_with('/')))
-}
 
 impl Library {
     fn policy_path(&self) -> std::path::PathBuf { self.dir.join(".sync-policy.json") }
@@ -180,80 +177,6 @@ impl Library {
         })
     }
 
-    /// Index one explicitly authorized scope. Incomplete or untrusted entries cannot become
-    /// active; the catalog's SHA-pinned scan enforces identity and rejects symlinks.
-    fn discover_scope(&self, api: catalog::Api<'_>, scope: &TrustedScope, report: &mut SyncReport) -> Result<(), String> {
-        let (commit, indexed) = catalog::scan(api, &scope.repo, scope.git_ref.as_deref())?;
-        let inside = |path: &str| scope.path.is_empty() || path == scope.path
-            || path.strip_prefix(scope.path.as_str()).is_some_and(|rest| rest.starts_with('/'));
-        let mut seen = std::collections::HashSet::new();
-        let mut ambiguous = std::collections::HashSet::new();
-        for candidate in &indexed {
-            if inside(&candidate.path) && !seen.insert(candidate.id.clone()) {
-                ambiguous.insert(candidate.id.clone());
-            }
-        }
-        let mut collision_reported = std::collections::HashSet::new();
-        for candidate in indexed {
-            if !inside(&candidate.path) { continue; }
-            if ambiguous.contains(&candidate.id) {
-                if collision_reported.insert(candidate.id.clone()) {
-                    report.skipped.push(format!("{}: multiple source paths have the same skill ID; no automatic source was chosen.", candidate.id));
-                }
-                continue;
-            }
-            let source_location = catalog::location(&scope.repo, &candidate.path);
-            if let Ok(existing) = self.load(&candidate.id) {
-                if existing.source.location.eq_ignore_ascii_case(&source_location) {
-                    continue;
-                }
-                // Do not implicitly decide between conflicting origins.
-                report.skipped.push(format!("{}: another origin already uses this skill ID; explicitly choose a source before activating.", candidate.id));
-                continue;
-            }
-            let result = (|| -> Result<(String, bool), String> {
-                if candidate.files > super::MAX_FILES || candidate.bytes as usize > super::MAX_BYTES {
-                    return Err("Package exceeds the validated file or size budget.".into());
-                }
-                let (files, observed_commit) = github::fetch_using(&scope.repo, &candidate.path, Some(&commit), api)?;
-                if observed_commit != commit {
-                    return Err("The selected Git revision changed during the transaction.".into());
-                }
-                let imported = self.import_as(super::Kind::Skill, files, &candidate.name, Source {
-                    kind: "github".into(), location: source_location.clone(),
-                    git_ref: scope.git_ref.clone(), commit: Some(commit.clone()),
-                }, true)?;
-                let safe = imported.findings.is_empty() && self.missing_required(&imported.meta).is_empty();
-                if safe {
-                    let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
-                    let mut meta = self.load(&imported.meta.id)?;
-                    meta.auto_available = true;
-                    self.save(&meta)?;
-                }
-                Ok((imported.meta.id, safe))
-            })();
-            match result {
-                Ok((id, safe)) => {
-                    report.installed.push(id.clone());
-                    report.events.push(SyncEvent {
-                        id, status: if safe { "installed".into() } else { "needs-approval".into() },
-                        old_commit: None, new_commit: Some(commit.clone()), impacted_harnesses: Vec::new(),
-                        detail: if safe { "Installed into the central library and available on the next bot brief.".into() }
-                            else { "Installed but activation is blocked pending safety acknowledgement or required peer skills.".into() },
-                    });
-                }
-                Err(error) => {
-                    report.skipped.push(format!("{}: {}", candidate.id, catalog::explain(&error)));
-                    report.events.push(SyncEvent {
-                        id: candidate.id, status: "error".into(), old_commit: None,
-                        new_commit: None, impacted_harnesses: Vec::new(), detail: catalog::explain(&error),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// One writer for all skill sync operations. When busy, return an in-progress report rather
     /// than race. Errors are isolated per skill; the old complete package remains available.
     pub fn synchronize(&self, api: catalog::Api, selection: Selection, automatic: bool) -> Result<SyncReport, String> {
@@ -272,10 +195,12 @@ impl Library {
                 Selection::One(id) => &meta.id == id,
                 Selection::Source(source_repo, scope) => source_repo.eq_ignore_ascii_case(&repo)
                     && (scope.is_empty() || path == *scope || path.strip_prefix(scope.as_str()).is_some_and(|p| p.starts_with('/'))),
+                Selection::Ids(ids) => ids.contains(&meta.id),
             };
             if !selected { continue; }
-            if automatic && (!meta.auto_update.unwrap_or(policy.auto_on_start)
-                || !policy.trusted_scopes.iter().any(|trusted| scope_contains(trusted, &repo, &path, meta.source.git_ref.as_deref()))) {
+            // Global switch is the master opt-in; per-skill Disabled can narrow it.
+            // Do not scan trusted directories or silently import newly added skills.
+            if automatic && (!policy.auto_on_start || meta.auto_update == Some(false)) {
                 continue;
             }
             let event = match self.sync_one(api, &meta, automatic) {
@@ -288,34 +213,6 @@ impl Library {
             else { report.skipped.push(format!("{}: {}", meta.id, event.detail)); }
             report.events.push(event);
         }
-        // New packages are never discovered from the bundled recommendation list itself.
-        // Only explicit user-trusted source/path scopes are eligible, and global startup
-        // discovery must be on. An individual per-skill override cannot grant repository trust.
-        if automatic && policy.auto_on_start {
-            for scope in &policy.trusted_scopes {
-                if let Err(error) = self.discover_scope(api, scope, &mut report) {
-                    let description = catalog::explain(&error);
-                    report.skipped.push(format!("{}/{}: {description}", scope.repo, scope.path));
-                    report.events.push(SyncEvent {
-                        id: format!("{}/{}", scope.repo, scope.path), status: "error".into(),
-                        old_commit: None, new_commit: None, impacted_harnesses: Vec::new(), detail: description,
-                    });
-                }
-            }
-            // A required peer can arrive after its dependent package in the same batch.
-            // Enable inheritance only after checking the complete installed set.
-            for id in &report.installed {
-                if let Ok(item) = self.load(id).and_then(|meta| self.item(meta)) {
-                    if item.meta.auto_available || !item.findings.is_empty() || !self.missing_required(&item.meta).is_empty() {
-                        continue;
-                    }
-                    let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
-                    let mut meta = self.load(id)?;
-                    meta.auto_available = true;
-                    self.save(&meta)?;
-                }
-            }
-        }
         self.save_sync_file(".sync-report.json", &report)?;
         Ok(report)
     }
@@ -326,13 +223,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_trust_never_expands_to_sibling_directories() {
-        let trusted = TrustedScope { repo: "ginmp8/rhapsodia".into(), path: "skills/engineering".into(), git_ref: Some("main".into()) };
-        assert!(scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build", Some("main")));
-        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/security/check", Some("main")));
-        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build", Some("feature/untrusted")));
-        assert!(!scope_contains(&trusted, "ginmp8/rhapsodia", "skills/engineering/build", None));
-        assert!(!scope_contains(&trusted, "evil/rhapsodia", "skills/engineering/build", Some("main")));
+    fn full_commit_pins_are_detected() {
         assert!(is_full_sha(Some(&"a".repeat(40))));
         assert!(!is_full_sha(Some("main")));
     }

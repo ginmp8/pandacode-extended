@@ -8,6 +8,7 @@ mod github;
 mod safety;
 pub(crate) mod scoped;
 mod sync;
+mod sources;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -778,6 +779,30 @@ pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs>
     crate::blocking(move || library(&app)?.discover(&github::api)).await
 }
 
+#[tauri::command]
+pub async fn skills_source_preview(app: AppHandle, repo: String, path: String, git_ref: Option<String>) -> crate::Result<sources::SourcePreview> {
+    crate::blocking(move || library(&app)?.preview_skill_source(&github::api, &repo, &path, git_ref.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn skills_source_list(app: AppHandle) -> crate::Result<Vec<sources::SavedSource>> {
+    crate::blocking(move || library(&app)?.saved_skill_sources()).await
+}
+
+#[tauri::command]
+pub async fn skills_source_import(
+    app: AppHandle, repo: String, path: String, git_ref: Option<String>, commit: String, selected_paths: Vec<String>,
+) -> crate::Result<sources::SourceImport> {
+    crate::blocking(move || library(&app)?.import_skill_source(
+        &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths,
+    )).await
+}
+
+#[tauri::command]
+pub async fn skills_source_remove(app: AppHandle, id: String) -> crate::Result<Vec<sources::SavedSource>> {
+    crate::blocking(move || library(&app)?.remove_skill_source(&id)).await
+}
+
 
 fn refresh_bot_briefs_if_changed(app: &AppHandle, report: &sync::SyncReport) {
     if report.updated.is_empty() && report.installed.is_empty() { return; }
@@ -814,6 +839,20 @@ pub async fn skills_sync_source(app: AppHandle, repo: String, path: Option<Strin
         Ok(report)
     }).await
 }
+#[tauri::command]
+pub async fn skills_sync_saved_source(app: AppHandle, id: String) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || {
+        let library = library(&app)?;
+        let ids = library.selected_skill_ids(&id)?;
+        if ids.is_empty() {
+            return Err("None of the skills in this saved source are still installed.".into());
+        }
+        let report = library.synchronize(&github::api, sync::Selection::Ids(ids), false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
+
 #[tauri::command]
 pub async fn skills_sync_policy(app: AppHandle) -> crate::Result<sync::SyncPolicy> {
     crate::blocking(move || library(&app)?.sync_policy()).await

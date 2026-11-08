@@ -50,3 +50,23 @@
 .skills-toggle>span{white-space:nowrap}
 .skills-toggles{padding:2px 0}
 .skills-subheading{padding:0 var(--ds-row-pad-x)}
+
+
+/* Extended Skills Library views follow the Settings card/row rhythm. Keep these
+   rules scoped: the existing import, catalog and harness activation rows are unchanged. */
+.settings-page-root .skills-view-tabs{width:max-content;max-width:100%;margin:0 0 var(--ds-section-gap);justify-content:flex-start;flex-wrap:wrap}
+.settings-page-root .skills-view-tabs>button{flex:0 1 auto;min-height:var(--ds-btn-h);height:auto;padding:6px var(--ds-row-pad-x);font-size:var(--ds-text-ui);line-height:1.3;white-space:normal}
+.settings-page-root .skills-recommended-controls>:is(.skills-note,label,.skills-import-actions),
+.settings-page-root .skills-sync-controls>:is(.skills-note,.skills-toggle,.skills-import-actions){margin:0;padding:var(--ds-row-pad-y) var(--ds-row-pad-x)}
+.settings-page-root .skills-recommended-controls>label:not(.skills-toggle){display:flex;flex-direction:column;gap:6px;min-width:0;font-size:var(--ds-text-ui)}
+.settings-page-root .skills-recommended-controls input[name="recommendedRef"]{box-sizing:border-box;display:block;width:100%;min-width:0;min-height:var(--ds-btn-h);padding:0 10px;border:0;border-radius:var(--ds-radius-control);background:var(--ds-card-inset);color:var(--text);font:inherit}
+.settings-page-root .skills-recommended-controls input[name="recommendedRef"]:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.settings-page-root .skills-recommended-controls>.skills-import-actions,
+.settings-page-root .skills-sync-controls>.skills-import-actions{justify-content:flex-end}
+.settings-page-root .skills-recommended-group .skills-catalog-skill{padding:var(--ds-row-pad-y) var(--ds-row-pad-x);border-radius:calc(var(--ds-radius-inner) - 2px)}
+.settings-page-root .skills-recommended-group .skills-toggle>span{min-width:0;white-space:normal;overflow-wrap:anywhere}
+.settings-page-root .skills-recommended-group .skills-catalog-skill code{margin-left:8px;overflow-wrap:anywhere}
+.settings-page-root .skills-sync-controls>.skills-toggle{min-height:var(--ds-row-h);justify-content:flex-start}
+.settings-page-root .skills-sync-controls>.skills-message:empty,
+.settings-page-root .skills-recommended-controls>.skills-message:empty{min-height:0;padding:0}
+.settings-page-root .skills-empty-group>.skills-empty{margin:0}

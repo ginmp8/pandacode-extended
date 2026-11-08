@@ -209,7 +209,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
     const source = catalogs.sources.find(entry => entry.repo === 'ginmp8/rhapsodia');
     const groupHtml = groups.map(group => {
       const entries = recommendations.templates.filter(entry => entry.group === group);
-      return `<section class="settings-group"><h4 class="skills-subheading">${escape(group)}</h4>
+      return `<h3 class="settings-heading">${escape(group)}</h3><section class="settings-group skills-recommended-group">
         <ul class="skills-catalog-skills">${entries.map(entry => {
           const path = `ginmp8/rhapsodia/${entry.path}`;
           const installed = items.find(item => item.source.location.toLowerCase() === path.toLowerCase());
@@ -223,7 +223,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
             <small>${escape(status)}</small></li>`;
         }).join('')}</ul></section>`;
     }).join('');
-    return `<div class="settings-group"><p class="skills-note">These are metadata references to public RhapsodIA skills, not preinstalled packages. Import requires the GitHub CLI. No scripts run on import and no bot is activated automatically.</p>
+    return `<div class="settings-group skills-recommended-controls"><p class="skills-note">These are metadata references to public RhapsodIA skills, not preinstalled packages. Import requires the GitHub CLI. No scripts run on import and no bot is activated automatically.</p>
       <label>Git ref (branch, tag, or immutable full commit SHA)
         <input name="recommendedRef" aria-label="Recommended source ref" value="main" spellcheck="false" autocomplete="off">
       </label><div class="skills-import-row skills-import-actions">
@@ -278,25 +278,25 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
         <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-item" ${busy ? 'disabled' : ''}>Sync this skill</button></div>
         ${report ? `<small>${escape(report.status)} · ${escape(report.detail)}${report.newCommit ? ` · ${escape(report.newCommit.slice(0, 12))}` : ''}</small>` : ''}</li>`;
     }).join('');
-    return `<div class="settings-group">
+    return `<div class="settings-group skills-sync-controls">
       <p class="skills-note">Startup checks run without blocking the application. Updates and discovery are off by default. Explicitly trusting a repository or collection authorizes the automatic installation of new valid, unflagged skills in that exact scope the next time startup checks are enabled. Check your trust scope carefully; use a full commit SHA to pin source content.  Automatic checks do not move full-SHA pins. Synchronization overwrites local PandaCode library edits without a backup; it never silently overwrites harness-managed or manual files. Later updates to previously acknowledged skills may add new warnings.</p>
       <label class="skills-toggle"><input type="checkbox" data-global-sync ${syncPolicy.autoOnStart ? 'checked' : ''} ${busy ? 'disabled' : ''}><span>Automatically check trusted skills when PandaCode starts</span></label>
       <div class="skills-import-row skills-import-actions"><button type="button" class="secondary-button" data-action="sync-all" ${busy ? 'disabled' : ''}>Sync all installed skills</button></div>
       <p class="skills-message" role="status">${escape(busy ? 'Working…' : note)}</p><p class="skills-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</p>
       ${syncReport.checkedAt ? `<small>Last synchronization report: ${escape(new Date(syncReport.checkedAt).toLocaleString())} · ${plural(syncReport.installed?.length ?? 0, 'new skill')} installed · ${plural(syncReport.updated.length, 'skill')} updated</small>` : ''}
-    </div><h4 class="skills-subheading">Sources</h4>
-    ${sources.length ? `<ul class="settings-group skills-list" aria-label="Synchronization sources">${sourceHtml}</ul>` : '<p class="skills-empty">No GitHub sources installed.</p>'}
-    <h4 class="skills-subheading">Installed skills</h4>
-    ${githubItems.length ? `<ul class="settings-group skills-list" aria-label="Skill synchronization">${entries}</ul>` : '<p class="skills-empty">No GitHub skills installed yet.</p>'}`;
+    </div><h3 class="settings-heading">Sources</h3>
+    ${sources.length ? `<ul class="settings-group skills-list" aria-label="Synchronization sources">${sourceHtml}</ul>` : '<div class="settings-group skills-empty-group"><p class="skills-empty">No GitHub sources installed.</p></div>'}
+    <h3 class="settings-heading">Installed skills</h3>
+    ${githubItems.length ? `<ul class="settings-group skills-list" aria-label="Skill synchronization">${entries}</ul>` : '<div class="settings-group skills-empty-group"><p class="skills-empty">No GitHub skills installed yet.</p></div>'}`;
   }
 
   function draw(): void {
     const list = projects();
     const values = clearFields ? {} : Object.fromEntries([...host.querySelectorAll<HTMLInputElement | HTMLSelectElement>('form [name]')].map(field => [field.name, field.value]));
-    host.innerHTML = `<nav class="skills-import-row skills-import-actions" aria-label="Skills Library pages">
-      <button type="button" class="secondary-button" data-action="view" data-view="library" aria-current="${view === 'library' ? 'page' : 'false'}">Library &amp; activation</button>
-      <button type="button" class="secondary-button" data-action="view" data-view="recommended" aria-current="${view === 'recommended' ? 'page' : 'false'}">Recommended skills</button>
-      <button type="button" class="secondary-button" data-action="view" data-view="sync" aria-current="${view === 'sync' ? 'page' : 'false'}">Synchronization</button>
+    host.innerHTML = `<nav class="ds-seg skills-view-tabs" aria-label="Skills Library pages">
+      <button type="button" data-action="view" data-view="library" aria-current="${view === 'library' ? 'page' : 'false'}" aria-pressed="${view === 'library' ? 'true' : 'false'}">Library &amp; activation</button>
+      <button type="button" data-action="view" data-view="recommended" aria-current="${view === 'recommended' ? 'page' : 'false'}" aria-pressed="${view === 'recommended' ? 'true' : 'false'}">Recommended skills</button>
+      <button type="button" data-action="view" data-view="sync" aria-current="${view === 'sync' ? 'page' : 'false'}" aria-pressed="${view === 'sync' ? 'true' : 'false'}">Synchronization</button>
     </nav>${view === 'recommended' ? recommendedHtml() : view === 'sync' ? syncHtml() : `<h3 class="settings-heading">Import</h3><div class="settings-group skills-library" aria-label="Skills and rules">
       <form class="skills-import" aria-label="Import a skill or rule" novalidate>
         <div class="skills-import-row">

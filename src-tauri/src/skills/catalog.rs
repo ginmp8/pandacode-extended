@@ -165,7 +165,7 @@ fn tree(api: Api, repo: &str, git_ref: Option<&str>) -> Result<Tree, String> {
         .filter(|e| e["type"] == "blob")
         .filter_map(|e| {
             let path = e["path"].as_str()?;
-            if !github::valid_path(path) || path.split('/').any(|p| p.starts_with('.')) {
+            if !github::valid_path(path) || path.split('/').any(|p| p.starts_with('.')) || e["mode"] == "120000" {
                 return None;
             }
             Some(Blob { path: path.into(), sha: e["sha"].as_str()?.into(), size: e["size"].as_u64().unwrap_or(0) })
@@ -186,9 +186,19 @@ fn blob(api: Api, repo: &str, sha: &str) -> Result<Vec<u8>, String> {
 
 /// The commit and the valid skill packages of `repo` at `git_ref` (default branch when `None`).
 pub fn scan(api: Api, repo: &str, git_ref: Option<&str>) -> Result<(String, Vec<CatalogSkill>), String> {
+    scan_path(api, repo, "", git_ref)
+}
+
+/// Read only skill metadata under the requested repository path. Never clone a repository,
+/// cache a scanned tree, or fetch SKILL.md blobs outside the selected directory.
+pub fn scan_path(api: Api, repo: &str, path: &str, git_ref: Option<&str>) -> Result<(String, Vec<CatalogSkill>), String> {
+    if !path.is_empty() && (!github::valid_path(path) || path.split('/').any(|p| p.starts_with('.'))) {
+        return Err("Choose a safe skills directory path.".into());
+    }
     let tree = tree(api, repo, git_ref)?;
     let mut skills = Vec::new();
     for dir in &tree.dirs {
+        if !path.is_empty() && dir != path && !under(dir, path) { continue; }
         let main = if dir.is_empty() { "SKILL.md".to_string() } else { format!("{dir}/SKILL.md") };
         let Some(entry) = tree.blobs.iter().find(|b| b.path == main) else { continue };
         if entry.size as usize > MAX_BYTES {
@@ -394,7 +404,7 @@ impl Library {
         }
         let tree = tree(api, &source.repo, Some(&commit)).map_err(|e| explain(&e))?;
         let (mut imported, mut skipped) = (Vec::new(), Vec::new());
-        for skill in chosen {
+        'skills: for skill in chosen {
             let here = location(&source.repo, &skill.path);
             let skip = |reason: String| Skipped { path: skill.path.clone(), name: skill.name.clone(), reason };
             if let Some(taken) = self.load(&skill.id).ok().filter(|m| !same(&m.source.location, &here)) {
@@ -407,13 +417,19 @@ impl Library {
                 continue;
             }
             if files.iter().map(|b| b.size as usize).sum::<usize>() > MAX_BYTES {
-                skipped.push(skip(format!("{} is larger than 1 MB.", skill.name)));
+                skipped.push(skip(format!("{} is larger than {} MiB.", skill.name, MAX_BYTES >> 20)));
                 continue;
             }
             let mut fetched = Vec::new();
             for file in files {
                 let relative = if skill.path.is_empty() { file.path.clone() } else { file.path[skill.path.len() + 1..].to_string() };
-                fetched.push((relative, blob(api, &source.repo, &file.sha).map_err(|e| explain(&e))?));
+                match blob(api, &source.repo, &file.sha) {
+                    Ok(bytes) => fetched.push((relative, bytes)),
+                    Err(error) => {
+                        skipped.push(skip(format!("Could not fetch {relative}: {}", explain(&error))));
+                        continue 'skills;
+                    }
+                }
             }
             let origin = Source { kind: "github".into(), location: here, git_ref: source.git_ref.clone(), commit: Some(commit.clone()) };
             // Checked again at commit: another import may have taken the id while this one fetched.

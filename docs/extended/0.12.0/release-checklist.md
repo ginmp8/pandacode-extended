@@ -52,3 +52,13 @@
 CI for source integration [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): [push #42449497421](https://github.com/ginmp8/pandacode-extended/actions/runs/42449497421) and [PR #42449500801](https://github.com/ginmp8/pandacode-extended/actions/runs/42449500801) were **queued when first inspected**. Do not classify as passed until exact-SHA results are read. No local Node/Rust or native Settings/Connect/MCP/cloud checks were executed.
 
 This checklist records a plan and observed historical facts; unchecked items do not constitute executed verification.
+
+## PandaCode 0.3.103 integration checkpoint
+
+- [x] Freeze [fork main `174f0c0b17ae`](https://github.com/ginmp8/pandacode/commit/174f0c0b17ae1b036210cbc5dddf45f0701cd8b0) and import all **41 changed paths** into [Extended `3f95db516e60`](https://github.com/ginmp8/pandacode-extended/commit/3f95db516e607cbe6fee5585e61d09ab2c118a71): 23 exact upstream replacements, 9 new files, 9 three-way adaptations. Preserve the original [release notes](../../../releases/0.3.103.md).
+- [x] Reconcile source (1,551 blobs) and Extended (1,608 blobs) recursive nontruncated trees: 1,471 matching shared files, 80 pre-existing customized shared files, 57 Extended-only, zero missing source files, no type/mode mismatches.
+- [x] Align the six native application-version fields to **0.3.103** without changing the planned Extended **0.12.0** documentation cycle.
+- [ ] Classify all existing 80 shared divergences semantically and verify both Settings On/Off, real Council model runs, Connect/MCP/cloud/VM and native installers.
+- [ ] Verify exact-SHA CI on the final documentation commit and review all jobs, including skipped or pending states. No local Node/Rust/native tests were executed here.
+
+Council's review loop and imported test files establish source coverage, not release approval. No tag, PR, installer, release or npm publication was made.

@@ -33,7 +33,7 @@ test.describe('shared bot channels', () => {
     await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);
 
     // The channel keeps a draft that was not sent before the switch.
-    await channel.click();
+    await channel.evaluate(button => (button as HTMLButtonElement).click());
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveValue('Unsent channel draft');
     expect(pageErrors).toEqual([]);
   });

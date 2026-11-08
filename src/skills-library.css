@@ -75,6 +75,8 @@
 .settings-page-root .skills-sync-controls>:is(.skills-note,.skills-toggle,.skills-import-actions){margin:0;padding:var(--ds-row-pad-y) var(--ds-row-pad-x)}
 .settings-page-root .skills-sync-controls>.skills-import-actions{justify-content:flex-end}
 .settings-page-root .skills-sync-controls>.skills-toggle{min-height:var(--ds-row-h);justify-content:flex-start}
+/* The longer opt-in label wraps instead of widening a narrow Settings panel. */
+.settings-page-root .skills-sync-controls>.skills-toggle>span{min-width:0;white-space:normal;overflow-wrap:anywhere}
 .settings-page-root .skills-sync-controls>.skills-message:empty{min-height:0;padding:0}
 .settings-page-root .skills-source-controls a,.settings-page-root .skills-source-results a,
 .settings-page-root .skills-list a{color:var(--text);text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere}

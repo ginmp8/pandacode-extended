@@ -70,7 +70,8 @@ export async function mountBotManifests(
     escape(source.manifests.join('\n')) + '</textarea></label>' +
     '<p class="bm-source-state">Checked: ' + escape(briefSha(source.lastCheckedSha)) +
     ' · Applied: ' + escape(briefSha(source.lastAppliedSha)) + '</p>' +
-    '<button type="button" class="secondary-button" data-source-remove="' + i + '">Remove source</button></fieldset>';
+    '<div class="bm-source-actions"><button type="button" class="secondary-button" data-source-sync="' + i + '">Sync source</button>' +
+    '<button type="button" class="secondary-button" data-source-remove="' + i + '">Remove source</button></div></fieldset>';
 
   function renderImport(): void {
     host.innerHTML = '<div class="bm-panel">' + description +
@@ -86,7 +87,7 @@ export async function mountBotManifests(
         '<button type="button" class="secondary-button" data-source-add>Add source</button>' +
         '<div class="dialog-footer bm-actions"><button type="button" class="secondary-button" data-sources-save>Save sources</button>' +
         '<button type="button" class="secondary-button" data-sources-check>Check for updates</button>' +
-        '<button type="button" class="primary-button" data-sources-sync>Sync now</button></div>' +
+        '<button type="button" class="primary-button" data-sources-sync>Sync all sources</button></div>' +
         '<p class="bm-note">No automatic Git polling is enabled. Sync is explicit and never pushes to a repository.</p></section>') +
       '<p role="status" data-manifest-status hidden></p></div>';
   }
@@ -121,7 +122,7 @@ export async function mountBotManifests(
     registry = await call<Registry>('bot_manifest_sources_save', { registry });
   }
 
-  async function runAction(action: string): Promise<void> {
+  async function runAction(action: string, sourceIndex?: number): Promise<void> {
     if (busy) return;
     busy = true;
     const buttons = host.querySelectorAll<HTMLButtonElement>('button');
@@ -159,8 +160,11 @@ export async function mountBotManifests(
       } else if (action === 'check' || action === 'sync') {
         if (!registry.sources.length) throw new Error('Add at least one Git source.');
         await saveSources();
+        const selected = sourceIndex === undefined ? undefined : registry.sources[sourceIndex];
+        if (sourceIndex !== undefined && !selected) throw new Error('Selected Git source is unavailable.');
         const result = await call<SyncResult>(
-          action === 'check' ? 'bot_manifest_sources_check' : 'bot_manifest_sources_sync');
+          action === 'check' ? 'bot_manifest_sources_check' : 'bot_manifest_sources_sync',
+          selected ? { sourceId: selected.id } : {});
         registry = await call<Registry>('bot_manifest_sources_list');
         renderImport();
         if (action === 'sync' && result.backupPath) await onApplied();
@@ -201,6 +205,8 @@ export async function mountBotManifests(
       syncSourceInputs();
       registry.sources.splice(Number(target.dataset.sourceRemove), 1);
       renderImport();
+    } else if (target.hasAttribute('data-source-sync')) {
+      void runAction('sync', Number(target.dataset.sourceSync));
     } else if (target.hasAttribute('data-manifest-export')) void runAction('export');
     else if (target.hasAttribute('data-manifest-apply')) void runAction('import');
     else if (target.hasAttribute('data-sources-save')) void runAction('save');

@@ -72,7 +72,7 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ response, body: source.replace(dialogImport,
       "const open = async () => '/mock/exports'; const save = async () => '/mock/bots.json';") });
   });
-  await page.goto('/');
+  await page.goto('/tests/fixtures/bot-manifests.html');
 });
 
 test.describe('bot manifests', () => {

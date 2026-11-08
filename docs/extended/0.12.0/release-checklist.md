@@ -27,7 +27,7 @@
 - [ ] **#123:** Round-trip selected/all bots, optional native and Extended settings, local Shared Channel members/lead and overrides; retain legacy `{"bots":[...]}` compatibility and safe external-channel configuration.
 - [ ] Test verified pre-import backups, backup failure-before-mutation, partial failures, no-clobber Desktop export, no-secret manifest content and the limits of configuration-only recovery.
 - [ ] Exercise the Desktop local JSON/Git source UI and existing headless import/export plus `pandacode serve --sync-bots`; verify read-only SHA-pinned GitHub sync, unsafe/invalid source refusal, private-source credentials and manual-only operation.
-- [ ] Run the new Playwright CI job for bot selection/export, malformed/successful import, Git source UI, attributed collaboration messages and #121 history controls. Distinguish mocked UI fixtures from native import/queue execution.
+- [ ] Run the isolated Playwright CI job for bot selection/export, malformed/successful import, Git source UI and attributed collaboration messages. Run the existing #121 history-controls browser tests separately against the integrated preview. Distinguish mocked UI fixtures from native import/queue execution.
 - [ ] Cross-check the [#121 context guide](../../extended-bot-context.md), [#122 collaboration guide](../../extended-bot-collaboration.md), [#123 manifest guide](../../extended-bot-manifests.md) and release notes against the final candidate SHA.
 
 These checks remain unchecked until directly executed. Code presence, existing unit tests and this documentation do not establish native or cross-machine acceptance.

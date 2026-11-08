@@ -106,8 +106,8 @@ jobs:
       - name: Exercise Extended bot manifest, collaboration and history UI
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
-            npx playwright test tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts tests/bots.spec.ts \
-            --grep "bot manifests|bot collaboration|fresh context stays|joined channels" --workers=2
+            npx playwright test tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts \
+            --grep "bot manifests|bot collaboration" --workers=2
 
   rust:
     name: Rust check and tests (Linux)

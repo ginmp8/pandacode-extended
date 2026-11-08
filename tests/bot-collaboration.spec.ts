@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test.describe('bot collaboration', () => {
   test('renders attributed bot posts, explicit recipients, and direct delegation status in one channel', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/tests/fixtures/bot-manifests.html');
     await page.evaluate(async () => {
       const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
       const bots = [

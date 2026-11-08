@@ -70,3 +70,9 @@ Council's review loop and imported test files establish source coverage, not rel
 - [x] Preserve original [0.3.104 upstream release notes](../../../releases/0.3.104.md), Git file modes, Extended-only files, dependency remediations and existing control paths.
 - [ ] Complete 80 shared customized-file hunk classifications and native app control-state testing; do not use absence of missing paths as proof of functional parity.
 - [ ] Verify final exact-SHA CI jobs and native installed-app/mobile/Connect/MCP/cloud/VM/credential scenarios. The integration-commit [push](https://github.com/ginmp8/pandacode-extended/actions/runs/42503275362) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/42503280072) were in progress on first inspection; local tests did not run.
+
+## Verified CI checkpoint — 2026-11-08
+
+- [x] Verify [push CI #42503386681](https://github.com/ginmp8/pandacode-extended/actions/runs/42503386681) and [PR CI #42503391142](https://github.com/ginmp8/pandacode-extended/actions/runs/42503391142) at **`e33fb2fd93aaa130f5e480db7d0e227fe966e1cf`**: both completed successfully with **6/6 jobs** (typecheck/Node/website, Rust check/tests, npm dependency audit, RustSec, mobile/Expo and ONNX/macOS).
+- [ ] Verify CI again for any later `base/development` SHA, including this documentation-only correction; earlier green CI does not transfer to a different SHA.
+- [ ] Complete all 80 shared hunk classifications and native Settings On/Off, Council, Connect/MCP/cloud/VM, credentials, and installer acceptance before claiming functional parity or approving Extended 0.12.0. Local tests were not executed during this follow-up.

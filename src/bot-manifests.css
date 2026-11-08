@@ -28,6 +28,8 @@
 .bm-panel .bm-source label { display: grid; gap: 5px; }
 .bm-panel .bm-source input, .bm-panel .bm-source textarea { box-sizing: border-box; width: 100%; min-width: 0; background: var(--input-bg, transparent); border: 1px solid var(--border, #7775); border-radius: 7px; color: inherit; padding: 9px; font: inherit; }
 .bm-panel .bm-source-state { font-size: 0.84rem; opacity: 0.75; margin: 0; overflow-wrap: anywhere; }
+.bm-panel .bm-source-actions { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+.bm-panel .bm-source-actions button { width: auto; }
 .bm-panel .bm-file { display: grid; gap: 10px; }
 .bm-panel [data-manifest-status] { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 12px; border: 1px solid var(--border, #7775); border-radius: 8px; line-height: 1.5; font-size: 0.9rem; }
 .bm-panel [data-manifest-status][data-error="true"] { border-color: var(--danger, #b33); }

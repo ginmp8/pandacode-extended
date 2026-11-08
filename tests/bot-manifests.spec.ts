@@ -41,13 +41,15 @@ async function mount(page: Page, mode: 'import' | 'export') {
         return clone(w.__manifestRegistry);
       }
       if (command === 'bot_manifest_sources_check' || command === 'bot_manifest_sources_sync') {
-        for (const source of w.__manifestRegistry.sources) {
+        const selected = args.sourceId
+          ? w.__manifestRegistry.sources.filter((source: any) => source.id === args.sourceId)
+          : w.__manifestRegistry.sources;
+        if (!selected.length) throw new Error('Git source not found.');
+        for (const source of selected) {
           source.lastCheckedSha = '0123456789abcdef0123456789abcdef01234567';
-          if (command === 'bot_manifest_sources_sync') {
-            source.lastAppliedSha = source.lastCheckedSha;
-          }
+          if (command === 'bot_manifest_sources_sync') source.lastAppliedSha = source.lastCheckedSha;
         }
-        return { sources: w.__manifestRegistry.sources.map((source: any) => ({
+        return { sources: selected.map((source: any) => ({
           id: source.id, repository: source.repository, ref: source.ref,
           commit: source.lastCheckedSha, paths: source.manifests, hashes: ['sha256'],
         })), backupPath: command === 'bot_manifest_sources_sync' ? '/app-data/bot-backups/sync.json' : null,
@@ -203,6 +205,43 @@ test.describe('bot manifests', () => {
       'Checked: 0123456789ab', 'Checked: 0123456789ab',
     ]);
     expect(await page.evaluate(() => (window as any).__manifestApplied)).toBe(1);
+  });
+
+  test('syncs one Git source beside Remove without changing other source receipts', async ({ page }) => {
+    const host = await mount(page, 'import');
+    await host.getByRole('button', { name: 'Git sources' }).click();
+    await host.getByRole('button', { name: 'Add source' }).click();
+    await host.getByRole('button', { name: 'Add source' }).click();
+    const rows = host.locator('[data-source-row]');
+    await rows.nth(0).getByRole('textbox', { name: 'Source ID' }).fill('team');
+    await rows.nth(0).getByRole('textbox', { name: 'GitHub repository' }).fill('https://github.com/team/config');
+    await rows.nth(0).getByRole('textbox', { name: /Manifest paths/ }).fill('bots/team.json');
+    await rows.nth(1).getByRole('textbox', { name: 'Source ID' }).fill('release');
+    await rows.nth(1).getByRole('textbox', { name: 'GitHub repository' }).fill('https://github.com/team/releases');
+    await rows.nth(1).getByRole('textbox', { name: /Manifest paths/ }).fill('bots/release.json');
+
+    const actions = rows.nth(1).locator('.bm-source-actions');
+    await expect(actions.getByRole('button', { name: 'Sync source' })).toBeVisible();
+    await expect(actions.getByRole('button', { name: 'Remove source' })).toBeVisible();
+    await actions.getByRole('button', { name: 'Sync source' }).click();
+    await expect(host.getByRole('status')).toContainText('Synced: release');
+    await expect(host.getByRole('status')).not.toContainText('team @');
+    const calls = await page.evaluate(() => (window as any).__manifestCalls);
+    expect(calls.filter((item: any) => item.command === 'bot_manifest_sources_sync')).toEqual([
+      { command: 'bot_manifest_sources_sync', args: { sourceId: 'release' } },
+    ]);
+    let registry = await page.evaluate(() => (window as any).__manifestRegistry);
+    expect(registry.sources[0].lastAppliedSha).toBeUndefined();
+    expect(registry.sources[1].lastAppliedSha).toBeTruthy();
+
+    await host.getByRole('button', { name: 'Sync all sources' }).click();
+    await expect(host.getByRole('status')).toContainText('Synced: team');
+    const afterAll = await page.evaluate(() => (window as any).__manifestCalls);
+    expect(afterAll.filter((item: any) => item.command === 'bot_manifest_sources_sync').at(-1)).toEqual({
+      command: 'bot_manifest_sources_sync', args: {},
+    });
+    registry = await page.evaluate(() => (window as any).__manifestRegistry);
+    expect(registry.sources.every((source: any) => Boolean(source.lastAppliedSha))).toBe(true);
   });
 
   test('reports backend import failure without claiming applied changes', async ({ page }) => {

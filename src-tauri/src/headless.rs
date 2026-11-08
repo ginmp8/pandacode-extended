@@ -89,7 +89,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
                         std::process::exit(if result.failed == 0 { 0 } else { 1 });
                     }
                     Err(error) => {
-                        eprintln!("Git bot sync failed before apply: {error}");
+                        eprintln!("Git bot sync failed: {error}");
                         std::process::exit(1);
                     }
                 }

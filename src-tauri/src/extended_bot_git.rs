@@ -450,13 +450,38 @@ pub(crate) async fn sync(
     Ok(result)
 }
 
+/// Keep headless receipts in private application data, not beside or inside the
+/// user-supplied source registry, which may be checked into Git or read-only.
+fn headless_receipts_path(data_dir: &Path, source: &Path) -> Result<std::path::PathBuf> {
+    let canonical = source.canonicalize()
+        .map_err(|error| format!("Cannot resolve the Git source registry: {error}"))?;
+    let folder = data_dir.join("bot-manifest-headless-state");
+    extended_bot_manifest::set_private_directory(&folder)?;
+    Ok(folder.join(format!("{}.json", read_hash(canonical.to_string_lossy().as_bytes()))))
+}
+
+/// The source file defines intent; only our private state file can supply trusted
+/// last-checked and last-applied receipts for matching source identities.
+fn read_headless_registry(source: &Path, receipts: &Path) -> Result<SourceRegistry> {
+    let mut registry = read_registry(source)?;
+    let persisted = read_registry(receipts)?;
+    preserve_receipts(&persisted, &mut registry);
+    Ok(registry)
+}
+
 pub(crate) async fn run_headless(
     app: &tauri::AppHandle, path: &Path,
 ) -> Result<SyncOutcome> {
-    let registry = read_registry(path)?;
-    let mut registry = registry;
+    let _operation = registry_lock().lock().await;
+    let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let receipts = headless_receipts_path(&data_dir, path)?;
+    let mut registry = read_headless_registry(path, &receipts)?;
     if registry.sources.is_empty() { return Err("The Git source registry has no sources.".into()); }
-    sync(app, &mut registry).await
+    let outcome = sync(app, &mut registry).await?;
+    // Persist successful receipts and partial-failure check results before reporting
+    // completion; a later one-shot run must not repeatedly import unchanged content.
+    save_registry(&receipts, &registry)?;
+    Ok(outcome)
 }
 
 fn check_main(window: &tauri::WebviewWindow) -> Result<()> {
@@ -550,6 +575,56 @@ mod tests {
             {"name":"new","mode":"ask"}]});
         let request = json!({"bots":[{"name":"existing"},{"name":"same"},{"name":"new"}]});
         assert_eq!(bot_delta_counts(&request, &prior, &after), (1, 1, 1));
+    }
+
+    #[test]
+    fn one_shot_headless_runs_reuse_private_receipts_without_mutating_source_registry() {
+        let root = std::env::temp_dir().join(format!("pandacode-headless-receipts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("sources.json");
+        let original = SourceRegistry { version: 1, sources: vec![ManifestSource {
+            id: "team".into(), repository: "https://github.com/team/bots".into(),
+            reference: "main".into(), manifests: vec!["bots.json".into()], auto_sync: false,
+            last_checked_sha: None, last_applied_sha: None, last_applied_hash: None,
+            last_applied_local_hash: None,
+        }] };
+        let source_bytes = serde_json::to_vec_pretty(&original).unwrap();
+        fs::write(&source_path, &source_bytes).unwrap();
+        let receipts_path = headless_receipts_path(&root, &source_path).unwrap();
+        assert_eq!(headless_receipts_path(&root, &source_path).unwrap(), receipts_path);
+        let mut first = read_headless_registry(&source_path, &receipts_path).unwrap();
+        assert_eq!(first.sources[0].last_applied_sha, None);
+
+        let receipt = SourceReceipt {
+            id: "team".into(), repository: "https://github.com/team/bots".into(),
+            reference: "main".into(), commit: "pinned-sha".into(),
+            paths: vec!["bots.json".into()], hashes: vec!["content-hash".into()],
+        };
+        first.sources[0].last_checked_sha = Some(receipt.commit.clone());
+        first.sources[0].last_applied_sha = Some(receipt.commit.clone());
+        first.sources[0].last_applied_hash = Some(receipt_hash(&receipt));
+        first.sources[0].last_applied_local_hash = Some("local-state".into());
+        save_registry(&receipts_path, &first).unwrap();
+
+        let resumed = read_headless_registry(&source_path, &receipts_path).unwrap();
+        assert!(same_applied_content(&resumed, std::slice::from_ref(&receipt), "local-state"),
+            "an unchanged second invocation must take the no-import/no-backup path");
+        assert!(!same_applied_content(&resumed, std::slice::from_ref(&receipt), "local-drift"));
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes,
+            "the user-owned Git source registry must remain read-only");
+
+        let mut changed = original.clone();
+        changed.sources[0].manifests = vec!["different.json".into()];
+        fs::write(&source_path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
+        let reconfigured = read_headless_registry(&source_path, &receipts_path).unwrap();
+        assert_eq!(reconfigured.sources[0].last_applied_sha, None,
+            "changing the source identity must invalidate prior receipts");
+
+        let other_source = root.join("another-source.json");
+        fs::write(&other_source, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        assert_ne!(headless_receipts_path(&root, &other_source).unwrap(), receipts_path,
+            "different registry paths must not share receipt storage");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub(crate) fn verify_manifest(doc: &Value) -> Result<()> {
     Ok(())
 }
 
-fn set_private_directory(path: &Path) -> Result<()> {
+pub(crate) fn set_private_directory(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|error| format!("Unable to create private configuration directory: {error}"))?;
     #[cfg(unix)]
     {

@@ -171,7 +171,9 @@ Each `--import-bots` run now creates and verifies a secret-free configuration ba
 before changing any bots. The backup path is printed, and a backup failure prevents
 all imports. The new one-shot `--sync-bots bot-sources.json` command reads GitHub source
 registries and exits after one sync attempt, without starting a Connect host. It
-does not automatically poll; the original serve and sign-in flows are unchanged.
+persists per-registry sync receipts in private application data rather than modifying
+the source JSON, so a second unchanged run can skip backup and import. It does not
+automatically poll; the original serve and sign-in flows are unchanged.
 
 Schedules, rules, profiles and secrets are read fresh by a running serve; channels added
 by hand (not through the import) need a restart to connect.

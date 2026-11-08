@@ -19,7 +19,19 @@ test.describe('shared bot channels', () => {
     // Leaving a channel must show the selected bot immediately, without its Back button.
     const channelPrompt = page.getByRole('textbox', { name: 'Message channel' });
     await channelPrompt.fill('Unsent channel draft');
+    const pageErrors: string[] = [];
+    page.on('pageerror', error => pageErrors.push(error.message));
     await sidebar(page).getByRole('button', { name: /^Chat with Scout/ }).click();
+    const snapshot = await page.evaluate(() => ({
+      url: location.href,
+      panes: document.querySelectorAll('.conversation-pane').length,
+      breadcrumb: document.querySelector('#breadcrumb')?.textContent,
+      rootLength: document.querySelector('#app')?.innerHTML.length,
+      botRows: document.querySelectorAll('.bot-row').length,
+      channelComposer: Boolean(document.querySelector('#shared-channel-composer')),
+      botComposer: Boolean(document.querySelector('#composer #prompt')),
+    }));
+    console.log('Channel-to-bot navigation diagnostics:', JSON.stringify({ ...snapshot, pageErrors }));
     await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
     await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
     await expect(page.locator('#transcript .bc-channel')).toHaveCount(0);

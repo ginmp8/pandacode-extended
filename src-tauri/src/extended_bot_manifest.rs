@@ -29,6 +29,13 @@ pub(crate) struct ExportOutcome {
     pub omitted_shared_channels: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportFolderOutcome {
+    pub paths: Vec<String>,
+    pub omitted_shared_channels: Vec<String>,
+}
+
 pub(crate) fn verify_manifest(doc: &Value) -> Result<()> {
     let bytes = serde_json::to_vec(doc).map_err(|error| error.to_string())?;
     if bytes.len() > MAX_MANIFEST_BYTES {
@@ -148,7 +155,9 @@ pub(crate) fn export_selection(store: &Store, ids: &[String]) -> Result<ExportOu
         let members = entry.get("members").and_then(Value::as_array);
         let complete = members.is_some_and(|items| items.iter().all(|member|
             member.as_str().is_some_and(|name| selected_names.contains(name))));
-        if !complete {
+        let selected_member = members.is_some_and(|items| items.iter().any(|member|
+            member.as_str().is_some_and(|name| selected_names.contains(name))));
+        if !complete && selected_member {
             if let Some(name) = entry.get("name").and_then(Value::as_str) { omitted.push(name.to_owned()); }
         }
         complete
@@ -229,28 +238,35 @@ fn safe_filename(value: &str) -> String {
     if trimmed.is_empty() { "bot".into() } else { trimmed.into() }
 }
 
-#[tauri::command]
-pub async fn bot_manifest_export_folder(
-    window: tauri::WebviewWindow, state: State<'_, AppState>, bot_ids: Vec<String>, folder: String,
-) -> Result<Vec<String>> {
-    check_main(&window)?;
-    let folder = PathBuf::from(folder);
+/// Export each bot independently. Shared channels whose complete membership is not
+/// in an individual manifest are intentionally omitted and reported to the caller.
+fn export_folder(store: &Store, bot_ids: &[String], folder: &Path) -> Result<ExportFolderOutcome> {
     if !folder.is_dir() { return Err("Choose an existing export directory.".into()); }
-    let store = state.store.lock().map_err(|error| error.to_string())?;
-    let known = bots::list(&store)?;
+    let known = bots::list(store)?;
     if bot_ids.is_empty() { return Err("Select at least one bot to export.".into()); }
     let mut paths = Vec::new();
+    let mut omitted = BTreeSet::new();
     let mut seen = BTreeSet::new();
     for id in bot_ids {
-        if !seen.insert(id.clone()) { return Err("A bot was selected twice.".into()); }
-        let bot = known.iter().find(|bot| bot.id == id).ok_or("A selected bot no longer exists.")?;
-        let outcome = export_selection(&store, &[id])?;
+        if !seen.insert(id) { return Err("A bot was selected twice.".into()); }
+        let bot = known.iter().find(|bot| &bot.id == id).ok_or("A selected bot no longer exists.")?;
+        let outcome = export_selection(store, std::slice::from_ref(id))?;
+        omitted.extend(outcome.omitted_shared_channels);
         // Suffix the local ID so bots with colliding names cannot overwrite one another.
         let path = folder.join(format!("{}-{}.json", safe_filename(&bot.name), safe_filename(&bot.id)));
         atomic_write_new(&path, &document_bytes(&outcome.document)?)?;
         paths.push(path.display().to_string());
     }
-    Ok(paths)
+    Ok(ExportFolderOutcome { paths, omitted_shared_channels: omitted.into_iter().collect() })
+}
+
+#[tauri::command]
+pub async fn bot_manifest_export_folder(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, bot_ids: Vec<String>, folder: String,
+) -> Result<ExportFolderOutcome> {
+    check_main(&window)?;
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    export_folder(&store, &bot_ids, Path::new(&folder))
 }
 
 #[cfg(test)]
@@ -278,6 +294,41 @@ mod tests {
         assert_eq!(saved["bots"], serde_json::json!([]));
         assert_eq!(saved["sharedChannels"], serde_json::json!([]));
         let _ = fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn individual_exports_report_only_relevant_omitted_shared_channels() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let root = std::env::temp_dir().join(format!("pandacode-export-selection-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("exports");
+        fs::create_dir_all(&folder).unwrap();
+        let create_bot = |name: &str| bots::create(&store, &bots::BotInput {
+            name: name.into(), instructions: "Keep the manifest portable.".into(),
+            provider: "claude".into(), model: "default".into(), mode: "ask".into(),
+            ..Default::default()
+        }, &root).unwrap();
+        let scout = create_bot("Scout");
+        let writer = create_bot("Writer");
+        let other = create_bot("Other");
+        bots::shared_channels::create(&store, "release", &[scout.id.clone(), writer.id.clone()]).unwrap();
+        bots::shared_channels::create(&store, "unrelated", std::slice::from_ref(&other.id)).unwrap();
+
+        let selected = export_selection(&store, std::slice::from_ref(&scout.id)).unwrap();
+        assert_eq!(selected.omitted_shared_channels, vec!["release"]);
+        assert_eq!(selected.document["sharedChannels"], serde_json::json!([]));
+        let combined = export_selection(&store, &[scout.id.clone(), writer.id.clone()]).unwrap();
+        assert!(combined.omitted_shared_channels.is_empty());
+        assert_eq!(combined.document["sharedChannels"].as_array().unwrap().len(), 1);
+
+        let separate = export_folder(&store, &[scout.id.clone(), writer.id.clone()], &folder).unwrap();
+        assert_eq!(separate.paths.len(), 2);
+        assert_eq!(separate.omitted_shared_channels, vec!["release"]);
+        for path in separate.paths {
+            let document: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(document["bots"].as_array().unwrap().len(), 1);
+            assert_eq!(document["sharedChannels"], serde_json::json!([]));
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

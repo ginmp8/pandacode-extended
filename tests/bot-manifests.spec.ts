@@ -30,7 +30,10 @@ async function mount(page: Page, mode: 'import' | 'export') {
         return { document: { bots: [] }, omittedSharedChannels: ['requires-other-bots'] };
       }
       if (command === 'bot_manifest_export_folder') {
-        return (args.botIds as string[]).map((id: string) => '/saved/' + id + '.json');
+        return {
+          paths: (args.botIds as string[]).map((id: string) => '/saved/' + id + '.json'),
+          omittedSharedChannels: ['shared-with-writer'],
+        };
       }
       if (command === 'bot_manifest_sources_list') return clone(w.__manifestRegistry);
       if (command === 'bot_manifest_sources_save') {
@@ -98,6 +101,7 @@ test.describe('bot manifests', () => {
     await host.getByRole('radio', { name: /separate JSON file per bot/i }).check();
     await host.getByRole('button', { name: /Export selected bots/ }).click();
     await expect(host.getByRole('status')).toContainText('Exported 2 bot manifest');
+    await expect(host.getByRole('status')).toContainText('shared-with-writer');
     const folders = await page.evaluate(() => (window as any).__manifestCalls.filter((entry: any) =>
       entry.command === 'bot_manifest_export_folder'));
     expect(folders[0].args.botIds).toEqual(['bot-scout', 'bot-writer']);

@@ -8,7 +8,7 @@ Open **Bots → +**. The existing **New bot** and **New channel** actions remain
 
 - **Import / Sync bots… → Local JSON file** reads a UTF-8 `{"bots":[...]}` manifest and imports it immediately after a verified local backup. No dry-run is required. A partial import reports errors and keeps the successfully imported entries.
 - **Import / Sync bots… → Git sources** manages one or more `https://github.com/owner/repo` repositories, refs and explicit JSON file paths. Choose **Save sources**, **Check for updates** (read-only), or **Sync now** (validates every selected manifest, backs up locally, then applies).
-- **Export bots…** selects one or many bots. Save a combined JSON file or choose a directory for individual per-bot JSON files. Existing destination files are not overwritten by Desktop exports. When a selected bot set excludes some members of a local shared channel, that channel is omitted and the dialog reports its name.
+- **Export bots…** selects one or many bots. Save a combined JSON file or choose a directory for individual per-bot JSON files. Existing destination files are not overwritten by Desktop exports. A combined file includes a shared channel only when all its members are selected; each individual bot file includes only channels whose full membership fits that file. Channels involving selected bots but omitted due to missing members are named in the export result and displayed in the dialog, including individual-file exports. Unrelated channels are not reported as omissions.
 
 The existing Bots view refreshes after import or sync. The manifest contains configuration only, not conversation posts, runtime state, memories, workspace files, pending assignments, pairing decisions, credentials or application/database backups.
 

@@ -10,12 +10,16 @@ type Source = {
 };
 type Registry = { version: number; sources: Source[] };
 type ExportResult = { omittedSharedChannels: string[]; document: unknown };
+type FolderExportResult = { paths: string[]; omittedSharedChannels: string[] };
 type ImportResult = { backupPath: string; lines: string[]; failed: number };
 type SyncResult = ImportResult & { applied: boolean; sources: { id: string; commit: string; paths: string[]; hashes: string[] }[]; backupPath: string | null };
 
 const text = (value: unknown): string => value instanceof Error ? value.message : String(value);
 const jsonFilter = [{ name: 'JSON manifests', extensions: ['json'] }];
 const briefSha = (value?: string | null): string => value ? value.slice(0, 12) : 'Not checked';
+const omissionNotice = (channels: string[]): string => channels.length
+  ? ' Shared channels omitted because their full membership is not in each exported file: ' + channels.join(', ') + '.'
+  : '';
 
 export async function mountBotManifests(
   host: HTMLElement,
@@ -130,15 +134,14 @@ export async function mountBotManifests(
         if (separate) {
           const folder = await open({ title: 'Export individual bot manifests', directory: true, multiple: false });
           if (typeof folder !== 'string') return;
-          const files = await call<string[]>('bot_manifest_export_folder', { botIds, folder });
-          status('Exported ' + files.length + ' bot manifest(s) to ' + folder + '.');
+          const result = await call<FolderExportResult>('bot_manifest_export_folder', { botIds, folder });
+          status('Exported ' + result.paths.length + ' bot manifest(s) to ' + folder + '.' +
+            omissionNotice(result.omittedSharedChannels));
         } else {
           const path = await save({ title: 'Export bot configuration', defaultPath: 'bots.json', filters: jsonFilter });
           if (!path) return;
           const result = await call<ExportResult>('bot_manifest_export_file', { botIds, path });
-          const omitted = result.omittedSharedChannels.length ?
-            ' Cross-selection shared channels omitted: ' + result.omittedSharedChannels.join(', ') + '.' : '';
-          status('Configuration saved to ' + path + '.' + omitted);
+          status('Configuration saved to ' + path + '.' + omissionNotice(result.omittedSharedChannels));
         }
       } else if (action === 'import') {
         const file = host.querySelector<HTMLInputElement>('[data-manifest-local]')?.files?.[0];

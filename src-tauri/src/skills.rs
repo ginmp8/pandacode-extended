@@ -9,6 +9,7 @@ mod safety;
 pub(crate) mod scoped;
 mod sync;
 mod sources;
+mod customize;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -893,3 +894,18 @@ pub fn begin_startup_sync(app: AppHandle) {
 mod tests;
 #[cfg(test)]
 mod catalog_tests;
+
+#[tauri::command]
+pub async fn skills_import_zip(app: AppHandle, path: String) -> crate::Result<customize::ZipInstall> {
+    crate::blocking(move || customize::import_zip(&app, &path)).await
+}
+
+#[tauri::command]
+pub async fn skills_preview_file(app: AppHandle, id: String, file: String) -> crate::Result<customize::PreviewFile> {
+    crate::blocking(move || customize::installed_preview(&app, &id, &file)).await
+}
+
+#[tauri::command]
+pub async fn skills_github_preview_file(repo: String, path: String, commit: String, file: String) -> crate::Result<customize::PreviewFile> {
+    crate::blocking(move || customize::github_preview(&repo, &path, &commit, &file)).await
+}

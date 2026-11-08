@@ -2948,10 +2948,12 @@ async function showViewMenu(anchor: HTMLElement): Promise<void> {
   const width = 200, rect = anchor.getBoundingClientRect();
   const inSidebar = Boolean(anchor.closest('.sidebar'));
   const point = { x: inSidebar ? Math.max(8, rect.right - width) : rect.left, y: rect.bottom };
-  await showChoices(anchor, { title: 'Workspace view', width, point, items: WORKSPACE_VIEWS.filter(view => view.id !== 'github' || githubEnabled()).map(view => ({ id: view.id, label: view.label, icon: view.icon, selected: view.id === state.view })), onSelect: id => setWorkspaceView(id as WorkspaceView) });
+  await showChoices(anchor, { title: 'Workspace view', width, point, items: WORKSPACE_VIEWS.filter(view => view.id !== 'github' || githubEnabled()).map(view => ({ id: view.id, label: view.label, icon: view.icon, selected: view.id === state.view })), onSelect: id => {
+    if (customizeShown) closeCustomize(false);
+    setWorkspaceView(id as WorkspaceView);
+  } });
 }
 function setWorkspaceView(view: WorkspaceView): void {
-  if (customizeShown) closeCustomize();
   if (state.view === view) return;
   closeMenus();
   state.view = view; localStorage.setItem('pandacode.view', view);
@@ -3224,7 +3226,6 @@ function selectSession(id: string, focusComposer = false): Promise<void> {
   return id === state.sessionId ? openThread(id, focusComposer) : snapDockDuring(() => openThread(id, focusComposer));
 }
 async function openThread(id: string, focusComposer: boolean): Promise<void> {
-  if (customizeShown) closeCustomize();
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
   // A channel is a separate conversation view, not an overlay on the selected task.
@@ -5727,13 +5728,13 @@ async function toggleCustomize(): Promise<void> {
   }).catch(cause => { closeCustomize(); report(cause); }).finally(() => { customizeOpening = undefined; });
   await customizeOpening;
 }
-function closeCustomize(): void {
+function closeCustomize(restoreFocus = true): void {
   if (!customizeShown) return;
   customizeShown = false;
   $('#customize-hub').hidden = true;
   $('.workspace').classList.remove('customize-open');
   document.querySelector<HTMLElement>('.sidebar-customize > button')?.setAttribute('aria-pressed', 'false');
-  if (customizeReturnFocus?.isConnected) customizeReturnFocus.focus({preventScroll:true});
+  if (restoreFocus && customizeReturnFocus?.isConnected) customizeReturnFocus.focus({preventScroll:true});
   customizeReturnFocus = null;
 }
 
@@ -6783,6 +6784,13 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   if (['tab-files', 'tab-changes', 'browser', 'back-inspector'].includes(name) || name === 'toggle-inspector' && !state.filePreviewLoading) ++fileRequest;
   if (name.startsWith('queue-')) { await queueAction(name, element); return; }
   if (name.startsWith('limit-')) { await limitAction(name, element); return; }
+  // Close Customize only for explicit user navigation, never for asynchronous
+  // thread refreshes or no-op workspace view updates.
+  if (customizeShown && [
+    'new-task', 'new-chat', 'board-view', 'conversation-view', 'github-view',
+    'board-open', 'select-task', 'select-project', 'open-bot',
+    'open-shared-channel', 'bots', 'new-bot', 'settings-page',
+  ].includes(name)) closeCustomize(false);
   switch (name) {
     case 'support': await openSupport(); break;
     case 'new-task': if (state.view === 'board') showBoardTaskForm(); else await createTask(); break;
@@ -6844,7 +6852,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'delete-task': showDeleteTask(); break;
     case 'search': showCommands(); break;
     case 'retry-response': { const id = actionTask(element)?.id ?? state.sessionId, finishing = finishingStreams.get(id); if (finishing) await finishResponse(id, finishing); break; }
-    case 'settings': case 'refresh-settings': if (customizeShown) closeCustomize(); await showSettings(); break;
+    case 'settings': case 'refresh-settings': if (customizeShown) closeCustomize(false); await showSettings(); break;
     case 'settings-page': await showSettings(element.dataset.id as import('./settings').SettingsSection); break;
     case 'wallpaper-settings': await showWallpaperSettings(); break;
     case 'provider-connections': await showProviderConnections(); break;
@@ -6875,7 +6883,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'bot-task-menu': await showBotTaskMenu(element); break;
     case 'cloud-menu': await showCloudMenu(element); break;
     case 'toggle-customize': await toggleCustomize(); break;
-    case 'toggle-bots-view': if (customizeShown) closeCustomize(); setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
+    case 'toggle-bots-view': if (customizeShown) closeCustomize(false); setSidebarView(sidebarView === 'bots' ? 'tasks' : 'bots'); break;
     case 'import-conversations': await showConversationImport(); break;
     case 'agent-updates': await agentUpdates.show(); break;
     case 'goal': case 'jobs': case 'usage': if (session()) await performSlashAction(name, '', session()!); break;

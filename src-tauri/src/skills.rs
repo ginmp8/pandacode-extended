@@ -23,8 +23,9 @@ pub use safety::Finding;
 
 /// Relative path and bytes of each file in a skill or rule.
 pub type Files = Vec<(String, Vec<u8>)>;
-pub const MAX_FILES: usize = 64;
-pub const MAX_BYTES: usize = 1 << 20;
+// Bounded to include the public RhapsodIA Archify package (206 files / ~18 MiB).
+pub const MAX_FILES: usize = 256;
+pub const MAX_BYTES: usize = 24 << 20;
 // ponytail: one lock for the whole library; per-item locks if imports ever get slow.
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -197,6 +198,23 @@ fn now_ms() -> u64 {
 
 /// A skill keeps its folder and needs a SKILL.md; a rule is one Markdown file, kept as RULE.md.
 fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
+    if files.len() > MAX_FILES {
+        return Err(format!("A package may contain at most {MAX_FILES} files."));
+    }
+    let mut bytes = 0usize;
+    let mut names = std::collections::HashSet::new();
+    for (name, content) in &files {
+        if name.is_empty() || name.starts_with('/') || name.contains('\\')
+            || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.starts_with('.'))
+            || !names.insert(name.to_ascii_lowercase())
+        {
+            return Err(format!("Unsafe, duplicate, or case-conflicting package path: {name}."));
+        }
+        bytes = bytes.checked_add(content.len()).ok_or("Package size overflow.")?;
+        if bytes > MAX_BYTES {
+            return Err(format!("A package may contain at most {} MiB.", MAX_BYTES >> 20));
+        }
+    }
     let markdown: Vec<_> = files.iter().filter(|(p, _)| !p.contains('/') && p.to_ascii_lowercase().ends_with(".md")).collect();
     match kind {
         Kind::Skill if files.iter().any(|(p, _)| p == "SKILL.md") => Ok(files),
@@ -216,7 +234,7 @@ fn read_local(path: &Path) -> Result<Files, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
     if meta.is_file() {
         if meta.len() as usize > MAX_BYTES {
-            return Err("That file is larger than 1 MB.".into());
+            return Err(format!("That file is larger than {} MiB.", MAX_BYTES >> 20));
         }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "SKILL.md".into());
         return Ok(vec![(name, fs::read(path).map_err(|e| e.to_string())?)]);
@@ -236,7 +254,7 @@ fn read_local(path: &Path) -> Result<Files, String> {
                 let bytes = fs::read(entry.path()).map_err(|e| e.to_string())?;
                 total += bytes.len();
                 if files.len() >= MAX_FILES || total > MAX_BYTES {
-                    return Err(format!("That folder holds more than {MAX_FILES} files or 1 MB."));
+                    return Err(format!("That folder holds more than {MAX_FILES} files or {} MiB.", MAX_BYTES >> 20));
                 }
                 let relative = entry.path().strip_prefix(path).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
                 files.push((relative, bytes));
@@ -580,9 +598,8 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
 #[tauri::command]
 pub async fn skills_import_github(app: AppHandle, repo: String, path: String, git_ref: Option<String>, kind: Kind) -> crate::Result<Item> {
     crate::blocking(move || {
-        let repo = repo_name(&repo);
+        let (repo, path, git_ref) = github::selection(&repo, &path, git_ref.as_deref())?;
         let (files, commit) = github::fetch(&repo, &path, git_ref.as_deref())?;
-        let path = path.trim_matches('/').to_string();
         let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(repo.rsplit('/').next().unwrap_or_default()).to_string();
         let location = if path.is_empty() { repo } else { format!("{repo}/{path}") };
         library(&app)?.import(kind, files, &name, Source { kind: "github".into(), location, git_ref, commit: Some(commit) })

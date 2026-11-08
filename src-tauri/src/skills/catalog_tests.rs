@@ -128,11 +128,11 @@ fn per_skill_and_per_catalog_limits_have_clear_errors() {
     let fx = Fixture::new();
     let mut fake = Fake::default();
     let mut big: Vec<(String, String)> = vec![("SKILL.md".into(), skill("Big"))];
-    big.extend((0..64).map(|i| (format!("extra/{i}.md"), "x".to_string())));
+    big.extend((0..MAX_FILES).map(|i| (format!("extra/{i}.md"), "x".to_string())));
     fake.repo("me/big", "b1", &big);
     fx.library.add_catalog(&fake.api(), "me/big", None).unwrap();
     let result = fx.library.import_catalog(&fake.api(), "me/big", None).unwrap();
-    assert!(result.skipped[0].reason.contains("more than 64 files"), "{:?}", result.skipped);
+    assert!(result.skipped[0].reason.contains(&format!("more than {MAX_FILES} files")), "{:?}", result.skipped);
 
     let many: Vec<(String, String)> = (0..=catalog::MAX_SKILLS).map(|i| (format!("s/{i}/SKILL.md"), skill(&format!("s{i}")))).collect();
     fake.repo("me/many", "m1", &many);

@@ -10,7 +10,7 @@
 
 ## Recommendations
 
-`src/recommended-skills.v1.json` provides 15 primary references, grouped into core engineering, diagrams, spec conformance and audit specialists, plus four optional entries. Paths, not personal ChatGPT plugins or local runtime URIs, identify each skill. The initial catalog explicitly excludes `mago`, `magia` and `nomia` from recommendations. Source availability is checked against the public Git tree: `agent-systems-best-practices` was absent when this branch was authored, so its optional recommendation is displayed as unavailable instead of claiming that it can be imported.
+`src/recommended-skills.v1.json` provides 15 primary references, grouped into core engineering, diagrams, spec conformance and audit specialists, plus four optional entries. Repository paths identify each skill without relying on local runtime-specific identifiers. The initial catalog explicitly excludes `mago`, `magia` and `nomia` from recommendations. Source availability is checked against the public Git tree: `agent-systems-best-practices` was absent when this branch was authored, so its optional recommendation is displayed as unavailable instead of claiming that it can be imported.
 
 Install the [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login`. In **Settings → Skills & rules → Recommended skills**, choose individual available packages or **Install all primary skills**. The catalog is an opt-in import, **not** automatic activation. The importer stores the full package (within bounded limits), source path, selected ref, resolved commit and file hashes. A user may select a full commit SHA instead of the moving `main` branch.
 

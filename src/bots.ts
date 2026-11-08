@@ -379,7 +379,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         <h5>Choose panda</h5>${avatarPicker(bot.avatar, bot.color ?? '')}<h5>Color</h5>${colorPicker(bot.color ?? '')}
         <button type="button" class="bp-avatar-reset" data-bots-action="avatar-reset">${icon('reset')}Reset</button></div>`
       : `<input type="hidden" name="avatar" value="${escape(bot.avatar)}"><input type="hidden" name="color" value="${escape(bot.color ?? '')}">`;
-    return `<form class="bots-form bots-profile" novalidate aria-label="Profile">
+    return `<form class="bots-form bots-profile" data-bot-id="${escape(bot.id)}" novalidate aria-label="Profile">
       <div class="bp-identity"><span class="bp-avatar-wrap"><button type="button" class="bp-avatar-button" data-bots-action="avatar" aria-haspopup="dialog" aria-expanded="${avatarOpen}" aria-label="Change icon">${avatar(bot, 'bp-avatar')}<span class="bp-avatar-badge">${icon('edit')}</span></button>${pop}</span>
         <div class="bp-identity-fields"><input name="name" maxlength="60" required value="${escape(bot.name)}" placeholder="Name" aria-label="Name" autocomplete="off"><input name="role" maxlength="200" value="${escape(bot.role)}" placeholder="Title, like Research assistant" aria-label="Title" autocomplete="off"><p class="bc-error" id="bp-name-error" hidden></p></div></div>
       ${card('Instructions', `<label class="bs-row stacked bots-instructions"><span class="bs-row-text"><small>How it should work, what to always or never do</small></span><textarea name="instructions" rows="4" maxlength="16000" aria-label="Instructions">${escape(bot.instructions)}</textarea></label>
@@ -526,6 +526,16 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const confirm = confirming ? `<div class="bots-confirm" role="alertdialog" aria-label="${escape(confirming.title)}"><b>${escape(confirming.title)}</b><p>${escape(confirming.text)}</p><div class="dialog-footer"><button type="button" class="secondary-button" data-bots-action="confirm-cancel">Cancel</button><button type="button" class="primary-button danger" data-bots-action="confirm-run">${escape(confirming.button)}</button></div></div>` : '';
     const alert = error ? `<p class="bots-error" role="alert">${escape(error)}</p>` : '';
     if (loading) { pane.innerHTML = '<p class="dialog-loading" role="status">Loading bots…</p>'; return; }
+    // Keep manual textarea sizes across rerenders, including when the resized field is not focused.
+    // Restrict them to the same bot and section; another bot's form starts at its default sizes.
+    const previousProfile = pane.querySelector<HTMLFormElement>('.bots-profile');
+    const textareaHeights = new Map<string, number>();
+    if (section === 'profile' && previousProfile?.dataset.botId === detail?.bot.id) {
+      for (const field of previousProfile.querySelectorAll<HTMLTextAreaElement>('textarea[name]')) {
+        const height = field.getBoundingClientRect().height;
+        if (height > 0) textareaHeights.set(field.name, height);
+      }
+    }
     // Keep a half-typed setting (a new memory, a schedule prompt) and its caret through background refreshes.
     const typing = pane.contains(document.activeElement) ? document.activeElement as HTMLInputElement | HTMLTextAreaElement : null;
     const kept = typing?.matches('textarea,input:not([type=checkbox],[type=hidden])') ? { name: typing!.name || typing!.getAttribute('aria-label') || '', value: typing!.value, start: typing!.selectionStart, end: typing!.selectionEnd } : null;
@@ -550,6 +560,10 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
       const saved = (section === 'profile' || section === 'shared-channels') ? `<span class="bs-saved" role="status" aria-live="polite" data-state="${saveState}"></span>` : '';
       morph(pane, `${renderHeader(detail.bot)}${confirm}${alert}<div class="bs-body">${nav}<div class="bots-panel" id="bs-panel" role="tabpanel" aria-labelledby="bs-tab-${section}"><div class="bs-panel-head"><h2>${current.label}${saved}</h2><p>${escape(current.text)}</p></div>${body}</div></div>`, 9);
       resetFields(pane);
+      for (const field of pane.querySelectorAll<HTMLTextAreaElement>('.bots-profile textarea[name]')) {
+        const height = textareaHeights.get(field.name);
+        if (height !== undefined) field.style.height = `${height}px`;
+      }
       setSaved(saveState);
     }
     hydrateFormModels();

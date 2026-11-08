@@ -148,5 +148,5 @@ To recover, import the backup JSON through the same import path. This restores s
 - Up to 1 MiB of normalized JSON and 250 bot entries per import batch; Git files are individually bounded to 512 KiB, with at most 16 sources and 32 manifest files.
 - Git is read-only and manual by default. A source revision that fails partially is not recorded as fully applied; correct the manifest and retry.
 - Native per-bot partial success, canonical name matching and non-deletion by omission are preserved.
-- The original `--export-bots` path behavior is retained for compatibility. For protected, no-clobber desktop exports, choose a new destination in the Export dialog.
+- Headless `--export-bots` retains its original path and overwrite behavior. It now writes a same-directory temporary file (mode `0600` on Unix), flushes it, atomically replaces the destination, verifies the final bytes and removes a temporary file after a failed write or replacement. For no-clobber desktop exports, choose a new destination in the Export dialog.
 - This is not an application restore, a second bot CRUD engine, two-way Git sync, or a replacement for security reviews before applying untrusted configuration.

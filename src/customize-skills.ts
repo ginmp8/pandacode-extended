@@ -30,7 +30,7 @@ type Operation = {
 type Detail = { kind: 'installed'; id: string; file: string } | { kind: 'remote'; path: string; file: string };
 export type CustomizeSkillsHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
-  subscribe(name: string, listener: (event: any) => void): Promise<() => void>;
+  subscribe(listener: (event: any) => void): Promise<() => void>;
   chooseZip(): Promise<string | null>;
   close(): void;
 };
@@ -167,6 +167,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const item = detail.kind === 'installed' ? installed.find(item => item.id === (detail as {id:string}).id) : scan?.skills.find(skill => skill.path === (detail as any).path);
     if (!item) return '';
     const files = detail.kind === 'installed' ? (item as SkillItem).files : ['SKILL.md'];
+    const selectedFile = detail.file;
     const source = detail.kind === 'installed' ? (item as SkillItem).source : {kind:'github',location:scan!.repo, gitRef:scan!.gitRef,commit:scan!.commit};
     return `<section class="customize-detail ds-card" aria-label="Read-only skill preview">
       <div class="customize-detail-heading">
@@ -177,7 +178,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       <div class="customize-preview-shell">
         <nav class="customize-file-tree" aria-label="Package files">
           <strong>Files</strong>
-          ${files.map(path => `<button type="button" data-customize="preview-file" data-file="${esc(path)}" class="${detail.file === path ? 'selected' : ''}">${icon('file')}<span>${esc(path)}</span></button>`).join('')}
+          ${files.map(path => `<button type="button" data-customize="preview-file" data-file="${esc(path)}" class="${selectedFile === path ? 'selected' : ''}">${icon('file')}<span>${esc(path)}</span></button>`).join('')}
         </nav>
         <div class="customize-preview-main">
           <div class="customize-preview-toolbar"><span>${esc(detail.file)}</span><div class="customize-mode-switch">
@@ -465,7 +466,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   host.addEventListener('input',input);
   host.addEventListener('change',change);
   host.addEventListener('submit',submit);
-  void options.subscribe('skills-operation-progress',handleProgress).then(cleanup=>{if(disposed)cleanup();else unsub=cleanup;}).catch(()=>{});
+  void options.subscribe(handleProgress).then(cleanup=>{if(disposed)cleanup();else unsub=cleanup;}).catch(()=>{});
   draw();
   void refresh();
   return {dispose(){

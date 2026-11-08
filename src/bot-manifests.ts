@@ -81,7 +81,7 @@ export async function mountBotManifests(
         '<section><label class="bm-file">Select a UTF-8 JSON manifest<input type="file" accept=".json,application/json" data-manifest-local></label>' +
         '<p class="bm-note">Existing bots are updated by name; omitted bots are never deleted. A failed bot does not undo other successful bots.</p>' +
         '<div class="dialog-footer"><button type="button" class="primary-button" data-manifest-apply>Import bots…</button></div></section>'
-        : '<section><p>Sources are read-only. Each Git ref is pinned to a commit before its JSON files are loaded. Private GitHub repositories require an existing <code>GH_TOKEN</code> or <code>GITHUB_TOKEN</code> in the application environment.</p>' +
+        : '<section><p>Sources are read-only. Each Git ref is pinned to a commit before its JSON files are loaded. PandaCode uses the installed GitHub CLI (<code>gh</code>) and your existing <code>gh auth login</code> session. Public repositories also work without authentication; no manually configured token is required.</p>' +
         registry.sources.map(sourceRow).join('') +
         '<button type="button" class="secondary-button" data-source-add>Add source</button>' +
         '<div class="dialog-footer bm-actions"><button type="button" class="secondary-button" data-sources-save>Save sources</button>' +

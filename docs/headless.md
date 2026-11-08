@@ -170,7 +170,11 @@ pandacode serve --import-bots bots.json
 Each `--import-bots` run now creates and verifies a secret-free configuration backup
 before changing any bots. The backup path is printed, and a backup failure prevents
 all imports. The new one-shot `--sync-bots bot-sources.json` command reads GitHub source
-registries and exits after one sync attempt, without starting a Connect host. It
+registries and exits after one sync attempt, without starting a Connect host.
+It prefers an installed, authenticated GitHub CLI (`gh api`; configure with
+`gh auth login`) and falls back to the existing HTTPS transport if `gh` is
+missing or not signed in. Public sources need no authentication, and existing
+headless environment tokens remain optional for private repositories. It
 persists per-registry sync receipts in private application data rather than modifying
 the source JSON, so a second unchanged run can skip backup and import. It does not
 automatically poll; the original serve and sign-in flows are unchanged.

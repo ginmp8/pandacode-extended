@@ -79,6 +79,15 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('bot manifests', () => {
+  test('explains existing GitHub CLI login without requiring manual tokens', async ({ page }) => {
+    const host = await mount(page, 'import');
+    await host.getByRole('button', { name: 'Git sources' }).click();
+    const text = await host.textContent();
+    expect(text).toContain('gh auth login');
+    expect(text).toContain('no manually configured token is required');
+    expect(text).not.toContain('require an existing GH_TOKEN');
+  });
+
   test('keeps export checkboxes and radios beside their labels with global app styles', async ({ page }) => {
     // The production stylesheet gives all inputs width: 100%; the fixture alone
     // does not include it, so explicitly load it to catch dialog regressions.

@@ -5,13 +5,14 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, process::Stdio, time::Duration};
 use tauri::{Emitter, Manager};
 
 const MAX_SOURCES: usize = 16;
 const MAX_FILES: usize = 32;
 const MAX_SOURCE_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // Base64 adds ~34% before JSON wrapping.
+const GH_API_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,10 +130,75 @@ fn validate_registry(registry: &SourceRegistry) -> Result<()> {
 }
 
 fn api_url(owner: &str, repo: &str, suffix: &[&str]) -> Result<tauri::Url> {
-    let mut url = tauri::Url::parse("https://api.github.com/repos/").map_err(|error| error.to_string())?;
+    let mut url = tauri::Url::parse("https://api.github.com/").map_err(|error| error.to_string())?;
+    // Start at the root: an accidental empty path segment makes every API call return 404.
     url.path_segments_mut().map_err(|_| "Invalid GitHub API path.")?
-        .extend([owner, repo].into_iter().chain(suffix.iter().copied()));
+        .clear().extend(["repos", owner, repo].into_iter().chain(suffix.iter().copied()));
     Ok(url)
+}
+
+/// Use the same exact GitHub REST path and query for CLI and anonymous HTTPS requests.
+fn gh_endpoint(url: &tauri::Url) -> Result<String> {
+    if url.scheme() != "https" || url.host_str() != Some("api.github.com") || url.port().is_some() {
+        return Err("Invalid GitHub API host.".into());
+    }
+    let path = url.path().trim_start_matches('/');
+    if !path.starts_with("repos/") { return Err("Invalid GitHub API endpoint.".into()); }
+    let mut endpoint = path.to_owned();
+    if let Some(query) = url.query() {
+        endpoint.push('?');
+        endpoint.push_str(query);
+    }
+    Ok(endpoint)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GhApiError {
+    Unavailable,
+    Unauthenticated,
+    Failed(String),
+}
+
+/// Invokes the user's installed GitHub CLI without a shell or extracting its credentials.
+/// CLI arguments are constructed from the already validated repository, ref, and path.
+async fn get_api_via_gh(executable: &str, url: &tauri::Url) -> std::result::Result<Value, GhApiError> {
+    let endpoint = gh_endpoint(url).map_err(GhApiError::Failed)?;
+    let mut command = tokio::process::Command::new(executable);
+    command.args([
+        "api", "--hostname", "github.com", "--method", "GET",
+        "--header", "Accept: application/vnd.github+json", &endpoint,
+    ])
+        .env("GH_PROMPT_DISABLED", "1")
+        .env_remove("GH_FORCE_TTY")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(GH_API_TIMEOUT, command.output()).await
+        .map_err(|_| GhApiError::Failed("GitHub CLI request timed out.".into()))?
+        .map_err(|error| if error.kind() == std::io::ErrorKind::NotFound {
+            GhApiError::Unavailable
+        } else {
+            GhApiError::Failed(format!("Could not run GitHub CLI: {error}"))
+        })?;
+    if !output.status.success() {
+        // Never return raw CLI stderr: authentication failures may include sensitive details.
+        let error = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if error.contains("gh auth login") || error.contains("not logged into")
+            || error.contains("authentication required") || error.contains("http 401") {
+            return Err(GhApiError::Unauthenticated);
+        }
+        if error.contains("http 404") {
+            return Err(GhApiError::Failed("GitHub CLI returned HTTP 404. Check the repository, branch/ref, file path, and account permissions with 'gh auth status'.".into()));
+        }
+        return Err(GhApiError::Failed(format!(
+            "GitHub CLI request failed ({}). Run 'gh auth status' and verify access to the selected source.",
+            output.status
+        )));
+    }
+    if output.stdout.len() > MAX_RESPONSE_BYTES {
+        return Err(GhApiError::Failed("GitHub CLI API response exceeds the 1 MB limit.".into()));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| GhApiError::Failed("GitHub CLI did not return valid JSON.".into()))
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -148,7 +214,9 @@ fn client() -> Result<reqwest::Client> {
         .build().map_err(|error| error.to_string())
 }
 
-async fn get_api(client: &reqwest::Client, url: tauri::Url) -> Result<Value> {
+/// Public sources work without gh or credentials. Preserve the optional legacy
+/// environment-token transport for headless deployments without an installed CLI.
+async fn get_api_via_http(client: &reqwest::Client, url: tauri::Url) -> Result<Value> {
     let mut request = client.get(url);
     let token = std::env::var("GH_TOKEN").ok().filter(|value| !value.is_empty())
         .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|value| !value.is_empty()));
@@ -156,10 +224,10 @@ async fn get_api(client: &reqwest::Client, url: tauri::Url) -> Result<Value> {
     let response = request.header("Accept", "application/vnd.github+json")
         .send().await.map_err(|error| if error.is_timeout() {
             "GitHub request timed out.".to_owned()
-        } else { "Could not connect to GitHub. Check network access and credentials.".to_owned() })?;
+        } else { "Could not connect to GitHub. Check network access.".to_owned() })?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("GitHub HTTP {status}. Check the source repository, ref, path, rate limits and GH_TOKEN/GITHUB_TOKEN access."));
+        return Err(format!("GitHub HTTP {status}. Check the repository, ref, file path and permissions. For private repositories, install GitHub CLI and run 'gh auth login'."));
     }
     if response.content_length().is_some_and(|size| size > MAX_RESPONSE_BYTES as u64) {
         return Err("GitHub API response exceeds the 1 MB limit.".into());
@@ -167,6 +235,14 @@ async fn get_api(client: &reqwest::Client, url: tauri::Url) -> Result<Value> {
     let bytes = response.bytes().await.map_err(|_| "Could not read the GitHub response.")?;
     if bytes.len() > MAX_RESPONSE_BYTES { return Err("GitHub API response exceeds the 1 MB limit.".into()); }
     serde_json::from_slice(&bytes).map_err(|_| "GitHub did not return valid JSON.".into())
+}
+
+async fn get_api(client: &reqwest::Client, url: tauri::Url) -> Result<Value> {
+    match get_api_via_gh("gh", &url).await {
+        Ok(document) => Ok(document),
+        Err(GhApiError::Unavailable | GhApiError::Unauthenticated) => get_api_via_http(client, url).await,
+        Err(GhApiError::Failed(error)) => Err(error),
+    }
 }
 
 fn read_hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
@@ -255,7 +331,8 @@ async fn fetch_batch(registry: &SourceRegistry) -> Result<(Value, Vec<SourceRece
         let (owner, repo) = github_repo(&source.repository)?;
         let mut url = api_url(&owner, &repo, &["commits"])?;
         url.query_pairs_mut().append_pair("sha", &source.reference).append_pair("per_page", "1");
-        let commits = get_api(&client, url).await?;
+        let commits = get_api(&client, url).await
+            .map_err(|error| format!("Git source {}: cannot resolve ref {:?}: {error}", source.id, source.reference))?;
         let sha = commits.as_array().and_then(|arr| arr.first()).and_then(|commit| commit["sha"].as_str())
             .ok_or_else(|| format!("Source {} has no accessible commit for the selected ref.", source.id))?.to_owned();
         if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -266,7 +343,8 @@ async fn fetch_batch(registry: &SourceRegistry) -> Result<(Value, Vec<SourceRece
             let mut url = api_url(&owner, &repo, &["contents"])?;
             url.path_segments_mut().map_err(|_| "Invalid manifest path.")?.extend(path.split('/'));
             url.query_pairs_mut().append_pair("ref", &sha);
-            let item = get_api(&client, url).await?;
+            let item = get_api(&client, url).await
+                .map_err(|error| format!("Git source {}: cannot read {} at commit {}: {error}", source.id, path, sha))?;
             if item["type"] != "file" || item["encoding"] != "base64" {
                 return Err(format!("Source {}: {} must be a regular JSON file.", source.id, path));
             }
@@ -538,6 +616,59 @@ pub async fn bot_manifest_sources_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_api_paths_match_gh_cli_and_have_no_empty_segments() {
+        let mut commits = api_url("ginmp8", "pandacode-extended", &["commits"]).unwrap();
+        commits.query_pairs_mut().append_pair("sha", "test/issue-122-collaboration-git-import").append_pair("per_page", "1");
+        assert_eq!(commits.path(), "/repos/ginmp8/pandacode-extended/commits");
+        assert_eq!(gh_endpoint(&commits).unwrap(),
+            "repos/ginmp8/pandacode-extended/commits?sha=test%2Fissue-122-collaboration-git-import&per_page=1");
+
+        let sha = "cb45ab437beac0327535340772ec86564651430f";
+        let mut manifest = api_url("ginmp8", "pandacode-extended", &["contents"]).unwrap();
+        manifest.path_segments_mut().unwrap().extend(["tests", "fixtures", "issue-122-collaboration-lab.json"]);
+        manifest.query_pairs_mut().append_pair("ref", sha);
+        assert_eq!(manifest.path(), "/repos/ginmp8/pandacode-extended/contents/tests/fixtures/issue-122-collaboration-lab.json");
+        assert_eq!(gh_endpoint(&manifest).unwrap(),
+            format!("repos/ginmp8/pandacode-extended/contents/tests/fixtures/issue-122-collaboration-lab.json?ref={sha}"));
+        assert!(gh_endpoint(&tauri::Url::parse("https://example.com/repos/a/b").unwrap()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_api_invokes_gh_without_shell_or_explicit_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("pandacode-gh-api-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("gh");
+        fs::write(&executable, r#"#!/bin/sh
+[ "$1" = "api" ] &&
+[ "$2" = "--hostname" ] &&
+[ "$3" = "github.com" ] &&
+[ "$4" = "--method" ] &&
+[ "$5" = "GET" ] &&
+[ "$6" = "--header" ] &&
+[ "$7" = "Accept: application/vnd.github+json" ] &&
+[ "$8" = "repos/acme/bots/commits?sha=feature%2Ftest&per_page=1" ] || exit 9
+printf '%s' '{"sha":"0123456789abcdef0123456789abcdef01234567"}'
+"#).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut url = api_url("acme", "bots", &["commits"]).unwrap();
+        url.query_pairs_mut().append_pair("sha", "feature/test").append_pair("per_page", "1");
+        let result = get_api_via_gh(executable.to_str().unwrap(), &url).await.unwrap();
+        assert_eq!(result["sha"], "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(get_api_via_gh(root.join("missing").to_str().unwrap(), &url).await.unwrap_err(),
+            GhApiError::Unavailable);
+        fs::write(&executable, "#!/bin/sh\necho 'You are not logged into any GitHub hosts. Run gh auth login.' >&2\nexit 4\n").unwrap();
+        assert_eq!(get_api_via_gh(executable.to_str().unwrap(), &url).await.unwrap_err(),
+            GhApiError::Unauthenticated);
+        fs::write(&executable, "#!/bin/sh\necho 'HTTP 404: Not Found' >&2\nexit 1\n").unwrap();
+        assert!(matches!(get_api_via_gh(executable.to_str().unwrap(), &url).await,
+            Err(GhApiError::Failed(error)) if error.contains("404") && !error.contains("token")));
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn unchanged_source_content_can_skip_import_only_when_local_config_has_not_drifted() {
         let receipt = SourceReceipt {

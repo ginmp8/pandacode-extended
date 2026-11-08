@@ -21,7 +21,7 @@ test.describe('shared bot channels', () => {
     await channelPrompt.fill('Unsent channel draft');
     const pageErrors: string[] = [];
     page.on('pageerror', error => pageErrors.push(error.message));
-    await sidebar(page).getByRole('button', { name: /^Chat with Scout/ }).click();
+    await sidebar(page).getByRole('button', { name: /^Chat with Scout/ }).click({ noWaitAfter: true });
     const snapshot = await page.evaluate(() => ({
       url: location.href,
       panes: document.querySelectorAll('.conversation-pane').length,

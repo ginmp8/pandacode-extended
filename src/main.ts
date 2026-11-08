@@ -5720,7 +5720,7 @@ async function toggleCustomize(): Promise<void> {
   document.querySelector<HTMLElement>('.sidebar-customize > button')?.setAttribute('aria-pressed', 'true');
   customizeOpening ??= import('./customize-skills').then(({mountCustomizeSkills}) => {
     if (!customizeMount) customizeMount = mountCustomizeSkills($('#customize-hub'), {
-      call, subscribe: (name, listener) => subscribe(name, listener),
+      call, subscribe: listener => subscribe('skills-operation-progress', listener),
       chooseZip: chooseSkillZip, close: closeCustomize,
     });
   }).catch(cause => { closeCustomize(); report(cause); }).finally(() => { customizeOpening = undefined; });

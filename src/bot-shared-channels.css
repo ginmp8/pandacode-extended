@@ -2,9 +2,9 @@
 .bots-panel-head { position: relative; }
 .bot-create-menu { position: absolute; z-index: 80; top: calc(100% + 6px); right: 0; display: flex; width: 186px; flex-direction: column; gap: 2px; padding: 6px; border-radius: var(--radius-md); background: var(--glass-warm); backdrop-filter: blur(26px) saturate(1.45); -webkit-backdrop-filter: blur(26px) saturate(1.45); box-shadow: 0 14px 36px -10px var(--glass-shadow-deep); }
 .bot-create-menu[hidden] { display: none; }
-.bot-create-menu button { display: flex; align-items: center; gap: 9px; min-height: 32px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.bot-create-menu button { display: flex; align-items: center; justify-content: flex-start; gap: 9px; width: 100%; min-height: 32px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .bot-create-menu button:hover, .bot-create-menu button:focus-visible { background: rgb(var(--accent-rgb) / .14); outline: none; }
-.bot-create-menu .icon { width: 16px; height: 16px; color: var(--muted); }
+.bot-create-menu .icon { flex: none; width: 16px; height: 16px; color: var(--muted); }
 .bot-shared-dialog:has(.bc-channel) { width: min(760px, calc(100vw - 32px)); }
 .conversation-pane.channel-thread #transcript { display: flex; flex-direction: column; padding: 0; }
 .conversation-pane.channel-thread .transcript { overflow: hidden; }

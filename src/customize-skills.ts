@@ -175,7 +175,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (!detail) return '';
     const item = detail.kind === 'installed' ? installed.find(item => item.id === (detail as {id:string}).id) : scan?.skills.find(skill => skill.path === (detail as any).path);
     if (!item) return '';
-    const files = detail.kind === 'installed' ? (item as SkillItem).files : ['SKILL.md'];
+    const files = detail.kind === 'installed' ? (item as SkillItem).files : ((item as CatalogSkill).filePaths?.length ? (item as CatalogSkill).filePaths! : ['SKILL.md']);
     const selectedFile = detail.file;
     const source = detail.kind === 'installed' ? (item as SkillItem).source : {kind:'github',location:scan!.repo, gitRef:scan!.gitRef,commit:scan!.commit};
     return `<section class="customize-detail ds-card" aria-label="Read-only skill preview">

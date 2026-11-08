@@ -41,6 +41,9 @@ pub struct CatalogSkill {
     pub description: String,
     pub files: usize,
     pub bytes: u64,
+    /// Full read-only package manifest, excluding nested independent skill packages.
+    #[serde(default)]
+    pub file_paths: Vec<String>,
     /// The commit of the library copy imported from this same path.
     #[serde(default, skip_deserializing)]
     pub imported: Option<String>,
@@ -290,7 +293,14 @@ pub fn scan_path(api: Api, repo: &str, path: &str, git_ref: Option<&str>) -> Res
             continue;
         }
         let files = tree.files_of(dir);
-        skills.push(CatalogSkill { path: dir.clone(), id, name, description, files: files.len(), bytes: files.iter().map(|b| b.size).sum(), imported: None, conflicts: Vec::new() });
+        let mut file_paths: Vec<String> = files.iter().map(|blob| {
+            if dir.is_empty() { blob.path.clone() } else {
+                blob.path.strip_prefix(&format!("{dir}/")).unwrap_or(&blob.path).to_string()
+            }
+        }).collect();
+        file_paths.sort();
+        skills.push(CatalogSkill { path: dir.clone(), id, name, description, files: files.len(),
+            bytes: files.iter().map(|b| b.size).sum(), file_paths, imported: None, conflicts: Vec::new() });
     }
     skills.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tree.commit, skills))

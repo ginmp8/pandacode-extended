@@ -165,6 +165,12 @@ test('synchronization page offers per-skill and bulk manual sync', async ({ page
   await expect(page.getByRole('status')).toContainText('already at the current ref');
   await page.getByRole('button', { name: 'Sync all installed skills' }).click();
   await expect(page.getByRole('status')).toContainText('Updated 0 skills.');
+  await page.getByRole('checkbox', { name: 'Automatically check trusted skills when PandaCode starts' }).check();
+  await expect(page.getByRole('status')).toHaveText('Startup checks enabled for trusted sources.');
+  await page.getByRole('button', { name: 'Trust repository root' }).click();
+  await expect(page.getByRole('status')).toHaveText('Repository root explicitly trusted for startup checks.');
+  await page.getByRole('combobox', { name: 'Startup updates for Release notes' }).selectOption('no');
+  await expect(page.getByRole('status')).toHaveText('Updated startup policy for release-notes.');
 });
 
 test('a pstack-sized collection is scanned as a catalog and imports past 64 files in total', async ({ page }) => {

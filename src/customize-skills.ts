@@ -165,7 +165,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
             (current.source.location !== `${scan!.repo}/${item.path}` || current.source.gitRef !== scan!.gitRef))) ?
             `<label class="customize-confirm-replace"><input type="checkbox" name="replace-conflicts" ${replaceConflicts ? 'checked' : ''}>I approve replacing conflicting installed skills</label>` : ''}
           ${editingSource ? `<button type="button" class="secondary-button" data-customize="save-source-selection" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Save tracked selection</button>` : ''}
-          <button type="button" class="customize-primary" data-customize="import-selected" ${!chosen.size || busy || operation?.state === 'running' ? 'disabled' : ''}>Import selected (${chosen.size})</button>
+          <button type="button" class="customize-primary" data-customize="import-selected" ${!chosen.size || busy || operation?.state === 'running' || (scan.skills.some(item => chosen.has(item.path) && installed.some(current => current.id === item.id && (current.source.location !== `${scan!.repo}/${item.path}` || current.source.gitRef !== scan!.gitRef))) && !replaceConflicts) ? 'disabled' : ''}>Import selected (${chosen.size})</button>
         </div>
       </div>
     </section>`;
@@ -472,7 +472,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   const change=(event:Event)=>{
     const target=event.target as HTMLInputElement;
     if(target.dataset.selectSkill!==undefined){selectSkillPath(target.dataset.selectSkill,target.checked);return;}
-    if(target.name==='replace-conflicts'){replaceConflicts=target.checked;return;}
+    if(target.name==='replace-conflicts'){replaceConflicts=target.checked;draw();return;}
     if(target.dataset.customizeToggle==='startup-sync'){
       const current=target.checked;
       void (async()=>{try{policy=await options.call<Policy>('skills_sync_set_global',{enabled:current});note=current?'Startup sync enabled for previously imported skills.':'Startup sync disabled.';error='';}

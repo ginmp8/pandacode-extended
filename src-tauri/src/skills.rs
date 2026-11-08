@@ -399,7 +399,9 @@ impl Library {
         if previous.as_ref().is_some_and(|p| p.kind != kind) {
             return Err(format!("A {} named {id} is already in the library.", if kind == Kind::Skill { "rule" } else { "skill" }));
         }
-        if let Some(taken) = previous.as_ref().filter(|p| same_source_only && !p.source.location.eq_ignore_ascii_case(&source.location)) {
+        if let Some(taken) = previous.as_ref().filter(|p| same_source_only
+            && (p.source.kind != source.kind || !p.source.location.eq_ignore_ascii_case(&source.location)
+                || p.source.git_ref != source.git_ref)) {
             return Err(format!("{id} is already in the library from {}.", taken.source.location));
         }
         let folder = self.dir.join(&id);

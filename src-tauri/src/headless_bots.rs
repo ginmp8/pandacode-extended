@@ -639,6 +639,44 @@ pub(crate) fn run_import(app: &tauri::AppHandle, path: &Path) {
     }
 }
 
+/// Stage a complete export beside its destination, then replace it atomically.
+/// Keep the headless CLI's original overwrite behavior, including bare filenames.
+fn write_export_atomically(path: &Path, bytes: &[u8]) -> crate::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        return Err(format!("The export directory does not exist: {}", parent.display()));
+    }
+    let temp = parent.join(format!(".pandacode-bots-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> crate::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)
+            .map_err(|error| format!("Could not stage bot export: {error}"))?;
+        file.write_all(bytes).map_err(|error| format!("Could not write bot export: {error}"))?;
+        file.sync_all().map_err(|error| format!("Could not flush bot export: {error}"))?;
+        drop(file);
+        std::fs::rename(&temp, path)
+            .map_err(|error| format!("Could not replace {}: {error}", path.display()))?;
+        let written = std::fs::read(path)
+            .map_err(|error| format!("Could not verify bot export: {error}"))?;
+        if written != bytes {
+            return Err("The exported file failed verification.".into());
+        }
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    result
+}
+
 /// Writes the export document to `path` (pretty-printed, newline-terminated).
 pub(crate) fn run_export(app: &tauri::AppHandle, path: &Path) -> crate::Result<()> {
     use tauri::Manager;
@@ -648,7 +686,7 @@ pub(crate) fn run_export(app: &tauri::AppHandle, path: &Path) -> crate::Result<(
         export(&store)?
     };
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    std::fs::write(path, text + "\n").map_err(|e| format!("Could not write {}: {e}", path.display()))
+    write_export_atomically(path, format!("{text}\n").as_bytes())
 }
 
 #[cfg(test)]
@@ -664,6 +702,33 @@ mod tests {
         let root = std::env::temp_dir().join(format!("pandacode-bot-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn headless_export_replaces_existing_file_with_verified_bytes() {
+        let root = root();
+        let destination = root.join("bots.json");
+        std::fs::write(&destination, b"previous manifest").unwrap();
+        write_export_atomically(&destination, b"{\"bots\":[]}\n").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"{\"bots\":[]}\n");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn headless_export_failed_replace_preserves_destination_and_cleans_temp() {
+        let root = root();
+        let destination = root.join("occupied");
+        std::fs::create_dir(&destination).unwrap();
+        assert!(write_export_atomically(&destination, b"{\"bots\":[]}\n").is_err());
+        assert!(destination.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A per-test variable name that is never set: reading a missing variable is safe

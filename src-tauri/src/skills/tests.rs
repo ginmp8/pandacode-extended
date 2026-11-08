@@ -293,3 +293,32 @@ fn bot_workspace_sync_and_prompt_text_stay_scoped() {
     assert!(text.contains("### Release Notes") && text.contains("Summarize the changes."));
     assert!(!text.contains("curl") && skipped.len() == 1);
 }
+
+#[test]
+fn rejects_case_collisions_before_changing_a_library_package() {
+    let fx = Fixture::new();
+    let original = fx.import(Kind::Skill, &fx.folder("original", &[("SKILL.md", SKILL)]));
+    let old = fs::read(fx.library.dir.join("release-notes/SKILL.md")).unwrap();
+    let source = Source { kind: "folder".into(), location: "/new".into(), git_ref: None, commit: None };
+    let malformed = vec![
+        ("SKILL.md".into(), SKILL.as_bytes().to_vec()),
+        ("docs/README.md".into(), b"one".to_vec()),
+        ("docs/readme.md".into(), b"two".to_vec()),
+    ];
+    assert!(fx.library.import(Kind::Skill, malformed, "release", source).unwrap_err().contains("case-conflicting"));
+    assert_eq!(fs::read(fx.library.dir.join("release-notes/SKILL.md")).unwrap(), old);
+    assert_eq!(fx.library.load(&original.meta.id).unwrap().sha256, original.meta.sha256);
+}
+
+#[test]
+fn interrupted_package_swap_restores_the_previous_complete_version() {
+    let fx = Fixture::new();
+    let item = fx.import(Kind::Skill, &fx.folder("original", &[("SKILL.md", SKILL)]));
+    fs::rename(fx.library.dir.join(&item.meta.id), fx.library.dir.join(format!(".{}.rollback", item.meta.id))).unwrap();
+    fs::create_dir(fx.library.dir.join(&item.meta.id)).unwrap();
+    fs::write(fx.library.dir.join(&item.meta.id).join("SKILL.md"), "interrupted install").unwrap();
+    let listed = fx.library.list().unwrap();
+    assert_eq!(listed[0].meta.sha256, item.meta.sha256);
+    assert_eq!(fs::read_to_string(fx.library.dir.join(&item.meta.id).join("SKILL.md")).unwrap(), SKILL);
+    assert!(!fx.library.dir.join(format!(".{}.rollback", item.meta.id)).exists());
+}

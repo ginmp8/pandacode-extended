@@ -34,7 +34,7 @@ pub(super) fn selection(input: &str, path: &str, git_ref: Option<&str>) -> Resul
     let mut resolved_path = String::new();
     let mut resolved_ref = explicit_ref.map(str::to_string);
     if let Some(url) = input.strip_prefix("https://github.com/") {
-        if url.contains(['?', '#']) {
+        if url.contains('?') || url.contains('#') {
             return Err("Remove query strings and fragments from the GitHub URL.".into());
         }
         let parts: Vec<&str> = url.split('/').collect();
@@ -53,9 +53,11 @@ pub(super) fn selection(input: &str, path: &str, git_ref: Option<&str>) -> Resul
                 None if matches!(parts[3], "main" | "master") => parts[3].to_string(),
                 None => return Err("For a tree URL with a named branch or tag, enter the exact ref separately; branch names can contain slashes.".into()),
             };
-            resolved_path = tail.strip_prefix(&format!("{reference}/")).unwrap_or(if tail == reference { "" } else {
-                return Err("The GitHub URL does not match the explicit ref.".into());
-            }).to_string();
+            resolved_path = if tail == reference { String::new() } else {
+                tail.strip_prefix(&format!("{reference}/"))
+                    .ok_or("The GitHub URL does not match the explicit ref.")?
+                    .to_string()
+            };
             resolved_ref = Some(reference);
             if parts[2] == "blob" && !resolved_path.ends_with("/SKILL.md") && resolved_path != "SKILL.md" {
                 return Err("A skill file URL must end in SKILL.md.".into());
@@ -67,7 +69,7 @@ pub(super) fn selection(input: &str, path: &str, git_ref: Option<&str>) -> Resul
         repository = input.trim_end_matches(".git").to_string();
     }
     if !explicit_path.is_empty() {
-        if !resolved_path.is_empty() && explicit_path != resolved_path && explicit_path != format!("{resolved_path}/SKILL.md") {
+        if !resolved_path.is_empty() && explicit_path != resolved_path && format!("{explicit_path}/SKILL.md") != resolved_path {
             return Err("The explicit path does not match the GitHub URL path.".into());
         }
         resolved_path = explicit_path.to_string();

@@ -299,7 +299,36 @@ impl Library {
         Ok(Item { files: files.into_iter().map(|(p, _)| p).collect(), findings, meta })
     }
 
+    /// Recover an import interrupted after the previous folder was renamed but before its
+    /// metadata was committed. A rollback folder is internal temporary state, not a user backup.
+    fn recover_interrupted(&self) -> Result<(), String> {
+        let Ok(entries) = fs::read_dir(&self.dir) else { return Ok(()) };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = file_name.strip_prefix('.').and_then(|s| s.strip_suffix(".rollback")) else { continue };
+            if !valid_id(id) || !entry.path().is_dir() { continue }
+            let target = self.dir.join(id);
+            let committed = self.load(id).ok().and_then(|meta| read_local(&target).ok().map(|files| meta.sha256 == content_hash(&files))).unwrap_or(false);
+            if !committed {
+                if target.exists() { fs::remove_dir_all(&target).map_err(|e| e.to_string())?; }
+                fs::rename(entry.path(), &target).map_err(|e| format!("Could not recover {id}: {e}"))?;
+            } else {
+                fs::remove_dir_all(entry.path()).map_err(|e| format!("Could not finish {id}: {e}"))?;
+            }
+        }
+        // Incomplete staging folders can never become active without the commit above.
+        for entry in fs::read_dir(&self.dir).map_err(|e| e.to_string())?.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if file_name.strip_prefix('.').and_then(|s| s.strip_suffix(".staging")).is_some_and(valid_id) && entry.path().is_dir() {
+                fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn list(&self) -> Result<Vec<Item>, String> {
+        let _guard = LOCK.lock().map_err(|e| e.to_string())?;
+        self.recover_interrupted()?;
         let Ok(entries) = fs::read_dir(&self.dir) else { return Ok(Vec::new()) };
         let mut ids: Vec<String> = entries
             .flatten()
@@ -330,6 +359,7 @@ impl Library {
         }
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        self.recover_interrupted()?;
         let previous = self.load(&id).ok();
         if previous.as_ref().is_some_and(|p| p.kind != kind) {
             return Err(format!("A {} named {id} is already in the library.", if kind == Kind::Skill { "rule" } else { "skill" }));
@@ -338,13 +368,25 @@ impl Library {
             return Err(format!("{id} is already in the library from {}.", taken.source.location));
         }
         let folder = self.dir.join(&id);
-        let _ = fs::remove_dir_all(&folder);
-        for (relative, bytes) in &files {
-            let path = folder.join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        if previous.is_none() && folder.exists() {
+            return Err(format!("{id} already exists on disk and is not a managed library entry."));
+        }
+        let staged = self.dir.join(format!(".{id}.staging"));
+        let rollback = self.dir.join(format!(".{id}.rollback"));
+        fs::create_dir(&staged).map_err(|e| format!("Could not stage {id}: {e}"))?;
+        let stage_result = (|| -> Result<(), String> {
+            for (relative, bytes) in &files {
+                let path = staged.join(relative);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Could not create {relative}: {e}"))?;
+                }
+                fs::write(&path, bytes).map_err(|e| format!("Could not stage {relative}: {e}"))?;
             }
-            fs::write(&path, bytes).map_err(|e| format!("Could not save {relative}: {e}"))?;
+            Ok(())
+        })();
+        if let Err(error) = stage_result {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(error);
         }
         let sha256 = content_hash(&files);
         let meta = Meta {
@@ -352,7 +394,23 @@ impl Library {
             activations: previous.map(|p| p.activations).unwrap_or_default(),
             id, name, kind, description, source, sha256, imported_at: now_ms(),
         };
-        self.save(&meta)?;
+        if folder.exists() {
+            if let Err(error) = fs::rename(&folder, &rollback) {
+                let _ = fs::remove_dir_all(&staged);
+                return Err(format!("Could not prepare {id} for update: {error}"));
+            }
+        }
+        if let Err(error) = fs::rename(&staged, &folder) {
+            let _ = fs::rename(&rollback, &folder);
+            let _ = fs::remove_dir_all(&staged);
+            return Err(format!("Could not install {id}: {error}"));
+        }
+        if let Err(error) = self.save(&meta) {
+            let _ = fs::remove_dir_all(&folder);
+            if rollback.exists() { let _ = fs::rename(&rollback, &folder); }
+            return Err(error);
+        }
+        if rollback.exists() { let _ = fs::remove_dir_all(&rollback); }
         self.item(meta)
     }
 

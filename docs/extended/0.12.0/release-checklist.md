@@ -62,3 +62,11 @@ This checklist records a plan and observed historical facts; unchecked items do 
 - [ ] Verify exact-SHA CI on the final documentation commit and review all jobs, including skipped or pending states. No local Node/Rust/native tests were executed here.
 
 Council's review loop and imported test files establish source coverage, not release approval. No tag, PR, installer, release or npm publication was made.
+
+## PandaCode 0.3.104 source checkpoint
+
+- [x] Import all 36 upstream paths changed since the prior source pin: 10 new blobs, 14 refreshed binary screenshots and 12 patched existing textual files, preserving five Extended-customized shared files. Source: [`d5d51769`](https://github.com/ginmp8/pandacode/commit/d5d51769ccac15145e67c071ea06a5502c4cadcb); Extended integration: [`6b6a39a8`](https://github.com/ginmp8/pandacode-extended/commit/6b6a39a82f508360572518519badb56e3df8313e).
+- [x] Confirm full nontruncated tree inventory (1,561 upstream / 1,618 Extended blobs, 0 missing source, 0 mode mismatches) and align all six upstream native version fields to **0.3.104** while retaining the planned Extended **0.12.0** distribution cycle.
+- [x] Preserve original [0.3.104 upstream release notes](../../../releases/0.3.104.md), Git file modes, Extended-only files, dependency remediations and existing control paths.
+- [ ] Complete 80 shared customized-file hunk classifications and native app control-state testing; do not use absence of missing paths as proof of functional parity.
+- [ ] Verify final exact-SHA CI jobs and native installed-app/mobile/Connect/MCP/cloud/VM/credential scenarios. The integration-commit [push](https://github.com/ginmp8/pandacode-extended/actions/runs/42503275362) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/42503280072) were in progress on first inspection; local tests did not run.

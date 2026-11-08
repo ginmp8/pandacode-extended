@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "kind": "github-skill-recommendations",
+  "templates": [
+    {
+      "id": "software-improvement-loop",
+      "group": "Core engineering",
+      "description": "software improvement loop",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/software-improvement-loop",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "systematic-debugging",
+      "group": "Core engineering",
+      "description": "systematic debugging",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/systematic-debugging",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "reproducibility-engineer",
+      "group": "Core engineering",
+      "description": "reproducibility engineer",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/reproducibility-engineer",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "archify",
+      "group": "Diagrams",
+      "description": "archify",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/archify",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "archify-review",
+      "group": "Diagrams",
+      "description": "archify review",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/archify-review",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "archify-tuning",
+      "group": "Diagrams",
+      "description": "archify tuning",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/archify-tuning",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "audit-spec-implementation",
+      "group": "Spec conformance",
+      "description": "audit spec implementation",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/audit-spec-implementation",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "spec-criteria-extractor",
+      "group": "Spec conformance",
+      "description": "spec criteria extractor",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/spec-criteria-extractor",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "implementation-reachability-auditor",
+      "group": "Spec conformance",
+      "description": "implementation reachability auditor",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/implementation-reachability-auditor",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "causal-behavior-auditor",
+      "group": "Spec conformance",
+      "description": "causal behavior auditor",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/causal-behavior-auditor",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "verification-oracle-auditor",
+      "group": "Spec conformance",
+      "description": "verification oracle auditor",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/verification-oracle-auditor",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "regression-parity-auditor",
+      "group": "Spec conformance",
+      "description": "regression parity auditor",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/regression-parity-auditor",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "test-oracle-engineering",
+      "group": "Audit specialists",
+      "description": "test oracle engineering",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/test-oracle-engineering",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "reverse-engineering",
+      "group": "Audit specialists",
+      "description": "reverse engineering",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/reverse-engineering",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "causal-flow-comprehension",
+      "group": "Audit specialists",
+      "description": "causal flow comprehension",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/causal-flow-comprehension",
+      "optional": false,
+      "available": true
+    },
+    {
+      "id": "context-architect",
+      "group": "Optional",
+      "description": "context architect",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/context-architect",
+      "optional": true,
+      "available": true
+    },
+    {
+      "id": "bug-security-hunter",
+      "group": "Optional",
+      "description": "bug security hunter",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/bug-security-hunter",
+      "optional": true,
+      "available": true
+    },
+    {
+      "id": "perceptual-validation",
+      "group": "Optional",
+      "description": "perceptual validation",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/perceptual-validation",
+      "optional": true,
+      "available": true
+    },
+    {
+      "id": "agent-systems-best-practices",
+      "group": "Optional",
+      "description": "agent systems best practices",
+      "repository": "ginmp8/rhapsodia",
+      "gitRef": "main",
+      "path": "skills/agent-systems-best-practices",
+      "optional": true,
+      "available": false
+    }
+  ]
+}

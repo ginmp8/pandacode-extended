@@ -156,7 +156,8 @@ impl Library {
         {
             let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
             let existing = self.read_sources()?;
-            if existing.sources.len() >= MAX_SAVED_SOURCES && existing.sources.iter().all(|s| s.id != id) {
+            if existing.sources.len() >= MAX_SAVED_SOURCES
+                && existing.sources.iter().all(|s| s.repo != repo || s.path != path || s.git_ref != git_ref) {
                 return Err(format!("At most {MAX_SAVED_SOURCES} saved sources are supported. Remove an unused configuration first."));
             }
         }
@@ -239,7 +240,7 @@ impl Library {
             id: id.clone(), repo, path, git_ref,
             commit: commit.to_string(), selected_paths: combined.into_iter().collect(), saved_at: now_ms(),
         };
-        if let Some(existing) = store.sources.iter_mut().find(|s| s.id == id) {
+        if let Some(existing) = store.sources.iter_mut().find(|s| s.repo == source.repo && s.path == source.path && s.git_ref == source.git_ref) {
             *existing = source.clone();
         } else {
             if store.sources.len() >= MAX_SAVED_SOURCES {

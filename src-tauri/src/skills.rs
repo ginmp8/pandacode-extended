@@ -439,7 +439,8 @@ impl Library {
         let sha256 = content_hash(&files);
         let accepted = previous.as_ref().filter(|p| p.source.kind == source.kind
             && p.source.location.eq_ignore_ascii_case(&source.location))
-            .and_then(|p| p.acknowledged.clone());
+            .and_then(|p| p.acknowledged.clone())
+            .filter(|hash| hash == &sha256);
         let file_hashes = files.iter().map(|(path, content)| (path.clone(), sha256_hex(content))).collect();
         let auto_update = previous.as_ref().and_then(|p| p.auto_update);
         let auto_available = previous.as_ref().filter(|p| p.source.location.eq_ignore_ascii_case(&source.location))
@@ -482,16 +483,6 @@ impl Library {
         meta.required_skills.iter().filter(|id| self.load(id).is_err()).cloned().collect()
     }
 
-    /// Opted-in auto-installed skills can be inherited by bot prompt-surface consumers.
-    /// Existing library items are NOT migrated to this state automatically.
-    pub(crate) fn bot_auto_skills(&self) -> Vec<String> {
-        self.list().unwrap_or_default().into_iter()
-            .filter(|item| item.meta.kind == Kind::Skill && item.meta.auto_available
-                && (item.findings.is_empty() || item.meta.acknowledged.is_some())
-                && self.missing_required(&item.meta).is_empty())
-            .map(|item| item.meta.id).collect()
-    }
-
     fn base<'a>(&'a self, scope: Scope, root: Option<&'a Path>) -> Result<&'a Path, String> {
         match scope {
             Scope::User => Ok(&self.home),
@@ -511,7 +502,7 @@ impl Library {
         if !missing.is_empty() {
             return Err(format!("Install required peer skills before activating {}: {}.", meta.name, missing.join(", ")));
         }
-        let acknowledged = if item.findings.is_empty() || meta.acknowledged.is_some() {
+        let acknowledged = if item.findings.is_empty() || meta.acknowledged.as_deref() == Some(meta.sha256.as_str()) {
             meta.acknowledged.clone()
         } else if acknowledge {
             Some(meta.sha256.clone())
@@ -812,20 +803,37 @@ pub async fn skills_source_import(
     )).await
 }
 
+/// A single checked import command payload (source identity, selection and progress ID).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedSourceImport {
+    pub repo: String,
+    pub path: String,
+    pub git_ref: Option<String>,
+    pub commit: String,
+    pub selected_paths: Vec<String>,
+    pub operation_id: String,
+    pub allow_replace: Option<bool>,
+}
+
 /// Streams package phases through the regular Tauri event bus, scoped to a UI operation.
 #[tauri::command]
 pub async fn skills_source_import_tracked(
-    app: AppHandle, repo: String, path: String, git_ref: Option<String>,
-    commit: String, selected_paths: Vec<String>, operation_id: String, allow_replace: Option<bool>,
+    app: AppHandle, request: TrackedSourceImport,
 ) -> crate::Result<sources::SourceImport> {
+    let TrackedSourceImport {repo, path, git_ref, commit, selected_paths, operation_id, allow_replace} = request;
     if operation_id.is_empty() || operation_id.len() > 80
         || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
         return Err("Invalid skill operation identifier.".into());
     }
     crate::blocking(move || {
         let event_app = app.clone();
-        library(&app)?.import_skill_source_progress_with_replace(
-            &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths, allow_replace.unwrap_or(false),
+        library(&app)?.import_skill_source_progress(
+            &github::api,
+            sources::SourceImportRequest {
+                repo: &repo, path: &path, git_ref: git_ref.as_deref(), commit: &commit,
+                selected_paths, allow_replace: allow_replace.unwrap_or(false),
+            },
             |progress| {
                 let _ = event_app.emit("skills-operation-progress", serde_json::json!({
                     "operationId": operation_id,

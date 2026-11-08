@@ -279,7 +279,8 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
         case 'skills_discover': return discover();
         case 'skills_source_preview': return previewSource(args.repo,args.path,args.gitRef);
         case 'skills_source_list': return structuredClone(savedSources);
-        case 'skills_source_import': case 'skills_source_import_tracked': return sourceImport(args);
+        case 'skills_source_import': return sourceImport(args);
+        case 'skills_source_import_tracked': return sourceImport(args.request);
         case 'skills_source_set_selection': {
           const source=savedSources.find(s=>s.id===args.id);
           if(!source)throw new Error('Saved source not found.');

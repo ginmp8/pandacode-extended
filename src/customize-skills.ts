@@ -307,10 +307,10 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const op = beginOperation('github','Importing selected skills',snapshot.repo,snapshot.commit,packages,snapshot);
     busy = true;
     try {
-      const result = await options.call<SourceImport>('skills_source_import_tracked',{
+      const result = await options.call<SourceImport>('skills_source_import_tracked',{request:{
         repo:snapshot.repo,path:snapshot.path,gitRef:snapshot.gitRef,commit:snapshot.commit,
         selectedPaths:[...snapshot.paths],operationId:op.id,allowReplace:!!snapshot.allowReplace,
-      });
+      }});
       for (const fail of result.skipped) {
         const item = op.packages.get(fail.path);
         if (item && !isTerminal(item.phase)) { item.phase='failed'; item.detail=fail.reason; }

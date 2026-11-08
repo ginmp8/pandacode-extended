@@ -46,6 +46,16 @@ pub struct SourceImport {
     pub skipped: Vec<catalog::Skipped>,
 }
 
+/// A frozen import request; grouping source coordinates prevents argument drift.
+pub struct SourceImportRequest<'a> {
+    pub repo: &'a str,
+    pub path: &'a str,
+    pub git_ref: Option<&'a str>,
+    pub commit: &'a str,
+    pub selected_paths: Vec<String>,
+    pub allow_replace: bool,
+}
+
 /// Incremental progress for one package in a frozen GitHub import batch.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,21 +139,17 @@ impl Library {
         &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
         commit: &str, selected_paths: Vec<String>,
     ) -> Result<SourceImport, String> {
-        self.import_skill_source_progress(api, repo, path, git_ref, commit, selected_paths, |_| {})
-    }
-
-    pub fn import_skill_source_progress(
-        &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
-        commit: &str, selected_paths: Vec<String>, progress: impl FnMut(SourceProgress),
-    ) -> Result<SourceImport, String> {
-        self.import_skill_source_progress_with_replace(api, repo, path, git_ref, commit, selected_paths, false, progress)
+        self.import_skill_source_progress(api, SourceImportRequest {
+            repo, path, git_ref, commit, selected_paths, allow_replace: false,
+        }, |_| {})
     }
 
     /// An explicit user choice may replace a different GitHub/ZIP origin, never implicitly.
-    pub fn import_skill_source_progress_with_replace(
-        &self, api: catalog::Api<'_>, repo: &str, path: &str, git_ref: Option<&str>,
-        commit: &str, selected_paths: Vec<String>, allow_replace: bool, mut progress: impl FnMut(SourceProgress),
+    pub fn import_skill_source_progress(
+        &self, api: catalog::Api<'_>, request: SourceImportRequest<'_>,
+        mut progress: impl FnMut(SourceProgress),
     ) -> Result<SourceImport, String> {
+        let SourceImportRequest { repo, path, git_ref, commit, selected_paths, allow_replace } = request;
         let (repo, path, git_ref) = github::selection(repo, path, git_ref)?;
         if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Rescan this source: the selected commit is not a full Git SHA.".into());

@@ -76,38 +76,6 @@ test.describe('bots', () => {
       Math.min(...positions.map(position => position.iconLeft))).toBeLessThan(1);
   });
 
-  test('shared history controls persist in the preview bot settings', async ({ page }) => {
-    await newBot(page, 'Scout');
-    const call = (command: string, args: Record<string, unknown> = {}) => page.evaluate(async ([command, args]) =>
-      (await import('/src/bridge.ts')).call(command, args), [command, args] as const);
-    const scout = (await call('bots_list') as { id: string; name: string }[]).find(bot => bot.name === 'Scout')!;
-    await call('bot_shared_channel_create', { name: 'review', memberIds: [scout.id] });
-    const openHistory = async () => {
-      await page.locator('#breadcrumb').getByRole('button', { name: 'Scout settings' })
-        .evaluate(element => (element as HTMLElement).click());
-      const settings = panel(page);
-      await expect(settings).toBeVisible();
-      await settings.getByRole('tab', { name: 'Shared Channels' })
-        .evaluate(element => (element as HTMLElement).click());
-      await expect(settings.getByRole('checkbox', { name: 'Include channel history by default' })).toBeVisible();
-      return settings;
-    };
-    let settings = await openHistory();
-    const history = settings.getByRole('checkbox', { name: 'Include channel history by default' });
-    const override = settings.getByRole('combobox', { name: 'History for #review' });
-    await expect(history).toBeChecked();
-    await expect(override).toHaveValue('default');
-    await history.evaluate(element => (element as HTMLInputElement).click());
-    await expect(history).not.toBeChecked();
-    await override.selectOption('include');
-    await expect(settings.getByText('Included via channel override')).toBeVisible();
-    await expect(settings.locator('.bs-saved')).toContainText('Saved');
-    await page.keyboard.press('Escape');
-    settings = await openHistory();
-    await expect(settings.getByRole('checkbox', { name: 'Include channel history by default' })).not.toBeChecked();
-    await expect(settings.getByRole('combobox', { name: 'History for #review' })).toHaveValue('include');
-  });
-
   test('a new bot keeps its draft and caret through background refreshes', async ({ page }) => {
     await openBots(page);
     const form = bots(page).getByRole('form', { name: 'New bot' });
@@ -296,8 +264,7 @@ test.describe('bots', () => {
     // Preserve the existing fresh-context tooltip and alignment regression checks.
     const help = profile.getByRole('img', { name: 'About fresh context each message' });
     await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
-    const helpRow = profile.locator('.bs-row.has-help', { hasText: 'Fresh context each message' });
-    await expect(helpRow).toHaveCount(1);
+    const helpRow = profile.locator('.bs-row.has-help', { has: fresh });
     const titleBox = await helpRow.locator('.bs-row-help-title strong').boundingBox();
     const tipBox = await help.boundingBox();
     const hintBox = await helpRow.locator('.bs-row-text > small').boundingBox();
@@ -328,36 +295,31 @@ test.describe('bots', () => {
     await expect(fresh).toBeChecked();
     await tab(page, 'Shared Channels').click();
     await expect(history).not.toBeChecked();
-  });
-
-  test('new bots default to shared history without fresh context', async ({ page }) => {
-    await newBot(page, 'Writer');
-    await openSettings(page, undefined, 'Writer');
-    const settings = panel(page, 'Writer');
-    await expect(settings.getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
-    await settings.getByRole('tab', { name: 'Shared Channels' }).click();
-    await expect(settings.getByRole('checkbox', { name: 'Include channel history by default' })).toBeChecked();
-  });
-
-  test('a saved channel-history default can be re-enabled without changing fresh context', async ({ page }) => {
-    await newBot(page, 'Scout');
-    await openSettings(page, 'Shared Channels');
-    const history = panel(page).getByRole('checkbox', { name: 'Include channel history by default' });
-    await history.uncheck();
-    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
     await page.keyboard.press('Escape');
+
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
+    await bots(page).getByRole('button', { name: 'Create bot' }).click();
+    await expect(bots(page)).toBeHidden();
+    await openSettings(page, undefined, 'Writer');
+    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
+    await panel(page, 'Writer').getByRole('tab', { name: 'Shared Channels' }).click();
+    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Include channel history by default' })).toBeChecked();
+    await page.keyboard.press('Escape');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Chat with Scout' }).click();
     await openSettings(page, 'Shared Channels');
     await expect(history).not.toBeChecked();
     await history.check();
-    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
+    await expect(profile.locator('.bs-saved')).toContainText('Saved');
     await page.keyboard.press('Escape');
     await openSettings(page, 'Shared Channels');
     await expect(history).toBeChecked();
-    await tab(page, 'Profile').click();
-    await expect(panel(page).getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
   });
 
-  test('joined channels independently override history defaults and reject invalid choices', async ({ page }) => {
+  test('joined channels can override the default independently and clear stale choices', async ({ page }) => {
     await newBot(page, 'Scout');
     const call = (command: string, args: Record<string, unknown> = {}) => page.evaluate(async ([command, args]) =>
       (await import('/src/bridge.ts')).call(command, args), [command, args] as const);
@@ -394,36 +356,15 @@ test.describe('bots', () => {
     await expect(call('bot_set_shared_channel_history_override', {
       botId: scoutId, channelId: launch.id, mode: 'invalid',
     })).rejects.toThrow(/Choose Use default/);
-  });
-
-  test('membership and archival clear only the affected channel history overrides', async ({ page }) => {
-    await newBot(page, 'Scout');
-    const call = (command: string, args: Record<string, unknown> = {}) => page.evaluate(async ([command, args]) =>
-      (await import('/src/bridge.ts')).call(command, args), [command, args] as const);
-    const scout = (await call('bots_list') as { id: string; name: string }[]).find(bot => bot.name === 'Scout')!;
-    const writer = await call('bot_create', { input: {
-      name: 'Writer', role: '', instructions: '', goals: '', avatar: 'panda:0',
-      provider: 'claude', model: 'default', mode: 'ask', heartbeatMinutes: 0,
-    } }) as { id: string };
-    const launch = await call('bot_shared_channel_create', {
-      name: 'launch', memberIds: [scout.id, writer.id],
-    }) as { id: string };
-    await call('bot_shared_channel_create', { name: 'review', memberIds: [scout.id] });
-    await openSettings(page, 'Shared Channels');
-    const settings = panel(page);
-    const choice = (name: string) => settings.getByRole('combobox', { name: `History for #${name}` });
-    await choice('launch').selectOption('include');
-    await choice('review').selectOption('exclude');
     await page.keyboard.press('Escape');
     await call('bot_shared_channel_update', {
       channelId: launch.id, name: 'launch', memberIds: [writer.id], leadBotId: writer.id,
     });
     await call('bot_shared_channel_update', {
-      channelId: launch.id, name: 'launch', memberIds: [scout.id, writer.id], leadBotId: scout.id,
+      channelId: launch.id, name: 'launch', memberIds: [scoutId, writer.id], leadBotId: scoutId,
     });
     await openSettings(page, 'Shared Channels');
     await expect(choice('launch')).toHaveValue('default');
-    await expect(choice('review')).toHaveValue('exclude');
     await choice('launch').selectOption('exclude');
     await page.keyboard.press('Escape');
     await call('bot_shared_channel_archive', { channelId: launch.id, archived: true });

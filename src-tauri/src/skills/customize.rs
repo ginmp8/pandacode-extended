@@ -58,7 +58,8 @@ fn read_zip(path: &std::path::Path) -> Result<super::Files, String> {
     let mut names = HashSet::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|_| "Cannot inspect a ZIP entry.")?;
-        let path = entry.name().trim_end_matches('/');
+        let entry_name = entry.name().map_err(|_| "Invalid ZIP entry name.")?.into_owned();
+        let path = entry_name.trim_end_matches('/');
         if !valid_portable_path(path) {
             return Err(format!("ZIP contains an unsafe path: {path}."));
         }

@@ -81,7 +81,7 @@ impl Library {
                     continue;
                 }
             };
-            if !item.findings.is_empty() && item.meta.acknowledged.as_deref() != Some(item.meta.sha256.as_str()) {
+            if !item.findings.is_empty() && item.meta.acknowledged.is_none() {
                 skipped.push(format!("Review the safety findings for {} in Settings → Skills & rules first.", item.meta.name));
                 continue;
             }

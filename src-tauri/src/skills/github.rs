@@ -89,6 +89,10 @@ pub(super) fn selection(input: &str, path: &str, git_ref: Option<&str>) -> Resul
 /// `owner/name`, a path inside it (empty for the root), and an optional branch, tag or commit.
 /// Returns the files under that path (relative to it), and the commit they came from.
 pub fn fetch(repo: &str, path: &str, git_ref: Option<&str>) -> Result<(Files, String), String> {
+    fetch_using(repo, path, git_ref, &api)
+}
+
+pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: super::catalog::Api<'_>) -> Result<(Files, String), String> {
     let path = path.trim_matches('/');
     if !valid_repo(repo) {
         return Err("Enter the repository as owner/name.".into());

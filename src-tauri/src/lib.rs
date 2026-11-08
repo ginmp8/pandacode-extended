@@ -3921,6 +3921,7 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
     schedules::start(app.handle().clone());
@@ -4448,6 +4449,15 @@ pub fn run() {
                 skills::skills_catalog_state,
                 skills::skills_catalog_import,
                 skills::skills_discover,
+                skills::skills_sync_item,
+                skills::skills_sync_all,
+                skills::skills_sync_source,
+                skills::skills_sync_policy,
+                skills::skills_sync_set_global,
+                skills::skills_sync_trust,
+                skills::skills_sync_override,
+                skills::skills_sync_set_ref,
+                skills::skills_sync_report,
                 set_task_link,
                 import_prompt_image,
                 read_clipboard_image,

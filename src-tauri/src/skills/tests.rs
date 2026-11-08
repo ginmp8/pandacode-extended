@@ -240,7 +240,7 @@ fn findings_need_acknowledgement_and_updates_wait_for_activation() {
     // A new version is stored but reaches the harness only when activated again.
     fs::write(source.join("SKILL.md"), "---\nname: setup\n---\nUse the package manager.\n").unwrap();
     let updated = fx.import(Kind::Skill, &source);
-    assert!(updated.findings.is_empty() && updated.meta.acknowledged.is_none());
+    assert!(updated.findings.is_empty() && updated.meta.acknowledged.is_some());
     assert_eq!(Fixture::cell(&fx.library.matrix(None).unwrap(), "claude", "setup", Scope::User).status, "outdated");
     assert!(fs::read_to_string(fx.home.join(".claude/skills/setup/SKILL.md")).unwrap().contains("curl"));
     assert!(fx.library.remove("setup").unwrap_err().contains("Turn setup off"));

@@ -7,6 +7,7 @@ mod catalog;
 mod github;
 mod safety;
 pub(crate) mod scoped;
+mod sync;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -86,6 +87,12 @@ pub struct Meta {
     pub imported_at: u64,
     /// The content hash whose safety findings the user accepted.
     pub acknowledged: Option<String>,
+    /// None inherits the application startup sync setting; legacy installs default to None.
+    #[serde(default)]
+    pub auto_update: Option<bool>,
+    /// Exact imported file digests; old metadata remains valid without this map.
+    #[serde(default)]
+    pub file_hashes: std::collections::BTreeMap<String, String>,
     pub activations: Vec<Activation>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -389,8 +396,15 @@ impl Library {
             return Err(error);
         }
         let sha256 = content_hash(&files);
+        let accepted = previous.as_ref().filter(|p| p.source.kind == source.kind
+            && p.source.location.eq_ignore_ascii_case(&source.location))
+            .and_then(|p| p.acknowledged.clone());
+        let file_hashes = files.iter().map(|(path, content)| (path.clone(), sha256_hex(content))).collect();
+        let auto_update = previous.as_ref().and_then(|p| p.auto_update);
         let meta = Meta {
-            acknowledged: previous.as_ref().and_then(|p| p.acknowledged.clone()).filter(|a| *a == sha256),
+            acknowledged: accepted,
+            auto_update,
+            file_hashes,
             activations: previous.map(|p| p.activations).unwrap_or_default(),
             id, name, kind, description, source, sha256, imported_at: now_ms(),
         };
@@ -433,7 +447,7 @@ impl Library {
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         let item = self.item(self.load(id)?)?;
         let meta = item.meta;
-        let acknowledged = if item.findings.is_empty() || meta.acknowledged.as_deref() == Some(meta.sha256.as_str()) {
+        let acknowledged = if item.findings.is_empty() || meta.acknowledged.is_some() {
             meta.acknowledged.clone()
         } else if acknowledge {
             Some(meta.sha256.clone())
@@ -713,6 +727,56 @@ pub async fn skills_catalog_import(app: AppHandle, repo: String, paths: Option<V
 #[tauri::command]
 pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs> {
     crate::blocking(move || library(&app)?.discover(&github::api)).await
+}
+
+
+#[tauri::command]
+pub async fn skills_sync_item(app: AppHandle, id: String) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || library(&app)?.synchronize(&github::api, sync::Selection::One(id), false)).await
+}
+#[tauri::command]
+pub async fn skills_sync_all(app: AppHandle) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || library(&app)?.synchronize(&github::api, sync::Selection::All, false)).await
+}
+#[tauri::command]
+pub async fn skills_sync_source(app: AppHandle, repo: String, path: Option<String>) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || {
+        let (repo, path, _) = github::selection(&repo, path.as_deref().unwrap_or(""), None)?;
+        library(&app)?.synchronize(&github::api, sync::Selection::Source(repo, path), false)
+    }).await
+}
+#[tauri::command]
+pub async fn skills_sync_policy(app: AppHandle) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_policy()).await
+}
+#[tauri::command]
+pub async fn skills_sync_set_global(app: AppHandle, enabled: bool) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_set_global(enabled)).await
+}
+#[tauri::command]
+pub async fn skills_sync_trust(app: AppHandle, repo: String, path: Option<String>, trusted: bool) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_trust_scope(&repo, path.as_deref().unwrap_or(""), trusted)).await
+}
+#[tauri::command]
+pub async fn skills_sync_override(app: AppHandle, id: String, auto_update: Option<bool>) -> crate::Result<Item> {
+    crate::blocking(move || library(&app)?.sync_set_override(&id, auto_update)).await
+}
+#[tauri::command]
+pub async fn skills_sync_set_ref(app: AppHandle, id: String, git_ref: Option<String>) -> crate::Result<Item> {
+    crate::blocking(move || library(&app)?.sync_set_ref(&id, git_ref)).await
+}
+#[tauri::command]
+pub async fn skills_sync_report(app: AppHandle) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || library(&app)?.last_sync_report()).await
+}
+
+/// Automatic checks run off the UI and bot admission threads, after app setup.
+pub fn begin_startup_sync(app: AppHandle) {
+    std::thread::spawn(move || {
+        if let Ok(library) = library(&app) {
+            let _ = library.synchronize(&github::api, sync::Selection::All, true);
+        }
+    });
 }
 
 #[cfg(test)]

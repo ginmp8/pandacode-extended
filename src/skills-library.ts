@@ -237,7 +237,7 @@ export function mountSkillsLibrary(host: HTMLElement, options: SkillsLibraryHost
       });
       return;
     }
-    if (item.findings.length && item.acknowledged !== item.sha256) {
+    if (item.findings.length && !item.acknowledged) {
       input.checked = false; pending = { id, harness, scope }; draw(); return;
     }
     void activate(id, harness, scope, false);

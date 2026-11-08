@@ -21,3 +21,7 @@ Preserve the existing security remediations and compatible overrides, including 
 | Final 0.12.0 dependency and native validation | Pending |
 
 Keep all future remediation notes source-linked, version-specific and reproducible.
+
+## Upstream 0.3.102 integration — 2026-11-08
+
+The [fork source `7134edf5`](https://github.com/ginmp8/pandacode/commit/7134edf501d31acc8bec28ff74be9d1dba171669) updates the upstream application's version metadata from 0.3.101 to **0.3.102** in root npm, Cargo package/lock and Tauri manifests; those fields were synchronized in Extended. The source change did not introduce dependency package version changes in the compared manifests. The existing Extended dependency overrides/remediations were preserved by applying only the source release-version hunks. No new security remediation is claimed. npm audit, RustSec, Rust/TypeScript builds and native packaging were not executed locally; CI for the integration commit must be checked by SHA before claiming it passed.

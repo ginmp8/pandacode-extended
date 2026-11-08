@@ -20,6 +20,8 @@
 - [ ] Preserve Extended-only features, optional controls, security remediations and data/build compatibility; retain upstream functionality.
 - [ ] Record upstream/integration SHAs, code changes, exceptions, tests and limitations in the 0.12.0 release notes.
 
+- [x] **2026-11-08 source checkpoint:** imported fork [`7134edf5`](https://github.com/ginmp8/pandacode/commit/7134edf501d31acc8bec28ff74be9d1dba171669) (app 0.3.102) as Extended [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): 12 upstream paths applied, including original `releases/0.3.102.md`; 0 upstream paths missing, all file modes preserved. Existing 80 modified shared paths still require full hunk-by-hunk acceptance. This checkbox verifies this source integration, **not** full functional parity.
+
 ## Final exact-SHA validation
 
 - [ ] Run CI at the exact final 0.12.0 candidate, including Node/TypeScript, release-identity tests, Rust/Cargo/Clippy, RustSec, npm audits, website, mobile/Expo, ONNX and platform-specific checks.
@@ -46,5 +48,7 @@
 | Prior exact-main CI | [#42392453324](https://github.com/ginmp8/pandacode-extended/actions/runs/42392453324): 6/6 passed; only validates 0.11.0 source |
 | Fork at opening | [`13a7cb68583cf77ac6c4ec351abc3ebc020ff62a`](https://github.com/ginmp8/pandacode/commit/13a7cb68583cf77ac6c4ec351abc3ebc020ff62a), app `0.3.101` |
 | First 0.12.0 documentation SHA CI | [`99206f1c`](https://github.com/ginmp8/pandacode-extended/commit/99206f1c0a9f1f6753227a6e33bb8df0bd6f8d45): [push #42394967107](https://github.com/ginmp8/pandacode-extended/actions/runs/42394967107) and [PR #42395013636](https://github.com/ginmp8/pandacode-extended/actions/runs/42395013636), 6/6 jobs successful each. Final exact-SHA CI and native integration acceptance remain pending. |
+
+CI for source integration [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): [push #42449497421](https://github.com/ginmp8/pandacode-extended/actions/runs/42449497421) and [PR #42449500801](https://github.com/ginmp8/pandacode-extended/actions/runs/42449500801) were **queued when first inspected**. Do not classify as passed until exact-SHA results are read. No local Node/Rust or native Settings/Connect/MCP/cloud checks were executed.
 
 This checklist records a plan and observed historical facts; unchecked items do not constitute executed verification.

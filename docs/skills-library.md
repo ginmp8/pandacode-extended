@@ -1,135 +1,58 @@
-# Skills library and rules registry
+# Skills Library and rules registry
 
-Issues #15 (skills) and #45 (rules). This is a small first version. It lets you import a skill or rule once, turn it on for each harness and scope, and see what each installed harness actually has.
+PandaCode Extended's **Settings → Tools → Skills & rules** reuses the original file-backed Skills Library (issues #15, #45, #114 and #115). The additions tracked in [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) are under development in [PR #127](https://github.com/ginmp8/pandacode-extended/pull/127); do not assume they are available in a released installer.
 
-The import form keeps the local path field at its full control height. Its Kind, Source and Project menus use the current theme's text and solid panel colors, including unselected options in Windows native menus.
+## The three Settings views
 
-## Storage
+- **Library & activation:** inspect imports and source commits, review safety findings, manually activate/deactivate each skill for supported harness and user/project scopes, and inspect installed-versus-actual harness drift.
+- **Recommended skills:** a versioned, bundled **JSON metadata catalog** lists 15 primary and four optional references from [RhapsodIA](https://github.com/ginmp8/rhapsodia/tree/main/skills). No skill content is bundled or automatically installed by a recommendation. **Install selected** chooses checked packages; **Install all primary skills** excludes optional entries. A listed but unavailable source package is disabled.
+- **Synchronization:** manually sync a library skill, installed source repository or all installed GitHub skills. Edit an installed skill's branch, tag or immutable full SHA; choose inherited, enabled or disabled startup updates. Global startup checking starts **off**. Trusting a source is separate from enabling startup checks. Each result reports changes or skipped/errors; prior source commits and impacted harnesses are recorded.
 
-Everything is files under the app data folder. There is no schema migration.
+The available implementation is **not a guarantee of per-bot isolation**: native harnesses can load the same shared filesystem folders for multiple bot sessions. An excluded skill may remain visible through the underlying harness.
 
-```
-<app data>/skills/<id>/SKILL.md     skill (the folder keeps its other files)
-<app data>/skills/<id>/RULE.md      rule (one Markdown file)
-<app data>/skills/<id>.json         Meta: source (folder path or owner/name/path, ref, commit),
-                                    content SHA-256, acknowledged hash, activations
-<app data>/skills/.catalogs.json    Catalog sources, the last discovery report, and repositories
-                                    discovery found without skills (by pushed_at)
-```
+## GitHub import and source provenance
 
-Each activation records the harness, scope, project checkout, surface, the library hash it wrote, the SHA-256 of every file or block it wrote, and any `.git/info/exclude` lines it added.
+Install and authenticate the [GitHub CLI](https://cli.github.com/) in the OS account running PandaCode: `gh auth login`, `gh auth status`. The desktop importer uses `gh api`; importing private sources requires existing read authorization. It does not store GitHub tokens or install executable dependencies. **No skill script executes on import.**
 
-## Adapters (`src-tauri/src/skills/adapter.rs`)
+Single-skill import accepts `owner/repo` with an exact path and optional ref. The Extended parser also accepts `https://github.com/owner/repo`, `/tree/main/skills/id`, or `/blob/<full-40-character-SHA>/skills/id/SKILL.md` URLs. When branch names contain slashes, provide the exact ref explicitly; the parser refuses ambiguous tree URLs rather than guessing. A repository root or collection must be indexed and packages chosen through the catalog; the individual importer does not recursively treat an arbitrary repository as one skill.
 
-| Harness | Skill, user | Skill, project | Rule, user | Rule, project |
-|---|---|---|---|---|
-| Claude Code | `~/.claude/skills/<id>/` | `<checkout>/.claude/skills/<id>/` | block in `~/.claude/CLAUDE.md` | block in `<checkout>/CLAUDE.md` |
-| Codex | `~/.codex/skills/<id>/` | `<checkout>/.agents/skills/<id>/` | block in `~/.codex/AGENTS.md` | block in `<checkout>/AGENTS.md` |
-| Others | `prompt` | `prompt` | `prompt` | `prompt` |
+Each import resolves the chosen ref to a commit and acquires source files at that immutable revision. Source metadata includes the original ref, resolved commit and SHA-256 content hashes. Paths must be structurally safe and unique on case-insensitive filesystems. Package limits on this branch are **256 files / 24 MiB per skill**, raised to accommodate real RhapsodIA packages such as Archify, but still bounded. A GitHub repository may have up to 20,000 tree entries and 300 detected skills for catalog indexing; a truncated tree is rejected.
 
-- A rule block is wrapped in `<!-- pandacode:rule:<id> -->` … `<!-- /pandacode:rule:<id> -->`. Text outside the block is never changed.
-- PandaCode never writes into a skill folder it did not create, never overwrites a file or block whose hash differs from what it wrote, and on deactivation leaves edited files in place (`Change.kept`).
-- In a Git checkout, project scope adds the skill folder (and a rule file, but only when PandaCode created that file) to `info/exclude`. The path comes from `git rev-parse --git-path info/exclude`, so worktrees work too. Passing `sessionId` scopes the activation to that task's worktree.
-- Harnesses marked `prompt` only record the activation. Nothing injects these items into prompts yet (see Not yet).
+GitHub skill imports do not fetch executable dependencies, change application permissions or automatically enable an imported skill. An imported package may be incomplete if its declared peer skills or runtime dependencies are not installed; inspect those requirements before activation.
 
-## Matrix and safety
+## Library storage and legacy compatibility
 
-- `skills_matrix` lists each installed file harness (its CLI is on PATH or `~/.<harness>` exists), plus any prompt harness in use. Each cell is `active`, `outdated` (a newer library version is not activated yet), `drifted`, `missing`, `prompt` or `off`. It also lists skill folders PandaCode does not manage, unknown PandaCode blocks, and instruction files with text PandaCode does not manage.
-- Importing again updates the library only. Harnesses keep the old version and show `outdated` until you activate again.
-- The safety scan (`skills/safety.rs`) flags secret-shaped tokens and named secrets, instructions that turn off approvals or the sandbox, and downloads piped into a shell. If an item has findings, activation fails until the user calls it with `acknowledge: true`. That acknowledgement is stored per content hash.
-- GitHub import uses `gh api` through `github::run_gh` (`workspace::run_process`). Limits: 64 files and 1 MB.
+Everything remains in the app data directory, with no new database migration:
 
-## Repository catalogs and discovery (#114, #115)
-
-`skills/catalog.rs`. A catalog source is a GitHub repository indexed for skills, kept apart from the library and from activation.
-
-- Scanning reads the commit for the ref, then one recursive Git tree. Every `SKILL.md` (at the root, `skills/<name>/`, or deeper in nested collections) counts only when its frontmatter has both `name` and `description` (YAML `>`/`|` block values work). A repository named "skills" without such a file is never registered. Hidden paths are skipped. A skill's files are its folder minus any nested skill folder.
-- Importing copies the chosen skills (or all of them) at the indexed commit, each with its supporting files and `owner/name/path`, ref and commit as its source. Nothing is activated. The 64-file and 1 MB limits apply per skill, and a skill over them is skipped with a reason. Per-catalog limits: 20,000 tree entries, 300 `SKILL.md` files, and a truncated GitHub tree, each refused with a clear error.
-- Same names: each indexed skill lists other catalog paths and library items with the same id (`conflicts`). An import whose id the library already holds from another source is skipped, never overwritten.
-- Refresh re-reads the index only. A library copy keeps its commit (`imported`), and the UI says when a newer version is upstream. Importing again updates the library, and harnesses then show `outdated`, as before.
-- Discovery (`skills_discover`) uses the same `gh` login as GitHub import, with no new scopes. It lists `user/repos?affiliation=owner` 100 at a time, up to 10 pages; organizations are not scanned. Matching repositories are registered as `discovered` sources. Ignored and disabled sources are left alone, unchanged repositories (same `pushed_at`) are not read again, and empty ones are skipped, so repeating discovery is idempotent. A rate limit or sign-in failure stops discovery with a clear message after saving progress; other per-repository failures are listed in the report.
-- Settings shows the sources with Refresh, Disable/Enable and Ignore (ignored sources are listed with Stop ignoring), each source's skills with checkboxes, and Import selected / Import all.
-
-## RhapsodIA as a public skill source (Extended)
-
-The public [RhapsodIA skills tree](https://github.com/ginmp8/rhapsodia/tree/main/skills) includes engineering, audit, diagramming and reproducibility skills. Install the [GitHub CLI](https://cli.github.com/), authenticate with `gh auth login`, and verify access with `gh auth status`. Source acquisition uses `gh api`; it does **not** depend on a personal AI-account catalog.
-
-**Already supported:** In **Settings → Skills & rules**, add the repository catalog `ginmp8/rhapsodia` and select a reviewed Git ref or commit. The existing catalog UI offers **Import selected** and **Import all**; no imported skill is activated automatically. For a direct individual import, select the GitHub source, enter repository `ginmp8/rhapsodia`, path `skills/archify` (or another exact skill directory), and optionally supply a pinned ref. A collection path should be used with catalog selection rather than passing the whole collection to the existing single-skill importer.
-
-**Proposed in [Extended issue #125](https://github.com/ginmp8/pandacode-extended/issues/125), not yet implemented:** Paste a full GitHub repository or `tree/<revision>/skills[/skill-id]` URL in one input; interpret a collection path as selectable **all/selected** skills and an exact package path as one skill, with explicit handling for ambiguous ref names. Add source-specific synchronization where the current source controls do not yet provide it. Reuse `src-tauri/src/skills/github.rs`, `src-tauri/src/skills/catalog.rs`, and their existing identity, conflict and permission gates.
-
-The same issue separately proposes **SHA-pinned skill bundles in release installers**. Those would remain available offline without auto-activation. Current manual import safety limits of **64 files and 1 MiB per skill** still apply; a large package requires an explicit validated handling strategy, not an implicit limit bypass. RhapsodIA's repository license is Apache-2.0, but copied skills may include additional notices and different third-party rights. See [Extended attribution and licensing](extended/attribution-and-licensing.md).
-
-## Commands
-
-`skills_list()`, `skills_import_folder({ path, kind })`, `skills_import_github({ repo, path, gitRef?, kind })`, `skills_activate({ id, harness, scope, projectId?, sessionId?, acknowledge? })`, `skills_deactivate({ id, harness, scope, projectId?, sessionId? })`, `skills_matrix({ projectId?, sessionId? })`, `skills_scan({ id })`, `skills_remove({ id })`, `skills_catalogs()`, `skills_catalog_add({ repo, gitRef? })`, `skills_catalog_refresh({ repo })`, `skills_catalog_state({ repo, state })` (`enabled`, `disabled` or `ignored`), `skills_catalog_import({ repo, paths? })` (returns `{ items, imported, skipped }`), `skills_discover()`. Here `kind` is `skill` or `rule`, and `scope` is `user` or `project`. Activate and deactivate return `{ items, kept }`.
-
-## Not yet
-
-Prompt injection for prompt harnesses (that belongs with the token saver's send-time block), role and task scopes beyond a session worktree, version diffs with promote/skip/pin, folding the Token saver packs into the library, GitLab (single imports and catalogs), organization discovery, conflict detection between rules.
-
-## Wiring
-
-These hunks fall outside the module's files.
-
-`src-tauri/src/lib.rs`, module list (next to `mod token_saver;`):
-
-```rust
-mod skills;
+```text
+<app data>/skills/<id>/SKILL.md         skill and its supporting files
+<app data>/skills/<id>.json             source, immutable commit, content hashes,
+                                        safety acceptance, activation and sync override
+<app data>/skills/.catalogs.json        discovered and configured repository indexes
+<app data>/skills/.sync-policy.json     opt-in startup and trusted repository/path scopes
+<app data>/skills/.sync-report.json     previous sync outcome by skill
 ```
 
-`src-tauri/src/lib.rs`, `generate_handler!` (after `token_saver::token_saver_install,`):
+Missing sync metadata in older installs means startup sync **disabled** and per-skill policy **inherited**; existing copies, activations, edited harness files and source receipts remain in place. A sync replaces the **central library copy** including local edits, without keeping a backup (a deliberate behavior). Package writes use staging and a rollback folder to recover an interruption. Successful library imports do **not** overwrite a manually edited or external native harness file; an older harness copy can remain active until user action. Sync cannot undo changes made by executing a skill.
 
-```rust
-                skills::skills_list,
-                skills::skills_import_folder,
-                skills::skills_import_github,
-                skills::skills_activate,
-                skills::skills_deactivate,
-                skills::skills_matrix,
-                skills::skills_scan,
-                skills::skills_remove,
-                skills::skills_catalogs,
-                skills::skills_catalog_add,
-                skills::skills_catalog_refresh,
-                skills::skills_catalog_state,
-                skills::skills_catalog_import,
-                skills::skills_discover,
-```
+Native adapter surfaces are:
 
-`src/settings.ts`:
+| Harness | User skill folder | Project skill folder |
+| --- | --- | --- |
+| Claude Code | `~/.claude/skills/<id>/` | `<checkout>/.claude/skills/<id>/` |
+| Codex | `~/.codex/skills/<id>/` | `<checkout>/.agents/skills/<id>/` |
+| Other supported harnesses | Managed prompt surface | Managed prompt surface |
 
-```ts
-import { mountSkillsLibrary, type SkillsLibraryHost } from './skills-library';
-// SettingsSection union: add 'skills'
-export type SettingsSection = 'general' | 'appearance' | 'agents' | 'providers' | 'teams' | 'tools' | 'skills' | 'cloud' | 'remote' | 'github' | 'about';
-// SettingsOptions:
-  /** Skills library and rules registry. */
-  skills?: SkillsLibraryHost;
-// SECTIONS, after 'tools':
-  { id: 'skills', label: 'Skills & rules', icon: 'widget', description: 'Import skills and rules once, turn them on per harness, and check for drift.' },
-// sectionHtml():
-    case 'skills': return '<div id="skills-library"></div>';
-// mountSection():
-    if (id === 'skills' && options.skills) cleanups.push(mountSkillsLibrary(panel.querySelector<HTMLElement>('#skills-library')!, options.skills));
-```
+PandaCode tracks the hash of its managed files and refuses accidental replacement of drifted native files. Project writes may be excluded in `.git/info/exclude`.
 
-`src/main.ts`, in the `mountSettings` options next to `cloud: { call, … }`:
+## Manual and startup synchronization
 
-```ts
-      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },
-```
+Manual buttons are explicit network requests. On application startup, checks run on a separate thread without blocking the UI. A startup check requires both the applicable global/per-skill policy **and** a trusted repository/path scope. Full SHA refs are immutable and are never silently moved by startup synchronization. Other refs can resolve to a newer commit.
 
-`src/preview.ts`:
+An update always targets the library copy; already-running bots keep their existing execution context. Newly imported content may change subsequent prompts or require a user to refresh an existing harness activation. Acknowledged safety findings from the same source are not repeatedly demanded for later versions, although new warnings are still visible. Source read errors, path validation errors, size violations and renamed packages are reported per item rather than deleting the previous installed files. The current implementation serializes sync operations; a concurrent request can report that another sync is running rather than running an overlapping write.
 
-```ts
-import { createPreviewSkills } from './preview-skills';
-const previewSkills = createPreviewSkills();
-// in invoke()'s switch, before `default:`
-    case 'skills_list': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
-    case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
-    case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import': case 'skills_discover':
-      result = previewSkills.call(command, args); break;
-```
+## Current limitations on this feature branch
 
-`playwright.config.ts`, `testMatch`: add `'**/skills-library.spec.ts'`. The spec mounts the section on its own page, so it passes before or after the Settings wiring.
+The source-index/catalog importer still refuses a second installed package with an identical effective ID instead of storing multiple active library candidates and offering explicit source precedence. The new one-time **overwrite harness copy** action is not yet available. The UI does not currently enforce required peer-skill dependencies, offer per-bot inherited/excluded library candidate controls, or automatically install newly discovered packages from an authorized scope. Those parts of #125 remain acceptance gaps and must not be represented as completed. The original bot manifest stores portable skill **IDs** without serializing contents; a missing ID on another machine must be installed separately.
+
+For the scope and validation gates, see [issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) and [the RhapsodIA integration notes](extended/rhapsodia-skills.md).

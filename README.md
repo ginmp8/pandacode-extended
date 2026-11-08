@@ -6,7 +6,7 @@
 
 **Licensing:** The [inherited PandaCode license](LICENSE) remains in effect and includes an attribution requirement beyond standard MIT wording. See [Extended attribution and licensing](docs/extended/attribution-and-licensing.md).
 
-**Public Agent Skills:** The existing Skills Library imports GitHub-hosted skills through the authenticated GitHub CLI. [RhapsodIA](https://github.com/ginmp8/rhapsodia) is an optional public skill source. [Issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) plans enhanced repository-path import and verified offline release bundles; those changes are **not yet shipped**. See [Skills Library](docs/skills-library.md) and [RhapsodIA integration plan](docs/extended/rhapsodia-skills.md).
+**Public Agent Skills:** The Skills Library imports GitHub-hosted skills through the authenticated GitHub CLI. [RhapsodIA](https://github.com/ginmp8/rhapsodia) is an optional public skill source. [Issue #125](https://github.com/ginmp8/pandacode-extended/issues/125) adds recommendation metadata and an opt-in source sync workflow on the in-development [PR #127](https://github.com/ginmp8/pandacode-extended/pull/127); **no skill packages are bundled in installers**, and implementation remains subject to PR validation. See [Skills Library](docs/skills-library.md) and [RhapsodIA integration](docs/extended/rhapsodia-skills.md).
 
 ---
 

@@ -20,7 +20,7 @@ export type SkillMatrix = {
   project: string | null;
   harnesses: { harness: string; installed: boolean; prompt: boolean; cells: SkillCell[]; unmanaged: { scope: SkillScope; kind: SkillKind; path: string; detail: string }[] }[];
 };
-export type CatalogSkill = { path: string; id: string; name: string; description: string; files: number; bytes: number; imported: string | null; conflicts: string[] };
+export type CatalogSkill = { path: string; id: string; name: string; description: string; files: number; bytes: number; filePaths?: string[]; imported: string | null; conflicts: string[] };
 export type CatalogSource = {
   repo: string; gitRef: string | null; commit: string | null; origin: 'manual' | 'discovered'; state: 'enabled' | 'disabled' | 'ignored';
   private: boolean; pushedAt: string | null; scannedAt: number; skills: CatalogSkill[];

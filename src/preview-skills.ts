@@ -20,7 +20,7 @@ const hash = (text: string) => [...text].reduce((h, c) => (h * 31 + c.charCodeAt
 
 type Entry = { item: SkillItem; text: string };
 type FixtureRepo = { commit: string; private?: boolean; skills: Omit<CatalogSkill, 'imported' | 'conflicts' | 'id' | 'bytes'>[] };
-const catalogSkill = (path: string, name: string, files = 2) => ({ path, name, description: `${name} from a repository catalog.`, files });
+const catalogSkill = (path: string, name: string, files = 2) => ({ path, name, description: `${name} from a repository catalog.`, files, filePaths: ['SKILL.md', ...Array.from({length: Math.max(0,files-1)}, (_, i) => `reference-${i+1}.md`)] });
 /** What GitHub would return: repositories the preview user owns, and one public collection. */
 const REPOS: Record<string, FixtureRepo> = {
   'you/agent-skills': { commit: '5e6f7a8b9c', private: true, skills: [catalogSkill('skills/release-notes', 'Release notes'), catalogSkill('skills/changelog', 'Changelog'), catalogSkill('skills/triage', 'Triage', 3)] },

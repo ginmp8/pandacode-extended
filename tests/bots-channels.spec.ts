@@ -11,6 +11,10 @@ async function showBots(page: Page): Promise<void> {
 
 test.describe('shared bot channels', () => {
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
+    // Sample bot bootstrapping creates several preview sessions. On CI it previously
+    // ran near the 20s suite default even when all navigation assertions passed.
+    // This budget is scoped to startup; functional expectations remain unchanged.
+    test.setTimeout(35_000);
     await showBots(page);
     // The sample channel is seeded during asynchronous startup.
     await expect(page.locator('#composer-area #composer')).toBeVisible();
@@ -26,8 +30,10 @@ test.describe('shared bot channels', () => {
     const bot = sidebar(page).getByRole('button', { name: /^Chat with Scout/ });
     await expect(bot).toBeVisible();
     await bot.click();
-    await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
+    // A positive destination assertion must pass before checking that the channel
+    // class went away; otherwise a blank intermediate view could pass that check.
     await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
+    await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
     await expect(page.locator('#transcript .bc-channel')).toHaveCount(0);
     await expect(page.locator('#composer #prompt')).toBeVisible();
     await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);

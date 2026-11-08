@@ -33,6 +33,26 @@ pub fn resolve(bot: &[String], project: &[String]) -> Vec<Resolved> {
 }
 
 impl Library {
+    /// Auto-installed skills exposed through bot prompt inheritance unless an already-present
+    /// native harness folder wins by default. Exclusions are advisory, not filesystem isolation.
+    pub(crate) fn bot_auto_for(&self, harness: &str, root: &Path) -> Vec<String> {
+        let eligible = self.bot_auto_skills();
+        if !has_skill_folder(harness) { return eligible; }
+        let mut inline = Vec::new();
+        let locations = [
+            adapter::surface(harness, Kind::Skill, Scope::User, &self.home),
+            adapter::surface(harness, Kind::Skill, Scope::Project, root),
+        ];
+        for id in eligible {
+            let native = locations.iter().any(|surface| match surface {
+                adapter::Surface::Folder(dir) => dir.join(&id).join("SKILL.md").is_file(),
+                _ => false,
+            });
+            if !native { inline.push(id); }
+        }
+        inline
+    }
+
     /// Skill ids active for `harness` at project scope in `root`.
     pub fn project_active(&self, harness: &str, root: &Path) -> Vec<String> {
         let project = Some(root.to_string_lossy().into_owned());
@@ -81,7 +101,12 @@ impl Library {
                     continue;
                 }
             };
-            if !item.findings.is_empty() && item.meta.acknowledged.as_deref() != Some(item.meta.sha256.as_str()) {
+            let missing = self.missing_required(&item.meta);
+            if !missing.is_empty() {
+                skipped.push(format!("{} requires missing peer skills: {}.", item.meta.name, missing.join(", ")));
+                continue;
+            }
+            if !item.findings.is_empty() && item.meta.acknowledged.is_none() {
                 skipped.push(format!("Review the safety findings for {} in Settings → Skills & rules first.", item.meta.name));
                 continue;
             }

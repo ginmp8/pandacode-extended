@@ -1,5 +1,6 @@
 /* Browser preview of the skills library (src-tauri/src/skills.rs): an in-memory library, a
  * pretend Claude Code and Codex install, and the same refusals the native side gives. */
+import recommendations from './recommended-skills.v1.json';
 import type { CatalogImport, CatalogSkill, CatalogSource, SkillActivation, SkillCatalogs, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 
 const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'omp', 'muse', 'devin', 'zcode', 'hermes']);
@@ -27,6 +28,7 @@ const REPOS: Record<string, FixtureRepo> = {
   'you/dotfiles': { commit: '0d0d0d0d0d', skills: [] },
   'you/skills-wishlist': { commit: '1a1a1a1a1a', skills: [] },
   'acme/pstack': { commit: 'c0ffee1234', skills: Array.from({ length: 40 }, (_, i) => catalogSkill(`skills/pstack-${String(i + 1).padStart(2, '0')}`, `pstack ${String(i + 1).padStart(2, '0')}`, 4)) },
+  'ginmp8/rhapsodia': { commit: 'abcdef123456', skills: recommendations.templates.filter(entry => entry.available).map(entry => catalogSkill(entry.path, entry.id)) },
 };
 const OWNED = ['you/agent-skills', 'you/dotfiles', 'you/skills-wishlist'];
 const at = (repo: string, path: string) => path ? `${repo}/${path}` : repo;
@@ -49,7 +51,7 @@ export function createPreviewSkills() {
     const sha256 = hash(text);
     const item: SkillItem = {
       id, name, kind, description: text.split('\n').find(l => l.trim() && !l.startsWith('#') && !l.startsWith('---')) ?? '', sha256, importedAt: Date.now(), source,
-      acknowledged: previous?.item.acknowledged === sha256 ? sha256 : null, activations: previous?.item.activations ?? [], files: files ?? [main], findings: scan(main, text),
+      acknowledged: previous?.item.acknowledged === sha256 ? sha256 : null, autoUpdate: previous?.item.autoUpdate ?? null, fileHashes: {}, activations: previous?.item.activations ?? [], files: files ?? [main], findings: scan(main, text),
     };
     entries.set(id, { item, text });
     return view({ item, text });
@@ -61,6 +63,8 @@ export function createPreviewSkills() {
   let sources: CatalogSource[] = [];
   let discovery: SkillCatalogs['discovery'] = null;
   let failure: string | null = null;
+  let syncPolicy = { autoOnStart: false, trustedScopes: [] as { repo: string; path: string }[] };
+  let syncReport = { checkedAt: 0, updated: [] as string[], skipped: [] as string[], events: [] as unknown[] };
   const failIfAsked = () => { const next = failure; failure = null; if (next) throw new Error(next); };
   const findSource = (repo: unknown) => {
     const source = sources.find(s => s.repo.toLowerCase() === String(repo).toLowerCase());
@@ -224,6 +228,19 @@ export function createPreviewSkills() {
         case 'skills_catalog_state': { const source = findSource(args.repo); upsert({ ...source, state: args.state }); return catalogs(); }
         case 'skills_catalog_import': return importCatalog(args.repo, args.paths);
         case 'skills_discover': return discover();
+        case 'skills_sync_item': { const entry = find(args.id); syncReport = { checkedAt: Date.now(), updated: [], skipped: [`${entry.item.id}: already at the current ref`], events: [] }; return syncReport; }
+        case 'skills_sync_all': { syncReport = { checkedAt: Date.now(), updated: [], skipped: list().filter(item => item.source.kind === 'github').map(item => `${item.id}: already at the current ref`), events: [] }; return syncReport; }
+        case 'skills_sync_source': { syncReport = { checkedAt: Date.now(), updated: [], skipped: [`Already synced ${args.repo}.`], events: [] }; return syncReport; }
+        case 'skills_sync_policy': return structuredClone(syncPolicy);
+        case 'skills_sync_report': return structuredClone(syncReport);
+        case 'skills_sync_set_global': syncPolicy.autoOnStart = !!args.enabled; return structuredClone(syncPolicy);
+        case 'skills_sync_trust': {
+          syncPolicy.trustedScopes = syncPolicy.trustedScopes.filter(s => s.repo !== args.repo || s.path !== (args.path ?? ''));
+          if (args.trusted) syncPolicy.trustedScopes.push({ repo: args.repo, path: args.path ?? '' });
+          return structuredClone(syncPolicy);
+        }
+        case 'skills_sync_override': { const entry = find(args.id); entry.item.autoUpdate = args.autoUpdate ?? null; return view(entry); }
+        case 'skills_sync_set_ref': { const entry = find(args.id); entry.item.source.gitRef = args.gitRef ?? null; return view(entry); }
         default: throw new Error(`Unknown preview command: ${command}`);
       }
     },

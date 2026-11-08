@@ -152,3 +152,7 @@ To recover, import the backup JSON through the same import path. This restores s
 - Native per-bot partial success, canonical name matching and non-deletion by omission are preserved.
 - Headless `--export-bots` retains its original path and overwrite behavior. It now writes a same-directory temporary file (mode `0600` on Unix), flushes it, atomically replaces the destination, verifies the final bytes and removes a temporary file after a failed write or replacement. For no-clobber desktop exports, choose a new destination in the Export dialog.
 - This is not an application restore, a second bot CRUD engine, two-way Git sync, or a replacement for security reviews before applying untrusted configuration.
+
+## Skill references on another machine (issue #125)
+
+The portable `bots[].skills` array contains skill IDs only. It never embeds `SKILL.md`, supporting files, archives, Base64 data, private repository contents, GitHub credentials or tokens. A receiving machine must obtain compatible skills through its own PandaCode Skills Library or an already configured harness before a bot can use those references. Missing skill IDs are not silently downloaded and should be reported during bot-configuration review. Per-bot selection/source-precedence enhancements remain an open part of the #125 acceptance criteria; a native harness can independently expose shared skill folders to multiple bots, and this is not a security isolation boundary.

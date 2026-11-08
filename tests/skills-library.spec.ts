@@ -18,6 +18,30 @@ async function open(page: Page): Promise<void> {
   await page.goto('/skills-library-harness.html');
   await expect(page.getByRole('list', { name: 'Library' })).toBeVisible();
 }
+/** The real Settings sidebar, content column and card tokens (not the isolated import harness). */
+async function openWithinSettings(page: Page): Promise<void> {
+  await page.route('**/skills-layout-harness.html', route => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><html data-theme="dark"><head>
+      <link rel="stylesheet" href="/src/styles.css">
+      <link rel="stylesheet" href="/src/design-system.css">
+      <link rel="stylesheet" href="/src/settings.css">
+    </head><body><div class="settings-page-root" style="--sidebar-width:220px;min-height:100vh">
+      <aside class="settings-nav"></aside>
+      <div class="settings-content"><section class="settings-panel settings-panel-paged">
+        <div class="settings-panel-body"><div id="skills-host"></div></div>
+      </section></div>
+    </div><script type="module">
+      import { mountSkillsLibrary } from '/src/skills-library.ts';
+      import { createPreviewSkills } from '/src/preview-skills.ts';
+      const preview = createPreviewSkills();
+      mountSkillsLibrary(document.getElementById('skills-host'), { call: (command, args = {}) => preview.call(command, args), projects: () => [] });
+    </script></body></html>`,
+  }));
+  await page.goto('/skills-layout-harness.html');
+  await expect(page.getByRole('navigation', { name: 'Skills Library pages' })).toBeVisible();
+}
+
 const item = (page: Page, name: string) => page.getByRole('list', { name: 'Library' }).locator('.skills-item', { hasText: name });
 const status = (page: Page, row: string, column: number) => page.getByRole('table', { name: 'Skills by harness' }).getByRole('row', { name: new RegExp(row) }).locator('td').nth(column);
 
@@ -145,6 +169,72 @@ test('discovery registers only skill repositories, shows name conflicts, and imp
   await expect(page.getByRole('button', { name: 'Import all from you/agent-skills' })).toHaveCount(0);
 });
 
+test('recommended RhapsodIA templates install only selected available skills', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Recommended skills', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Select recommended agent-systems-best-practices' })).toBeDisabled();
+  await page.getByRole('checkbox', { name: 'Select recommended software-improvement-loop' }).check();
+  await page.getByRole('button', { name: 'Install selected', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('Imported 1 recommended skill. Activation is separate.');
+  await page.getByRole('button', { name: 'Library & activation' }).click();
+  await expect(item(page, 'software-improvement-loop')).toContainText('ginmp8/rhapsodia/skills/software-improvement-loop');
+  await expect(page.getByRole('checkbox', { name: 'software-improvement-loop: Claude Code · User' })).not.toBeChecked();
+});
+
+test('synchronization page offers per-skill and bulk manual sync', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Synchronization' }).click();
+  await expect(page.getByRole('list', { name: 'Skill synchronization' })).toContainText('Release notes');
+  await page.getByRole('button', { name: 'Sync this skill' }).click();
+  await expect(page.getByRole('status')).toContainText('already at the current ref');
+  await page.getByRole('button', { name: 'Sync all installed skills' }).click();
+  await expect(page.getByRole('status')).toContainText('Updated 0 skills.');
+  await page.getByRole('checkbox', { name: 'Automatically check trusted skills when PandaCode starts' }).check();
+  await expect(page.getByRole('status')).toHaveText('Startup checks enabled for trusted sources.');
+  await page.getByRole('button', { name: 'Trust repository root' }).click();
+  await expect(page.getByRole('status')).toHaveText('Repository root explicitly trusted for startup checks.');
+  await page.getByRole('combobox', { name: 'Startup updates for Release notes' }).selectOption('no');
+  await expect(page.getByRole('status')).toHaveText('Updated startup policy for release-notes.');
+});
+
+test('an exact GitHub tree URL imports one complete recommended skill by reference', async ({ page }) => {
+  await open(page);
+  await page.getByRole('combobox', { name: 'Source' }).selectOption('github');
+  await page.getByRole('textbox', { name: 'Repository', exact: true }).fill('https://github.com/ginmp8/rhapsodia/tree/main/skills/archify');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('Imported 1 skill.');
+  await expect(item(page, 'archify')).toContainText('ginmp8/rhapsodia/skills/archify');
+  await expect(page.getByRole('checkbox', { name: 'archify: Claude Code · User' })).not.toBeChecked();
+});
+
+test('collection browsing is scoped and refuses an ambiguous tree ref without a ref field', async ({ page }) => {
+  await open(page);
+  await page.getByRole('combobox', { name: 'Source' }).selectOption('github');
+  const repo = page.getByRole('textbox', { name: 'Repository', exact: true });
+  await repo.fill('https://github.com/ginmp8/rhapsodia/tree/feature/custom/skills');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('exact ref separately');
+  await repo.fill('https://github.com/ginmp8/rhapsodia/tree/main/skills');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Use catalog selection or Import all');
+  const catalog = page.getByRole('list', { name: 'Catalog sources' });
+  await expect(catalog).toContainText('software-improvement-loop');
+  await catalog.getByRole('button', { name: 'Import all from ginmp8/rhapsodia' }).click();
+  await expect(page.getByRole('status')).toContainText('Nothing is active until you turn it on.');
+});
+
+test('trusting a collection can be revoked without granting repository-root trust', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Synchronization' }).click();
+  const collection = page.getByRole('textbox', { name: 'Authorized collection path for anthropics/skills' });
+  await collection.fill('skills/engineering');
+  await page.getByRole('button', { name: 'Trust collection' }).click();
+  await expect(page.getByRole('list', { name: 'Trusted paths in anthropics/skills' })).toContainText('skills/engineering');
+  await expect(page.getByText('Only selected collection paths trusted')).toBeVisible();
+  await page.getByRole('button', { name: 'Revoke collection trust' }).click();
+  await expect(page.getByRole('list', { name: 'Trusted paths in anthropics/skills' })).toHaveCount(0);
+});
+
 test('a pstack-sized collection is scanned as a catalog and imports past 64 files in total', async ({ page }) => {
   await open(page);
   await page.getByRole('textbox', { name: 'Catalog repository' }).fill('acme/nope');
@@ -152,7 +242,7 @@ test('a pstack-sized collection is scanned as a catalog and imports past 64 file
   await expect(page.getByRole('alert').filter({ hasText: 'not found, or your GitHub login cannot read it' })).toBeVisible();
   await page.getByRole('textbox', { name: 'Catalog repository' }).fill('https://github.com/acme/pstack');
   await page.getByRole('button', { name: 'Scan' }).click();
-  await expect(page.getByRole('status')).toHaveText('Found 40 skills in acme/pstack.');
+  await expect(page.getByRole('status')).toContainText('Found 40 skills in acme/pstack.');
   await expect(page.getByRole('list', { name: 'Skills in acme/pstack' }).getByRole('listitem')).toHaveCount(40);
   await page.getByRole('button', { name: 'Import all from acme/pstack' }).click();
   await expect(page.getByRole('status')).toHaveText('Imported 40 skills. Nothing is active until you turn it on.');
@@ -160,4 +250,64 @@ test('a pstack-sized collection is scanned as a catalog and imports past 64 file
   await page.getByRole('button', { name: 'Refresh acme/pstack' }).click();
   await expect(page.getByRole('status')).toHaveText('Refreshed acme/pstack. Library copies stay as imported.');
 });
+test('recommended and synchronization spacing follows the existing Settings design in both themes', async ({ page }) => {
+  await page.setViewportSize({ width: 1120, height: 900 });
+  await openWithinSettings(page);
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.getByRole('button', { name: 'Recommended skills', exact: true }).click();
+    const tabs = page.getByRole('navigation', { name: 'Skills Library pages' });
+    const positions = await tabs.locator('button').evaluateAll(buttons => buttons.map(button => {
+      const bounds = button.getBoundingClientRect();
+      return { left: bounds.left, right: bounds.right };
+    }));
+    expect(positions).toHaveLength(3);
+    expect(positions[1].left - positions[0].right).toBeLessThanOrEqual(12);
+    expect(positions[2].left - positions[1].right).toBeLessThanOrEqual(12);
+    await expect(tabs.getByRole('button', { name: 'Recommended skills' })).toHaveAttribute('aria-pressed', 'true');
+
+    const controls = page.locator('.skills-recommended-controls');
+    const group = page.locator('.skills-recommended-group').first();
+    const [controlsBox, refBox, buttonBox, groupBox, checkboxBox] = await Promise.all([
+      controls.boundingBox(),
+      controls.getByRole('textbox', { name: 'Recommended source ref' }).boundingBox(),
+      controls.getByRole('button', { name: 'Install selected' }).boundingBox(),
+      group.boundingBox(),
+      group.getByRole('checkbox').first().boundingBox(),
+    ]);
+    expect(refBox!.x - controlsBox!.x).toBeGreaterThanOrEqual(16);
+    expect(controlsBox!.x + controlsBox!.width - refBox!.x - refBox!.width).toBeGreaterThanOrEqual(16);
+    expect(buttonBox!.x - controlsBox!.x).toBeGreaterThanOrEqual(16);
+    expect(checkboxBox!.x - groupBox!.x).toBeGreaterThanOrEqual(16);
+    await expect(group.locator('xpath=preceding-sibling::*[1]')).toHaveClass(/settings-heading/);
+
+    await page.getByRole('button', { name: 'Synchronization', exact: true }).click();
+    const sync = page.locator('.skills-sync-controls');
+    const [syncBox, toggleBox, syncButtonBox] = await Promise.all([
+      sync.boundingBox(),
+      sync.getByRole('checkbox', { name: 'Automatically check trusted skills when PandaCode starts' }).boundingBox(),
+      sync.getByRole('button', { name: 'Sync all installed skills' }).boundingBox(),
+    ]);
+    expect(toggleBox!.x - syncBox!.x).toBeGreaterThanOrEqual(16);
+    expect(syncBox!.x + syncBox!.width - syncButtonBox!.x - syncButtonBox!.width).toBeGreaterThanOrEqual(16);
+    await expect(page.getByText('Sources', { exact: true })).toHaveClass(/settings-heading/);
+    await expect(page.getByText('Installed skills', { exact: true })).toHaveClass(/settings-heading/);
+  }
+});
+
+test('new Skills Library views stay inside the Settings panel at a narrow window', async ({ page }) => {
+  await page.setViewportSize({ width: 720, height: 900 });
+  await openWithinSettings(page);
+  const panel = page.locator('.settings-panel');
+  for (const name of ['Recommended skills', 'Synchronization']) {
+    await page.getByRole('button', { name, exact: true }).click();
+    const bounds = await panel.boundingBox();
+    const tabs = await page.getByRole('navigation', { name: 'Skills Library pages' }).boundingBox();
+    expect(tabs!.x).toBeGreaterThanOrEqual(bounds!.x - 1);
+    expect(tabs!.x + tabs!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width + 1);
+    const overflow = await page.locator('#skills-host').evaluate(host => host.scrollWidth - host.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+});
+
 });

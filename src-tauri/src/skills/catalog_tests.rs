@@ -25,11 +25,30 @@ impl Fake {
         self.responses.insert(format!("repos/{repo}/commits/HEAD"), json!({ "sha": commit }));
         self.responses.insert(format!("repos/{repo}/commits/{commit}"), json!({ "sha": commit }));
         let mut tree = Vec::new();
+        let mut directories: HashMap<String, Vec<Value>> = HashMap::new();
         for (index, (path, text)) in files.iter().enumerate() {
-            let sha = format!("{commit}-{index}");
+            // Real Git file object IDs are exactly 40 hexadecimal digits.
+            let sha = format!("{:040x}", index + 1);
             tree.push(json!({ "path": path, "type": "blob", "sha": sha, "size": text.len() }));
             let content = base64::engine::general_purpose::STANDARD.encode(text);
             self.responses.insert(format!("repos/{repo}/git/blobs/{sha}"), json!({ "content": content, "encoding": "base64" }));
+            let parts: Vec<&str> = path.split('/').collect();
+            for depth in 0..parts.len().saturating_sub(1) {
+                let parent = parts[..depth].join("/");
+                let folder = parts[..=depth].join("/");
+                let entries = directories.entry(parent).or_default();
+                if !entries.iter().any(|entry: &Value| entry["path"].as_str() == Some(folder.as_str())) {
+                    entries.push(json!({ "path": folder, "name": parts[depth], "type": "dir" }));
+                }
+            }
+            let parent = parts[..parts.len() - 1].join("/");
+            directories.entry(parent).or_default().push(json!({
+                "path": path, "name": parts[parts.len() - 1], "type": "file",
+                "sha": sha, "size": text.len(),
+            }));
+        }
+        for (directory, entries) in directories {
+            self.responses.insert(format!("repos/{repo}/contents/{directory}?ref={commit}"), Value::Array(entries));
         }
         self.responses.insert(format!("repos/{repo}/git/trees/{commit}?recursive=1"), json!({ "sha": commit, "tree": tree, "truncated": false }));
     }
@@ -128,11 +147,11 @@ fn per_skill_and_per_catalog_limits_have_clear_errors() {
     let fx = Fixture::new();
     let mut fake = Fake::default();
     let mut big: Vec<(String, String)> = vec![("SKILL.md".into(), skill("Big"))];
-    big.extend((0..64).map(|i| (format!("extra/{i}.md"), "x".to_string())));
+    big.extend((0..MAX_FILES).map(|i| (format!("extra/{i}.md"), "x".to_string())));
     fake.repo("me/big", "b1", &big);
     fx.library.add_catalog(&fake.api(), "me/big", None).unwrap();
     let result = fx.library.import_catalog(&fake.api(), "me/big", None).unwrap();
-    assert!(result.skipped[0].reason.contains("more than 64 files"), "{:?}", result.skipped);
+    assert!(result.skipped[0].reason.contains(&format!("more than {MAX_FILES} files")), "{:?}", result.skipped);
 
     let many: Vec<(String, String)> = (0..=catalog::MAX_SKILLS).map(|i| (format!("s/{i}/SKILL.md"), skill(&format!("s{i}")))).collect();
     fake.repo("me/many", "m1", &many);
@@ -278,4 +297,143 @@ fn access_failures_are_explained_and_progress_is_kept() {
     assert_eq!(saved.sources.len(), 1, "sources found before the rate limit are kept");
     assert!(saved.discovery.unwrap().failures[0].starts_with("me/b-locked: "));
     assert!(fx.library.add_catalog(&fake.api(), "me/missing", None).unwrap_err().contains("not found, or your GitHub login cannot read it"));
+}
+
+#[test]
+fn automatic_sync_never_discovers_unselected_repository_skills() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "a".repeat(40);
+    fake.repo("me/kit", &commit, &files(&[
+        ("skills/engineering/alpha/SKILL.md", &skill("Alpha")),
+        ("skills/security/secret/SKILL.md", &skill("Secret")),
+    ]));
+    fake.responses.insert("repos/me/kit/commits/main".into(), json!({"sha": commit}));
+    fx.library.sync_trust_scope_ref("me/kit", "skills", Some("main"), true).unwrap();
+    fx.library.sync_set_global(true).unwrap();
+    // Legacy trust metadata may exist; it cannot authorize downloading any new skill.
+    let report = fx.library.synchronize(&fake.api(), super::sync::Selection::All, true).unwrap();
+    assert!(report.installed.is_empty());
+    assert!(fx.library.list().unwrap().is_empty());
+    assert_eq!(fake.count("repos/me/kit/"), 0, "startup must not enumerate or clone a repository");
+}
+
+#[test]
+fn required_peer_metadata_blocks_manual_activation_and_legacy_metadata_stays_opted_out() {
+    let fx = Fixture::new();
+    let source = Source { kind: "folder".into(), location: "/home/needs".into(), git_ref: None, commit: None };
+    let files = vec![
+        ("SKILL.md".into(), skill("Needs").into_bytes()),
+        ("skill-dependencies.json".into(), br#"{"requiredSkills":["provider"]}"#.to_vec()),
+    ];
+    let item = fx.library.import(Kind::Skill, files, "needs", source).unwrap();
+    assert!(item.meta.required_skills.contains(&"provider".into()));
+    assert!(!item.meta.auto_available && item.meta.auto_update.is_none());
+    assert!(fx.library.activate("needs", "claude", Scope::User, None, false).unwrap_err().contains("Install required peer"));
+    let legacy = serde_json::json!({
+        "id":"old", "name":"Old", "kind":"skill", "description":"Old", "source":{"kind":"folder","location":"/legacy","gitRef":null,"commit":null},
+        "sha256":"abc", "importedAt":0, "acknowledged":null, "activations":[]
+    });
+    let old: Meta = serde_json::from_value(legacy).unwrap();
+    assert!(!old.auto_available && old.auto_update.is_none() && old.required_skills.is_empty());
+}
+
+#[test]
+fn configured_source_preview_is_ephemeral_and_imports_only_explicitly_selected_paths() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "a".repeat(40);
+    fake.repo("me/kit", &commit, &files(&[
+        ("skills/engineering/alpha/SKILL.md", &skill("Alpha")),
+        ("skills/engineering/alpha/reference.md", "Useful reference"),
+        ("skills/engineering/beta/SKILL.md", &skill("Beta")),
+        ("skills/security/secret/SKILL.md", &skill("Secret")),
+    ]));
+    fake.responses.insert("repos/me/kit/commits/main".into(), json!({"sha": commit}));
+
+    let preview = fx.library.preview_skill_source(&fake.api(), "me/kit", "skills/engineering", Some("main")).unwrap();
+    assert_eq!(preview.skills.len(), 2);
+    assert_eq!(preview.path, "skills/engineering");
+    assert!(fx.library.saved_skill_sources().unwrap().is_empty(), "scanning must not save unused repositories");
+    assert!(fx.library.list().unwrap().is_empty(), "scanning must not install skills");
+
+    let result = fx.library.import_skill_source(&fake.api(), "me/kit", "skills/engineering", Some("main"), &commit,
+        vec!["skills/engineering/alpha".into()]).unwrap();
+    assert_eq!(result.imported, ["Alpha"]);
+    assert_eq!(result.source.selected_paths, ["skills/engineering/alpha"]);
+    assert!(fx.library.load("alpha").is_ok());
+    assert!(fx.library.load("beta").is_err());
+    assert!(fx.library.load("secret").is_err());
+    assert!(fx.library.files("alpha").unwrap().iter().any(|(path, _)| path == "reference.md"));
+
+    let saved = fx.library.saved_skill_sources().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].repo, "me/kit");
+    assert_eq!(saved[0].git_ref.as_deref(), Some("main"));
+    assert_eq!(fx.library.selected_skill_ids(&saved[0].id).unwrap(), ["alpha"]);
+    assert_eq!(fake.count("repos/me/kit/commits/main"), 1);
+    assert!(fake.calls.borrow().iter().all(|path| !path.contains("clone")), "GitHub CLI API only, no local clone");
+}
+
+#[test]
+fn multiple_paths_in_same_repo_are_independent_and_can_be_removed_without_deleting_skills() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "b".repeat(40);
+    fake.repo("me/kit", &commit, &files(&[
+        ("skills/core/alpha/SKILL.md", &skill("Alpha")),
+        ("skills/extra/beta/SKILL.md", &skill("Beta")),
+    ]));
+    for (path, skill_path) in [
+        ("skills/core", "skills/core/alpha"),
+        ("skills/extra", "skills/extra/beta"),
+    ] {
+        fx.library.import_skill_source(&fake.api(), "me/kit", path, None, &commit,
+            vec![skill_path.to_string()]).unwrap();
+    }
+    let saved = fx.library.saved_skill_sources().unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_ne!(saved[0].id, saved[1].id);
+    fx.library.remove_skill_source(&saved[0].id).unwrap();
+    assert_eq!(fx.library.saved_skill_sources().unwrap().len(), 1);
+    assert!(fx.library.load("alpha").is_ok(), "remove source must not delete library content");
+    assert!(fx.library.load("beta").is_ok());
+}
+
+#[test]
+fn configured_source_rejects_out_of_scope_and_duplicate_id_selections() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "c".repeat(40);
+    fake.repo("me/kit", &commit, &files(&[
+        ("skills/one/a/SKILL.md", &skill("Duplicate")),
+        ("skills/one/b/SKILL.md", &skill("Duplicate")),
+        ("skills/two/outside/SKILL.md", &skill("Outside")),
+    ]));
+    let rejected = fx.library.import_skill_source(&fake.api(), "me/kit", "skills/one", None, &commit,
+        vec!["skills/two/outside".into()]).unwrap_err();
+    assert!(rejected.contains("outside this collection"), "{rejected}");
+    let duplicates = fx.library.import_skill_source(&fake.api(), "me/kit", "skills/one", None, &commit,
+        vec!["skills/one/a".into(), "skills/one/b".into()]).unwrap_err();
+    assert!(duplicates.contains("same skill ID"), "{duplicates}");
+    assert!(fx.library.list().unwrap().is_empty());
+    assert!(fx.library.saved_skill_sources().unwrap().is_empty());
+}
+
+#[test]
+fn auto_sync_master_switch_never_downloads_when_off_even_for_per_skill_enabled() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "d".repeat(40);
+    fake.repo("me/kit", &commit, &files(&[("skills/alpha/SKILL.md", &skill("Alpha"))]));
+    fx.library.import_skill_source(&fake.api(), "me/kit", "skills", None, &commit,
+        vec!["skills/alpha".into()]).unwrap();
+    fx.library.sync_set_override("alpha", Some(true)).unwrap();
+    let before = fake.count("repos/me/kit/");
+    assert!(!fx.library.sync_policy().unwrap().auto_on_start);
+    fx.library.synchronize(&fake.api(), super::sync::Selection::All, true).unwrap();
+    assert_eq!(fake.count("repos/me/kit/"), before, "global disabled must prevent network calls");
+    fx.library.sync_set_global(true).unwrap();
+    fx.library.synchronize(&fake.api(), super::sync::Selection::All, true).unwrap();
+    assert!(fake.count("repos/me/kit/") > before);
 }

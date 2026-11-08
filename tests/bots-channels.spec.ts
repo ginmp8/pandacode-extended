@@ -12,6 +12,9 @@ async function showBots(page: Page): Promise<void> {
 test.describe('shared bot channels', () => {
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
     await showBots(page);
+    // The sidebar is painted before asynchronous application boot finishes.
+    // Wait for the first conversation composer before navigating between views.
+    await expect(page.locator('#composer-area #composer')).toBeVisible();
     const pageErrors: string[] = [];
     page.on('pageerror', error => pageErrors.push(error.message));
     await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
@@ -21,6 +24,7 @@ test.describe('shared bot channels', () => {
     await create.getByRole('textbox', { name: 'Channel name' }).fill('navigation-regression');
     await create.getByRole('checkbox', { name: 'Scout' }).check();
     await create.getByRole('button', { name: 'Create channel' }).click();
+    await expect(create).toBeHidden();
     const channel = sidebar(page).getByRole('button', { name: '#navigation-regression' });
     await expect(channel).toBeVisible();
     await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();

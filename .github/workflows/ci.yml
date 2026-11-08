@@ -107,7 +107,7 @@ jobs:
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
             npx playwright test tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts tests/bots.spec.ts \
-            --grep "bot manifests|bot collaboration|fresh context stays in Profile|joined channels can override|bot actions menu aligns" --workers=2
+            --grep "bot manifests|bot collaboration|fresh context stays in Profile|joined channels can override|bot actions menu aligns" --workers=1
 
   rust:
     name: Rust check and tests (Linux)

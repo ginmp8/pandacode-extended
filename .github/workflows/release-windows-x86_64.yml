@@ -1,0 +1,73 @@
+name: Release Windows x86_64
+
+# Standalone Windows installer build; the existing multi-platform release.yml is unchanged.
+# Pull requests only exercise changes to this workflow and never use updater signing secrets.
+# Manual runs upload an Actions artifact; they do not create tags or GitHub Releases.
+on:
+  pull_request:
+    branches: [extended/development]
+    paths:
+      - .github/workflows/release-windows-x86_64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-x86_64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-x86_64:
+    name: Windows x86_64 installer
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      RELEASE_TARGET: windows-x86_64
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Verify pinned upstream source release identity
+        run: node --test scripts/release/version-identity.test.mjs
+
+      - name: Resolve application and release identities
+        id: version
+        shell: pwsh
+        run: |
+          $identity = @(node scripts/release/resolve-release-identity.mjs)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $identity | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run release tests
+        run: npm run test:release
+
+      - name: Build Windows x86_64 installer
+        run: node scripts/release/build.mjs
+        env:
+          # PR builds are unsigned; manual builds may generate signed updater assets.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name == 'workflow_dispatch' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          PANDACODE_RELAY_URL: ${{ vars.PANDACODE_RELAY_URL }}
+          PANDACODE_GITHUB_CLIENT_ID: ${{ vars.PANDACODE_GITHUB_CLIENT_ID }}
+
+      - name: Check packaged app startup (not GUI behavior)
+        timeout-minutes: 4
+        run: node scripts/release/ci-startup-smoke.mjs
+
+      - name: Upload Windows x86_64 release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pandacode-${{ steps.version.outputs.version }}-windows-x86_64
+          path: release/${{ steps.version.outputs.version }}/
+          if-no-files-found: error
+          retention-days: 14

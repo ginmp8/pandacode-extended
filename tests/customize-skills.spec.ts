@@ -9,11 +9,41 @@ async function openCustomize(page: Page): Promise<void> {
         import { mountCustomizeSkills } from '/src/customize-skills.ts';
         import { createPreviewSkills } from '/src/preview-skills.ts';
         const skills = createPreviewSkills();
+        const listeners = new Set();
         window.__skills = skills;
         window.__closeCount = 0;
+        window.__progressEvents = [];
         mountCustomizeSkills(document.getElementById('host'), {
-          call: async (command, args = {}) => skills.call(command, args),
-          subscribe: async () => () => {},
+          call: async (command, args = {}) => {
+            if (command === 'skills_preview_file' && window.__scenario === 'malicious') {
+              const text = '<img src="https://example.org/tracker.png"><script>window.bad=1</script>';
+              return {path:args.file,text,size:text.length,binary:false};
+            }
+            if (command === 'skills_source_import_tracked' && window.__scenario === 'partial') {
+              const request = args.request, paths=request.selectedPaths;
+              const preview=skills.call('skills_source_preview',{repo:request.repo,path:request.path,gitRef:request.gitRef});
+              const failedPath=paths.length===3 ? paths[1] : null;
+              const successful=paths.filter(path=>path!==failedPath);
+              const persisted=skills.call('skills_source_import_tracked',{request:{...request,selectedPaths:successful}});
+              const results=[];
+              for(let index=0;index<paths.length;index++){
+                const path=paths[index];
+                const found=preview.skills.find(skill=>skill.path===path);
+                const common={operationId:request.operationId,path,name:found?.name??path,total:paths.length,completed:index,detail:null};
+                for(const listener of listeners)listener({...common,phase:'fetching'});
+                await new Promise(resolve=>setTimeout(resolve,20));
+                const final={...common,completed:index+1,phase:path===failedPath?'failed':'installed',
+                  detail:path===failedPath?'GitHub rate limit: retry this package.':null};
+                for(const listener of listeners)listener(final);
+                window.__progressEvents.push(final);
+                results.push(final);
+              }
+              return {...persisted,results,
+                skipped:failedPath?[{path:failedPath,name:preview.skills.find(skill=>skill.path===failedPath)?.name??failedPath,reason:'GitHub rate limit: retry this package.'}]:[]};
+            }
+            return skills.call(command, args);
+          },
+          subscribe: async listener => { listeners.add(listener); return () => listeners.delete(listener); },
           chooseZip: async () => '/Users/you/Downloads/skill.zip',
           close: () => window.__closeCount++,
         });
@@ -90,4 +120,47 @@ test('a conflicting installed skill requires explicit replacement approval', asy
   await expect(found.getByRole('button', {name:'Import selected (1)'})).toBeDisabled();
   await found.getByRole('checkbox', {name:'I approve replacing conflicting installed skills'}).check();
   await expect(found.getByRole('button', {name:'Import selected (1)'})).toBeEnabled();
+});
+
+test('three selected skills show partial failure, truthful progress and selective retry', async ({page}) => {
+  await openCustomize(page);
+  await page.evaluate(() => { (window as any).__scenario='partial'; });
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  await page.getByRole('button',{name:'Select shown'}).click();
+  await page.getByRole('button',{name:'Import selected (3)'}).click();
+  const progress=page.getByRole('region',{name:'Skill operation status'});
+  await expect(progress).toContainText('Completed with errors');
+  await expect(progress).toContainText('3 of 3 processed');
+  await expect(progress).toContainText('GitHub rate limit');
+  await expect(page.getByRole('button',{name:'Retry failed (1)'})).toBeVisible();
+  const observed=await page.evaluate(() => (window as any).__progressEvents.map((event:any)=>event.completed));
+  expect(observed).toEqual([1,2,3]);
+  await page.evaluate(() => { (window as any).__scenario='success'; });
+  await page.getByRole('button',{name:'Retry failed (1)'}).click();
+  await expect(progress).toContainText('Completed successfully');
+  await expect(progress).toContainText('1 of 1 processed');
+});
+
+test('aggregate-only completion is not falsely described as streamed progress', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  await page.getByRole('button',{name:'Select shown'}).click();
+  await page.getByRole('button',{name:'Import selected (3)'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Incremental progress events were not received');
+});
+
+test('read-only preview cannot load remote resources or execute scripts', async ({page}) => {
+  await openCustomize(page);
+  await page.evaluate(() => { (window as any).__scenario='malicious'; });
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  await expect(detail.getByRole('region',{name:'Skill file content'})).toBeVisible();
+  await expect(detail.locator('script,img,iframe,pandacode-ui')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).bad)).toBeUndefined();
 });

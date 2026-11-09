@@ -243,6 +243,39 @@ pub fn github_preview(repo: &str, package: &str, commit: &str, file: &str) -> Re
 mod tests {
     use super::valid_portable_path;
     #[test]
+    fn zip_packages_are_validated_before_any_library_installation() {
+        use super::read_zip;
+        use std::io::Write;
+        fn archive(entries: &[(&str, &str)]) -> std::path::PathBuf {
+            let path = std::env::temp_dir().join(format!("pandacode-zip-{}.zip", uuid::Uuid::new_v4()));
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            for (name, body) in entries {
+                writer.start_file((*name).to_string(), zip::write::SimpleFileOptions::default()).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+            path
+        }
+        let good = archive(&[
+            ("wrapper/SKILL.md", "---\nname: Valid\ndescription: Safe package\n---\n# Valid"),
+            ("wrapper/references/guide.md", "Help"),
+        ]);
+        let files = read_zip(&good).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|(path,_)| path=="SKILL.md"));
+        let _ = std::fs::remove_file(good);
+        let multiple = archive(&[
+            ("one/SKILL.md", "---\nname: One\ndescription: First\n---"),
+            ("two/SKILL.md", "---\nname: Two\ndescription: Second\n---"),
+        ]);
+        assert!(read_zip(&multiple).unwrap_err().contains("exactly one"));
+        let _ = std::fs::remove_file(multiple);
+        let traversal = archive(&[("../SKILL.md", "malicious")]);
+        assert!(read_zip(&traversal).unwrap_err().contains("unsafe path"));
+        let _ = std::fs::remove_file(traversal);
+    }
+
+    #[test]
     fn rejects_malformed_zip_frontmatter() {
         use super::validate_zip_frontmatter;
         assert!(validate_zip_frontmatter("---\\nname: Good\\ndescription: Good description\\n---\\n# Good".replace("\\n", "\n").as_str()).is_ok());

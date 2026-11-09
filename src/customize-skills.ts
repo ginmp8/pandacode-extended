@@ -29,7 +29,8 @@ type Operation = {
   total: number; completed: number; packages: Map<string, PackageProgress>;
   snapshot?: ImportSnapshot; detail: string; progressSeen: boolean;
 };
-type Detail = { kind: 'installed'; id: string; file: string } | { kind: 'remote'; path: string; file: string };
+type PreviewMode = 'rendered' | 'raw';
+type Detail = { kind: 'installed'; id: string; file: string; mode: PreviewMode } | { kind: 'remote'; path: string; file: string; mode: PreviewMode };
 export type CustomizeSkillsHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   subscribe(listener: (event: any) => void): Promise<() => void>;
@@ -87,7 +88,19 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let chosen = new Set<string>();
   let editingSource: string | null = null, replaceConflicts = false;
   let detail: Detail | null = null;
-  let markdownMode: 'rendered' | 'raw' = 'rendered';
+  const openedDetails: Detail[] = [];
+  // Keep each tab's file and preview mode while switching between skills.
+  const detailKey = (value: Detail) => value.kind === 'installed' ? `installed:${value.id}` : `remote:${value.path}`;
+  let inspectorWidth: number | null = null;
+  const inspectorWidthKey = 'pandacode.customizeSkillsInspectorWidth';
+  try {
+    const raw = localStorage.getItem(inspectorWidthKey);
+    const saved = raw === null ? NaN : Number(raw);
+    if (Number.isFinite(saved) && saved >= 320 && saved <= 4096) inspectorWidth = saved;
+  } catch { /* Resizing remains available without storage. */ }
+  if (inspectorWidth !== null) host.style.setProperty('--customize-inspector-width', `${inspectorWidth}px`);
+  type ResizeDrag = { id: number; handle: HTMLElement; startX: number; startWidth: number; priorWidth: number | null };
+  let resizeDrag: ResizeDrag | null = null;
   let previewText: PreviewFile | null = null;
   let previewSerial = 0;
   let pendingRemove: string | null = null;
@@ -167,7 +180,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     busy=true; busyLabel=`Uninstalling ${item.name}…`; error=''; draw();
     try {
       await options.call<SkillItem[]>('skills_remove',{id});
-      pendingUninstall=null; pendingActivation=null; detail=null; previewSerial++;
+      pendingUninstall=null; pendingActivation=null;
       await refresh();
       success(`${item.name} uninstalled from the PandaCode library.`);
     } catch (cause) { error=message(cause); }
@@ -269,14 +282,137 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       : root;
   }
 
-  function dismissDetail(): void {
-    const old=detail;
-    detail=null;pendingActivation=null;pendingReplacement=null;pendingUninstall=null;collapsedFiles.clear();previewSerial++;
+
+  function selectDetail(next: Detail): void {
+    const key = detailKey(next);
+    const existing = openedDetails.find(value => detailKey(value) === key);
+    if (!existing) openedDetails.push(next);
+    if (detail && detailKey(detail) === key) return;
+    detail = existing ?? next;
+    pendingActivation = null; pendingReplacement = null; pendingUninstall = null;
+    collapsedFiles.clear(); tryHarness = ''; previewSerial++;
     draw();
-    const selector=old?.kind==='installed'
-      ? `[data-customize="inspect-installed"][data-id="${CSS.escape(old.id)}"]`
-      : old ? `[data-customize="inspect-remote"][data-path="${CSS.escape(old.path)}"]` : '';
-    if(selector)host.querySelector<HTMLButtonElement>(selector)?.focus({preventScroll:true});
+    host.querySelector<HTMLButtonElement>('.customize-skill-tab.selected .customize-skill-tab-button')?.focus({preventScroll:true});
+  }
+
+  function replaceActiveDetail(next: Detail): void {
+    const index = openedDetails.findIndex(value => detailKey(value) === detailKey(next));
+    if (index >= 0) openedDetails[index] = next;
+    detail = next;
+    draw();
+  }
+
+  function closeSkillDetail(key = detail ? detailKey(detail) : ''): void {
+    const index = openedDetails.findIndex(value => detailKey(value) === key);
+    if (index < 0) return;
+    const closing = openedDetails[index];
+    const wasActive = detail !== null && detailKey(detail) === key;
+    openedDetails.splice(index, 1);
+    if (wasActive) {
+      detail = openedDetails[index] ?? openedDetails[index - 1] ?? null;
+      pendingActivation = null; pendingReplacement = null; pendingUninstall = null;
+      collapsedFiles.clear(); previewSerial++;
+    }
+    draw();
+    if (detail) host.querySelector<HTMLButtonElement>('.customize-skill-tab.selected .customize-skill-tab-button')?.focus({preventScroll:true});
+    else if (wasActive) {
+      const selector = closing.kind === 'installed'
+        ? `[data-customize="inspect-installed"][data-id="${CSS.escape(closing.id)}"]`
+        : `[data-customize="inspect-remote"][data-path="${CSS.escape(closing.path)}"]`;
+      host.querySelector<HTMLButtonElement>(selector)?.focus({preventScroll:true});
+    }
+  }
+
+  function forgetRemoteDetails(): void {
+    const wasRemote = detail?.kind === 'remote';
+    for (let index = openedDetails.length - 1; index >= 0; index--) {
+      if (openedDetails[index].kind === 'remote') openedDetails.splice(index, 1);
+    }
+    if (wasRemote) {
+      detail = openedDetails.at(-1) ?? null;
+      pendingActivation = null; pendingReplacement = null; pendingUninstall = null;
+      collapsedFiles.clear(); previewSerial++;
+    }
+  }
+
+  function pruneUninstalledTabs(): void {
+    const remaining = new Set(installed.map(item => item.id));
+    const lostActive = detail?.kind === 'installed' && !remaining.has(detail.id);
+    for (let index = openedDetails.length - 1; index >= 0; index--) {
+      const value = openedDetails[index];
+      if (value.kind === 'installed' && !remaining.has(value.id)) openedDetails.splice(index, 1);
+    }
+    if (lostActive) {
+      detail = openedDetails.at(-1) ?? null;
+      pendingActivation = null; pendingReplacement = null; pendingUninstall = null;
+      collapsedFiles.clear(); previewSerial++;
+    }
+  }
+
+  function inspectorWidthRange(): {min: number; max: number} {
+    return {min: 320, max: Math.max(320, host.clientWidth - 440)};
+  }
+
+  function updateResizeHandle(): void {
+    const handle = host.querySelector<HTMLElement>('.customize-side-resize');
+    const pane = host.querySelector<HTMLElement>('.customize-detail-side');
+    if (!handle || !pane) return;
+    const bounds = inspectorWidthRange();
+    handle.setAttribute('aria-valuemin', String(bounds.min));
+    handle.setAttribute('aria-valuemax', String(bounds.max));
+    handle.setAttribute('aria-valuenow', String(Math.round(pane.getBoundingClientRect().width)));
+  }
+
+  function applyInspectorWidth(value: number | null, persist = false): void {
+    if (value === null) {
+      inspectorWidth = null;
+      host.style.removeProperty('--customize-inspector-width');
+    } else {
+      const {min, max} = inspectorWidthRange();
+      inspectorWidth = Math.round(Math.min(max, Math.max(min, value)));
+      host.style.setProperty('--customize-inspector-width', `${inspectorWidth}px`);
+    }
+    if (persist) {
+      try {
+        if (inspectorWidth === null) localStorage.removeItem(inspectorWidthKey);
+        else localStorage.setItem(inspectorWidthKey, String(inspectorWidth));
+      } catch { /* The selected width still applies in the current session. */ }
+    }
+    updateResizeHandle();
+  }
+
+  function finishResize(commit: boolean): void {
+    if (!resizeDrag) return;
+    const finished = resizeDrag;
+    resizeDrag = null;
+    host.classList.remove('customize-side-resizing');
+    if (finished.handle.isConnected && finished.handle.hasPointerCapture(finished.id)) finished.handle.releasePointerCapture(finished.id);
+    if (commit) applyInspectorWidth(inspectorWidth, true);
+    else applyInspectorWidth(finished.priorWidth);
+  }
+
+  function resizePointerDown(event: PointerEvent): void {
+    const handle = event.target instanceof Element ? event.target.closest<HTMLElement>('.customize-side-resize') : null;
+    if (!handle || !host.contains(handle) || resizeDrag || event.button !== 0 || !event.isPrimary || matchMedia('(max-width:1100px)').matches) return;
+    event.preventDefault();
+    const pane = host.querySelector<HTMLElement>('.customize-detail-side');
+    if (!pane) return;
+    resizeDrag = {id:event.pointerId, handle, startX:event.clientX, startWidth:pane.getBoundingClientRect().width, priorWidth:inspectorWidth};
+    handle.setPointerCapture(event.pointerId);
+    handle.focus({preventScroll:true});
+    host.classList.add('customize-side-resizing');
+  }
+  function resizePointerMove(event: PointerEvent): void {
+    if (!resizeDrag || resizeDrag.id !== event.pointerId) return;
+    applyInspectorWidth(resizeDrag.startWidth + resizeDrag.startX - event.clientX);
+  }
+  function resizePointerUp(event: PointerEvent): void { if (resizeDrag?.id === event.pointerId) finishResize(true); }
+  function resizePointerCancel(event: PointerEvent): void { if (resizeDrag?.id === event.pointerId) finishResize(false); }
+  function resetInspectorWidth(event: MouseEvent): void {
+    if (!(event.target instanceof Element) || !event.target.closest('.customize-side-resize')) return;
+    event.preventDefault();
+    finishResize(false);
+    applyInspectorWidth(null, true);
   }
 
   function installedHtml(): string {
@@ -437,6 +573,32 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     </div>`;
   }
 
+
+  function skillTabsHtml(): string {
+    const tabs = openedDetails.map(value => {
+      const key = detailKey(value);
+      const item = value.kind === 'installed'
+        ? installed.find(skill => skill.id === value.id)
+        : scan?.skills.find(skill => skill.path === value.path);
+      const name = item?.name ?? (value.kind === 'installed' ? value.id : value.path);
+      const characters = Array.from(name);
+      const label = characters.length > 22 ? characters.slice(0, 22).join('') + '…' : name;
+      const selected = detail !== null && detailKey(detail) === key;
+      return `<div class="customize-skill-tab inspector-tab${selected ? ' selected' : ''}" data-skill-tab="${esc(key)}">
+        <button type="button" role="tab" class="customize-skill-tab-button inspector-tab-button${selected ? ' selected' : ''}"
+          data-customize="activate-skill-tab" data-key="${esc(key)}" aria-controls="customize-skill-panel-content"
+          aria-selected="${selected}" aria-label="${esc(name)}" title="${esc(name)}" tabindex="${selected ? 0 : -1}">
+          ${icon(value.kind === 'installed' ? 'skill' : 'github')}<span class="inspector-tab-label" aria-hidden="true">${esc(label)}</span>
+        </button>
+        <button type="button" class="customize-skill-tab-close inspector-tab-close" data-customize="close-skill-tab"
+          data-key="${esc(key)}" aria-label="Close ${esc(name)}" title="Close ${esc(name)}" tabindex="-1">${icon('close')}</button>
+      </div>`;
+    }).join('');
+    return `<div class="customize-side-tabbar inspector-strip">
+      <nav class="customize-skill-tabs inspector-tabs" role="tablist" aria-label="Open skill previews">${tabs}</nav>
+    </div>`;
+  }
+
   function detailHtml(): string {
     if (!detail) return '';
     const item = detail.kind === 'installed'
@@ -450,13 +612,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       ? (item as SkillItem).source
       : {kind:'github',location:scan!.repo,gitRef:scan!.gitRef,commit:scan!.commit};
     const sourceUrl = githubSourceLink(source);
-    return `<aside class="customize-detail-side" role="region" aria-label="Read-only skill preview">
+    return `<aside id="customize-skill-detail-panel" class="customize-detail-side" role="region" aria-label="Read-only skill preview">
+      <div class="customize-side-resize" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize skill inspector"
+        aria-description="Use Left and Right arrows to resize. Hold Shift for larger steps. Home and End select the minimum and maximum widths. Double-click to reset."
+        aria-controls="customize-skill-detail-panel" title="Resize skill inspector · Double-click to reset"></div>
+      ${skillTabsHtml()}
       <header class="customize-side-heading">
         <div><p class="customize-eyebrow">${detail.kind === 'remote' ? 'GITHUB PREVIEW · NOT INSTALLED' : 'INSTALLED PACKAGE'}</p>
           <h2>${esc(item.name)}</h2></div>
-        <button type="button" class="secondary-button" data-customize="close-detail" aria-label="Close preview">${icon('close')}</button>
       </header>
-      <div class="customize-side-content">
+      <div id="customize-skill-panel-content" class="customize-side-content" role="tabpanel" aria-label="${esc(item.name)}">
         ${activityHtml()}
         <p class="customize-side-description">${esc(item.description)}</p>
         <div class="customize-side-source"><small>${esc(source.location)} · ${esc(shaShort(source.commit))}</small>
@@ -468,8 +633,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         <section class="customize-preview-main" aria-label="Selected package file">
           <div class="customize-preview-toolbar"><span title="${esc(detail.file)}">${esc(detail.file)}</span>
             <div class="customize-mode-switch">
-              <button type="button" data-customize="preview-mode" data-mode="rendered" aria-pressed="${markdownMode==='rendered'}">Rendered</button>
-              <button type="button" data-customize="preview-mode" data-mode="raw" aria-pressed="${markdownMode==='raw'}">Raw</button>
+              <button type="button" data-customize="preview-mode" data-mode="rendered" aria-pressed="${detail.mode==='rendered'}">Rendered</button>
+              <button type="button" data-customize="preview-mode" data-mode="raw" aria-pressed="${detail.mode==='raw'}">Raw</button>
             </div>
           </div>
           <div id="customize-preview-content" class="customize-preview-body" role="region" aria-label="Skill file content">
@@ -495,6 +660,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   function draw(): void {
     if (disposed) return;
+    if (resizeDrag) finishResize(false); // A full redraw must not orphan an active pointer capture.
     host.classList.toggle('customize-detail-open', !!detail);
     const active = document.activeElement as HTMLInputElement | null;
     const withinHost = !!active && host.contains(active);
@@ -505,6 +671,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const activeHarnessId = withinHost ? active.dataset.id : undefined;
     const activeActionId = withinHost ? active.dataset.id : undefined;
     const activePath = withinHost ? active.dataset.file || active.dataset.path : undefined;
+    const activeTabKey = withinHost ? active.dataset.key : undefined;
     const cursor = activeName && typeof active?.selectionStart === 'number' ? active.selectionStart : -1;
     host.innerHTML = `<div class="customize-page">
       <header class="customize-page-header">
@@ -544,7 +711,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       : activeSkillPath !== undefined
       ? [...host.querySelectorAll<HTMLInputElement>('[data-select-skill]')].find(input => input.dataset.selectSkill === activeSkillPath)
       : activeAction
-        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && (activePath !== undefined ? (button.dataset.file || button.dataset.path) === activePath : button.dataset.id === activeActionId))
+        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && (activePath !== undefined ? (button.dataset.file || button.dataset.path) === activePath : activeTabKey !== undefined ? button.dataset.key === activeTabKey : button.dataset.id === activeActionId))
         : activeName
           ? [...host.querySelectorAll<HTMLInputElement>('input[name]')].find(input => input.name === activeName)
           : undefined;
@@ -553,6 +720,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       if (cursor >= 0 && next instanceof HTMLInputElement && next.type !== 'checkbox')
         next.setSelectionRange(cursor, cursor);
     }
+    updateResizeHandle();
     if (detail) void loadPreview();
   }
 
@@ -570,6 +738,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       ]);
       if (disposed || serial !== refreshSerial) return;
       installed=items; installedIcons=icons; sources=saved; policy=current; matrix=statuses; syncReport=recent;
+      pruneUninstalledTabs();
       loadFailed=false;
     } catch (cause) {
       if (disposed || serial !== refreshSerial) return;
@@ -597,7 +766,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       if (value.binary || value.text === null) {
         slot.textContent = `This file cannot be rendered as text (${value.size} bytes).`; return;
       }
-      if (markdownMode === 'raw' || !/\.md$/i.test(current.file)) {
+      if (current.mode === 'raw' || !/\.md$/i.test(current.file)) {
         slot.innerHTML = `<pre><code>${esc(value.text)}</code></pre>`;
       } else {
         // Skill instructions are untrusted data, never interactive message/UI code.
@@ -762,7 +931,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     try {
       const changing=changingRefSource?sources.find(source=>source.id===changingRefSource):null;
       const result=await options.call<SourcePreview>('skills_source_preview',{repo:githubUrl.trim(),path:changing?.path??'',gitRef:githubRef.trim()||null});
-      scan=result;chosen=new Set(changing?.selectedPaths.filter(path=>result.skills.some(skill=>skill.path===path))??[]);
+      forgetRemoteDetails(); scan=result;chosen=new Set(changing?.selectedPaths.filter(path=>result.skills.some(skill=>skill.path===path))??[]);
       editingSource=null;replaceConflicts=false;discoverySearch='';githubForm=false;
       note=`Found ${plural(result.skills.length,'skill')} at ${shaShort(result.commit)}. Select packages to import.`;
     } catch(cause){error=message(cause);note='';}
@@ -775,7 +944,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     githubUrl=`https://github.com/${source.repo}${source.path?`/tree/${source.gitRef??'main'}/${source.path}`:''}`;
     githubRef=source.gitRef??'';busy=true;busyLabel='Scanning saved GitHub source…';error='';note='Scanning saved source…';draw();
     try {
-      scan=await options.call<SourcePreview>('skills_source_preview',{repo:source.repo,path:source.path,gitRef:source.gitRef});
+      const sourcePreview=await options.call<SourcePreview>('skills_source_preview',{repo:source.repo,path:source.path,gitRef:source.gitRef});
+      forgetRemoteDetails(); scan=sourcePreview;
       chosen=new Set(source.selectedPaths);editingSource=id;replaceConflicts=false;discoverySearch='';note='Save tracked selection to change automatic update scope without uninstalling packages.';
     } catch(cause){error=message(cause);}
     finally{busy=false;draw();}
@@ -784,7 +954,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   function changeSourceRef(id:string):void {
     const source=sources.find(source=>source.id===id);
     if(!source)return;
-    changingRefSource=id;editingSource=null;scan=null;detail=null;chosen.clear();
+    changingRefSource=id;editingSource=null;forgetRemoteDetails();scan=null;chosen.clear();
     githubUrl=`https://github.com/${source.repo}`;githubRef=source.gitRef??'';
     githubForm=true;
     note='Enter the new branch or full SHA, scan, and explicitly import the selected skills to change this source revision.';
@@ -823,7 +993,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'confirm-zip-replace':
         if(pendingZipReplacement) {const selected=pendingZipReplacement;pendingZipReplacement=null;void importZip(selected,true);}
         break;
-      case 'add-github':addOpen=false;githubForm=true;scan=null;editingSource=null;changingRefSource=null;replaceConflicts=false;detail=null;draw();break;
+      case 'add-github':addOpen=false;githubForm=true;forgetRemoteDetails();scan=null;editingSource=null;changingRefSource=null;replaceConflicts=false;draw();break;
       case 'close-github-form':githubForm=false;changingRefSource=null;draw();break;
       case 'tab-installed':tab='installed';pendingRemove=null;draw();break;
       case 'tab-sources':tab='sources';pendingRemove=null;draw();break;
@@ -848,12 +1018,17 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       }
       case 'reactivate-skill':void setHarnessEnabled(id,button.dataset.harness??'',true);break;
       case 'try-skill':void tryInstalledSkill(id);break;
-      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingReplacement=null;pendingUninstall=null;collapsedFiles.clear();tryHarness='';draw();host.querySelector<HTMLButtonElement>('[data-customize="close-detail"]')?.focus({preventScroll:true});break;
-      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;pendingReplacement=null;collapsedFiles.clear();draw();host.querySelector<HTMLButtonElement>('[data-customize="close-detail"]')?.focus({preventScroll:true});break;
-      case 'close-detail':dismissDetail();break;
-      case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;
-      case 'preview-mode':markdownMode=button.dataset.mode==='raw'?'raw':'rendered';draw();break;
-      case 'hide-discovery':scan=null;chosen.clear();editingSource=null;changingRefSource=null;draw();break;
+      case 'inspect-installed':selectDetail({kind:'installed',id,file:'SKILL.md',mode:'rendered'});break;
+      case 'inspect-remote':selectDetail({kind:'remote',path,file:'SKILL.md',mode:'rendered'});break;
+      case 'activate-skill-tab':{
+        const tabToActivate = openedDetails.find(value => detailKey(value) === button.dataset.key);
+        if (tabToActivate) selectDetail(tabToActivate);
+        break;
+      }
+      case 'close-skill-tab':closeSkillDetail(button.dataset.key);break;
+      case 'preview-file':if(detail)replaceActiveDetail({...detail,file:button.dataset.file??'SKILL.md'});break;
+      case 'preview-mode':if(detail)replaceActiveDetail({...detail,mode:button.dataset.mode==='raw'?'raw':'rendered'});break;
+      case 'hide-discovery':forgetRemoteDetails();scan=null;chosen.clear();editingSource=null;changingRefSource=null;draw();break;
       case 'select-all':if(scan)for(const entry of scan.skills)if([entry.name,entry.path,entry.description].some(s=>s.toLowerCase().includes(discoverySearch.toLowerCase())))chosen.add(entry.path);draw();break;
       case 'select-none':chosen.clear();draw();break;
       case 'import-selected':if(scan&&chosen.size){const snap={repo:scan.repo,path:scan.path,gitRef:scan.gitRef,commit:scan.commit,paths:[...chosen],allowReplace:replaceConflicts};void importSelected(snap);}break;
@@ -914,8 +1089,39 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     }
   };
   const submit=(event:Event)=>{if((event.target as HTMLElement).id==='customize-github-form'){event.preventDefault();void scanGithub();}};
-  const keydown=(event:KeyboardEvent)=>{if(event.key==='Escape'&&detail){event.preventDefault();dismissDetail();}};
+
+  const keydown=(event:KeyboardEvent)=>{
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.matches('.customize-side-resize')) {
+      if (event.altKey || event.ctrlKey || event.metaKey || matchMedia('(max-width:1100px)').matches) return;
+      if (event.key === 'Escape' && resizeDrag) { event.preventDefault(); finishResize(false); return; }
+      const {min,max} = inspectorWidthRange();
+      const current = host.querySelector<HTMLElement>('.customize-detail-side')?.getBoundingClientRect().width ?? min;
+      const step = event.shiftKey ? 32 : 8;
+      const width = event.key === 'ArrowLeft' ? current + step : event.key === 'ArrowRight' ? current - step
+        : event.key === 'Home' ? min : event.key === 'End' ? max : null;
+      if (width !== null) { event.preventDefault(); applyInspectorWidth(width,true); }
+      return;
+    }
+    if (target?.matches('.customize-skill-tab-button') && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      const tabs = [...host.querySelectorAll<HTMLButtonElement>('.customize-skill-tab-button')];
+      const index = tabs.indexOf(target as HTMLButtonElement);
+      if (index >= 0) {
+        if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); closeSkillDetail(target.dataset.key); return; }
+        const next = event.key === 'ArrowRight' ? tabs[(index+1)%tabs.length] : event.key === 'ArrowLeft' ? tabs[(index-1+tabs.length)%tabs.length]
+          : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : undefined;
+        if (next) { event.preventDefault(); const found=openedDetails.find(value => detailKey(value) === next.dataset.key); if (found) selectDetail(found); }
+      }
+      return;
+    }
+    if (event.key === 'Escape' && detail) { event.preventDefault(); closeSkillDetail(); }
+  };
   host.addEventListener('keydown',keydown);
+  host.addEventListener('pointerdown',resizePointerDown);
+  host.addEventListener('pointermove',resizePointerMove);
+  host.addEventListener('pointerup',resizePointerUp);
+  host.addEventListener('pointercancel',resizePointerCancel);
+  host.addEventListener('dblclick',resetInspectorWidth);
   host.addEventListener('click',click);
   host.addEventListener('input',input);
   host.addEventListener('change',change);
@@ -924,12 +1130,19 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   draw();
   void refresh();
   return {refresh,closeDetail:()=>{
-    if(detail) dismissDetail();
+    if(detail) closeSkillDetail();
   },dispose(){
     disposed=true;previewSerial++;unsub?.();
-    host.classList.remove('customize-skills-root','customize-detail-open');
+    finishResize(false);
+    host.classList.remove('customize-skills-root','customize-detail-open','customize-side-resizing');
+    host.style.removeProperty('--customize-inspector-width');
     if(toastTimer !== undefined)clearTimeout(toastTimer);
     host.removeEventListener('keydown',keydown);
+    host.removeEventListener('pointerdown',resizePointerDown);
+    host.removeEventListener('pointermove',resizePointerMove);
+    host.removeEventListener('pointerup',resizePointerUp);
+    host.removeEventListener('pointercancel',resizePointerCancel);
+    host.removeEventListener('dblclick',resetInspectorWidth);
     host.removeEventListener('click',click);host.removeEventListener('input',input);
     host.removeEventListener('change',change);host.removeEventListener('submit',submit);
     host.replaceChildren();

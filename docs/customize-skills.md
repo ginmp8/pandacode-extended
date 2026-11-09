@@ -1,5 +1,7 @@
 # Customize → Skills (Extended)
 
+The right-hand skill inspector follows the Files/Changes tab pattern: opening a skill adds an independently closable tab named for the skill (at most 22 visible characters, with the full name in the tooltip and accessible label). Switching tabs preserves the selected file and rendered/raw mode. The close control sits inside each tab, and the left-edge separator can be dragged, adjusted with the keyboard, or double-clicked to reset; the preferred width is saved locally. The skill cards do not animate on press or select text when clicked. On narrow layouts, the preview occupies the available width.
+
 Customize is a standalone, scrollable workspace opened from the main sidebar's top action card, immediately below Search. Its plug icon identifies workspace customization. **Skills** is the only active category. The existing **Settings → Tools → Skills & rules** page remains available for the original rules, catalogs, harness activation and drift matrix; both surfaces share the **same central native skills library**.
 
 ## Browse and preview

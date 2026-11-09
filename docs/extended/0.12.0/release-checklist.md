@@ -122,3 +122,13 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Inspect RustSec and `cargo test --locked`/Clippy jobs on the **new exact base/development SHA**, not just the source branch's [CI #42651770546](https://github.com/ginmp8/pandacode-extended/actions/runs/42651770546).
 - [ ] Verify native SQLite storage, upgrades/migrations, rollback and Rust >=1.89 compatibility on the supported platforms; the local environment has no Cargo.
 - [ ] Complete 80 shared source-file hunk reviews and Settings On/Off, Connect/MCP, bots, cloud/VM and credential runtime checks. Extended `0.12.0` remains an unapproved candidate.
+
+## Exact-SHA CI completion evidence — 2026-11-09
+
+- [x] Verify [push #42680289120](https://github.com/ginmp8/pandacode-extended/actions/runs/42680289120) and [PR #42680300162](https://github.com/ginmp8/pandacode-extended/actions/runs/42680300162) for code SHA [`06cb9b0c0141`](https://github.com/ginmp8/pandacode-extended/commit/06cb9b0c0141e964d43d0c462cbd30e9fc44ec1c): all six jobs passed in both runs.
+- [x] Verify RustSec audit against the remediated lockfile, `cargo test --locked --lib`, Clippy with warnings denied, Node/release tests, website build, npm audits, mobile/Expo and macOS ONNX in those exact-SHA jobs.
+- [ ] Independently validate native SQLite storage migrations, upgrade/rollback, installer behavior and supported Rust/platform compatibility.
+- [ ] Classify the remaining 80 divergent shared files hunk by hunk and execute Settings On/Off, Connect/MCP, bots, cloud/VM and credential integrations end to end.
+- [ ] Approve Extended `0.12.0` release separately; passing CI does not authorize tagging or distribution.
+
+The earlier unchecked CI items were authored while the remediation jobs were pending. They are superseded only for the verified code SHA above. Any new documentation commit has its own CI identity.

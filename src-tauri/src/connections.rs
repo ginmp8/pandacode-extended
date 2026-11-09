@@ -724,6 +724,7 @@ mod tests {
             reasoning_effort: None,
             mode: "full".into(),
             reviewer_boundary: false,
+            reviewer_policy: None,
             cwd: dir.clone(),
             resume_id: None,
             prompt: "hello".into(),

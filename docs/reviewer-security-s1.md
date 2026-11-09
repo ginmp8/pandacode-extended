@@ -1,33 +1,39 @@
-# Council S1: native reviewer authority and isolation
+# Council S1: task-scoped native reviewer authority
 
-## Compatibility
+## Product contract
 
-The existing Architect Council, its score parser, rounds, native automatic reviewer selection, saved WorkerProfile schema and ordinary bot/team workflows are unchanged in purpose. S1 adds a frozen per-seat reviewer binding, not a new Council engine or bot type. Legacy Council seats without the new field remain readable and receive the same restrictive runtime policy.
+A PandaCode bot keeps its configured harness, Skills, MCP references, Connections, and permissions. Council does not edit the bot profile. A reviewer seat runs with an **effective task- and phase-scoped policy** instead of inheriting every ambient capability. Native reviewers default to `NativeReadOnly`. A future user-facing S2/S4 flow can provide a frozen, explicitly authorized intersection of the bot's configured tools and the user's exact task grants.
 
-ReviewerBinding freezes a cycle ID, optional delivery ID, round, seat ID, optional reviewer bot ID, native artifact revision token, provider, model, lens and tool policy. Native artifact revision identifies the source state at dispatch; it is not a source hash, verified check or mandatory evidence gate. ReviewerState and ReviewerFailureCode are typed internal contracts for later integrations.
+A grant names an existing **host-managed function tool**, an exact operation (`action` argument, or atomic `call`), and an exact string resource argument/value. The native wrapper both advertises only granted tools and checks every invocation before dispatch, including MCP transport. Unknown, composite, absent, unscoped, or unsupported tools do not silently gain access. Full-access source bot permission alone never authorizes a reviewer write. A grant must be explicitly sourced from the user's selection, not a model prompt, skill description, or other untrusted artifact. A user-authorized operation that changes the assessed artifact must invalidate the approval; S4-S6 own revision and delivery integration.
 
-## Security boundary
+The same bot can conduct a review and later publish GitHub issues based on accepted findings. **Issue publishing is S5**, after an approved verdict and the user's repository/action opt-in; no extra confirmation or second bot is required for an already authorized action. S1 implements the underlying grants and native execution boundary only. The current Council UI does not yet select these grants and no new GitHub publishing workflow is claimed here.
 
-The reviewer identity is resolved from admitted Architect state, never from a prompt or a bot profile. Every Council reviewer turn runs with plan/read-only permissions even if the parent session has Full access. This does not mutate the persisted bot profile or ordinary session mode.
+## Frozen identity and compatibility
 
-- Codex receives the native read-only sandbox, network denied and no elevation. Its reviewer-specific CLI also disables native goals, multi-agent delegation, apps, plugins, remote plugins, browser and computer-use features. Feature flags alone do not establish isolation and must not override the fail-closed MCP-inventory preflight. Before starting a reviewer, the native CLI must successfully report an **empty** MCP inventory via `codex mcp list --json`; non-empty, disabled, unreadable, malformed or unsupported inventories and project-local MCP/plugin/app configuration fail closed. `-c mcp_servers={}` is only defense in depth: TOML merging does **not** remove inherited MCP servers.
-- Claude, GLM and MiMo have defensive CLI flags for read-only tools but **must fail closed** as reviewer harnesses: managed hooks/settings or externally managed MCP servers can override session-level policies, so CLI filters alone are not verified isolation.
-- No PandaCode host tools are registered for Council reviewers: bot profiles/memory, schedules, approvals, private messages, channels, settings, skills, Connections, deployments and team management tools cannot be called through the app's tool transport.
-- A native permission escalation request is rejected without a user-overridable approval.
-- Named Connections cannot inject reviewer-specific arguments, environments, MCP or secrets. Claude-family, ACP, other unsupported harnesses and cloud execution fail with read_only_unsupported rather than falling back to a writable execution context.
+`ReviewerBinding` contains Council cycle, optional delivery ID, round, seat, optional reviewer bot ID, artifact revision token, and immutable provider/model/lens/tool policy. Native automatically scheduled reviewers use no delivery or external bot identity in S1; S2 and S4 must bind their IDs to authoritative records. An S1-issued native artifact token is anchored to Council start, source dispatch revision, worker creation time, and worker ID; it is **not** a content hash or proof that an artifact was checked. Legacy workers without a binding retain read-only admission. Existing WorkerProfile and native Council scoring/rounds are not replaced.
 
-This is an implementation boundary, not proof that all CLI versions have no undeclared side effects. AC-03 and AC-18 require actual native-harness mutation attempts and filesystem/database comparisons, not just unit tests or serialized permission flags.
+The reviewer tool catalog version is bumped so Codex's persisted native worker contexts recover without retaining an older writable tool inventory. New grants must be derived from actual configured bot capabilities by trusted native code; S2 will own collecting and resolving user grants. S6 will revalidate them on resume and failover.
 
-## Baseline and required verification
+## Enforcement boundary
 
-Source baseline: extended/development at d0100f72c25e3ccff58c294d624505af8a216b48. Before this implementation, GitHub CI showed eight passing checks and one failing Bot manifest and collaboration UI Playwright check.
+- Codex review always retains its native read-only filesystem sandbox, denied network through sandboxed shell, and `approvalPolicy=never`; the bot's ordinary `Full access` mode remains unchanged.
+- A scoped Council reviewer may receive only individually permitted **PandaCode-owned host tools**. The wrapper checks tool name, operation and resource argument again at invocation time. User-granted actions are preauthorized for exactly that scope; unauthorized actions are rejected. Generic tool and shell privileges are not conferred.
+- Direct external Codex MCP servers are **not** a managed host-tool boundary. The native `codex mcp list --json` preflight requires an empty external server inventory and project-local MCP/plugin/app configuration is rejected. `-c mcp_servers={}` does not erase inherited TOML servers. Direct third-party MCP access remains unsupported until a future adapter can enforce scoped calls; never silently allow it because the bot already has an MCP reference.
+- Claude-family and ACP adapters still fail closed if they lack a verified native shell/tool boundary, including when a task grant exists. This is not a blanket revocation of the bot's ordinary capabilities.
+- A reviewer subprocess receives a bounded runtime/authentication environment (including Codex authentication, runtime paths, certificate/proxy setup) instead of inheriting unrelated provider/global variables such as GitHub and AWS tokens. Ordinary bot runs remain unchanged. Native host tools handle their own separately authorized credentials. Credentials must not be inserted into prompts, UI results or logs.
+- Skills are evidence/method inputs, never permission grants. Reviewer changes to protected Council scores, source artifact, unrelated profiles/schedules/messages or approval evidence remain unauthorized absent a precise trustworthy grant and corresponding gate.
 
-Commands: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib; cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings; npm ci; npm run build; npm test; and relevant Council/Architect/bots Playwright regressions in issue #126.
+## Verification status and commands
 
-Desktop/harness proof remains required: configure a normally full-access bot reviewer, attempt actual shell, script, file, MCP, bot-profile/memory, schedule, approval, message, skill and Connection mutations, capture redacted before/after tracked and untracked filesystem hashes and SQLite states, exact CLI version/model and explicit permission denials. Unsupported harnesses are blocked/not tested. No simulated protocol test is a replacement for those experiments.
+Baseline: `extended/development` at `d0100f72c25e3ccff58c294d624505af8a216b48`. PR #133 original S1 head: `e4c5c4c45869ee21d4e120128b3da825fa188357`. Its CI had nine successful jobs on the retried source revision; that is baseline test evidence, not native-harness adversarial proof.
 
-Do not check S1 complete until AC-03 and AC-18 have the required live evidence.
+Focused S1 tests cover policy construction from bot + user intersections, rejected grants, native host tool dispatch denial and scoped positive calls, no tool list elevation, subprocess environment filtering, reviewer identity/revision rejection, legacy workers and an ordinary full-access parent. Run:
 
-Reviewer support is provisionally limited to the Codex native read-only sandbox. This intentionally blocks native automatic Council reviews routed to unsupported models; it preserves the automatic selection algorithm, saved profiles and Council states without claiming unsafe reviewer execution is compatible. Enabling another harness requires a proven platform-level read-only boundary and versioned live tests, not just allowlist flags.
+```sh
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run build
+npm test
+```
 
-A native Codex MCP inventory preflight is a necessary restriction, not definitive proof that managed/plugin-provided tools cannot be introduced later. S1 stays unchecked until the effective tool inventory and unauthorized mutation attempts are verified on installed native harnesses, with before/after filesystem and persisted-state snapshots.
+**Outstanding acceptance proof:** AC-03 and AC-18 require an installed authenticated harness, actual denied/allowed tool attempts (including command, filesystem, MCP and scoped host action), and redacted before/after checkout/SQLite/profile/skill/Connection comparisons at the exact candidate SHA. Report absent providers as blocked/not tested. CI and protocol test success are not substitutes. Full GitHub issue publication after acceptance remains S5 and must not be listed as a missing S1 implementation.

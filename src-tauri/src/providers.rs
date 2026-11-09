@@ -26,6 +26,7 @@ mod warm;
 pub use warm::{discard as discard_warm_agent, epoch as warm_epoch, prewarm as prewarm_agent, supported as warms};
 use host_tools::apply_step;
 pub use host_tools::ToolHost;
+pub(crate) use host_tools::ToolFuture;
 pub(crate) mod acp;
 pub(crate) mod acp_catalog;
 #[cfg(test)]
@@ -144,6 +145,8 @@ pub struct RunConfig {
     pub mode: String,
     /// Verified task-scoped Council reviewer, never inferred from prompts.
     pub reviewer_boundary: bool,
+    /// Native user authorization for this one Council seat; none for ordinary tasks.
+    pub reviewer_policy: Option<crate::architect::reviewer_security::ReviewerToolPolicy>,
     pub cwd: PathBuf,
     pub resume_id: Option<String>,
     pub prompt: String,
@@ -163,20 +166,32 @@ pub struct RunConfig {
 
 /// A read-only prompt or flag alone cannot safely constrain a reviewer.
 fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), String> {
-    if !config.reviewer_boundary { return Ok(()) }
-    // Claude-family managed hooks and MCP policy can outlive CLI --settings
-    // and --strict-mcp-config; a tool allowlist is not an OS sandbox.
-    // Until native isolation is independently proven, only Codex's
-    // sandbox-backed read-only adapter is eligible for Council review.
-    if config.provider != "codex" {
-        return Err(format!("read_only_unsupported: {} has no native reviewer tool boundary.", config.provider));
+    use crate::architect::reviewer_security::{ReviewerPhase, ReviewerToolPolicy};
+    if !config.reviewer_boundary {
+        return if config.reviewer_policy.is_none() { Ok(()) }
+        else { Err("read_only_policy_violation: non-reviewer received reviewer authority.".into()) };
     }
-    if config.mode != "plan" || has_host || config.skill.is_some()
+    let policy = config.reviewer_policy.as_ref()
+        .ok_or("read_only_policy_violation: reviewer authority was not validated.")?;
+    policy.validate()?;
+    // A tool allowlist alone cannot sandbox shell/hooks on other CLI adapters.
+    if config.provider != "codex" {
+        return Err(format!("read_only_unsupported: {} has no verified native reviewer boundary.", config.provider));
+    }
+    if config.mode != "plan" || config.skill.is_some()
         || config.goal.is_some() || config.codex_settings.is_some()
     {
-        return Err("read_only_policy_violation: reviewer cannot inherit elevated mode, host tools, goals, skills or Codex settings.".into());
+        return Err("read_only_policy_violation: reviewer cannot inherit writable checkout, goals, skills or mutable Codex settings.".into());
     }
-    Ok(())
+    match policy {
+        ReviewerToolPolicy::NativeReadOnly if has_host => {
+            Err("read_only_policy_violation: default review must not expose host tools.".into())
+        }
+        ReviewerToolPolicy::Scoped(scope) if scope.phase != ReviewerPhase::Review || !has_host => {
+            Err("policy_unsupported: granted native tools must be present in the review phase.".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3302,10 +3317,39 @@ fn reviewer_codex_project_tools_absent(cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Launch a Council harness with only runtime essentials and Codex authentication.
+/// Ordinary bot launches retain their existing user-configured environment.
+fn sanitize_reviewer_environment(command: &mut Command) {
+    const ALLOWED: &[&str] = &[
+        "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+        "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "SYSTEMDRIVE",
+        "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "TEMP", "TMP", "TMPDIR",
+        "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "LANG", "LC_ALL", "LC_CTYPE",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+        "OPENAI_ORGANIZATION", "OPENAI_PROJECT",
+        "DO_NOT_TRACK", "OTEL_SDK_DISABLED",
+    ];
+    let overrides: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = command
+        .as_std().get_envs().map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned))).collect();
+    command.env_clear();
+    for key in ALLOWED {
+        let override_value = overrides.iter().find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case(key));
+        let value = match override_value {
+            Some((_, value)) => value.clone(),
+            None => std::env::var_os(key),
+        };
+        if let Some(value) = value { command.env(key, value); }
+    }
+}
+
 /// No runnable reviewer until the native executable confirms no MCP servers.
 async fn verify_reviewer_codex_external_tools(path: &Path, cwd: &Path) -> Result<(), String> {
     reviewer_codex_project_tools_absent(cwd)?;
     let mut command = provider_command("codex", path)?;
+    sanitize_reviewer_environment(&mut command);
     command
         .args(["mcp", "list", "--json", "-c", "mcp_servers={}"])
         .current_dir(cwd)
@@ -3344,7 +3388,7 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             } else {
                 command.args(["app-server", "--enable", "goals"]);
             }
-            if !codex_user_limits_threads(command, config) {
+            if !config.reviewer_boundary && !codex_user_limits_threads(command, config) {
                 command.args(["-c", CODEX_NO_THREAD_LIMIT]);
             }
             // Defense in depth only: an empty TOML override does not clear
@@ -3490,6 +3534,9 @@ async fn run_inner(
     }
     let image_blocks = attachments::load(&config.provider, &config.images).await?;
     let mut command = provider_command(&config.provider, &path)?;
+    if config.reviewer_boundary {
+        sanitize_reviewer_environment(&mut command);
+    }
     configure_command(&mut command, &config);
     // A named connection's arguments and environment win over the global setup.
     if let Some(connection) = &connection {
@@ -4102,9 +4149,13 @@ mod tests {
 
     #[test]
     fn reviewer_policy_blocks_unsupported_harnesses_and_privilege_inheritance() {
+        use crate::architect::reviewer_security::{
+            ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy,
+        };
         let mut cfg = config("codex");
         cfg.mode = "plan".into();
         cfg.reviewer_boundary = true;
+        cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
         assert!(enforce_reviewer_policy(&cfg, false).is_ok());
         assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("read_only_policy_violation"));
         cfg.mode = "full".into();
@@ -4115,7 +4166,35 @@ mod tests {
             assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
         }
         cfg.provider = "codex".into();
-        assert!(enforce_reviewer_policy(&cfg, false).is_ok());
+        let grant = ReviewerCapabilityGrant {
+            tool: "pandacode_github_issue".into(), action: "create".into(),
+            action_argument: Some("action".into()), resource_argument: "repository".into(),
+            resource: "owner/repo".into(),
+        };
+        cfg.reviewer_policy = Some(ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "user-grant-1", &[grant.clone()], &[grant],
+        ).unwrap());
+        assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("policy_unsupported"));
+        assert!(enforce_reviewer_policy(&cfg, true).is_ok());
+        cfg.reviewer_boundary = false;
+        assert!(enforce_reviewer_policy(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn reviewer_subprocess_drops_unrelated_provider_and_host_credentials() {
+        let mut command = Command::new("codex");
+        command.env("OPENAI_API_KEY", "authentication");
+        command.env("GITHUB_TOKEN", "private-github");
+        command.env("AWS_SECRET_ACCESS_KEY", "private-aws");
+        command.env("PATH", "/usr/bin");
+        sanitize_reviewer_environment(&mut command);
+        let set: std::collections::HashMap<_, _> = command.as_std().get_envs()
+            .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+            .collect();
+        assert_eq!(set.get("OPENAI_API_KEY").map(String::as_str), Some("authentication"));
+        assert_eq!(set.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert!(!set.contains_key("GITHUB_TOKEN"));
+        assert!(!set.contains_key("AWS_SECRET_ACCESS_KEY"));
     }
 
     #[test]
@@ -4225,6 +4304,7 @@ mod tests {
             reasoning_effort: None,
             mode: "ask".into(),
             reviewer_boundary: false,
+            reviewer_policy: None,
             cwd: PathBuf::from("/tmp"),
             resume_id: None,
             prompt: "Explain this project".into(),
@@ -5863,6 +5943,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
                 reasoning_effort: None,
                 mode: "ask".into(),
                 reviewer_boundary: false,
+            reviewer_policy: None,
                 cwd: root.clone(),
                 resume_id: resume.clone(),
                 prompt: prompt.into(),

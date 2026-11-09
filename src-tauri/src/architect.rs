@@ -37,7 +37,7 @@ use tauri::{Emitter, Manager, State};
 /// 10: dispatch_workers takes councilLens (Council reviewers); a few descriptions are shorter.
 /// 11: native reviewer host tools are removed. Old Codex worker contexts require
 /// history recovery so a prior writable tool catalog is never resumed.
-const TOOL_CATALOG_VERSION: u32 = 11;
+const TOOL_CATALOG_VERSION: u32 = 12;
 /// Auto teams carry a roster of installed models the lead may choose from.
 const AUTO_ROSTER_MAX: usize = 24;
 /// Team tools only change this team's own state, and every call is checked against the
@@ -615,20 +615,33 @@ pub(crate) fn check_manual(store: &Store, sid: &str) -> Result<()> {
 }
 /// Require native reviewer tool restrictions on every Council turn, including
 /// resumes from old persisted automatic Council sessions.
-pub(crate) fn reviewer_boundary(store: &Store, sid: &str, admission: Option<&Admission>) -> Result<bool> {
-    let Some(admission) = admission else { return Ok(false) };
-    if admission.parent == sid { return Ok(false) }
+pub(crate) fn reviewer_policy(
+    store: &Store,
+    sid: &str,
+    admission: Option<&Admission>,
+) -> Result<Option<reviewer_security::ReviewerToolPolicy>> {
+    let Some(admission) = admission else { return Ok(None) };
+    if admission.parent == sid { return Ok(None) }
     let team = load(store, &admission.parent)?.ok_or("Reviewer team unavailable.")?;
     let worker = team.workers.iter().find(|worker| worker.session_id == sid)
         .ok_or("Reviewer worker unavailable.")?;
-    if worker.council.is_none() { return Ok(false) }
+    if worker.council.is_none() { return Ok(None) }
     if !worker.read_only {
-        return Err("read_only_policy_violation: Council reviewer must be read-only.".into());
+        return Err("read_only_policy_violation: a Council reviewer cannot modify its reviewed checkout.".into());
     }
-    if let Some(binding) = &worker.reviewer_binding {
+    let policy = if let Some(binding) = &worker.reviewer_binding {
         binding.validate(&team, worker)?;
-    }
-    Ok(true)
+        binding.snapshot.tool_policy.clone()
+    } else {
+        reviewer_security::ReviewerToolPolicy::NativeReadOnly
+    };
+    policy.validate()?;
+    Ok(Some(policy))
+}
+
+#[cfg(test)]
+pub(crate) fn reviewer_boundary(store: &Store, sid: &str, admission: Option<&Admission>) -> Result<bool> {
+    Ok(reviewer_policy(store, sid, admission)?.is_some())
 }
 
 pub(crate) fn validate_admission(
@@ -2006,7 +2019,7 @@ fn dispatch_as(
                 }
                 let reviewer_binding = seat.as_ref().map(|seat| {
                     reviewer_security::ReviewerBinding::native(
-                        &team, &id, &profile.provider, &profile.model, seat,
+                        &team, &id, now, &profile.provider, &profile.model, seat,
                     )
                 });
                 ids.push(id.clone());

@@ -1765,7 +1765,8 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
-    let reviewer_boundary = architect::reviewer_boundary(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
+    let reviewer_policy = architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
+    let reviewer_boundary = reviewer_policy.is_some();
     let config = RunConfig {
         session_id: session_id.clone(),
         provider: session.provider,
@@ -1773,6 +1774,7 @@ fn prepare_task_run_in_project(
         reasoning_effort: session.reasoning_effort,
         mode: if reviewer_boundary { "plan".into() } else { session.mode },
         reviewer_boundary,
+        reviewer_policy,
         cwd,
         resume_id: session.resume_id,
         prompt,
@@ -1831,6 +1833,7 @@ fn prepare_cloud_attach(
         reasoning_effort: session.reasoning_effort,
         mode: session.mode,
         reviewer_boundary: false,
+        reviewer_policy: None,
         cwd,
         resume_id: session.resume_id,
         prompt: String::new(),
@@ -2344,33 +2347,47 @@ async fn launch_operation_admitted(
                 }
             }
         });
-        // Council reviewers must never receive application host tools, including
-        // bot memories, schedules, approvals, messages, Connections or skills.
-        let (host, team_tools_missing) = if config.reviewer_boundary {
-            (None, false)
-        } else {
-        let host = if let Some(admission) = team.as_ref() {
-            architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
-        } else {
-            (config.provider == "codex")
-                .then(|| agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
-        };
-        let team_tools_missing = team.is_some() && host.is_none();
-        let host = agent_tools::with_jev(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = bots::tools::with_bot(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
-        let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
-        // A cloud agent's checkout is on its machine, where screenshots cannot be read.
-        let host = if cloud { host } else { progress::with_progress(host, app.clone(), session_id.clone(), stopped.clone()) };
-        let host = cloud::deploy::with_deploy(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = Some(agent_tools::with_preview(host, app.clone(), session_id.clone(), stopped.clone()));
-        let host = Some(turn_changes::with_host(host, tracker.clone(), stopped.clone()));
-        let host = Some(session_titles::with_host(title_run.as_ref(), host, stopped.clone()));
-            (host, team_tools_missing)
-        };
+        // Build host tools only when needed; a Council seat receives an exact,
+        // task-scoped filtered catalog with a second check at handler dispatch.
+        let scoped_reviewer = matches!(
+            config.reviewer_policy.as_ref(),
+            Some(architect::reviewer_security::ReviewerToolPolicy::Scoped(_))
+        );
+        let (host, team_tools_missing, reviewer_host_error) =
+            if !config.reviewer_boundary || scoped_reviewer {
+                let host = if let Some(admission) = team.as_ref() {
+                    architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
+                } else {
+                    (config.provider == "codex")
+                        .then(|| agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
+                };
+                let missing = team.is_some() && host.is_none();
+                let host = agent_tools::with_jev(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = bots::tools::with_bot(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
+                let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = if cloud { host } else { progress::with_progress(host, app.clone(), session_id.clone(), stopped.clone()) };
+                let host = cloud::deploy::with_deploy(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = Some(agent_tools::with_preview(host, app.clone(), session_id.clone(), stopped.clone()));
+                let host = Some(turn_changes::with_host(host, tracker.clone(), stopped.clone()));
+                let host = Some(session_titles::with_host(title_run.as_ref(), host, stopped.clone()));
+                if config.reviewer_boundary {
+                    let result = config.reviewer_policy.as_ref()
+                        .ok_or_else(|| "policy_unsupported: reviewer policy is missing.".to_string())
+                        .and_then(|policy| policy.restrict_host(host));
+                    match result {
+                        Ok(filtered) => (filtered, missing, None),
+                        Err(error) => (None, missing, Some(error)),
+                    }
+                } else {
+                    (host, missing, None)
+                }
+            } else {
+                (None, false, None)
+            };
         // What the next turn's warm agent needs: this launch and the tools it listed.
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.
@@ -2384,6 +2401,8 @@ async fn launch_operation_admitted(
         let reached_harness = Arc::new(AtomicBool::new(false));
         let result = if stopped.load(Ordering::SeqCst) {
             Ok(())
+        } else if let Some(error) = reviewer_host_error {
+            Err(error)
         } else if team_tools_missing {
             Err(
                 "Team tools could not be initialized. No unrestricted tool fallback was used."

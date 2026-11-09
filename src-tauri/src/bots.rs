@@ -1127,11 +1127,29 @@ pub(crate) async fn pause_all(app: &tauri::AppHandle) {
     }
 }
 
+/// The Architect's durable state, not a single harness turn, determines whether a
+/// team-backed bot delivery can finish. Read errors fail closed.
+pub(crate) fn team_state(store: &Store, session_id: &str) -> Result<Option<String>> {
+    Ok(crate::architect::load(store, session_id)?.map(|team| team.status))
+}
+
+pub(crate) fn delivery_may_settle(store: &Store, session_id: &str) -> Result<bool> {
+    Ok(matches!(team_state(store, session_id)?.as_deref(), None | Some("completed" | "failed")))
+}
+
 /// Called when any task's run ends; replies for bot conversations go back to their channel.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) {
     let app = app.clone();
     let session_id = session_id.to_owned();
     tauri::async_runtime::spawn(async move {
+        let ready = app.state::<AppState>().store.lock().ok()
+            .and_then(|store| delivery_may_settle(&store, &session_id).ok())
+            .unwrap_or(false);
+        if !ready {
+            // A Council round, correction or worker may still be running. Do not
+            // send a final reply, consume a delivery, or drain the next queued turn.
+            return;
+        }
         let reply = app.state::<AppState>().store.lock().ok()
             .and_then(|store| shared_channels::latest_reply(&store, &session_id).ok())
             .unwrap_or_default();

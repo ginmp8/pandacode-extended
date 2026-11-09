@@ -2595,9 +2595,9 @@ async fn launch_operation_admitted(
         let restored = kind.is_some() && turn_message_id != 0 && store.lock().ok().is_some_and(|db| remote::orchestrate::restore_wake(&db, &session_id, turn_message_id).unwrap_or(false));
         // Settled machine threads wake this task now that it is idle.
         remote::orchestrate::parent_finished(&app, &session_id, was_stopped, restored);
-        // Bot conversations reply on their channel and send their next queued message.
+        // Schedules follow provider turns; bot deliveries must wait for the
+        // Architect to persist the final Team/Council state below.
         if !was_stopped {
-            bots::run_finished(&app, &session_id, successful);
             schedules::run_finished(&app, &session_id, successful);
         }
         // Serve has no window: link pull requests and send the next queued message natively.
@@ -2627,6 +2627,11 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // A lead turn may end while its workers or Council reviewers still run.
+        // Only the settled Architect snapshot can authorize a bot delivery.
+        if !was_stopped {
+            bots::run_finished(&app, &session_id, successful);
+        }
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
         if let (true, Some((mut next, (tools, approvals)))) = (successful && !was_stopped, warm_next) {
             // A turn that ended without any reply (seen after background commands) may have

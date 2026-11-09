@@ -43,6 +43,43 @@ fn running_worker(
 }
 
 #[test]
+fn bot_delivery_waits_for_team_completion_and_queued_turns_keep_the_team_route() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    assert_eq!(crate::bots::team_state(&store, &sid).unwrap().as_deref(), Some("running"));
+    assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+        "an ended lead turn must not complete an active team delivery");
+
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.status = "waiting".into();
+    save(&store, &mut team).unwrap();
+    assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+        "Council rounds and corrections can outlive the lead turn");
+
+    team.status = "completed".into();
+    save(&store, &mut team).unwrap();
+    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap());
+    assert_eq!(crate::bots::team_state(&store, &sid).unwrap().as_deref(), Some("completed"),
+        "a queued message must still use Architect for a configured team");
+
+    team.status = "failed".into();
+    save(&store, &mut team).unwrap();
+    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+        "a failed team must be allowed to report failure");
+
+    team.status = "paused".into();
+    save(&store, &mut team).unwrap();
+    assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+        "a paused team must not emit a success callback");
+
+    let project = store.session(&sid).unwrap().project_id;
+    let ordinary = store.create_session(&project, "claude", "default", "ask").unwrap();
+    assert!(crate::bots::team_state(&store, &ordinary.id).unwrap().is_none());
+    assert!(crate::bots::delivery_may_settle(&store, &ordinary.id).unwrap(),
+        "regular bot conversations retain turn-based completion");
+}
+
+#[test]
 fn task_deletion_waits_for_team_cleanup_and_late_callbacks_cannot_recreate_it() {
     let (state, parent) = state_fixture();
     // Logical team activity continues even between provider processes.

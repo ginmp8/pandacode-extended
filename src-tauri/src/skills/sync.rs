@@ -1,7 +1,7 @@
 //! Explicit and opt-in startup synchronization of GitHub-backed library skills.
 //! No scripts run during import or synchronization. Native harness copies are not touched.
 use serde::{Deserialize, Serialize};
-use std::{fs, sync::Mutex};
+use std::{collections::HashMap, fs, sync::Mutex};
 
 use super::{catalog, content_hash, frontmatter, github, now_ms, slug, Item, Kind, Library, Meta, Source};
 
@@ -158,7 +158,7 @@ impl Library {
         }
     }
 
-    fn sync_one(&self, api: catalog::Api, meta: &Meta, automatic: bool) -> Result<SyncEvent, String> {
+    fn sync_one(&self, api: catalog::Api, meta: &Meta, automatic: bool, pinned_commit: Option<&str>) -> Result<SyncEvent, String> {
         let (repo, path) = split_location(&meta.source.location).ok_or("The original GitHub source location is invalid.")?;
         let old_commit = meta.source.commit.clone();
         let impacted_harnesses = meta.activations.iter().map(|a| a.harness.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
@@ -166,7 +166,12 @@ impl Library {
             return Ok(SyncEvent { id: meta.id.clone(), status: "skipped".into(), old_commit: old_commit.clone(), new_commit: old_commit,
                 impacted_harnesses, detail: "Pinned full-SHA ref; automatic updates never repoint it.".into() });
         }
-        let (files, commit) = github::fetch_using(&repo, &path, meta.source.git_ref.as_deref(), api)?;
+        // A batch resolves each moving ref once. Fetching by SHA cannot mix revisions
+        // if a branch advances while other packages are still synchronizing.
+        let (files, commit) = github::fetch_using(&repo, &path, pinned_commit.or(meta.source.git_ref.as_deref()), api)?;
+        if pinned_commit.is_some_and(|expected| commit != expected) {
+            return Err("GitHub returned a different commit during the frozen synchronization batch.".into());
+        }
         let current = self.files(&meta.id)?;
         let edited = content_hash(&current) != meta.sha256;
         if meta.source.commit.as_deref() == Some(commit.as_str()) && !edited {
@@ -217,10 +222,34 @@ impl Library {
             selected && (!automatic || (policy.auto_on_start && meta.auto_update != Some(false)))
         }).collect();
         let total = targets.len();
+        // Freeze each repository/ref once, including HEAD, for this synchronization batch.
+        // Cache failures too: one failed ref must not cause a later package to use a new SHA.
+        let mut resolved: HashMap<(String, String), Result<String, String>> = HashMap::new();
         for (index, meta) in targets.into_iter().enumerate() {
             progress(SyncProgress { id:meta.id.clone(), name:meta.name.clone(), phase:"fetching".into(),
                 completed:index, total, detail:None });
-            let event = match self.sync_one(api, &meta, automatic) {
+            let revision = if automatic && is_full_sha(meta.source.git_ref.as_deref()) {
+                None // The pinned-source skip is handled without a network call.
+            } else {
+                split_location(&meta.source.location).map(|(repo, _)| {
+                    let reference = meta.source.git_ref.clone().unwrap_or_else(|| "HEAD".into());
+                    resolved.entry((repo.clone(), reference.clone())).or_insert_with(|| {
+                        let response = api(&format!("repos/{repo}/commits/{reference}"))
+                            .map_err(|error| catalog::explain(&error))?;
+                        let sha = response["sha"].as_str().ok_or("GitHub did not return a commit for that ref.")?;
+                        if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return Err("GitHub did not return an immutable full commit SHA.".into());
+                        }
+                        Ok(sha.to_string())
+                    }).clone()
+                })
+            };
+            let result = match revision {
+                Some(Ok(sha)) => self.sync_one(api, &meta, automatic, Some(&sha)),
+                Some(Err(error)) => Err(error),
+                None => self.sync_one(api, &meta, automatic, None),
+            };
+            let event = match result {
                 Ok(event) => event,
                 Err(error) => SyncEvent { id: meta.id.clone(), status: "error".into(), old_commit: meta.source.commit.clone(),
                     new_commit: None, impacted_harnesses: meta.activations.iter().map(|a| a.harness.clone()).collect(),

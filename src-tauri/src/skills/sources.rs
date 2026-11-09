@@ -1,12 +1,18 @@
 //! User-configured GitHub skill collections. A scan is read-only and ephemeral;
 //! only the explicitly selected packages are downloaded into the library.
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs, sync::Mutex};
+use std::{collections::BTreeSet, fs, sync::{atomic::{AtomicBool, Ordering}, Mutex}};
 
 use super::{catalog, github, now_ms, sha256_hex, Kind, Library, Source, MAX_BYTES, MAX_FILES};
 
 const MAX_SAVED_SOURCES: usize = 64;
 static SOURCES_LOCK: Mutex<()> = Mutex::new(());
+static IMPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct ImportGuard;
+impl Drop for ImportGuard {
+    fn drop(&mut self) { IMPORT_ACTIVE.store(false, Ordering::Release); }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +32,19 @@ pub struct SavedSource {
 struct SourceStore {
     #[serde(default)]
     sources: Vec<SavedSource>,
+}
+
+/// Recovery intent written before installing any package. Only packages whose
+/// committed metadata matches this exact import are enrolled after a crash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingSourceImport {
+    id: String,
+    repo: String,
+    path: String,
+    git_ref: Option<String>,
+    commit: String,
+    selected_paths: Vec<String>,
+    started_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +95,16 @@ fn id_for(repo: &str, path: &str, git_ref: Option<&str>) -> String {
 impl Library {
     fn sources_path(&self) -> std::path::PathBuf { self.dir.join(".skill-sources.json") }
     fn sources_backup_path(&self) -> std::path::PathBuf { self.dir.join(".skill-sources.json.rollback") }
+    fn pending_import_path(&self) -> std::path::PathBuf { self.dir.join(".skill-sources.pending.json") }
+
+    fn stage_pending_import(&self, pending: &PendingSourceImport) -> Result<(), String> {
+        fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        let path = self.pending_import_path();
+        let temp = self.dir.join(".skill-sources.pending.json.tmp");
+        let content = serde_json::to_vec(pending).map_err(|e| e.to_string())?;
+        fs::write(&temp, content).and_then(|_| fs::rename(&temp, &path))
+            .map_err(|e| format!("Could not stage skill source recovery: {e}"))
+    }
 
     /// Recover an interrupted file replacement on Windows and Unix.
     fn read_sources(&self) -> Result<SourceStore, String> {
@@ -88,11 +117,51 @@ impl Library {
                 fs::rename(&backup, &current).map_err(|e| format!("Could not restore saved source state: {e}"))?;
             }
         }
-        match fs::read(current) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("Saved skill sources are unreadable: {e}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SourceStore::default()),
-            Err(error) => Err(error.to_string()),
+        let mut store: SourceStore = match fs::read(current) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("Saved skill sources are unreadable: {e}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceStore::default(),
+            Err(error) => return Err(error.to_string()),
+        };
+        // Another view may inspect sources while an import is active. Only a
+        // subsequent process (or an idle process after failure) reconciles the journal.
+        if !IMPORT_ACTIVE.load(Ordering::Acquire) && self.pending_import_path().exists() {
+            let pending: PendingSourceImport = serde_json::from_slice(
+                &fs::read(self.pending_import_path()).map_err(|e| e.to_string())?
+            ).map_err(|e| format!("Saved skill import recovery is unreadable: {e}"))?;
+            let installed = self.list()?;
+            let complete: BTreeSet<String> = pending.selected_paths.iter().filter(|path| {
+                let location = catalog::location(&pending.repo, path);
+                installed.iter().any(|item| item.meta.kind == Kind::Skill
+                    && item.meta.source.kind == "github"
+                    && item.meta.source.location == location
+                    && item.meta.source.git_ref == pending.git_ref
+                    && item.meta.source.commit.as_deref() == Some(pending.commit.as_str())
+                    && item.meta.imported_at >= pending.started_at)
+            }).cloned().collect();
+            if !complete.is_empty() {
+                let mut selected = complete;
+                if let Some(previous) = store.sources.iter().find(|s| s.id == pending.id) {
+                    selected.extend(previous.selected_paths.iter().cloned());
+                }
+                let recovered = SavedSource {
+                    id: pending.id.clone(), repo: pending.repo.clone(),
+                    path: pending.path.clone(), git_ref: pending.git_ref.clone(),
+                    commit: pending.commit.clone(), selected_paths: selected.into_iter().collect(),
+                    saved_at: now_ms(),
+                };
+                if let Some(existing) = store.sources.iter_mut().find(|s| s.id == pending.id) {
+                    *existing = recovered;
+                } else if store.sources.len() < MAX_SAVED_SOURCES {
+                    store.sources.push(recovered);
+                } else {
+                    return Err("Cannot recover a skill import: saved source limit reached.".into());
+                }
+                store.sources.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.path.cmp(&b.path)));
+                self.save_sources(&store)?;
+            }
+            fs::remove_file(self.pending_import_path()).map_err(|e| format!("Could not clear recovered skill source intent: {e}"))?;
         }
+        Ok(store)
     }
 
     fn save_sources(&self, store: &SourceStore) -> Result<(), String> {
@@ -182,6 +251,15 @@ impl Library {
             return Err("Two selected paths use the same skill ID. Choose only one source for that ID.".into());
         }
 
+        if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return Err("Another GitHub skill import is still running.".into());
+        }
+        let _guard = ImportGuard;
+        self.stage_pending_import(&PendingSourceImport {
+            id: id.clone(), repo: repo.clone(), path: path.clone(),
+            git_ref: git_ref.clone(), commit: commit.to_string(),
+            selected_paths: chosen.iter().cloned().collect(), started_at: now_ms(),
+        })?;
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
         let mut successful_paths = Vec::new();
@@ -206,28 +284,37 @@ impl Library {
                 continue;
             }
             report("fetching", completed, None);
-            let result = (|| -> Result<(), String> {
+            let result = (|| -> Result<&'static str, String> {
                 let (files, actual_commit) = github::fetch_using(&repo, skill_path, Some(commit), api)
                     .map_err(|e| catalog::explain(&e))?;
                 if actual_commit != commit { return Err("The fetched commit does not match the selected revision.".into()); }
                 report("validating", completed, None);
+                let location = catalog::location(&repo, skill_path);
+                let previous = self.load(&skill.id).ok();
+                if previous.as_ref().is_some_and(|meta| meta.source.kind == "github"
+                    && meta.source.location == location && meta.source.git_ref == git_ref
+                    && meta.source.commit.as_deref() == Some(commit)
+                    && meta.sha256 == super::content_hash(&files)) {
+                    return Ok("unchanged");
+                }
                 report("installing", completed, None);
                 self.import_as(Kind::Skill, files, &skill.name, Source {
-                    kind: "github".into(),
-                    location: catalog::location(&repo, skill_path),
+                    kind: "github".into(), location,
                     git_ref: git_ref.clone(),
                     commit: Some(commit.to_string()),
                 }, !allow_replace)?;
-                Ok(())
+                Ok(if previous.is_some() { "updated" } else { "installed" })
             })();
             completed += 1;
             match result {
-                Ok(()) => {
-                    imported.push(skill.name.clone()); successful_paths.push(skill_path.clone());
-                    report("installed", completed, None);
+                Ok(status) => {
+                    if status != "unchanged" { imported.push(skill.name.clone()); }
+                    successful_paths.push(skill_path.clone());
+                    report(status, completed, None);
                 }
                 Err(error) => {
-                    report("failed", completed, Some(error.clone()));
+                    let status = if error.contains("already in the library from") { "skipped" } else { "failed" };
+                    report(status, completed, Some(error.clone()));
                     skipped.push(skip(error));
                 }
             }
@@ -256,6 +343,8 @@ impl Library {
         }
         store.sources.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.path.cmp(&b.path)));
         self.save_sources(&store)?;
+        fs::remove_file(self.pending_import_path())
+            .map_err(|e| format!("The import completed but its recovery marker could not be cleared: {e}"))?;
         Ok(SourceImport { source, imported, skipped })
     }
 

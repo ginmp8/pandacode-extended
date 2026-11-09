@@ -490,3 +490,70 @@ fn truncated_recursive_trees_fall_back_to_bounded_nonrecursive_walk() {
     assert_eq!(found[0].path,"skills/demo");
     assert_eq!(fake.count("repos/me/walk/git/trees/"),4);
 }
+
+#[test]
+fn a_batch_sync_freezes_moving_default_branch_once_for_all_packages() {
+    let fx = Fixture::new();
+    let old = "a".repeat(40);
+    let next = "b".repeat(40);
+    let mut fake = Fake::default();
+    fake.repo("me/frozen", &old, &files(&[
+        ("skills/alpha/SKILL.md", &skill("Alpha")),
+        ("skills/beta/SKILL.md", &skill("Beta")),
+    ]));
+    fx.library.import_skill_source(&fake.api(), "me/frozen", "skills", None, &old,
+        vec!["skills/alpha".into(), "skills/beta".into()]).unwrap();
+    let mut changed = Fake::default();
+    changed.repo("me/frozen", &next, &files(&[
+        ("skills/alpha/SKILL.md", &skill("Alpha")),
+        ("skills/alpha/added.md", "alpha changed"),
+        ("skills/beta/SKILL.md", &skill("Beta")),
+        ("skills/beta/added.md", "beta changed"),
+    ]));
+    let calls = std::cell::Cell::new(0);
+    let api = |endpoint: &str| {
+        if endpoint == "repos/me/frozen/commits/HEAD" {
+            calls.set(calls.get() + 1);
+            if calls.get() > 1 {
+                return Ok(json!({"sha": "c".repeat(40)}));
+            }
+        }
+        changed.call(endpoint)
+    };
+    let report = fx.library.synchronize(&api, super::sync::Selection::All, false).unwrap();
+    assert_eq!(calls.get(), 1, "the moving source ref must resolve once per batch");
+    assert_eq!(report.updated.len(), 2);
+    for id in ["alpha", "beta"] {
+        assert_eq!(fx.library.load(id).unwrap().source.commit.as_deref(), Some(next.as_str()));
+    }
+}
+
+#[test]
+fn interrupted_import_recovers_only_finished_selected_packages() {
+    let fx = Fixture::new();
+    let commit = "a".repeat(40);
+    let started_at = now_ms().saturating_sub(10);
+    fx.library.import(Kind::Skill, vec![("SKILL.md".into(), skill("Alpha").into_bytes())],
+        "Alpha", Source {
+            kind: "github".into(), location: "me/kit/skills/alpha".into(),
+            git_ref: Some("main".into()), commit: Some(commit.clone()),
+        }).unwrap();
+    let pending = serde_json::json!({
+        "id": sha256_hex(b"me/kit\\nskills\\nmain")[..16].to_string(),
+        "repo": "me/kit", "path": "skills", "gitRef": "main",
+        "commit": commit, "selectedPaths": ["skills/alpha", "skills/missing"],
+        "startedAt": started_at
+    });
+    // PendingSourceImport uses snake_case JSON fields internally.
+    let pending = json!({
+        "id": pending["id"], "repo": "me/kit", "path": "skills", "git_ref": "main",
+        "commit": commit, "selected_paths": ["skills/alpha", "skills/missing"],
+        "started_at": started_at
+    });
+    fs::create_dir_all(&fx.library.dir).unwrap();
+    fs::write(fx.library.dir.join(".skill-sources.pending.json"), serde_json::to_vec(&pending).unwrap()).unwrap();
+    let restored = fx.library.saved_skill_sources().unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].selected_paths, ["skills/alpha"]);
+    assert!(!fx.library.dir.join(".skill-sources.pending.json").exists());
+}

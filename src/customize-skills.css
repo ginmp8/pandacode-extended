@@ -211,7 +211,8 @@
 .customize-side-resize:is(:hover,:focus-visible)::before,.customize-side-resizing .customize-side-resize::before{width:2px;background:var(--focus)}
 .customize-side-resize:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
 .customize-side-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
-.customize-side-content{flex:1 1 auto;min-height:0;min-width:0;overflow:auto;padding:16px 18px 28px;display:flex;flex-direction:column;gap:13px}
+/* Redraws can insert/remove a loading banner above the focused control. Preserve the explicit scroll position rather than allowing browser scroll anchoring to compensate. */
+.customize-side-content{flex:1 1 auto;min-height:0;min-width:0;overflow:auto;overflow-anchor:none;padding:16px 18px 28px;display:flex;flex-direction:column;gap:13px}
 .customize-side-description{font-size:var(--ds-text-ui);color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
 .customize-side-source{display:flex;align-items:flex-start;flex-direction:column;gap:4px;min-width:0}
 .customize-side-source small{font-size:var(--ds-text-chip);color:var(--muted);overflow-wrap:anywhere}

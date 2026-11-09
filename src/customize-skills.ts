@@ -55,6 +55,10 @@ function skillIconUrl(source: string | undefined): string | null {
   const inspect = (element: Element): void => {
     if (++nodes > 256 || !tags.has(element.localName)) safe = false;
     for (const attr of Array.from(element.attributes)) {
+      if (attr.name === 'xmlns') {
+        if (attr.value !== 'http://www.w3.org/2000/svg') safe = false;
+        continue;
+      }
       if (!attrs.has(attr.name) || /url\s*\(|javascript\s*:|https?\s*:|data\s*:|@import/i.test(attr.value)) safe = false;
     }
     for (const child of Array.from(element.children)) inspect(child);

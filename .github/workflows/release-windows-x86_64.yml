@@ -1,13 +1,9 @@
 name: Release Windows x86_64
 
-# Standalone Windows installer build; the existing multi-platform release.yml is unchanged.
-# Pull requests only exercise changes to this workflow and never use updater signing secrets.
+# Standalone, manually triggered Windows installer build; release.yml is unchanged.
+# No pull_request, push or tag trigger: CI validates changes without publishing installers.
 # Manual runs upload an Actions artifact; they do not create tags or GitHub Releases.
 on:
-  pull_request:
-    branches: [extended/development]
-    paths:
-      - .github/workflows/release-windows-x86_64.yml
   workflow_dispatch:
 
 permissions:
@@ -54,7 +50,7 @@ jobs:
       - name: Build Windows x86_64 installer
         run: node scripts/release/build.mjs
         env:
-          # PR builds are unsigned; manual builds may generate signed updater assets.
+          # Manual builds may generate signed updater assets when signing secrets exist.
           TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name == 'workflow_dispatch' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           PANDACODE_RELAY_URL: ${{ vars.PANDACODE_RELAY_URL }}

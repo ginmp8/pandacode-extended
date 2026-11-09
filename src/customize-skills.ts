@@ -71,7 +71,7 @@ function skillIconUrl(source: string | undefined): string | null {
   return safe ? 'data:image/svg+xml,' + encodeURIComponent(new XMLSerializer().serializeToString(doc.documentElement)) : null;
 }
 
-export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void} {
+export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void;refresh():Promise<void>} {
   let installed: SkillItem[] = [];
   let installedIcons: Record<string,string> = {};
   let sources: SavedSource[] = [];
@@ -131,7 +131,12 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       const kept = !enabled && change.kept?.length ? ` ${plural(change.kept.length,'edited file')} preserved on disk.` : '';
       success(`${item.name} ${enabled?'enabled':'disabled'} for ${harnessLabel(harness)}.${kept}`);
     } catch (cause) { error=message(cause); }
-    finally { busy=false; draw(); }
+    finally {
+      busy=false; draw();
+      if (detail?.kind==='installed' && detail.id===id) {
+        host.querySelector<HTMLInputElement>(`[data-customize-harness="${CSS.escape(harness)}"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});
+      }
+    }
   }
 
   async function uninstall(id: string): Promise<void> {
@@ -361,6 +366,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         <h3>${esc(item.name)}</h3><p>${esc(item.description)}</p><small>${esc(source.location)} · ${esc(shaShort(source.commit))}</small></div>
         <button type="button" class="secondary-button" data-customize="close-detail">Close preview</button>
       </div>
+      ${detail.kind === 'installed' ? lifecycleHtml(item as SkillItem) : ''}
       <div class="customize-preview-shell">
         <nav class="customize-file-tree" aria-label="Package files">
           <strong>Files</strong>
@@ -374,7 +380,6 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           <div id="customize-preview-content" class="customize-preview-body" role="region" aria-label="Skill file content">Loading file…</div>
         </div>
       </div>
-      ${detail.kind === 'installed' ? lifecycleHtml(item as SkillItem) : ''}
     </section>`;
   }
 
@@ -395,6 +400,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const activeName = withinHost ? active.name : '';
     const activeSkillPath = withinHost ? active.dataset.selectSkill : undefined;
     const activeAction = withinHost ? active.dataset.customize : undefined;
+    const activeHarness = withinHost ? active.dataset.customizeHarness : undefined;
+    const activeHarnessId = withinHost ? active.dataset.id : undefined;
     const activeActionId = withinHost ? active.dataset.id : undefined;
     const cursor = activeName && typeof active?.selectionStart === 'number' ? active.selectionStart : -1;
     host.innerHTML = `<div class="customize-page">
@@ -431,7 +438,9 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         </section>
       </div>
     </div>`;
-    const next = activeSkillPath !== undefined
+    const next = activeHarness !== undefined
+      ? [...host.querySelectorAll<HTMLInputElement>('[data-customize-harness]')].find(input => input.dataset.customizeHarness === activeHarness && input.dataset.id === activeHarnessId)
+      : activeSkillPath !== undefined
       ? [...host.querySelectorAll<HTMLInputElement>('[data-select-skill]')].find(input => input.dataset.selectSkill === activeSkillPath)
       : activeAction
         ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && button.dataset.id === activeActionId)
@@ -787,7 +796,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   void options.subscribe(handleProgress).then(cleanup=>{if(disposed)cleanup();else unsub=cleanup;}).catch(()=>{});
   draw();
   void refresh();
-  return {dispose(){
+  return {refresh,dispose(){
     disposed=true;previewSerial++;unsub?.();
     if(toastTimer !== undefined)clearTimeout(toastTimer);
     host.removeEventListener('click',click);host.removeEventListener('input',input);

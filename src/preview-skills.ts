@@ -35,6 +35,7 @@ export function createPreviewSkills() {
   const entries = new Map<string, Entry>();
   /** What sits on disk per activation surface: library text, or an edit. */
   const disk = new Map<string, string>();
+  const unmanaged = new Set<string>();
   const key = (id: string, harness: string, scope: SkillScope) => `${harness}:${scope}:${id}`;
   const view = (entry: Entry): SkillItem => structuredClone(entry.item);
   const list = () => [...entries.values()].sort((a, b) => a.item.id.localeCompare(b.item.id)).map(view);
@@ -199,6 +200,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
     PROJECT_ROOT,
     /** Simulate a hand edit of an activated file. */
     edit(id: string, harness: string, scope: SkillScope) { disk.set(key(id, harness, scope), 'edited'); },
+    plantUnmanaged(id: string, harness: string, scope: SkillScope) { unmanaged.add(key(id,harness,scope)); },
     list,
     /** Make the next catalog call fail the way GitHub would (rate limit, signed out). */
     failNext(error: string) { failure = error; },
@@ -215,7 +217,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
       const inner = String(path ?? '').replace(/^\/|\/$/g, '');
       return add(kind === 'rule' ? 'rule' : 'skill', inner.split('/').pop() || name.split('/')[1], `# ${inner || name}\nFrom GitHub.`, { kind: 'github', location: inner ? `${name}/${inner}` : name, gitRef: (gitRef as string) || null, commit: 'a1b2c3d4e5f6' });
     },
-    activate(id: unknown, harness: unknown, scope: unknown, projectId: unknown, acknowledge: unknown) {
+    activate(id: unknown, harness: unknown, scope: unknown, projectId: unknown, acknowledge: unknown, replaceExisting: unknown = false) {
       const entry = find(id);
       const h = String(harness), s = scope as SkillScope;
       if (!FILES.includes(h) && !PROMPT.has(h)) throw new Error('Unknown harness.');
@@ -227,10 +229,13 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
       const k = key(entry.item.id, h, s);
       const previous = entry.item.activations.find(a => a.harness === h && a.scope === s);
       if (previous && previous.surface !== 'prompt' && disk.get(k) !== previous.sha256) throw new Error('That file was edited on disk; PandaCode will not overwrite it.');
+      if (!previous && unmanaged.has(k) && !replaceExisting) throw new Error(`${cell(entry,h,s).surface} already exists and PandaCode did not create it.`);
+      const backup = !previous && unmanaged.has(k) && replaceExisting ? `Original skill backed up at /Users/you/.codex/.pandacode-skill-backups/${entry.item.id}-backup` : null;
+      if (backup) unmanaged.delete(k);
       const activation: SkillActivation = { harness: h, scope: s, project: s === 'project' ? PROJECT_ROOT : null, surface: PROMPT.has(h) ? 'prompt' : entry.item.kind === 'skill' ? 'folder' : 'block', sha256: entry.item.sha256, files: [] };
       if (!PROMPT.has(h)) disk.set(k, entry.item.sha256);
       entry.item = { ...entry.item, activations: [...entry.item.activations.filter(a => a !== previous), activation] };
-      return { items: list(), kept: [] };
+      return { items: list(), kept: backup ? [backup] : [] };
     },
     deactivate(id: unknown, harness: unknown, scope: unknown) {
       const entry = find(id);
@@ -266,7 +271,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
         case 'skills_list': return list();
         case 'skills_import_folder': return this.importFolder(args.path, args.kind);
         case 'skills_import_github': return this.importGithub(args.repo, args.path, args.gitRef, args.kind);
-        case 'skills_activate': return this.activate(args.id, args.harness, args.scope, args.projectId, args.acknowledge);
+        case 'skills_activate': return this.activate(args.id, args.harness, args.scope, args.projectId, args.acknowledge, args.replaceExisting);
         case 'skills_deactivate': return this.deactivate(args.id, args.harness, args.scope);
         case 'skills_matrix': return this.matrix(args.projectId);
         case 'skills_scan': return this.scan(args.id);

@@ -382,3 +382,49 @@ test('Try in chat opens a new projectless chat with a prefilled skill command', 
   await expect(page.locator('#prompt')).toHaveValue('/release-notes ');
   await expect(page.locator('#prompt')).toBeFocused();
 });
+
+test('search typing keeps the caret at the end instead of reversing characters',async({page})=>{
+  await openCustomize(page);
+  const search=page.getByRole('searchbox',{name:'Search installed skills'});
+  await search.pressSequentially('release');
+  await expect(search).toHaveValue('release');
+  expect(await search.evaluate(element=>(element as HTMLInputElement).selectionStart)).toBe('release'.length);
+  await expect(page.getByRole('button',{name:'Inspect Release notes'})).toBeVisible();
+});
+
+test('skill details are a dismissible modal with source only there and a nested file tree',async({page})=>{
+  await openCustomize(page);
+  await expect(page.locator('.customize-skill-row').getByRole('link',{name:'View source'})).toHaveCount(0);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const dialog=page.getByRole('dialog',{name:'Skill details'});
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('link',{name:'View source'})).toHaveAttribute('href',/github\.com\/anthropics\/skills\/tree\//);
+  const tree=dialog.getByRole('tree',{name:'Package file tree'});
+  await expect(tree).toBeVisible();
+  await expect(tree.getByRole('button',{name:'SKILL.md'})).toBeVisible();
+  await expect(tree.getByRole('button',{name:'Collapse assets folder'})).toBeVisible();
+  await expect(tree.getByRole('button',{name:'icon.svg'})).toBeVisible();
+  await tree.getByRole('button',{name:'Collapse assets folder'}).click();
+  await expect(tree.getByRole('button',{name:'icon.svg'})).toHaveCount(0);
+  await tree.getByRole('button',{name:'Expand assets folder'}).click();
+  await tree.getByRole('button',{name:'icon.svg'}).click();
+  await expect(dialog.locator('#customize-preview-content')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Inspect Release notes'})).toBeFocused();
+});
+
+test('unmanaged harness copies require confirmation and retain a backup on replace',async({page})=>{
+  await openCustomize(page);
+  await page.evaluate(()=>(window as any).__skills.plantUnmanaged('release-notes','codex','user'));
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const dialog=page.getByRole('dialog',{name:'Skill details'});
+  const toggle=dialog.getByRole('checkbox',{name:'Enable Release notes for Codex'});
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(dialog).toContainText('An unmanaged skill folder already exists');
+  await dialog.getByRole('button',{name:'Back up and replace'}).click();
+  await expect(toggle).toBeChecked();
+  await expect(dialog.locator('.customize-dialog-toast')).toContainText('Original skill backed up at');
+  await expect(page.locator('.customize-skill-activity').first()).toHaveClass(/customize-active-text/);
+});

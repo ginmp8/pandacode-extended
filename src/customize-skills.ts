@@ -71,7 +71,7 @@ function skillIconUrl(source: string | undefined): string | null {
   return safe ? 'data:image/svg+xml,' + encodeURIComponent(new XMLSerializer().serializeToString(doc.documentElement)) : null;
 }
 
-export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void;refresh():Promise<void>} {
+export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void;refresh():Promise<void>;closeDetail():void} {
   let installed: SkillItem[] = [];
   let installedIcons: Record<string,string> = {};
   let sources: SavedSource[] = [];
@@ -904,7 +904,9 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   void options.subscribe(handleProgress).then(cleanup=>{if(disposed)cleanup();else unsub=cleanup;}).catch(()=>{});
   draw();
   void refresh();
-  return {refresh,dispose(){
+  return {refresh,closeDetail:()=>{
+    if(detail) dismissDetail();
+  },dispose(){
     disposed=true;previewSerial++;unsub?.();
     host.querySelector<HTMLDialogElement>('.customize-detail-dialog')?.close();
     if(toastTimer !== undefined)clearTimeout(toastTimer);

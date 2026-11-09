@@ -509,6 +509,119 @@ test('the skill inspector becomes a full-width pane on narrow viewports',async({
   await expect(page.locator('.customize-page')).toBeHidden();
   const box=await detail.boundingBox();
   expect(box!.width).toBeGreaterThan(850);
-  await detail.getByRole('button',{name:'Close preview'}).click();
+  await detail.getByRole('button',{name:'Close Release notes'}).click();
   await expect(page.locator('.customize-page')).toBeVisible();
 });
+
+test('each opened skill has a closable tab with its own selected file and preview mode', async ({page}) => {
+  await page.setViewportSize({width:1450,height:850});
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'ZIP archive'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
+
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const tabs=detail.getByRole('tablist',{name:'Open skill previews'});
+  await expect(tabs.getByRole('tab',{name:'Release notes'})).toHaveAttribute('aria-selected','true');
+  await expect(detail.getByRole('button',{name:'Close preview'})).toHaveCount(0);
+  await detail.getByRole('tree',{name:'Package file tree'}).getByRole('button',{name:'icon.svg'}).click();
+  await expect(detail.locator('.customize-preview-toolbar')).toContainText('assets/icon.svg');
+  await detail.getByRole('button',{name:'Raw'}).click();
+  await expect(detail.getByRole('button',{name:'Raw'})).toHaveAttribute('aria-pressed','true');
+
+  await page.getByRole('button',{name:'Inspect ZIP sample'}).click();
+  await expect(tabs.getByRole('tab')).toHaveCount(2);
+  await expect(tabs.getByRole('tab',{name:'ZIP sample'})).toHaveAttribute('aria-selected','true');
+  await expect(detail.locator('.customize-preview-toolbar')).toContainText('SKILL.md');
+  await expect(detail.getByRole('button',{name:'Rendered'})).toHaveAttribute('aria-pressed','true');
+
+  await tabs.getByRole('tab',{name:'Release notes'}).click();
+  await expect(detail.locator('.customize-preview-toolbar')).toContainText('assets/icon.svg');
+  await expect(detail.getByRole('button',{name:'Raw'})).toHaveAttribute('aria-pressed','true');
+  await expect(tabs.getByRole('tab',{name:'Release notes'})).toHaveAttribute('aria-selected','true');
+  await tabs.getByRole('button',{name:'Close ZIP sample'}).click();
+  await expect(tabs.getByRole('tab')).toHaveCount(1);
+  await expect(tabs.getByRole('tab',{name:'Release notes'})).toHaveAttribute('aria-selected','true');
+  await tabs.getByRole('button',{name:'Close Release notes'}).click();
+  await expect(detail).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Inspect Release notes'})).toBeFocused();
+});
+
+test('long skill names are truncated in inspector tabs but retain full accessible names', async ({page}) => {
+  await openCustomize(page);
+  const fullName='An extraordinarily long skill name for comprehensive interface validation';
+  await page.evaluate(name => {
+    const skills=(window as any).__skills;
+    const original=skills.call.bind(skills);
+    skills.call=(command:string,args:Record<string,unknown> = {}) => {
+      const result=original(command,args);
+      return command==='skills_list'
+        ? result.map((item:any) => item.id==='release-notes' ? {...item,name} : item)
+        : result;
+    };
+  },fullName);
+  await page.getByRole('button',{name:'Refresh skills'}).click();
+  await page.getByRole('button',{name:`Inspect ${fullName}`}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const tab=detail.getByRole('tab',{name:fullName});
+  await expect(tab).toHaveAttribute('title',fullName);
+  const visibleLabel=await tab.locator('.inspector-tab-label').textContent();
+  expect(Array.from(visibleLabel??'')).toHaveLength(23);
+  expect(visibleLabel).toEndWith('…');
+  await expect(detail.getByRole('button',{name:`Close ${fullName}`})).toBeVisible();
+});
+
+test('clicking a skill does not depress its card or select its text', async ({page}) => {
+  await openCustomize(page);
+  const card=page.getByRole('button',{name:'Inspect Release notes'});
+  expect(await card.evaluate(element => getComputedStyle(element).userSelect)).toBe('none');
+  await card.hover();
+  const box=await card.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + 40,box!.y + box!.height/2);
+  const before=await card.evaluate(element => getComputedStyle(element).backgroundColor);
+  await page.mouse.down();
+  const pressed=await card.evaluate(element => ({
+    background:getComputedStyle(element).backgroundColor,
+    scale:getComputedStyle(element).scale,
+    transform:getComputedStyle(element).transform,
+  }));
+  expect(pressed.background).toBe(before);
+  expect(pressed.scale).toBe('1');
+  expect(pressed.transform).toBe('none');
+  await page.mouse.up();
+  await card.click({clickCount:3});
+  expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('');
+});
+
+test('skill inspector resizes by drag and keyboard, persists its width, and resets on double-click', async ({page}) => {
+  await page.setViewportSize({width:1500,height:860});
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const separator=detail.getByRole('separator',{name:'Resize skill inspector'});
+  await expect(separator).toBeVisible();
+  const initial=await detail.boundingBox();
+  const grip=await separator.boundingBox();
+  expect(initial).not.toBeNull();
+  expect(grip).not.toBeNull();
+  await page.mouse.move(grip!.x + grip!.width/2,grip!.y + 90);
+  await page.mouse.down();
+  await page.mouse.move(grip!.x + grip!.width/2 - 130,grip!.y + 90,{steps:5});
+  await page.mouse.up();
+  const expanded=await detail.boundingBox();
+  expect(expanded!.width).toBeGreaterThan(initial!.width + 90);
+  const saved=await page.evaluate(() => localStorage.getItem('pandacode.customizeSkillsInspectorWidth'));
+  expect(Number(saved)).toBeGreaterThan(initial!.width + 90);
+  await separator.focus();
+  await separator.press('ArrowRight');
+  const keyboard=await detail.boundingBox();
+  expect(keyboard!.width).toBeLessThan(expanded!.width);
+  await expect(separator).toHaveAttribute('aria-valuenow',String(Math.round(keyboard!.width)));
+  await separator.dblclick();
+  const reset=await detail.boundingBox();
+  expect(Math.abs(reset!.width - initial!.width)).toBeLessThan(4);
+  expect(await page.evaluate(() => localStorage.getItem('pandacode.customizeSkillsInspectorWidth'))).toBeNull();
+});
+

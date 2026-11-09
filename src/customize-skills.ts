@@ -1,7 +1,7 @@
 /* Standalone Customize -> Skills workspace. Owns no package storage or harness writes:
  * the native skills_* commands share one library with Settings -> Skills & rules. */
 import './customize-skills.css';
-import { escape, icon, markdownHtml } from './dom';
+import { escape, fileIcon, icon, markdownHtml } from './dom';
 import type { SkillItem, CatalogSkill, SkillMatrix } from './skills-library';
 
 type SavedSource = {
@@ -72,6 +72,7 @@ function skillIconUrl(source: string | undefined): string | null {
 }
 
 export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void;refresh():Promise<void>;closeDetail():void} {
+  host.classList.add('customize-skills-root');
   let installed: SkillItem[] = [];
   let installedIcons: Record<string,string> = {};
   let sources: SavedSource[] = [];
@@ -90,7 +91,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let previewText: PreviewFile | null = null;
   let previewSerial = 0;
   let pendingRemove: string | null = null;
-  let busy = false, error = '', note = '', disposed = false;
+  let busy = false, busyLabel = '', error = '', note = '', disposed = false;
   let operation: Operation | null = null;
   let pendingZipReplacement: string | null = null;
   let unsub: (() => void) | undefined;
@@ -109,6 +110,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     toastTimer = setTimeout(() => { if (!disposed && toast === text) { toast = ''; draw(); } }, 5500);
   }
 
+  function activityHtml(): string {
+    if (!busy && (!refreshing || firstLoad)) return '';
+    const label = busy ? busyLabel || 'Working on skills…' : 'Refreshing installed skills…';
+    return `<div class="customize-activity" role="status" aria-label="Skill action in progress" aria-live="polite">
+      <span class="customize-spinner" aria-hidden="true"></span><span>${esc(label)}</span>
+    </div>`;
+  }
+
   function currentUserActivation(item: SkillItem, harness: string): boolean {
     const activation = item.activations.find(a => a.harness === harness && a.scope === 'user');
     const cell = matrix.harnesses.find(row=>row.harness===harness)?.cells.find(c=>c.id===item.id&&c.scope==='user');
@@ -124,7 +133,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (enabled && item.findings.length && item.acknowledged !== item.sha256 && !acknowledge) {
       pendingActivation={id,harness}; draw(); return;
     }
-    pendingActivation=null; pendingReplacement=null; busy=true; error=''; draw();
+    pendingActivation=null; pendingReplacement=null; busy=true;
+    busyLabel=`${enabled?'Enabling':'Disabling'} ${item.name} for ${harnessLabel(harness)}…`; error=''; draw();
     try {
       const change = enabled
         ? await options.call<{kept:string[]}>('skills_activate', {id,harness,scope:'user',acknowledge,replaceExisting})
@@ -154,7 +164,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (busy || operation?.state === 'running') return;
     const item=installed.find(entry=>entry.id===id);
     if (!item || item.activations.length || pendingUninstall!==id) return;
-    busy=true; error=''; draw();
+    busy=true; busyLabel=`Uninstalling ${item.name}…`; error=''; draw();
     try {
       await options.call<SkillItem[]>('skills_remove',{id});
       pendingUninstall=null; pendingActivation=null; detail=null; previewSerial++;
@@ -170,7 +180,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const available=item ? matrix.harnesses.filter(row=>row.installed && currentUserActivation(item,row.harness)) : [];
     const harness=available.find(row=>row.harness===tryHarness)?.harness ?? available[0]?.harness;
     if (!item || !harness) return;
-    busy=true; error=''; draw();
+    busy=true; busyLabel=`Opening ${item.name} in chat…`; error=''; draw();
     try { await options.trySkill(id,harness); }
     catch(cause) { error=message(cause); }
     finally { busy=false; if(!disposed)draw(); }
@@ -213,40 +223,39 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (slot) slot.innerHTML = operationHtml();
   }
 
-  /** Build an accessible directory tree without altering the original package paths. */
+  /** Use the inspector Files row grammar: a flat, depth-indented, collapsible tree. */
   function filesTreeHtml(paths: string[], selected: string): string {
-    type Node = { name: string; path: string; folders: Map<string,Node>; file: boolean };
-    const root: Node = {name:'',path:'',folders:new Map(),file:false};
-    for(const relative of paths) {
-      const segments=relative.split('/').filter(Boolean);
-      let branch=root;
-      for(const [index,name] of segments.entries()) {
-        const path=segments.slice(0,index+1).join('/');
-        let child=branch.folders.get(name);
-        if(!child) {child={name,path,folders:new Map(),file:false};branch.folders.set(name,child);}
-        if(index===segments.length-1) child.file=true;
-        branch=child;
+    type Node = { name: string; path: string; children: Map<string, Node>; isFile: boolean };
+    const root: Node = {name:'',path:'',children:new Map(),isFile:false};
+    for (const relative of paths) {
+      const segments = relative.split('/').filter(Boolean);
+      let parent = root;
+      for (const [index, name] of segments.entries()) {
+        const path = segments.slice(0,index+1).join('/');
+        let child = parent.children.get(name);
+        if (!child) { child={name,path,children:new Map(),isFile:false};parent.children.set(name,child); }
+        if (index === segments.length-1) child.isFile = true;
+        parent = child;
       }
     }
-    const render = (nodes: Map<string,Node>, nested=false): string => {
-      const ordered=[...nodes.values()].sort((a,b)=>Number(a.file)-Number(b.file)||a.name.localeCompare(b.name));
-      return `<ul role="${nested?'group':'tree'}" ${nested?'':'aria-label="Package file tree"'}>${ordered.map(node=>{
-        if(node.file) return `<li role="treeitem" aria-selected="${selected===node.path}">
-          <button type="button" data-customize="preview-file" data-file="${esc(node.path)}"
-            class="customize-file-entry ${selected===node.path?'selected':''}" title="${esc(node.path)}">
-            ${icon('file')}<span>${esc(node.name)}</span>
-          </button>
-        </li>`;
-        const open=!collapsedFiles.has(node.path);
-        return `<li role="treeitem" aria-expanded="${open}">
-          <button type="button" class="customize-folder-entry" data-customize="toggle-file-folder" data-path="${esc(node.path)}" aria-label="${open?'Collapse':'Expand'} ${esc(node.name)} folder">
-            <span class="customize-tree-caret" aria-hidden="true">${open?'⌄':'›'}</span>${icon('folder')}<span>${esc(node.name)}</span>
-          </button>
-          ${open?render(node.folders,true):''}
-        </li>`;
-      }).join('')}</ul>`;
-    };
-    return render(root.folders);
+    const render = (nodes: Map<string,Node>, depth: number): string =>
+      [...nodes.values()].sort((a,b)=>Number(a.isFile)-Number(b.isFile)||a.name.localeCompare(b.name))
+        .map(node => {
+          const folder = !node.isFile || node.children.size > 0;
+          const open = !collapsedFiles.has(node.path);
+          const action = folder ? 'toggle-file-folder' : 'preview-file';
+          const label = folder ? ` aria-label="${open?'Collapse':'Expand'} ${esc(node.name)} folder"` : '';
+          const expanded = folder ? ` aria-expanded="${open}"` : '';
+          const selectedState = folder ? '' : ` aria-selected="${selected===node.path}"`;
+          const row = `<div class="file-row ${!folder&&selected===node.path?'customize-file-selected':''}" role="treeitem" aria-level="${depth+1}"${expanded}${selectedState} style="--depth:${depth}">
+            <button type="button" data-customize="${action}" data-path="${esc(node.path)}" data-file="${folder?'':esc(node.path)}" title="${esc(node.path)}"${label}${expanded}>
+              ${folder?icon('chevron','file-twisty'):'<span class="file-twisty"></span>'}
+              ${fileIcon(node.name,folder)}<span>${esc(node.name)}</span>
+            </button>
+          </div>`;
+          return row + (folder&&open ? render(node.children,depth+1) : '');
+        }).join('');
+    return `<div class="file-list customize-file-list" role="tree" aria-label="Package file tree">${render(root.children,0)}</div>`;
   }
 
   function githubSourceLink(source: {kind:string;location:string;gitRef?:string|null;commit?:string|null}): string | null {
@@ -430,38 +439,48 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   function detailHtml(): string {
     if (!detail) return '';
-    const item = detail.kind === 'installed' ? installed.find(item => item.id === (detail as {id:string}).id) : scan?.skills.find(skill => skill.path === (detail as any).path);
+    const item = detail.kind === 'installed'
+      ? installed.find(entry => entry.id === (detail as {id:string}).id)
+      : scan?.skills.find(entry => entry.path === (detail as {path:string}).path);
     if (!item) return '';
-    const files = detail.kind === 'installed' ? (item as SkillItem).files : ((item as CatalogSkill).filePaths?.length ? (item as CatalogSkill).filePaths! : ['SKILL.md']);
-    const selectedFile = detail.file;
-    const source = detail.kind === 'installed' ? (item as SkillItem).source : {kind:'github',location:scan!.repo, gitRef:scan!.gitRef,commit:scan!.commit};
+    const files = detail.kind === 'installed'
+      ? (item as SkillItem).files
+      : ((item as CatalogSkill).filePaths?.length ? (item as CatalogSkill).filePaths! : ['SKILL.md']);
+    const source = detail.kind === 'installed'
+      ? (item as SkillItem).source
+      : {kind:'github',location:scan!.repo,gitRef:scan!.gitRef,commit:scan!.commit};
     const sourceUrl = githubSourceLink(source);
-    return `<dialog class="customize-detail-dialog" aria-label="Skill details">
-      <section class="customize-detail ds-card" aria-label="Read-only skill preview">
-      <div class="customize-detail-heading">
+    return `<aside class="customize-detail-side" role="region" aria-label="Read-only skill preview">
+      <header class="customize-side-heading">
         <div><p class="customize-eyebrow">${detail.kind === 'remote' ? 'GITHUB PREVIEW · NOT INSTALLED' : 'INSTALLED PACKAGE'}</p>
-        <h3>${esc(item.name)}</h3><p>${esc(item.description)}</p><small>${esc(source.location)} · ${esc(shaShort(source.commit))}</small>
+          <h2>${esc(item.name)}</h2></div>
+        <button type="button" class="secondary-button" data-customize="close-detail" aria-label="Close preview">${icon('close')}</button>
+      </header>
+      <div class="customize-side-content">
+        ${activityHtml()}
+        <p class="customize-side-description">${esc(item.description)}</p>
+        <div class="customize-side-source"><small>${esc(source.location)} · ${esc(shaShort(source.commit))}</small>
           ${sourceUrl ? `<a class="customize-source-link" href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">View source</a>` : ''}</div>
-        <button type="button" class="secondary-button" data-customize="close-detail">Close preview</button>
+        <section class="customize-package-files" aria-label="Package files">
+          <div class="file-folder-path"><span>Files</span><small>${plural(files.length,'file')}</small></div>
+          ${filesTreeHtml(files,detail.file)}
+        </section>
+        <section class="customize-preview-main" aria-label="Selected package file">
+          <div class="customize-preview-toolbar"><span title="${esc(detail.file)}">${esc(detail.file)}</span>
+            <div class="customize-mode-switch">
+              <button type="button" data-customize="preview-mode" data-mode="rendered" aria-pressed="${markdownMode==='rendered'}">Rendered</button>
+              <button type="button" data-customize="preview-mode" data-mode="raw" aria-pressed="${markdownMode==='raw'}">Raw</button>
+            </div>
+          </div>
+          <div id="customize-preview-content" class="customize-preview-body" role="region" aria-label="Skill file content">
+            <span class="customize-spinner" aria-hidden="true"></span>Loading file…
+          </div>
+        </section>
+        ${detail.kind === 'installed' ? lifecycleHtml(item as SkillItem) : ''}
+        ${toast ? `<div class="customize-dialog-toast" role="status">${esc(toast)}</div>` : ''}
+        ${error ? `<p class="customize-dialog-error" role="alert">${esc(error)}</p>` : ''}
       </div>
-      ${detail.kind === 'installed' ? lifecycleHtml(item as SkillItem) : ''}
-      <div class="customize-preview-shell">
-        <nav class="customize-file-tree" aria-label="Package files">
-          <strong>Files</strong>
-          ${filesTreeHtml(files, selectedFile)}
-        </nav>
-        <div class="customize-preview-main">
-          <div class="customize-preview-toolbar"><span>${esc(detail.file)}</span><div class="customize-mode-switch">
-            <button type="button" data-customize="preview-mode" data-mode="rendered" aria-pressed="${markdownMode === 'rendered'}">Rendered</button>
-            <button type="button" data-customize="preview-mode" data-mode="raw" aria-pressed="${markdownMode === 'raw'}">Raw</button>
-          </div></div>
-          <div id="customize-preview-content" class="customize-preview-body" role="region" aria-label="Skill file content">Loading file…</div>
-        </div>
-      </div>
-      ${toast ? `<div class="customize-dialog-toast" role="status">${esc(toast)}</div>` : ''}
-      ${error ? `<p class="customize-dialog-error" role="alert">${esc(error)}</p>` : ''}
-      </section>
-    </dialog>`;
+    </aside>`;
   }
 
   function githubFormHtml(): string {
@@ -476,6 +495,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   function draw(): void {
     if (disposed) return;
+    host.classList.toggle('customize-detail-open', !!detail);
     const active = document.activeElement as HTMLInputElement | null;
     const withinHost = !!active && host.contains(active);
     const activeName = withinHost ? active.name : '';
@@ -484,6 +504,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const activeHarness = withinHost ? active.dataset.customizeHarness : undefined;
     const activeHarnessId = withinHost ? active.dataset.id : undefined;
     const activeActionId = withinHost ? active.dataset.id : undefined;
+    const activePath = withinHost ? active.dataset.file || active.dataset.path : undefined;
     const cursor = activeName && typeof active?.selectionStart === 'number' ? active.selectionStart : -1;
     host.innerHTML = `<div class="customize-page">
       <header class="customize-page-header">
@@ -507,7 +528,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
             <button type="button" data-customize="tab-sources" aria-current="${tab === 'sources' ? 'page' : 'false'}">GitHub sources <small>${sources.length}</small></button></nav>
           ${toast ? `<div class="customize-toast" role="status">${icon('check')}<span>${esc(toast)}</span><button type="button" data-customize="dismiss-toast" aria-label="Dismiss notification">${icon('close')}</button></div>` : ''}
           ${error ? `<p class="customize-error" role="alert">${esc(error)}</p>` : ''}
-          ${refreshing && !firstLoad ? '<p class="customize-refreshing" role="status">Refreshing skills…</p>' : ''}
+          ${detail ? '' : activityHtml()}
           ${note ? `<p class="customize-notice" role="status">${esc(note)}</p>` : ''}
           ${githubFormHtml()}
           ${scan ? discoveryHtml() : ''}
@@ -515,16 +536,15 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           ${firstLoad || loadFailed ? `<section class="customize-loading" role="status" aria-label="${refreshing ? 'Loading installed skills' : 'Unable to load installed skills'}">
             ${refreshing ? '<span class="customize-spinner" aria-hidden="true"></span><strong>Loading installed skills…</strong><p>Reading your library and harness activations.</p><div class="customize-skeleton"></div><div class="customize-skeleton"></div>' : '<strong>Unable to load the skill library.</strong><p>Use Refresh to retry. Installed skills have not been changed.</p>'}
           </section>` : (tab === 'installed' ? installedHtml() : sourcesHtml())}
-          ${detailHtml()}
         </section>
       </div>
-    </div>`;
+    </div>${detailHtml()}`;
     const next = activeHarness !== undefined
       ? [...host.querySelectorAll<HTMLInputElement>('[data-customize-harness]')].find(input => input.dataset.customizeHarness === activeHarness && input.dataset.id === activeHarnessId)
       : activeSkillPath !== undefined
       ? [...host.querySelectorAll<HTMLInputElement>('[data-select-skill]')].find(input => input.dataset.selectSkill === activeSkillPath)
       : activeAction
-        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && button.dataset.id === activeActionId)
+        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && (activePath !== undefined ? (button.dataset.file || button.dataset.path) === activePath : button.dataset.id === activeActionId))
         : activeName
           ? [...host.querySelectorAll<HTMLInputElement>('input[name]')].find(input => input.name === activeName)
           : undefined;
@@ -533,14 +553,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       if (cursor >= 0 && next instanceof HTMLInputElement && next.type !== 'checkbox')
         next.setSelectionRange(cursor, cursor);
     }
-    if (detail) {
-      const modal=host.querySelector<HTMLDialogElement>('.customize-detail-dialog');
-      if(modal) {
-        modal.addEventListener('cancel',event=>{event.preventDefault();dismissDetail();},{once:true});
-        modal.showModal();
-      }
-      void loadPreview();
-    }
+    if (detail) void loadPreview();
   }
 
   async function refresh(): Promise<void> {
@@ -574,7 +587,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const current = detail, serial = ++previewSerial;
     const slot = host.querySelector<HTMLElement>('#customize-preview-content');
     if (!slot) return;
-    slot.textContent = 'Loading file…';
+    slot.innerHTML = '<span class="customize-preview-loading"><span class="customize-spinner" aria-hidden="true"></span>Loading file…</span>';
     try {
       const value = current.kind === 'installed'
         ? await options.call<PreviewFile>('skills_preview_file', {id:current.id,file:current.file})
@@ -618,7 +631,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       return {path,name:skill?.name ?? path};
     });
     const op = beginOperation('github','Importing selected skills',snapshot.repo,snapshot.commit,packages,snapshot);
-    busy = true;
+    busy = true; busyLabel=`Importing ${plural(packages.length,'skill')} from GitHub…`; draw();
     try {
       const result = await options.call<SourceImport>('skills_source_import_tracked',{request:{
         repo:snapshot.repo,path:snapshot.path,gitRef:snapshot.gitRef,commit:snapshot.commit,
@@ -665,15 +678,15 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   async function importZip(selectedPath?: string, confirmed = false): Promise<void> {
     if (busy || operation?.state === 'running') return;
-    addOpen = false;
+    addOpen = false; busy=true; busyLabel='Selecting a ZIP archive…'; draw();
     let path: string | null;
     try { path = selectedPath ?? await options.chooseZip(); }
-    catch (cause) { error = message(cause); draw(); return; }
-    if (!path) { draw(); return; }
+    catch (cause) { busy=false; error = message(cause); draw(); return; }
+    if (!path) { busy=false; draw(); return; }
     pendingZipReplacement = null;
     const filename = path.split(/[\\/]/).pop() || 'Skill archive';
     const op = beginOperation('zip','Importing ZIP package',filename,null,[{path:filename,name:filename}]);
-    busy = true;
+    busy = true; busyLabel=`Installing ${filename}…`; draw();
     try {
       const result = await options.call<{item:SkillItem;replaced:boolean;previousSource:SkillItem['source']|null;impactedHarnesses:string[]}>('skills_import_zip_tracked',{path,operationId:op.id,allowReplace:confirmed});
       const item = op.packages.get(filename)!;
@@ -706,7 +719,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (kind === 'ids') {entries=installed.filter(x=>retryIds.includes(x.id)&&x.source.kind==='github').map(x=>({path:x.id,name:x.name}));label='Retrying failed skill syncs';}
     if (!entries.length) {note='No GitHub skills are selected for synchronization.';draw();return;}
     const op=beginOperation('sync',label,kind==='source'?sources.find(x=>x.id===id)?.repo??'Saved source': 'Installed GitHub skills',null,entries);
-    busy=true;
+    busy=true; busyLabel=`${label}…`; draw();
     try {
       const command='skills_sync_tracked';
       const report=await options.call<SyncReport>(command,{scope:kind,id:id??null,ids:kind==='ids'?retryIds:null,operationId:op.id});
@@ -745,7 +758,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if(!/^https:\/\/github\.com\/[^/?#]+\/[^/?#]+(?:\/.*)?$/i.test(githubUrl.trim())){
       error='Enter an https://github.com/owner/repo URL.';draw();return;
     }
-    busy=true;error='';note='Scanning repository for SKILL.md packages…';draw();
+    busy=true;busyLabel='Scanning GitHub for SKILL.md packages…';error='';note='Scanning repository for SKILL.md packages…';draw();
     try {
       const changing=changingRefSource?sources.find(source=>source.id===changingRefSource):null;
       const result=await options.call<SourcePreview>('skills_source_preview',{repo:githubUrl.trim(),path:changing?.path??'',gitRef:githubRef.trim()||null});
@@ -760,7 +773,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const source=sources.find(s=>s.id===id); if(!source)return;
     changingRefSource=null;
     githubUrl=`https://github.com/${source.repo}${source.path?`/tree/${source.gitRef??'main'}/${source.path}`:''}`;
-    githubRef=source.gitRef??'';busy=true;error='';note='Scanning saved source…';draw();
+    githubRef=source.gitRef??'';busy=true;busyLabel='Scanning saved GitHub source…';error='';note='Scanning saved source…';draw();
     try {
       scan=await options.call<SourcePreview>('skills_source_preview',{repo:source.repo,path:source.path,gitRef:source.gitRef});
       chosen=new Set(source.selectedPaths);editingSource=id;replaceConflicts=false;discoverySearch='';note='Save tracked selection to change automatic update scope without uninstalling packages.';
@@ -800,13 +813,6 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   }
 
   const click=(event:Event)=>{
-    const backdrop=event.target;
-    if(backdrop instanceof HTMLDialogElement && backdrop.classList.contains('customize-detail-dialog')) {
-      const rect=backdrop.getBoundingClientRect();
-      const point=event as MouseEvent;
-      if(point.clientX<rect.left||point.clientX>rect.right||point.clientY<rect.top||point.clientY>rect.bottom) dismissDetail();
-      return;
-    }
     const button=(event.target as HTMLElement).closest<HTMLElement>('[data-customize]');
     if(!button || !host.contains(button))return;
     const action=button.dataset.customize, id=button.dataset.id??'', path=button.dataset.path??'';
@@ -842,8 +848,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       }
       case 'reactivate-skill':void setHarnessEnabled(id,button.dataset.harness??'',true);break;
       case 'try-skill':void tryInstalledSkill(id);break;
-      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingReplacement=null;pendingUninstall=null;collapsedFiles.clear();tryHarness='';draw();break;
-      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;pendingReplacement=null;collapsedFiles.clear();draw();break;
+      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingReplacement=null;pendingUninstall=null;collapsedFiles.clear();tryHarness='';draw();host.querySelector<HTMLButtonElement>('[data-customize="close-detail"]')?.focus({preventScroll:true});break;
+      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;pendingReplacement=null;collapsedFiles.clear();draw();host.querySelector<HTMLButtonElement>('[data-customize="close-detail"]')?.focus({preventScroll:true});break;
       case 'close-detail':dismissDetail();break;
       case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;
       case 'preview-mode':markdownMode=button.dataset.mode==='raw'?'raw':'rendered';draw();break;
@@ -852,11 +858,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'select-none':chosen.clear();draw();break;
       case 'import-selected':if(scan&&chosen.size){const snap={repo:scan.repo,path:scan.path,gitRef:scan.gitRef,commit:scan.commit,paths:[...chosen],allowReplace:replaceConflicts};void importSelected(snap);}break;
       case 'save-source-selection':
-        if(editingSource)void (async()=>{try{
-          const source=await options.call<SavedSource>('skills_source_set_selection',{id:editingSource,selectedPaths:[...chosen]});
-          note=`Tracking updated for ${source.repo}; installed packages were not deleted.`;
-          error='';await refresh();
-        }catch(cause){error=message(cause);draw();}})();break;
+        if(editingSource && !busy && operation?.state!=='running')void (async()=>{
+          busy=true;busyLabel='Saving tracked GitHub selection…';draw();
+          try{
+            const source=await options.call<SavedSource>('skills_source_set_selection',{id:editingSource,selectedPaths:[...chosen]});
+            note=`Tracking updated for ${source.repo}; installed packages were not deleted.`;
+            error='';await refresh();
+          }catch(cause){error=message(cause);}finally{busy=false;draw();}
+        })();break;
       case 'retry-failed':
         if(operation?.kind==='github'&&operation.snapshot){
           const snap={...operation.snapshot,paths:[...operation.packages.values()].filter(entry=>entry.phase==='failed').map(entry=>entry.path)};
@@ -874,7 +883,11 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'change-source-ref':changeSourceRef(id);break;
       case 'remove-source':
         if(pendingRemove!==id){pendingRemove=id;draw();break;}
-        pendingRemove=null;void (async()=>{try{sources=await options.call<SavedSource[]>('skills_source_remove',{id});note='Source configuration removed. Installed packages were kept.';error='';}catch(cause){error=message(cause);}draw();})();break;
+        pendingRemove=null;void (async()=>{
+          const existingBusy=busy; if(!existingBusy){busy=true;busyLabel='Removing GitHub source…';draw();}
+          try{sources=await options.call<SavedSource[]>('skills_source_remove',{id});note='Source configuration removed. Installed packages were kept.';error='';}
+          catch(cause){error=message(cause);}finally{if(!existingBusy)busy=false;draw();}
+        })();break;
     }
   };
   const input=(event:Event)=>{
@@ -893,11 +906,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if(target.name==='replace-conflicts'){replaceConflicts=target.checked;draw();return;}
     if(target.dataset.customizeToggle==='startup-sync'){
       const current=target.checked;
-      void (async()=>{try{policy=await options.call<Policy>('skills_sync_set_global',{enabled:current});note=current?'Startup sync enabled for previously imported skills.':'Startup sync disabled.';error='';}
-        catch(cause){error=message(cause);}draw();})();
+      void (async()=>{
+        busy=true;busyLabel='Updating startup synchronization…';draw();
+        try{policy=await options.call<Policy>('skills_sync_set_global',{enabled:current});note=current?'Startup sync enabled for previously imported skills.':'Startup sync disabled.';error='';}
+        catch(cause){error=message(cause);}finally{busy=false;draw();}
+      })();
     }
   };
   const submit=(event:Event)=>{if((event.target as HTMLElement).id==='customize-github-form'){event.preventDefault();void scanGithub();}};
+  const keydown=(event:KeyboardEvent)=>{if(event.key==='Escape'&&detail){event.preventDefault();dismissDetail();}};
+  host.addEventListener('keydown',keydown);
   host.addEventListener('click',click);
   host.addEventListener('input',input);
   host.addEventListener('change',change);
@@ -909,8 +927,9 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if(detail) dismissDetail();
   },dispose(){
     disposed=true;previewSerial++;unsub?.();
-    host.querySelector<HTMLDialogElement>('.customize-detail-dialog')?.close();
+    host.classList.remove('customize-skills-root','customize-detail-open');
     if(toastTimer !== undefined)clearTimeout(toastTimer);
+    host.removeEventListener('keydown',keydown);
     host.removeEventListener('click',click);host.removeEventListener('input',input);
     host.removeEventListener('change',change);host.removeEventListener('submit',submit);
     host.replaceChildren();

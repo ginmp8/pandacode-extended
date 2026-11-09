@@ -23,6 +23,15 @@ async function openCustomize(page: Page, slow = false): Promise<void> {
             if (command === 'skills_source_import_tracked' && window.__scenario === 'hold-import') {
               return await new Promise(resolve => { window.__releaseImport = () => resolve(skills.call(command, args)); });
             }
+            if (command === 'skills_source_preview' && window.__scenario === 'hold-scan') {
+              return await new Promise(resolve => {window.__releaseScan = () => resolve(skills.call(command,args));});
+            }
+            if (command === 'skills_sync_tracked' && window.__scenario === 'hold-sync') {
+              return await new Promise(resolve => {window.__releaseSync = () => resolve(skills.call(command,args));});
+            }
+            if (command === 'skills_preview_file' && window.__scenario === 'hold-preview') {
+              return await new Promise(resolve => {window.__releasePreview = () => resolve(skills.call(command,args));});
+            }
             if (command === 'skills_sync_tracked' && window.__scenario === 'sync-busy') {
               return {checkedAt:Date.now(),installed:[],updated:[],skipped:['A skill synchronization is already running.'],events:[]};
             }
@@ -145,7 +154,7 @@ test('ZIP import reports replacement without changing harness activation', async
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
   await expect(page.getByText('ZIP sample',{exact:true}).first()).toBeVisible();
-  await expect(page.getByRole('dialog',{name:'Skill details'})).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Read-only skill preview'})).toHaveCount(0);
   await page.screenshot({path:'test-results/customize-zip-installed.png',fullPage:true});
   await page.getByRole('button', {name:'Add',exact:true}).click();
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();
@@ -393,18 +402,29 @@ test('search typing keeps the caret at the end instead of reversing characters',
   await expect(page.getByRole('button',{name:'Inspect Release notes'})).toBeVisible();
 });
 
-test('skill details are a dismissible modal with source only there and a nested file tree',async({page})=>{
+test('skill details open in a solid right inspector with the Files row tree',async({page})=>{
   await openCustomize(page);
   await expect(page.locator('.customize-skill-row').getByRole('link',{name:'View source'})).toHaveCount(0);
   await page.getByRole('button',{name:'Inspect Release notes'}).click();
-  const dialog=page.getByRole('dialog',{name:'Skill details'});
+  const dialog=page.getByRole('region',{name:'Read-only skill preview'});
   await expect(dialog).toBeVisible();
+  await expect(page.locator('.customize-detail-dialog')).toHaveCount(0);
+  const box = await dialog.boundingBox(), main = await page.locator('.customize-page').boundingBox();
+  expect(box).not.toBeNull();
+  expect(main).not.toBeNull();
+  expect(Math.abs(main!.x + main!.width - box!.x)).toBeLessThan(3);
+  expect(await dialog.evaluate(element => getComputedStyle(element).backgroundColor)).toMatch(/^rgb\(/);
   await expect(dialog.getByRole('link',{name:'View source'})).toHaveAttribute('href',/github\.com\/anthropics\/skills\/tree\//);
   const tree=dialog.getByRole('tree',{name:'Package file tree'});
   await expect(tree).toBeVisible();
   await expect(tree.getByRole('button',{name:'SKILL.md'})).toBeVisible();
+  const rootRow = tree.locator('.file-row').filter({has:tree.getByRole('button',{name:'SKILL.md'})});
+  await expect(rootRow).toHaveAttribute('style','--depth:0');
+  await expect(tree.locator('.file-row .file-twisty').first()).toBeVisible();
   await expect(tree.getByRole('button',{name:'Collapse assets folder'})).toBeVisible();
   await expect(tree.getByRole('button',{name:'icon.svg'})).toBeVisible();
+  const nestedRow = tree.locator('.file-row').filter({has:tree.getByRole('button',{name:'icon.svg'})});
+  await expect(nestedRow).toHaveAttribute('style','--depth:1');
   await tree.getByRole('button',{name:'Collapse assets folder'}).click();
   await expect(tree.getByRole('button',{name:'icon.svg'})).toHaveCount(0);
   await tree.getByRole('button',{name:'Expand assets folder'}).click();
@@ -419,7 +439,7 @@ test('unmanaged harness copies require confirmation and retain a backup on repla
   await openCustomize(page);
   await page.evaluate(()=>(window as any).__skills.plantUnmanaged('release-notes','codex','user'));
   await page.getByRole('button',{name:'Inspect Release notes'}).click();
-  const dialog=page.getByRole('dialog',{name:'Skill details'});
+  const dialog=page.getByRole('region',{name:'Read-only skill preview'});
   const toggle=dialog.getByRole('checkbox',{name:'Enable Release notes for Codex'});
   await toggle.click();
   await expect(toggle).not.toBeChecked();
@@ -428,4 +448,65 @@ test('unmanaged harness copies require confirmation and retain a backup on repla
   await expect(toggle).toBeChecked();
   await expect(dialog.locator('.customize-dialog-toast')).toContainText('Original skill backed up at');
   await expect(page.locator('.customize-skill-activity').first()).toHaveClass(/customize-active-text/);
+});
+
+test('GitHub scanning shows a spinner and the current action before results arrive',async({page})=>{
+  await openCustomize(page);
+  await page.evaluate(() => { (window as any).__scenario='hold-scan'; });
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  const activity=page.getByRole('status',{name:'Skill action in progress'});
+  await expect(activity).toContainText('Scanning GitHub');
+  await expect(activity.locator('.customize-spinner')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Scan repository'})).toBeDisabled();
+  await page.evaluate(() => (window as any).__releaseScan());
+  await expect(activity).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Discovered GitHub skills'})).toBeVisible();
+});
+
+test('manual GitHub sync shows a loading state for the entire external operation',async({page})=>{
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  const found=page.getByRole('region',{name:'Discovered GitHub skills'});
+  await found.getByRole('checkbox').first().check();
+  await found.getByRole('checkbox',{name:'I approve replacing conflicting installed skills'}).check();
+  await found.getByRole('button',{name:'Import selected (1)'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed');
+  await page.evaluate(() => { (window as any).__scenario='hold-sync'; });
+  await page.getByRole('button',{name:'GitHub sources'}).click();
+  await page.getByRole('button',{name:'Sync all GitHub skills'}).click();
+  const activity=page.getByRole('status',{name:'Skill action in progress'});
+  await expect(activity).toContainText('Synchronizing GitHub skills');
+  await expect(page.getByRole('button',{name:'Sync all GitHub skills'})).toBeDisabled();
+  await page.evaluate(() => (window as any).__releaseSync());
+  await expect(activity).toHaveCount(0);
+});
+
+test('skill file preview renders an explicit loading state while the file is read',async({page})=>{
+  await openCustomize(page);
+  await page.evaluate(() => { (window as any).__scenario='hold-preview'; });
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  await expect(detail.locator('.customize-preview-loading .customize-spinner')).toBeVisible();
+  await page.evaluate(() => (window as any).__releasePreview());
+  await expect(detail.locator('.customize-preview-loading')).toHaveCount(0);
+  await expect(detail.locator('#customize-preview-content')).toContainText('Release notes');
+});
+
+test('the skill inspector becomes a full-width pane on narrow viewports',async({page})=>{
+  await page.setViewportSize({width:900,height:750});
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  await expect(detail).toBeVisible();
+  await expect(page.locator('.customize-page')).toBeHidden();
+  const box=await detail.boundingBox();
+  expect(box!.width).toBeGreaterThan(850);
+  await detail.getByRole('button',{name:'Close preview'}).click();
+  await expect(page.locator('.customize-page')).toBeVisible();
 });

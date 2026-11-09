@@ -627,3 +627,74 @@ test('skill inspector resizes by drag and keyboard, persists its width, and rese
   expect(await page.evaluate(() => localStorage.getItem('pandacode.customizeSkillsInspectorWidth'))).toBeNull();
 });
 
+
+test('detail controls preserve panel scroll across redraws, confirmations and async activation', async ({page}) => {
+  await page.setViewportSize({width:1420,height:640});
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const scroller=detail.locator('.customize-side-content');
+  await expect(detail.locator('#customize-preview-content')).toContainText('Release notes');
+  const scroll=()=>scroller.evaluate(element=>element.scrollTop);
+  const mode=detail.getByRole('button',{name:'Raw',exact:true});
+  await mode.scrollIntoViewIfNeeded();
+  await scroller.evaluate(element=>{element.scrollTop=140;});
+  const beforeMode=await scroll();
+  expect(beforeMode).toBeGreaterThan(60);
+  await mode.click();
+  await expect(mode).toHaveAttribute('aria-pressed','true');
+  await expect(mode).toBeFocused();
+  await expect.poll(scroll).toBe(beforeMode);
+  await detail.getByRole('button',{name:'Rendered',exact:true}).click();
+  await expect.poll(scroll).toBe(beforeMode);
+
+  const toggle=detail.getByRole('checkbox',{name:'Enable Release notes for Codex'});
+  await toggle.scrollIntoViewIfNeeded();
+  const beforeToggle=await scroll();
+  expect(beforeToggle).toBeGreaterThan(100);
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  await expect(detail.locator('.customize-dialog-toast')).toContainText('enabled for Codex');
+  await expect.poll(scroll).toBe(beforeToggle);
+
+  const uninstall=detail.getByRole('button',{name:'Uninstall',exact:true});
+  await uninstall.scrollIntoViewIfNeeded();
+  const beforeConfirm=await scroll();
+  expect(beforeConfirm).toBeGreaterThan(100);
+  await uninstall.click();
+  await expect(detail.getByRole('button',{name:'Cancel uninstall'})).toBeVisible();
+  await expect.poll(scroll).toBe(beforeConfirm);
+  await detail.getByRole('button',{name:'Cancel uninstall'}).click();
+  await expect.poll(scroll).toBe(beforeConfirm);
+});
+
+test('switching skill tabs restores their independent scroll positions after refresh', async ({page}) => {
+  await page.setViewportSize({width:1450,height:650});
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'ZIP archive'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const scroll=()=>detail.locator('.customize-side-content').evaluate(element=>element.scrollTop);
+  await detail.locator('.customize-side-content').evaluate(element=>{element.scrollTop=225;});
+  const releaseScroll=await scroll();
+  expect(releaseScroll).toBeGreaterThan(100);
+
+  await page.getByRole('button',{name:'Inspect ZIP sample'}).click();
+  await expect(detail.getByRole('tab',{name:'ZIP sample'})).toHaveAttribute('aria-selected','true');
+  await expect(scroll()).resolves.toBe(0);
+  await detail.locator('.customize-side-content').evaluate(element=>{element.scrollTop=150;});
+  const zipScroll=await scroll();
+  expect(zipScroll).toBeGreaterThan(50);
+  await detail.getByRole('tab',{name:'Release notes'}).click();
+  await expect.poll(scroll).toBe(releaseScroll);
+  await page.getByRole('button',{name:'Refresh skills'}).click();
+  await expect.poll(scroll).toBe(releaseScroll);
+  await detail.getByRole('tab',{name:'ZIP sample'}).click();
+  await expect.poll(scroll).toBe(zipScroll);
+  await detail.getByRole('button',{name:'Close ZIP sample'}).click();
+  await page.getByRole('button',{name:'Inspect ZIP sample'}).click();
+  await expect(scroll()).resolves.toBe(0);
+});
+

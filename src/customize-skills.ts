@@ -89,6 +89,34 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let editingSource: string | null = null, replaceConflicts = false;
   let detail: Detail | null = null;
   const openedDetails: Detail[] = [];
+  // The DOM is recreated on every state change. Remember the scroll position of
+  // each open skill independently, including the nested file tree and preview.
+  type DetailScroll = { content: number; files: number; preview: number; file: string };
+  const scrollByDetail = new Map<string, DetailScroll>();
+  let drawnDetailKey: string | null = null;
+  let drawnDetailFile: string | null = null;
+  function rememberDetailScroll(): void {
+    if (!drawnDetailKey || !drawnDetailFile) return;
+    const content = host.querySelector<HTMLElement>('.customize-side-content');
+    if (!content) return;
+    scrollByDetail.set(drawnDetailKey, {
+      content: content.scrollTop,
+      files: host.querySelector<HTMLElement>('.customize-file-list')?.scrollTop ?? 0,
+      preview: host.querySelector<HTMLElement>('#customize-preview-content')?.scrollTop ?? 0,
+      file: drawnDetailFile,
+    });
+  }
+  function restoreDetailScroll(): void {
+    if (!detail) return;
+    const saved = scrollByDetail.get(detailKey(detail));
+    if (!saved) return;
+    const content = host.querySelector<HTMLElement>('.customize-side-content');
+    const files = host.querySelector<HTMLElement>('.customize-file-list');
+    const preview = host.querySelector<HTMLElement>('#customize-preview-content');
+    if (content) content.scrollTop = saved.content;
+    if (files) files.scrollTop = saved.files;
+    if (preview && saved.file === detail.file) preview.scrollTop = saved.preview;
+  }
   // Keep each tab's file and preview mode while switching between skills.
   const detailKey = (value: Detail) => value.kind === 'installed' ? `installed:${value.id}` : `remote:${value.path}`;
   let inspectorWidth: number | null = null;
@@ -314,6 +342,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       collapsedFiles.clear(); previewSerial++;
     }
     draw();
+    scrollByDetail.delete(key);
     if (detail) host.querySelector<HTMLButtonElement>('.customize-skill-tab.selected .customize-skill-tab-button')?.focus({preventScroll:true});
     else if (wasActive) {
       const selector = closing.kind === 'installed'
@@ -661,6 +690,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   function draw(): void {
     if (disposed) return;
     if (resizeDrag) finishResize(false); // A full redraw must not orphan an active pointer capture.
+    const hubScrollTop = host.scrollTop;
+    rememberDetailScroll();
     host.classList.toggle('customize-detail-open', !!detail);
     const active = document.activeElement as HTMLInputElement | null;
     const withinHost = !!active && host.contains(active);
@@ -672,6 +703,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const activeActionId = withinHost ? active.dataset.id : undefined;
     const activePath = withinHost ? active.dataset.file || active.dataset.path : undefined;
     const activeTabKey = withinHost ? active.dataset.key : undefined;
+    const activeMode = withinHost ? active.dataset.mode : undefined;
     const cursor = activeName && typeof active?.selectionStart === 'number' ? active.selectionStart : -1;
     const previousTabScroll = host.querySelector<HTMLElement>('.customize-skill-tabs')?.scrollLeft ?? 0;
     host.innerHTML = `<div class="customize-page">
@@ -707,6 +739,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         </section>
       </div>
     </div>${detailHtml()}`;
+    drawnDetailKey = detail ? detailKey(detail) : null;
+    drawnDetailFile = detail?.file ?? null;
     const strip = host.querySelector<HTMLElement>('.customize-skill-tabs');
     if (strip) {
       strip.scrollLeft = previousTabScroll;
@@ -722,7 +756,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       : activeSkillPath !== undefined
       ? [...host.querySelectorAll<HTMLInputElement>('[data-select-skill]')].find(input => input.dataset.selectSkill === activeSkillPath)
       : activeAction
-        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && (activePath !== undefined ? (button.dataset.file || button.dataset.path) === activePath : activeTabKey !== undefined ? button.dataset.key === activeTabKey : button.dataset.id === activeActionId))
+        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && (activePath !== undefined ? (button.dataset.file || button.dataset.path) === activePath : activeTabKey !== undefined ? button.dataset.key === activeTabKey : activeMode !== undefined ? button.dataset.mode === activeMode : button.dataset.id === activeActionId))
         : activeName
           ? [...host.querySelectorAll<HTMLInputElement>('input[name]')].find(input => input.name === activeName)
           : undefined;
@@ -731,6 +765,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       if (cursor >= 0 && next instanceof HTMLInputElement && next.type !== 'checkbox')
         next.setSelectionRange(cursor, cursor);
     }
+    restoreDetailScroll();
+    host.scrollTop = hubScrollTop;
     updateResizeHandle();
     if (detail) void loadPreview();
   }
@@ -767,6 +803,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const current = detail, serial = ++previewSerial;
     const slot = host.querySelector<HTMLElement>('#customize-preview-content');
     if (!slot) return;
+    const content = slot.closest<HTMLElement>('.customize-side-content');
+    const contentBeforeLoad = content?.scrollTop ?? 0;
     slot.innerHTML = '<span class="customize-preview-loading"><span class="customize-spinner" aria-hidden="true"></span>Loading file…</span>';
     try {
       const value = current.kind === 'installed'
@@ -795,6 +833,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       }
     } catch (cause) {
       if (!disposed && serial === previewSerial) { slot.textContent = message(cause); slot.setAttribute('role','alert'); }
+    } finally {
+      if (!disposed && serial === previewSerial && slot.isConnected) {
+        const saved = scrollByDetail.get(detailKey(current));
+        // The loading placeholder can temporarily shrink the scrollable content.
+        // Restore only if the user did not scroll while the file was loading.
+        if (saved && saved.file === current.file && slot.scrollTop === 0) slot.scrollTop = saved.preview;
+        if (saved && content && content.scrollTop === contentBeforeLoad) content.scrollTop = saved.content;
+      }
     }
   }
 

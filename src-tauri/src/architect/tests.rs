@@ -46,11 +46,15 @@ fn running_worker(
 fn bot_delivery_waits_for_team_completion_and_queued_turns_keep_the_team_route() {
     let (state, sid) = state_fixture();
     let store = state.store.lock().unwrap();
+    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+        "ordinary non-Council bot teams must retain per-turn callbacks");
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.config.council = Some(CouncilConfig::default());
+    save(&store, &mut team).unwrap();
     assert_eq!(crate::bots::team_state(&store, &sid).unwrap().as_deref(), Some("running"));
     assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
         "an ended lead turn must not complete an active team delivery");
 
-    let mut team = load(&store, &sid).unwrap().unwrap();
     team.status = "waiting".into();
     save(&store, &mut team).unwrap();
     assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),

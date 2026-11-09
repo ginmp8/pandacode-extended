@@ -1134,7 +1134,15 @@ pub(crate) fn team_state(store: &Store, session_id: &str) -> Result<Option<Strin
 }
 
 pub(crate) fn delivery_may_settle(store: &Store, session_id: &str) -> Result<bool> {
-    Ok(matches!(team_state(store, session_id)?.as_deref(), None | Some("completed" | "failed")))
+    let Some(team) = crate::architect::load(store, session_id)? else {
+        return Ok(true);
+    };
+    // Existing bot Teams without Council keep their turn-based completion
+    // callbacks. Council review cycles, unlike normal Teams, must settle first.
+    if team.config.council.is_none() {
+        return Ok(true);
+    }
+    Ok(matches!(team.status.as_str(), "completed" | "failed"))
 }
 
 /// Called when any task's run ends; replies for bot conversations go back to their channel.

@@ -1,12 +1,14 @@
 # Customize → Skills (Extended)
 
-Customize is a standalone, scrollable workspace immediately above Bots in the PandaCode left sidebar. **Skills** is the only active category. The existing **Settings → Tools → Skills & rules** page remains available for the original rules, catalogs, harness activation and drift matrix; both surfaces share the **same central native skills library**.
+Customize is a standalone, scrollable workspace opened from the main sidebar's top action card, immediately below Search. Its plug icon identifies workspace customization. **Skills** is the only active category. The existing **Settings → Tools → Skills & rules** page remains available for the original rules, catalogs, harness activation and drift matrix; both surfaces share the **same central native skills library**.
 
 ## Browse and preview
 
 Open **Customize → Installed** to search by skill name, ID, description or origin. Selecting a row shows the installed package with a sanitized **Rendered** Markdown preview, **Raw** source, and a read-only list of package files. Binary or unsupported files show metadata instead of being executed. A GitHub discovery preview is clearly labeled **not installed** and reads the immutable commit selected by the scan.
 
-Imported skills remain inactive until explicitly activated for a supported harness through Settings. Native harness copies, bot permissions, approval policies and running instructions are not modified by importing or synchronizing.
+Imported skills remain inactive until explicitly activated for a supported harness through Settings. Activated, current skills appear as `/skillname` suggestions alongside harness commands in regular chats, tasks and bot conversations, without replacing native harness commands. Native harness copies, bot permissions, approval policies and running instructions are not modified by importing or synchronizing.
+
+Installed skill rows use a safe, inert SVG thumbnail when the package provides `assets/icon.svg`; otherwise a cube symbol is shown. Safety finding counts appear alongside skill names, not in the right action group.
 
 ## Add a ZIP skill
 

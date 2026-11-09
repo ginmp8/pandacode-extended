@@ -55,7 +55,7 @@ export function createPreviewSkills() {
     return view({ item, text });
   }
 
-  add('skill', 'Release notes', '# Release notes\nWrites release notes from merged pull requests.', { kind: 'github', location: 'anthropics/skills/release-notes', gitRef: null, commit: '9f3c2a1b7e' }, ['SKILL.md', 'templates/short.md']);
+  add('skill', 'Release notes', '# Release notes\nWrites release notes from merged pull requests.', { kind: 'github', location: 'anthropics/skills/release-notes', gitRef: null, commit: '9f3c2a1b7e' }, ['SKILL.md', 'assets/icon.svg', 'templates/short.md']);
   add('rule', 'No force push', 'Never force-push to main or release branches.', { kind: 'folder', location: '/Users/you/rules/no-force-push.md', gitRef: null, commit: null });
 
   let savedSources: {id:string;repo:string;path:string;gitRef:string|null;commit:string;selectedPaths:string[];savedAt:number}[] = [];
@@ -299,6 +299,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
             :[...entries.values()].filter(x=>x.item.source.kind==='github').map(x=>x.item.id);
           return {checkedAt:Date.now(),installed:[],updated:[],skipped:[],events:ids.map(id=>({id,status:'skipped',oldCommit:null,newCommit:null,impactedHarnesses:[],detail:'Already at the selected source commit.'}))};
         }
+        case 'skills_icons': return {'release-notes': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/></svg>'};
         case 'skills_preview_file': {
           const entry=find(args.id);
           return {path:args.file,text:entry.text,size:entry.text.length,binary:false};

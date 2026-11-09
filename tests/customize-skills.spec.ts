@@ -63,9 +63,19 @@ async function openCustomize(page: Page): Promise<void> {
   await page.goto('/customize-skills-harness.html');
   await expect(page.getByRole('heading', {name:'Customize'})).toBeVisible();
   await expect(page.getByRole('heading', {name:'Skills'})).toBeVisible();
+  const category = page.getByRole('navigation', {name:'Customization categories'}).getByRole('button', {name:'Skills'});
+  await expect(category).toBeVisible();
+  const geometry = await category.evaluate(button => {
+    const title = button.querySelector('span')!;
+    return {left:button.getBoundingClientRect().left,iconLeft:button.querySelector('svg')!.getBoundingClientRect().left,textLeft:title.getBoundingClientRect().left};
+  });
+  expect(geometry.iconLeft).toBeLessThan(geometry.textLeft);
+  expect(geometry.iconLeft-geometry.left).toBeLessThan(30);
+  await expect(page.locator('.customize-skill-icon img').first()).toHaveAttribute('src', /^data:image\/svg\+xml,/);
+
 }
 
-test('Customize navigation remains separate from the Bots bar', async ({page}) => {
+test('Customize follows Search inside the top actions card and stays separate from Bots', async ({page}) => {
   // The full application preview loads multiple independent panels. Waiting for
   // DOM readiness plus the observable navigation control avoids idle media/font
   // requests counting against this test's existing, unchanged timeout.
@@ -73,9 +83,13 @@ test('Customize navigation remains separate from the Bots bar', async ({page}) =
   const customize = page.getByRole('button', {name:'Customize', exact:true});
   await expect(customize).toBeVisible();
   await page.locator('.sidebar').screenshot({path:'test-results/customize-navigation-before.png',animations:'disabled'});
-  await expect(page.locator('.sidebar-customize + #sidebar-bots-panel + #sidebar-bots')).toHaveCount(1);
+  await expect(page.locator('.sidebar-actions > .sidebar-customize-action')).toHaveCount(1);
+  await expect(page.locator('.sidebar-actions > button').last()).toHaveAttribute('data-action', 'toggle-customize');
+  await expect(page.locator('.sidebar-actions > .search-trigger + .sidebar-customize-action')).toHaveCount(1);
+  await expect(page.locator('#sidebar-bots-panel + #sidebar-bots')).toHaveCount(1);
   await customize.click();
   await expect(page.getByRole('heading', {name:'Customize',exact:true})).toBeVisible();
+  await expect(customize).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.workspace-header')).toBeHidden();
   await expect(page.locator('.conversation-pane')).toBeHidden();
   await page.screenshot({path:'test-results/customize-navigation-after.png',fullPage:true,animations:'disabled'});

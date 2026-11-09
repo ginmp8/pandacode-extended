@@ -44,8 +44,28 @@ const sourceLocation = (repo:string,path:string) => path ? `${repo}/${path}` : r
 const isTerminal = (phase: Phase) => ['installed', 'replaced', 'updated', 'unchanged', 'skipped', 'failed', 'cancelled'].includes(phase);
 const stateLabel = (phase: Phase) => ({ queued:'Queued', fetching:'Downloading', validating:'Validating', installing:'Installing', installed:'Installed', replaced:'Replaced', updated:'Updated', unchanged:'Unchanged', skipped:'Skipped', failed:'Failed', cancelled:'Cancelled' } as Record<Phase,string>)[phase];
 
+/** SVGs belong to imported packages: render only strictly validated, inert image markup. */
+function skillIconUrl(source: string | undefined): string | null {
+  if (!source || source.length > 65_536) return null;
+  const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
+  if (doc.querySelector('parsererror') || doc.documentElement.localName !== 'svg') return null;
+  const tags = new Set(['svg','g','path','rect','circle','ellipse','line','polyline','polygon','title','desc']);
+  const attrs = new Set(['xmlns','viewBox','width','height','version','fill','fill-rule','stroke','stroke-width','stroke-linecap','stroke-linejoin','stroke-miterlimit','opacity','d','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry','points','transform']);
+  let nodes = 0, safe = true;
+  const inspect = (element: Element): void => {
+    if (++nodes > 256 || !tags.has(element.localName)) safe = false;
+    for (const attr of Array.from(element.attributes)) {
+      if (!attrs.has(attr.name) || /url\s*\(|javascript\s*:|https?\s*:|data\s*:|@import/i.test(attr.value)) safe = false;
+    }
+    for (const child of Array.from(element.children)) inspect(child);
+  };
+  inspect(doc.documentElement);
+  return safe ? 'data:image/svg+xml,' + encodeURIComponent(new XMLSerializer().serializeToString(doc.documentElement)) : null;
+}
+
 export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void} {
   let installed: SkillItem[] = [];
+  let installedIcons: Record<string,string> = {};
   let sources: SavedSource[] = [];
   let policy = initialPolicy;
   let matrix: SkillMatrix = {project:null,harnesses:[]};
@@ -122,17 +142,17 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       const sourceLink = item.source.kind === 'github'
         ? `https://github.com/${item.source.location.split('/').slice(0,2).map(encodeURIComponent).join('/')}`
         : null;
+      const iconUrl = skillIconUrl(installedIcons[item.id]);
       return `<li class="customize-skill-row">
         <button type="button" class="customize-skill-main" data-customize="inspect-installed" data-id="${esc(item.id)}" aria-label="Inspect ${esc(item.name)}">
-          <span class="customize-skill-icon">${icon('spark')}</span>
-          <span class="customize-skill-description"><strong>${esc(item.name)}</strong><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}${item.source.gitRef ? ` · ref ${esc(item.source.gitRef)}` : ''}</small>
+          <span class="customize-skill-icon">${iconUrl ? `<img src="${esc(iconUrl)}" alt="" loading="lazy">` : icon('skill')}</span>
+          <span class="customize-skill-description"><span class="customize-skill-title"><strong>${esc(item.name)}</strong>${item.findings?.length ? `<small class="customize-warning">${plural(item.findings.length, 'safety finding')}</small>` : ''}</span><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}${item.source.gitRef ? ` · ref ${esc(item.source.gitRef)}` : ''}</small>
           ${item.source.kind==='github' ? `<small>${esc(update)}</small>` : ''}
           ${missingPeers.length ? `<small class="customize-warning">Missing dependencies: ${esc(missingPeers.join(', '))}</small>` : ''}
           ${statuses.length ? `<small>${esc(statuses.join(' · '))}</small>` : ''}</span>
         </button>
         <span class="customize-skill-trailing">
           ${sourceLink ? `<a class="secondary-button" href="${esc(sourceLink)}" target="_blank" rel="noopener noreferrer">Source</a>` : ''}
-          ${item.findings?.length ? `<small class="customize-warning">${plural(item.findings.length, 'safety finding')}</small>` : ''}
           ${active ? `<small>${plural(active, 'activation')}</small>` : ''}
           ${item.source.kind === 'github' ? `<button type="button" class="secondary-button" data-customize="sync-skill" data-id="${esc(item.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Sync</button>` : ''}
         </span>
@@ -255,7 +275,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       </header>
       <div class="customize-page-layout">
         <nav class="customize-category-nav" aria-label="Customization categories">
-          <span class="customize-nav-heading">Categories</span><button type="button" aria-current="page">${icon('spark')}<span>Skills</span></button>
+          <span class="customize-nav-heading">Categories</span><button type="button" aria-current="page">${icon('skill')}<span>Skills</span></button>
         </nav>
         <section class="customize-page-body">
           <div class="customize-toolbar">
@@ -294,14 +314,15 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   async function refresh(): Promise<void> {
     try {
-      const [items, saved, current, statuses, recent] = await Promise.all([
+      const [items, saved, current, statuses, recent, icons] = await Promise.all([
         options.call<SkillItem[]>('skills_list'), options.call<SavedSource[]>('skills_source_list'),
         options.call<Policy>('skills_sync_policy'),
         options.call<SkillMatrix>('skills_matrix').catch(()=>({project:null,harnesses:[]} as SkillMatrix)),
         options.call<SyncReport>('skills_sync_report').catch(()=>({checkedAt:0,installed:[],updated:[],skipped:[],events:[]} as SyncReport)),
+        options.call<Record<string,string>>('skills_icons').catch(()=>({})),
       ]);
       if (disposed) return;
-      installed = items; sources = saved; policy = current; matrix=statuses; syncReport=recent;
+      installed = items; installedIcons = icons; sources = saved; policy = current; matrix=statuses; syncReport=recent;
     } catch (cause) { error = message(cause); }
     draw();
   }

@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "=0.9.12", default-features = false, features = ["parse", "serde"] }
 tokio = { version = "1.53.3", features = ["full"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 portable-pty = "0.9"
 ignore = "0.4.33"

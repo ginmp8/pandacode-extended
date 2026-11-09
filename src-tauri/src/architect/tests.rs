@@ -51,6 +51,26 @@ fn bot_delivery_waits_for_team_completion_and_queued_turns_keep_the_team_route()
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.config.council = Some(CouncilConfig::default());
     save(&store, &mut team).unwrap();
+    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+        "a direct bot conversation with Council retains its original callback policy");
+
+    // A live Shared Channel delivery with Council must wait for the team gate.
+    let project = store.session(&sid).unwrap().project_id;
+    store.db.execute(
+        "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at) VALUES('reviewed-bot','Reviewer',?1,'claude','default','ask',1,1)",
+        [&project],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channels(id,name,created_at,updated_at) VALUES('review-channel','Review',1,1)", [],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES('review-msg','review-channel','user','Review this','in_progress',1)",
+        [],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,created_at,updated_at) VALUES('review-delivery','review-channel','review-msg','reviewed-bot',?1,'in_progress',1,1)",
+        [&sid],
+    ).unwrap();
     assert_eq!(crate::bots::team_state(&store, &sid).unwrap().as_deref(), Some("running"));
     assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
         "an ended lead turn must not complete an active team delivery");
@@ -76,7 +96,10 @@ fn bot_delivery_waits_for_team_completion_and_queued_turns_keep_the_team_route()
     assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
         "a paused team must not emit a success callback");
 
-    let project = store.session(&sid).unwrap().project_id;
+    // Council disabled on the same delivery restores the legacy per-turn path.
+    team.config.council = None;
+    save(&store, &mut team).unwrap();
+    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap());
     let ordinary = store.create_session(&project, "claude", "default", "ask").unwrap();
     assert!(crate::bots::team_state(&store, &ordinary.id).unwrap().is_none());
     assert!(crate::bots::delivery_may_settle(&store, &ordinary.id).unwrap(),

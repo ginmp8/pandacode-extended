@@ -1134,11 +1134,19 @@ pub(crate) fn team_state(store: &Store, session_id: &str) -> Result<Option<Strin
 }
 
 pub(crate) fn delivery_may_settle(store: &Store, session_id: &str) -> Result<bool> {
+    // Preserve direct bot conversations and ordinary Team callbacks. This gate
+    // concerns an in-progress Shared Channel delivery using native Council.
+    let channel_delivery: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bot_shared_channel_deliveries WHERE session_id=?1 AND status='in_progress')",
+        [session_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !channel_delivery {
+        return Ok(true);
+    }
     let Some(team) = crate::architect::load(store, session_id)? else {
         return Ok(true);
     };
-    // Existing bot Teams without Council keep their turn-based completion
-    // callbacks. Council review cycles, unlike normal Teams, must settle first.
     if team.config.council.is_none() {
         return Ok(true);
     }

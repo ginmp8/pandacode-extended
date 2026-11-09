@@ -114,3 +114,11 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Execute the release Node tests including Windows CRLF behavior; no local clone was available to run them here.
 - [ ] Fix the existing RustSec failure with a Cargo-generated lockfile and compatible SQLite/rusqlite graph, then validate Rust build/tests/audit on the newly published SHA.
 - [ ] Verify final SHA CI and independent Settings On/Off, Connect/MCP/cloud/VM, credential and installer workflows; **0.12.0** remains a draft, not a release.
+
+## SQLite dependency remediation candidate — 2026-11-09
+
+- [x] Verify advisory [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html) against the original bundled SQLite graph.
+- [x] Port the existing, CI-checked `rusqlite 0.41.1` / `libsqlite3-sys 0.39.1` graph from the read-only [`extended/development` commit `d0100f72`](https://github.com/ginmp8/pandacode-extended/commit/d0100f72c25e3ccff58c294d624505af8a216b48), retaining app version `0.3.106` and all 686 package records.
+- [ ] Inspect RustSec and `cargo test --locked`/Clippy jobs on the **new exact base/development SHA**, not just the source branch's [CI #42651770546](https://github.com/ginmp8/pandacode-extended/actions/runs/42651770546).
+- [ ] Verify native SQLite storage, upgrades/migrations, rollback and Rust >=1.89 compatibility on the supported platforms; the local environment has no Cargo.
+- [ ] Complete 80 shared source-file hunk reviews and Settings On/Off, Connect/MCP, bots, cloud/VM and credential runtime checks. Extended `0.12.0` remains an unapproved candidate.

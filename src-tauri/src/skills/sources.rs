@@ -1,7 +1,7 @@
 //! User-configured GitHub skill collections. A scan is read-only and ephemeral;
 //! only the explicitly selected packages are downloaded into the library.
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs, sync::{atomic::{AtomicBool, Ordering}, Mutex}};
+use std::{collections::BTreeSet, fs, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 
 use super::{catalog, github, now_ms, sha256_hex, Kind, Library, Source, MAX_BYTES, MAX_FILES};
 
@@ -253,6 +253,18 @@ impl Library {
                 return Err(format!("At most {MAX_SAVED_SOURCES} saved sources are supported. Remove an unused configuration first."));
             }
         }
+        // Register the import before repository verification. Otherwise removing
+        // this saved source during a slow scan could succeed and the import would
+        // silently recreate the configuration after fetching packages.
+        {
+            let _source_guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+            let mut active = ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?;
+            if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                return Err("Another GitHub skill import is still running.".into());
+            }
+            *active = Some(id.clone());
+        }
+        let _guard = ImportGuard;
         let (verified_commit, indexed) = catalog::scan_path(api, &repo, &path, Some(commit))
             .map_err(|e| catalog::explain(&e))?;
         if verified_commit != commit {
@@ -268,17 +280,6 @@ impl Library {
             return Err("Two selected paths use the same skill ID. Choose only one source for that ID.".into());
         }
 
-        // Lock source writes while registering the in-flight source, so removing
-        // this source cannot race with the final import/source reconciliation.
-        {
-            let _source_guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
-            let mut active = ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?;
-            if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-                return Err("Another GitHub skill import is still running.".into());
-            }
-            *active = Some(id.clone());
-        }
-        let _guard = ImportGuard;
         self.stage_pending_import(&PendingSourceImport {
             id: id.clone(), repo: repo.clone(), path: path.clone(),
             git_ref: git_ref.clone(), commit: commit.to_string(),
@@ -290,6 +291,8 @@ impl Library {
         let mut successful_paths = Vec::new();
         let total = chosen.len();
         let mut completed = 0usize;
+        let batch_started = Instant::now();
+        const MAX_BATCH_DURATION: Duration = Duration::from_secs(15 * 60);
         for skill_path in &chosen {
             let skill = &indexed[skill_path];
             let skip = |reason: String| catalog::Skipped {
@@ -305,6 +308,13 @@ impl Library {
                 }
                 progress(event);
             };
+            if batch_started.elapsed() >= MAX_BATCH_DURATION {
+                let reason = "This import exceeded the 15-minute batch time limit. Retry this package separately.".to_string();
+                skipped.push(skip(reason.clone()));
+                completed += 1;
+                report("skipped", completed, Some(reason));
+                continue;
+            }
             if skill.files > MAX_FILES || skill.bytes > MAX_BYTES as u64 {
                 let reason = format!("{} exceeds the validated package size or file limit.", skill.name);
                 skipped.push(skip(reason.clone()));
@@ -391,7 +401,8 @@ impl Library {
         let installed: BTreeSet<String> = self.list()?.into_iter()
             .filter(|item| item.meta.kind == Kind::Skill && item.meta.source.kind == "github"
                 && item.meta.source.git_ref == source.git_ref
-                && item.meta.source.location.starts_with(&format!("{}/", source.repo)))
+                && (item.meta.source.location == source.repo
+                     || item.meta.source.location.starts_with(&format!("{}/", source.repo))))
             .map(|item| item.meta.source.location)
             .collect();
         if normalized.iter().any(|path| {

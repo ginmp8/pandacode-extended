@@ -818,6 +818,19 @@ pub struct TrackedSourceImport {
     pub allow_replace: Option<bool>,
 }
 
+/// The same payload contract is used by ZIP, source import and manual sync.
+/// Kept separate from event transport so native tests can assert exact fields.
+fn operation_progress_payload(
+    operation_id: &str, path: &str, name: &str, phase: &str,
+    completed: usize, total: usize, detail: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operationId": operation_id, "path": path, "name": name,
+        "phase": phase, "completed": completed, "total": total,
+        "detail": detail,
+    })
+}
+
 /// Streams package phases through the regular Tauri event bus, scoped to a UI operation.
 #[tauri::command]
 pub async fn skills_source_import_tracked(
@@ -837,15 +850,11 @@ pub async fn skills_source_import_tracked(
                 selected_paths, allow_replace: allow_replace.unwrap_or(false),
             },
             |progress| {
-                let _ = event_app.emit("skills-operation-progress", serde_json::json!({
-                    "operationId": operation_id,
-                    "path": progress.path,
-                    "name": progress.name,
-                    "phase": progress.phase,
-                    "completed": progress.completed,
-                    "total": progress.total,
-                    "detail": progress.detail,
-                }));
+                let payload = operation_progress_payload(
+                    &operation_id, &progress.path, &progress.name, &progress.phase,
+                    progress.completed, progress.total, progress.detail.as_deref(),
+                );
+                let _ = event_app.emit("skills-operation-progress", payload);
             },
         )
     }).await
@@ -971,17 +980,17 @@ pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_i
             .unwrap_or_default().to_string_lossy().into_owned();
         let event_app = app.clone();
         let result = customize::import_zip_progress(&app, &path, allow_replace.unwrap_or(false), |phase| {
-            let _ = event_app.emit("skills-operation-progress", serde_json::json!({
-                "operationId": operation_id, "path": name, "name": name,
-                "phase": phase, "completed": if phase == "installed" { 1 } else { 0 },
-                "total": 1, "detail": null,
-            }));
+            let payload = operation_progress_payload(
+                &operation_id, &name, &name, phase,
+                usize::from(phase == "installed"), 1, None,
+            );
+            let _ = event_app.emit("skills-operation-progress", payload);
         });
         if let Err(error) = &result {
-            let _ = app.emit("skills-operation-progress", serde_json::json!({
-                "operationId":operation_id, "path":name, "name":name,
-                "phase":"failed","completed":1,"total":1,"detail":error,
-            }));
+            let payload = operation_progress_payload(
+                &operation_id, &name, &name, "failed", 1, 1, Some(error),
+            );
+            let _ = app.emit("skills-operation-progress", payload);
         }
         result
     }).await
@@ -1010,11 +1019,11 @@ pub async fn skills_sync_tracked(app: AppHandle, scope: String, id: Option<Strin
         };
         let events_app = app.clone();
         let report = library.synchronize_progress(&github::api, selection, false, |progress| {
-            let _ = events_app.emit("skills-operation-progress", serde_json::json!({
-                "operationId":operation_id, "path":progress.id,"name":progress.name,
-                "phase":progress.phase,"completed":progress.completed,
-                "total":progress.total,"detail":progress.detail,
-            }));
+            let payload = operation_progress_payload(
+                &operation_id, &progress.id, &progress.name, &progress.phase,
+                progress.completed, progress.total, progress.detail.as_deref(),
+            );
+            let _ = events_app.emit("skills-operation-progress", payload);
         })?;
         refresh_bot_briefs_if_changed(&app, &report);
         Ok(report)

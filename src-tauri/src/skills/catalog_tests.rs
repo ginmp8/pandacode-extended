@@ -108,14 +108,16 @@ fn detects_root_collections_and_nested_skills_by_frontmatter() {
         ("skills/broken/SKILL.md", "---\nname: Broken\n---\nno description"),
         ("skills/plain/SKILL.md", "# no frontmatter"),
         (".github/skills/hidden/SKILL.md", &skill("Hidden")),
+        (".github/skills/hidden/.config/settings.md", "hidden supporting config"),
         ("README.md", "skills!"),
     ]));
     let (commit, skills) = catalog::scan(&fake.api(), "me/kit", None).unwrap();
     assert_eq!(commit, "c1");
     let found: Vec<(&str, &str, usize)> = skills.iter().map(|s| (s.path.as_str(), s.name.as_str(), s.files)).collect();
     // The root skill keeps its own files, never a nested skill's.
-    assert_eq!(found, vec![("", "Kit", 3), ("collections/writing/skills/blog", "Blog", 1), ("skills/pdf", "PDF", 2)]);
-    assert_eq!(skills[1].description, "Writes blog posts.");
+    assert_eq!(found, vec![("", "Kit", 3), (".github/skills/hidden", "Hidden", 2),
+        ("collections/writing/skills/blog", "Blog", 1), ("skills/pdf", "PDF", 2)]);
+    assert_eq!(skills[2].description, "Writes blog posts.");
 }
 
 #[test]
@@ -573,12 +575,19 @@ fn tracked_batch_reports_real_terminal_progress_and_saves_only_successes() {
     fx.library.import(Kind::Skill, vec![("SKILL.md".into(), skill("Gamma").into_bytes())],
         "Gamma", Source {kind:"folder".into(),location:"/local/gamma".into(),git_ref:None,commit:None}).unwrap();
     let mut progress = Vec::new();
+    let mut event_payloads = Vec::new();
     let result = fx.library.import_skill_source_progress(&fake.api(),
         super::sources::SourceImportRequest {
             repo:"me/mixed",path:"skills",git_ref:None,commit:&commit,
             selected_paths:vec!["skills/alpha".into(),"skills/beta".into(),"skills/gamma".into()],
             allow_replace:false,
-        }, |event| progress.push(event)).unwrap();
+        }, |event| {
+            event_payloads.push(super::operation_progress_payload(
+                "test-123", &event.path, &event.name, &event.phase,
+                event.completed, event.total, event.detail.as_deref(),
+            ));
+            progress.push(event);
+        }).unwrap();
     assert_eq!(result.source.selected_paths, ["skills/alpha"]);
     assert_eq!(result.imported, ["Alpha"]);
     assert_eq!(result.skipped.len(), 2);
@@ -587,6 +596,16 @@ fn tracked_batch_reports_real_terminal_progress_and_saves_only_successes() {
     assert_eq!(result.results.iter().map(|entry| entry.completed).collect::<Vec<_>>(), [1,2,3]);
     assert_eq!(progress.iter().filter(|entry| matches!(entry.phase.as_str(),
         "installed"|"failed"|"skipped")).count(), 3);
+    assert!(event_payloads.iter().any(|event| event["phase"] == "fetching"
+        && event["completed"] == 0 && event["total"] == 3));
+    assert!(event_payloads.iter().any(|event| event["phase"] == "validating"
+        && event["path"] == "skills/alpha"));
+    assert_eq!(event_payloads.iter().filter(|event| {
+        matches!(event["phase"].as_str(), Some("installed" | "failed" | "skipped"))
+    }).count(), 3);
+    assert!(event_payloads.iter().all(|event| event["operationId"] == "test-123"
+        && event["total"] == 3 && event["path"].as_str().is_some()
+        && event["name"].as_str().is_some()));
 }
 
 #[test]
@@ -617,4 +636,68 @@ fn removing_a_saved_source_during_its_import_is_rejected() {
     assert!(observed_conflict.get(), "the removal must be challenged inside the active import");
     assert_eq!(fx.library.saved_skill_sources().unwrap().len(), 1);
     assert!(fx.library.load("alpha").is_ok());
+}
+
+#[test]
+fn hidden_github_skill_directories_and_supporting_files_are_importable() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "a".repeat(40);
+    fake.repo("me/hidden", &commit, &files(&[
+        (".agents/skills/archify/SKILL.md", &skill("Archify")),
+        (".agents/skills/archify/.config/setting.md", "Keep hidden package data"),
+        (".github/skills/other/SKILL.md", &skill("Other")),
+    ]));
+    let scanned = fx.library.preview_skill_source(&fake.api(), "me/hidden", "", None).unwrap();
+    assert_eq!(scanned.skills.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+        [".agents/skills/archify", ".github/skills/other"]);
+    let imported = fx.library.import_skill_source(&fake.api(), "me/hidden", "", None, &commit,
+        vec![".agents/skills/archify".into()]).unwrap();
+    assert_eq!(imported.imported, ["Archify"]);
+    assert!(fx.library.files("archify").unwrap().iter()
+        .any(|(path, _)| path == ".config/setting.md"));
+    assert!(fx.library.load("other").is_err(), "unselected skills must not be imported");
+}
+
+#[test]
+fn an_installed_root_skill_can_remain_selected_in_its_saved_source() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "b".repeat(40);
+    fake.repo("me/root", &commit, &files(&[
+        ("SKILL.md", &skill("Root")),
+        ("README.md", "Readme"),
+    ]));
+    let source = fx.library.import_skill_source(&fake.api(), "me/root", "", None, &commit,
+        vec!["".into()]).unwrap().source;
+    assert_eq!(fx.library.selected_skill_ids(&source.id).unwrap(), ["root"]);
+    let updated = fx.library.set_saved_source_paths(&source.id, vec!["".into()]).unwrap();
+    assert_eq!(updated.selected_paths, [""]);
+    assert_eq!(fx.library.selected_skill_ids(&source.id).unwrap(), ["root"]);
+}
+
+#[test]
+fn removing_a_source_during_initial_remote_validation_is_rejected() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "c".repeat(40);
+    fake.repo("me/slow", &commit, &files(&[
+        ("skills/alpha/SKILL.md", &skill("Alpha")),
+    ]));
+    let existing = fx.library.import_skill_source(&fake.api(), "me/slow", "skills", None, &commit,
+        vec!["skills/alpha".into()]).unwrap().source;
+    let checked = std::cell::Cell::new(false);
+    let endpoint = format!("repos/me/slow/commits/{commit}");
+    let api = |path: &str| {
+        if path == endpoint && !checked.get() {
+            checked.set(true);
+            let error = fx.library.remove_skill_source(&existing.id).unwrap_err();
+            assert!(error.contains("import in progress"), "{error}");
+        }
+        fake.call(path)
+    };
+    fx.library.import_skill_source(&api, "me/slow", "skills", None, &commit,
+        vec!["skills/alpha".into()]).unwrap();
+    assert!(checked.get(), "test must attempt the conflicting removal before scanning");
+    assert_eq!(fx.library.saved_skill_sources().unwrap().len(), 1);
 }

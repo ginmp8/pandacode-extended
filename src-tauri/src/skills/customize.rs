@@ -37,29 +37,95 @@ fn valid_portable_path(path: &str) -> bool {
     path.split('/').all(|part| {
         let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
         let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9");
-        !part.is_empty() && part != "." && part != ".." && !part.starts_with('.')
+        !part.is_empty() && part != "." && part != ".." && part != ".git"
             && !part.ends_with([' ', '.']) && !reserved && !part.contains(':')
             && !part.chars().any(char::is_control)
     })
 }
 
-/// Validate the bounded, declarative YAML frontmatter shape supported by the
-/// native Skills Library. Reject malformed top-level fields and duplicate IDs.
+/// Validate bounded YAML flow syntax and reject incomplete nested collections.
+fn valid_yaml_flow(value: &str) -> bool {
+    let mut stack = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    let mut finished = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(delimiter) = quote {
+            if delimiter == '"' {
+                if escape { escape = false; }
+                else if c == '\\' { escape = true; }
+                else if c == '"' { quote = None; }
+            } else if c == '\'' {
+                if chars.peek() == Some(&'\'') { chars.next(); }
+                else { quote = None; }
+            }
+            continue;
+        }
+        if finished {
+            if !c.is_whitespace() { return false; }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '[' | '{' => stack.push(c),
+            ']' => { if stack.pop() != Some('[') { return false; } },
+            '}' => { if stack.pop() != Some('{') { return false; } },
+            _ => {}
+        }
+        if matches!(c, ']' | '}') && stack.is_empty() { finished = true; }
+    }
+    finished && stack.is_empty() && quote.is_none() && !escape
+}
+
+fn valid_yaml_value(key: &str, value: &str) -> bool {
+    let forbidden_required = matches!(key, "name" | "description")
+        && (value.starts_with(['[', '{', '!', '&', '*'])
+            || matches!(value, "~" | "null" | "Null" | "NULL"));
+    let malformed_double = value.starts_with('"') && serde_json::from_str::<String>(value).is_err();
+    let malformed_single = value.starts_with('\'')
+        && (value.len() < 2 || !value.ends_with('\'')
+            || value[1..value.len() - 1].replace("''", "").contains('\''));
+    !forbidden_required && !malformed_double && !malformed_single
+        && !(value.starts_with(['[', '{']) && !valid_yaml_flow(value))
+        && value.starts_with('"') == value.ends_with('"')
+        && value.starts_with('\'') == value.ends_with('\'')
+        && (value.starts_with(['"', '\'', '[', '{']) || !value.contains(": "))
+}
+
+/// Validate a bounded, declarative YAML frontmatter shape supported by the
+/// native Skills Library, including optional nested maps/lists and flow values.
 fn validate_zip_frontmatter(markdown: &str) -> Result<String, String> {
     let normalized = markdown.replace("\r\n", "\n");
     let body = normalized.strip_prefix("---\n")
         .ok_or("SKILL.md must start with YAML frontmatter.")?;
     let end = body.lines().position(|line| line == "---")
         .ok_or("SKILL.md YAML frontmatter must have a closing delimiter.")?;
-    let header = body.lines().take(end);
     let mut name_seen = false;
     let mut description_seen = false;
     let mut block_scalar = false;
-    for line in header {
+    let mut nested = false;
+    for line in body.lines().take(end) {
         if line.trim().is_empty() || line.trim_start().starts_with('#') { continue; }
-        if line.starts_with([' ', '\t']) {
-            if line.starts_with('\t') || !block_scalar {
-                return Err("SKILL.md YAML frontmatter has invalid indentation.".into());
+        let indentation = line.bytes().take_while(|b| *b == b' ').count();
+        if line.starts_with('\t') || line[indentation..].starts_with('\t') {
+            return Err("SKILL.md YAML frontmatter has invalid tab indentation.".into());
+        }
+        if indentation > 0 {
+            if block_scalar { continue; }
+            if !nested {
+                return Err("SKILL.md YAML frontmatter has unexpected indentation.".into());
+            }
+            let child = line.trim();
+            let field = child.strip_prefix("- ").unwrap_or(child);
+            if field.is_empty() { continue; }
+            if let Some((key, value)) = field.split_once(':') {
+                let value = value.trim();
+                if key.is_empty() || (!value.is_empty() && !valid_yaml_value(key, value)) {
+                    return Err("SKILL.md YAML metadata has a malformed nested field.".into());
+                }
+            } else if !valid_yaml_value("", field) {
+                return Err("SKILL.md YAML metadata has a malformed nested value.".into());
             }
             continue;
         }
@@ -68,7 +134,6 @@ fn validate_zip_frontmatter(markdown: &str) -> Result<String, String> {
         if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return Err("SKILL.md YAML frontmatter contains an invalid key.".into());
         }
-        let value = value.trim();
         if key == "name" {
             if name_seen { return Err("SKILL.md has duplicate name declarations.".into()); }
             name_seen = true;
@@ -76,23 +141,11 @@ fn validate_zip_frontmatter(markdown: &str) -> Result<String, String> {
             if description_seen { return Err("SKILL.md has duplicate description declarations.".into()); }
             description_seen = true;
         }
+        let value = value.trim();
         block_scalar = matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+");
-        // Required fields must be strings, not YAML sequences, maps, aliases,
-        // custom tags, or nulls. Validate quoted scalar syntax as well: simply
-        // checking matching quote characters accepts malformed escape sequences.
-        let invalid_required_type = matches!(key, "name" | "description")
-            && (value.starts_with(['[', '{', '!', '&', '*'])
-                || matches!(value, "~" | "null" | "Null" | "NULL"));
-        let invalid_double_quote = value.starts_with('"')
-            && serde_json::from_str::<String>(value).is_err();
-        let invalid_single_quote = value.starts_with('\'')
-            && (value.len() < 2 || !value.ends_with('\'')
-                || value[1..value.len() - 1].replace("''", "").contains('\''));
-        if !block_scalar && (invalid_required_type || invalid_double_quote || invalid_single_quote
-            || value.starts_with('"') != value.ends_with('"')
-            || value.starts_with('\'') != value.ends_with('\'')
-            || (!value.starts_with(['"', '\'']) && value.contains(": "))) {
-            return Err("SKILL.md YAML frontmatter has a malformed scalar.".into());
+        nested = value.is_empty();
+        if !block_scalar && !nested && !valid_yaml_value(key, value) {
+            return Err("SKILL.md YAML frontmatter has a malformed scalar or collection.".into());
         }
     }
     let (name, description, _) = frontmatter(&normalized);
@@ -298,13 +351,18 @@ mod tests {
         assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: {invalid-flow\n---").is_err());
         assert!(validate_zip_frontmatter("---\nname: \"invalid\\q\"\ndescription: Test\n---").is_err());
         assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: >-\n  Safe multi-line\n  description.\n---").is_ok());
+        assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: Good\nmetadata:\n  author: Alice\n  labels:\n    - tooling\n---").is_ok());
+        assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: Good\nmetadata: [missing\n---").is_err());
+        assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: Good\nmetadata:\n  labels: [missing\n---").is_err());
     }
     #[test]
     fn rejects_unsafe_zip_paths() {
-        for path in ["../SKILL.md", "/SKILL.md", "a\\SKILL.md", "a/../b", "con.txt", "folder/COM1.md", ".hidden/SKILL.md", "file."] {
+        for path in ["../SKILL.md", "/SKILL.md", "a\\SKILL.md", "a/../b", "con.txt", "folder/COM1.md", ".git/config", "file."] {
             assert!(!valid_portable_path(path), "{path}");
         }
         assert!(valid_portable_path("references/guide.md"));
+        assert!(valid_portable_path(".github/settings.md"));
+        assert!(valid_portable_path(".config/reference.md"));
         assert!(valid_portable_path("SKILL.md"));
     }
 }

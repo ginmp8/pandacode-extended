@@ -197,7 +197,7 @@ fn tree(api: Api, repo: &str, requested_path: &str, git_ref: Option<&str>) -> Re
         for entry in entries.iter().filter(|entry| entry["type"] == "blob") {
             let Some(relative) = entry["path"].as_str() else { continue };
             let path = if prefix.is_empty() { relative.to_string() } else { format!("{prefix}/{relative}") };
-            if !github::valid_path(&path) || path.split('/').any(|part| part.starts_with('.')) || entry["mode"] == "120000" {
+            if !github::valid_path(&path) || entry["mode"] == "120000" {
                 continue;
             }
             if let Some(file_sha) = entry["sha"].as_str() {
@@ -234,7 +234,7 @@ fn tree(api: Api, repo: &str, requested_path: &str, git_ref: Option<&str>) -> Re
             for entry in children {
                 let Some(relative) = entry["path"].as_str() else { continue };
                 let absolute = if folder.is_empty() { relative.to_string() } else { format!("{folder}/{relative}") };
-                if !github::valid_path(&absolute) || absolute.split('/').any(|part| part.starts_with('.')) {
+                if !github::valid_path(&absolute) {
                     continue;
                 }
                 if entry["type"] == "tree" {
@@ -273,7 +273,7 @@ pub fn scan(api: Api, repo: &str, git_ref: Option<&str>) -> Result<(String, Vec<
 /// Read only skill metadata under the requested repository path. Never clone a repository,
 /// cache a scanned tree, or fetch SKILL.md blobs outside the selected directory.
 pub fn scan_path(api: Api, repo: &str, path: &str, git_ref: Option<&str>) -> Result<(String, Vec<CatalogSkill>), String> {
-    if !path.is_empty() && (!github::valid_path(path) || path.split('/').any(|p| p.starts_with('.'))) {
+    if !path.is_empty() && !github::valid_path(path) {
         return Err("Choose a safe skills directory path.".into());
     }
     let tree = tree(api, repo, path, git_ref)?;

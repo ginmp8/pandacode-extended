@@ -112,6 +112,14 @@ jobs:
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
             npx playwright test tests/customize-skills.spec.ts tests/skills-library.spec.ts --workers=1
+      - name: Publish Customize UI review screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: customize-issue-129-ui-review
+          path: test-results/customize-*.png
+          if-no-files-found: warn
+          retention-days: 30
 
   rust:
     name: Rust check and tests (Linux)

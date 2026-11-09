@@ -15,6 +15,17 @@ async function openCustomize(page: Page): Promise<void> {
         window.__progressEvents = [];
         mountCustomizeSkills(document.getElementById('host'), {
           call: async (command, args = {}) => {
+            if (command === 'skills_source_import_tracked' && window.__scenario === 'hold-import') {
+              return await new Promise(resolve => { window.__releaseImport = () => resolve(skills.call(command, args)); });
+            }
+            if (command === 'skills_sync_tracked' && window.__scenario === 'sync-busy') {
+              return {checkedAt:Date.now(),installed:[],updated:[],skipped:['A skill synchronization is already running.'],events:[]};
+            }
+            if (command === 'skills_sync_tracked' && window.__scenario === 'sync-revisions') {
+              const skill=skills.call('skills_list').find(item=>item.kind==='skill'&&item.source.kind==='github');
+              return {checkedAt:Date.now(),installed:[],updated:[skill.id],skipped:[],events:[{id:skill.id,status:'updated',
+                oldCommit:'a'.repeat(40),newCommit:'b'.repeat(40),impactedHarnesses:['codex'],detail:'Updated the central library.'}]};
+            }
             if (command === 'skills_preview_file' && window.__scenario === 'malicious') {
               const text = '<img src="https://example.org/tracker.png"><scr'+'ipt>window.bad=1</scr'+'ipt>';
               return {path:args.file,text,size:text.length,binary:false};
@@ -165,4 +176,62 @@ test('read-only preview cannot load remote resources or execute scripts', async 
   await expect(detail.getByRole('region',{name:'Skill file content'})).toBeVisible();
   await expect(detail.locator('script,img,iframe,pandacode-ui')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).bad)).toBeUndefined();
+});
+
+test('a busy native synchronization cannot be reported as successful', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  await page.getByRole('region',{name:'Discovered GitHub skills'}).getByRole('checkbox').nth(1).check();
+  await page.getByRole('button',{name:'Import selected (1)'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
+  await page.evaluate(() => { (window as any).__scenario='sync-busy'; });
+  await page.getByRole('button',{name:'GitHub sources'}).click();
+  await page.getByRole('button',{name:'Sync all GitHub skills'}).click();
+  const status=page.getByRole('region',{name:'Skill operation status'});
+  await expect(status).toContainText('Operation failed');
+  await expect(status).toContainText('A skill synchronization is already running.');
+  await expect(status).not.toContainText('Completed successfully');
+});
+
+test('manual synchronization reports old and new revisions and harness impact', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  await page.getByRole('region',{name:'Discovered GitHub skills'}).getByRole('checkbox').nth(1).check();
+  await page.getByRole('button',{name:'Import selected (1)'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
+  await page.evaluate(() => { (window as any).__scenario='sync-revisions'; });
+  await page.getByRole('button',{name:'GitHub sources'}).click();
+  await page.getByRole('button',{name:'Sync all GitHub skills'}).click();
+  const status=page.getByRole('region',{name:'Skill operation status'});
+  await expect(status).toContainText('Old revision: aaaaaaaaaaaa');
+  await expect(status).toContainText('New revision: bbbbbbbbbbbb');
+  await expect(status).toContainText('Harnesses to review: codex');
+});
+
+test('a source cannot be removed while its import is in flight', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Add',exact:true}).click();
+  await page.getByRole('menuitem',{name:'GitHub link'}).click();
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button',{name:'Scan repository'}).click();
+  await page.getByRole('region',{name:'Discovered GitHub skills'}).getByRole('checkbox').nth(1).check();
+  await page.getByRole('button',{name:'Import selected (1)'}).click();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
+  await page.getByRole('button',{name:'GitHub sources'}).click();
+  await page.getByRole('button',{name:'Edit selection'}).click();
+  await expect(page.getByRole('button',{name:'Import selected (1)'})).toBeEnabled();
+  await page.evaluate(() => { (window as any).__scenario='hold-import'; });
+  await page.getByRole('button',{name:'Import selected (1)'}).click();
+  await page.getByRole('button',{name:'GitHub sources'}).click();
+  const remove=page.getByRole('button',{name:'Remove source'});
+  await expect(remove).toBeDisabled();
+  await page.evaluate(() => (window as any).__releaseImport());
+  await expect(remove).toBeEnabled();
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
 });

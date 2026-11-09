@@ -31,8 +31,8 @@ Repository enumeration resolves explicitly scoped subtrees before scanning. When
 
 **GitHub sources** lists saved repository, requested ref, resolved commit, selected paths and update configuration. Different refs or subtrees can have separate entries.
 
-- **Edit selection** rescans the source. **Save tracked selection** changes tracked installed packages without deleting them. First import any new package that should be tracked. **Remove source** deletes only the source configuration, not library files.
-- **Sync** updates an individual GitHub skill, **Sync source** updates installed packages in one saved selection, and **Sync all GitHub skills** covers installed GitHub-backed skills. Results describe old/new revisions, unchanged/failed packages and affected native harness activations.
+- **Edit selection** rescans the source. **Save tracked selection** changes tracked installed packages without deleting them. First import any new package that should be tracked. **Remove source** deletes only the source configuration, not library files. Removing a source with an active import is blocked until the operation completes; other sources remain available.
+- **Sync** updates an individual GitHub skill, **Sync source** updates installed packages in one saved selection, and **Sync all GitHub skills** covers installed GitHub-backed skills. Each terminal result shows its old/new revision (when known), error or skip reason, and affected native harness activations. Concurrent synchronization attempts show an explicit failure instead of a false completion.
 - **On startup** is **off by default**. When explicitly enabled it checks *only previously imported skills still selected in saved sources*, respecting per-skill opt-outs. There is no polling, newly discovered packages are never auto-installed, and a full SHA remains pinned. Removing a source stops that source's automatic tracking.
 - Manual synchronization is available even with automatic startup synchronization off. Updates affect the central library only; existing harness copies must be reconciled using the original Settings screen.
 
@@ -68,5 +68,7 @@ suspends old GitHub automatic tracking and never rewrites native harness copies.
 change requires a new scan and explicit selected-package import.
 
 SKILL.md previews show untrusted Markdown without executing interactive message widgets or
-loading remote images. ZIP frontmatter validation rejects malformed required fields and
-duplicate name/description keys before staging files.
+loading remote images. ZIP frontmatter validation rejects invalid scalar types, malformed quoted required fields,
+and duplicate name/description keys before staging files. Only supported scalar and
+block-scalar frontmatter forms are accepted; arbitrary YAML objects cannot be used as
+skill names or descriptions.

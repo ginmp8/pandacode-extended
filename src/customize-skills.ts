@@ -155,7 +155,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         <button type="button" class="secondary-button" data-customize="edit-source" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Edit selection</button>
         <button type="button" class="secondary-button" data-customize="change-source-ref" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Change ref</button>
         <button type="button" class="secondary-button" data-customize="sync-source" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Sync source</button>
-        <button type="button" class="secondary-button" data-customize="remove-source" data-id="${esc(source.id)}">${pendingRemove === source.id ? 'Confirm remove' : 'Remove source'}</button>
+        <button type="button" class="secondary-button" data-customize="remove-source" data-id="${esc(source.id)}" ${operation?.state === 'running' && operation.kind === 'github' && operation.snapshot?.repo === source.repo && operation.snapshot?.path === source.path && operation.snapshot?.gitRef === source.gitRef ? 'disabled title="Finish importing this source before removing it"' : ''}>${pendingRemove === source.id ? 'Confirm remove' : 'Remove source'}</button>
       </div>
     </li>`).join('');
     return `<section class="customize-sources-section">
@@ -432,17 +432,29 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     try {
       const command='skills_sync_tracked';
       const report=await options.call<SyncReport>(command,{scope:kind,id:id??null,ids:kind==='ids'?retryIds:null,operationId:op.id});
+      const returned = new Set<string>();
       for (const result of report.events) {
-        const item=[...op.packages.values()].find(entry=>entry.path===result.id || installed.find(x=>x.id===result.id)?.source.location.endsWith('/'+entry.path));
-        if(!item) continue;
-        item.phase=result.status==='updated'?'updated':result.status==='error'?'failed':result.status==='unchanged'||result.detail.startsWith('Already at')?'unchanged':'skipped';
-        item.detail=result.detail;
+        const item = op.packages.get(result.id);
+        if (!item) continue;
+        returned.add(result.id);
+        item.phase = result.status==='updated' ? 'updated' : result.status==='error' ? 'failed'
+          : result.status==='unchanged' || result.detail.startsWith('Already at') ? 'unchanged' : 'skipped';
+        const previous = result.oldCommit ? shaShort(result.oldCommit) : 'unavailable';
+        const current = result.newCommit ? shaShort(result.newCommit) : 'unavailable';
+        const harnesses = result.impactedHarnesses.length
+          ? ` · Harnesses to review: ${result.impactedHarnesses.join(', ')}` : '';
+        item.detail = `Old revision: ${previous} · New revision: ${current} · ${result.detail}${harnesses}`;
       }
-      for(const item of op.packages.values()) if(!isTerminal(item.phase)) item.phase='skipped';
-      op.completed=op.total;
-      const failed=[...op.packages.values()].filter(item=>item.phase==='failed').length;
-      op.state=failed===op.total?'failed':failed?'partial':'success';
-      op.detail=`${plural(report.updated.length,'skill')} updated. Native harness activations stay unchanged until reactivated.`;
+      // The native terminal report is authoritative: an empty or incomplete
+      // report must not turn a rejected/competing synchronization into success.
+      for (const item of op.packages.values()) if (!returned.has(item.path)) {
+        item.phase = 'failed';
+        item.detail = report.skipped.join('; ') || 'No terminal synchronization result was returned for this skill.';
+      }
+      op.completed = op.total;
+      const failed = [...op.packages.values()].filter(item=>item.phase==='failed').length;
+      op.state = failed===op.total ? 'failed' : failed ? 'partial' : 'success';
+      op.detail = `${plural(report.updated.length,'skill')} updated${failed ? ` · ${plural(failed,'skill')} failed` : ''}. Native harness activations stay unchanged until reactivated.`;
       if(!op.progressSeen&&op.total>1)op.detail+=' Incremental progress events were not received; results are from the final report.';
     } catch(cause) {
       op.detail=message(cause);op.completed=op.total;op.state='failed';

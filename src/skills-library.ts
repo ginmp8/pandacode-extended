@@ -14,6 +14,7 @@ export type SkillItem = {
   id: string; name: string; kind: SkillKind; description: string; sha256: string; importedAt: number;
   source: { kind: 'folder' | 'github' | 'zip'; location: string; gitRef: string | null; commit: string | null };
   acknowledged: string | null; activations: SkillActivation[]; files: string[]; findings: SkillFinding[];
+  requiredSkills?: string[]; autoUpdate?: boolean | null; autoAvailable?: boolean; fileHashes?: Record<string,string>;
 };
 export type SkillCell = { id: string; scope: SkillScope; status: 'active' | 'outdated' | 'drifted' | 'missing' | 'prompt' | 'off'; surface: string };
 export type SkillMatrix = {

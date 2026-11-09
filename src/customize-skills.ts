@@ -2,7 +2,7 @@
  * the native skills_* commands share one library with Settings -> Skills & rules. */
 import './customize-skills.css';
 import { escape, icon, markdownHtml } from './dom';
-import type { SkillItem, CatalogSkill } from './skills-library';
+import type { SkillItem, CatalogSkill, SkillMatrix } from './skills-library';
 
 type SavedSource = {
   id: string; repo: string; path: string; gitRef: string | null;
@@ -11,21 +11,22 @@ type SavedSource = {
 type SourcePreview = {
   repo: string; path: string; gitRef: string | null; commit: string; skills: CatalogSkill[];
 };
-type SourceImport = { source: SavedSource; imported: string[]; skipped: {path: string; name: string; reason: string}[] };
+type SourceImport = { source: SavedSource; imported: string[]; skipped: {path: string; name: string; reason: string}[];
+  results?: {path:string;name:string;phase:Phase;completed:number;total:number;detail:string|null}[] };
 type SyncReport = {
   checkedAt: number; installed: string[]; updated: string[]; skipped: string[];
   events: { id: string; status: string; oldCommit: string | null; newCommit: string | null; impactedHarnesses: string[]; detail: string }[];
 };
 type Policy = { autoOnStart: boolean };
 type PreviewFile = { path: string; text: string | null; size: number; binary: boolean };
-type Phase = 'queued' | 'fetching' | 'validating' | 'installing' | 'installed' | 'updated' | 'unchanged' | 'skipped' | 'failed' | 'cancelled';
+type Phase = 'queued' | 'fetching' | 'validating' | 'installing' | 'installed' | 'replaced' | 'updated' | 'unchanged' | 'skipped' | 'failed' | 'cancelled';
 type PackageProgress = { path: string; name: string; phase: Phase; detail: string | null };
 type ImportSnapshot = { repo: string; path: string; gitRef: string | null; commit: string; paths: string[]; allowReplace?: boolean };
 type Operation = {
   id: string; kind: 'github' | 'zip' | 'sync'; label: string; source: string; revision: string | null;
   state: 'running' | 'success' | 'partial' | 'failed';
   total: number; completed: number; packages: Map<string, PackageProgress>;
-  snapshot?: ImportSnapshot; detail: string;
+  snapshot?: ImportSnapshot; detail: string; progressSeen: boolean;
 };
 type Detail = { kind: 'installed'; id: string; file: string } | { kind: 'remote'; path: string; file: string };
 export type CustomizeSkillsHost = {
@@ -38,13 +39,16 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
 const initialPolicy: Policy = { autoOnStart: false };
 const plural = (amount: number, word: string) => `${amount} ${word}${amount === 1 ? '' : 's'}`;
 const shaShort = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'Not pinned';
-const isTerminal = (phase: Phase) => ['installed', 'updated', 'unchanged', 'skipped', 'failed', 'cancelled'].includes(phase);
-const stateLabel = (phase: Phase) => ({ queued:'Queued', fetching:'Downloading', validating:'Validating', installing:'Installing', installed:'Installed', updated:'Updated', unchanged:'Unchanged', skipped:'Skipped', failed:'Failed', cancelled:'Cancelled' } as Record<Phase,string>)[phase];
+const isTerminal = (phase: Phase) => ['installed', 'replaced', 'updated', 'unchanged', 'skipped', 'failed', 'cancelled'].includes(phase);
+const stateLabel = (phase: Phase) => ({ queued:'Queued', fetching:'Downloading', validating:'Validating', installing:'Installing', installed:'Installed', replaced:'Replaced', updated:'Updated', unchanged:'Unchanged', skipped:'Skipped', failed:'Failed', cancelled:'Cancelled' } as Record<Phase,string>)[phase];
 
 export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkillsHost): {dispose(): void} {
   let installed: SkillItem[] = [];
   let sources: SavedSource[] = [];
   let policy = initialPolicy;
+  let matrix: SkillMatrix = {project:null,harnesses:[]};
+  let syncReport: SyncReport = {checkedAt:0,installed:[],updated:[],skipped:[],events:[]};
+  let changingRefSource: string | null = null;
   let tab: 'installed' | 'sources' = 'installed';
   let addOpen = false, githubForm = false;
   let githubUrl = '', githubRef = '', search = '', discoverySearch = '';
@@ -67,15 +71,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const op = operation;
     const values = [...op.packages.values()];
     const count = (phase: Phase) => values.filter(entry => entry.phase === phase).length;
-    const successes = count('installed') + count('updated');
+    const successes = count('installed') + count('replaced') + count('updated');
     const failures = count('failed'), skipped = count('skipped'), unchanged = count('unchanged');
     const title = op.state === 'running' ? op.label
       : op.state === 'success' ? 'Completed successfully'
       : op.state === 'partial' ? 'Completed with errors' : 'Operation failed';
     const processing = values.find(entry => !isTerminal(entry.phase));
     const canConfirmZip = op.kind === 'zip' && op.state === 'failed' && !!pendingZipReplacement;
-    const canRetry = op.kind === 'github' && op.state !== 'running' && op.snapshot
-      && values.some(entry => entry.phase === 'failed' || entry.phase === 'skipped');
+    const retryable = values.filter(entry => entry.phase === 'failed');
+    const canRetry = op.state !== 'running' && retryable.length > 0
+      && (op.kind === 'sync' || (op.kind === 'github' && !!op.snapshot));
     return `<section class="customize-operation ds-card" aria-label="Skill operation status" aria-live="off">
       <div class="customize-operation-title">
         <div><h3>${esc(title)}</h3><p>${esc(op.source)}${op.revision ? ` · <code>${esc(shaShort(op.revision))}</code>` : ''}</p></div>
@@ -88,7 +93,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       <div class="customize-operation-actions">
         <button type="button" class="secondary-button" data-customize="view-installed">View installed skills</button>
         ${canConfirmZip ? '<button type="button" class="customize-primary" data-customize="confirm-zip-replace">Confirm ZIP replacement</button>' : ''}
-        ${canRetry ? `<button type="button" class="secondary-button" data-customize="retry-failed">Retry failed (${failures + skipped})</button>` : ''}
+        ${canRetry ? `<button type="button" class="secondary-button" data-customize="retry-failed">Retry failed (${retryable.length})</button>` : ''}
       </div>
     </section>`;
   }
@@ -104,10 +109,24 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const card = (item: SkillItem) => {
       const type = item.source.kind === 'github' ? 'GitHub' : item.source.kind === 'zip' ? 'ZIP' : 'Local';
       const active = item.activations?.length ?? 0;
+      const statuses = matrix.harnesses.flatMap(row=>row.cells.filter(cell=>cell.id===item.id && cell.status!=='off')
+        .map(cell=>`${row.harness}: ${cell.status}`));
+      const missingPeers = (item.requiredSkills??[]).filter(id=>!installed.some(entry=>entry.id===id));
+      const last = syncReport.events.find(event=>event.id===item.id);
+      const update = !last ? 'Update status not checked'
+        : last.status==='updated' ? 'Updated on last sync'
+        : last.status==='unchanged' ? 'Up to date at last check'
+        : last.status==='error' ? 'Update failed' : 'Update skipped';
+      const sourceLink = item.source.kind === 'github'
+        ? `https://github.com/${item.source.location.split('/').slice(0,2).map(encodeURIComponent).join('/')}`
+        : null;
       return `<li class="customize-skill-row">
         <button type="button" class="customize-skill-main" data-customize="inspect-installed" data-id="${esc(item.id)}" aria-label="Inspect ${esc(item.name)}">
           <span class="customize-skill-icon">${icon('spark')}</span>
-          <span class="customize-skill-description"><strong>${esc(item.name)}</strong><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}</small></span>
+          <span class="customize-skill-description"><strong>${esc(item.name)}</strong><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}${item.source.gitRef ? ` · ref ${esc(item.source.gitRef)}` : ''}</small>
+          ${item.source.kind==='github' ? `<small>${esc(update)}${sourceLink ? ` · <a href="${esc(sourceLink)}" target="_blank" rel="noopener noreferrer">Source repository</a>` : ''}</small>` : ''}
+          ${missingPeers.length ? `<small class="customize-warning">Missing dependencies: ${esc(missingPeers.join(', '))}</small>` : ''}
+          ${statuses.length ? `<small>${esc(statuses.join(' · '))}</small>` : ''}</span>
         </button>
         <span class="customize-skill-trailing">
           ${item.findings?.length ? `<small class="customize-warning">${plural(item.findings.length, 'safety finding')}</small>` : ''}
@@ -125,9 +144,12 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       <div class="customize-source-identity">
         <strong>${esc(source.repo)}</strong><small>${esc(source.path || 'Repository root')} · ${esc(source.gitRef ?? 'Default branch')}</small>
         <small>${plural(source.selectedPaths.length, 'tracked skill')} · commit <code>${esc(shaShort(source.commit))}</code></small>
+        ${syncReport.checkedAt && syncReport.events.some(event=>installed.some(item=>item.id===event.id && item.source.kind==='github' && item.source.location.startsWith(source.repo+'/')))
+          ? `<small>Last sync report: ${esc(new Date(syncReport.checkedAt).toLocaleString())}</small>` : ''}
       </div>
       <div class="customize-source-actions">
         <button type="button" class="secondary-button" data-customize="edit-source" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Edit selection</button>
+        <button type="button" class="secondary-button" data-customize="change-source-ref" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Change ref</button>
         <button type="button" class="secondary-button" data-customize="sync-source" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Sync source</button>
         <button type="button" class="secondary-button" data-customize="remove-source" data-id="${esc(source.id)}">${pendingRemove === source.id ? 'Confirm remove' : 'Remove source'}</button>
       </div>
@@ -207,7 +229,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (!githubForm) return '';
     return `<form class="customize-github-form ds-card" id="customize-github-form">
       <div class="customize-section-head"><div><h3>Add from GitHub</h3><p>Scan every SKILL.md in the repository or the directory linked in a tree URL. Nothing is installed until you choose packages.</p></div><button type="button" class="secondary-button" data-customize="close-github-form">Cancel</button></div>
-      <label>GitHub URL<input type="url" required name="github-url" spellcheck="false" autocomplete="off" placeholder="https://github.com/owner/repo" value="${esc(githubUrl)}"></label>
+      <label>GitHub URL<input type="url" required name="github-url" spellcheck="false" autocomplete="off" placeholder="https://github.com/owner/repo" value="${esc(githubUrl)}" ${changingRefSource ? 'readonly' : ''}></label>
       <label>Branch or full commit SHA <span class="customize-optional">Optional</span><input type="text" name="github-ref" spellcheck="false" autocomplete="off" placeholder="Default branch" value="${esc(githubRef)}"></label>
       <div class="customize-form-actions"><button type="submit" class="customize-primary" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Scan repository</button></div>
     </form>`;
@@ -257,12 +279,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   async function refresh(): Promise<void> {
     try {
-      const [items, saved, current] = await Promise.all([
+      const [items, saved, current, statuses, recent] = await Promise.all([
         options.call<SkillItem[]>('skills_list'), options.call<SavedSource[]>('skills_source_list'),
         options.call<Policy>('skills_sync_policy'),
+        options.call<SkillMatrix>('skills_matrix').catch(()=>({project:null,harnesses:[]} as SkillMatrix)),
+        options.call<SyncReport>('skills_sync_report').catch(()=>({checkedAt:0,installed:[],updated:[],skipped:[],events:[]} as SyncReport)),
       ]);
       if (disposed) return;
-      installed = items; sources = saved; policy = current;
+      installed = items; sources = saved; policy = current; matrix=statuses; syncReport=recent;
     } catch (cause) { error = message(cause); }
     draw();
   }
@@ -285,7 +309,18 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       if (markdownMode === 'raw' || !/\.md$/i.test(current.file)) {
         slot.innerHTML = `<pre><code>${esc(value.text)}</code></pre>`;
       } else {
-        slot.innerHTML = await markdownHtml(value.text);
+        // Skill instructions are untrusted data, never interactive message/UI code.
+        const inert = value.text.replace(/^(\\s*`{3,})\\s*(ui|chart|svg|html|mermaid)\\b/gim, '$1text');
+        const purify = (await import('dompurify')).default;
+        slot.innerHTML = purify.sanitize(await markdownHtml(inert), {
+          FORBID_TAGS: ['pandacode-ui','pandacode-code','img','iframe','form','input','button','video','audio','object','embed','svg','math'],
+          FORBID_ATTR: ['src','srcset','style','id','name','onload','onclick'],
+          ALLOW_DATA_ATTR: false,
+        });
+        for (const anchor of slot.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+          if (!/^https:\/\//i.test(anchor.href)) anchor.removeAttribute('href');
+          else {anchor.target='_blank';anchor.rel='noopener noreferrer';}
+        }
       }
     } catch (cause) {
       if (!disposed && serial === previewSerial) { slot.textContent = message(cause); slot.setAttribute('role','alert'); }
@@ -294,7 +329,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   function beginOperation(kind: Operation['kind'], label: string, source: string, revision: string | null, entries: {path: string; name: string}[], snapshot?: ImportSnapshot): Operation {
     const op: Operation = {id:crypto.randomUUID(),kind,label,source,revision,state:'running',total:entries.length,completed:0,
-      packages:new Map(entries.map(entry => [entry.path,{...entry,phase:'queued',detail:null}])),snapshot,detail:''};
+      packages:new Map(entries.map(entry => [entry.path,{...entry,phase:'queued',detail:null}])),snapshot,detail:'',progressSeen:false};
     operation = op; note = ''; error = ''; draw(); return op;
   }
 
@@ -311,14 +346,35 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         repo:snapshot.repo,path:snapshot.path,gitRef:snapshot.gitRef,commit:snapshot.commit,
         selectedPaths:[...snapshot.paths],operationId:op.id,allowReplace:!!snapshot.allowReplace,
       }});
+      for (const resultItem of result.results??[]) {
+        const item = op.packages.get(resultItem.path);
+        if (item && isTerminal(resultItem.phase)) {
+          item.phase=resultItem.phase; item.detail=resultItem.detail;
+        }
+      }
       for (const fail of result.skipped) {
         const item = op.packages.get(fail.path);
         if (item && !isTerminal(item.phase)) { item.phase='failed'; item.detail=fail.reason; }
       }
-      for (const entry of op.packages.values()) if (!isTerminal(entry.phase)) entry.phase='installed';
-      op.completed = op.total;
-      op.state = result.skipped.length ? 'partial' : 'success';
-      note = `Saved ${result.source.repo}: ${plural(result.imported.length,'skill')} installed. Skills are inactive until enabled for a harness.`;
+      // Compatibility with the original aggregate-only preview backend: use
+      // only named confirmed successes, never invent intermediate stages.
+      for (const entry of op.packages.values()) {
+        if (!isTerminal(entry.phase) && result.imported.includes(entry.name)) entry.phase='installed';
+        if (!isTerminal(entry.phase)) {entry.phase='failed';entry.detail='No terminal outcome was returned for this package.';}
+      }
+      op.completed=[...op.packages.values()].filter(item=>isTerminal(item.phase)).length;
+      const failures=[...op.packages.values()].filter(item=>item.phase==='failed').length;
+      op.state = failures || result.skipped.length ? (failures===op.total?'failed':'partial') : 'success';
+      if (!op.progressSeen && op.total>1) {
+        op.detail='Incremental progress events were not received; these are final command results only.';
+      }
+      if (changingRefSource && !failures && !result.skipped.length) {
+        if (changingRefSource!==result.source.id) {
+          await options.call('skills_source_remove',{id:changingRefSource});
+        }
+        changingRefSource=null;
+      }
+      note = `Saved ${result.source.repo}: ${plural(result.imported.length,'skill')} installed or updated. Skills remain inactive until enabled for a harness.`;
     } catch (cause) {
       op.detail = message(cause);
       for (const item of op.packages.values()) if (!isTerminal(item.phase)) { item.phase='failed'; item.detail=op.detail; }
@@ -340,7 +396,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     try {
       const result = await options.call<{item:SkillItem;replaced:boolean;previousSource:SkillItem['source']|null;impactedHarnesses:string[]}>('skills_import_zip_tracked',{path,operationId:op.id,allowReplace:confirmed});
       const item = op.packages.get(filename)!;
-      item.phase = 'installed'; item.name = result.item.name;
+      item.phase = result.replaced ? 'replaced' : 'installed'; item.name = result.item.name;
       op.completed = 1; op.state = 'success';
       op.detail = result.replaced
         ? `Replaced previous central library source ${result.previousSource?.location ?? 'unknown'}. ${plural(result.impactedHarnesses.length,'harness')} may require reactivation. Native harness files were not overwritten.`
@@ -354,7 +410,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     } finally { busy=false; await refresh(); }
   }
 
-  async function synchronize(kind: 'skill'|'source'|'all', id?: string): Promise<void> {
+  async function synchronize(kind: 'skill'|'source'|'all'|'ids', id?: string, retryIds: string[] = []): Promise<void> {
     if (busy || operation?.state === 'running') return;
     let entries: {path:string;name:string}[] = [], label = '';
     if (kind === 'skill') { const item=installed.find(x=>x.id===id); if (!item) return; entries=[{path:item.id,name:item.name}];label='Synchronizing skill'; }
@@ -365,20 +421,25 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       label='Synchronizing saved source';
     }
     if (kind === 'all') {entries=installed.filter(x=>x.kind==='skill'&&x.source.kind==='github').map(x=>({path:x.id,name:x.name}));label='Synchronizing GitHub skills';}
+    if (kind === 'ids') {entries=installed.filter(x=>retryIds.includes(x.id)&&x.source.kind==='github').map(x=>({path:x.id,name:x.name}));label='Retrying failed skill syncs';}
+    if (!entries.length) {note='No GitHub skills are selected for synchronization.';draw();return;}
     const op=beginOperation('sync',label,kind==='source'?sources.find(x=>x.id===id)?.repo??'Saved source': 'Installed GitHub skills',null,entries);
     busy=true;
     try {
       const command='skills_sync_tracked';
-      const report=await options.call<SyncReport>(command,{scope:kind,id:id??null,operationId:op.id});
+      const report=await options.call<SyncReport>(command,{scope:kind,id:id??null,ids:kind==='ids'?retryIds:null,operationId:op.id});
       for (const result of report.events) {
         const item=[...op.packages.values()].find(entry=>entry.path===result.id || installed.find(x=>x.id===result.id)?.source.location.endsWith('/'+entry.path));
         if(!item) continue;
-        item.phase=result.status==='updated'?'updated':result.status==='error'?'failed':result.detail.startsWith('Already at')?'unchanged':'skipped';
+        item.phase=result.status==='updated'?'updated':result.status==='error'?'failed':result.status==='unchanged'||result.detail.startsWith('Already at')?'unchanged':'skipped';
         item.detail=result.detail;
       }
       for(const item of op.packages.values()) if(!isTerminal(item.phase)) item.phase='skipped';
-      op.completed=op.total;op.state=report.events.some(x=>x.status==='error')?'partial':'success';
+      op.completed=op.total;
+      const failed=[...op.packages.values()].filter(item=>item.phase==='failed').length;
+      op.state=failed===op.total?'failed':failed?'partial':'success';
       op.detail=`${plural(report.updated.length,'skill')} updated. Native harness activations stay unchanged until reactivated.`;
+      if(!op.progressSeen&&op.total>1)op.detail+=' Incremental progress events were not received; results are from the final report.';
     } catch(cause) {
       op.detail=message(cause);op.completed=op.total;op.state='failed';
       for(const item of op.packages.values()) {item.phase='failed';item.detail=op.detail;}
@@ -392,8 +453,11 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     }
     busy=true;error='';note='Scanning repository for SKILL.md packages…';draw();
     try {
-      const result=await options.call<SourcePreview>('skills_source_preview',{repo:githubUrl.trim(),path:'',gitRef:githubRef.trim()||null});
-      scan=result;chosen=new Set();editingSource=null;replaceConflicts=false;discoverySearch='';githubForm=false;note=`Found ${plural(result.skills.length,'skill')} at ${shaShort(result.commit)}. Select packages to import.`;
+      const changing=changingRefSource?sources.find(source=>source.id===changingRefSource):null;
+      const result=await options.call<SourcePreview>('skills_source_preview',{repo:githubUrl.trim(),path:changing?.path??'',gitRef:githubRef.trim()||null});
+      scan=result;chosen=new Set(changing?.selectedPaths.filter(path=>result.skills.some(skill=>skill.path===path))??[]);
+      editingSource=null;replaceConflicts=false;discoverySearch='';githubForm=false;
+      note=`Found ${plural(result.skills.length,'skill')} at ${shaShort(result.commit)}. Select packages to import.`;
     } catch(cause){error=message(cause);note='';}
     finally{busy=false;draw();}
   }
@@ -409,13 +473,26 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     finally{busy=false;draw();}
   }
 
+  function changeSourceRef(id:string):void {
+    const source=sources.find(source=>source.id===id);
+    if(!source)return;
+    changingRefSource=id;editingSource=null;scan=null;detail=null;chosen.clear();
+    githubUrl=`https://github.com/${source.repo}`;githubRef=source.gitRef??'';
+    githubForm=true;
+    note='Enter the new branch or full SHA, scan, and explicitly import the selected skills to change this source revision.';
+    error='';draw();
+  }
+
   function handleProgress(value:any):void {
     if (!operation || operation.state !== 'running' || value.operationId !== operation.id) return;
     const item=operation.packages.get(value.path);
     if(!item || value.total!==operation.total || typeof value.completed!=='number' || value.completed < operation.completed || value.completed>operation.total) return;
     if(isTerminal(item.phase)) return;
-    const allowed=['fetching','validating','installing','installed','updated','unchanged','skipped','failed','cancelled'];
+    const allowed=['fetching','validating','installing','installed','replaced','updated','unchanged','skipped','failed','cancelled'];
     if(!allowed.includes(value.phase))return;
+    const rank:Record<Phase,number>={queued:0,fetching:1,validating:2,installing:3,installed:4,replaced:4,updated:4,unchanged:4,skipped:4,failed:4,cancelled:4};
+    if(rank[value.phase as Phase]<rank[item.phase])return;
+    operation.progressSeen=true;
     item.phase=value.phase as Phase;
     item.detail=typeof value.detail==='string'?value.detail:null;
     operation.completed=Math.max(operation.completed,value.completed);
@@ -438,7 +515,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'confirm-zip-replace':
         if(pendingZipReplacement) {const selected=pendingZipReplacement;pendingZipReplacement=null;void importZip(selected,true);}
         break;
-      case 'add-github':addOpen=false;githubForm=true;scan=null;editingSource=null;replaceConflicts=false;detail=null;draw();break;
+      case 'add-github':addOpen=false;githubForm=true;scan=null;editingSource=null;changingRefSource=null;replaceConflicts=false;detail=null;draw();break;
       case 'close-github-form':githubForm=false;draw();break;
       case 'tab-installed':tab='installed';pendingRemove=null;draw();break;
       case 'tab-sources':tab='sources';pendingRemove=null;draw();break;
@@ -458,12 +535,21 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           note=`Tracking updated for ${source.repo}; installed packages were not deleted.`;
           error='';await refresh();
         }catch(cause){error=message(cause);draw();}})();break;
-      case 'retry-failed':if(operation?.snapshot){const snap={...operation.snapshot,paths:[...operation.packages.values()].filter(entry=>entry.phase==='failed'||entry.phase==='skipped').map(entry=>entry.path)};void importSelected(snap);}break;
+      case 'retry-failed':
+        if(operation?.kind==='github'&&operation.snapshot){
+          const snap={...operation.snapshot,paths:[...operation.packages.values()].filter(entry=>entry.phase==='failed').map(entry=>entry.path)};
+          if(snap.paths.length)void importSelected(snap);
+        }else if(operation?.kind==='sync'){
+          const ids=[...operation.packages.values()].filter(entry=>entry.phase==='failed').map(entry=>entry.path);
+          if(ids.length)void synchronize('ids',undefined,ids);
+        }
+        break;
       case 'view-installed':tab='installed';search='';draw();break;
       case 'sync-skill':void synchronize('skill',id);break;
       case 'sync-source':void synchronize('source',id);break;
       case 'sync-all':void synchronize('all');break;
       case 'edit-source':void editSource(id);break;
+      case 'change-source-ref':changeSourceRef(id);break;
       case 'remove-source':
         if(pendingRemove!==id){pendingRemove=id;draw();break;}
         pendingRemove=null;void (async()=>{try{sources=await options.call<SavedSource[]>('skills_source_remove',{id});note='Source configuration removed. Installed packages were kept.';error='';}catch(cause){error=message(cause);}draw();})();break;

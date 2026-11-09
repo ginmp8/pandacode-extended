@@ -86,3 +86,14 @@ Council's review loop and imported test files establish source coverage, not rel
 - [x] Verify [documentation commit `002e433fb0bf`](https://github.com/ginmp8/pandacode-extended/commit/002e433fb0bfe5d51bdf89ed8cde5cc21ba3a4da) exact-SHA CI: [push #42554384509](https://github.com/ginmp8/pandacode-extended/actions/runs/42554384509) and [PR #42554389369](https://github.com/ginmp8/pandacode-extended/actions/runs/42554389369) each completed **successfully (6/6 jobs)**. The follow-up documentation commit needs its own CI; native functional acceptance remains unchecked.
 - [ ] Independently validate account pool, identity/usage/fallback, real credentials and account-switch message persistence, and existing Extended Settings On/Off, MCP, Connect, cloud/VM, bot/channel and native platform behavior.
 - [ ] Classify each remaining shared-file divergence by hunk and verify final documentation-commit CI separately. Neither source coverage nor CI is release approval; `0.12.0` is still planned.
+
+
+## Upstream 0.3.106 source checkpoint — 2026-11-09
+
+- [x] Freeze [fork main `0bfd5738`](https://github.com/ginmp8/pandacode/commit/0bfd57383621d5aa001d3871018920855cabec39), tree `391951e2d59e81946195ed2d66281991b33294a0`, application version **0.3.106**; compare to the previous fork source pin `f28c4df0` across all ten new commits.
+- [x] Reconcile all 34 upstream-changed paths (26 verbatim source files, eight uniquely applicable three-way patches) and preserve the original `releases/0.3.106.md`, Extended-only files, configurable controls and dependency remediation.
+- [x] Inspect complete nontruncated candidate trees: **1,567 source paths / 1,624 Extended**, **1,487 exact**, **80 divergent shared**, **57 Extended-only**, **zero missing**, **no mode mismatches**.
+- [ ] Complete semantic hunk review and behavioral acceptance of all 80 shared divergences; validate task tools across harnesses/team leads/workers and all Extended control On/Off paths.
+- [ ] Check exact final Extended publication SHA against npm/Node/website, Rust check/test/Clippy, RustSec, mobile/Expo, ONNX and release tests. A staged candidate tree and previous green CI do **not** count as final CI success.
+- [ ] Execute native Windows/macOS/Linux, two-device Connect, authenticated MCP/cloud/VM/credential, RTL/IME and browser scroll/inspector tests. They were **not** run locally due to inaccessible GitHub DNS.
+- [ ] Keep **Extended 0.12.0** a documentation-only planned distribution until separate release authorization, independent of upstream app version **0.3.106**.

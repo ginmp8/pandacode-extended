@@ -3328,8 +3328,22 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
     let use_model = !config.model.is_empty() && config.model != "default";
     match config.provider.as_str() {
         "codex" => {
-            // Process-local override: never alter the user's Codex config.
-            command.args(["app-server", "--enable", "goals"]);
+            // Process-local options: never change the user's Codex settings.
+            if config.reviewer_boundary {
+                command.arg("app-server");
+                // Defense in depth: disable optional tools that can delegate
+                // authority outside the read-only sandbox. Do not rely on
+                // feature flags alone for a security decision.
+                for feature in [
+                    "goals", "multi_agent", "multi_agent_v2", "apps", "plugins",
+                    "remote_plugin", "browser_use", "computer_use",
+                ] {
+                    command.args(["--disable", feature]);
+                }
+                command.args(["-c", "web_search=\"disabled\""]);
+            } else {
+                command.args(["app-server", "--enable", "goals"]);
+            }
             if !codex_user_limits_threads(command, config) {
                 command.args(["-c", CODEX_NO_THREAD_LIMIT]);
             }
@@ -4114,6 +4128,10 @@ mod tests {
         let args: Vec<_> = command.as_std().get_args()
             .map(|arg| arg.to_string_lossy().into_owned()).collect();
         assert!(args.windows(2).any(|a| a[0] == "-c" && a[1] == "mcp_servers={}"));
+        assert!(!args.windows(2).any(|a| a[0] == "--enable" && a[1] == "goals"));
+        for feature in ["goals", "multi_agent", "multi_agent_v2", "apps", "plugins", "remote_plugin", "browser_use", "computer_use"] {
+            assert!(args.windows(2).any(|a| a[0] == "--disable" && a[1] == feature));
+        }
         assert!(reviewer_codex_mcp_roster_empty(b"[]").is_ok());
         for roster in [
             br#"[{"name":"writable","enabled":true}]"#.as_slice(),

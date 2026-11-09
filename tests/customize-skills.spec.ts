@@ -145,6 +145,7 @@ test('ZIP import reports replacement without changing harness activation', async
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
   await expect(page.getByText('ZIP sample',{exact:true}).first()).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Skill details'})).toHaveCount(0);
   await page.screenshot({path:'test-results/customize-zip-installed.png',fullPage:true});
   await page.getByRole('button', {name:'Add',exact:true}).click();
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();

@@ -701,3 +701,38 @@ fn removing_a_source_during_initial_remote_validation_is_rejected() {
     assert!(checked.get(), "test must attempt the conflicting removal before scanning");
     assert_eq!(fx.library.saved_skill_sources().unwrap().len(), 1);
 }
+
+#[test]
+fn imports_in_distinct_library_directories_can_overlap_without_global_rejection() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let commit = "d".repeat(40);
+    let mut first_api = Fake::default();
+    let mut second_api = Fake::default();
+    first_api.repo("me/first", &commit, &files(&[
+        ("skills/alpha/SKILL.md", &skill("Alpha")),
+    ]));
+    second_api.repo("me/second", &commit, &files(&[
+        ("skills/beta/SKILL.md", &skill("Beta")),
+    ]));
+    let observed = std::cell::Cell::new(false);
+    let endpoint = format!("repos/me/first/commits/{commit}");
+    let api = |path: &str| {
+        if path == endpoint && !observed.get() {
+            observed.set(true);
+            let error = first.library.import_skill_source(&first_api.api(), "me/first", "skills", None, &commit,
+                vec!["skills/alpha".into()]).unwrap_err();
+            assert!(error.contains("import is still running"), "{error}");
+            let concurrent = second.library.import_skill_source(&second_api.api(), "me/second", "skills", None, &commit,
+                vec!["skills/beta".into()]).unwrap();
+            assert_eq!(concurrent.imported, ["Beta"],
+                "an unrelated profile must never fail because another source is importing");
+        }
+        first_api.call(path)
+    };
+    first.library.import_skill_source(&api, "me/first", "skills", None, &commit,
+        vec!["skills/alpha".into()]).unwrap();
+    assert!(observed.get());
+    assert!(first.library.load("alpha").is_ok());
+    assert!(second.library.load("beta").is_ok());
+}

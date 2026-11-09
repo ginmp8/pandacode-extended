@@ -1,23 +1,23 @@
 //! User-configured GitHub skill collections. A scan is read-only and ephemeral;
 //! only the explicitly selected packages are downloaded into the library.
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
 
 use super::{catalog, github, now_ms, sha256_hex, Kind, Library, Source, MAX_BYTES, MAX_FILES};
 
 const MAX_SAVED_SOURCES: usize = 64;
 static SOURCES_LOCK: Mutex<()> = Mutex::new(());
-static IMPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// The currently importing saved-source ID, protected together with source writes.
-static ACTIVE_IMPORT_ID: Mutex<Option<String>> = Mutex::new(None);
+/// One in-flight import per central library; independent libraries never
+/// contend for this lease. Source removal and registration use SOURCES_LOCK
+/// before taking ACTIVE_IMPORTS so an import cannot resurrect a removed source.
+static ACTIVE_IMPORTS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
-struct ImportGuard;
+struct ImportGuard(PathBuf);
 impl Drop for ImportGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = ACTIVE_IMPORT_ID.lock() {
-            *active = None;
+        if let Ok(mut active) = ACTIVE_IMPORTS.lock() {
+            active.remove(&self.0);
         }
-        IMPORT_ACTIVE.store(false, Ordering::Release);
     }
 }
 
@@ -140,7 +140,8 @@ impl Library {
         };
         // Another view may inspect sources while an import is active. Only a
         // subsequent process (or an idle process after failure) reconciles the journal.
-        if !IMPORT_ACTIVE.load(Ordering::Acquire) && self.pending_import_path().exists() {
+        if !ACTIVE_IMPORTS.lock().map_err(|e| e.to_string())?.contains_key(&self.dir)
+            && self.pending_import_path().exists() {
             let pending: PendingSourceImport = serde_json::from_slice(
                 &fs::read(self.pending_import_path()).map_err(|e| e.to_string())?
             ).map_err(|e| format!("Saved skill import recovery is unreadable: {e}"))?;
@@ -254,13 +255,13 @@ impl Library {
                 && existing.sources.iter().all(|s| s.repo != repo || s.path != path || s.git_ref != git_ref) {
                 return Err(format!("At most {MAX_SAVED_SOURCES} saved sources are supported. Remove an unused configuration first."));
             }
-            let mut active = ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?;
-            if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            let mut active = ACTIVE_IMPORTS.lock().map_err(|e| e.to_string())?;
+            if active.contains_key(&self.dir) {
                 return Err("Another GitHub skill import is still running.".into());
             }
-            *active = Some(id.clone());
+            active.insert(self.dir.clone(), id.clone());
         }
-        let _guard = ImportGuard;
+        let _guard = ImportGuard(self.dir.clone());
         let (verified_commit, indexed) = catalog::scan_path(api, &repo, &path, Some(commit))
             .map_err(|e| catalog::explain(&e))?;
         if verified_commit != commit {
@@ -418,7 +419,8 @@ impl Library {
     /// Removes only the source configuration, not imported files or harness state.
     pub fn remove_skill_source(&self, id: &str) -> Result<Vec<SavedSource>, String> {
         let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
-        if ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?.as_deref() == Some(id) {
+        if ACTIVE_IMPORTS.lock().map_err(|e| e.to_string())?
+            .get(&self.dir).map(String::as_str) == Some(id) {
             return Err("This source has an import in progress. Remove it after the import completes.".into());
         }
         let mut store = self.read_sources()?;

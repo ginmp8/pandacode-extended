@@ -673,6 +673,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const activePath = withinHost ? active.dataset.file || active.dataset.path : undefined;
     const activeTabKey = withinHost ? active.dataset.key : undefined;
     const cursor = activeName && typeof active?.selectionStart === 'number' ? active.selectionStart : -1;
+    const previousTabScroll = host.querySelector<HTMLElement>('.customize-skill-tabs')?.scrollLeft ?? 0;
     host.innerHTML = `<div class="customize-page">
       <header class="customize-page-header">
         <div><p class="customize-eyebrow">PERSONALIZATION</p><h1>Customize</h1><p>Manage extensions for your workspace.</p></div>
@@ -706,6 +707,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         </section>
       </div>
     </div>${detailHtml()}`;
+    const strip = host.querySelector<HTMLElement>('.customize-skill-tabs');
+    if (strip) {
+      strip.scrollLeft = previousTabScroll;
+      const selectedTab = strip.querySelector<HTMLElement>('.customize-skill-tab.selected');
+      if (selectedTab) {
+        const visible = strip.getBoundingClientRect(), chosenTab = selectedTab.getBoundingClientRect();
+        if (chosenTab.left < visible.left) strip.scrollLeft -= visible.left - chosenTab.left;
+        else if (chosenTab.right > visible.right) strip.scrollLeft += chosenTab.right - visible.right;
+      }
+    }
     const next = activeHarness !== undefined
       ? [...host.querySelectorAll<HTMLInputElement>('[data-customize-harness]')].find(input => input.dataset.customizeHarness === activeHarness && input.dataset.id === activeHarnessId)
       : activeSkillPath !== undefined

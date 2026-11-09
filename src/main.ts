@@ -5763,6 +5763,7 @@ async function toggleCustomize(): Promise<void> {
 function closeCustomize(restoreFocus = true): void {
   if (!customizeShown) return;
   customizeShown = false;
+  document.querySelector<HTMLDialogElement>('#customize-hub .customize-detail-dialog')?.close();
   $('#customize-hub').hidden = true;
   $('.workspace').classList.remove('customize-open');
   document.querySelector<HTMLElement>('.sidebar-actions > [data-action="toggle-customize"]')?.setAttribute('aria-pressed', 'false');

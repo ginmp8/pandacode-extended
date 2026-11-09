@@ -97,6 +97,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let firstLoad = true, refreshing = false, loadFailed = false, refreshSerial = 0;
   let toast = '', toastTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingActivation: {id:string;harness:string}|null = null;
+  let pendingReplacement: {id:string;harness:string;acknowledge:boolean}|null = null;
+  const collapsedFiles = new Set<string>();
   let pendingUninstall: string|null = null, tryHarness = '';
   const esc = (s: unknown) => escape(s);
 
@@ -115,22 +117,31 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       && (cell?.status === 'active' || cell?.status === 'prompt');
   }
 
-  async function setHarnessEnabled(id: string, harness: string, enabled: boolean, acknowledge = false): Promise<void> {
+  async function setHarnessEnabled(id: string, harness: string, enabled: boolean, acknowledge = false, replaceExisting = false): Promise<void> {
     if (busy || operation?.state === 'running') return;
     const item = installed.find(entry => entry.id === id);
     if (!item || !matrix.harnesses.some(row=>row.harness===harness)) return;
     if (enabled && item.findings.length && item.acknowledged !== item.sha256 && !acknowledge) {
       pendingActivation={id,harness}; draw(); return;
     }
-    pendingActivation=null; busy=true; error=''; draw();
+    pendingActivation=null; pendingReplacement=null; busy=true; error=''; draw();
     try {
       const change = enabled
-        ? await options.call<{kept:string[]}>('skills_activate', {id,harness,scope:'user',acknowledge})
+        ? await options.call<{kept:string[]}>('skills_activate', {id,harness,scope:'user',acknowledge,replaceExisting})
         : await options.call<{kept:string[]}>('skills_deactivate', {id,harness,scope:'user'});
       await refresh();
-      const kept = !enabled && change.kept?.length ? ` ${plural(change.kept.length,'edited file')} preserved on disk.` : '';
+      const kept = change.kept?.length
+        ? enabled ? ` ${change.kept.join(' ')}.`
+          : ` ${plural(change.kept.length,'edited file')} preserved on disk.`
+        : '';
       success(`${item.name} ${enabled?'enabled':'disabled'} for ${harnessLabel(harness)}.${kept}`);
-    } catch (cause) { error=message(cause); }
+    } catch (cause) {
+      const detail=message(cause);
+      if(enabled && !replaceExisting && detail.includes('already exists and PandaCode did not create it.')) {
+        pendingReplacement={id,harness,acknowledge};
+        error='';
+      } else error=detail;
+    }
     finally {
       busy=false; draw();
       if (detail?.kind==='installed' && detail.id===id) {
@@ -202,35 +213,90 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (slot) slot.innerHTML = operationHtml();
   }
 
+  /** Build an accessible directory tree without altering the original package paths. */
+  function filesTreeHtml(paths: string[], selected: string): string {
+    type Node = { name: string; path: string; folders: Map<string,Node>; file: boolean };
+    const root: Node = {name:'',path:'',folders:new Map(),file:false};
+    for(const relative of paths) {
+      const segments=relative.split('/').filter(Boolean);
+      let branch=root;
+      for(const [index,name] of segments.entries()) {
+        const path=segments.slice(0,index+1).join('/');
+        let child=branch.folders.get(name);
+        if(!child) {child={name,path,folders:new Map(),file:false};branch.folders.set(name,child);}
+        if(index===segments.length-1) child.file=true;
+        branch=child;
+      }
+    }
+    const render = (nodes: Map<string,Node>, nested=false): string => {
+      const ordered=[...nodes.values()].sort((a,b)=>Number(a.file)-Number(b.file)||a.name.localeCompare(b.name));
+      return `<ul role="${nested?'group':'tree'}" ${nested?'':'aria-label="Package file tree"'}>${ordered.map(node=>{
+        if(node.file) return `<li role="treeitem" aria-selected="${selected===node.path}">
+          <button type="button" data-customize="preview-file" data-file="${esc(node.path)}"
+            class="customize-file-entry ${selected===node.path?'selected':''}" title="${esc(node.path)}">
+            ${icon('file')}<span>${esc(node.name)}</span>
+          </button>
+        </li>`;
+        const open=!collapsedFiles.has(node.path);
+        return `<li role="treeitem" aria-expanded="${open}">
+          <button type="button" class="customize-folder-entry" data-customize="toggle-file-folder" data-path="${esc(node.path)}" aria-label="${open?'Collapse':'Expand'} ${esc(node.name)} folder">
+            <span class="customize-tree-caret" aria-hidden="true">${open?'⌄':'›'}</span>${icon('folder')}<span>${esc(node.name)}</span>
+          </button>
+          ${open?render(node.folders,true):''}
+        </li>`;
+      }).join('')}</ul>`;
+    };
+    return render(root.folders);
+  }
+
+  function githubSourceLink(source: {kind:string;location:string;gitRef?:string|null;commit?:string|null}): string | null {
+    if(source.kind!=='github')return null;
+    const parts=source.location.split('/');
+    if(parts.length<2||parts.some(part=>!/^[a-zA-Z0-9._-]+$/.test(part)))return null;
+    const root=`https://github.com/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+    const revision=source.commit||source.gitRef;
+    return revision
+      ? `${root}/tree/${encodeURIComponent(revision)}${parts.length>2?'/'+parts.slice(2).map(encodeURIComponent).join('/'):''}`
+      : root;
+  }
+
+  function dismissDetail(): void {
+    const old=detail;
+    detail=null;pendingActivation=null;pendingReplacement=null;pendingUninstall=null;collapsedFiles.clear();previewSerial++;
+    draw();
+    const selector=old?.kind==='installed'
+      ? `[data-customize="inspect-installed"][data-id="${CSS.escape(old.id)}"]`
+      : old ? `[data-customize="inspect-remote"][data-path="${CSS.escape(old.path)}"]` : '';
+    if(selector)host.querySelector<HTMLButtonElement>(selector)?.focus({preventScroll:true});
+  }
+
   function installedHtml(): string {
+
     const visible = installed.filter(item => item.kind==='skill' && [item.name, item.id, item.description, item.source.location]
       .some(value => value.toLowerCase().includes(search.trim().toLowerCase())));
     const card = (item: SkillItem) => {
       const type = item.source.kind === 'github' ? 'GitHub' : item.source.kind === 'zip' ? 'ZIP' : 'Local';
       const active = item.activations?.length ?? 0;
       const statuses = matrix.harnesses.flatMap(row=>row.cells.filter(cell=>cell.id===item.id && cell.status!=='off')
-        .map(cell=>`${row.harness}: ${cell.status}`));
+        .map(cell=>({label:`${harnessLabel(row.harness)}: ${cell.status}`, live:cell.status==='active'||cell.status==='prompt'})));
+      const live=statuses.some(status=>status.live);
       const missingPeers = (item.requiredSkills??[]).filter(id=>!installed.some(entry=>entry.id===id));
       const last = syncReport.events.find(event=>event.id===item.id);
       const update = !last ? 'Update status not checked'
         : last.status==='updated' ? 'Updated on last sync'
         : last.status==='unchanged' ? 'Up to date at last check'
         : last.status==='error' ? 'Update failed' : 'Update skipped';
-      const sourceLink = item.source.kind === 'github'
-        ? `https://github.com/${item.source.location.split('/').slice(0,2).map(encodeURIComponent).join('/')}`
-        : null;
-      const iconUrl = skillIconUrl(installedIcons[item.id]);
+       const iconUrl = skillIconUrl(installedIcons[item.id]);
       return `<li class="customize-skill-row">
         <button type="button" class="customize-skill-main" data-customize="inspect-installed" data-id="${esc(item.id)}" aria-label="Inspect ${esc(item.name)}">
           <span class="customize-skill-icon">${iconUrl ? `<img src="${esc(iconUrl)}" alt="" loading="lazy">` : icon('skill')}</span>
           <span class="customize-skill-description"><span class="customize-skill-title"><strong>${esc(item.name)}</strong>${item.findings?.length ? `<small class="customize-warning">${plural(item.findings.length, 'safety finding')}</small>` : ''}</span><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}${item.source.gitRef ? ` · ref ${esc(item.source.gitRef)}` : ''}</small>
           ${item.source.kind==='github' ? `<small>${esc(update)}</small>` : ''}
           ${missingPeers.length ? `<small class="customize-warning">Missing dependencies: ${esc(missingPeers.join(', '))}</small>` : ''}
-          ${statuses.length ? `<small>${esc(statuses.join(' · '))}</small>` : ''}</span>
+          ${statuses.length ? `<small class="customize-harness-statuses">${statuses.map(status=>`<span class="${status.live?'customize-active-text':''}">${esc(status.label)}</span>`).join('<span aria-hidden="true"> · </span>')}</small>` : ''}</span>
         </button>
         <span class="customize-skill-trailing">
-          ${sourceLink ? `<a class="secondary-button" href="${esc(sourceLink)}" target="_blank" rel="noopener noreferrer">Source</a>` : ''}
-          <small class="customize-skill-activity">${active ? plural(active,'activation') : 'Not enabled'}</small>
+          <small class="customize-skill-activity ${active && live ? 'customize-active-text' : ''}">${active ? plural(active,'activation') : 'Not enabled'}</small>
           ${item.source.kind === 'github' ? `<button type="button" class="secondary-button" data-customize="sync-skill" data-id="${esc(item.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Sync</button>` : ''}
         </span>
       </li>`;
@@ -324,6 +390,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       <div class="customize-inline-actions"><button type="button" class="secondary-button" data-customize="cancel-activation">Cancel</button>
         <button type="button" class="customize-primary" data-customize="confirm-activation" data-id="${esc(item.id)}" data-harness="${esc(pendingActivation.harness)}">I reviewed the findings. Enable anyway</button></div>
       </div>` : '';
+    const replacement = pendingReplacement?.id === item.id ? `<div class="customize-replace-confirm" role="alert">
+      <strong>Replace the existing ${esc(harnessLabel(pendingReplacement.harness))} skill?</strong>
+      <p>An unmanaged skill folder already exists at this harness location. PandaCode will move it to a backup outside the harness skill directory before installing ${esc(item.name)}. The original files will not be deleted.</p>
+      <div class="customize-inline-actions">
+        <button type="button" class="secondary-button" data-customize="cancel-replacement">Cancel</button>
+        <button type="button" class="customize-primary" data-customize="confirm-replacement" data-id="${esc(item.id)}" data-harness="${esc(pendingReplacement.harness)}">Back up and replace</button>
+      </div>
+    </div>` : '';
     const confirm = pendingUninstall === item.id ? `<div class="customize-uninstall-confirm" role="alert">
       <strong>Uninstall ${esc(item.name)}?</strong>
       <p>${item.activations.length ?
@@ -339,6 +413,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       ${harnesses ? `<div class="customize-harness-grid">${harnesses}</div>` : '<p class="customize-help">No supported harness is installed. Install a harness to enable this skill.</p>'}
       ${projectCount ? `<p class="customize-help">${plural(projectCount,'project activation')} configured separately in Settings.</p>` : ''}
       ${consent}
+      ${replacement}
       <div class="customize-skill-footer">
         <button type="button" class="customize-danger" data-customize="uninstall-skill" data-id="${esc(item.id)}" ${busy || operation?.state==='running'?'disabled':''}>Uninstall</button>
         <div class="customize-try-controls">
@@ -360,17 +435,20 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const files = detail.kind === 'installed' ? (item as SkillItem).files : ((item as CatalogSkill).filePaths?.length ? (item as CatalogSkill).filePaths! : ['SKILL.md']);
     const selectedFile = detail.file;
     const source = detail.kind === 'installed' ? (item as SkillItem).source : {kind:'github',location:scan!.repo, gitRef:scan!.gitRef,commit:scan!.commit};
-    return `<section class="customize-detail ds-card" aria-label="Read-only skill preview">
+    const sourceUrl = githubSourceLink(source);
+    return `<dialog class="customize-detail-dialog" aria-label="Skill details">
+      <section class="customize-detail ds-card" aria-label="Read-only skill preview">
       <div class="customize-detail-heading">
         <div><p class="customize-eyebrow">${detail.kind === 'remote' ? 'GITHUB PREVIEW · NOT INSTALLED' : 'INSTALLED PACKAGE'}</p>
-        <h3>${esc(item.name)}</h3><p>${esc(item.description)}</p><small>${esc(source.location)} · ${esc(shaShort(source.commit))}</small></div>
+        <h3>${esc(item.name)}</h3><p>${esc(item.description)}</p><small>${esc(source.location)} · ${esc(shaShort(source.commit))}</small>
+          ${sourceUrl ? `<a class="customize-source-link" href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">View source</a>` : ''}</div>
         <button type="button" class="secondary-button" data-customize="close-detail">Close preview</button>
       </div>
       ${detail.kind === 'installed' ? lifecycleHtml(item as SkillItem) : ''}
       <div class="customize-preview-shell">
         <nav class="customize-file-tree" aria-label="Package files">
           <strong>Files</strong>
-          ${files.map(path => `<button type="button" data-customize="preview-file" data-file="${esc(path)}" class="${selectedFile === path ? 'selected' : ''}">${icon('file')}<span>${esc(path)}</span></button>`).join('')}
+          ${filesTreeHtml(files, selectedFile)}
         </nav>
         <div class="customize-preview-main">
           <div class="customize-preview-toolbar"><span>${esc(detail.file)}</span><div class="customize-mode-switch">
@@ -380,7 +458,10 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           <div id="customize-preview-content" class="customize-preview-body" role="region" aria-label="Skill file content">Loading file…</div>
         </div>
       </div>
-    </section>`;
+      ${toast ? `<div class="customize-dialog-toast" role="status">${esc(toast)}</div>` : ''}
+      ${error ? `<p class="customize-dialog-error" role="alert">${esc(error)}</p>` : ''}
+      </section>
+    </dialog>`;
   }
 
   function githubFormHtml(): string {
@@ -449,9 +530,17 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           : undefined;
     if (next && !next.hasAttribute('disabled')) {
       next.focus({ preventScroll: true });
-      if (cursor >= 0 && next instanceof HTMLInputElement && !['checkbox','search'].includes(next.type)) next.setSelectionRange(cursor,cursor);
+      if (cursor >= 0 && next instanceof HTMLInputElement && next.type !== 'checkbox')
+        next.setSelectionRange(cursor, cursor);
     }
-    if (detail) void loadPreview();
+    if (detail) {
+      const modal=host.querySelector<HTMLDialogElement>('.customize-detail-dialog');
+      if(modal) {
+        modal.addEventListener('cancel',event=>{event.preventDefault();dismissDetail();},{once:true});
+        modal.showModal();
+      }
+      void loadPreview();
+    }
   }
 
   async function refresh(): Promise<void> {
@@ -710,6 +799,13 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   }
 
   const click=(event:Event)=>{
+    const backdrop=event.target;
+    if(backdrop instanceof HTMLDialogElement && backdrop.classList.contains('customize-detail-dialog')) {
+      const rect=backdrop.getBoundingClientRect();
+      const point=event as MouseEvent;
+      if(point.clientX<rect.left||point.clientX>rect.right||point.clientY<rect.top||point.clientY>rect.bottom) dismissDetail();
+      return;
+    }
     const button=(event.target as HTMLElement).closest<HTMLElement>('[data-customize]');
     if(!button || !host.contains(button))return;
     const action=button.dataset.customize, id=button.dataset.id??'', path=button.dataset.path??'';
@@ -731,11 +827,23 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'confirm-uninstall':void uninstall(id);break;
       case 'cancel-activation':pendingActivation=null;draw();break;
       case 'confirm-activation':if(pendingActivation?.id===id && pendingActivation.harness===button.dataset.harness) void setHarnessEnabled(id,pendingActivation.harness,true,true);break;
+      case 'cancel-replacement':pendingReplacement=null;draw();break;
+      case 'confirm-replacement':
+        if(pendingReplacement?.id===id && pendingReplacement.harness===button.dataset.harness) {
+          const decision=pendingReplacement;
+          void setHarnessEnabled(id,decision.harness,true,decision.acknowledge,true);
+        }
+        break;
+      case 'toggle-file-folder':{
+        if(!path)break;
+        if(collapsedFiles.has(path))collapsedFiles.delete(path);else collapsedFiles.add(path);
+        draw();break;
+      }
       case 'reactivate-skill':void setHarnessEnabled(id,button.dataset.harness??'',true);break;
       case 'try-skill':void tryInstalledSkill(id);break;
-      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingUninstall=null;tryHarness='';draw();host.querySelector('.customize-detail')?.scrollIntoView({block:'start'});break;
-      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;draw();break;
-      case 'close-detail':detail=null;pendingUninstall=null;pendingActivation=null;previewSerial++;draw();break;
+      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingReplacement=null;pendingUninstall=null;collapsedFiles.clear();tryHarness='';draw();break;
+      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;pendingReplacement=null;collapsedFiles.clear();draw();break;
+      case 'close-detail':dismissDetail();break;
       case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;
       case 'preview-mode':markdownMode=button.dataset.mode==='raw'?'raw':'rendered';draw();break;
       case 'hide-discovery':scan=null;chosen.clear();editingSource=null;changingRefSource=null;draw();break;
@@ -798,6 +906,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   void refresh();
   return {refresh,dispose(){
     disposed=true;previewSerial++;unsub?.();
+    host.querySelector<HTMLDialogElement>('.customize-detail-dialog')?.close();
     if(toastTimer !== undefined)clearTimeout(toastTimer);
     host.removeEventListener('click',click);host.removeEventListener('input',input);
     host.removeEventListener('change',change);host.removeEventListener('submit',submit);

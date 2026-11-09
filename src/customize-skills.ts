@@ -1112,7 +1112,6 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : undefined;
         if (next) { event.preventDefault(); const found=openedDetails.find(value => detailKey(value) === next.dataset.key); if (found) selectDetail(found); }
       }
-      return;
     }
     if (event.key === 'Escape' && detail) { event.preventDefault(); closeSkillDetail(); }
   };

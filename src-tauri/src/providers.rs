@@ -3270,6 +3270,59 @@ fn codex_user_limits_threads(command: &Command, config: &RunConfig) -> bool {
     })
 }
 
+/// An empty TOML-table override does not clear inherited Codex MCP servers.
+/// Require a proven empty native inventory before launching a reviewer.
+fn reviewer_codex_mcp_roster_empty(stdout: &[u8]) -> Result<(), String> {
+    let roster: Value = serde_json::from_slice(stdout)
+        .map_err(|_| "read_only_unsupported: Codex MCP roster could not be verified.".to_string())?;
+    match roster.as_array() {
+        Some(servers) if servers.is_empty() => Ok(()),
+        _ => Err("read_only_unsupported: Codex has configured MCP servers; reviewer execution requires an empty external-tool roster.".into()),
+    }
+}
+
+/// A global Codex MCP listing may omit repository-local configuration.
+fn reviewer_codex_project_tools_absent(cwd: &Path) -> Result<(), String> {
+    for dir in cwd.ancestors() {
+        let config = dir.join(".codex").join("config.toml");
+        let data = match std::fs::read_to_string(&config) {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("read_only_unsupported: Codex project configuration is unreadable.".into()),
+        };
+        let settings: toml::Table = data.parse()
+            .map_err(|_| "read_only_unsupported: Codex project configuration is invalid.".to_string())?;
+        if settings.contains_key("mcp_servers")
+            || settings.contains_key("plugins")
+            || settings.contains_key("apps")
+        {
+            return Err("read_only_unsupported: Codex project configuration may provide writable external tools.".into());
+        }
+    }
+    Ok(())
+}
+
+/// No runnable reviewer until the native executable confirms no MCP servers.
+async fn verify_reviewer_codex_external_tools(path: &Path, cwd: &Path) -> Result<(), String> {
+    reviewer_codex_project_tools_absent(cwd)?;
+    let mut command = provider_command("codex", path)?;
+    command
+        .args(["mcp", "list", "--json", "-c", "mcp_servers={}"])
+        .current_dir(cwd)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        command.output(),
+    )
+    .await
+    .map_err(|_| "read_only_unsupported: timed out while verifying the Codex MCP roster.".to_string())?
+    .map_err(|_| "read_only_unsupported: cannot inspect the Codex MCP roster.".to_string())?;
+    if !output.status.success() {
+        return Err("read_only_unsupported: Codex MCP roster probe failed.".into());
+    }
+    reviewer_codex_mcp_roster_empty(&output.stdout)
+}
+
 fn configure_command(command: &mut Command, config: &RunConfig) {
     claude_auth::configure(command, &config.provider);
     let use_model = !config.model.is_empty() && config.model != "default";
@@ -3280,8 +3333,8 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             if !codex_user_limits_threads(command, config) {
                 command.args(["-c", CODEX_NO_THREAD_LIMIT]);
             }
-            // The launcher overrides only this process, not the user's Codex files.
-            // PandaCode's authenticated per-run MCP server can still be injected.
+            // Defense in depth only: an empty TOML override does not clear
+            // inherited MCP servers. Reviewer admission requires an empty roster.
             if config.reviewer_boundary || !crate::feature_controls::get().external_mcp_servers {
                 command.args(["-c", "mcp_servers={}"]);
             }
@@ -3418,6 +3471,9 @@ async fn run_inner(
             format!("{} CLI is not installed or is not on PATH", config.provider)
         })?;
     config.cwd = external_path(&config.cwd);
+    if config.reviewer_boundary {
+        verify_reviewer_codex_external_tools(&path, &config.cwd).await?;
+    }
     let image_blocks = attachments::load(&config.provider, &config.images).await?;
     let mut command = provider_command(&config.provider, &path)?;
     configure_command(&mut command, &config);
@@ -4049,7 +4105,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_codex_native_sandbox_and_empty_mcp_override_full_access() {
+    fn reviewer_codex_native_sandbox_and_mcp_roster_preflight() {
         let mut cfg = config("codex");
         cfg.reviewer_boundary = true;
         cfg.mode = "plan".into();
@@ -4058,11 +4114,42 @@ mod tests {
         let args: Vec<_> = command.as_std().get_args()
             .map(|arg| arg.to_string_lossy().into_owned()).collect();
         assert!(args.windows(2).any(|a| a[0] == "-c" && a[1] == "mcp_servers={}"));
+        assert!(reviewer_codex_mcp_roster_empty(b"[]").is_ok());
+        for roster in [
+            br#"[{"name":"writable","enabled":true}]"#.as_slice(),
+            br#"[{"name":"disabled","enabled":false}]"#.as_slice(),
+            br#"{"servers":[]}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert!(reviewer_codex_mcp_roster_empty(roster).unwrap_err().contains("read_only_unsupported"));
+        }
         let protocol = Protocol::new(cfg);
         let permissions = protocol.codex_permissions(true);
         assert_eq!(permissions["sandboxPolicy"]["type"], "readOnly");
         assert_eq!(permissions["sandboxPolicy"]["networkAccess"], false);
         assert_eq!(permissions["approvalPolicy"], "never");
+    }
+
+    #[test]
+    fn reviewer_codex_project_mcp_and_plugin_config_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "pandacode-reviewer-security-{}", uuid::Uuid::new_v4()
+        ));
+        let nested = root.join("repo").join("subdir");
+        std::fs::create_dir_all(&nested).unwrap();
+        let settings_dir = root.join(".codex");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        for config in [
+            "[mcp_servers.untrusted]\ncommand = 'write-tool'\n",
+            "[plugins]\nenabled = true\n",
+            "[apps]\nexternal = true\n",
+            "malformed = [",
+        ] {
+            std::fs::write(settings_dir.join("config.toml"), config).unwrap();
+            let error = reviewer_codex_project_tools_absent(&nested).unwrap_err();
+            assert!(error.contains("read_only_unsupported"), "{error}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

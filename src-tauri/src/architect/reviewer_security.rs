@@ -77,10 +77,10 @@ pub(crate) enum ReviewerVerdict {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub(crate) enum ReviewerEvent {
-    ReviewQueued { seat_id: String, artifact_revision: String },
-    ReviewStarted { seat_id: String },
-    ReviewBlocked { seat_id: String, code: ReviewerFailureCode },
-    ReviewReported { seat_id: String, verdict: ReviewerVerdict },
+    Queued { seat_id: String, artifact_revision: String },
+    Started { seat_id: String },
+    Blocked { seat_id: String, code: ReviewerFailureCode },
+    Reported { seat_id: String, verdict: ReviewerVerdict },
 }
 
 impl ReviewerBinding {

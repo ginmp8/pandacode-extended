@@ -3228,7 +3228,8 @@ pub async fn run_with_tools(
     let identity = Protocol::new(config.clone());
     sink(identity.event("status", "Starting agent", None));
     // A goal operation is acknowledged by its own turn, so it is never continued elsewhere.
-    let pooled = config.goal.is_none() && crate::account_pool::enabled(&config.provider) && !crate::cloud_agents::transport::is_cloud(&config.session_id);
+    // Reviewer cycles must not rotate or persist Connection/account assignments.
+    let pooled = !config.reviewer_boundary && config.goal.is_none() && crate::account_pool::enabled(&config.provider) && !crate::cloud_agents::transport::is_cloud(&config.session_id);
     let result = if pooled {
         HARNESS.scope(harness, pool::run(config, sink.clone(), input, host)).await
     } else {

@@ -164,7 +164,11 @@ pub struct RunConfig {
 /// A read-only prompt or flag alone cannot safely constrain a reviewer.
 fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), String> {
     if !config.reviewer_boundary { return Ok(()) }
-    if !matches!(config.provider.as_str(), "codex" | "claude" | "glm" | "mimo") {
+    // Claude-family managed hooks and MCP policy can outlive CLI --settings
+    // and --strict-mcp-config; a tool allowlist is not an OS sandbox.
+    // Until native isolation is independently proven, only Codex's
+    // sandbox-backed read-only adapter is eligible for Council review.
+    if config.provider != "codex" {
         return Err(format!("read_only_unsupported: {} has no native reviewer tool boundary.", config.provider));
     }
     if config.mode != "plan" || has_host || config.skill.is_some()
@@ -4036,14 +4040,12 @@ mod tests {
         cfg.mode = "full".into();
         assert!(enforce_reviewer_policy(&cfg, false).is_err());
         cfg.mode = "plan".into();
-        for provider in ["opencode", "kimi", "pi", "github-copilot", "zcode", "hermes"] {
+        for provider in ["claude", "glm", "mimo", "opencode", "kimi", "pi", "github-copilot", "zcode", "hermes"] {
             cfg.provider = provider.into();
             assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
         }
-        for provider in ["claude", "glm", "mimo", "codex"] {
-            cfg.provider = provider.into();
-            assert!(enforce_reviewer_policy(&cfg, false).is_ok());
-        }
+        cfg.provider = "codex".into();
+        assert!(enforce_reviewer_policy(&cfg, false).is_ok());
     }
 
     #[test]
@@ -4064,11 +4066,12 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_claude_family_exposes_only_read_tools_with_hooks_disabled() {
+    fn reviewer_claude_family_still_fails_closed_despite_defensive_read_flags() {
         for provider in ["claude", "glm", "mimo"] {
             let mut cfg = config(provider);
             cfg.reviewer_boundary = true;
             cfg.mode = "plan".into();
+            assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
             let mut command = Command::new(provider);
             configure_command(&mut command, &cfg);
             let args: Vec<_> = command.as_std().get_args()

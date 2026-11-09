@@ -5710,6 +5710,9 @@ async function discoverSettingsProviders(): Promise<Provider[]> {
 /** A preview chat is always new, pinned to the enabled harness, and never auto-submits. */
 async function tryCustomizeSkill(id: string, harnessId: string): Promise<void> {
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) throw new Error('Invalid skill name.');
+  // The Skills matrix may finish loading before the application's initial provider list.
+  // Refresh on demand rather than rejecting an enabled harness during startup.
+  if (!state.providers.some(p => p.id === harnessId && p.installed)) await discoverSettingsProviders();
   if (!state.providers.some(p => p.id === harnessId && p.installed)) {
     throw new Error('The selected harness is not installed or available for chats.');
   }

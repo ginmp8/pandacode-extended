@@ -557,3 +557,34 @@ fn interrupted_import_recovers_only_finished_selected_packages() {
     assert_eq!(restored[0].selected_paths, ["skills/alpha"]);
     assert!(!fx.library.dir.join(".skill-sources.pending.json").exists());
 }
+
+#[test]
+fn tracked_batch_reports_real_terminal_progress_and_saves_only_successes() {
+    let fx = Fixture::new();
+    let commit = "a".repeat(40);
+    let mut fake = Fake::default();
+    fake.repo("me/mixed", &commit, &files(&[
+        ("skills/alpha/SKILL.md", &skill("Alpha")),
+        ("skills/beta/SKILL.md", &skill("Beta")),
+        ("skills/gamma/SKILL.md", &skill("Gamma")),
+    ]));
+    fake.failures.insert(format!("repos/me/mixed/contents/skills/beta?ref={commit}"),
+        "gh: Temporary API failure (HTTP 503)".into());
+    fx.library.import(Kind::Skill, vec![("SKILL.md".into(), skill("Gamma").into_bytes())],
+        "Gamma", Source {kind:"folder".into(),location:"/local/gamma".into(),git_ref:None,commit:None}).unwrap();
+    let mut progress = Vec::new();
+    let result = fx.library.import_skill_source_progress(&fake.api(),
+        super::sources::SourceImportRequest {
+            repo:"me/mixed",path:"skills",git_ref:None,commit:&commit,
+            selected_paths:vec!["skills/alpha".into(),"skills/beta".into(),"skills/gamma".into()],
+            allow_replace:false,
+        }, |event| progress.push(event)).unwrap();
+    assert_eq!(result.source.selected_paths, ["skills/alpha"]);
+    assert_eq!(result.imported, ["Alpha"]);
+    assert_eq!(result.skipped.len(), 2);
+    let statuses: Vec<&str> = result.results.iter().map(|entry| entry.phase.as_str()).collect();
+    assert_eq!(statuses, ["installed", "failed", "skipped"]);
+    assert_eq!(result.results.iter().map(|entry| entry.completed).collect::<Vec<_>>(), [1,2,3]);
+    assert_eq!(progress.iter().filter(|entry| matches!(entry.phase.as_str(),
+        "installed"|"failed"|"skipped")).count(), 3);
+}

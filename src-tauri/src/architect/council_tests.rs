@@ -50,6 +50,60 @@ fn store_team(state: &AppState, team: &mut TeamSnapshot) {
 }
 
 #[test]
+fn channel_council_never_approves_a_native_round_limit_or_stale_review() {
+    use crate::bots::ChannelCouncilOutcome;
+    let (state, sid) = council_state(on(9.0, 1, 2));
+    let mut team = saved(&state, &sid);
+    team.council_since = SINCE;
+    team.workers = vec![
+        writer("implement", SINCE),
+        seat("correctness", 1, Some(7.0), SINCE + 1),
+        seat("security", 1, Some(8.0), SINCE + 1),
+    ];
+    team.status = "completed".into();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    store.db.execute(
+        "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+         VALUES('channel-lead','Lead',?1,'claude','default','ask',1,1)",
+        [&project],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channels(id,name,created_at,updated_at)
+         VALUES('council-channel','Council',1,1)", [],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES('council-post','council-channel','user','Review','in_progress',1)", [],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,created_at,updated_at)
+         VALUES('council-delivery','council-channel','council-post','channel-lead',?1,'in_progress',1,1)",
+        [&sid],
+    ).unwrap();
+    save(&store, &mut team).unwrap();
+    assert_eq!(load(&store, &sid).unwrap().unwrap().council_status.unwrap().state, "limit");
+    assert!(matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(),
+        ChannelCouncilOutcome::Denied(_)),
+        "team completion at the native Council limit is not a channel approval");
+
+    for worker in &mut team.workers {
+        if let Some(seat) = &mut worker.council {
+            seat.score = Some(9.5);
+        }
+    }
+    save(&store, &mut team).unwrap();
+    assert_eq!(crate::bots::channel_council_outcome(&store, &sid).unwrap(),
+        ChannelCouncilOutcome::Approved);
+
+    team.workers.push(writer("late-change", SINCE + 3));
+    save(&store, &mut team).unwrap();
+    assert!(matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(),
+        ChannelCouncilOutcome::Denied(_)),
+        "a change after a passing round must revoke channel approval");
+}
+
+#[test]
 fn score_parsing_takes_the_last_marked_line() {
     assert_eq!(parse_score("Fine.\n\nCouncil score: 8/10"), Some(8.0));
     assert_eq!(parse_score("**Council score: 9.5/10**"), Some(9.5));

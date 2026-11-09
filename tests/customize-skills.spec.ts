@@ -82,6 +82,8 @@ async function openCustomize(page: Page, slow = false): Promise<void> {
 }
 
 test('Customize follows Search inside the top actions card and stays separate from Bots', async ({page}) => {
+  // Full application startup on CI may exceed the default test budget; preserve every assertion.
+  test.setTimeout(60_000);
   // The full application preview loads multiple independent panels. Waiting for
   // DOM readiness plus the observable navigation control avoids idle media/font
   // requests counting against this test's existing, unchanged timeout.

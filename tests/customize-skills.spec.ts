@@ -418,12 +418,12 @@ test('skill details open in a solid right inspector with the Files row tree',asy
   const tree=dialog.getByRole('tree',{name:'Package file tree'});
   await expect(tree).toBeVisible();
   await expect(tree.getByRole('button',{name:'SKILL.md'})).toBeVisible();
-  const rootRow = tree.locator('.file-row').filter({has:tree.getByRole('button',{name:'SKILL.md'})});
+  const rootRow = tree.locator('.file-row:has(> button[data-file="SKILL.md"])');
   await expect(rootRow).toHaveAttribute('style','--depth:0');
   await expect(tree.locator('.file-row .file-twisty').first()).toBeVisible();
   await expect(tree.getByRole('button',{name:'Collapse assets folder'})).toBeVisible();
   await expect(tree.getByRole('button',{name:'icon.svg'})).toBeVisible();
-  const nestedRow = tree.locator('.file-row').filter({has:tree.getByRole('button',{name:'icon.svg'})});
+  const nestedRow = tree.locator('.file-row:has(> button[data-file="assets/icon.svg"])');
   await expect(nestedRow).toHaveAttribute('style','--depth:1');
   await tree.getByRole('button',{name:'Collapse assets folder'}).click();
   await expect(tree.getByRole('button',{name:'icon.svg'})).toHaveCount(0);

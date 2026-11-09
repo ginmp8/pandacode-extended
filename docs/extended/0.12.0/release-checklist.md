@@ -76,3 +76,12 @@ Council's review loop and imported test files establish source coverage, not rel
 - [x] Verify [push CI #42503386681](https://github.com/ginmp8/pandacode-extended/actions/runs/42503386681) and [PR CI #42503391142](https://github.com/ginmp8/pandacode-extended/actions/runs/42503391142) at **`e33fb2fd93aaa130f5e480db7d0e227fe966e1cf`**: both completed successfully with **6/6 jobs** (typecheck/Node/website, Rust check/tests, npm dependency audit, RustSec, mobile/Expo and ONNX/macOS).
 - [ ] Verify CI again for any later `base/development` SHA, including this documentation-only correction; earlier green CI does not transfer to a different SHA.
 - [ ] Complete all 80 shared hunk classifications and native Settings On/Off, Council, Connect/MCP/cloud/VM, credentials, and installer acceptance before claiming functional parity or approving Extended 0.12.0. Local tests were not executed during this follow-up.
+
+## PandaCode 0.3.105 source checkpoint — 2026-11-08
+
+- [x] Pin the exact [fork `main` SHA `f28c4df0`](https://github.com/ginmp8/pandacode/commit/f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665), tree `49077426e74a7134da8f3393a6abff32b9cc07c4`, and read native app version **0.3.105** from source manifests.
+- [x] Publish [Extended integration `36228b94`](https://github.com/ginmp8/pandacode-extended/commit/36228b949aaf8648109e2f8f8da441a8735cee41) as a single-parent non-forced commit on `base/development`: 4 added upstream paths, 26 source-exact replacements, 8 adapted paths, original release notes preserved, source provenance updated; 1,565 source/1,622 candidate blobs, zero missing source paths or mode changes.
+- [x] Preserve Extended-only prior customizations, dependency remediations, /btw slash-resolution test and separate 0.12.0 planned release identity while aligning six upstream application-version fields.
+- [ ] Obtain **completed** exact-SHA CI results for [push #42554247514](https://github.com/ginmp8/pandacode-extended/actions/runs/42554247514) and [PR #42554252219](https://github.com/ginmp8/pandacode-extended/actions/runs/42554252219); both were queued/in progress when first checked for the code commit.
+- [ ] Independently validate account pool, identity/usage/fallback, real credentials and account-switch message persistence, and existing Extended Settings On/Off, MCP, Connect, cloud/VM, bot/channel and native platform behavior.
+- [ ] Classify each remaining shared-file divergence by hunk and verify final documentation-commit CI separately. Neither source coverage nor CI is release approval; `0.12.0` is still planned.

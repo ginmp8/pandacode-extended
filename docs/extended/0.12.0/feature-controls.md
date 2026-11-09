@@ -30,3 +30,9 @@ The Extended `architect.rs` file-scope contract and shorter existing dispatch/ca
 ## PandaCode 0.3.104 inherited desktop branding
 
 The upstream desktop intro, replayable wordmark and star panda are integrated without changing the Extended's existing optional Settings (updates, Connect, bot pause, external MCP, cloud/VM, credential forwarding, fresh context or shared channels). The inherited tests describe reduced-motion handling, keyboard access, nonblocking text entry and narrow-sidebar behavior; native Windows/macOS/Linux and interactions with Extended Settings have **not** been independently accepted. Both enabled and disabled operational paths remain subject to the separate control-state regression matrix. No previously permitted upstream feature was intentionally removed or stubbed by this import.
+
+## PandaCode 0.3.105 account pooling and Extended controls
+
+Inherited account-pool selection, sign-in identity, provider-local usage and account-switch history were integrated from [fork `f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665`](https://github.com/ginmp8/pandacode/commit/f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665) in [Extended `36228b949aaf8648109e2f8f8da441a8735cee41`](https://github.com/ginmp8/pandacode-extended/commit/36228b949aaf8648109e2f8f8da441a8735cee41). Pool opt-in and task-specific account routing are upstream behavior, **not** a newly introduced Extended safety switch. The model picker continues to offer one choice per harness/model; named provider accounts remain manageable under Settings. The Extended /btw deferred-slash test hook was preserved alongside the upstream account-switch test additions.
+
+No Extended setting was intentionally removed or changed to a stricter default. Actual opt-in/opt-out pool behavior, provider login/fallback, account-switch persistence, and interaction with existing bot pause, external MCP, Connect, cloud/VM and credential permissions still require independent runtime/native tests.

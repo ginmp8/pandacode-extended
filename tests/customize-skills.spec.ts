@@ -568,7 +568,7 @@ test('long skill names are truncated in inspector tabs but retain full accessibl
   await expect(tab).toHaveAttribute('title',fullName);
   const visibleLabel=await tab.locator('.inspector-tab-label').textContent();
   expect(Array.from(visibleLabel??'')).toHaveLength(23);
-  expect(visibleLabel).toEndWith('…');
+  expect(visibleLabel?.endsWith('…')).toBe(true);
   await expect(detail.getByRole('button',{name:`Close ${fullName}`})).toBeVisible();
 });
 

@@ -6,15 +6,8 @@
    Customize owns the workspace. Without this rule floating composer/dock elements
    can paint above the full-page hub and remain keyboard-accessible. */
 .workspace.customize-open>.main-pane>:not(#customize-hub){visibility:hidden;pointer-events:none}
-.sidebar-customize{padding:0 8px 7px;flex:none}
-.sidebar-customize>button{display:flex;align-items:center;width:100%;height:44px;gap:var(--ds-row-gap);padding:0 var(--ds-row-pad-x) 0 16px;
-  background:var(--ds-card);border:1px solid var(--ds-border);border-radius:var(--ds-radius-card);
-  box-shadow:var(--ds-shadow-card);color:var(--ds-row-ink);font-size:var(--ds-text-ui);text-align:left}
-.sidebar-customize>button .icon{--icon-size:var(--icon-lg);--icon-stroke:var(--icon-stroke-lg);color:var(--muted)}
-.sidebar-customize>button .icon:last-child{margin-left:auto;--icon-size:var(--icon-xs);color:var(--faint)}
-.sidebar-customize>button:hover{background:var(--ds-row-hover)}
-.sidebar-customize>button[aria-pressed=true]{background:var(--ds-fill-hover)}
-.sidebar-customize>button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.sidebar .sidebar-actions>.sidebar-customize-action[aria-pressed=true]{background:var(--ds-fill-hover)}
+.sidebar .sidebar-actions>.sidebar-customize-action:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 #customize-hub{position:absolute;inset:0;z-index:5;overflow:auto;min-width:0;background:var(--panel-surface,var(--bg));color:var(--text)}
 .customize-page{width:100%;max-width:1600px;margin:0 auto;padding:clamp(18px,2.3vw,38px);box-sizing:border-box;min-height:100%;font-size:var(--ds-text-ui)}
 .customize-page *{box-sizing:border-box}
@@ -26,7 +19,8 @@
 .customize-page-layout{display:grid;grid-template-columns:minmax(145px,196px) minmax(0,1fr);gap:clamp(20px,2.8vw,40px);padding-top:27px}
 .customize-category-nav{display:flex;flex-direction:column;gap:8px;padding:12px 0}
 .customize-nav-heading{font-size:var(--ds-text-meta);font-weight:var(--weight-medium);color:var(--muted);padding:0 11px 6px}
-.customize-category-nav button{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--ds-radius-inner);text-align:left;font-size:var(--ds-text-ui)}
+.customize-category-nav button{display:flex;align-items:center;justify-content:flex-start;width:100%;gap:12px;padding:12px;border-radius:var(--ds-radius-inner);text-align:left;font-size:var(--ds-text-ui)}
+.customize-category-nav button>span{margin:0}
 .customize-category-nav button[aria-current=page]{background:var(--ds-fill-hover);font-weight:var(--weight-medium)}
 .customize-category-nav button .icon{color:var(--muted)}
 .customize-page-body{min-width:0;padding:3px 0 64px;display:flex;flex-direction:column;gap:var(--ds-section-gap)}
@@ -63,11 +57,13 @@
 .customize-skill-row,.customize-source-row{border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card);box-shadow:var(--ds-shadow-card);
   display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:8px 12px}
 .customize-skill-main{display:flex;align-items:center;gap:13px;min-width:0;flex:1;text-align:left;padding:5px 2px}
-.customize-skill-main:hover .customize-skill-description>strong{text-decoration:underline;text-underline-offset:3px}
+.customize-skill-main:hover .customize-skill-title>strong{text-decoration:underline;text-underline-offset:3px}
 .customize-skill-icon{width:38px;height:38px;display:grid;place-items:center;flex:none;border:1px solid var(--ds-border);background:var(--ds-fill);border-radius:var(--ds-radius-inner)}
 .customize-skill-icon .icon{color:var(--muted)}
+.customize-skill-icon img{width:26px;height:26px;max-width:100%;max-height:100%;object-fit:contain}
+.customize-skill-title{display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;min-width:0}
 .customize-skill-description,.customize-source-identity{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0;overflow-wrap:anywhere}
-.customize-skill-description>strong,.customize-source-identity>strong{font-weight:var(--weight-medium);font-size:var(--ds-text-ui)}
+.customize-skill-title>strong,.customize-source-identity>strong{font-weight:var(--weight-medium);font-size:var(--ds-text-ui)}
 .customize-skill-description>span{font-size:var(--ds-text-meta);color:var(--muted);line-height:1.4}
 .customize-skill-description small,.customize-source-identity small{font-size:var(--ds-text-chip);color:var(--muted);line-height:1.5}
 .customize-skill-trailing{display:flex;align-items:center;gap:10px;flex-shrink:0}
@@ -136,7 +132,7 @@
 .customize-preview-body pre{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:var(--ds-text-meta)}
 .customize-preview-body img{display:none}
 @media(max-width:1050px){.customize-page-layout{grid-template-columns:1fr;gap:12px}.customize-category-nav{padding:0;flex-direction:row}.customize-nav-heading{display:none}
-  .customize-category-nav button{padding:8px 12px}.customize-toolbar{gap:10px}}
+  .customize-category-nav button{width:auto;padding:8px 12px}.customize-toolbar{gap:10px}}
 @media(max-width:740px){.customize-page{padding:16px}.customize-page-header{padding-bottom:16px}
   .customize-toolbar,.customize-section-head,.customize-discovery-heading,.customize-detail-heading{flex-direction:column;gap:12px}
   .customize-skill-row,.customize-source-row,.customize-source-settings{align-items:stretch;flex-direction:column}
@@ -144,4 +140,4 @@
   .customize-file-tree{max-height:110px}.customize-source-actions{width:100%}
   .customize-discovery-choice>span{grid-template-columns:minmax(0,1fr)}
   .customize-discovery-choice>span code{grid-column:1;grid-row:auto;justify-self:start;max-width:100%}}
-@media(prefers-reduced-motion:reduce){.sidebar-customize>button{transition:none}}
+@media(prefers-reduced-motion:reduce){.sidebar .sidebar-actions>.sidebar-customize-action{transition:none}}

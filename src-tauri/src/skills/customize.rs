@@ -69,8 +69,8 @@ fn valid_yaml_flow(value: &str) -> bool {
         match c {
             '"' | '\'' => quote = Some(c),
             '[' | '{' => stack.push(c),
-            ']' => { if stack.pop() != Some('[') { return false; } },
-            '}' => { if stack.pop() != Some('{') { return false; } },
+            ']' if stack.pop() != Some('[') => return false,
+            '}' if stack.pop() != Some('{') => return false,
             _ => {}
         }
         if matches!(c, ']' | '}') && stack.is_empty() { finished = true; }

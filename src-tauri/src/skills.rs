@@ -240,7 +240,7 @@ fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
     let mut names = std::collections::HashSet::new();
     for (name, content) in &files {
         if name.is_empty() || name.starts_with('/') || name.contains('\\')
-            || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.starts_with('.'))
+            || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part == ".git")
             || !names.insert(name.to_ascii_lowercase())
         {
             return Err(format!("Unsafe, duplicate, or case-conflicting package path: {name}."));
@@ -264,8 +264,9 @@ fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
     }
 }
 
-/// Regular, non-hidden files under `path` (or `path` itself), bounded.
-fn read_local(path: &Path) -> Result<Files, String> {
+/// Managed packages retain hidden supporting files; legacy local-folder imports
+/// exclude hidden files so unrelated dotfiles are not enrolled unexpectedly.
+fn read_local(path: &Path, include_hidden: bool) -> Result<Files, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
     if meta.is_file() {
         if meta.len() as usize > MAX_BYTES {
@@ -279,7 +280,9 @@ fn read_local(path: &Path) -> Result<Files, String> {
     let mut pending = vec![path.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(&dir).map_err(|e| format!("Could not read {}: {e}", dir.display()))?.flatten() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
+            let entry_name = entry.file_name();
+            let name = entry_name.to_string_lossy();
+            if name == ".git" || (!include_hidden && name.starts_with('.')) {
                 continue;
             }
             let Ok(kind) = entry.file_type() else { continue };
@@ -324,7 +327,7 @@ impl Library {
         fs::write(&temp, json).and_then(|_| fs::rename(&temp, self.meta_path(&meta.id))).map_err(|e| format!("Could not save the library: {e}"))
     }
     fn files(&self, id: &str) -> Result<Files, String> {
-        let mut files = read_local(&self.dir.join(id))?;
+        let mut files = read_local(&self.dir.join(id), true)?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
     }
@@ -343,7 +346,7 @@ impl Library {
             let Some(id) = file_name.strip_prefix('.').and_then(|s| s.strip_suffix(".rollback")) else { continue };
             if !valid_id(id) || !entry.path().is_dir() { continue }
             let target = self.dir.join(id);
-            let committed = self.load(id).ok().and_then(|meta| read_local(&target).ok().map(|files| meta.sha256 == content_hash(&files))).unwrap_or(false);
+            let committed = self.load(id).ok().and_then(|meta| read_local(&target, true).ok().map(|files| meta.sha256 == content_hash(&files))).unwrap_or(false);
             if !committed {
                 if target.exists() { fs::remove_dir_all(&target).map_err(|e| e.to_string())?; }
                 fs::rename(entry.path(), &target).map_err(|e| format!("Could not recover {id}: {e}"))?;
@@ -717,7 +720,7 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
         if !path.is_absolute() {
             return Err("Choose a folder or Markdown file.".into());
         }
-        let files = read_local(&path)?;
+        let files = read_local(&path, false)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let source = Source { kind: "folder".into(), location: path.to_string_lossy().into_owned(), git_ref: None, commit: None };
         library(&app)?.import(kind, files, &name, source)

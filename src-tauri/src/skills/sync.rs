@@ -1,14 +1,30 @@
 //! Explicit and opt-in startup synchronization of GitHub-backed library skills.
 //! No scripts run during import or synchronization. Native harness copies are not touched.
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, sync::Mutex};
+use std::{collections::{BTreeSet, HashMap}, fs, path::{Path, PathBuf}, sync::Mutex};
 
 use super::{catalog, content_hash, frontmatter, github, now_ms, slug, Item, Kind, Library, Meta, Source};
 
-static SYNC: Mutex<()> = Mutex::new(());
+// Synchronization is exclusive per central library, not globally across
+// independent profiles/test fixtures that write to different library folders.
+static ACTIVE_SYNC_DIRS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
-fn acquire_sync(lock: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, String> {
-    lock.try_lock().map_err(|_| "A skill synchronization is already running.".into())
+#[derive(Debug)]
+struct SyncGuard(PathBuf);
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        if let Ok(mut running) = ACTIVE_SYNC_DIRS.lock() {
+            running.remove(&self.0);
+        }
+    }
+}
+
+fn acquire_sync(directory: &Path) -> Result<SyncGuard, String> {
+    let mut running = ACTIVE_SYNC_DIRS.lock().map_err(|e| e.to_string())?;
+    if !running.insert(directory.to_path_buf()) {
+        return Err("A skill synchronization is already running.".into());
+    }
+    Ok(SyncGuard(directory.to_path_buf()))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -198,8 +214,8 @@ impl Library {
         })
     }
 
-    /// One writer for all skill sync operations. When busy, return an in-progress report rather
-    /// than race. Errors are isolated per skill; the old complete package remains available.
+    /// One writer per central library. A second synchronization of the same
+    /// library fails explicitly; independent library paths may run concurrently.
     pub fn synchronize(&self, api: catalog::Api, selection: Selection, automatic: bool) -> Result<SyncReport, String> {
         self.synchronize_progress(api, selection, automatic, |_| {})
     }
@@ -208,7 +224,7 @@ impl Library {
         &self, api: catalog::Api, selection: Selection, automatic: bool,
         mut progress: impl FnMut(SyncProgress),
     ) -> Result<SyncReport, String> {
-        let _guard = acquire_sync(&SYNC)?;
+        let _guard = acquire_sync(&self.dir)?;
         let policy = self.sync_policy()?;
         let mut report = SyncReport { checked_at: now_ms(), ..SyncReport::default() };
         let targets: Vec<Meta> = self.list()?.into_iter().map(|item| item.meta).filter(|meta| {
@@ -281,14 +297,17 @@ mod tests {
 
     #[test]
     fn a_busy_synchronization_returns_an_error_not_an_empty_success_report() {
-        let isolated_lock = Mutex::new(());
-        let running = isolated_lock.lock().unwrap();
+        let same_library = std::env::temp_dir().join(format!("sync-{}", uuid::Uuid::new_v4()));
+        let independent_library = std::env::temp_dir().join(format!("sync-{}", uuid::Uuid::new_v4()));
+        let running = acquire_sync(&same_library).unwrap();
         assert_eq!(
-            acquire_sync(&isolated_lock).unwrap_err(),
+            acquire_sync(&same_library).unwrap_err(),
             "A skill synchronization is already running."
         );
+        assert!(acquire_sync(&independent_library).is_ok(),
+            "independent library profiles must not contend for one global lock");
         drop(running);
-        assert!(acquire_sync(&isolated_lock).is_ok());
+        assert!(acquire_sync(&same_library).is_ok());
     }
 
     #[test]

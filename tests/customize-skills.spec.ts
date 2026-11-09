@@ -73,6 +73,8 @@ test('Customize navigation remains separate from the Bots bar', async ({page}) =
   await expect(page.locator('.sidebar-customize + #sidebar-bots-panel + #sidebar-bots')).toHaveCount(1);
   await customize.click();
   await expect(page.getByRole('heading', {name:'Customize',exact:true})).toBeVisible();
+  await expect(page.locator('.workspace-header')).toBeHidden();
+  await expect(page.locator('.conversation-pane')).toBeHidden();
   await page.screenshot({path:'test-results/customize-navigation-after.png',fullPage:true});
   await page.getByRole('button', {name:'Back to workspace'}).click();
   await expect(page.locator('#customize-hub')).toBeHidden();
@@ -87,6 +89,20 @@ test('GitHub Add has only URL and optional ref, then imports only selected skill
   await form.getByRole('textbox', {name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
   await form.getByRole('button', {name:'Scan repository'}).click();
   await expect(page.getByRole('region',{name:'Discovered GitHub skills'})).toContainText('Found 3 skills');
+  // The global input rule assigns width:100%; checkboxes must override it
+  // or they consume the row and crush skill names into vertical letters.
+  const geometry = await page.locator('.customize-discovery-list > li').first().evaluate(row => {
+    const checkbox = row.querySelector<HTMLInputElement>('input[type=checkbox]')!;
+    const label = row.querySelector<HTMLElement>('.customize-discovery-choice > span')!;
+    return {
+      checkboxWidth: checkbox.getBoundingClientRect().width,
+      labelWidth: label.getBoundingClientRect().width,
+      rowHeight: row.getBoundingClientRect().height,
+    };
+  });
+  expect(geometry.checkboxWidth).toBeLessThan(32);
+  expect(geometry.labelWidth).toBeGreaterThan(180);
+  expect(geometry.rowHeight).toBeLessThan(120);
   await page.screenshot({path:'test-results/customize-github-discovery.png',fullPage:true});
   await expect(page.getByRole('button', {name:'Import selected (0)'})).toBeDisabled();
   await page.getByRole('region', {name:'Discovered GitHub skills'}).getByRole('checkbox').nth(1).check();

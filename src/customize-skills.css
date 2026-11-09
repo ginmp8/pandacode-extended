@@ -2,6 +2,10 @@
 .workspace.customize-open,.workspace.customize-open.inspector-closed{grid-template-columns:var(--sidebar-width,var(--sidebar-default-width)) minmax(0,1fr)}
 .workspace.customize-open>.inspector,.workspace.customize-open>.sidebar-resize-handle{display:none}
 .workspace.customize-open>.main-pane{position:relative}
+/* Keep chats, active tasks and terminal state mounted but visually inert while
+   Customize owns the workspace. Without this rule floating composer/dock elements
+   can paint above the full-page hub and remain keyboard-accessible. */
+.workspace.customize-open>.main-pane>:not(#customize-hub){visibility:hidden;pointer-events:none}
 .sidebar-customize{padding:0 8px 7px;flex:none}
 .sidebar-customize>button{display:flex;align-items:center;width:100%;height:44px;gap:var(--ds-row-gap);padding:0 var(--ds-row-pad-x) 0 16px;
   background:var(--ds-card);border:1px solid var(--ds-border);border-radius:var(--ds-radius-card);
@@ -86,9 +90,11 @@
 .customize-discovery-scroll{max-height:min(400px,48vh);overflow:auto;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner)}
 .customize-discovery-list>li{padding:10px 12px;display:flex;align-items:center;gap:12px;justify-content:space-between}
 .customize-discovery-list>li+li{border-top:1px solid var(--ds-border)}
+.customize-discovery-list>li>.secondary-button{flex:none}
 .customize-discovery-choice{display:flex;align-items:flex-start;gap:11px;min-width:0;flex:1;cursor:pointer}
-.customize-discovery-choice>input{flex:none;margin-top:3px;accent-color:var(--text)}
-.customize-discovery-choice>span{min-width:0;display:grid;gap:4px;overflow-wrap:anywhere}
+.customize-page input[type=checkbox]{width:16px;height:16px;min-height:16px;padding:0;flex:0 0 16px}
+.customize-discovery-choice>input{margin-top:3px;accent-color:var(--text)}
+.customize-discovery-choice>span{min-width:0;flex:1;display:grid;gap:4px;overflow-wrap:anywhere}
 .customize-discovery-choice>span strong{font-size:var(--ds-text-ui);font-weight:var(--weight-medium)}
 .customize-discovery-choice>span small{font-size:var(--ds-text-meta);color:var(--muted)}
 .customize-discovery-choice code,.customize-source-identity code{font-family:var(--font-mono,monospace);font-size:var(--ds-text-chip)}

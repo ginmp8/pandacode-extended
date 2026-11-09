@@ -139,7 +139,7 @@ pub fn replace_unmanaged_folder(
     let staged = backups.join(format!(".pending-{id}-{unique}"));
     fs::create_dir(&staged)
         .map_err(|e| format!("Could not stage {}: {e}", staged.display()))?;
-    let prepared = (|| -> Result<Vec<Written>, String> {
+    let prepared: Result<Vec<Written>, String> =
         files.iter().map(|(relative, bytes)| {
             if relative.is_empty() || !Path::new(relative).components().all(|c| matches!(c, Component::Normal(_))) {
                 return Err(format!("Unsafe skill file path: {relative}"));
@@ -150,8 +150,7 @@ pub fn replace_unmanaged_folder(
             }
             fs::write(&file, bytes).map_err(|e| format!("Could not stage {}: {e}", file.display()))?;
             Ok(Written { path: target.join(relative).to_string_lossy().into_owned(), sha256: sha256_hex(bytes) })
-        }).collect()
-    })();
+        }).collect();
     let written = match prepared {
         Ok(written) => written,
         Err(error) => {

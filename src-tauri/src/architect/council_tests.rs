@@ -56,6 +56,7 @@ fn full_access_parent_council_reviewer_enforces_native_read_only_without_profile
     let (run, _) = claim(&state, action);
     assert_eq!(run.config.mode, "plan", "Council must not inherit full access");
     assert!(run.config.reviewer_boundary);
+    assert_eq!(run.config.reviewer_policy, Some(reviewer_security::ReviewerToolPolicy::NativeReadOnly));
     assert!(run.config.skill.is_none());
     assert!(run.config.goal.is_none());
     assert!(run.config.codex_settings.is_none());
@@ -101,6 +102,62 @@ fn persisted_pre_s1_automatic_council_seat_gets_the_same_native_guard() {
     let admission = Admission { parent: sid.clone(), generation: team.generation };
     assert!(reviewer_boundary(&state.store.lock().unwrap(), &reviewer_session, Some(&admission)).unwrap());
     assert!(!reviewer_boundary(&state.store.lock().unwrap(), &sid, Some(&admission)).unwrap());
+}
+
+#[test]
+fn frozen_revision_and_unbound_bot_delivery_ids_are_validated() {
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("revision-guard", "security")]
+    })).unwrap();
+    let mut team = saved(&state, &sid);
+    let session = team.workers[0].session_id.clone();
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    let original = team.workers[0].reviewer_binding.clone().unwrap();
+    for changed in 0..3 {
+        let mut binding = original.clone();
+        match changed {
+            0 => binding.artifact_revision = "forged".into(),
+            1 => binding.reviewer_bot_id = Some("unexpected-bot".into()),
+            _ => binding.delivery_id = Some("unexpected-delivery".into()),
+        }
+        team.workers[0].reviewer_binding = Some(binding);
+        store_team(&state, &mut team);
+        let error = reviewer_policy(&state.store.lock().unwrap(), &session, Some(&admission))
+            .unwrap_err();
+        assert!(error.contains("reviewer_session_mismatch"), "{error}");
+    }
+    team.workers[0].reviewer_binding = Some(original);
+    store_team(&state, &mut team);
+    assert!(reviewer_policy(&state.store.lock().unwrap(), &session, Some(&admission))
+        .unwrap().is_some());
+}
+
+#[test]
+fn scoped_reviewer_grants_round_trip_into_native_run_config() {
+    use reviewer_security::{ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy};
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("granted-review", "correctness")]
+    })).unwrap();
+    let mut team = saved(&state, &sid);
+    let grant = ReviewerCapabilityGrant {
+        tool: "pandacode_github_issue".into(),
+        action: "create".into(),
+        action_argument: Some("action".into()),
+        resource_argument: "repository".into(),
+        resource: "owner/repo".into(),
+    };
+    let policy = ReviewerToolPolicy::from_user_grants(
+        ReviewerPhase::Review, "user-approval-1", &[grant.clone()], &[grant],
+    ).unwrap();
+    team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.tool_policy = policy.clone();
+    store_team(&state, &mut team);
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (run, _) = claim(&state, action);
+    assert_eq!(run.config.reviewer_policy, Some(policy));
+    assert!(run.config.reviewer_boundary);
+    assert_eq!(run.config.mode, "plan");
 }
 
 fn saved(state: &AppState, sid: &str) -> TeamSnapshot {

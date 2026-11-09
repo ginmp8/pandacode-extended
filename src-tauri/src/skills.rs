@@ -307,6 +307,13 @@ pub struct Library {
     home: PathBuf,
 }
 
+/// An explicitly activated central-library skill; never a global auto-install.
+pub(crate) struct SlashSkill {
+    pub id: String,
+    pub description: String,
+    pub path: PathBuf,
+}
+
 impl Library {
     pub fn new(dir: PathBuf, home: PathBuf) -> Self {
         Self { dir, home }
@@ -375,6 +382,65 @@ impl Library {
             .collect();
         ids.sort();
         ids.into_iter().map(|id| self.load(&id).and_then(|meta| self.item(meta))).collect()
+    }
+
+    /// Optional package icons are bounded data. The webview checks SVG markup before display.
+    pub fn icons(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let entries = self.list()?;
+        let mut icons = std::collections::BTreeMap::new();
+        for item in entries {
+            if item.meta.kind != Kind::Skill || !item.files.iter().any(|file| file == "assets/icon.svg") {
+                continue;
+            }
+            let skill_dir = self.dir.join(&item.meta.id);
+            let assets_dir = skill_dir.join("assets");
+            let icon_path = assets_dir.join("icon.svg");
+            let safe_directory = [skill_dir.as_path(), assets_dir.as_path()].iter().all(|dir| {
+                fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+            });
+            if !safe_directory || !fs::symlink_metadata(&icon_path).is_ok_and(|meta| {
+                meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 65_536
+            }) {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(icon_path) {
+                icons.insert(item.meta.id, content);
+            }
+        }
+        Ok(icons)
+    }
+
+    /// Only current, acknowledged, explicitly activated revisions can be invoked.
+    pub fn slash_skills(&self, harness: &str, cwd: &Path) -> Result<Vec<SlashSkill>, String> {
+        let entries = self.list()?;
+        let known_ids: std::collections::HashSet<_> = entries.iter().map(|item| item.meta.id.as_str()).collect();
+        let mut skills = Vec::new();
+        for item in entries.iter().filter(|item| item.meta.kind == Kind::Skill) {
+            let meta = &item.meta;
+            if !item.findings.is_empty() && meta.acknowledged.as_deref() != Some(meta.sha256.as_str()) {
+                continue;
+            }
+            if meta.required_skills.iter().any(|id| !known_ids.contains(id.as_str())) {
+                continue;
+            }
+            let active = meta.activations.iter().any(|activation| {
+                activation.harness == harness
+                    && activation.sha256 == meta.sha256
+                    && (activation.scope == Scope::User
+                        || (activation.scope == Scope::Project && activation.project.as_deref() == cwd.to_str()))
+                    && matches!(Self::status(meta, Some(activation)), "active" | "prompt")
+            });
+            if !active { continue; }
+            // Reject out-of-band package edits until the user reviews and reimports them.
+            let Ok(files) = self.files(&meta.id) else { continue };
+            if content_hash(&files) != meta.sha256 { continue; }
+            let path = self.dir.join(&meta.id).join("SKILL.md");
+            if !fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file() && !entry.file_type().is_symlink()) {
+                continue;
+            }
+            skills.push(SlashSkill { id: meta.id.clone(), description: meta.description.clone(), path });
+        }
+        Ok(skills)
     }
 
     /// Add or update an item. Updating keeps activations; they show as outdated until the
@@ -712,6 +778,15 @@ fn root(state: &AppState, project_id: Option<String>, session_id: Option<String>
 #[tauri::command]
 pub async fn skills_list(app: AppHandle) -> crate::Result<Vec<Item>> {
     crate::blocking(move || library(&app)?.list()).await
+}
+
+#[tauri::command]
+pub async fn skills_icons(app: AppHandle) -> crate::Result<std::collections::BTreeMap<String, String>> {
+    crate::blocking(move || library(&app)?.icons()).await
+}
+
+pub(crate) fn active_slash_skills(app: &AppHandle, harness: &str, cwd: &Path) -> Result<Vec<SlashSkill>, String> {
+    library(app)?.slash_skills(harness, cwd)
 }
 #[tauri::command]
 pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> crate::Result<Item> {

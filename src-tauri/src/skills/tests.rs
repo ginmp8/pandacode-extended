@@ -82,6 +82,40 @@ fn imports_activates_for_claude_and_codex_and_reports_drift() {
 }
 
 #[test]
+fn slash_commands_require_current_activation_and_respect_scope() {
+    let fx = Fixture::new();
+    fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL)]));
+    let root = fx.repo();
+    assert!(fx.library.slash_skills("codex", &root).unwrap().is_empty());
+    fx.library.activate("release-notes", "codex", Scope::Project, Some(&root), false).unwrap();
+    assert_eq!(fx.library.slash_skills("codex", &root).unwrap()[0].id, "release-notes");
+    assert!(fx.library.slash_skills("claude", &root).unwrap().is_empty());
+    let other = fx.base.join("unrelated");
+    fs::create_dir_all(&other).unwrap();
+    assert!(fx.library.slash_skills("codex", &other).unwrap().is_empty());
+    let source = fx.base.join("source/release");
+    fs::write(source.join("SKILL.md"), "---\nname: Release Notes\ndescription: Updated.\n---\nNew instructions.").unwrap();
+    fx.import(Kind::Skill, &source);
+    assert!(fx.library.slash_skills("codex", &root).unwrap().is_empty());
+    fx.library.activate("release-notes", "codex", Scope::Project, Some(&root), false).unwrap();
+    assert_eq!(fx.library.slash_skills("codex", &root).unwrap().len(), 1);
+    fs::write(fx.library.dir.join("release-notes/SKILL.md"), "unreviewed disk edit").unwrap();
+    assert!(fx.library.slash_skills("codex", &root).unwrap().is_empty());
+}
+
+#[test]
+fn optional_svg_icons_are_returned_only_when_safe_to_read() {
+    let fx = Fixture::new();
+    fx.import(Kind::Skill, &fx.folder("release", &[
+        ("SKILL.md", SKILL),
+        ("assets/icon.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M3 3h18\"/></svg>"),
+    ]));
+    assert!(fx.library.icons().unwrap()["release-notes"].contains("<svg"));
+    fs::write(fx.library.dir.join("release-notes/assets/icon.svg"), vec![b'x'; 65_537]).unwrap();
+    assert!(fx.library.icons().unwrap().is_empty());
+}
+
+#[test]
 fn codex_project_skills_go_where_codex_reads_them() {
     let fx = Fixture::new();
     let root = fx.repo();

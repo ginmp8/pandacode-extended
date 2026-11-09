@@ -664,8 +664,13 @@ test('detail controls preserve panel scroll across redraws, confirmations and as
   await uninstall.click();
   await expect(detail.getByRole('button',{name:'Cancel uninstall'})).toBeVisible();
   await expect.poll(scroll).toBe(beforeConfirm);
-  await detail.getByRole('button',{name:'Cancel uninstall'}).click();
-  await expect.poll(scroll).toBe(beforeConfirm);
+  const cancel=detail.getByRole('button',{name:'Cancel uninstall'});
+  // This confirmation is below the viewport: scrolling to reveal its button
+  // is an intentional user action, not a redraw-induced jump.
+  await cancel.scrollIntoViewIfNeeded();
+  const beforeCancel=await scroll();
+  await cancel.click();
+  await expect.poll(scroll).toBe(beforeCancel);
 });
 
 test('switching skill tabs restores their independent scroll positions after refresh', async ({page}) => {

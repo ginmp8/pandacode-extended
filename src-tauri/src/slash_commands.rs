@@ -499,6 +499,25 @@ fn normalize(catalog: &mut Catalog, provider: &str) {
         .for_each(|warning| *warning = bounded(warning, 500));
 }
 
+/// Decorate the provider catalog without changing its cache or shadowing native commands.
+pub(crate) fn append_library_skills(catalog: &mut Catalog, entries: Vec<crate::skills::SlashSkill>) {
+    let mut used: HashSet<String> = catalog.commands.iter().map(|entry| entry.name.clone()).collect();
+    for skill in entries {
+        let name = format!("/{}", skill.id);
+        if catalog.commands.len() >= 1000 || !valid_name(&name) || !used.insert(name.clone()) { continue; }
+        catalog.commands.push(SlashCommand {
+            id: format!("pandacode:skill:{}", skill.id),
+            name,
+            description: bounded(&skill.description, 500),
+            argument_hint: Some("[instructions]".into()),
+            kind: "prompt".into(),
+            source: "PandaCode skill".into(),
+            reason: None,
+            invocation: Invocation::Skill { name: skill.id, path: skill.path },
+        });
+    }
+}
+
 const LOCAL_ACTIONS: &[(&str, &str, &str, Option<&str>)] = &[
     ("/new", "Start a new task in this project", "new", None),
     (
@@ -659,6 +678,22 @@ pub async fn resolve(provider: &str, cwd: &Path, text: &str) -> Result<Resolutio
     resolve_from_catalog(provider, text, &catalog)
 }
 
+/// Rebuild the library overlay for every dispatch so disabling or updating a skill
+/// invalidates previously suggested commands without touching the harness cache.
+pub async fn resolve_with_library(
+    app: &tauri::AppHandle, provider: &str, cwd: &Path, text: &str,
+) -> Result<Resolution, String> {
+    let Some((name, _)) = split_command(text) else { return Ok(plain_resolution(text)) };
+    if is_local_control(name) { return resolve_from_catalog(provider, text, &Catalog::default()) }
+    let mut commands = catalog(provider, cwd, false).await?;
+    let app = app.clone();
+    let provider_id = provider.to_owned();
+    let cwd = cwd.to_owned();
+    let skills = crate::blocking(move || crate::skills::active_slash_skills(&app, &provider_id, &cwd)).await?;
+    append_library_skills(&mut commands, skills);
+    resolve_from_catalog(provider, text, &commands)
+}
+
 /// A command may be removed after the picker cached it. Claude's fresh
 /// initialization metadata is the final check before writing its user message.
 pub fn validate_claude_start(text: &str, metadata: &Value) -> Result<(), String> {
@@ -729,15 +764,24 @@ fn resolve_from_catalog(
             result.accepts_attachments = provider != "kimi" && !result.maintenance;
         }
         Invocation::Skill { name, path } => {
-            result.prompt = format!(
-                "${name}{}",
-                if arguments.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {arguments}")
+            if provider == "codex" {
+                result.prompt = format!(
+                    "${name}{}",
+                    if arguments.is_empty() { String::new() } else { format!(" {arguments}") }
+                );
+                result.skill = Some((name.clone(), path.clone()));
+            } else {
+                // Other harnesses cannot consume Codex skill content blocks.
+                let metadata = std::fs::symlink_metadata(path).map_err(|_| "The activated skill is unavailable. Refresh skills and reactivate it.")?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 131_072 {
+                    return Err("The activated skill is unavailable or exceeds the prompt size limit.".into());
                 }
-            );
-            result.skill = Some((name.clone(), path.clone()));
+                let content = std::fs::read_to_string(path).map_err(|_| "The activated skill is not valid UTF-8.")?;
+                result.prompt = format!(
+                    "Apply the explicitly enabled PandaCode skill \"{name}\". Its SKILL.md and reference files are located in {}. Read supporting files when needed, and do not execute skill scripts automatically.\n\n<skill_instructions>\n{content}\n</skill_instructions>\n\nUser request: {arguments}",
+                    path.parent().unwrap_or(path).display()
+                );
+            }
         }
         Invocation::Action(action) => {
             if !arguments.is_empty() && !action_accepts_arguments(action) {

@@ -1291,6 +1291,7 @@ async fn recipes_dry_run(recipe: recipes::Recipe, provider: String, slash: Vec<S
 }
 #[tauri::command]
 async fn list_slash_commands(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     force: Option<bool>,
@@ -1306,14 +1307,21 @@ async fn list_slash_commands(
         };
         (task.provider, cwd)
     };
-    if cached_only.unwrap_or(false) {
-        return slash_commands::snapshot(&provider, &cwd);
+    let mut catalog = if cached_only.unwrap_or(false) {
+        slash_commands::snapshot(&provider, &cwd)?
+    } else {
+        slash_commands::catalog(&provider, &cwd, force.unwrap_or(false)).await?
+    };
+    match blocking(move || skills::active_slash_skills(&app, &provider, &cwd)).await {
+        Ok(entries) => slash_commands::append_library_skills(&mut catalog, entries),
+        Err(_) => catalog.warnings.push("Could not read activated PandaCode skills. Review Skills & rules.".into()),
     }
-    slash_commands::catalog(&provider, &cwd, force.unwrap_or(false)).await
+    Ok(catalog)
 }
 
 #[tauri::command]
 async fn resolve_slash_command(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     text: String,
@@ -1331,7 +1339,7 @@ async fn resolve_slash_command(
         };
         (task.provider, cwd)
     };
-    slash_commands::resolve(&provider, &cwd, &text).await
+    slash_commands::resolve_with_library(&app, &provider, &cwd, &text).await
 }
 
 struct PreparedCommand {
@@ -1357,6 +1365,7 @@ async fn prepare_command(
     state: &AppState,
     session_id: &str,
     text: Option<&str>,
+    app: Option<&tauri::AppHandle>,
 ) -> Result<Option<PreparedCommand>> {
     let (provider, cwd, original) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -1386,7 +1395,11 @@ async fn prepare_command(
             original,
         )
     };
-    let resolution = slash_commands::resolve(&provider, &cwd, &original).await?;
+    let resolution = if let Some(app) = app {
+        slash_commands::resolve_with_library(app, &provider, &cwd, &original).await?
+    } else {
+        slash_commands::resolve(&provider, &cwd, &original).await?
+    };
     if resolution.action.is_some() {
         return Err("This command opens a PandaCode control. Run it from the message box.".into());
     }
@@ -1413,7 +1426,7 @@ pub(crate) async fn team_maintenance_command(
     session_id: &str,
     text: &str,
 ) -> Result<Option<PreparedCommand>> {
-    team_command_gate(prepare_command(state, session_id, Some(text)).await)
+    team_command_gate(prepare_command(state, session_id, Some(text), None).await)
 }
 
 /// Where a prompt goes. A mirror goes to its host even when a team was saved on it (a
@@ -2032,7 +2045,7 @@ async fn launch_operation_admitted(
     let command = if prepared.is_some() {
         prepared
     } else if goal.is_none() && team_admission.is_none() && !cloud_attach && kind.is_none() {
-        prepare_command(&state, &session_id, text.as_deref()).await?
+        prepare_command(&state, &session_id, text.as_deref(), Some(&app)).await?
     } else {
         None
     };
@@ -4436,6 +4449,7 @@ pub fn run() {
                 token_saver::token_saver_install,
                 task_usage::task_token_usage,
                 skills::skills_list,
+                skills::skills_icons,
                 skills::skills_import_folder,
                 skills::skills_import_github,
                 skills::skills_activate,

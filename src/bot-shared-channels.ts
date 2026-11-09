@@ -13,7 +13,7 @@ export interface SharedChannelSummary {
 }
 export interface SharedChannelMessage {
   id: string;
-  kind: 'user' | 'reply' | 'assigned' | 'bot_post' | 'bot_request' | 'direct_delegation';
+  kind: 'user' | 'reply' | 'council_status' | 'assigned' | 'bot_post' | 'bot_request' | 'direct_delegation';
   authorBotId: string | null;
   recipientIds?: string[];
   text: string;

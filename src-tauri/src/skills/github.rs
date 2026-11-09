@@ -1,10 +1,13 @@
 //! Import a skill or rule from a GitHub repository path through the user's `gh` login.
 use base64::Engine;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{Files, MAX_BYTES, MAX_FILES};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PACKAGE_REQUESTS: usize = 512;
+const MAX_PACKAGE_DIRS: usize = 512;
+const MAX_PACKAGE_TIME: Duration = Duration::from_secs(300);
 
 pub(super) fn valid_repo(repo: &str) -> bool {
     let mut parts = repo.split('/');
@@ -104,7 +107,18 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
     if git_ref.is_some_and(|r| !valid_ref(r)) {
         return Err("That branch, tag or commit is not valid.".into());
     }
-    let commit = api(&format!("repos/{repo}/commits/{}", git_ref.unwrap_or("HEAD")))?["sha"]
+    // Count both directory and blob requests, including the initial ref lookup.
+    // The GitHub CLI's per-request timeout does not bound a recursive walk.
+    let started = Instant::now();
+    let mut requests = 0usize;
+    let mut request = |endpoint: &str| -> Result<serde_json::Value, String> {
+        if requests >= MAX_PACKAGE_REQUESTS || started.elapsed() >= MAX_PACKAGE_TIME {
+            return Err("This skill exceeded the bounded GitHub request/time budget. Use a smaller skill package.".into());
+        }
+        requests += 1;
+        api(endpoint)
+    };
+    let commit = request(&format!("repos/{repo}/commits/{}", git_ref.unwrap_or("HEAD")))?["sha"]
         .as_str()
         .ok_or("GitHub did not return a commit for that ref.")?
         .to_string();
@@ -112,7 +126,7 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
     let mut total = 0;
     let mut pending = vec![path.to_string()];
     while let Some(current) = pending.pop() {
-        let value = api(&format!("repos/{repo}/contents/{current}?ref={commit}"))?;
+        let value = request(&format!("repos/{repo}/contents/{current}?ref={commit}"))?;
         let entries = match value {
             serde_json::Value::Array(entries) => entries,
             single => vec![single],
@@ -125,11 +139,16 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
         for entry in entries {
             let entry_path = entry["path"].as_str().unwrap_or_default().to_string();
             let name = entry["name"].as_str().unwrap_or_default();
-            if name.starts_with('.') || !valid_path(&entry_path) {
+            if name == ".git" || !valid_path(&entry_path) {
                 continue;
             }
             match entry["type"].as_str() {
-                Some("dir") => pending.push(entry_path),
+                Some("dir") => {
+                    if pending.len() >= MAX_PACKAGE_DIRS {
+                        return Err("This skill has too many nested directories. Use a smaller package.".into());
+                    }
+                    pending.push(entry_path);
+                },
                 Some("file") => {
                     if files.len() >= MAX_FILES {
                         return Err(format!("That path holds more than {MAX_FILES} files."));
@@ -148,7 +167,7 @@ pub(super) fn fetch_using(repo: &str, path: &str, git_ref: Option<&str>, api: su
                         if !sha.bytes().all(|b| b.is_ascii_hexdigit()) || sha.len() != 40 {
                             return Err(format!("Invalid file object ID for {entry_path}."));
                         }
-                        api(&format!("repos/{repo}/git/blobs/{sha}"))?
+                        request(&format!("repos/{repo}/git/blobs/{sha}"))?
                     };
                     if detail["encoding"] != "base64" {
                         return Err(format!("GitHub did not provide Base64 file contents for {entry_path}."));
@@ -234,5 +253,31 @@ mod tests {
         );
         assert!(selection("https://github.com/o/r/tree/feature/a/skills/pdf", "", None).is_err());
         assert!(selection("https://github.com/o/r/tree/main/skills/pdf", "skills/other", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_directory_only_tree_cannot_trigger_unbounded_api_calls() {
+        let commit = "a".repeat(40);
+        let calls = Cell::new(0);
+        let api = |endpoint: &str| {
+            calls.set(calls.get() + 1);
+            if endpoint == format!("repos/me/deep/commits/{commit}") {
+                return Ok(serde_json::json!({"sha":commit}));
+            }
+            let path = endpoint.strip_prefix("repos/me/deep/contents/")
+                .and_then(|value| value.split_once("?ref=").map(|(path, _)| path))
+                .ok_or_else(|| format!("Unexpected endpoint: {endpoint}"))?;
+            let next = if path.is_empty() { "deep".into() } else { format!("{path}/deep") };
+            Ok(serde_json::json!([{"type":"dir","path":next,"name":"deep"}]))
+        };
+        let error = fetch_using("me/deep", "", Some(&commit), &api).unwrap_err();
+        assert!(error.contains("request/time budget"), "{error}");
+        assert!(calls.get() <= MAX_PACKAGE_REQUESTS);
     }
 }

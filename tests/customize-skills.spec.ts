@@ -69,9 +69,11 @@ test('Customize navigation remains separate from the Bots bar', async ({page}) =
   await page.goto('/');
   const customize = page.getByRole('button', {name:'Customize', exact:true});
   await expect(customize).toBeVisible();
+  await page.screenshot({path:'test-results/customize-navigation-before.png',fullPage:true});
   await expect(page.locator('.sidebar-customize + #sidebar-bots-panel + #sidebar-bots')).toHaveCount(1);
   await customize.click();
   await expect(page.getByRole('heading', {name:'Customize',exact:true})).toBeVisible();
+  await page.screenshot({path:'test-results/customize-navigation-after.png',fullPage:true});
   await page.getByRole('button', {name:'Back to workspace'}).click();
   await expect(page.locator('#customize-hub')).toBeHidden();
 });
@@ -85,6 +87,7 @@ test('GitHub Add has only URL and optional ref, then imports only selected skill
   await form.getByRole('textbox', {name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
   await form.getByRole('button', {name:'Scan repository'}).click();
   await expect(page.getByRole('region',{name:'Discovered GitHub skills'})).toContainText('Found 3 skills');
+  await page.screenshot({path:'test-results/customize-github-discovery.png',fullPage:true});
   await expect(page.getByRole('button', {name:'Import selected (0)'})).toBeDisabled();
   await page.getByRole('region', {name:'Discovered GitHub skills'}).getByRole('checkbox').nth(1).check();
   await expect(page.getByRole('button', {name:'Import selected (1)'})).toBeEnabled();
@@ -101,6 +104,7 @@ test('ZIP import reports replacement without changing harness activation', async
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
   await expect(page.getByText('ZIP sample',{exact:true}).first()).toBeVisible();
+  await page.screenshot({path:'test-results/customize-zip-installed.png',fullPage:true});
   await page.getByRole('button', {name:'Add',exact:true}).click();
   await page.getByRole('menuitem', {name:'ZIP archive'}).click();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('ZIP replacement requires confirmation');
@@ -165,7 +169,9 @@ test('aggregate-only completion is not falsely described as streamed progress', 
   const choices=page.getByRole('region',{name:'Discovered GitHub skills'}).getByRole('checkbox');
   for(let i=0;i<3;i++)await choices.nth(i).check();
   await page.getByRole('button',{name:'Import selected (3)'}).click();
-  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Incremental progress events were not received');
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Native incremental progress events were not received');
+  await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed with errors');
+  await expect(page.getByRole('region',{name:'Skill operation status'})).not.toContainText('Completed successfully');
 });
 
 test('read-only preview cannot load remote resources or execute scripts', async ({page}) => {
@@ -234,4 +240,21 @@ test('a source cannot be removed while its import is in flight', async ({page}) 
   await page.evaluate(() => (window as any).__releaseImport());
   await expect(remove).toBeEnabled();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Completed successfully');
+});
+
+test('checkbox selection preserves keyboard focus after the workspace redraw', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button', {name:'Add',exact:true}).click();
+  await page.getByRole('menuitem', {name:'GitHub link'}).click();
+  await page.getByRole('textbox', {name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('button', {name:'Scan repository'}).click();
+  const checkbox = page.getByRole('region', {name:'Discovered GitHub skills'})
+    .getByRole('checkbox').nth(1);
+  await checkbox.focus();
+  await page.keyboard.press('Space');
+  await expect(checkbox).toBeChecked();
+  await expect(checkbox).toBeFocused();
+  await page.keyboard.press('Space');
+  await expect(checkbox).not.toBeChecked();
+  await expect(checkbox).toBeFocused();
 });

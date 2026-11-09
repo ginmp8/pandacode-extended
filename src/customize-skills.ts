@@ -242,7 +242,11 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   function draw(): void {
     if (disposed) return;
     const active = document.activeElement as HTMLInputElement | null;
-    const activeName = active && host.contains(active) ? active.name : '';
+    const withinHost = !!active && host.contains(active);
+    const activeName = withinHost ? active.name : '';
+    const activeSkillPath = withinHost ? active.dataset.selectSkill : undefined;
+    const activeAction = withinHost ? active.dataset.customize : undefined;
+    const activeActionId = withinHost ? active.dataset.id : undefined;
     const cursor = activeName && typeof active?.selectionStart === 'number' ? active.selectionStart : -1;
     host.innerHTML = `<div class="customize-page">
       <header class="customize-page-header">
@@ -274,9 +278,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         </section>
       </div>
     </div>`;
-    if (activeName) {
-      const next = [...host.querySelectorAll<HTMLInputElement>('input[name]')].find(input => input.name === activeName);
-      if (next) { next.focus({ preventScroll: true }); if (cursor >= 0 && next.type !== 'checkbox' && next.type !== 'search') next.setSelectionRange(cursor,cursor); }
+    const next = activeSkillPath !== undefined
+      ? [...host.querySelectorAll<HTMLInputElement>('[data-select-skill]')].find(input => input.dataset.selectSkill === activeSkillPath)
+      : activeAction
+        ? [...host.querySelectorAll<HTMLElement>('[data-customize]')].find(button => button.dataset.customize === activeAction && button.dataset.id === activeActionId)
+        : activeName
+          ? [...host.querySelectorAll<HTMLInputElement>('input[name]')].find(input => input.name === activeName)
+          : undefined;
+    if (next && !next.hasAttribute('disabled')) {
+      next.focus({ preventScroll: true });
+      if (cursor >= 0 && next instanceof HTMLInputElement && !['checkbox','search'].includes(next.type)) next.setSelectionRange(cursor,cursor);
     }
     if (detail) void loadPreview();
   }
@@ -369,8 +380,11 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       op.completed=[...op.packages.values()].filter(item=>isTerminal(item.phase)).length;
       const failures=[...op.packages.values()].filter(item=>item.phase==='failed').length;
       op.state = failures || result.skipped.length ? (failures===op.total?'failed':'partial') : 'success';
-      if (!op.progressSeen && op.total>1) {
-        op.detail='Incremental progress events were not received; these are final command results only.';
+      if (!op.progressSeen && op.total > 1) {
+        // Final native results are authoritative for installed package contents,
+        // but missing incremental events violate the progress acceptance contract.
+        op.state = 'partial';
+        op.detail = 'Native incremental progress events were not received. Package outcomes are final, but progress delivery failed; verify the installed skills.';
       }
       if (changingRefSource && !failures && !result.skipped.length) {
         if (changingRefSource!==result.source.id) {

@@ -198,7 +198,7 @@
 .customize-skill-tab.selected{color:var(--text);background:var(--ds-thumb);box-shadow:var(--ds-thumb-shadow)}
 .customize-skill-tab .customize-skill-tab-button{display:flex;align-items:center;flex:1 1 auto;min-width:0;max-width:100%;gap:6px;height:var(--control,32px);padding:0 30px 0 9px;border-radius:var(--ds-radius-control);font-size:var(--ds-text-ui);font-weight:var(--weight-regular);color:inherit;white-space:nowrap;--press:1}
 .customize-skill-tab .customize-skill-tab-button.selected{font-weight:var(--weight-medium)}
-.customize-skill-tab-button .inspector-tab-label{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.2;background:transparent;color:inherit;font:inherit}
+.customize-skill-tab-button .customize-skill-tab-label{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.2;background:transparent;color:inherit;font:inherit}
 .customize-skill-tab-button>.icon{flex:none;width:var(--icon-sm);height:var(--icon-sm)}
 .customize-skill-tab .customize-skill-tab-close{position:absolute;right:3px;top:50%;transform:translateY(-50%);width:24px;height:24px;padding:0;border-radius:var(--ds-radius-chip);background:transparent;color:var(--muted);opacity:0;--press:1}
 .customize-skill-tab:is(:hover,:focus-within,.selected) .customize-skill-tab-close{opacity:1}

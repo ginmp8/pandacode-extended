@@ -183,3 +183,32 @@
 @keyframes customize-spin{to{transform:rotate(360deg)}}
 @media(max-width:740px){.customize-skill-footer{align-items:stretch;flex-direction:column}.customize-try-controls{justify-content:space-between}.customize-harness-grid{grid-template-columns:minmax(0,1fr)}}
 @media(prefers-reduced-motion:reduce){.customize-spinner{animation:none}.customize-harness-row input[type=checkbox]::before{transition:none}}
+
+/* Inert list view; the native dialog uses the top layer and traps keyboard focus. */
+.customize-detail-dialog{width:min(900px,calc(100vw - 32px));max-width:min(92vh,1040px);padding:0;margin:auto;border:0;border-radius:var(--ds-radius-card);background:transparent;color:var(--text);overflow:auto;box-shadow:var(--ds-shadow-card)}
+.customize-detail-dialog::backdrop{background:rgba(0,0,0,.66)}
+.customize-detail-dialog>.customize-detail{display:grid;gap:10px;margin:0;padding:clamp(16px,2vw,26px);border-radius:var(--ds-radius-card);background:var(--ds-card);box-shadow:none}
+.customize-detail-dialog .customize-detail-heading{align-items:flex-start;gap:20px}
+.customize-detail-dialog .customize-detail-heading>div{min-width:0}
+.customize-source-link{display:inline-flex;align-items:center;font-size:var(--ds-text-meta);color:var(--accent);text-underline-offset:3px;margin-top:10px}
+.customize-detail-dialog .customize-preview-shell{margin-top:4px}
+.customize-detail-dialog .customize-lifecycle{margin-top:4px}
+.customize-file-tree{min-width:0}
+.customize-file-tree ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.customize-file-tree ul[role=group]{padding-left:15px;border-left:1px solid var(--ds-border);margin-left:9px}
+.customize-file-tree li{margin:0;min-width:0}
+.customize-file-tree li>button{width:100%;text-align:left;min-width:0;display:flex;align-items:center;gap:7px}
+.customize-file-tree li>button>span:last-child{overflow-wrap:anywhere;white-space:normal;min-width:0}
+.customize-folder-entry{color:var(--text);font-weight:var(--weight-medium)}
+.customize-tree-caret{width:12px;flex:0 0 12px;color:var(--muted);text-align:center}
+.customize-file-entry{padding-left:20px}
+.customize-file-tree li[role=treeitem]:focus-within>button{outline-offset:-2px}
+.customize-active-text{color:var(--ds-success)!important}
+.customize-harness-statuses{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.customize-dialog-toast,.customize-dialog-error{padding:10px 12px;border-radius:var(--ds-radius-inner);font-size:var(--ds-text-meta);line-height:1.45;overflow-wrap:anywhere}
+.customize-dialog-toast{border:1px solid var(--ds-success);color:var(--ds-success);background:var(--ds-card-inner)}
+.customize-dialog-error{border:1px solid var(--ds-danger);color:var(--ds-danger)}
+.customize-replace-confirm{padding:14px;display:grid;gap:10px;background:var(--ds-card-inner);border:1px solid var(--ds-warn);border-radius:var(--ds-radius-inner)}
+.customize-replace-confirm strong{font-size:var(--ds-text-meta)}
+.customize-replace-confirm p{font-size:var(--ds-text-meta);color:var(--muted);line-height:1.5}
+@media(max-width:740px){.customize-detail-dialog{width:calc(100vw - 18px);max-height:calc(100vh - 18px)}.customize-detail-dialog .customize-preview-shell{grid-template-columns:1fr}}

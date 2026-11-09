@@ -42,6 +42,67 @@ fn council_state(config: CouncilConfig) -> (AppState, String) {
 fn reviewer_assignment(key: &str, lens: &str) -> Value {
     json!({"key":key,"profileId":"fast","name":key,"prompt":format!("Review {key}."),"files":[],"councilLens":lens})
 }
+#[test]
+fn full_access_parent_council_reviewer_enforces_native_read_only_without_profile_mutation() {
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET mode='full' WHERE id=?1", [&sid]).unwrap();
+    }
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("secure-review", "security")]
+    })).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (run, _) = claim(&state, action);
+    assert_eq!(run.config.mode, "plan", "Council must not inherit full access");
+    assert!(run.config.reviewer_boundary);
+    assert!(run.config.skill.is_none());
+    assert!(run.config.goal.is_none());
+    assert!(run.config.codex_settings.is_none());
+    let store = state.store.lock().unwrap();
+    assert_eq!(store.session(&sid).unwrap().mode, "full", "ordinary bot session remains unchanged");
+    let saved = load(&store, &sid).unwrap().unwrap();
+    let worker = &saved.workers[0];
+    let binding = worker.reviewer_binding.as_ref().unwrap();
+    assert_eq!(binding.seat_id, worker.id);
+    assert_eq!(binding.round, 1);
+    assert_eq!(binding.snapshot.provider, worker.provider);
+    assert_eq!(binding.snapshot.tool_policy, reviewer_security::ReviewerToolPolicy::NativeReadOnly);
+    assert!(binding.delivery_id.is_none());
+    assert!(binding.reviewer_bot_id.is_none());
+}
+
+#[test]
+fn mismatched_immutable_reviewer_binding_blocks_admission() {
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("review", "correctness")]
+    })).unwrap();
+    let mut team = saved(&state, &sid);
+    let reviewer_session = team.workers[0].session_id.clone();
+    team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.provider = "forged".into();
+    store_team(&state, &mut team);
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    let error = reviewer_boundary(&state.store.lock().unwrap(), &reviewer_session, Some(&admission))
+        .unwrap_err();
+    assert!(error.contains("reviewer_session_mismatch"), "{error}");
+}
+
+#[test]
+fn persisted_pre_s1_automatic_council_seat_gets_the_same_native_guard() {
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("legacy-review", "security")]
+    })).unwrap();
+    let mut team = saved(&state, &sid);
+    let reviewer_session = team.workers[0].session_id.clone();
+    team.workers[0].reviewer_binding = None;
+    store_team(&state, &mut team);
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    assert!(reviewer_boundary(&state.store.lock().unwrap(), &reviewer_session, Some(&admission)).unwrap());
+    assert!(!reviewer_boundary(&state.store.lock().unwrap(), &sid, Some(&admission)).unwrap());
+}
+
 fn saved(state: &AppState, sid: &str) -> TeamSnapshot {
     load(&state.store.lock().unwrap(), sid).unwrap().unwrap()
 }

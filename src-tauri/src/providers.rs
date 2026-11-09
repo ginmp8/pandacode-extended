@@ -4025,6 +4025,89 @@ mod tests {
         assert!(validate_reasoning_effort("hermes", Some("bad\nflag")).is_err());
     }
 
+    #[test]
+    fn reviewer_policy_blocks_unsupported_harnesses_and_privilege_inheritance() {
+        let mut cfg = config("codex");
+        cfg.mode = "plan".into();
+        cfg.reviewer_boundary = true;
+        assert!(enforce_reviewer_policy(&cfg, false).is_ok());
+        assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("read_only_policy_violation"));
+        cfg.mode = "full".into();
+        assert!(enforce_reviewer_policy(&cfg, false).is_err());
+        cfg.mode = "plan".into();
+        for provider in ["opencode", "kimi", "pi", "github-copilot", "zcode", "hermes"] {
+            cfg.provider = provider.into();
+            assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
+        }
+        for provider in ["claude", "glm", "mimo", "codex"] {
+            cfg.provider = provider.into();
+            assert!(enforce_reviewer_policy(&cfg, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn reviewer_codex_native_sandbox_and_empty_mcp_override_full_access() {
+        let mut cfg = config("codex");
+        cfg.reviewer_boundary = true;
+        cfg.mode = "plan".into();
+        let mut command = Command::new("codex");
+        configure_command(&mut command, &cfg);
+        let args: Vec<_> = command.as_std().get_args()
+            .map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|a| a[0] == "-c" && a[1] == "mcp_servers={}"));
+        let protocol = Protocol::new(cfg);
+        let permissions = protocol.codex_permissions(true);
+        assert_eq!(permissions["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(permissions["sandboxPolicy"]["networkAccess"], false);
+        assert_eq!(permissions["approvalPolicy"], "never");
+    }
+
+    #[test]
+    fn reviewer_claude_family_exposes_only_read_tools_with_hooks_disabled() {
+        for provider in ["claude", "glm", "mimo"] {
+            let mut cfg = config(provider);
+            cfg.reviewer_boundary = true;
+            cfg.mode = "plan".into();
+            let mut command = Command::new(provider);
+            configure_command(&mut command, &cfg);
+            let args: Vec<_> = command.as_std().get_args()
+                .map(|arg| arg.to_string_lossy().into_owned()).collect();
+            assert!(args.windows(2).any(|a| a[0] == "--permission-mode" && a[1] == "plan"));
+            assert!(args.windows(2).any(|a| a[0] == "--tools" && a[1] == "Read,Glob,Grep"));
+            assert!(args.windows(2).any(|a| a[0] == "--settings" && a[1].contains("disableAllHooks")));
+            assert!(!args.iter().any(|arg| arg == "--allow-dangerously-skip-permissions"));
+        }
+    }
+
+    #[test]
+    fn reviewer_permission_requests_are_declined_without_user_approval() {
+        let mut codex = config("codex");
+        codex.mode = "plan".into();
+        codex.reviewer_boundary = true;
+        let mut protocol = Protocol::new(codex);
+        let change = protocol.receive(json!({
+            "id":77,"method":"item/fileChange/requestApproval",
+            "params":{"command":"touch forbidden.txt"}
+        })).unwrap();
+        assert_eq!(change.write[0]["result"]["decision"], "decline");
+        assert!(change.events.iter().all(|e| e.kind != "approval"));
+        let escalation = protocol.receive(json!({
+            "id":78,"method":"item/permissions/requestApproval",
+            "params":{"permissions":{"network":true}}
+        })).unwrap();
+        assert_eq!(escalation.write[0]["result"]["permissions"], json!({}));
+        let mut claude = config("claude");
+        claude.mode = "plan".into();
+        claude.reviewer_boundary = true;
+        let mut protocol = Protocol::new(claude);
+        let shell = protocol.receive(json!({
+            "type":"control_request","request_id":"unsafe",
+            "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch forbidden.txt"}}
+        })).unwrap();
+        assert_eq!(shell.write[0]["response"]["response"]["behavior"], "deny");
+        assert!(shell.events.iter().all(|e| e.kind != "approval"));
+    }
+
     pub(super) fn config(provider: &str) -> RunConfig {
         RunConfig {
             session_id: "local".into(),

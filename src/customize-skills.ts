@@ -683,7 +683,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         ? `Replaced previous central library source ${result.previousSource?.location ?? 'unknown'}. ${plural(result.impactedHarnesses.length,'harness')} may require reactivation. Native harness files were not overwritten.`
         : 'Installed into the central library. No harness was activated.';
       note = `${result.replaced ? 'Replaced' : 'Installed'} ${result.item.name}.`;
-      detail = {kind:'installed',id:result.item.id,file:'SKILL.md'}; tab='installed';
+      // Installing does not open a blocking dialog; users can inspect the new row explicitly.
+      tab='installed';
     } catch (cause) {
       op.completed = 1; op.state = 'failed'; op.detail = message(cause);
       if(op.detail.startsWith('ZIP replacement requires confirmation:')) pendingZipReplacement = path;

@@ -724,7 +724,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'confirm-activation':if(pendingActivation?.id===id && pendingActivation.harness===button.dataset.harness) void setHarnessEnabled(id,pendingActivation.harness,true,true);break;
       case 'reactivate-skill':void setHarnessEnabled(id,button.dataset.harness??'',true);break;
       case 'try-skill':void tryInstalledSkill(id);break;
-      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingUninstall=null;tryHarness='';draw();host.querySelector('.customize-detail')?.scrollIntoView({block:'nearest'});break;
+      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingUninstall=null;tryHarness='';draw();host.querySelector('.customize-detail')?.scrollIntoView({block:'start'});break;
       case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;draw();break;
       case 'close-detail':detail=null;pendingUninstall=null;pendingActivation=null;previewSerial++;draw();break;
       case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;

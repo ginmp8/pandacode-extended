@@ -1765,20 +1765,22 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    let reviewer_boundary = architect::reviewer_boundary(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
     let config = RunConfig {
         session_id: session_id.clone(),
         provider: session.provider,
         model: session.model,
         reasoning_effort: session.reasoning_effort,
-        mode: session.mode,
+        mode: if reviewer_boundary { "plan".into() } else { session.mode },
+        reviewer_boundary,
         cwd,
         resume_id: session.resume_id,
         prompt,
         instructions: String::new(),
         images,
-        skill,
-        goal: admission.goal,
-        codex_settings: session.codex_settings,
+        skill: if reviewer_boundary { None } else { skill },
+        goal: if reviewer_boundary { None } else { admission.goal },
+        codex_settings: if reviewer_boundary { None } else { session.codex_settings },
     };
     architect::mark_started(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
     let mut agent = RunningAgent::new(tx, stopped.clone());
@@ -1828,6 +1830,7 @@ fn prepare_cloud_attach(
         model: session.model,
         reasoning_effort: session.reasoning_effort,
         mode: session.mode,
+        reviewer_boundary: false,
         cwd,
         resume_id: session.resume_id,
         prompt: String::new(),
@@ -2341,6 +2344,11 @@ async fn launch_operation_admitted(
                 }
             }
         });
+        // Council reviewers must never receive application host tools, including
+        // bot memories, schedules, approvals, messages, Connections or skills.
+        let (host, team_tools_missing) = if config.reviewer_boundary {
+            (None, false)
+        } else {
         let host = if let Some(admission) = team.as_ref() {
             architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
         } else {
@@ -2361,6 +2369,8 @@ async fn launch_operation_admitted(
         let host = Some(agent_tools::with_preview(host, app.clone(), session_id.clone(), stopped.clone()));
         let host = Some(turn_changes::with_host(host, tracker.clone(), stopped.clone()));
         let host = Some(session_titles::with_host(title_run.as_ref(), host, stopped.clone()));
+            (host, team_tools_missing)
+        };
         // What the next turn's warm agent needs: this launch and the tools it listed.
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.

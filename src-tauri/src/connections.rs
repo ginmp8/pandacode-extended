@@ -723,6 +723,7 @@ mod tests {
             model: "default".into(),
             reasoning_effort: None,
             mode: "full".into(),
+            reviewer_boundary: false,
             cwd: dir.clone(),
             resume_id: None,
             prompt: "hello".into(),

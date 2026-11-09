@@ -2,6 +2,7 @@
 mod briefing;
 pub(crate) mod coordination;
 mod council;
+pub(crate) mod reviewer_security;
 pub(crate) mod internal_turns;
 pub(crate) mod profiles;
 mod routing;
@@ -231,6 +232,9 @@ pub struct Worker {
     /// This worker is a Council reviewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub council: Option<CouncilSeat>,
+    /// Immutable reviewer identity and authority; absent in legacy Council seats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_binding: Option<reviewer_security::ReviewerBinding>,
     /// A reviewer's report had no score and it was asked once for the line; a second miss fails it.
     /// Separate from `nudged`, which any reply resets, so this can never ask twice.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -607,6 +611,24 @@ pub(crate) fn check_manual(store: &Store, sid: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Require native reviewer tool restrictions on every Council turn, including
+/// resumes from old persisted automatic Council sessions.
+pub(crate) fn reviewer_boundary(store: &Store, sid: &str, admission: Option<&Admission>) -> Result<bool> {
+    let Some(admission) = admission else { return Ok(false) };
+    if admission.parent == sid { return Ok(false) }
+    let team = load(store, &admission.parent)?.ok_or("Reviewer team unavailable.")?;
+    let worker = team.workers.iter().find(|worker| worker.session_id == sid)
+        .ok_or("Reviewer worker unavailable.")?;
+    if worker.council.is_none() { return Ok(false) }
+    if !worker.read_only {
+        return Err("read_only_policy_violation: Council reviewer must be read-only.".into());
+    }
+    if let Some(binding) = &worker.reviewer_binding {
+        binding.validate(&team, worker)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn validate_admission(
     store: &Store,
     sid: &str,
@@ -1980,6 +2002,11 @@ fn dispatch_as(
                         old.result_revision = team.dispatch_revision + 1;
                     }
                 }
+                let reviewer_binding = seat.as_ref().map(|seat| {
+                    reviewer_security::ReviewerBinding::native(
+                        &team, &id, &profile.provider, &profile.model, seat,
+                    )
+                });
                 ids.push(id.clone());
                 team.workers.push(Worker {
                     id,
@@ -2011,6 +2038,7 @@ fn dispatch_as(
                     nudged: false,
                     reported: false,
                     council: seat,
+                    reviewer_binding,
                     score_nudged: false,
                     wrote_at: 0,
                 });

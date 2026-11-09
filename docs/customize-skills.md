@@ -53,3 +53,20 @@ Repository enumeration resolves explicitly scoped subtrees before scanning. When
 The native GitHub discovery/source persistence/sync engine and regression tests are selectively reused from [PR #128](https://github.com/ginmp8/pandacode-extended/pull/128); its Settings-based prototype UI is not copied. Tauri skills commands and their original shared library remain authoritative. This feature does **not** implement Agent/Plugin management, a plugin runtime, a Git working-tree clone, automatic activation, or changes to existing bot permission boundaries.
 
 Optional skill packages retain their own copyright and licenses separately from PandaCode Extended's application attribution.
+
+## Reliability and verification
+
+The GitHub import operation uses one immutable commit. During manual or startup synchronization,
+a moving repository/ref is resolved once per batch, preventing mixed revisions within that source.
+An interrupted import leaves a bounded recovery intent; the next read reconciles only committed
+packages that match its reviewed selection, source and commit.
+
+The UI distinguishes Installed, Replaced, Updated, Unchanged, Skipped and Failed. It uses
+authoritative terminal per-package outcomes and explicitly reports missing incremental events,
+rather than simulating progress. Only failed items are eligible for Retry failed. ZIP replacement
+suspends old GitHub automatic tracking and never rewrites native harness copies. A source ref
+change requires a new scan and explicit selected-package import.
+
+SKILL.md previews show untrusted Markdown without executing interactive message widgets or
+loading remote images. ZIP frontmatter validation rejects malformed required fields and
+duplicate name/description keys before staging files.

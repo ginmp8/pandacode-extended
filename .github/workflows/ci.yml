@@ -111,7 +111,7 @@ jobs:
       - name: Exercise Customize Skills and ZIP/GitHub UI
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
-            npx playwright test tests/customize-skills.spec.ts --workers=1
+            npx playwright test tests/customize-skills.spec.ts tests/skills-library.spec.ts --workers=1
 
   rust:
     name: Rust check and tests (Linux)

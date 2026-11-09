@@ -456,12 +456,12 @@ pub(crate) fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
 
 /// Finalize the assignment whose turn just ended, copy its result into the channel or sender
 /// thread, then promote the next queued collaboration request if the ordinary gateway started it.
-pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool, reply: &str) {
+pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool, reply: &str, council_denied: bool) {
     let state=app.state::<AppState>();
     // The request this run carried; with none recorded (an older run), the oldest active one.
     let tracked = take_running(session_id);
     let (message_id, delivery_id) = match &tracked { Some(Running::Message(id)) => (Some(id.as_str()),None), Some(Running::Delivery(id)) => (None,Some(id.as_str())), None => (None,None) };
-    let direct = if delivery_id.is_some() { None } else {
+    let direct = if delivery_id.is_some() || council_denied { None } else {
         let Ok(store)=state.store.lock() else { return };
         store.db.query_row("SELECT id,source_bot_id,target_bot_id,source_channel_id,source_external_id FROM bot_messages WHERE target_session_id=?1 AND status='in_progress' AND (?2 IS NULL OR id=?2) ORDER BY created_at,id LIMIT 1", params![session_id,message_id], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))).optional().ok().flatten()
     };
@@ -488,13 +488,19 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
             let store = match state.store.lock() { Ok(store)=>store, Err(_)=>return };
         let status=if successful {"completed"} else {"failed"};
         let _=store.db.execute("UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3 WHERE id=?1",params![delivery_id,status,crate::storage::now()]);
-        if successful && !reply.trim().is_empty() {
+        if council_denied {
+            // An attributed Council decision is a channel notice, not a bot's
+            // completed answer. Exclude it from future task history.
+            let _=store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,created_at) VALUES(?1,?2,'council_status',?3,?4)",params![crate::storage::id(),channel_id,reply.trim(),crate::storage::now()]);
+        } else if successful && !reply.trim().is_empty() {
             let _=store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at) VALUES(?1,?2,'reply',?3,?4,?5)",params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()]);
         }
         let _=update_message_status(&store,&message_id);
             let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
         }
-        collaboration::finish_delivery(app, &delivery_id, reply).await;
+        if !council_denied {
+            collaboration::finish_delivery(app, &delivery_id, reply).await;
+        }
     }
     // The window may have sent the next queued entry itself; credit it to its request.
     let running=state.agents.lock().map(|agents|agents.contains_key(session_id)).unwrap_or(false);

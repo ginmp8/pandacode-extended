@@ -79,10 +79,10 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
-  const name = bot?.name ?? (message.kind === 'user' ? 'You' : 'Bot');
+  const name = bot?.name ?? (message.kind === 'user' ? 'You' : message.kind === 'council_status' ? 'Council' : 'Bot');
   const targets = (message.recipientIds ?? []).map(id => bots.find(item => item.id === id)?.name ?? 'Bot');
   const label = message.kind === 'bot_request' ? `Requested ${targets.join(' and ')}`
-    : message.kind === 'bot_post' ? 'Channel update' : '';
+    : message.kind === 'bot_post' ? 'Channel update' : message.kind === 'council_status' ? 'Review not approved' : '';
   const marker = message.kind === 'bot_request' ? `<small class="bc-message-status">${escape([label, message.status].filter(Boolean).join(' · '))}</small>`
     : label ? `<small class="bc-message-status">${escape(label)}</small>`
     : message.status === 'Failed' || message.status === 'Stopped' ? `<small class="bc-message-status">${escape(message.status)}</small>` : '';

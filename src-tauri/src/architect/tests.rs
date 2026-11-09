@@ -46,12 +46,12 @@ fn running_worker(
 fn bot_delivery_waits_for_team_completion_and_queued_turns_keep_the_team_route() {
     let (state, sid) = state_fixture();
     let store = state.store.lock().unwrap();
-    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+    assert!(!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "ordinary non-Council bot teams must retain per-turn callbacks");
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.config.council = Some(CouncilConfig::default());
     save(&store, &mut team).unwrap();
-    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+    assert!(!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "a direct bot conversation with Council retains its original callback policy");
 
     // A live Shared Channel delivery with Council must wait for the team gate.
@@ -72,37 +72,43 @@ fn bot_delivery_waits_for_team_completion_and_queued_turns_keep_the_team_route()
         [&sid],
     ).unwrap();
     assert_eq!(crate::bots::team_state(&store, &sid).unwrap().as_deref(), Some("running"));
-    assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+    assert!(!!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "an ended lead turn must not complete an active team delivery");
 
     team.status = "waiting".into();
     save(&store, &mut team).unwrap();
-    assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+    assert!(!!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "Council rounds and corrections can outlive the lead turn");
 
     team.status = "completed".into();
     save(&store, &mut team).unwrap();
-    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap());
+    assert!(!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting));
     assert_eq!(crate::bots::team_state(&store, &sid).unwrap().as_deref(), Some("completed"),
         "a queued message must still use Architect for a configured team");
 
+    // A completed native team is not a channel approval when the Council
+    // had no passing round, even though finish_team can end at a round limit.
+    assert!(matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(),
+        crate::bots::ChannelCouncilOutcome::Denied(_)));
     team.status = "failed".into();
     save(&store, &mut team).unwrap();
-    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+    assert!(!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "a failed team must be allowed to report failure");
 
     team.status = "paused".into();
     save(&store, &mut team).unwrap();
-    assert!(!crate::bots::delivery_may_settle(&store, &sid).unwrap(),
+    assert!(!!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "a paused team must not emit a success callback");
 
     // Council disabled on the same delivery restores the legacy per-turn path.
     team.config.council = None;
     save(&store, &mut team).unwrap();
-    assert!(crate::bots::delivery_may_settle(&store, &sid).unwrap());
+    assert!(!matches!(crate::bots::channel_council_outcome(&store, &sid).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting));
     let ordinary = store.create_session(&project, "claude", "default", "ask").unwrap();
     assert!(crate::bots::team_state(&store, &ordinary.id).unwrap().is_none());
-    assert!(crate::bots::delivery_may_settle(&store, &ordinary.id).unwrap(),
+    assert_eq!(crate::bots::channel_council_outcome(&store, &ordinary.id).unwrap(),
+        crate::bots::ChannelCouncilOutcome::Ordinary);
+    assert!(!matches!(crate::bots::channel_council_outcome(&store, &ordinary.id).unwrap(), crate::bots::ChannelCouncilOutcome::Waiting),
         "regular bot conversations retain turn-based completion");
 }
 

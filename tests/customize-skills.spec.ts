@@ -387,12 +387,7 @@ test('Try in chat opens a new projectless chat with a prefilled skill command', 
   const detail=page.getByRole('region',{name:'Read-only skill preview'});
   await detail.getByRole('checkbox',{name:'Enable Release notes for Codex'}).check();
   await detail.getByRole('button',{name:'Try in chat'}).click();
-  try {
-    await expect(page.locator('.customize-error')).toHaveCount(0);
-  } catch (assertion) {
-    const messages=await page.locator('.customize-error').allTextContents();
-    throw new Error(`Try in chat returned: ${messages.join(' | ')}\n${String(assertion)}`);
-  }
+  await expect(page.locator('.customize-error')).toHaveCount(0);
   await expect(page.locator('#customize-hub')).toBeHidden();
   await expect(page.locator('#prompt')).toHaveValue('/release-notes ');
   await expect(page.locator('#prompt')).toBeFocused();
@@ -572,7 +567,7 @@ test('long skill names are truncated in inspector tabs but retain full accessibl
   const detail=page.getByRole('region',{name:'Read-only skill preview'});
   const tab=detail.getByRole('tab',{name:fullName});
   await expect(tab).toHaveAttribute('title',fullName);
-  const visibleLabel=await tab.locator('.inspector-tab-label').textContent();
+  const visibleLabel=await tab.locator('.customize-skill-tab-label').textContent();
   expect(Array.from(visibleLabel??'')).toHaveLength(23);
   expect(visibleLabel?.endsWith('…')).toBe(true);
   await expect(detail.getByRole('button',{name:`Close ${fullName}`})).toBeVisible();

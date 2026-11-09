@@ -584,18 +584,18 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       const characters = Array.from(name);
       const label = characters.length > 22 ? characters.slice(0, 22).join('') + '…' : name;
       const selected = detail !== null && detailKey(detail) === key;
-      return `<div class="customize-skill-tab inspector-tab${selected ? ' selected' : ''}" data-skill-tab="${esc(key)}">
-        <button type="button" role="tab" class="customize-skill-tab-button inspector-tab-button${selected ? ' selected' : ''}"
+      return `<div class="customize-skill-tab${selected ? ' selected' : ''}" data-skill-tab="${esc(key)}">
+        <button type="button" role="tab" class="customize-skill-tab-button${selected ? ' selected' : ''}"
           data-customize="activate-skill-tab" data-key="${esc(key)}" aria-controls="customize-skill-panel-content"
           aria-selected="${selected}" aria-label="${esc(name)}" title="${esc(name)}" tabindex="${selected ? 0 : -1}">
-          ${icon(value.kind === 'installed' ? 'skill' : 'github')}<span class="inspector-tab-label" aria-hidden="true">${esc(label)}</span>
+          ${icon(value.kind === 'installed' ? 'skill' : 'github')}<span class="customize-skill-tab-label" aria-hidden="true">${esc(label)}</span>
         </button>
-        <button type="button" class="customize-skill-tab-close inspector-tab-close" data-customize="close-skill-tab"
+        <button type="button" class="customize-skill-tab-close" data-customize="close-skill-tab"
           data-key="${esc(key)}" aria-label="Close ${esc(name)}" title="Close ${esc(name)}" tabindex="-1">${icon('close')}</button>
       </div>`;
     }).join('');
-    return `<div class="customize-side-tabbar inspector-strip">
-      <nav class="customize-skill-tabs inspector-tabs" role="tablist" aria-label="Open skill previews">${tabs}</nav>
+    return `<div class="customize-side-tabbar">
+      <nav class="customize-skill-tabs" role="tablist" aria-label="Open skill previews">${tabs}</nav>
     </div>`;
   }
 

@@ -375,6 +375,7 @@ test('Try in chat opens a new projectless chat with a prefilled skill command', 
   const detail=page.getByRole('region',{name:'Read-only skill preview'});
   await detail.getByRole('checkbox',{name:'Enable Release notes for Codex'}).check();
   await detail.getByRole('button',{name:'Try in chat'}).click();
+  await expect(page.locator('.customize-error')).toHaveCount(0);
   await expect(page.locator('#customize-hub')).toBeHidden();
   await expect(page.locator('#prompt')).toHaveValue('/release-notes ');
   await expect(page.locator('#prompt')).toBeFocused();

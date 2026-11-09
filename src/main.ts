@@ -5309,7 +5309,7 @@ async function startTask(projectId: string): Promise<void> {
 }
 /** A projectless chat: its own folder, the usual harness and model. `from` is a New task moved to No project:
  *  the chat takes over its choices, typed text and attachments, so the draft is left empty and discarded on the way out. */
-async function createChat(from?: Session, providerOverride?: string): Promise<void> {
+async function createChat(from?: Session, providerOverride?: string): Promise<Session | undefined> {
   if (creatingTask) return;
   closeModelPicker(); closeProjectPicker();
   const generation = state.generation;
@@ -5317,7 +5317,7 @@ async function createChat(from?: Session, providerOverride?: string): Promise<vo
   const unused = from || providerOverride ? undefined : state.sessions.find(task => chatTask(task) && task.lastPromptAt == null && !task.resumeId && !task.archived && !deletedSessions.has(task.id) && taskStage(task) !== 'completed');
   if (unused) {
     if (state.projectFilter) setProjectFilter('');
-    state.query = ''; closeModal(); await selectSession(unused.id, true); return;
+    state.query = ''; closeModal(); await selectSession(unused.id, true); return unused;
   }
   const harness = providerOverride ? state.providers.find(p => p.id === providerOverride && p.installed)
     : state.providers.find(p => p.id === state.defaultProvider && p.installed)
@@ -5349,9 +5349,10 @@ async function createChat(from?: Session, providerOverride?: string): Promise<vo
     if ((from.id === state.sessionId && state.attachments.length) || state.moodboardAttachments.get(from.id)?.length) notify('Project files and moodboards stay with the project, so they were not moved to the chat.');
     state.moodboardAttachments.delete(from.id);
   }
-  if (generation !== state.generation) { renderNavigation(); return; }
+  if (generation !== state.generation) { renderNavigation(); return created; }
   if (state.projectFilter) setProjectFilter('');
   state.query = ''; closeModal(); await selectSession(created.id, true);
+  return created;
 }
 /** Drops a chat's hidden project (and its empty folder) once no task uses it. */
 async function forgetChat(projectId: string): Promise<void> {
@@ -5713,7 +5714,13 @@ async function tryCustomizeSkill(id: string, harnessId: string): Promise<void> {
     throw new Error('The selected harness is not installed or available for chats.');
   }
   if (state.view !== 'conversation') setWorkspaceView('conversation');
-  await createChat(undefined, harnessId);
+  const created = await createChat(undefined, harnessId);
+  if (!created || created.provider !== harnessId) {
+    throw new Error('Could not create a chat with the selected harness.');
+  }
+  // A sessions-changed event may advance the generation while chat_create is pending.
+  // Try in chat still targets the exact new chat, never an unrelated existing draft.
+  if (state.sessionId !== created.id) await selectSession(created.id, true);
   const chat = session();
   if (!chat || !chatTask(chat) || chat.provider !== harnessId) {
     throw new Error('Could not open a chat with the selected harness.');
@@ -5730,7 +5737,7 @@ async function tryCustomizeSkill(id: string, harnessId: string): Promise<void> {
   }
 }
 let customizeShown = false;
-let customizeMount: {dispose(): void} | undefined;
+let customizeMount: {dispose(): void;refresh(): Promise<void>} | undefined;
 let customizeOpening: Promise<void> | undefined;
 let customizeReturnFocus: HTMLElement | null = null;
 async function toggleCustomize(): Promise<void> {
@@ -5743,6 +5750,8 @@ async function toggleCustomize(): Promise<void> {
   $('#customize-hub').hidden = false;
   $('.workspace').classList.add('customize-open');
   document.querySelector<HTMLElement>('.sidebar-actions > [data-action="toggle-customize"]')?.setAttribute('aria-pressed', 'true');
+  if (customizeMount) void customizeMount.refresh();
+  else $('#customize-hub').innerHTML = '<div class="customize-startup-loading" role="status" aria-label="Loading skills manager">Loading skills manager…</div>';
   customizeOpening ??= import('./customize-skills').then(({mountCustomizeSkills}) => {
     if (!customizeMount) customizeMount = mountCustomizeSkills($('#customize-hub'), {
       call, subscribe: listener => subscribe('skills-operation-progress', listener),

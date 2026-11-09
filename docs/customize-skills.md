@@ -12,7 +12,7 @@ Installed skill rows use a safe, inert SVG thumbnail when the package provides `
 
 ### Activation, uninstall and trying a skill
 
-Customize shows a loading indicator while initial library, activation and source information is read; it never displays an empty-library message before that read finishes. Refresh preserves existing items while rechecking. Successful activation and deactivation display a brief accessible notification; failures retain the existing activation and show an actionable error.
+Customize shows an immediate loading message while the Skills UI module loads, then a loading indicator while initial library, activation and source information is read; it never displays an empty-library message before that read finishes. Refresh preserves existing items while rechecking. Successful activation and deactivation display a brief accessible notification; failures retain the existing activation and show an actionable error.
 
 Open an installed skill to **Enable** or **Disable** it for any available harness at user scope. Risk findings must be reviewed and explicitly acknowledged before enablement. Project-scope activations remain available in Settings. A stale or edited file may require a separate reactivation; PandaCode does not silently overwrite changed harness files.
 

@@ -419,6 +419,9 @@ impl Library {
         if previous.is_none() && folder.exists() {
             return Err(format!("{id} already exists on disk and is not a managed library entry."));
         }
+        // Validate peer metadata before creating any staging folder. A malformed
+        // dependency manifest must not leave temporary library content behind.
+        let required_skills = peer_dependencies(&files)?;
         let staged = self.dir.join(format!(".{id}.staging"));
         let rollback = self.dir.join(format!(".{id}.rollback"));
         fs::create_dir(&staged).map_err(|e| format!("Could not stage {id}: {e}"))?;
@@ -445,7 +448,6 @@ impl Library {
         let auto_update = previous.as_ref().and_then(|p| p.auto_update);
         let auto_available = previous.as_ref().filter(|p| p.source.location.eq_ignore_ascii_case(&source.location))
             .is_some_and(|p| p.auto_available);
-        let required_skills = peer_dependencies(&files)?;
         let meta = Meta {
             acknowledged: accepted,
             auto_update,
@@ -986,7 +988,7 @@ pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_i
 }
 
 #[tauri::command]
-pub async fn skills_sync_tracked(app: AppHandle, scope: String, id: Option<String>, operation_id: String) -> crate::Result<sync::SyncReport> {
+pub async fn skills_sync_tracked(app: AppHandle, scope: String, id: Option<String>, ids: Option<Vec<String>>, operation_id: String) -> crate::Result<sync::SyncReport> {
     if operation_id.is_empty() || operation_id.len() > 80
         || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
         return Err("Invalid skill operation identifier.".into());
@@ -997,6 +999,13 @@ pub async fn skills_sync_tracked(app: AppHandle, scope: String, id: Option<Strin
             "all" => sync::Selection::All,
             "skill" => sync::Selection::One(id.ok_or("Choose a skill ID to synchronize.")?),
             "source" => sync::Selection::Ids(library.selected_skill_ids(&id.ok_or("Choose a saved source.")?)?),
+            "ids" => {
+                let ids = ids.ok_or("Choose which failed skills to retry.")?;
+                if ids.is_empty() || ids.len() > 300 {
+                    return Err("Retry requires between one and 300 installed skill IDs.".into());
+                }
+                sync::Selection::Ids(ids)
+            }
             _ => return Err("Unknown skill synchronization scope.".into()),
         };
         let events_app = app.clone();

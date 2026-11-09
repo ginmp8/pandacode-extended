@@ -63,6 +63,8 @@ pub struct SourceImport {
     pub source: SavedSource,
     pub imported: Vec<String>,
     pub skipped: Vec<catalog::Skipped>,
+    /// Authoritative per-package terminal results even if a webview missed events.
+    pub results: Vec<SourceProgress>,
 }
 
 /// A frozen import request; grouping source coordinates prevents argument drift.
@@ -102,8 +104,9 @@ impl Library {
         let path = self.pending_import_path();
         let temp = self.dir.join(".skill-sources.pending.json.tmp");
         let content = serde_json::to_vec(pending).map_err(|e| e.to_string())?;
-        fs::write(&temp, content).and_then(|_| fs::rename(&temp, &path))
-            .map_err(|e| format!("Could not stage skill source recovery: {e}"))
+        let result = fs::write(&temp, content).and_then(|_| fs::rename(&temp, &path));
+        if result.is_err() { let _ = fs::remove_file(&temp); }
+        result.map_err(|e| format!("Could not stage skill source recovery: {e}"))
     }
 
     /// Recover an interrupted file replacement on Windows and Unix.
@@ -262,6 +265,7 @@ impl Library {
         })?;
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
+        let mut results = Vec::new();
         let mut successful_paths = Vec::new();
         let total = chosen.len();
         let mut completed = 0usize;
@@ -271,10 +275,14 @@ impl Library {
                 path: skill_path.clone(), name: skill.name.clone(), reason,
             };
             let mut report = |phase: &str, current: usize, detail: Option<String>| {
-                progress(SourceProgress {
+                let event = SourceProgress {
                     path: skill_path.clone(), name: skill.name.clone(), phase: phase.into(),
                     completed: current, total, detail,
-                });
+                };
+                if matches!(phase, "installed" | "updated" | "unchanged" | "skipped" | "failed") {
+                    results.push(event.clone());
+                }
+                progress(event);
             };
             if skill.files > MAX_FILES || skill.bytes > MAX_BYTES as u64 {
                 let reason = format!("{} exceeds the validated package size or file limit.", skill.name);
@@ -345,7 +353,7 @@ impl Library {
         self.save_sources(&store)?;
         fs::remove_file(self.pending_import_path())
             .map_err(|e| format!("The import completed but its recovery marker could not be cleared: {e}"))?;
-        Ok(SourceImport { source, imported, skipped })
+        Ok(SourceImport { source, imported, skipped, results })
     }
 
 

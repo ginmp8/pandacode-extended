@@ -175,7 +175,7 @@ impl Library {
         let current = self.files(&meta.id)?;
         let edited = content_hash(&current) != meta.sha256;
         if meta.source.commit.as_deref() == Some(commit.as_str()) && !edited {
-            return Ok(SyncEvent { id: meta.id.clone(), status: "skipped".into(), old_commit: old_commit.clone(), new_commit: old_commit,
+            return Ok(SyncEvent { id: meta.id.clone(), status: "unchanged".into(), old_commit: old_commit.clone(), new_commit: old_commit,
                 impacted_harnesses, detail: "Already at the selected source commit.".into() });
         }
         let main = files.iter().find(|(name, _)| name == "SKILL.md").ok_or("The upstream package no longer contains SKILL.md.")?;
@@ -259,7 +259,7 @@ impl Library {
             else { report.skipped.push(format!("{}: {}", meta.id, event.detail)); }
             let phase = if event.status == "updated" { "updated" }
                 else if event.status == "error" { "failed" }
-                else if event.detail.starts_with("Already at") { "unchanged" }
+                else if event.status == "unchanged" { "unchanged" }
                 else { "skipped" };
             progress(SyncProgress { id:meta.id.clone(), name:meta.name.clone(), phase:phase.into(),
                 completed:index + 1, total, detail:Some(event.detail.clone()) });

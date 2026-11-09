@@ -533,6 +533,7 @@ test('each opened skill has a closable tab with its own selected file and previe
   await page.getByRole('button',{name:'Inspect ZIP sample'}).click();
   await expect(tabs.getByRole('tab')).toHaveCount(2);
   await expect(tabs.getByRole('tab',{name:'ZIP sample'})).toHaveAttribute('aria-selected','true');
+  await page.screenshot({path:'test-results/customize-skill-tabs.png',animations:'disabled'});
   await expect(detail.locator('.customize-preview-toolbar')).toContainText('SKILL.md');
   await expect(detail.getByRole('button',{name:'Rendered'})).toHaveAttribute('aria-pressed','true');
 
@@ -612,6 +613,7 @@ test('skill inspector resizes by drag and keyboard, persists its width, and rese
   await page.mouse.up();
   const expanded=await detail.boundingBox();
   expect(expanded!.width).toBeGreaterThan(initial!.width + 90);
+  await page.screenshot({path:'test-results/customize-resized-inspector.png',animations:'disabled'});
   const saved=await page.evaluate(() => localStorage.getItem('pandacode.customizeSkillsInspectorWidth'));
   expect(Number(saved)).toBeGreaterThan(initial!.width + 90);
   await separator.focus();

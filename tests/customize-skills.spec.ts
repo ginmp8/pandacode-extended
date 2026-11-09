@@ -409,6 +409,8 @@ test('skill details open in a solid right inspector with the Files row tree',asy
   const dialog=page.getByRole('region',{name:'Read-only skill preview'});
   await expect(dialog).toBeVisible();
   await expect(page.locator('.customize-detail-dialog')).toHaveCount(0);
+  await expect(dialog.locator('#customize-preview-content')).toContainText('Release notes');
+  await page.screenshot({path:'test-results/customize-installed-side-panel.png',animations:'disabled'});
   const box = await dialog.boundingBox(), main = await page.locator('.customize-page').boundingBox();
   expect(box).not.toBeNull();
   expect(main).not.toBeNull();

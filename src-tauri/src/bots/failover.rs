@@ -396,7 +396,7 @@ pub async fn bot_failover_decide(app: tauri::AppHandle, session_id: String, acti
             } else {
                 // Nothing will run this message again, so settle its channel or bot delivery as
                 // failed now (recoverable from the channel); a later turn must not finish it.
-                super::shared_channels::run_finished(&app, &session_id, false, "").await;
+                super::shared_channels::run_finished(&app, &session_id, false, "", false).await;
             }
             let summary = if ask.cause == Cause::Limit && ask.resets_at.is_some() { "Waiting for the reset" } else { "Hold dismissed" };
             super::note(&app, &bot.id, "failover", summary, json!({"sessionId": session_id}));

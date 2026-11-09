@@ -76,4 +76,19 @@ The CI browser job publishes the `customize-issue-129-ui-review` artifact, with
 before/after navigation and Customize GitHub/ZIP screenshots from the preview
 harness. Those screenshots are design review evidence, **not** native packaged
 Windows/macOS/Linux desktop acceptance. Focused Rust tests exercise native
-package import and the shared Tauri progress event payload contract.
+package import and the shared Tauri progress event payload contract. The
+Windows CI job runs the dedicated native catalog, ZIP and GitHub acquisition
+regression tests, alongside the Linux and macOS jobs.
+
+## Visual review observations
+
+The browser preview CI job captures both the workspace before opening Customize
+and the standalone Customize view after navigation, plus GitHub discovery and
+ZIP-install states. The Customize hub hides the underlying workspace content
+visually and from keyboard focus without disposing of chats or running tasks.
+Checkboxes in skill discovery explicitly use control-sized geometry rather
+than inheriting the application's full-width generic input rule; automated
+layout assertions verify readable skill rows and keyboard focus retention.
+
+These captures are preview-harness evidence; packaged desktop acceptance is
+separate. The CI artifact is named `customize-issue-129-ui-review`.

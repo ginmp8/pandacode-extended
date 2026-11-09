@@ -245,19 +245,15 @@ impl Library {
             return Err("Select between one and 300 skills from the scanned collection.".into());
         }
         let id = id_for(&repo, &path, git_ref.as_deref());
+        // Validate the source and register an in-flight import under the SAME
+        // source lock. There must not be a removal window between these steps.
         {
-            let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+            let _source_guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
             let existing = self.read_sources()?;
             if existing.sources.len() >= MAX_SAVED_SOURCES
                 && existing.sources.iter().all(|s| s.repo != repo || s.path != path || s.git_ref != git_ref) {
                 return Err(format!("At most {MAX_SAVED_SOURCES} saved sources are supported. Remove an unused configuration first."));
             }
-        }
-        // Register the import before repository verification. Otherwise removing
-        // this saved source during a slow scan could succeed and the import would
-        // silently recreate the configuration after fetching packages.
-        {
-            let _source_guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
             let mut active = ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?;
             if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
                 return Err("Another GitHub skill import is still running.".into());

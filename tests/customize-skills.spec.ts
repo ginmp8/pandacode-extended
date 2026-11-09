@@ -359,10 +359,23 @@ test('safety findings require a separate explicit consent to activate', async ({
   await page.getByRole('button',{name:'Inspect setup'}).click();
   const detail=page.getByRole('region',{name:'Read-only skill preview'});
   const toggle=detail.getByRole('checkbox',{name:'Enable setup for Codex'});
-  await toggle.check();
+  await toggle.click(); // Safety consent intentionally rejects an immediate checked state.
   await expect(toggle).not.toBeChecked();
   await expect(detail).toContainText('safety finding');
   await detail.getByRole('button',{name:'I reviewed the findings. Enable anyway'}).click();
   await expect(toggle).toBeChecked();
   await expect(page.locator('.customize-toast')).toContainText('setup enabled for Codex');
+});
+
+test('Try in chat opens a new projectless chat with a prefilled skill command', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/',{waitUntil:'domcontentloaded'});
+  await page.getByRole('button',{name:'Customize',exact:true}).click();
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  await detail.getByRole('checkbox',{name:'Enable Release notes for Codex'}).check();
+  await detail.getByRole('button',{name:'Try in chat'}).click();
+  await expect(page.locator('#customize-hub')).toBeHidden();
+  await expect(page.locator('#prompt')).toHaveValue('/release-notes ');
+  await expect(page.locator('#prompt')).toBeFocused();
 });

@@ -5737,7 +5737,7 @@ async function tryCustomizeSkill(id: string, harnessId: string): Promise<void> {
   }
 }
 let customizeShown = false;
-let customizeMount: {dispose(): void;refresh(): Promise<void>} | undefined;
+let customizeMount: {dispose(): void;refresh(): Promise<void>;closeDetail():void} | undefined;
 let customizeOpening: Promise<void> | undefined;
 let customizeReturnFocus: HTMLElement | null = null;
 async function toggleCustomize(): Promise<void> {
@@ -5763,7 +5763,7 @@ async function toggleCustomize(): Promise<void> {
 function closeCustomize(restoreFocus = true): void {
   if (!customizeShown) return;
   customizeShown = false;
-  document.querySelector<HTMLDialogElement>('#customize-hub .customize-detail-dialog')?.close();
+  customizeMount?.closeDetail();
   $('#customize-hub').hidden = true;
   $('.workspace').classList.remove('customize-open');
   document.querySelector<HTMLElement>('.sidebar-actions > [data-action="toggle-customize"]')?.setAttribute('aria-pressed', 'false');

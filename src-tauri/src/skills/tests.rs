@@ -276,6 +276,92 @@ fn unmanaged_skills_are_reported_and_never_replaced() {
     assert_eq!(details, ["Not in the library.", "Same name as a library skill, not written by PandaCode."]);
 }
 
+
+#[test]
+fn replacing_an_unmanaged_harness_skill_requires_consent_and_preserves_a_backup() {
+    let fx = Fixture::new();
+    let target = fx.home.join(".codex/skills/release-notes");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("SKILL.md"), "original instructions").unwrap();
+    fs::write(target.join("custom.txt"), "user content").unwrap();
+    fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL), ("assets/icon.svg", "<svg/>")]));
+
+    let refused = fx.library.activate("release-notes", "codex", Scope::User, None, false).unwrap_err();
+    assert!(refused.contains("did not create it"));
+    assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "original instructions");
+
+    let changed = fx.library.activate_with_replacement("release-notes", "codex", Scope::User, None, false, true).unwrap();
+    assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), SKILL);
+    assert!(target.join("assets/icon.svg").is_file());
+    assert_eq!(changed.kept.len(), 1);
+    let backup = PathBuf::from(changed.kept[0].strip_prefix("Original skill backed up at ").unwrap());
+    assert_eq!(fs::read_to_string(backup.join("SKILL.md")).unwrap(), "original instructions");
+    assert_eq!(fs::read_to_string(backup.join("custom.txt")).unwrap(), "user content");
+    assert_eq!(backup.parent().unwrap(), fx.home.join(".codex/.pandacode-skill-backups"));
+    assert!(!fx.home.join(".codex/skills").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("backup")));
+    assert_eq!(Fixture::cell(&fx.library.matrix(None).unwrap(), "codex", "release-notes", Scope::User).status, "active");
+
+    fx.library.deactivate("release-notes", "codex", Scope::User, None).unwrap();
+    assert!(!target.exists());
+    assert!(backup.join("custom.txt").is_file());
+}
+
+#[test]
+fn explicit_replacement_never_bypasses_managed_drift_or_non_directory_targets() {
+    let fx = Fixture::new();
+    fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL)]));
+    fx.library.activate("release-notes", "codex", Scope::User, None, false).unwrap();
+    let target = fx.home.join(".codex/skills/release-notes");
+    fs::write(target.join("SKILL.md"), "hand edited").unwrap();
+    assert!(fx.library.activate_with_replacement("release-notes", "codex", Scope::User, None, false, true)
+        .unwrap_err().contains("edited on disk"));
+    assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "hand edited");
+    assert!(!fx.home.join(".codex/.pandacode-skill-backups").exists());
+
+    let fx = Fixture::new();
+    fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL)]));
+    let file = fx.home.join(".codex/skills/release-notes");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "not a directory").unwrap();
+    assert!(fx.library.activate_with_replacement("release-notes", "codex", Scope::User, None, false, true)
+        .unwrap_err().contains("not a regular skill directory"));
+    assert_eq!(fs::read_to_string(file).unwrap(), "not a directory");
+}
+
+#[test]
+fn invalid_staging_input_cannot_modify_an_unmanaged_skill() {
+    let fx = Fixture::new();
+    let target = fx.home.join(".claude/skills/release-notes");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("SKILL.md"), "unmanaged").unwrap();
+    assert!(adapter::replace_unmanaged_folder(
+        &fx.home.join(".claude/skills"),
+        "release-notes",
+        &[("../other.txt".into(), b"malicious".to_vec())],
+    ).unwrap_err().contains("Unsafe skill file path"));
+    assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "unmanaged");
+    assert!(!fx.home.join(".claude/other.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn replacement_does_not_follow_an_unmanaged_symlink() {
+    use std::os::unix::fs::symlink;
+    let fx = Fixture::new();
+    let target = fx.home.join(".claude/skills/release-notes");
+    let external = fx.base.join("external");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("SKILL.md"), "external").unwrap();
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    symlink(&external, &target).unwrap();
+    assert!(adapter::replace_unmanaged_folder(
+        &fx.home.join(".claude/skills"),
+        "release-notes",
+        &[("SKILL.md".into(), SKILL.as_bytes().to_vec())],
+    ).unwrap_err().contains("not a regular skill directory"));
+    assert_eq!(fs::read_to_string(external.join("SKILL.md")).unwrap(), "external");
+}
+
 #[test]
 fn findings_need_acknowledgement_and_updates_wait_for_activation() {
     let fx = Fixture::new();

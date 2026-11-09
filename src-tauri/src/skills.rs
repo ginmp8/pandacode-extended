@@ -562,6 +562,11 @@ impl Library {
     }
 
     pub fn activate(&self, id: &str, harness: &str, scope: Scope, root: Option<&Path>, acknowledge: bool) -> Result<Change, String> {
+        self.activate_with_replacement(id, harness, scope, root, acknowledge, false)
+    }
+
+    /// Only the explicit replacement command may take over an unmanaged skill directory.
+    pub fn activate_with_replacement(&self, id: &str, harness: &str, scope: Scope, root: Option<&Path>, acknowledge: bool, replace_existing: bool) -> Result<Change, String> {
         if !adapter::known(harness) {
             return Err("Unknown harness.".into());
         }
@@ -592,10 +597,19 @@ impl Library {
             Surface::Folder(dir) => {
                 // After a surface move the new folder must be free, as for a first activation;
                 // the old copy goes only once the new one is written, and an edited file stays.
-                let written = adapter::write_folder(&dir, id, &files, if moved { &[] } else { &old_files })?;
+                let prior = if moved { &[][..] } else { old_files.as_slice() };
+                let written = if replace_existing && prior.is_empty() && dir.join(id).exists() {
+                    let (written, backup) = adapter::replace_unmanaged_folder(&dir, id, &files)?;
+                    kept.push(format!("Original skill backed up at {}", backup.display()));
+                    written
+                } else {
+                    adapter::write_folder(&dir, id, &files, prior)?
+                };
                 if moved {
-                    kept = adapter::remove_folder(&old_files);
-                    if kept.is_empty() {
+                    let removed = adapter::remove_folder(&old_files);
+                    let all_removed = removed.is_empty();
+                    kept.extend(removed);
+                    if all_removed {
                         excluded.drain(..).for_each(|entry| adapter::unexclude(base, &entry));
                     }
                 }
@@ -815,9 +829,9 @@ pub async fn skills_import_github(app: AppHandle, repo: String, path: String, gi
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn skills_activate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>, acknowledge: Option<bool>) -> crate::Result<Change> {
+pub async fn skills_activate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>, acknowledge: Option<bool>, replace_existing: Option<bool>) -> crate::Result<Change> {
     let root = root(&state, project_id, session_id)?;
-    crate::blocking(move || library(&app)?.activate(&id, &harness, scope, root.as_deref(), acknowledge.unwrap_or(false))).await
+    crate::blocking(move || library(&app)?.activate_with_replacement(&id, &harness, scope, root.as_deref(), acknowledge.unwrap_or(false), replace_existing.unwrap_or(false))).await
 }
 #[tauri::command]
 pub async fn skills_deactivate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>) -> crate::Result<Change> {

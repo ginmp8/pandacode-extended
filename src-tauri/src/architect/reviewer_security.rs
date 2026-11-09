@@ -58,6 +58,31 @@ pub(crate) enum ReviewerFailureCode {
     ReviewRevisionStale,
 }
 
+/// Reviewer-level result vocabulary; native Council scoring remains unchanged.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewerVerdict {
+    Pending,
+    Passed,
+    NeedsCorrection,
+    Blocked,
+    Failed,
+    Inconclusive,
+    AcceptedByUser,
+}
+
+/// Minimal typed internal events. S2-S6 will own routing and persistence of events.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub(crate) enum ReviewerEvent {
+    ReviewQueued { seat_id: String, artifact_revision: String },
+    ReviewStarted { seat_id: String },
+    ReviewBlocked { seat_id: String, code: ReviewerFailureCode },
+    ReviewReported { seat_id: String, verdict: ReviewerVerdict },
+}
+
 impl ReviewerBinding {
     pub fn native(
         team: &TeamSnapshot,

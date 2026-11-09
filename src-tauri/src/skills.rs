@@ -705,7 +705,7 @@ impl Library {
         for harness in adapter::FILE_HARNESSES.iter().chain(adapter::PROMPT_HARNESSES) {
             let prompt = !adapter::FILE_HARNESSES.contains(harness);
             let in_use = metas.iter().any(|m| m.activations.iter().any(|a| a.harness == *harness));
-            let installed = !prompt && adapter::installed(harness, &self.home);
+            let installed = adapter::installed(harness, &self.home);
             if !installed && !in_use {
                 continue;
             }

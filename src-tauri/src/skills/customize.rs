@@ -77,7 +77,19 @@ fn validate_zip_frontmatter(markdown: &str) -> Result<String, String> {
             description_seen = true;
         }
         block_scalar = matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+");
-        if !block_scalar && (value.starts_with('"') != value.ends_with('"')
+        // Required fields must be strings, not YAML sequences, maps, aliases,
+        // custom tags, or nulls. Validate quoted scalar syntax as well: simply
+        // checking matching quote characters accepts malformed escape sequences.
+        let invalid_required_type = matches!(key, "name" | "description")
+            && (value.starts_with(['[', '{', '!', '&', '*'])
+                || matches!(value, "~" | "null" | "Null" | "NULL"));
+        let invalid_double_quote = value.starts_with('"')
+            && serde_json::from_str::<String>(value).is_err();
+        let invalid_single_quote = value.starts_with('\'')
+            && (value.len() < 2 || !value.ends_with('\'')
+                || value[1..value.len() - 1].replace("''", "").contains('\''));
+        if !block_scalar && (invalid_required_type || invalid_double_quote || invalid_single_quote
+            || value.starts_with('"') != value.ends_with('"')
             || value.starts_with('\'') != value.ends_with('\'')
             || (!value.starts_with(['"', '\'']) && value.contains(": "))) {
             return Err("SKILL.md YAML frontmatter has a malformed scalar.".into());
@@ -282,6 +294,10 @@ mod tests {
         assert!(validate_zip_frontmatter("---\\nname: Broken\\ndescription: \"unterminated\\n---".replace("\\n", "\n").as_str()).is_err());
         assert!(validate_zip_frontmatter("---\\nname: One\\nname: Two\\ndescription: Duplicate\\n---".replace("\\n", "\n").as_str()).is_err());
         assert!(validate_zip_frontmatter("---\\nname: Missing\\nnot-a-field\\ndescription: Test\\n---".replace("\\n", "\n").as_str()).is_err());
+        assert!(validate_zip_frontmatter("---\nname: [unclosed\ndescription: Test\n---").is_err());
+        assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: {invalid-flow\n---").is_err());
+        assert!(validate_zip_frontmatter("---\nname: \"invalid\\q\"\ndescription: Test\n---").is_err());
+        assert!(validate_zip_frontmatter("---\nname: Valid\ndescription: >-\n  Safe multi-line\n  description.\n---").is_ok());
     }
     #[test]
     fn rejects_unsafe_zip_paths() {

@@ -8,10 +8,17 @@ use super::{catalog, github, now_ms, sha256_hex, Kind, Library, Source, MAX_BYTE
 const MAX_SAVED_SOURCES: usize = 64;
 static SOURCES_LOCK: Mutex<()> = Mutex::new(());
 static IMPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The currently importing saved-source ID, protected together with source writes.
+static ACTIVE_IMPORT_ID: Mutex<Option<String>> = Mutex::new(None);
 
 struct ImportGuard;
 impl Drop for ImportGuard {
-    fn drop(&mut self) { IMPORT_ACTIVE.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_IMPORT_ID.lock() {
+            *active = None;
+        }
+        IMPORT_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,8 +268,15 @@ impl Library {
             return Err("Two selected paths use the same skill ID. Choose only one source for that ID.".into());
         }
 
-        if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return Err("Another GitHub skill import is still running.".into());
+        // Lock source writes while registering the in-flight source, so removing
+        // this source cannot race with the final import/source reconciliation.
+        {
+            let _source_guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+            let mut active = ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?;
+            if IMPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                return Err("Another GitHub skill import is still running.".into());
+            }
+            *active = Some(id.clone());
         }
         let _guard = ImportGuard;
         self.stage_pending_import(&PendingSourceImport {
@@ -397,6 +411,9 @@ impl Library {
     /// Removes only the source configuration, not imported files or harness state.
     pub fn remove_skill_source(&self, id: &str) -> Result<Vec<SavedSource>, String> {
         let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+        if ACTIVE_IMPORT_ID.lock().map_err(|e| e.to_string())?.as_deref() == Some(id) {
+            return Err("This source has an import in progress. Remove it after the import completes.".into());
+        }
         let mut store = self.read_sources()?;
         let original = store.sources.len();
         store.sources.retain(|s| s.id != id);

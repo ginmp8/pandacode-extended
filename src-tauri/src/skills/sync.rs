@@ -7,6 +7,10 @@ use super::{catalog, content_hash, frontmatter, github, now_ms, slug, Item, Kind
 
 static SYNC: Mutex<()> = Mutex::new(());
 
+fn acquire_sync(lock: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    lock.try_lock().map_err(|_| "A skill synchronization is already running.".into())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncPolicy {
@@ -204,9 +208,7 @@ impl Library {
         &self, api: catalog::Api, selection: Selection, automatic: bool,
         mut progress: impl FnMut(SyncProgress),
     ) -> Result<SyncReport, String> {
-        let Ok(_guard) = SYNC.try_lock() else {
-            return Ok(SyncReport { checked_at: now_ms(), skipped: vec!["A skill synchronization is already running.".into()], ..SyncReport::default() });
-        };
+        let _guard = acquire_sync(&SYNC)?;
         let policy = self.sync_policy()?;
         let mut report = SyncReport { checked_at: now_ms(), ..SyncReport::default() };
         let targets: Vec<Meta> = self.list()?.into_iter().map(|item| item.meta).filter(|meta| {
@@ -276,6 +278,18 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_synchronization_returns_an_error_not_an_empty_success_report() {
+        let isolated_lock = Mutex::new(());
+        let running = isolated_lock.lock().unwrap();
+        assert_eq!(
+            acquire_sync(&isolated_lock).unwrap_err(),
+            "A skill synchronization is already running."
+        );
+        drop(running);
+        assert!(acquire_sync(&isolated_lock).is_ok());
+    }
 
     #[test]
     fn full_commit_pins_are_detected() {

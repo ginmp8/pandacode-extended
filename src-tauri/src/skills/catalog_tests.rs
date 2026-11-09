@@ -588,3 +588,33 @@ fn tracked_batch_reports_real_terminal_progress_and_saves_only_successes() {
     assert_eq!(progress.iter().filter(|entry| matches!(entry.phase.as_str(),
         "installed"|"failed"|"skipped")).count(), 3);
 }
+
+#[test]
+fn removing_a_saved_source_during_its_import_is_rejected() {
+    let fx = Fixture::new();
+    let mut fake = Fake::default();
+    let commit = "a".repeat(40);
+    fake.repo("me/locked", &commit, &files(&[
+        ("skills/alpha/SKILL.md", &skill("Alpha")),
+    ]));
+    let original = fx.library.import_skill_source(&fake.api(), "me/locked", "skills", None, &commit,
+        vec!["skills/alpha".into()]).unwrap().source;
+    fake.calls.borrow_mut().clear();
+    let observed_conflict = std::cell::Cell::new(false);
+    let commit_endpoint = format!("repos/me/locked/commits/{commit}");
+    let guarded_api = |endpoint: &str| {
+        // The first commit lookup is validation; the second occurs inside the
+        // installed-package fetch, while the import intent is active.
+        if endpoint == commit_endpoint && fake.count(&commit_endpoint) == 1 {
+            observed_conflict.set(true);
+            let error = fx.library.remove_skill_source(&original.id).unwrap_err();
+            assert!(error.contains("import in progress"), "{error}");
+        }
+        fake.call(endpoint)
+    };
+    fx.library.import_skill_source(&guarded_api, "me/locked", "skills", None, &commit,
+        vec!["skills/alpha".into()]).unwrap();
+    assert!(observed_conflict.get(), "the removal must be challenged inside the active import");
+    assert_eq!(fx.library.saved_skill_sources().unwrap().len(), 1);
+    assert!(fx.library.load("alpha").is_ok());
+}

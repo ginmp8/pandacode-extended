@@ -486,17 +486,34 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     if let Some((delivery_id,channel_id,message_id,bot_id)) = channel {
         {
             let store = match state.store.lock() { Ok(store)=>store, Err(_)=>return };
-        let status=if successful {"completed"} else {"failed"};
-        let _=store.db.execute("UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3 WHERE id=?1",params![delivery_id,status,crate::storage::now()]);
-        if council_denied {
-            // An attributed Council decision is a channel notice, not a bot's
-            // completed answer. Exclude it from future task history.
-            let _=store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,created_at) VALUES(?1,?2,'council_status',?3,?4)",params![crate::storage::id(),channel_id,reply.trim(),crate::storage::now()]);
-        } else if successful && !reply.trim().is_empty() {
-            let _=store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at) VALUES(?1,?2,'reply',?3,?4,?5)",params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()]);
-        }
-        let _=update_message_status(&store,&message_id);
-            let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
+        // Claim exactly one terminal transition. A replay or a Stop that won the
+        // race cannot publish another reply, Council notice or collaboration callback.
+        let persisted = (|| -> Result<bool> {
+            let transaction=store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+            let status=if successful {"completed"} else {"failed"};
+            let changed=store.db.execute(
+                "UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3 WHERE id=?1 AND status='in_progress'",
+                params![delivery_id,status,crate::storage::now()],
+            ).map_err(|error| error.to_string())?;
+            if changed == 0 { return Ok(false); }
+            if council_denied {
+                // This is a system notice, never a bot response or shared context.
+                store.db.execute(
+                    "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,created_at) VALUES(?1,?2,'council_status',?3,?4)",
+                    params![crate::storage::id(),channel_id,reply.trim(),crate::storage::now()],
+                ).map_err(|error| error.to_string())?;
+            } else if successful && !reply.trim().is_empty() {
+                store.db.execute(
+                    "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at) VALUES(?1,?2,'reply',?3,?4,?5)",
+                    params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()],
+                ).map_err(|error| error.to_string())?;
+            }
+            update_message_status(&store,&message_id)?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            Ok(true)
+        })();
+        if !matches!(persisted, Ok(true)) { return; }
+        let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
         }
         if !council_denied {
             collaboration::finish_delivery(app, &delivery_id, reply).await;

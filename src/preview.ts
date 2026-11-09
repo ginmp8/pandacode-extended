@@ -1915,7 +1915,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'design_read': result = previewDesign.read(args.name); break;
     case 'design_comments': result = previewDesign.comments(); break;
     case 'design_save_comments': result = previewDesign.saveComments(args.comments); break;
-    case 'skills_list': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
+    case 'skills_list': case 'skills_icons': case 'skills_import_folder': case 'skills_import_github': case 'skills_activate':
     case 'skills_deactivate': case 'skills_matrix': case 'skills_scan': case 'skills_remove':
     case 'skills_catalogs': case 'skills_catalog_add': case 'skills_catalog_refresh': case 'skills_catalog_state': case 'skills_catalog_import': case 'skills_discover':
     case 'skills_source_preview': case 'skills_source_list': case 'skills_source_import': case 'skills_source_import_tracked':

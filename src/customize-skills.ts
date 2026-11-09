@@ -39,6 +39,7 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
 const initialPolicy: Policy = { autoOnStart: false };
 const plural = (amount: number, word: string) => `${amount} ${word}${amount === 1 ? '' : 's'}`;
 const shaShort = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'Not pinned';
+const sourceLocation = (repo:string,path:string) => path ? `${repo}/${path}` : repo;
 const isTerminal = (phase: Phase) => ['installed', 'replaced', 'updated', 'unchanged', 'skipped', 'failed', 'cancelled'].includes(phase);
 const stateLabel = (phase: Phase) => ({ queued:'Queued', fetching:'Downloading', validating:'Validating', installing:'Installing', installed:'Installed', replaced:'Replaced', updated:'Updated', unchanged:'Unchanged', skipped:'Skipped', failed:'Failed', cancelled:'Cancelled' } as Record<Phase,string>)[phase];
 
@@ -104,7 +105,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   }
 
   function installedHtml(): string {
-    const visible = installed.filter(item => [item.name, item.id, item.description, item.source.location]
+    const visible = installed.filter(item => item.kind==='skill' && [item.name, item.id, item.description, item.source.location]
       .some(value => value.toLowerCase().includes(search.trim().toLowerCase())));
     const card = (item: SkillItem) => {
       const type = item.source.kind === 'github' ? 'GitHub' : item.source.kind === 'zip' ? 'ZIP' : 'Local';
@@ -124,11 +125,12 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         <button type="button" class="customize-skill-main" data-customize="inspect-installed" data-id="${esc(item.id)}" aria-label="Inspect ${esc(item.name)}">
           <span class="customize-skill-icon">${icon('spark')}</span>
           <span class="customize-skill-description"><strong>${esc(item.name)}</strong><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}${item.source.gitRef ? ` · ref ${esc(item.source.gitRef)}` : ''}</small>
-          ${item.source.kind==='github' ? `<small>${esc(update)}${sourceLink ? ` · <a href="${esc(sourceLink)}" target="_blank" rel="noopener noreferrer">Source repository</a>` : ''}</small>` : ''}
+          ${item.source.kind==='github' ? `<small>${esc(update)}</small>` : ''}
           ${missingPeers.length ? `<small class="customize-warning">Missing dependencies: ${esc(missingPeers.join(', '))}</small>` : ''}
           ${statuses.length ? `<small>${esc(statuses.join(' · '))}</small>` : ''}</span>
         </button>
         <span class="customize-skill-trailing">
+          ${sourceLink ? `<a class="secondary-button" href="${esc(sourceLink)}" target="_blank" rel="noopener noreferrer">Source</a>` : ''}
           ${item.findings?.length ? `<small class="customize-warning">${plural(item.findings.length, 'safety finding')}</small>` : ''}
           ${active ? `<small>${plural(active, 'activation')}</small>` : ''}
           ${item.source.kind === 'github' ? `<button type="button" class="secondary-button" data-customize="sync-skill" data-id="${esc(item.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Sync</button>` : ''}
@@ -180,17 +182,17 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       </div>
       <div class="customize-discovery-scroll"><ul class="customize-discovery-list">${shown.map(entry => {
         const installedItem = installed.find(item => item.id === entry.id);
-        const conflict = installedItem && (installedItem.source.location !== `${scan!.repo}/${entry.path}` || installedItem.source.gitRef !== scan!.gitRef);
+        const conflict = installedItem && (installedItem.source.location !== `${sourceLocation(scan!.repo,entry.path)}` || installedItem.source.gitRef !== scan!.gitRef);
         return `<li><label class="customize-discovery-choice"><input type="checkbox" data-select-skill="${esc(entry.path)}" ${chosen.has(entry.path) ? 'checked' : ''} ${busy ? 'disabled' : ''}><span><strong>${esc(entry.name)}</strong><small>${esc(entry.description)}</small><code>${esc(entry.path || '(repository root)')}</code>${conflict ? `<small class="customize-warning">Installed from another source; import requires a deliberate replacement.</small>` : ''}</span></label>
           <button type="button" class="secondary-button" data-customize="inspect-remote" data-path="${esc(entry.path)}">Preview</button></li>`;
       }).join('')}</ul></div>
       <div class="customize-discovery-footer"><span>${plural(chosen.size, 'skill')} selected</span>
         <div class="customize-discovery-actions">
           ${scan.skills.some(item => chosen.has(item.path) && installed.some(current => current.id === item.id &&
-            (current.source.location !== `${scan!.repo}/${item.path}` || current.source.gitRef !== scan!.gitRef))) ?
+            (current.source.location !== `${sourceLocation(scan!.repo,item.path)}` || current.source.gitRef !== scan!.gitRef))) ?
             `<label class="customize-confirm-replace"><input type="checkbox" name="replace-conflicts" ${replaceConflicts ? 'checked' : ''}>I approve replacing conflicting installed skills</label>` : ''}
           ${editingSource ? `<button type="button" class="secondary-button" data-customize="save-source-selection" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Save tracked selection</button>` : ''}
-          <button type="button" class="customize-primary" data-customize="import-selected" ${!chosen.size || busy || operation?.state === 'running' || (scan.skills.some(item => chosen.has(item.path) && installed.some(current => current.id === item.id && (current.source.location !== `${scan!.repo}/${item.path}` || current.source.gitRef !== scan!.gitRef))) && !replaceConflicts) ? 'disabled' : ''}>Import selected (${chosen.size})</button>
+          <button type="button" class="customize-primary" data-customize="import-selected" ${!chosen.size || busy || operation?.state === 'running' || (scan.skills.some(item => chosen.has(item.path) && installed.some(current => current.id === item.id && (current.source.location !== `${sourceLocation(scan!.repo,item.path)}` || current.source.gitRef !== scan!.gitRef))) && !replaceConflicts) ? 'disabled' : ''}>Import selected (${chosen.size})</button>
         </div>
       </div>
     </section>`;
@@ -258,7 +260,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
               </div>
             </div>
           </div>
-          <nav class="customize-tabs" aria-label="Skills pages"><button type="button" data-customize="tab-installed" aria-current="${tab === 'installed' ? 'page' : 'false'}">Installed <small>${installed.length}</small></button>
+          <nav class="customize-tabs" aria-label="Skills pages"><button type="button" data-customize="tab-installed" aria-current="${tab === 'installed' ? 'page' : 'false'}">Installed <small>${installed.filter(item=>item.kind==='skill').length}</small></button>
             <button type="button" data-customize="tab-sources" aria-current="${tab === 'sources' ? 'page' : 'false'}">GitHub sources <small>${sources.length}</small></button></nav>
           ${error ? `<p class="customize-error" role="alert">${esc(error)}</p>` : ''}
           ${note ? `<p class="customize-notice" role="status">${esc(note)}</p>` : ''}
@@ -310,7 +312,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         slot.innerHTML = `<pre><code>${esc(value.text)}</code></pre>`;
       } else {
         // Skill instructions are untrusted data, never interactive message/UI code.
-        const inert = value.text.replace(/^(\\s*`{3,})\\s*(ui|chart|svg|html|mermaid)\\b/gim, '$1text');
+        const inert = value.text.replace(/^(\s*`{3,})\s*(ui|chart|svg|html|mermaid)\b/gim, '$1text');
         const purify = (await import('dompurify')).default;
         slot.innerHTML = purify.sanitize(await markdownHtml(inert), {
           FORBID_TAGS: ['pandacode-ui','pandacode-code','img','iframe','form','input','button','video','audio','object','embed','svg','math'],
@@ -417,7 +419,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     if (kind === 'source') {
       const source=sources.find(x=>x.id===id); if (!source) return;
       entries=installed.filter(item=>item.source.kind==='github' && item.source.gitRef===source.gitRef &&
-        source.selectedPaths.some(path=>item.source.location===`${source.repo}/${path}`)).map(item=>({path:item.id,name:item.name}));
+        source.selectedPaths.some(path=>item.source.location===sourceLocation(source.repo,path))).map(item=>({path:item.id,name:item.name}));
       label='Synchronizing saved source';
     }
     if (kind === 'all') {entries=installed.filter(x=>x.kind==='skill'&&x.source.kind==='github').map(x=>({path:x.id,name:x.name}));label='Synchronizing GitHub skills';}
@@ -464,6 +466,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   async function editSource(id:string):Promise<void> {
     const source=sources.find(s=>s.id===id); if(!source)return;
+    changingRefSource=null;
     githubUrl=`https://github.com/${source.repo}${source.path?`/tree/${source.gitRef??'main'}/${source.path}`:''}`;
     githubRef=source.gitRef??'';busy=true;error='';note='Scanning saved source…';draw();
     try {
@@ -516,7 +519,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         if(pendingZipReplacement) {const selected=pendingZipReplacement;pendingZipReplacement=null;void importZip(selected,true);}
         break;
       case 'add-github':addOpen=false;githubForm=true;scan=null;editingSource=null;changingRefSource=null;replaceConflicts=false;detail=null;draw();break;
-      case 'close-github-form':githubForm=false;draw();break;
+      case 'close-github-form':githubForm=false;changingRefSource=null;draw();break;
       case 'tab-installed':tab='installed';pendingRemove=null;draw();break;
       case 'tab-sources':tab='sources';pendingRemove=null;draw();break;
       case 'refresh':error='';void refresh();break;
@@ -525,7 +528,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'close-detail':detail=null;previewSerial++;draw();break;
       case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;
       case 'preview-mode':markdownMode=button.dataset.mode==='raw'?'raw':'rendered';draw();break;
-      case 'hide-discovery':scan=null;chosen.clear();editingSource=null;draw();break;
+      case 'hide-discovery':scan=null;chosen.clear();editingSource=null;changingRefSource=null;draw();break;
       case 'select-all':if(scan)for(const entry of scan.skills)if([entry.name,entry.path,entry.description].some(s=>s.toLowerCase().includes(discoverySearch.toLowerCase())))chosen.add(entry.path);draw();break;
       case 'select-none':chosen.clear();draw();break;
       case 'import-selected':if(scan&&chosen.size){const snap={repo:scan.repo,path:scan.path,gitRef:scan.gitRef,commit:scan.commit,paths:[...chosen],allowReplace:replaceConflicts};void importSelected(snap);}break;

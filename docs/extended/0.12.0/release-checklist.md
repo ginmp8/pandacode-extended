@@ -105,3 +105,12 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Upgrade the compatible `rusqlite` graph to a release supporting patched `libsqlite3-sys >=0.39.0`, regenerate `Cargo.lock` with Cargo, verify Rust >=1.89/toolchain compatibility, and test SQLite storage/migration behavior; then rerun locked Rust build/tests and RustSec on the **new SHA**.
 - [ ] Verify CI for the documentation-only follow-up SHA separately; exact prior failures do not become passing merely because notes were updated.
 - [ ] Complete 80 shared-path semantic reconciliations and native Settings, Connect, MCP, bots, cloud/VM, credentials, cross-platform installation and release checks. No 0.12.0 publication approval is implied.
+
+## Post-0.3.106 upstream HEAD synchronization — 2026-11-09
+
+- [x] Pin source [`7cadfdbeb7006573897a16e1d9c15ac0a59febad`](https://github.com/ginmp8/pandacode/commit/7cadfdbeb7006573897a16e1d9c15ac0a59febad), app version **0.3.106**, and identify the sole post-release source file modification.
+- [x] Mirror `scripts/release/sbom.test.mjs` exactly (CRLF and workflow section parsing) and preserve the Extended controls and dependency overrides.
+- [x] Compare nontruncated Git trees: 1,567 source / 1,624 Extended, 1,487 exact shared, 80 divergent shared, 57 Extended-only, zero missing or mode mismatches.
+- [ ] Execute the release Node tests including Windows CRLF behavior; no local clone was available to run them here.
+- [ ] Fix the existing RustSec failure with a Cargo-generated lockfile and compatible SQLite/rusqlite graph, then validate Rust build/tests/audit on the newly published SHA.
+- [ ] Verify final SHA CI and independent Settings On/Off, Connect/MCP/cloud/VM, credential and installer workflows; **0.12.0** remains a draft, not a release.

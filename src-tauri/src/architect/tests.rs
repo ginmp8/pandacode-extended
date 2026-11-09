@@ -975,6 +975,7 @@ fn worker(id: &str, status: &str, files: &[&str], depends: &[&str]) -> Worker {
         reported: false,
         parent_worker: None,
         council: None,
+        reviewer_binding: None,
         score_nudged: false,
         wrote_at: 0,
     }

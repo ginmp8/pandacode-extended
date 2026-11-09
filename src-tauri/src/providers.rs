@@ -142,6 +142,8 @@ pub struct RunConfig {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub mode: String,
+    /// Verified task-scoped Council reviewer, never inferred from prompts.
+    pub reviewer_boundary: bool,
     pub cwd: PathBuf,
     pub resume_id: Option<String>,
     pub prompt: String,
@@ -157,6 +159,20 @@ pub struct RunConfig {
     pub codex_settings: Option<Value>,
     /// Only native-validated, managed screenshot paths; never arbitrary web content.
     pub images: Vec<PathBuf>,
+}
+
+/// A read-only prompt or flag alone cannot safely constrain a reviewer.
+fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), String> {
+    if !config.reviewer_boundary { return Ok(()) }
+    if !matches!(config.provider.as_str(), "codex" | "claude" | "glm" | "mimo") {
+        return Err(format!("read_only_unsupported: {} has no native reviewer tool boundary.", config.provider));
+    }
+    if config.mode != "plan" || has_host || config.skill.is_some()
+        || config.goal.is_some() || config.codex_settings.is_some()
+    {
+        return Err("read_only_policy_violation: reviewer cannot inherit elevated mode, host tools, goals, skills or Codex settings.".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1611,12 +1627,14 @@ impl Protocol {
         content
     }
     fn codex_permissions(&self, turn: bool) -> Value {
-        let (sandbox, policy, reviewer) = match self.config.mode.as_str() {
+        let (sandbox, policy, reviewer) = if self.config.reviewer_boundary {
+            ("read-only", "never", "user")
+        } else { match self.config.mode.as_str() {
             "auto" => ("workspace-write", "on-request", "auto_review"),
             "plan" => ("read-only", "never", "user"),
             "full" => ("danger-full-access", "never", "user"),
             _ => ("workspace-write", "on-request", "user"),
-        };
+        }};
         let mut params = json!({"approvalPolicy":policy,"approvalsReviewer":reviewer});
         if turn {
             // Apply every turn, including after resume. This revokes an earlier
@@ -2050,6 +2068,27 @@ impl Protocol {
         }
     }
     fn receive(&mut self, mut value: Value) -> Result<Step, String> {
+        if self.config.reviewer_boundary {
+            let method = value.get("method").and_then(Value::as_str).unwrap_or_default();
+            let codex_permission = matches!(
+                method,
+                "item/commandExecution/requestApproval"
+                    | "item/fileChange/requestApproval"
+                    | "item/permissions/requestApproval"
+            );
+            let claude_permission = value["type"] == "control_request"
+                && value["request"]["subtype"] == "can_use_tool";
+            if codex_permission || claude_permission {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                self.pending.insert(request_id.clone(), value);
+                let denial = self.approve(&request_id, false)
+                    .ok_or("read_only_policy_violation: could not deny reviewer permission request.")?;
+                let mut step = Step::default();
+                step.write.push(denial);
+                step.events.push(self.event("status", "Reviewer tool authorization denied", None));
+                return Ok(step);
+            }
+        }
         let Some(mut subagents) = self.subagents.take() else {
             return self.receive_inner(value);
         };
@@ -3238,7 +3277,7 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             }
             // The launcher overrides only this process, not the user's Codex files.
             // PandaCode's authenticated per-run MCP server can still be injected.
-            if !crate::feature_controls::get().external_mcp_servers {
+            if config.reviewer_boundary || !crate::feature_controls::get().external_mcp_servers {
                 command.args(["-c", "mcp_servers={}"]);
             }
         }
@@ -3282,6 +3321,11 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             // Always override the resumed session's mode, including when the
             // user has moved from full access back to standard approvals.
             command.args(["--permission-mode", permission_mode]);
+            if config.reviewer_boundary {
+                // Native CLI tool catalog (not prompt): no shell, edits, scripts or subagents.
+                command.args(["--tools", "Read,Glob,Grep"]);
+                command.args(["--settings", r#"{"disableAllHooks":true}"#]);
+            }
             if config.mode == "full" {
                 command.arg("--allow-dangerously-skip-permissions");
             }
@@ -3343,15 +3387,23 @@ async fn run_inner(
         return Err("Unknown permission mode".into());
     }
     review_supported(&config.provider, &config.mode)?;
+    enforce_reviewer_policy(&config, host.is_some())?;
+    if config.reviewer_boundary && crate::cloud_agents::transport::is_cloud(&config.session_id) {
+        return Err("read_only_unsupported: cloud reviewer isolation is not verified.".into());
+    }
     validate_reasoning_effort(&config.provider, config.reasoning_effort.as_deref())?;
     // A cloud task runs the same pipeline through a bridge to its machine; local MCP host
     // tools stay on this computer (docs/cloud-agents.md, step 5).
     if let Some(command) = crate::cloud_agents::transport::command(&config, |command| configure_command(command, &config)).await? {
         return run_process_with_tools(config, sink, input, command, Vec::new(), None).await;
     }
-    let mut connection = crate::connections::for_task(&config.session_id, &config.provider)
-        .map(|connection| crate::connections::launch(&connection))
-        .transpose()?;
+    let mut connection = if config.reviewer_boundary {
+        None // Never inject Connection arguments, environment, MCP or secrets into a reviewer.
+    } else {
+        crate::connections::for_task(&config.session_id, &config.provider)
+            .map(|connection| crate::connections::launch(&connection))
+            .transpose()?
+    };
     let path = connection
         .as_ref()
         .and_then(|connection| connection.executable.clone())
@@ -3478,6 +3530,7 @@ async fn run_process_with_tools(
     image_blocks: Vec<Value>,
     host: Option<ToolHost>,
 ) -> Result<(), String> {
+    enforce_reviewer_policy(&config, host.is_some())?;
     let mcp_tool_names: HashSet<String> = {
         host.as_ref()
             .into_iter()
@@ -3565,7 +3618,7 @@ async fn run_process_with_tools(
             agent_temp = AgentTemp::redirect(&mut command);
         }
         if matches!(config.provider.as_str(), "claude" | "glm" | "mimo") {
-            let external = crate::feature_controls::get().external_mcp_servers;
+            let external = crate::feature_controls::get().external_mcp_servers && !config.reviewer_boundary;
             if !external {
                 command.arg("--strict-mcp-config");
             }
@@ -3979,6 +4032,7 @@ mod tests {
             model: "default".into(),
             reasoning_effort: None,
             mode: "ask".into(),
+            reviewer_boundary: false,
             cwd: PathBuf::from("/tmp"),
             resume_id: None,
             prompt: "Explain this project".into(),
@@ -5616,6 +5670,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
                 model: model.clone(),
                 reasoning_effort: None,
                 mode: "ask".into(),
+                reviewer_boundary: false,
                 cwd: root.clone(),
                 resume_id: resume.clone(),
                 prompt: prompt.into(),

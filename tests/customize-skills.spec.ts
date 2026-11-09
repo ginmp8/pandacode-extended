@@ -670,7 +670,13 @@ test('detail controls preserve panel scroll across redraws, confirmations and as
   await cancel.scrollIntoViewIfNeeded();
   const beforeCancel=await scroll();
   await cancel.click();
-  await expect.poll(scroll).toBe(beforeCancel);
+  await expect(detail.locator('#customize-preview-content')).toContainText('Release notes');
+  // Removing the confirmation can reduce scrollHeight. A browser must clamp
+  // scrollTop to the new maximum, but must never reset it to the top.
+  const expectedAfterCancel=await scroller.evaluate((element,previous)=>
+    Math.min(previous,Math.max(0,element.scrollHeight-element.clientHeight)),beforeCancel);
+  expect(expectedAfterCancel).toBeGreaterThan(100);
+  await expect.poll(scroll).toBe(expectedAfterCancel);
 });
 
 test('switching skill tabs restores their independent scroll positions after refresh', async ({page}) => {

@@ -24,7 +24,7 @@ impl Fixture {
         dir
     }
     fn import(&self, kind: Kind, path: &Path) -> Item {
-        let files = read_local(path).unwrap();
+        let files = read_local(path, false).unwrap();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         self.library.import(kind, files, &name, Source { kind: "folder".into(), location: path.to_string_lossy().into_owned(), git_ref: None, commit: None }).unwrap()
     }

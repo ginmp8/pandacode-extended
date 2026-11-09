@@ -266,6 +266,9 @@ impl Library {
             report.events.push(event);
         }
         self.save_sync_file(".sync-report.json", &report)?;
+        self.record_saved_source_sync(&report).map_err(|e| format!(
+            "Skills were processed, but their source sync status could not be saved: {e}"
+        ))?;
         Ok(report)
     }
 }

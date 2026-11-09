@@ -26,6 +26,12 @@ pub struct SavedSource {
     pub commit: String,
     pub selected_paths: Vec<String>,
     pub saved_at: u64,
+    #[serde(default)]
+    pub last_synced_at: Option<u64>,
+    #[serde(default)]
+    pub last_sync_status: Option<String>,
+    #[serde(default)]
+    pub last_sync_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -150,7 +156,8 @@ impl Library {
                     id: pending.id.clone(), repo: pending.repo.clone(),
                     path: pending.path.clone(), git_ref: pending.git_ref.clone(),
                     commit: pending.commit.clone(), selected_paths: selected.into_iter().collect(),
-                    saved_at: now_ms(),
+                    saved_at: now_ms(), last_synced_at: None,
+                    last_sync_status: None, last_sync_commit: None,
                 };
                 if let Some(existing) = store.sources.iter_mut().find(|s| s.id == pending.id) {
                     *existing = recovered;
@@ -302,7 +309,8 @@ impl Library {
                 if previous.as_ref().is_some_and(|meta| meta.source.kind == "github"
                     && meta.source.location == location && meta.source.git_ref == git_ref
                     && meta.source.commit.as_deref() == Some(commit)
-                    && meta.sha256 == super::content_hash(&files)) {
+                    && meta.sha256 == super::content_hash(&files)
+                    && self.files(&skill.id).map(|current| super::content_hash(&current) == meta.sha256).unwrap_or(false)) {
                     return Ok("unchanged");
                 }
                 report("installing", completed, None);
@@ -340,6 +348,7 @@ impl Library {
         let source = SavedSource {
             id: id.clone(), repo, path, git_ref,
             commit: commit.to_string(), selected_paths: combined.into_iter().collect(), saved_at: now_ms(),
+            last_synced_at: None, last_sync_status: None, last_sync_commit: None,
         };
         if let Some(existing) = store.sources.iter_mut().find(|s| s.repo == source.repo && s.path == source.path && s.git_ref == source.git_ref) {
             *existing = source.clone();
@@ -396,6 +405,39 @@ impl Library {
         }
         self.save_sources(&store)?;
         Ok(store.sources)
+    }
+
+    /// Persist each source's last sync result independently of the global report.
+    /// The saved import commit remains the user's explicit import snapshot.
+    pub fn record_saved_source_sync(&self, report: &super::sync::SyncReport) -> Result<(), String> {
+        if report.events.is_empty() { return Ok(()); }
+        let installed = self.list()?;
+        let _guard = SOURCES_LOCK.lock().map_err(|e| e.to_string())?;
+        let mut store = self.read_sources()?;
+        let mut changed = false;
+        for source in &mut store.sources {
+            let ids: BTreeSet<String> = installed.iter().filter(|item| {
+                item.meta.kind == Kind::Skill && item.meta.source.kind == "github"
+                    && item.meta.source.git_ref == source.git_ref
+                    && source.selected_paths.iter().any(|path| item.meta.source.location ==
+                        catalog::location(&source.repo, path))
+            }).map(|item| item.meta.id.clone()).collect();
+            let matched: Vec<&super::sync::SyncEvent> = report.events.iter()
+                .filter(|event| ids.contains(&event.id)).collect();
+            if matched.is_empty() { continue; }
+            changed = true;
+            source.last_synced_at = Some(report.checked_at);
+            source.last_sync_status = Some(if matched.iter().any(|event| event.status == "error") {
+                "partial_failure".to_string()
+            } else if matched.iter().any(|event| event.status == "updated") {
+                "updated".to_string()
+            } else { "unchanged_or_skipped".to_string() });
+            let commits: BTreeSet<String> = matched.iter()
+                .filter_map(|event| event.new_commit.clone()).collect();
+            source.last_sync_commit = if commits.len() == 1 { commits.into_iter().next() } else { None };
+        }
+        if changed { self.save_sources(&store)?; }
+        Ok(())
     }
 
     /// A configured source synchronizes only the paths the user previously imported.

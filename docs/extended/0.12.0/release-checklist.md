@@ -97,3 +97,11 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Check exact final Extended publication SHA against npm/Node/website, Rust check/test/Clippy, RustSec, mobile/Expo, ONNX and release tests. A staged candidate tree and previous green CI do **not** count as final CI success.
 - [ ] Execute native Windows/macOS/Linux, two-device Connect, authenticated MCP/cloud/VM/credential, RTL/IME and browser scroll/inspector tests. They were **not** run locally due to inaccessible GitHub DNS.
 - [ ] Keep **Extended 0.12.0** a documentation-only planned distribution until separate release authorization, independent of upstream app version **0.3.106**.
+
+## Exact-SHA CI security finding — 2026-11-09
+
+- [x] Inspect exact-SHA [push #42644925066](https://github.com/ginmp8/pandacode-extended/actions/runs/42644925066) and [PR #42644937837](https://github.com/ginmp8/pandacode-extended/actions/runs/42644937837) for [`34d8fb4c`](https://github.com/ginmp8/pandacode-extended/commit/34d8fb4caa985f2ceb4815945dc58ed3042c8353): **five of six jobs passed in each run; RustSec failed in both**. These are **not green** runs.
+- [x] Identify the inherited, **bundled** `libsqlite3-sys 0.36.0` vulnerability [RUSTSEC-2026-0459](https://github.com/RustSec/advisory-db/blob/main/crates/libsqlite3-sys/RUSTSEC-2026-0459.md), exposed through `rusqlite 0.38.0` in the pinned Cargo lockfile. Record the 6.8-severity finding without suppressing audit.
+- [ ] Upgrade the compatible `rusqlite` graph to a release supporting patched `libsqlite3-sys >=0.39.0`, regenerate `Cargo.lock` with Cargo, verify Rust >=1.89/toolchain compatibility, and test SQLite storage/migration behavior; then rerun locked Rust build/tests and RustSec on the **new SHA**.
+- [ ] Verify CI for the documentation-only follow-up SHA separately; exact prior failures do not become passing merely because notes were updated.
+- [ ] Complete 80 shared-path semantic reconciliations and native Settings, Connect, MCP, bots, cloud/VM, credentials, cross-platform installation and release checks. No 0.12.0 publication approval is implied.

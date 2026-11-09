@@ -10,7 +10,7 @@ ReviewerBinding freezes a cycle ID, optional delivery ID, round, seat ID, option
 
 The reviewer identity is resolved from admitted Architect state, never from a prompt or a bot profile. Every Council reviewer turn runs with plan/read-only permissions even if the parent session has Full access. This does not mutate the persisted bot profile or ordinary session mode.
 
-- Codex receives the native read-only sandbox, network denied, no elevation and process-local empty MCP configuration.
+- Codex receives the native read-only sandbox, network denied and no elevation. Before starting a reviewer, the native CLI must successfully report an **empty** MCP inventory via `codex mcp list --json`; non-empty, disabled, unreadable, malformed or unsupported inventories and project-local MCP/plugin/app configuration fail closed. `-c mcp_servers={}` is only defense in depth: TOML merging does **not** remove inherited MCP servers.
 - Claude, GLM and MiMo have defensive CLI flags for read-only tools but **must fail closed** as reviewer harnesses: managed hooks/settings or externally managed MCP servers can override session-level policies, so CLI filters alone are not verified isolation.
 - No PandaCode host tools are registered for Council reviewers: bot profiles/memory, schedules, approvals, private messages, channels, settings, skills, Connections, deployments and team management tools cannot be called through the app's tool transport.
 - A native permission escalation request is rejected without a user-overridable approval.
@@ -29,3 +29,5 @@ Desktop/harness proof remains required: configure a normally full-access bot rev
 Do not check S1 complete until AC-03 and AC-18 have the required live evidence.
 
 Reviewer support is provisionally limited to the Codex native read-only sandbox. This intentionally blocks native automatic Council reviews routed to unsupported models; it preserves the automatic selection algorithm, saved profiles and Council states without claiming unsafe reviewer execution is compatible. Enabling another harness requires a proven platform-level read-only boundary and versioned live tests, not just allowlist flags.
+
+A native Codex MCP inventory preflight is a necessary restriction, not definitive proof that managed/plugin-provided tools cannot be introduced later. S1 stays unchecked until the effective tool inventory and unauthorized mutation attempts are verified on installed native harnesses, with before/after filesystem and persisted-state snapshots.

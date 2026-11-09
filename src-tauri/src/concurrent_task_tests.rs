@@ -981,6 +981,7 @@ fn settled_team_lead(provider: &str, stage: &str, status: &str) -> (Arc<AppState
             nudged: false,
             reported: false,
             council: None,
+            reviewer_binding: None,
             score_nudged: false,
             wrote_at: 0,
             tool_catalog_version: 0,

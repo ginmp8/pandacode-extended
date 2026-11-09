@@ -3400,6 +3400,7 @@ mod tests {
             nudged: false,
             reported: false,
             council: None,
+            reviewer_binding: None,
             score_nudged: false,
             wrote_at: 0,
         }

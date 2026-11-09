@@ -43,6 +43,55 @@ fn valid_portable_path(path: &str) -> bool {
     })
 }
 
+/// Validate the bounded, declarative YAML frontmatter shape supported by the
+/// native Skills Library. Reject malformed top-level fields and duplicate IDs.
+fn validate_zip_frontmatter(markdown: &str) -> Result<String, String> {
+    let normalized = markdown.replace("\r\n", "\n");
+    let body = normalized.strip_prefix("---\n")
+        .ok_or("SKILL.md must start with YAML frontmatter.")?;
+    let end = body.lines().position(|line| line == "---")
+        .ok_or("SKILL.md YAML frontmatter must have a closing delimiter.")?;
+    let header = body.lines().take(end);
+    let mut name_seen = false;
+    let mut description_seen = false;
+    let mut block_scalar = false;
+    for line in header {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') { continue; }
+        if line.starts_with([' ', '\t']) {
+            if line.starts_with('\t') || !block_scalar {
+                return Err("SKILL.md YAML frontmatter has invalid indentation.".into());
+            }
+            continue;
+        }
+        let (key, value) = line.split_once(':')
+            .ok_or("SKILL.md YAML frontmatter contains a malformed field.")?;
+        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err("SKILL.md YAML frontmatter contains an invalid key.".into());
+        }
+        let value = value.trim();
+        if key == "name" {
+            if name_seen { return Err("SKILL.md has duplicate name declarations.".into()); }
+            name_seen = true;
+        } else if key == "description" {
+            if description_seen { return Err("SKILL.md has duplicate description declarations.".into()); }
+            description_seen = true;
+        }
+        block_scalar = matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+");
+        if !block_scalar && (value.starts_with('"') != value.ends_with('"')
+            || value.starts_with('\'') != value.ends_with('\'')
+            || (!value.starts_with(['"', '\'']) && value.contains(": "))) {
+            return Err("SKILL.md YAML frontmatter has a malformed scalar.".into());
+        }
+    }
+    let (name, description, _) = frontmatter(&normalized);
+    let name = name.ok_or("SKILL.md must declare a name in YAML frontmatter.")?;
+    if !name_seen || !description_seen || description.is_none_or(|text| text.is_empty())
+        || !valid_id(&slug(&name)) {
+        return Err("SKILL.md must declare a valid name and description in YAML frontmatter.".into());
+    }
+    Ok(name)
+}
+
 fn read_zip(path: &std::path::Path) -> Result<super::Files, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("Could not open ZIP: {e}"))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_ARCHIVE_BYTES {
@@ -113,11 +162,7 @@ fn read_zip(path: &std::path::Path) -> Result<super::Files, String> {
     let main = files.iter().find(|(name, _)| name == "SKILL.md")
         .ok_or("The package has no SKILL.md.")?;
     let markdown = std::str::from_utf8(&main.1).map_err(|_| "SKILL.md must be UTF-8.")?;
-    let (name, description, _) = frontmatter(markdown);
-    if name.as_deref().is_none_or(str::is_empty) || description.as_deref().is_none_or(str::is_empty)
-        || !name.as_deref().is_some_and(|name| valid_id(&slug(name))) {
-        return Err("SKILL.md must declare a valid name and description in YAML frontmatter.".into());
-    }
+    validate_zip_frontmatter(markdown)?;
     Ok(files)
 }
 
@@ -134,7 +179,7 @@ pub fn import_zip_progress(app: &AppHandle, path: &str, allow_replace: bool, mut
     let files = read_zip(&path)?;
     let main = files.iter().find(|(name, _)| name == "SKILL.md").ok_or("Missing SKILL.md.")?;
     let content = std::str::from_utf8(&main.1).map_err(|_| "Invalid SKILL.md.")?;
-    let name = frontmatter(content).0.ok_or("Missing skill name.")?;
+    let name = validate_zip_frontmatter(content)?;
     let id = slug(&name);
     let library = library(app)?;
     let previous = library.list()?.into_iter().find(|entry| entry.meta.id == id);
@@ -197,6 +242,14 @@ pub fn github_preview(repo: &str, package: &str, commit: &str, file: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::valid_portable_path;
+    #[test]
+    fn rejects_malformed_zip_frontmatter() {
+        use super::validate_zip_frontmatter;
+        assert!(validate_zip_frontmatter("---\\nname: Good\\ndescription: Good description\\n---\\n# Good".replace("\\n", "\n").as_str()).is_ok());
+        assert!(validate_zip_frontmatter("---\\nname: Broken\\ndescription: \"unterminated\\n---".replace("\\n", "\n").as_str()).is_err());
+        assert!(validate_zip_frontmatter("---\\nname: One\\nname: Two\\ndescription: Duplicate\\n---".replace("\\n", "\n").as_str()).is_err());
+        assert!(validate_zip_frontmatter("---\\nname: Missing\\nnot-a-field\\ndescription: Test\\n---".replace("\\n", "\n").as_str()).is_err());
+    }
     #[test]
     fn rejects_unsafe_zip_paths() {
         for path in ["../SKILL.md", "/SKILL.md", "a\\SKILL.md", "a/../b", "con.txt", "folder/COM1.md", ".hidden/SKILL.md", "file."] {

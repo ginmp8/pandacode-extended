@@ -6,9 +6,19 @@ Customize is a standalone, scrollable workspace opened from the main sidebar's t
 
 Open **Customize → Installed** to search by skill name, ID, description or origin. Selecting a row shows the installed package with a sanitized **Rendered** Markdown preview, **Raw** source, and a read-only list of package files. Binary or unsupported files show metadata instead of being executed. A GitHub discovery preview is clearly labeled **not installed** and reads the immutable commit selected by the scan.
 
-Imported skills remain inactive until explicitly activated for a supported harness through Settings. Activated, current skills appear as `/skillname` suggestions alongside harness commands in regular chats, tasks and bot conversations, without replacing native harness commands. Native harness copies, bot permissions, approval policies and running instructions are not modified by importing or synchronizing.
+Imported skills remain inactive until explicitly activated for a supported harness. The installed skill preview now provides user-scope enable/disable switches per installed harness, explicit safety-finding acknowledgement, an uninstall confirmation, and a Try in chat action. Project-scope activations and drift details remain in Settings → Tools → Skills & rules. Activated, current skills appear as `/skillname` suggestions alongside harness commands in regular chats, tasks and bot conversations, without replacing native harness commands. Native harness copies, bot permissions, approval policies and running instructions are not modified by importing or synchronizing.
 
 Installed skill rows use a safe, inert SVG thumbnail when the package provides `assets/icon.svg`; otherwise a cube symbol is shown. Safety finding counts appear alongside skill names, not in the right action group.
+
+### Activation, uninstall and trying a skill
+
+Customize shows a loading indicator while initial library, activation and source information is read; it never displays an empty-library message before that read finishes. Refresh preserves existing items while rechecking. Successful activation and deactivation display a brief accessible notification; failures retain the existing activation and show an actionable error.
+
+Open an installed skill to **Enable** or **Disable** it for any available harness at user scope. Risk findings must be reviewed and explicitly acknowledged before enablement. Project-scope activations remain available in Settings. A stale or edited file may require a separate reactivation; PandaCode does not silently overwrite changed harness files.
+
+Choose **Try in chat** to open a **new projectless chat** using one of the harnesses for which the skill is enabled at user scope. The composer is prefilled with `/skillname ` and receives focus. Nothing is submitted or executed automatically.
+
+**Uninstall** requires a second confirmation and every activation must first be disabled, including project-scoped ones. This removes the central library package, not saved GitHub source configuration. Previously removed packages are not silently reinstalled by startup synchronization.
 
 ## Add a ZIP skill
 

@@ -867,6 +867,31 @@ mod tests {
     }
 
     #[test]
+    fn activated_library_skills_resolve_without_overriding_harness_commands() {
+        let root = std::env::temp_dir().join(format!("pandacode-slash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let skill_path = root.join("SKILL.md");
+        std::fs::write(&skill_path, "---\nname: review\ndescription: Review code\n---\nReview carefully.").unwrap();
+        let mut commands = native_catalog(&["/review"]);
+        append_library_skills(&mut commands, vec![
+            crate::skills::SlashSkill { id: "review".into(), description: "Must not shadow native".into(), path: skill_path.clone() },
+            crate::skills::SlashSkill { id: "local-review".into(), description: "Review locally".into(), path: skill_path.clone() },
+        ]);
+        assert_eq!(commands.commands.iter().filter(|cmd| cmd.name == "/review").count(), 1);
+        let command = command(&commands, "/local-review");
+        assert_eq!(command.source, "PandaCode skill");
+        assert_eq!(command.description, "Review locally");
+        let prompt = resolve_from_catalog("claude", "/local-review check these changes", &commands).unwrap();
+        assert!(prompt.prompt.contains("Review carefully."));
+        assert!(prompt.prompt.contains("User request: check these changes"));
+        assert!(prompt.skill.is_none());
+        let codex = resolve_from_catalog("codex", "/local-review check these changes", &commands).unwrap();
+        assert_eq!(codex.skill, Some(("local-review".into(), skill_path.clone())));
+        assert_eq!(codex.prompt, "$local-review check these changes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn commands_do_not_capture_file_paths_or_embedded_prose() {
         assert_eq!(
             split_command(" /skill:name  keep  spacing"),

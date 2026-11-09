@@ -104,6 +104,19 @@ fn slash_commands_require_current_activation_and_respect_scope() {
 }
 
 #[test]
+fn prompt_harness_skills_are_visible_only_after_activation() {
+    let fx = Fixture::new();
+    fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL)]));
+    let cwd = fx.base.join("project");
+    assert!(fx.library.slash_skills("opencode", &cwd).unwrap().is_empty());
+    fx.library.activate("release-notes", "opencode", Scope::User, None, false).unwrap();
+    assert_eq!(fx.library.slash_skills("opencode", &cwd).unwrap().len(), 1);
+    assert!(fx.library.slash_skills("claude", &cwd).unwrap().is_empty());
+    fx.library.deactivate("release-notes", "opencode", Scope::User, None).unwrap();
+    assert!(fx.library.slash_skills("opencode", &cwd).unwrap().is_empty());
+}
+
+#[test]
 fn optional_svg_icons_are_returned_only_when_safe_to_read() {
     let fx = Fixture::new();
     fx.import(Kind::Skill, &fx.folder("release", &[

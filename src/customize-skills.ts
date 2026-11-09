@@ -34,6 +34,8 @@ export type CustomizeSkillsHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   subscribe(listener: (event: any) => void): Promise<() => void>;
   chooseZip(): Promise<string | null>;
+  /** Create a projectless chat using an enabled harness; prefill /skillname without sending. */
+  trySkill(id: string, harness: string): Promise<void>;
   close(): void;
 };
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -41,6 +43,8 @@ const initialPolicy: Policy = { autoOnStart: false };
 const plural = (amount: number, word: string) => `${amount} ${word}${amount === 1 ? '' : 's'}`;
 const shaShort = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'Not pinned';
 const sourceLocation = (repo:string,path:string) => path ? `${repo}/${path}` : repo;
+const HARNESS_LABELS: Record<string,string> = { claude:'Claude Code', codex:'Codex', opencode:'OpenCode', 'github-copilot':'GitHub Copilot', glm:'GLM', mimo:'MiMo', deepseek:'DeepSeek', kimi:'Kimi', cline:'Cline', kilo:'Kilo', pi:'Pi' };
+const harnessLabel = (harness: string) => HARNESS_LABELS[harness] ?? harness;
 const isTerminal = (phase: Phase) => ['installed', 'replaced', 'updated', 'unchanged', 'skipped', 'failed', 'cancelled'].includes(phase);
 const stateLabel = (phase: Phase) => ({ queued:'Queued', fetching:'Downloading', validating:'Validating', installing:'Installing', installed:'Installed', replaced:'Replaced', updated:'Updated', unchanged:'Unchanged', skipped:'Skipped', failed:'Failed', cancelled:'Cancelled' } as Record<Phase,string>)[phase];
 
@@ -90,7 +94,71 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let operation: Operation | null = null;
   let pendingZipReplacement: string | null = null;
   let unsub: (() => void) | undefined;
+  let firstLoad = true, refreshing = false, loadFailed = false, refreshSerial = 0;
+  let toast = '', toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingActivation: {id:string;harness:string}|null = null;
+  let pendingUninstall: string|null = null, tryHarness = '';
   const esc = (s: unknown) => escape(s);
+
+  function success(text: string): void {
+    toast = text;
+    if (toastTimer !== undefined) clearTimeout(toastTimer);
+    draw();
+    toastTimer = setTimeout(() => { if (!disposed && toast === text) { toast = ''; draw(); } }, 5500);
+  }
+
+  function currentUserActivation(item: SkillItem, harness: string): boolean {
+    const activation = item.activations.find(a => a.harness === harness && a.scope === 'user');
+    const cell = matrix.harnesses.find(row=>row.harness===harness)?.cells.find(c=>c.id===item.id&&c.scope==='user');
+    return !!activation && activation.sha256 === item.sha256
+      && (!item.findings.length || item.acknowledged === item.sha256)
+      && (cell?.status === 'active' || cell?.status === 'prompt');
+  }
+
+  async function setHarnessEnabled(id: string, harness: string, enabled: boolean, acknowledge = false): Promise<void> {
+    if (busy || operation?.state === 'running') return;
+    const item = installed.find(entry => entry.id === id);
+    if (!item || !matrix.harnesses.some(row=>row.harness===harness)) return;
+    if (enabled && item.findings.length && item.acknowledged !== item.sha256 && !acknowledge) {
+      pendingActivation={id,harness}; draw(); return;
+    }
+    pendingActivation=null; busy=true; error=''; draw();
+    try {
+      const change = enabled
+        ? await options.call<{kept:string[]}>('skills_activate', {id,harness,scope:'user',acknowledge})
+        : await options.call<{kept:string[]}>('skills_deactivate', {id,harness,scope:'user'});
+      await refresh();
+      const kept = !enabled && change.kept?.length ? ` ${plural(change.kept.length,'edited file')} preserved on disk.` : '';
+      success(`${item.name} ${enabled?'enabled':'disabled'} for ${harnessLabel(harness)}.${kept}`);
+    } catch (cause) { error=message(cause); }
+    finally { busy=false; draw(); }
+  }
+
+  async function uninstall(id: string): Promise<void> {
+    if (busy || operation?.state === 'running') return;
+    const item=installed.find(entry=>entry.id===id);
+    if (!item || item.activations.length || pendingUninstall!==id) return;
+    busy=true; error=''; draw();
+    try {
+      await options.call<SkillItem[]>('skills_remove',{id});
+      pendingUninstall=null; pendingActivation=null; detail=null; previewSerial++;
+      await refresh();
+      success(`${item.name} uninstalled from the PandaCode library.`);
+    } catch (cause) { error=message(cause); }
+    finally { busy=false; draw(); }
+  }
+
+  async function tryInstalledSkill(id: string): Promise<void> {
+    if (busy || operation?.state === 'running') return;
+    const item=installed.find(entry=>entry.id===id);
+    const available=item ? matrix.harnesses.filter(row=>row.installed && currentUserActivation(item,row.harness)) : [];
+    const harness=available.find(row=>row.harness===tryHarness)?.harness ?? available[0]?.harness;
+    if (!item || !harness) return;
+    busy=true; error=''; draw();
+    try { await options.trySkill(id,harness); }
+    catch(cause) { error=message(cause); }
+    finally { busy=false; if(!disposed)draw(); }
+  }
 
   function operationHtml(): string {
     if (!operation) return '';
@@ -157,7 +225,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         </button>
         <span class="customize-skill-trailing">
           ${sourceLink ? `<a class="secondary-button" href="${esc(sourceLink)}" target="_blank" rel="noopener noreferrer">Source</a>` : ''}
-          ${active ? `<small>${plural(active, 'activation')}</small>` : ''}
+          <small class="customize-skill-activity">${active ? plural(active,'activation') : 'Not enabled'}</small>
           ${item.source.kind === 'github' ? `<button type="button" class="secondary-button" data-customize="sync-skill" data-id="${esc(item.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Sync</button>` : ''}
         </span>
       </li>`;
@@ -224,6 +292,62 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     </section>`;
   }
 
+
+  function lifecycleHtml(item: SkillItem): string {
+    const selectable = matrix.harnesses.filter(row => row.installed || item.activations.some(a => a.harness === row.harness));
+    const projectCount = item.activations.filter(a=>a.scope==='project').length;
+    const available = selectable.filter(row=>row.installed && currentUserActivation(item,row.harness));
+    const picked = available.find(row=>row.harness===tryHarness)?.harness ?? available[0]?.harness ?? '';
+    const harnesses = selectable.map(row => {
+      const enabled = item.activations.some(a=>a.harness===row.harness && a.scope==='user');
+      const state = row.cells.find(c=>c.id===item.id && c.scope==='user')?.status ?? 'off';
+      const status = !row.installed ? 'Harness unavailable' : !enabled ? 'Not enabled' :
+        state === 'active' || state === 'prompt' ? 'Enabled' :
+        state === 'outdated' ? 'Update requires reactivation' : state === 'drifted' ? 'Edited on disk' : 'Missing harness files';
+      return `<div class="customize-harness-row">
+        <label><span><strong>${esc(harnessLabel(row.harness))}</strong><small>${esc(status)}</small></span>
+          <input type="checkbox" data-customize-harness="${esc(row.harness)}" data-id="${esc(item.id)}"
+          aria-label="Enable ${esc(item.name)} for ${esc(harnessLabel(row.harness))}" ${enabled?'checked':''}
+          ${busy || operation?.state==='running' || (!row.installed && !enabled) ? 'disabled':''}></label>
+        ${enabled && state !== 'active' && state !== 'prompt' && row.installed ?
+          `<button type="button" class="secondary-button" data-customize="reactivate-skill" data-id="${esc(item.id)}" data-harness="${esc(row.harness)}" ${busy?'disabled':''}>Reactivate</button>` : ''}
+      </div>`;
+    }).join('');
+    const consent = pendingActivation?.id === item.id ? `<div class="customize-skill-consent" role="alert">
+      <p class="customize-warning">Review ${plural(item.findings.length,'safety finding')} before enabling ${esc(item.name)} for ${esc(harnessLabel(pendingActivation.harness))}.</p>
+      <ul>${item.findings.map(f=>`<li>${esc(f.rule)} · ${esc(f.file)}:${f.line}</li>`).join('')}</ul>
+      <div class="customize-inline-actions"><button type="button" class="secondary-button" data-customize="cancel-activation">Cancel</button>
+        <button type="button" class="customize-primary" data-customize="confirm-activation" data-id="${esc(item.id)}" data-harness="${esc(pendingActivation.harness)}">I reviewed the findings. Enable anyway</button></div>
+      </div>` : '';
+    const confirm = pendingUninstall === item.id ? `<div class="customize-uninstall-confirm" role="alert">
+      <strong>Uninstall ${esc(item.name)}?</strong>
+      <p>${item.activations.length ?
+        `Disable all ${plural(item.activations.length,'activation')} (including project scopes in Settings → Skills & rules) before uninstalling.` :
+        'This removes the skill package from the central library. Saved GitHub sources remain configured, but removed skills are not automatically reinstalled.'}</p>
+      <div class="customize-inline-actions">
+        <button type="button" class="secondary-button" data-customize="cancel-uninstall">Cancel uninstall</button>
+        <button type="button" class="customize-danger" data-customize="confirm-uninstall" data-id="${esc(item.id)}" ${item.activations.length || busy ? 'disabled':''}>Confirm uninstall</button>
+      </div>
+    </div>` : '';
+    return `<div class="customize-lifecycle" aria-label="Manage installed skill">
+      <div class="customize-section-head"><div><h3>Activation by harness</h3><p>Enable at user scope for new chats and tasks. Project-specific activations remain managed in Settings → Skills & rules.</p></div></div>
+      ${harnesses ? `<div class="customize-harness-grid">${harnesses}</div>` : '<p class="customize-help">No supported harness is installed. Install a harness to enable this skill.</p>'}
+      ${projectCount ? `<p class="customize-help">${plural(projectCount,'project activation')} configured separately in Settings.</p>` : ''}
+      ${consent}
+      <div class="customize-skill-footer">
+        <button type="button" class="customize-danger" data-customize="uninstall-skill" data-id="${esc(item.id)}" ${busy || operation?.state==='running'?'disabled':''}>Uninstall</button>
+        <div class="customize-try-controls">
+          ${available.length > 1 ? `<label>Test with <select name="try-harness" aria-label="Harness for test chat">
+            ${available.map(row=>`<option value="${esc(row.harness)}" ${row.harness===picked?'selected':''}>${esc(harnessLabel(row.harness))}</option>`).join('')}
+          </select></label>` : (picked ? `<span>${esc(harnessLabel(picked))}</span>` : '')}
+          <button type="button" class="customize-primary" data-customize="try-skill" data-id="${esc(item.id)}" ${!picked || busy || operation?.state==='running'?'disabled':''}>${icon('chat')}<span>Try in chat</span></button>
+        </div>
+      </div>
+      ${!picked ? '<p class="customize-help">Enable this skill for an installed harness at user scope to test it in a new chat.</p>' : '<p class="customize-help">Creates a new chat with /skillname prefilled. It does not send or run the skill automatically.</p>'}
+      ${confirm}
+    </div>`;
+  }
+
   function detailHtml(): string {
     if (!detail) return '';
     const item = detail.kind === 'installed' ? installed.find(item => item.id === (detail as {id:string}).id) : scan?.skills.find(skill => skill.path === (detail as any).path);
@@ -250,6 +374,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           <div id="customize-preview-content" class="customize-preview-body" role="region" aria-label="Skill file content">Loading file…</div>
         </div>
       </div>
+      ${detail.kind === 'installed' ? lifecycleHtml(item as SkillItem) : ''}
     </section>`;
   }
 
@@ -292,12 +417,16 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           </div>
           <nav class="customize-tabs" aria-label="Skills pages"><button type="button" data-customize="tab-installed" aria-current="${tab === 'installed' ? 'page' : 'false'}">Installed <small>${installed.filter(item=>item.kind==='skill').length}</small></button>
             <button type="button" data-customize="tab-sources" aria-current="${tab === 'sources' ? 'page' : 'false'}">GitHub sources <small>${sources.length}</small></button></nav>
+          ${toast ? `<div class="customize-toast" role="status">${icon('check')}<span>${esc(toast)}</span><button type="button" data-customize="dismiss-toast" aria-label="Dismiss notification">${icon('close')}</button></div>` : ''}
           ${error ? `<p class="customize-error" role="alert">${esc(error)}</p>` : ''}
+          ${refreshing && !firstLoad ? '<p class="customize-refreshing" role="status">Refreshing skills…</p>' : ''}
           ${note ? `<p class="customize-notice" role="status">${esc(note)}</p>` : ''}
           ${githubFormHtml()}
           ${scan ? discoveryHtml() : ''}
           <div id="customize-operation-slot">${operationHtml()}</div>
-          ${tab === 'installed' ? installedHtml() : sourcesHtml()}
+          ${firstLoad || loadFailed ? `<section class="customize-loading" role="status" aria-label="${refreshing ? 'Loading installed skills' : 'Unable to load installed skills'}">
+            ${refreshing ? '<span class="customize-spinner" aria-hidden="true"></span><strong>Loading installed skills…</strong><p>Reading your library and harness activations.</p><div class="customize-skeleton"></div><div class="customize-skeleton"></div>' : '<strong>Unable to load the skill library.</strong><p>Use Refresh to retry. Installed skills have not been changed.</p>'}
+          </section>` : (tab === 'installed' ? installedHtml() : sourcesHtml())}
           ${detailHtml()}
         </section>
       </div>
@@ -317,6 +446,9 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   }
 
   async function refresh(): Promise<void> {
+    const serial = ++refreshSerial;
+    refreshing = true;
+    draw();
     try {
       const [items, saved, current, statuses, recent, icons] = await Promise.all([
         options.call<SkillItem[]>('skills_list'), options.call<SavedSource[]>('skills_source_list'),
@@ -325,10 +457,18 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         options.call<SyncReport>('skills_sync_report').catch(()=>({checkedAt:0,installed:[],updated:[],skipped:[],events:[]} as SyncReport)),
         options.call<Record<string,string>>('skills_icons').catch(()=>({})),
       ]);
-      if (disposed) return;
-      installed = items; installedIcons = icons; sources = saved; policy = current; matrix=statuses; syncReport=recent;
-    } catch (cause) { error = message(cause); }
-    draw();
+      if (disposed || serial !== refreshSerial) return;
+      installed=items; installedIcons=icons; sources=saved; policy=current; matrix=statuses; syncReport=recent;
+      loadFailed=false;
+    } catch (cause) {
+      if (disposed || serial !== refreshSerial) return;
+      error=message(cause);
+      if (firstLoad || loadFailed) loadFailed=true;
+    } finally {
+      if (!disposed && serial === refreshSerial) {
+        firstLoad=false; refreshing=false; draw();
+      }
+    }
   }
 
   async function loadPreview(): Promise<void> {
@@ -576,9 +716,17 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       case 'tab-installed':tab='installed';pendingRemove=null;draw();break;
       case 'tab-sources':tab='sources';pendingRemove=null;draw();break;
       case 'refresh':error='';void refresh();break;
-      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';draw();break;
-      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';draw();break;
-      case 'close-detail':detail=null;previewSerial++;draw();break;
+      case 'dismiss-toast':toast='';draw();break;
+      case 'uninstall-skill':pendingUninstall=id;pendingActivation=null;draw();break;
+      case 'cancel-uninstall':pendingUninstall=null;draw();break;
+      case 'confirm-uninstall':void uninstall(id);break;
+      case 'cancel-activation':pendingActivation=null;draw();break;
+      case 'confirm-activation':if(pendingActivation?.id===id && pendingActivation.harness===button.dataset.harness) void setHarnessEnabled(id,pendingActivation.harness,true,true);break;
+      case 'reactivate-skill':void setHarnessEnabled(id,button.dataset.harness??'',true);break;
+      case 'try-skill':void tryInstalledSkill(id);break;
+      case 'inspect-installed':detail={kind:'installed',id,file:'SKILL.md'};markdownMode='rendered';pendingActivation=null;pendingUninstall=null;tryHarness='';draw();host.querySelector('.customize-detail')?.scrollIntoView({block:'nearest'});break;
+      case 'inspect-remote':detail={kind:'remote',path,file:'SKILL.md'};markdownMode='rendered';pendingUninstall=null;pendingActivation=null;draw();break;
+      case 'close-detail':detail=null;pendingUninstall=null;pendingActivation=null;previewSerial++;draw();break;
       case 'preview-file':if(detail){detail={...detail,file:button.dataset.file??'SKILL.md'};draw();}break;
       case 'preview-mode':markdownMode=button.dataset.mode==='raw'?'raw':'rendered';draw();break;
       case 'hide-discovery':scan=null;chosen.clear();editingSource=null;changingRefSource=null;draw();break;
@@ -621,6 +769,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   };
   const change=(event:Event)=>{
     const target=event.target as HTMLInputElement;
+    if(target.dataset.customizeHarness!==undefined) { void setHarnessEnabled(target.dataset.id??'',target.dataset.customizeHarness,target.checked); return; }
+    if(target.name==='try-harness'){tryHarness=target.value;return;}
     if(target.dataset.selectSkill!==undefined){selectSkillPath(target.dataset.selectSkill,target.checked);return;}
     if(target.name==='replace-conflicts'){replaceConflicts=target.checked;draw();return;}
     if(target.dataset.customizeToggle==='startup-sync'){
@@ -639,6 +789,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   void refresh();
   return {dispose(){
     disposed=true;previewSerial++;unsub?.();
+    if(toastTimer !== undefined)clearTimeout(toastTimer);
     host.removeEventListener('click',click);host.removeEventListener('input',input);
     host.removeEventListener('change',change);host.removeEventListener('submit',submit);
     host.replaceChildren();

@@ -5309,18 +5309,19 @@ async function startTask(projectId: string): Promise<void> {
 }
 /** A projectless chat: its own folder, the usual harness and model. `from` is a New task moved to No project:
  *  the chat takes over its choices, typed text and attachments, so the draft is left empty and discarded on the way out. */
-async function createChat(from?: Session): Promise<void> {
+async function createChat(from?: Session, providerOverride?: string): Promise<void> {
   if (creatingTask) return;
   closeModelPicker(); closeProjectPicker();
   const generation = state.generation;
   // A chat nobody has written in yet is reopened, as New task reopens its draft.
-  const unused = from ? undefined : state.sessions.find(task => chatTask(task) && task.lastPromptAt == null && !task.resumeId && !task.archived && !deletedSessions.has(task.id) && taskStage(task) !== 'completed');
+  const unused = from || providerOverride ? undefined : state.sessions.find(task => chatTask(task) && task.lastPromptAt == null && !task.resumeId && !task.archived && !deletedSessions.has(task.id) && taskStage(task) !== 'completed');
   if (unused) {
     if (state.projectFilter) setProjectFilter('');
     state.query = ''; closeModal(); await selectSession(unused.id, true); return;
   }
-  const harness = state.providers.find(p => p.id === state.defaultProvider && p.installed)
-    ?? state.providers.find(p => p.installed) ?? state.providers[0];
+  const harness = providerOverride ? state.providers.find(p => p.id === providerOverride && p.installed)
+    : state.providers.find(p => p.id === state.defaultProvider && p.installed)
+      ?? state.providers.find(p => p.installed) ?? state.providers[0];
   if (!harness) { notify('Open Settings to check your installed agents.'); return; }
   if (!from) leaveDraft('');
   creatingTask = true;
@@ -5705,6 +5706,29 @@ async function discoverSettingsProviders(): Promise<Provider[]> {
 }
 /* Customize remains mounted when hidden so an in-flight import keeps its operation state.
  * It never re-initializes chats, bots or native harnesses. */
+/** A preview chat is always new, pinned to the enabled harness, and never auto-submits. */
+async function tryCustomizeSkill(id: string, harnessId: string): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) throw new Error('Invalid skill name.');
+  if (!state.providers.some(p => p.id === harnessId && p.installed)) {
+    throw new Error('The selected harness is not installed or available for chats.');
+  }
+  if (state.view !== 'conversation') setWorkspaceView('conversation');
+  await createChat(undefined, harnessId);
+  const chat = session();
+  if (!chat || !chatTask(chat) || chat.provider !== harnessId) {
+    throw new Error('Could not open a chat with the selected harness.');
+  }
+  const draft = `/${id} `;
+  state.drafts.set(chat.id,draft);
+  renderComposer();
+  closeCustomize(false);
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  if (prompt?.dataset.sessionId === chat.id) {
+    prompt.value = draft;
+    prompt.focus({preventScroll:true});
+    prompt.setSelectionRange(draft.length,draft.length);
+  }
+}
 let customizeShown = false;
 let customizeMount: {dispose(): void} | undefined;
 let customizeOpening: Promise<void> | undefined;
@@ -5722,7 +5746,7 @@ async function toggleCustomize(): Promise<void> {
   customizeOpening ??= import('./customize-skills').then(({mountCustomizeSkills}) => {
     if (!customizeMount) customizeMount = mountCustomizeSkills($('#customize-hub'), {
       call, subscribe: listener => subscribe('skills-operation-progress', listener),
-      chooseZip: chooseSkillZip, close: closeCustomize,
+      chooseZip: chooseSkillZip, trySkill: tryCustomizeSkill, close: closeCustomize,
     });
   }).catch(cause => { closeCustomize(); report(cause); }).finally(() => { customizeOpening = undefined; });
   await customizeOpening;

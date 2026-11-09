@@ -110,6 +110,73 @@ pub fn write_folder(dir: &Path, id: &str, files: &[(String, Vec<u8>)], previous:
     Ok(out)
 }
 
+
+/// Replace an unmanaged harness folder only after explicit user consent. The original is
+/// moved outside the harness's skill search root; no user files are deleted. New files are
+/// staged before touching the original and the original is restored if installation fails.
+pub fn replace_unmanaged_folder(
+    dir: &Path, id: &str, files: &[(String, Vec<u8>)],
+) -> Result<(Vec<Written>, PathBuf), String> {
+    use std::path::Component;
+    let target = dir.join(id);
+    let metadata = fs::symlink_metadata(&target)
+        .map_err(|e| format!("Could not inspect {}: {e}", target.display()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("{} is not a regular skill directory. PandaCode will not replace it.", target.display()));
+    }
+    let parent = dir.parent().ok_or("Could not locate the harness's backup directory.")?;
+    let backups = parent.join(".pandacode-skill-backups");
+    fs::create_dir_all(&backups)
+        .map_err(|e| format!("Could not create {}: {e}", backups.display()))?;
+    let backup_metadata = fs::symlink_metadata(&backups)
+        .map_err(|e| format!("Could not inspect {}: {e}", backups.display()))?;
+    if !backup_metadata.is_dir() || backup_metadata.file_type().is_symlink() {
+        return Err(format!("Unsafe backup directory {}.", backups.display()));
+    }
+
+    let unique = uuid::Uuid::new_v4();
+    let original_backup = backups.join(format!("{id}-{unique}"));
+    let staged = backups.join(format!(".pending-{id}-{unique}"));
+    fs::create_dir(&staged)
+        .map_err(|e| format!("Could not stage {}: {e}", staged.display()))?;
+    let prepared = (|| -> Result<Vec<Written>, String> {
+        files.iter().map(|(relative, bytes)| {
+            if relative.is_empty() || !Path::new(relative).components().all(|c| matches!(c, Component::Normal(_))) {
+                return Err(format!("Unsafe skill file path: {relative}"));
+            }
+            let file = staged.join(relative);
+            if let Some(parent) = file.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("Could not prepare {}: {e}", parent.display()))?;
+            }
+            fs::write(&file, bytes).map_err(|e| format!("Could not stage {}: {e}", file.display()))?;
+            Ok(Written { path: target.join(relative).to_string_lossy().into_owned(), sha256: sha256_hex(bytes) })
+        }).collect()
+    })();
+    let written = match prepared {
+        Ok(written) => written,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(&target, &original_backup) {
+        let _ = fs::remove_dir_all(&staged);
+        return Err(format!("Could not back up {}: {error}", target.display()));
+    }
+    if let Err(error) = fs::rename(&staged, &target) {
+        let restored = fs::rename(&original_backup, &target);
+        let _ = fs::remove_dir_all(&staged);
+        return Err(match restored {
+            Ok(()) => format!("Could not install {}: {error}. Original skill restored.", target.display()),
+            Err(restore_error) => format!(
+                "Could not install {}: {error}. Restoration failed ({restore_error}); original remains at {}.",
+                target.display(), original_backup.display()
+            ),
+        });
+    }
+    Ok((written, original_backup))
+}
+
 /// Remove the files PandaCode wrote that still match; returns the ones left because they changed.
 pub fn remove_folder(written: &[Written]) -> Vec<String> {
     let mut kept = Vec::new();

@@ -13,7 +13,7 @@ use super::{sha256_hex, Kind, Scope, Written};
 /// Harnesses with file-based skills and instruction files.
 pub const FILE_HARNESSES: &[&str] = &["claude", "codex"];
 /// Every other PandaCode harness; their skills and rules ride in the prompt.
-pub const PROMPT_HARNESSES: &[&str] = &["kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "muse", "devin", "zcode", "hermes"];
+pub const PROMPT_HARNESSES: &[&str] = &["kimi", "opencode", "glm", "antigravity", "grok", "mimo", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "muse", "devin", "zcode", "hermes", "github-copilot"];
 
 pub enum Surface {
     /// A folder `<dir>/<id>/` holding the skill's files.
@@ -44,7 +44,8 @@ pub fn surface(harness: &str, kind: Kind, scope: Scope, base: &Path) -> Surface 
 
 /// A harness counts as installed when its CLI is on the PATH or its home folder exists.
 pub fn installed(harness: &str, home: &Path) -> bool {
-    home.join(format!(".{harness}")).is_dir() || crate::token_saver::find_tool(harness).is_some()
+    let command = if harness == "github-copilot" { "copilot" } else { harness };
+    home.join(format!(".{harness}")).is_dir() || crate::token_saver::find_tool(command).is_some()
 }
 
 fn begin(id: &str) -> String {

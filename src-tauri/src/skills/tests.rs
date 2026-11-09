@@ -114,6 +114,8 @@ fn prompt_harness_skills_are_visible_only_after_activation() {
     assert!(fx.library.slash_skills("claude", &cwd).unwrap().is_empty());
     fx.library.deactivate("release-notes", "opencode", Scope::User, None).unwrap();
     assert!(fx.library.slash_skills("opencode", &cwd).unwrap().is_empty());
+    fx.library.activate("release-notes", "github-copilot", Scope::User, None, false).unwrap();
+    assert_eq!(fx.library.slash_skills("github-copilot", &cwd).unwrap().len(), 1);
 }
 
 #[test]

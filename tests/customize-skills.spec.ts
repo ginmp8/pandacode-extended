@@ -66,16 +66,19 @@ async function openCustomize(page: Page): Promise<void> {
 }
 
 test('Customize navigation remains separate from the Bots bar', async ({page}) => {
-  await page.goto('/');
+  // The full application preview loads multiple independent panels. Waiting for
+  // DOM readiness plus the observable navigation control avoids idle media/font
+  // requests counting against this test's existing, unchanged timeout.
+  await page.goto('/', {waitUntil:'domcontentloaded'});
   const customize = page.getByRole('button', {name:'Customize', exact:true});
   await expect(customize).toBeVisible();
-  await page.screenshot({path:'test-results/customize-navigation-before.png',fullPage:true});
+  await page.locator('.sidebar').screenshot({path:'test-results/customize-navigation-before.png',animations:'disabled'});
   await expect(page.locator('.sidebar-customize + #sidebar-bots-panel + #sidebar-bots')).toHaveCount(1);
   await customize.click();
   await expect(page.getByRole('heading', {name:'Customize',exact:true})).toBeVisible();
   await expect(page.locator('.workspace-header')).toBeHidden();
   await expect(page.locator('.conversation-pane')).toBeHidden();
-  await page.screenshot({path:'test-results/customize-navigation-after.png',fullPage:true});
+  await page.screenshot({path:'test-results/customize-navigation-after.png',fullPage:true,animations:'disabled'});
   await page.getByRole('button', {name:'Back to workspace'}).click();
   await expect(page.locator('#customize-hub')).toBeHidden();
 });

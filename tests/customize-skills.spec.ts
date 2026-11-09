@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 
 /* Isolate Customize from the chat runtime while exercising the same browser preview library. */
-async function openCustomize(page: Page): Promise<void> {
-  await page.route('**/customize-skills-harness.html', route => route.fulfill({
+async function openCustomize(page: Page, slow = false): Promise<void> {
+  await page.route('**/customize-skills-harness.html*', route => route.fulfill({
     contentType: 'text/html',
     body: `<!doctype html><html lang="en"><head><link rel="stylesheet" href="/src/styles.css"><link rel="stylesheet" href="/src/design-system.css"></head>
       <body><div id="host"></div><script type="module">
@@ -13,8 +13,13 @@ async function openCustomize(page: Page): Promise<void> {
         window.__skills = skills;
         window.__closeCount = 0;
         window.__progressEvents = [];
+        window.__trySkillRequests = [];
+        window.__holdSkillsList = new URLSearchParams(location.search).has('slow');
         mountCustomizeSkills(document.getElementById('host'), {
           call: async (command, args = {}) => {
+            if (command === 'skills_list' && window.__holdSkillsList) {
+              await new Promise(resolve => {window.__releaseSkillsList = () => {window.__holdSkillsList=false;resolve();};});
+            }
             if (command === 'skills_source_import_tracked' && window.__scenario === 'hold-import') {
               return await new Promise(resolve => { window.__releaseImport = () => resolve(skills.call(command, args)); });
             }
@@ -56,11 +61,12 @@ async function openCustomize(page: Page): Promise<void> {
           },
           subscribe: async listener => { listeners.add(listener); return () => listeners.delete(listener); },
           chooseZip: async () => '/Users/you/Downloads/skill.zip',
+          trySkill: async (id, harness) => {window.__trySkillRequests.push({id,harness});},
           close: () => window.__closeCount++,
         });
       </script></body></html>`,
   }));
-  await page.goto('/customize-skills-harness.html');
+  await page.goto(slow ? '/customize-skills-harness.html?slow=1' : '/customize-skills-harness.html');
   await expect(page.getByRole('heading', {name:'Customize'})).toBeVisible();
   await expect(page.getByRole('heading', {name:'Skills'})).toBeVisible();
   const category = page.getByRole('navigation', {name:'Customization categories'}).getByRole('button', {name:'Skills'});
@@ -71,7 +77,7 @@ async function openCustomize(page: Page): Promise<void> {
   });
   expect(geometry.iconLeft).toBeLessThan(geometry.textLeft);
   expect(geometry.iconLeft-geometry.left).toBeLessThan(30);
-  await expect(page.locator('.customize-skill-icon img').first()).toHaveAttribute('src', /^data:image\/svg\+xml,/);
+  if(!slow) await expect(page.locator('.customize-skill-icon img').first()).toHaveAttribute('src', /^data:image\/svg\+xml,/);
 
 }
 
@@ -290,4 +296,73 @@ test('checkbox selection preserves keyboard focus after the workspace redraw', a
   await page.keyboard.press('Space');
   await expect(checkbox).not.toBeChecked();
   await expect(checkbox).toBeFocused();
+});
+
+test('initial library load shows progress and never flashes an empty library', async ({page}) => {
+  await openCustomize(page,true);
+  const loading=page.getByRole('status',{name:'Loading installed skills'});
+  await expect(loading).toBeVisible();
+  await expect(page.getByText('No skills installed')).toHaveCount(0);
+  await page.evaluate(() => (window as any).__releaseSkillsList());
+  await expect(loading).toBeHidden();
+  await expect(page.getByRole('button',{name:'Inspect Release notes'})).toBeVisible();
+});
+
+test('installed skill can be enabled and disabled with visible feedback', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const toggle=detail.getByRole('checkbox',{name:'Enable Release notes for Codex'});
+  await expect(toggle).not.toBeChecked();
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeDisabled();
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  await expect(page.locator('.customize-toast')).toContainText('enabled for Codex');
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeEnabled();
+  await toggle.uncheck();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.locator('.customize-toast')).toContainText('disabled for Codex');
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeDisabled();
+});
+
+test('Try in chat uses the enabled harness and never submits the skill automatically', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  await detail.getByRole('checkbox',{name:'Enable Release notes for Claude Code'}).check();
+  await detail.getByRole('button',{name:'Try in chat'}).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__trySkillRequests)).toEqual([{id:'release-notes',harness:'claude'}]);
+});
+
+test('uninstall requires confirmation and refuses skills still activated', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const toggle=detail.getByRole('checkbox',{name:'Enable Release notes for Codex'});
+  await toggle.check();
+  await detail.getByRole('button',{name:'Uninstall',exact:true}).click();
+  await expect(detail).toContainText('Disable all 1 activation');
+  await expect(detail.getByRole('button',{name:'Confirm uninstall'})).toBeDisabled();
+  await detail.getByRole('button',{name:'Cancel uninstall'}).click();
+  await toggle.uncheck();
+  await detail.getByRole('button',{name:'Uninstall',exact:true}).click();
+  await expect(detail.getByRole('button',{name:'Confirm uninstall'})).toBeEnabled();
+  await detail.getByRole('button',{name:'Confirm uninstall'}).click();
+  await expect(page.getByRole('button',{name:'Inspect Release notes'})).toHaveCount(0);
+  await expect(page.locator('.customize-toast')).toContainText('uninstalled from the PandaCode library');
+});
+
+test('safety findings require a separate explicit consent to activate', async ({page}) => {
+  await openCustomize(page);
+  await page.evaluate(() => (window as any).__skills.importFolder('/tmp/setup','skill'));
+  await page.getByRole('button',{name:'Refresh skills'}).click();
+  await page.getByRole('button',{name:'Inspect setup'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const toggle=detail.getByRole('checkbox',{name:'Enable setup for Codex'});
+  await toggle.check();
+  await expect(toggle).not.toBeChecked();
+  await expect(detail).toContainText('safety finding');
+  await detail.getByRole('button',{name:'I reviewed the findings. Enable anyway'}).click();
+  await expect(toggle).toBeChecked();
+  await expect(page.locator('.customize-toast')).toContainText('setup enabled for Codex');
 });

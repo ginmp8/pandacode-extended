@@ -234,7 +234,7 @@ pub struct Worker {
     pub council: Option<CouncilSeat>,
     /// Immutable reviewer identity and authority; absent in legacy Council seats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reviewer_binding: Option<reviewer_security::ReviewerBinding>,
+    pub(crate) reviewer_binding: Option<reviewer_security::ReviewerBinding>,
     /// A reviewer's report had no score and it was asked once for the line; a second miss fails it.
     /// Separate from `nudged`, which any reply resets, so this can never ask twice.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

@@ -7,6 +7,7 @@ import type { SkillItem, CatalogSkill, SkillMatrix } from './skills-library';
 type SavedSource = {
   id: string; repo: string; path: string; gitRef: string | null;
   commit: string; selectedPaths: string[]; savedAt: number;
+  lastSyncedAt?: number|null; lastSyncStatus?: string|null; lastSyncCommit?: string|null;
 };
 type SourcePreview = {
   repo: string; path: string; gitRef: string | null; commit: string; skills: CatalogSkill[];
@@ -146,8 +147,9 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       <div class="customize-source-identity">
         <strong>${esc(source.repo)}</strong><small>${esc(source.path || 'Repository root')} · ${esc(source.gitRef ?? 'Default branch')}</small>
         <small>${plural(source.selectedPaths.length, 'tracked skill')} · commit <code>${esc(shaShort(source.commit))}</code></small>
-        ${syncReport.checkedAt && syncReport.events.some(event=>installed.some(item=>item.id===event.id && item.source.kind==='github' && item.source.location.startsWith(source.repo+'/')))
-          ? `<small>Last sync report: ${esc(new Date(syncReport.checkedAt).toLocaleString())}</small>` : ''}
+        ${source.lastSyncedAt
+          ? `<small>Last sync: ${esc(source.lastSyncStatus??'checked')} · ${esc(new Date(source.lastSyncedAt).toLocaleString())}${source.lastSyncCommit ? ` · ${esc(shaShort(source.lastSyncCommit))}` : ''}</small>`
+          : '<small>Not synchronized yet</small>'}
       </div>
       <div class="customize-source-actions">
         <button type="button" class="secondary-button" data-customize="edit-source" data-id="${esc(source.id)}" ${busy || operation?.state === 'running' ? 'disabled' : ''}>Edit selection</button>

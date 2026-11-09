@@ -16,7 +16,7 @@ async function openCustomize(page: Page): Promise<void> {
         mountCustomizeSkills(document.getElementById('host'), {
           call: async (command, args = {}) => {
             if (command === 'skills_preview_file' && window.__scenario === 'malicious') {
-              const text = '<img src="https://example.org/tracker.png"><script>window.bad=1</script>';
+              const text = '<img src="https://example.org/tracker.png"><scr'+'ipt>window.bad=1</scr'+'ipt>';
               return {path:args.file,text,size:text.length,binary:false};
             }
             if (command === 'skills_source_import_tracked' && window.__scenario === 'partial') {
@@ -127,9 +127,10 @@ test('three selected skills show partial failure, truthful progress and selectiv
   await page.evaluate(() => { (window as any).__scenario='partial'; });
   await page.getByRole('button',{name:'Add',exact:true}).click();
   await page.getByRole('menuitem',{name:'GitHub link'}).click();
-  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/acme/pstack');
   await page.getByRole('button',{name:'Scan repository'}).click();
-  await page.getByRole('button',{name:'Select shown'}).click();
+  const choices=page.getByRole('region',{name:'Discovered GitHub skills'}).getByRole('checkbox');
+  for(let i=0;i<3;i++)await choices.nth(i).check();
   await page.getByRole('button',{name:'Import selected (3)'}).click();
   const progress=page.getByRole('region',{name:'Skill operation status'});
   await expect(progress).toContainText('Completed with errors');
@@ -148,9 +149,10 @@ test('aggregate-only completion is not falsely described as streamed progress', 
   await openCustomize(page);
   await page.getByRole('button',{name:'Add',exact:true}).click();
   await page.getByRole('menuitem',{name:'GitHub link'}).click();
-  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/you/agent-skills');
+  await page.getByRole('textbox',{name:'GitHub URL'}).fill('https://github.com/acme/pstack');
   await page.getByRole('button',{name:'Scan repository'}).click();
-  await page.getByRole('button',{name:'Select shown'}).click();
+  const choices=page.getByRole('region',{name:'Discovered GitHub skills'}).getByRole('checkbox');
+  for(let i=0;i<3;i++)await choices.nth(i).check();
   await page.getByRole('button',{name:'Import selected (3)'}).click();
   await expect(page.getByRole('region',{name:'Skill operation status'})).toContainText('Incremental progress events were not received');
 });

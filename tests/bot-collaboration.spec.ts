@@ -14,7 +14,7 @@ test.describe('bot collaboration', () => {
         leadBotId: 'executor', archived: false, updatedAt: 1, activeBotIds: [],
         messages: [
           { id: 'one', kind: 'assigned', authorBotId: 'executor', text: 'Assigned', status: 'In progress', createdAt: 1,
-            council: { cycleId: 'isolated-one', state: 'Reviewing', round: 1, target: 9, lowest: null,
+            council: { cycleId: 'isolated-one', sessionId: 'council-task-one', state: 'Reviewing', round: 1, target: 9, lowest: null,
               artifactRevision: '1:2', reviewers: [{ botId: 'reviewer', name: 'Reviewer', score: null }] } },
           { id: 'two', kind: 'assigned', authorBotId: 'reviewer', text: 'Assigned', status: 'Completed', createdAt: 2 },
         ],
@@ -28,12 +28,16 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilEnabled"]')).not.toBeChecked();
     await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Council: Reviewing');
     await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Reviewer');
+    await expect(fixture.locator('.bc-assigned[data-message-id="one"] [data-action="channel-council-report"]')).toHaveAttribute('data-session-id', 'council-task-one');
     await expect(fixture.locator('.bc-assigned[data-message-id="two"]')).not.toContainText('Council:');
     await fixture.locator('input[name="councilEnabled"]').check();
     await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('9');
     await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('10');
     await expect(fixture.locator('input[name="councilReviewer"]')).toHaveCount(2);
+    await fixture.locator('input[name="councilMode"][value="selected"]').check();
+    await expect(fixture.locator('input[name="councilScopedFile"]')).toHaveCount(1);
+    await expect(fixture.locator('input[name="councilFilePath"]')).toHaveCount(1);
   });
 
   test('renders attributed bot posts, explicit recipients, and direct delegation status in one channel', async ({ page }) => {

@@ -7147,6 +7147,15 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
     case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
+    case 'channel-council-report': {
+      const taskId = element.dataset.sessionId;
+      if (!taskId) break;
+      if (!state.sessions.some(task => task.id === taskId)) await reloadSessions();
+      if (!state.sessions.some(task => task.id === taskId)) { notify('This Council delivery report is unavailable.'); break; }
+      await selectSession(taskId);
+      if (state.sessionId === taskId) (await ensureArchitectView()).open();
+      break;
+    }
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;
     case 'bot-pause': if (element.dataset.bot) { const bot = sidebarBots.find(item => item.id === element.dataset.bot); if (bot) await setBotPaused(bot, !bot.paused); } break;
     case 'toggle-hidden-bots': hiddenBotsOpen = !hiddenBotsOpen; try { localStorage.setItem('pandacode.botsHiddenOpen', String(hiddenBotsOpen)); } catch { /* Keep the choice for this window. */ } renderBots(); break;
@@ -7307,8 +7316,21 @@ document.addEventListener('submit', event => {
       notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
       return;
     }
+    const scopedFile = data.get('councilScopedFile') === 'on' && councilMode === 'selected';
+    const filePath = String(data.get('councilFilePath') ?? '').trim();
+    const validFilePath = filePath.length > 0 && filePath.length <= 240 && !filePath.startsWith('/')
+      && !filePath.startsWith('\\') && !filePath.includes(':')
+      && filePath.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
+    if (councilEnabled && scopedFile && !validFilePath) {
+      notify('Choose one valid relative file path for the scoped reviewer action.');
+      return;
+    }
     const council = councilEnabled ? {
       target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      ...(scopedFile ? { reviewPermissions: {
+        authorizationId: crypto.randomUUID(),
+        grants: [{ tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: filePath }],
+      } } : {}),
     } : undefined;
     const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {

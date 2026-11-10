@@ -73,6 +73,10 @@
 .bc-council-reviewer-options { display: none; flex-wrap: wrap; gap: 8px 12px; padding: 8px 0; }
 .bc-council-reviewer-options p { flex-basis: 100%; margin: 0; }
 .bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-reviewer-options { display: flex; }
+.bc-council-selected-permissions { display: none; flex-direction: column; gap: 8px; }
+.bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-selected-permissions { display: flex; }
+.bc-council-selected-permissions input[type=text] { width: min(100%, 240px); padding: 4px; border: 1px solid var(--ds-border, var(--faint)); border-radius: 5px; background: var(--ds-fill); color: var(--text); }
+.bc-council-report { padding: 2px 8px; font-size: 12px; }
 .bc-council-summary { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; color: var(--text); }
 .bc-council-summary strong { font-weight: 600; }
 .bc-council-reviewers { color: var(--muted); }

@@ -43,6 +43,8 @@ pub struct SharedChannelMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelCouncilView {
     pub cycle_id: String,
+    /// Bot-owned task for the scoped native Council report.
+    pub session_id: String,
     pub state: String,
     pub round: usize,
     pub target: f64,
@@ -268,7 +270,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         "failed" => "Failed".into(),
         _ => state,
     };
-    Ok(Some(ChannelCouncilView { cycle_id, state, round, target, lowest, artifact_revision: revision, notice, reviewers }))
+    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers }))
 }
 
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.

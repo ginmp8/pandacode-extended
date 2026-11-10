@@ -169,7 +169,7 @@ export function createCouncil(host: CouncilHost) {
     if (team) loaded(sessionId);
     // An explicit empty strip is the baseline for future Council round entrance.
     // A strip already present on first paint is not a newly started review.
-    if (!html) motion(sessionId, 'strip', '', null, () => []);
+    if (!html && (team || host.loaded(sessionId))) motion(sessionId, 'strip', '', null, () => []);
     return `<div class="council-strip-slot" data-session-id="${escape(sessionId)}">${html}</div>`;
   }
 
@@ -193,11 +193,14 @@ export function createCouncil(host: CouncilHost) {
     if (!panel.dataset.compact) {
       const draft = selection(sessionId), bots = reviewerBots.get(sessionId) ?? [], executor = host.executorBotId?.(sessionId);
       const list = panel.querySelector<HTMLElement>('.council-bots')!;
+      const missing = draft.ids.filter(id => !bots.some(bot => bot.id === id)).map(id => `<label class="council-bot-choice is-unavailable"><input type="checkbox" data-reviewer-bot="${escape(id)}" checked><span class="council-bot-info"><strong>${escape(id)}</strong><small>Selected reviewer · remove to choose another bot</small></span><span class="council-bot-state">${reviewerLoads.has(sessionId) ? 'Unavailable' : 'Missing bot'}</span></label>`).join('');
       const markup = draft.selected ? `<p class="council-bot-heading">Task reviewers · 2–8 distinct bots</p>${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
-        const disabled = bot.paused || bot.available === false || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
+        const unavailable = bot.paused || bot.available === false || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
+        // An unavailable reviewer cannot be added, but an existing selection must remain removable.
+        const checked = draft.ids.includes(bot.id), disabled = unavailable && !checked;
         const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : bot.available === false ? (bot.reason || 'Unavailable') : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
-        return `<label class="council-bot-choice${disabled ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${draft.ids.includes(bot.id) ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${escape(reason)}</span></label>`;
-      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}<div class="council-review-permissions"><label><input type="checkbox" data-council-scoped ${draft.scoped ? 'checked' : ''}> Allow one exact native host action (file inspector)</label>${draft.scoped ? `<label>Relative file path<input type="text" data-council-path maxlength="240" autocomplete="off" placeholder="src/example.ts" value="${escape(draft.fileScope ?? '')}" aria-label="Allowed reviewer file path"></label>` : ''}<small>Read-only by default; this per-task action never grants shell or checkout writes.</small></div>` : '';
+        return `<label class="council-bot-choice${unavailable ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${escape(reason)}</span></label>`;
+      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}${missing}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.filter(id => bots.some(bot => bot.id === id)).length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}<div class="council-review-permissions"><label><input type="checkbox" data-council-scoped ${draft.scoped ? 'checked' : ''}> Allow one exact native host action (file inspector)</label>${draft.scoped ? `<label>Relative file path<input type="text" data-council-path maxlength="240" autocomplete="off" placeholder="src/example.ts" value="${escape(draft.fileScope ?? '')}" aria-label="Allowed reviewer file path"></label>` : ''}<small>Read-only by default; this per-task action never grants shell or checkout writes.</small></div>` : '';
       const focusedBot = (document.activeElement as HTMLElement | null)?.closest<HTMLInputElement>('[data-reviewer-bot]')?.dataset.reviewerBot;
       if (list.innerHTML !== markup) {
         // A checked input's property is not always reconciled by a DOM attribute morph.
@@ -206,7 +209,10 @@ export function createCouncil(host: CouncilHost) {
         list.innerHTML = markup;
         list.scrollTop = scroll;
       }
-      if (focusedBot && !list.contains(document.activeElement)) list.querySelector<HTMLInputElement>(`[data-reviewer-bot="${CSS.escape(focusedBot)}"]`)?.focus({ preventScroll: true });
+      if (focusedBot && !list.contains(document.activeElement)) {
+        const next = list.querySelector<HTMLInputElement>(`[data-reviewer-bot="${CSS.escape(focusedBot)}"]:not(:disabled)`) ?? list.querySelector<HTMLInputElement>('input:not(:disabled)');
+        next?.focus({ preventScroll: true });
+      }
       list.hidden = !draft.selected;
     }
     // Which row had focus before this paint (its focused option may be hidden below).
@@ -312,7 +318,7 @@ export function createCouncil(host: CouncilHost) {
       faceSoon(sessionId);
     }
     const slot = document.querySelector<HTMLElement>(`#composer .council-strip-slot[data-session-id="${CSS.escape(sessionId)}"]`), team = host.team(sessionId);
-    if (slot) paintStrip(slot, team);
+    if (slot) paintStrip(slot, team, host.loaded(sessionId));
     paint(sessionId);
     keepOpener();
   }
@@ -668,11 +674,11 @@ function stripHtml(native: TeamSnapshot): string {
 const STRIP_EXIT_MS = 120;
 /** Draws the strip in place (morph keeps focus), with its motion: it enters and leaves with a short fade and a few pixels of
  *  rise (never the height of anything else), its state cross-fades, and a score lands. */
-function paintStrip(slot: HTMLElement, team: TeamSnapshot | null): void {
+function paintStrip(slot: HTMLElement, team: TeamSnapshot | null, known: boolean): void {
   const html = team ? stripHtml(team) : '', id = slot.dataset.sessionId!, shown = slot.querySelector<HTMLElement>(':scope > .council-strip');
   if (!html && !shown) {
     // A settled empty state must count as a real baseline for the next round.
-    motion(id, 'strip', '', null, () => []);
+    if (team || known) motion(id, 'strip', '', null, () => []);
     return;
   }
   if (!html && shown) {
@@ -689,10 +695,10 @@ function paintStrip(slot: HTMLElement, team: TeamSnapshot | null): void {
   if (!strip) return;
   loaded(id);
   const entered = motion(id, 'strip', 'shown', strip, element => [element.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 180, easing: 'ease-out' })]);
-  if (entered.length) return;
+  // The entrance carries the children, but still establish their baseline for the next real change.
   const state = strip.querySelector<HTMLElement>('.council-strip-state');
-  motion(id, 'strip-state', state?.textContent ?? '', state, element => fade(element, 180, 0.4));
-  for (const score of strip.querySelectorAll<HTMLElement>('.council-row-score')) motion(id, `score:${score.closest<HTMLElement>('.council-row')!.dataset.id}`, score.dataset.scored ?? '', score, element => element.dataset.scored ? land(element) : []);
+  motion(id, 'strip-state', state?.textContent ?? '', entered.length ? null : state, element => fade(element, 180, 0.4));
+  for (const score of strip.querySelectorAll<HTMLElement>('.council-row-score')) motion(id, `score:${score.closest<HTMLElement>('.council-row')!.dataset.id}`, score.dataset.scored ?? '', entered.length ? null : score, element => element.dataset.scored ? land(element) : []);
 }
 
 /* Motion: one gate for every Council animation. An animation plays for a change seen while its thread is the one shown,

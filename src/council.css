@@ -105,7 +105,8 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-bot-choice:focus-within{outline:2px solid var(--focus);outline-offset:1px}
 /* Global input width rules must never consume the entire reviewer row. */
 .council-bot-choice>input[type="checkbox"],.council-review-permissions input[type="checkbox"]{flex:none;inline-size:14px;block-size:14px;min-inline-size:14px;margin:0;accent-color:var(--ds-primary-bg)}
-.council-bot-choice.is-unavailable{opacity:.65;cursor:not-allowed}
+.council-bot-choice.is-unavailable{opacity:.65}
+.council-bot-choice:has(input:disabled){cursor:not-allowed}
 .council-bot-info{display:grid;flex:1;min-width:0;gap:2px}
 .council-bot-info strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--weight-medium)}
 .council-bot-info small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

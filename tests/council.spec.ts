@@ -6,12 +6,13 @@ const toggle = (page: Page) => panel(page).getByRole('switch', { name: 'Council'
 /** Eligible reviewer identities, excluding the current task executor and unavailable bots. */
 const eligibleReviewers = (page: Page) => panel(page).locator('.council-bots input[data-reviewer-bot]:not(:disabled)');
 const option = (page: Page, field: string, name: string) => panel(page).locator(`[data-field="${field}"]`).getByRole('button', { name, exact: true });
+type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: string; provider: string; model: string; paused: boolean; available?: boolean; reason?: string }[] };
 
 // The first paint can be slow on a busy machine; what is under test is what happens after it.
 test.setTimeout(60_000);
 
 /** Records every architect_set_council; `refuse` makes the mock refuse a command, like a native error. */
-async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}): Promise<void> {
+async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
     const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
@@ -22,6 +23,12 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
       if (${JSON.stringify(slow)}[command]) await new Promise(done => setTimeout(done, ${JSON.stringify(slow)}[command]));
       if (window.__hold?.[command]) await window.__hold[command];
       if (${JSON.stringify(refuse)}[command]) throw new Error(${JSON.stringify(refuse)}[command]);
+      if (command === 'architect_get' && ${Boolean(reviewers)}) {
+        const team = architect.get(args.sessionId);
+        if (team?.config.council) team.config.council.reviewerBotIds = ${JSON.stringify(reviewers?.ids ?? [])};
+        return team;
+      }
+      if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
       switch (command) {
     `);
     await route.fulfill({ response, body });
@@ -33,8 +40,8 @@ const calls = (page: Page) => page.evaluate(() => (window as any).__councilCalls
 const strip = (page: Page) => page.locator('#composer .council-strip');
 const disclosure = (page: Page) => strip(page).locator('.council-strip-toggle');
 const ready = (page: Page) => expect(page.locator('html')).toHaveAttribute('data-ready', '');
-/** Past the quiet window after a thread first shows (motion plays only for changes after it). */
-const settle = async (page: Page) => { await ready(page); await expect(button(page)).toBeVisible(); await page.waitForTimeout(700); };
+/** Past the quiet window after the thread and its actual team have shown. The tray can precede the team snapshot. */
+const settle = async (page: Page) => { await expect(button(page)).toBeVisible(); await expect(strip(page)).toBeVisible(); await ready(page); await page.waitForTimeout(700); };
 
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
@@ -116,6 +123,28 @@ test('selected reviewer mode refuses to launch with fewer than two bots', async 
   await expect(panel(page).getByRole('alert')).toContainText('Select 2 to 8 distinct reviewer bots');
   await expect(toggle(page)).not.toBeChecked();
   expect(await calls(page)).toEqual([]);
+});
+
+for (const state of ['paused', 'unavailable', 'missing'] as const) test(`a selected ${state} bot stays removable and cannot bypass reviewer validation`, async ({ page }) => {
+  const staleId = 'old<reviewer>', valid = ['ready-one', 'ready-two'].map(id => ({ id, name: id, role: 'Reviewer', provider: 'codex', model: 'gpt-5', paused: false }));
+  const stale = { id: staleId, name: 'Old reviewer', role: 'Reviewer', provider: 'codex', model: 'gpt-5', paused: state === 'paused', available: state !== 'unavailable' };
+  await open(page, '/?council=fixing', {}, 0, '', {}, { ids: [staleId, ...valid.map(bot => bot.id)], bots: state === 'missing' ? valid : [stale, ...valid] });
+  await button(page).click();
+  const old = panel(page).getByRole('checkbox', { name: state === 'missing' ? /old<reviewer>/ : /Old reviewer/ });
+  await expect(old).toBeChecked();
+  await expect(old).toBeEnabled();
+  if (state === 'missing') await expect(panel(page).getByText('Missing bot', { exact: true })).toBeVisible();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('A selected reviewer bot is unavailable');
+  expect(await calls(page)).toEqual([]);
+  await old.focus();
+  await page.keyboard.press('Space');
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].reviewerBotIds).toEqual(valid.map(bot => bot.id));
+  if (state === 'missing') await expect(old).toHaveCount(0);
+  else { await expect(old).not.toBeChecked(); await expect(old).toBeDisabled(); }
+  await expect(panel(page).getByRole('checkbox', { name: /ready-one/ })).toBeFocused();
+  await expect(panel(page).getByText('2 of 2–8 reviewers selected', { exact: true })).toBeVisible();
 });
 
 test('while off, a choice only sets what council starts with', async ({ page }) => {
@@ -786,6 +815,47 @@ async function recordMotion(page: Page): Promise<void> {
   });
 }
 const motion = (page: Page): Promise<{ name: string; frames: string }[]> => page.evaluate(() => (window as any).__motion.splice(0));
+
+for (const known of [false, true]) test(`motion: ${known ? 'a known empty Council enters' : 'an unknown Council hydrates quietly'} after a delayed first strip paint`, async ({ page }) => {
+  await recordMotion(page);
+  // Isolate the model/paint gap: a slow initial load and a real later round must have different baselines.
+  await page.route('**/__council-motion', route => route.fulfill({ contentType: 'text/html', body: '<html data-ready><body><div id="composer"></div></body></html>' }));
+  await page.goto('/__council-motion');
+  await page.evaluate(async known => {
+    const { createCouncil } = await import('/src/council-panel.ts');
+    let team: any = null, loaded = known;
+    const council = createCouncil({
+      team: () => team, loaded: () => loaded, call: async () => null as any,
+      startTeam: async () => false, updated: () => {}, keepFixing: async () => {},
+      classicSetup: () => false, openClassicSetup: () => {}, announce: () => {},
+    });
+    document.querySelector('#composer')!.innerHTML = council.button('delayed') + council.strip('delayed');
+    council.sync('delayed');
+    (window as any).__hydrateCouncil = () => {
+      loaded = true;
+      team = {
+        sessionId: 'delayed', status: 'running', config: { council: { target: 9.5, maxRounds: 10, reviewers: 0 } },
+        councilStatus: { state: 'reviewing', round: 1, lowest: null, target: 9.5, stale: false },
+        workers: [{ id: 'seat', name: 'Correctness', status: 'running', createdAt: 1, council: { round: 1, lens: 'Correctness', score: null } }],
+      };
+      council.button('delayed'); // The snapshot is known before the strip's deferred paint.
+    };
+    (window as any).__paintCouncil = () => council.sync('delayed');
+    (window as any).__changeCouncil = () => { team.councilStatus.state = 'fixing'; council.sync('delayed'); };
+  }, known);
+  await page.waitForTimeout(700);
+  await page.evaluate(() => (window as any).__hydrateCouncil());
+  await page.waitForTimeout(700);
+  await page.evaluate(() => (window as any).__paintCouncil());
+  await expect(strip(page)).toBeVisible();
+  const initial = await motion(page);
+  if (known) expect(initial.filter(entry => entry.name === 'council-strip')).toHaveLength(1);
+  else expect(initial).toEqual([]);
+  await page.waitForTimeout(250);
+  await page.evaluate(() => (window as any).__changeCouncil());
+  await expect(strip(page).locator('.council-strip-state')).toHaveText('Round 1 of 10 · fixing');
+  expect((await motion(page)).some(entry => entry.name === 'council-strip-state')).toBe(true);
+});
 
 test('motion: nothing on load or thread switch; the strip enters with a short fade and rise; the state cross-fades; a score lands; the glyph pops for asking', async ({ page }) => {
   await recordMotion(page);

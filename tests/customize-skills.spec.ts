@@ -70,7 +70,14 @@ async function openCustomize(page: Page, slow = false): Promise<void> {
           },
           subscribe: async listener => { listeners.add(listener); return () => listeners.delete(listener); },
           chooseZip: async () => '/Users/you/Downloads/skill.zip',
-          trySkill: async (id, harness) => {window.__trySkillRequests.push({id,harness});},
+          trySkill: async (id, harness) => {
+            window.__trySkillRequests.push({id,harness});
+            if (window.__scenario === 'hold-chat') {
+              await new Promise((resolve,reject) => {
+                window.__rejectSkillChat = () => reject(new Error('Chat creation unavailable'));
+              });
+            }
+          },
           close: () => window.__closeCount++,
         });
       </script></body></html>`,
@@ -379,6 +386,25 @@ test('safety findings require a separate explicit consent to activate', async ({
   await expect(page.locator('.customize-toast')).toContainText('setup enabled for Codex');
 });
 
+test('Try in chat reports a delayed failure and restores its controls after completing', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  await detail.getByRole('checkbox',{name:'Enable Release notes for Codex'}).check();
+  await page.evaluate(() => (window as any).__scenario='hold-chat');
+  const tryChat=detail.getByRole('button',{name:'Try in chat'});
+  await tryChat.click();
+  const activity=page.getByRole('status',{name:'Skill action in progress'});
+  await expect(activity).toContainText('Opening Release notes in chat');
+  await expect(tryChat).toBeDisabled();
+  await expect(page.locator('.customize-error')).toHaveCount(0);
+  await page.evaluate(() => (window as any).__rejectSkillChat());
+  await expect(activity).toBeHidden();
+  await expect(page.locator('.customize-error')).toHaveText('Chat creation unavailable');
+  await expect(tryChat).toBeEnabled();
+  await expect(detail).toBeVisible();
+});
+
 test('Try in chat opens a new projectless chat with a prefilled skill command', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/',{waitUntil:'domcontentloaded'});
@@ -387,6 +413,11 @@ test('Try in chat opens a new projectless chat with a prefilled skill command', 
   const detail=page.getByRole('region',{name:'Read-only skill preview'});
   await detail.getByRole('checkbox',{name:'Enable Release notes for Codex'}).check();
   await detail.getByRole('button',{name:'Try in chat'}).click();
+  const activity=page.getByRole('status',{name:'Skill action in progress'});
+  // The click starts an async operation, including any remaining startup and
+  // thread reads. Wait for its visible completion within the existing test
+  // budget before checking the unchanged navigation/prefill/focus contract.
+  await expect(activity).toBeHidden({timeout:45_000});
   await expect(page.locator('.customize-error')).toHaveCount(0);
   await expect(page.locator('#customize-hub')).toBeHidden();
   await expect(page.locator('#prompt')).toHaveValue('/release-notes ');

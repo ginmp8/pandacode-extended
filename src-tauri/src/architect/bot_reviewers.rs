@@ -3,6 +3,7 @@
 use super::{council::CouncilConfig, TeamSnapshot, WorkerProfile, HARNESSES};
 use crate::{bots, model_health, model_routing, providers, storage::Store, Result};
 use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Only a direct bot conversation or explicitly assigned bot task establishes
@@ -126,12 +127,57 @@ pub(super) fn occupied_bot_ids<'a>(team: &'a TeamSnapshot, round: usize, replace
         .collect()
 }
 
-/// Resolve a selected persistent reviewer for one native seat. A replacement keeps its bot.
-/// Never silently use a native worker or another bot when the intended seat is unavailable.
-pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>) -> Result<Option<bots::Bot>> {
+/// All selected profiles are captured together, before the first seat is issued. Store this in a
+/// native-only request record, separate from mutable worker snapshots and bot profiles.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(super) struct SelectedReviewer {
+    pub id: String,
+    pub roster_bot_ids: Vec<String>,
+    pub profile: WorkerProfile,
+    pub context: super::reviewer_security::ReviewerBotContext,
+    pub tool_policy: super::reviewer_security::ReviewerToolPolicy,
+}
+
+fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_executable: bool) -> Result<Vec<SelectedReviewer>> {
+    let key = format!("native-reviewer-round:{}:{round}", team.council_since);
+    let saved: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
+        rusqlite::params![team.session_id, key], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(raw) = saved {
+        return serde_json::from_str(&raw).map_err(|_| "reviewer_session_mismatch: invalid frozen reviewer round.".into());
+    }
+    // Older S2 rounds only pinned profiles as seats were issued. Re-reading the remaining bots
+    // would invent a snapshot; require explicit recovery instead.
+    if team.workers.iter().any(|w| w.created_at >= team.council_since && w.council.as_ref().is_some_and(|s| s.round == round)) {
+        return Err("reviewer_session_mismatch: this legacy round has no frozen roster. Stop its reviewers and change the selected roster to start a new round.".into());
+    }
+    let config = team.config.council.as_ref().ok_or("Council is off.")?;
+    config.validate()?;
+    let executor = executor(store, &team.session_id)?;
+    let mut reviewers = Vec::new();
+    for id in &config.reviewer_bot_ids {
+        let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
+        valid_bot(&bot, executor.as_deref(), check_executable)?;
+        let tool_policy = config.review_permissions.as_ref().map(|permissions| review_policy(&bot, permissions)).transpose()?.unwrap_or(super::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
+        reviewers.push(SelectedReviewer {
+            id: id.clone(), roster_bot_ids: config.reviewer_bot_ids.clone(), profile: profile(&bot),
+            context: super::reviewer_security::ReviewerBotContext::from_bot(&bot), tool_policy,
+        });
+    }
+    super::record_request(store, &team.session_id, &key, "reviewer_round", &serde_json::to_string(&reviewers).map_err(|e| e.to_string())?, "")?;
+    Ok(reviewers)
+}
+
+/// Resolve a frozen selected reviewer. Live deletion, pause, executor identity and frozen-model
+/// availability are still checked, without substituting a newly edited profile or another bot.
+pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>) -> Result<Option<SelectedReviewer>> {
+    seat_bot_inner(store, team, round, replaces, true)
+}
+pub(super) fn seat_bot_inner(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool) -> Result<Option<SelectedReviewer>> {
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     if config.reviewer_bot_ids.is_empty() { return Ok(None); }
-    validate_roster(store, &team.session_id, config)?;
+    let reviewers = round_reviewers(store, team, round, check_executable)?;
     let old = replaces.and_then(|id| team.workers.iter().find(|w| w.id == id));
     let inherited = old.and_then(|w| w.reviewer_binding.as_ref()).and_then(|b| b.reviewer_bot_id.as_deref());
     if old.is_some() && inherited.is_none() {
@@ -140,19 +186,33 @@ pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replace
     let occupied = occupied_bot_ids(team, round, replaces);
     let selected = match inherited {
         Some(id) => id,
-        None => config.reviewer_bot_ids.iter().find(|id| !occupied.contains(id.as_str()))
-            .map(String::as_str)
+        None => reviewers.iter().find(|bot| !occupied.contains(bot.id.as_str()))
+            .map(|bot| bot.id.as_str())
             .ok_or("All selected reviewer bots already have a seat in this round.")?,
     };
-    if occupied.contains(selected) || !config.reviewer_bot_ids.iter().any(|id| id == selected) {
+    if occupied.contains(selected) {
         return Err("reviewer_session_mismatch: reviewer identity is duplicated or no longer selected.".into());
     }
-    let bot = bots::get(store, selected).map_err(|_| format!("reviewer_unavailable: selected bot {selected} was removed."))?;
-    valid_bot(&bot, executor(store, &team.session_id)?.as_deref(), true)?;
-    Ok(Some(bot))
+    let frozen = reviewers.iter().find(|bot| bot.id == selected)
+        .ok_or("reviewer_session_mismatch: replacement bot is absent from the frozen round.")?;
+    let mut available = bots::get(store, selected).map_err(|_| format!("reviewer_unavailable: selected bot {selected} was removed."))?;
+    available.provider = frozen.profile.provider.clone();
+    available.model = frozen.profile.model.clone();
+    available.reasoning_effort = frozen.context.reasoning_effort.clone();
+    valid_bot(&available, executor(store, &team.session_id)?.as_deref(), check_executable)?;
+    if let Some(binding) = old.and_then(|w| w.reviewer_binding.as_ref()) {
+        super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+        if binding.round == round && (binding.snapshot.provider != frozen.profile.provider || binding.snapshot.model != frozen.profile.model
+            || binding.snapshot.bot_context.as_ref() != Some(&frozen.context)
+            || binding.snapshot.tool_policy != frozen.tool_policy || binding.roster_bot_ids != frozen.roster_bot_ids)
+        {
+            return Err("reviewer_session_mismatch: replacement differs from its frozen round.".into());
+        }
+    }
+    Ok(Some(frozen.clone()))
 }
 
-pub(super) fn profile(bot: &bots::Bot) -> WorkerProfile {
+fn profile(bot: &bots::Bot) -> WorkerProfile {
     WorkerProfile {
         id: format!("bot-{}", bot.id), name: bot.name.clone(),
         provider: bot.provider.clone(), model: bot.model.clone(),
@@ -160,20 +220,34 @@ pub(super) fn profile(bot: &bots::Bot) -> WorkerProfile {
     }
 }
 
-/// Changing the roster partway through a live or incomplete round would reassign
-/// reviewers and silently change the required vote count.
+fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool {
+    let old = team.config.council.as_ref();
+    let next = next.as_ref();
+    old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
+        || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
+}
+
+/// Live rounds must settle first. A user change can explicitly recover a stopped/incomplete
+/// round, while fixed native lenses must remain satisfiable by distinct selected bots.
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
-    let old_ids = team.config.council.as_ref().map(|c| &c.reviewer_bot_ids);
-    let new_ids = next.as_ref().map(|c| &c.reviewer_bot_ids);
-    let old_policy = team.config.council.as_ref().and_then(|c| c.review_permissions.as_ref());
-    let new_policy = next.as_ref().and_then(|c| c.review_permissions.as_ref());
-    if (old_ids == new_ids && old_policy == new_policy) || next.is_none() { return Ok(()); }
-    let current = team.workers.iter().filter(|w| w.created_at >= team.council_since).filter_map(|w| w.council.as_ref()).map(|seat| seat.round).max().unwrap_or(0);
-    let incomplete = current > 0 && super::council::current_round_incomplete(team);
-    if incomplete {
+    if !selection_changed(team, next) || next.is_none() { return Ok(()); }
+    if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()) {
+        let lenses = super::council::fixed_lens_count(team);
+        if config.reviewer_bot_ids.len() < lenses {
+            return Err(format!("This Council cycle fixed {lenses} lenses. Select at least {lenses} reviewer bots, or finish this cycle before reducing the roster."));
+        }
+    }
+    if team.workers.iter().any(|w| w.created_at >= team.council_since && w.council.is_some() && super::unsettled(&w.status)) {
         return Err("Finish or stop the current Council round before changing selected reviewer bots.".into());
     }
     Ok(())
+}
+
+/// Call only after both selection-change and eligibility validation succeeded.
+pub(super) fn recover_roster_change(team: &mut TeamSnapshot, next: &Option<CouncilConfig>) {
+    if next.is_some() && selection_changed(team, next) {
+        super::council::recover_round(team);
+    }
 }
 
 #[cfg(test)]

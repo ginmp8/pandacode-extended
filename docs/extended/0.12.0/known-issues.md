@@ -95,3 +95,15 @@ Fork [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc3541
 ## Post-0.3.108 source follow-up — 2026-11-10
 
 No new source-code defect or vulnerability identified. Manual publication intentionally fails when only PR/non-main CI exists for the SHA or when main push CI is pending, failed or cancelled. This gate has not been independently exercised in a live manual run. Native controls, Voice, installers and 80 shared-file semantic differences remain open; no release approval.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+The upstream update adds clearer documentation of x64 on-device voice CPU requirements, Windows on Arm limitations, transcription cancellation/retention behavior and a diagnostic for an unavailable/malformed GitHub Actions CI response. These are source clarifications, **not** confirmed Extended product defects. The preceding destination SHA `4ef18f0fe5fda72190c6754711ae8d7fbc4ab200` had a [failed push workflow](https://github.com/ginmp8/pandacode-extended/actions/runs/42862512017) due to a cancelled ONNX/macOS job, while its [PR workflow succeeded](https://github.com/ginmp8/pandacode-extended/actions/runs/42862529729). Check the new exact SHA; do not mislabel prior PR success as push-CI success. The 80 historical divergent shared paths and installed-app feature acceptance remain open.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+The upstream fixes correct automatic recording-stop instructions (the visible button says **Transcribe recording**, not Retry), improve unexpected speech-engine termination messaging, prevent later main pushes cancelling a release commit's CI, and treat a nonzero `gh run list` exit as a failure. These are **inherited fixes**, not proof of previously failing Extended behavior. [previous Extended `858253745655`](https://github.com/ginmp8/pandacode-extended/commit/858253745655e2c7ebf4b0115679aaceeef69140) passed [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/42872820878) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/42872835520); new CI and native voice acceptance must be checked independently. Eighty historic modified shared paths and the intentional Extended release-guide deviation still need complete hunk-level confirmation. No release approval.
+
+## Fork HEAD 9437b3a9 follow-up — 2026-11-10
+
+The fork documents inherited Voice constraints: a custom local transcription URL requires a literal loopback IP (not `localhost`), a path and no query/fragment/embedded credentials; speech-service uploads and local speech-model downloads do not use system/HTTP proxy settings, so proxy-only networks cannot reach them. It also clarifies when a recording stopping sends audio to the chosen service. These disclosures are **not** newly reproduced Extended defects. The release gate now reports CI run IDs and permits rerunning cancelled or infrastructure/flaky jobs; manual publishing remains opt-in only. Native platform and service integration has not been independently exercised. The 80+ shared-file divergences still need hunk-level and runtime acceptance.

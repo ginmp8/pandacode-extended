@@ -46,3 +46,25 @@ test('manual publishing requires main push CI for the exact commit', () => {
   assert.match(prepare, /Re-run CI for this commit/);
   assert.match(prepare, /No CI run from a push to main/);
 });
+
+test('failed or malformed CI lookup aborts manual publication with a diagnostic', () => {
+  const prepare = workflow.split('  prepare:')[1].split('\n  build:')[0];
+  assert.match(prepare, /if \[ -z "\$runs" \] \|\| ! jq -e 'type == "array"'/);
+  assert.match(prepare, /CI lookup for \$GITHUB_SHA failed: gh did not return a list of runs/);
+  assert.match(prepare, /jq -e '\.\[0\] \| type == "object"'/, 'a non-object first run must abort');
+  assert.match(prepare, /run_id=\$\(jq -r/);
+  assert.match(prepare, /gh run rerun \$run_id'/, 'cancelled CI includes a precise rerun command');
+  assert.match(prepare, /gh run rerun \$run_id --failed/, 'failed CI includes a precise failed-jobs command');
+});
+
+test('nonzero CI lookup exit status blocks manual publication', () => {
+  const prepare = workflow.split('  prepare:')[1].split('\n  build:')[0];
+  assert.match(prepare, /if ! runs=\$\(gh run list/);
+  assert.match(prepare, /echo "\$lookup_failed"/);
+  assert.match(prepare, /exit 1/);
+});
+
+test('main-push CI is not cancelled by later pushes', () => {
+  const ci = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.match(ci, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+});

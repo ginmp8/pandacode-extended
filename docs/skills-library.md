@@ -2,9 +2,9 @@
 
 Issues #15 (skills) and #45 (rules). This is a small first version. It is about rules: import a rule once, turn it on for each harness and scope, and see what each installed harness actually has.
 
-Skills are added in one place: Settings → Tools → **Skills** → **Add skill** ([skill-manager.md](skill-manager.md)), which takes owner/repo, a GitHub or GitLab URL, a skills.sh link or a local folder. This page has no catalogs and no skill import; everything here that leads to a skill opens that dialog (`requestAddSkill(source)`; Settings follows the button's `data-section="skills"`).
+Agent skills are installed and switched in one place: Settings → Tools → **Skills** → **Add skill** ([skill-manager.md](skill-manager.md)), which takes owner/repo, a GitHub or GitLab URL, a skills.sh link or a local folder. Rules & library imports rules only. **PandaCode Extended** also retains an optional **Catalogs** section: it indexes saved GitHub repositories and can import selected skills into the bot library without activating any harness. The **Install for agents…** action still opens the upstream Add skill dialog (`requestAddSkill(source)`; Settings follows the button's `data-section="skills"`).
 
-The page, top to bottom: one intro line, **Import a rule**, **Rules** (the library's rules, each with its per-agent boxes), **Bot library** (the library's skills; the heading, its list and the intro's sentence about it appear only when it has any), then **By harness**.
+The page, top to bottom: one intro line, **Import a rule**, **Rules** (the library's rules, each with its per-agent boxes), **Bot library** (visible only when it contains skills), **Catalogs** (Extended's saved GitHub indexes), then **By harness**.
 
 - The intro says exactly that: **Import rules and turn them on per agent. The bot library holds skills for bots only. To add or switch skills, use Skills.** (the middle sentence only with a bot library). Its **Skills** link opens the Skills page; the rule import card has no second pointer.
 - A library item's source (a path or `GitHub · owner/repo`) is monospace and wraps only after its separators, never mid-name; a single part wider than the line ellipsizes, with the whole source in its tooltip.
@@ -64,12 +64,9 @@ Each activation records the harness, scope, project checkout, surface, the libra
 - The safety scan (`skills/safety.rs`) flags secret-shaped tokens and named secrets, instructions that turn off approvals or the sandbox, and downloads piped into a shell. If an item has findings, activation fails until the user calls it with `acknowledge: true`. That acknowledgement is stored per content hash.
 - GitHub import uses `gh api` through `github::run_gh` (`workspace::run_process`). Limits: 64 files and 1 MB.
 
-## Repository catalogs (removed)
+## Repository catalogs (Extended compatibility)
 
-Earlier builds indexed GitHub repositories as catalogs (`skills/catalog.rs`, `skills_catalog*`, `skills_discover`).
-That code, its commands and the Catalogs section are gone, and the saved catalog list (a leftover
-`<app data>/skills/.catalogs.json`) is no longer read or used: Add skill on the Skills page reads repositories, so
-there is one place to add skills.
+Vanilla upstream removed its saved repository catalogs in favor of Skills → Add skill. PandaCode Extended intentionally retains `skills/catalog.rs`, `skills_catalog*`, `skills_discover` and the Catalogs section for users with saved indexes and the opt-in GitHub repository discovery workflow. Catalog imports copy selected packages to the bot library only; they do not install them for agents or bypass Skills Manager switches. New agent installations still use **Skills → Add skill**. The separate Customize → Skills workspace manages tracked GitHub sources, ZIP imports, replacement and sync.
 
 ## Commands
 

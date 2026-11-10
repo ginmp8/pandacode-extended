@@ -95,3 +95,11 @@ The seven changed source paths at [`57f0aaf7cfc3`](https://github.com/ginmp8/pan
 ## Post-0.3.108 source follow-up — 2026-11-10
 
 No npm/Cargo manifest or lockfile change; native app remains **0.3.108**, with Extended remediations `rusqlite 0.41.1` / `libsqlite3-sys 0.39.1` unchanged. Prior code SHA `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` passed both 11-job CI runs. Reverify RustSec, npm, and locked-build checks on the exact new destination commit; previous success is SHA-specific.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+No package manifests or lockfiles changed in the six-path source delta. Existing Extended remediation (`rusqlite 0.41.1`, `libsqlite3-sys 0.39.1`) remains unchanged; no new vulnerability or remediation is asserted. Recheck RustSec, npm audit and locked Rust/Node builds on the new destination SHA; a previously cancelled ONNX/macOS push job does not demonstrate a dependency defect.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+No npm/Cargo manifests or lockfiles changed in the 11-path upstream delta. Native application version remains **0.3.108** and Extended preserves `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. The added Voice tests and CI gate changes do not claim a new vulnerability fix. Run RustSec, npm audits, Rust/Node locked checks and platform build verification against the **new destination SHA**; previous CI results cannot validate it.

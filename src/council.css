@@ -72,6 +72,7 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-row-mark[data-state-tone]{color:var(--state-tone)}
 .council-row-mark>.icon{width:14px;height:14px}
 .council-row-lens{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.council-row-skills{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:var(--ds-text-meta);font-weight:var(--weight-regular)}
 .council-row-score{flex:none;color:var(--muted);font-size:var(--ds-text-meta);font-variant-numeric:tabular-nums;white-space:nowrap;transform-origin:100% 50%}
 .council-row-score[data-scored]{color:var(--text);font-weight:var(--weight-medium)}
 .council-first{color:var(--muted);font-weight:var(--weight-regular)}

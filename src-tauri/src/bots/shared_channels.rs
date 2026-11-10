@@ -440,11 +440,17 @@ fn prompt_matches(content: &str, sender_prefix: &str, text: &str) -> bool {
 
 /// Durable admission for one channel delivery, shared by native dispatch and
 /// isolated-context regression tests. No model/harness execution occurs here.
+pub(super) struct ChannelDeliveryAdmission {
+    pub(super) created_at: i64,
+    pub(super) depth: u8,
+}
+
 pub(super) fn provision_channel_delivery(
     store: &Store, channel_id: &str, message_id: &str, bot_id: &str,
-    text: &str, created_at: i64, depth: u8, delivery_id: &str,
+    text: &str, admission: ChannelDeliveryAdmission, delivery_id: &str,
 ) -> Result<(SharedChannel, Bot, String, String)> {
-        let channel = shared_channel(&store, channel_id)?;
+    let ChannelDeliveryAdmission { created_at, depth } = admission;
+        let channel = shared_channel(store, channel_id)?;
         if channel.archived { return Err("This channel is deleted.".into()); }
         if !channel.member_ids.iter().any(|id| id == bot_id) { return Err("Choose a bot that belongs to this channel.".into()); }
         let origin: Option<String> = store.db.query_row(
@@ -454,25 +460,25 @@ pub(super) fn provision_channel_delivery(
         if origin.is_some_and(|origin| !channel.member_ids.contains(&origin)) {
             return Err("The sending bot is no longer a channel member.".into());
         }
-        let bot = super::get(&store, bot_id)?;
+        let bot = super::get(store, bot_id)?;
         if bot.paused { return Err(format!("{} is paused.", bot.name)); }
-        let requested = council_request(&store, message_id)?;
+        let requested = council_request(store, message_id)?;
         if let Some(request) = &requested {
             let mut executors = request.executors.clone();
             if !executors.iter().any(|id| id == bot_id) { executors.push(bot_id.to_owned()); }
-            crate::architect::validate_channel_reviewers(&store, &request.council, &channel.member_ids, &executors)?;
+            crate::architect::validate_channel_reviewers(store, &request.council, &channel.member_ids, &executors)?;
         }
-        let thread = channel_delivery_thread(&delivery_id, requested.is_some());
+        let thread = channel_delivery_thread(delivery_id, requested.is_some());
         let title = if requested.is_some() { format!("{} · Channel Council", bot.name) }
             else { format!("{} · You", bot.name) };
         // One SQLite transaction protects the new task, native Council team and
         // linked delivery. Failure must not leave a detached bot conversation.
         let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, &thread, &title)?;
+        let (session_id, _) = super::thread_session(store, &bot, DESKTOP, &thread, &title)?;
         if let Some(request) = &requested {
-            crate::architect::configure_channel_delivery(&store, &session_id, request.council.clone())?;
+            crate::architect::configure_channel_delivery(store, &session_id, request.council.clone())?;
         }
-        let prompt = assignment_text(&store, &channel, &bot.id, message_id, text)?;
+        let prompt = assignment_text(store, &channel, &bot.id, message_id, text)?;
         store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7)", params![delivery_id,channel_id,message_id,bot_id,session_id,depth as i64,created_at]).map_err(|e| e.to_string())?;
         if requested.is_some() {
             store.db.execute("INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,'0',?7)", params![delivery_id,channel_id,message_id,bot_id,crate::storage::id(),text,created_at]).map_err(|e| e.to_string())?;
@@ -490,7 +496,7 @@ pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: 
     let delivery_id = crate::storage::id();
     let (channel, bot, prompt, thread) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        provision_channel_delivery(&store, channel_id, message_id, bot_id, text, created_at, depth, &delivery_id)?
+        provision_channel_delivery(&store, channel_id, message_id, bot_id, text, ChannelDeliveryAdmission { created_at, depth }, &delivery_id)?
     };
     let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread, sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
     if let Err(error) = gateway::deliver(app, inbound).await {

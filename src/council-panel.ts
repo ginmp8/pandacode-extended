@@ -163,8 +163,11 @@ export function createCouncil(host: CouncilHost) {
   }
   /** The strip's slot inside the prompt box: always there (empty while hidden), so the strip updates in place. */
   function strip(sessionId: string): string {
-    const team = host.team(sessionId);
-    return `<div class="council-strip-slot" data-session-id="${escape(sessionId)}">${team ? stripHtml(team) : ''}</div>`;
+    const team = host.team(sessionId), html = team ? stripHtml(team) : '';
+    // An explicit empty strip is the baseline for future Council round entrance.
+    // A strip already present on first paint is not a newly started review.
+    if (!html) motion(sessionId, 'strip', '', null, () => []);
+    return `<div class="council-strip-slot" data-session-id="${escape(sessionId)}">${html}</div>`;
   }
 
   function paint(sessionId: string): void {
@@ -664,6 +667,11 @@ const STRIP_EXIT_MS = 120;
  *  rise (never the height of anything else), its state cross-fades, and a score lands. */
 function paintStrip(slot: HTMLElement, team: TeamSnapshot | null): void {
   const html = team ? stripHtml(team) : '', id = slot.dataset.sessionId!, shown = slot.querySelector<HTMLElement>(':scope > .council-strip');
+  if (!html && !shown) {
+    // A settled empty state must count as a real baseline for the next round.
+    motion(id, 'strip', '', null, () => []);
+    return;
+  }
   if (!html && shown) {
     if (shown.dataset.leaving) return;
     const out = motion(id, 'strip', '', shown, element => [element.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(4px)' }], { duration: STRIP_EXIT_MS, easing: 'ease-in', fill: 'forwards' })]);
@@ -677,7 +685,7 @@ function paintStrip(slot: HTMLElement, team: TeamSnapshot | null): void {
   const strip = slot.querySelector<HTMLElement>(':scope > .council-strip');
   if (!strip) return;
   loaded(id);
-  const entered = motion(id, 'strip', 'shown', strip, element => [element.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 180, easing: 'ease-out' })], { fromNothing: true });
+  const entered = motion(id, 'strip', 'shown', strip, element => [element.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 180, easing: 'ease-out' })]);
   if (entered.length) return;
   const state = strip.querySelector<HTMLElement>('.council-strip-state');
   motion(id, 'strip-state', state?.textContent ?? '', state, element => fade(element, 180, 0.4));

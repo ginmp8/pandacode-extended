@@ -11,10 +11,10 @@ async function showBots(page: Page): Promise<void> {
 
 test.describe('shared bot channels', () => {
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
-    // Sample bot bootstrapping creates several preview sessions. On CI it previously
-    // ran near the 20s suite default even when all navigation assertions passed.
-    // This budget is scoped to startup; functional expectations remain unchanged.
-    test.setTimeout(35_000);
+    // Sample bot bootstrapping creates several preview sessions. This end-to-end
+    // scenario includes two asynchronous navigation transitions on slow CI runners.
+    // Keep the complete navigation and draft-retention assertions unchanged.
+    test.setTimeout(60_000);
     await showBots(page);
     // The sample channel is seeded during asynchronous startup.
     await expect(page.locator('#composer-area #composer')).toBeVisible();
@@ -39,7 +39,9 @@ test.describe('shared bot channels', () => {
     await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);
 
     // The channel keeps a draft that was not sent before the switch.
-    await channel.evaluate(button => (button as HTMLButtonElement).click());
+    // Re-resolve the current channel row after the bot switch; the sidebar can
+    // replace its nodes asynchronously, so clicking a detached old element is inert.
+    await channel.click();
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveValue('Unsent channel draft');
     expect(pageErrors).toEqual([]);
   });

@@ -37,7 +37,7 @@ fn selected_bot_authority_cannot_be_forged_in_a_legacy_reviewer() {
     binding.reviewer_bot_id = Some("forged-bot".into());
     binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
         name: "Forged".into(), role: "Reviewer".into(), instructions: String::new(),
-        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(), skill_ids: vec![],
     });
     let store = state.store.lock().unwrap();
     store.db.execute("DELETE FROM architect_requests WHERE worker_id=?1 AND kind='reviewer_authority'", [&id]).unwrap();

@@ -39,8 +39,8 @@ test.describe('Council', () => {
 test('selected configured bots are task-scoped, attributed by ID, and automatic reviewers remain the default', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();
-  await expect(panel(page).getByRole('radio', { name: 'Automatic / native workers' })).toBeChecked();
-  await panel(page).getByRole('radio', { name: 'Selected bots' }).check();
+  await expect(option(page, 'reviewers', 'Auto: the lead picks reviewers for the work')).toHaveAttribute('aria-pressed', 'true');
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
   await expect(panel(page).getByText('Dozy')).toBeVisible();
   await expect(panel(page).getByText('Paused')).toBeVisible();
   await expect(panel(page).getByRole('checkbox', { name: /Dozy/ })).toBeDisabled();
@@ -53,7 +53,7 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   expect(selected.reviewerBotIds).toHaveLength(2);
   expect(new Set(selected.reviewerBotIds).size).toBe(2);
   await expect(panel(page).getByRole('checkbox', { name: /Scout/ })).toBeChecked();
-  await panel(page).getByRole('radio', { name: 'Automatic / native workers' }).check();
+  await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
@@ -61,10 +61,11 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
 test('selected reviewers can be chosen using keyboard controls', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();
-  const automatic = panel(page).getByRole('radio', { name: 'Automatic / native workers' });
-  await automatic.focus();
-  await page.keyboard.press('ArrowDown');
-  await expect(panel(page).getByRole('radio', { name: 'Selected bots' })).toBeChecked();
+  await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').focus();
+  await page.keyboard.press('End');
+  await expect(panel(page).getByRole('button', { name: 'Selected bots' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(panel(page).getByRole('button', { name: 'Selected bots' })).toHaveAttribute('aria-pressed', 'true');
   const scout = panel(page).getByRole('checkbox', { name: /Scout/ });
   await scout.focus();
   await page.keyboard.press('Space');
@@ -79,7 +80,7 @@ test('selected reviewers can be chosen using keyboard controls', async ({ page }
 test('selected reviewer mode refuses to launch with fewer than two bots', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();
-  await panel(page).getByRole('radio', { name: 'Selected bots' }).check();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
   await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
   await toggle(page).click();
   await expect(panel(page).getByRole('alert')).toContainText('Select 2 to 8 distinct reviewer bots');

@@ -180,7 +180,11 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
             let optional = config.optional_skill_ids.iter()
                 .filter(|id| bot.skills.contains(id))
                 .cloned().collect::<Vec<_>>();
-            Some(crate::skills::reviewer::freeze_with_optional(library, &bot.skills, &bot.provider, &optional)?)
+            Some(if optional.is_empty() {
+                crate::skills::reviewer::freeze(library, &bot.skills, &bot.provider)?
+            } else {
+                crate::skills::reviewer::freeze_with_optional(library, &bot.skills, &bot.provider, &optional)?
+            })
         } else if check_executable {
             return Err("reviewer_skill_unavailable: central Skills Library could not be opened.".into());
         } else { None };

@@ -67,3 +67,7 @@ The updated release gate checks exact-SHA successful push-to-main CI only when m
 ## Fork HEAD 979b7d4e integration — 2026-11-10
 
 This source update affects upstream Voice documentation and the release-gating workflow, **not** the Extended update/bot-pause/Connect/direct-route/MCP/cloud/VM/credential switches. The inherited empty/malformed CI lookup guard is incorporated exclusively into manually authorized GitHub Release publication. Tag pushes still produce build artifacts without publishing. Native enabled/disabled feature paths and actual manual publish acceptance remain unverified.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+The new fork Voice changes and CI/release fixes do not change any Extended Feature control. The revised `AGENTS.md` includes upstream's push-main CI prerequisite but explicitly points to the Extended manual-publication override. Tag pushes remain artifact-only; publishing still requires separately authorized manual `workflow_dispatch` with `publish=true`. Automatic updates, Connect/direct routes, bots pause/resume, MCP, cloud/VM management and cloud credential controls retain prior semantics; independent On/Off acceptance remains outstanding.

@@ -184,3 +184,11 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [ ] Verify **new destination SHA** push/PR CI by job; the preceding `4ef18f0f` push had a cancelled ONNX/macOS job while PR CI passed.
 - [ ] Independently test manual publish CI lookup failure/pending/green paths without publishing, native voice behavior, Settings On/Off, Connect, MCP, bots, cloud/VM, credentials, platform installers and all 80 historic divergent shared-file hunks.
 - [ ] Approve a release separately; no tag, installer publication or npm release is authorized here.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+- [x] Pin [fork main `bc323966a0e0`](https://github.com/ginmp8/pandacode/commit/bc323966a0e0f24b13dfd5732cc300f791a965fe), source tree `74ac097cad986c31715b54553e2017ae978d1351`, application **0.3.108** and the existing planned Extended **0.12.0** documentation marker.
+- [x] Stage all 11 upstream path updates: 8 exact and 3 adapted for Extended's CI/manual release and agent guidance; extend regression tests.
+- [x] Preserve prior Extended controls, SQLite remediation and historical release files; make no PR, tag, public installer, GitHub Release or npm publication.
+- [ ] Verify published one-parent commit, complete source/destination path/mode/blob inventory, final statuses of all CI jobs and remaining shared-file differences.
+- [ ] Validate native Voice, Settings On/Off, Connect, MCP, bots, cloud/VM, credential workflows, installers, SQLite upgrade/rollback and release gate without actually publishing. Separate release approval required.

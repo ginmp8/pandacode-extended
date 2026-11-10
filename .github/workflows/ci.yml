@@ -8,7 +8,8 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel push CI: each commit's result is needed for the release gate.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   dependency-audit:
     name: Dependency audit (npm lockfiles)

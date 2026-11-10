@@ -24,3 +24,7 @@ See the [Extended readiness checklist](0.11.0/release-checklist.md) and [upstrea
 ## Manual publication requires main-push CI (2026-11-10)
 
 A successful `ci.yml` run must match **both** the exact source commit SHA being released and a **push event on `main`**. Successful PR and other-branch runs do not satisfy the release gate. Only an explicit `workflow_dispatch` with `publish=true` checks this gate and may create a GitHub Release; tag pushes still build workflow artifacts and never publish. Pending/failed/cancelled CI blocks manual publication, and cancelled CI must be rerun for that commit before retrying the release. The app version, Extended release identity and no-npm policy are unchanged.
+
+## Upstream CI retention and failed API lookups — 2026-11-10
+
+[source `bc323966a0e0`](https://github.com/ginmp8/pandacode/commit/bc323966a0e0f24b13dfd5732cc300f791a965fe) retains main-push CI runs when newer commits are pushed, and the release gate now rejects a nonzero `gh run list` exit before parsing its output. The Extended workflow applies both protections while preserving manual `workflow_dispatch` `publish=true` as the only GitHub Release publication path. Tag pushes build artifacts only; npm publishing stays disabled. A successful rerun of failed/flaky CI jobs is eligible for the exact-SHA gate, while actual release approval and native testing remain separate.

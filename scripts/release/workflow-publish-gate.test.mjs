@@ -52,3 +52,15 @@ test('failed or malformed CI lookup aborts manual publication with a diagnostic'
   assert.match(prepare, /if \[ -z "\$runs" \] \|\| ! jq -e 'type == "array"'/);
   assert.match(prepare, /CI lookup for \$GITHUB_SHA failed: gh did not return a list of runs/);
 });
+
+test('nonzero CI lookup exit status blocks manual publication', () => {
+  const prepare = workflow.split('  prepare:')[1].split('\n  build:')[0];
+  assert.match(prepare, /if ! runs=\$\(gh run list/);
+  assert.match(prepare, /echo "\$lookup_failed"/);
+  assert.match(prepare, /exit 1/);
+});
+
+test('main-push CI is not cancelled by later pushes', () => {
+  const ci = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.match(ci, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+});

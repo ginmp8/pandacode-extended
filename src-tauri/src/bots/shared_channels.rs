@@ -204,6 +204,12 @@ pub(super) struct ChannelCouncilRequest {
     pub(super) executors: Vec<String>,
 }
 
+/// Council-off shares the existing desktop conversation, preserving its
+/// routing, queue and history. Council-on uses a unique context per delivery.
+pub(super) fn channel_delivery_thread(delivery_id: &str, enabled: bool) -> String {
+    if enabled { format!("channel-council:{delivery_id}") } else { DESKTOP.to_owned() }
+}
+
 pub(super) fn council_request(store: &Store, message_id: &str) -> Result<Option<ChannelCouncilRequest>> {
     let row: Option<(String, String)> = store.db.query_row(
         "SELECT council_json,executor_ids FROM extended_channel_council_requests WHERE message_id=?1",
@@ -445,9 +451,13 @@ pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: 
             if !executors.iter().any(|id| id == bot_id) { executors.push(bot_id.to_owned()); }
             crate::architect::validate_channel_reviewers(&store, &request.council, &channel.member_ids, &executors)?;
         }
-        let thread = requested.as_ref().map(|_| format!("channel-council:{delivery_id}"))
-            .unwrap_or_else(|| DESKTOP.to_owned());
-        let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, &thread, &format!("{} · Channel Council", bot.name))?;
+        let thread = channel_delivery_thread(&delivery_id, requested.is_some());
+        let title = if requested.is_some() { format!("{} · Channel Council", bot.name) }
+            else { format!("{} · You", bot.name) };
+        // One SQLite transaction protects the new task, native Council team and
+        // linked delivery. Failure must not leave a detached bot conversation.
+        let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, &thread, &title)?;
         if let Some(request) = &requested {
             crate::architect::configure_channel_delivery(&store, &session_id, request.council.clone())?;
         }
@@ -456,6 +466,7 @@ pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: 
         if requested.is_some() {
             store.db.execute("INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,'0',?7)", params![delivery_id,channel_id,message_id,bot_id,crate::storage::id(),text,created_at]).map_err(|e| e.to_string())?;
         }
+        transaction.commit().map_err(|e| e.to_string())?;
         (channel, bot, prompt, thread)
     };
     let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread, sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
@@ -665,10 +676,12 @@ pub async fn bot_shared_channel_post(app:tauri::AppHandle,state:State<'_,AppStat
             crate::architect::validate_channel_reviewers(&store, config, &channel.member_ids, &recipients)?;
         }
         let message_id=crate::storage::id();
+        let transaction=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
         store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user',?3,'in_progress',?4)",params![message_id,channel_id,text,crate::storage::now()]).map_err(|e|e.to_string())?;
         if let Some(config) = &council {
             store.db.execute("INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at) VALUES(?1,?2,?3,?4)",params![message_id,serde_json::to_string(config).map_err(|e|e.to_string())?,serde_json::to_string(&recipients).map_err(|e|e.to_string())?,crate::storage::now()]).map_err(|e|e.to_string())?;
         }
+        transaction.commit().map_err(|e|e.to_string())?;
         (channel,message_id,recipients)
     };
     let posted_at=crate::storage::now();

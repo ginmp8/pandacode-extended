@@ -134,6 +134,27 @@ fn frozen_revision_and_unbound_bot_delivery_ids_are_validated() {
 }
 
 #[test]
+fn forged_but_well_formed_revision_is_rejected_against_native_issuance() {
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("revision-integrity", "correctness")]
+    })).unwrap();
+    let mut team = saved(&state, &sid);
+    let session = team.workers[0].session_id.clone();
+    let original = team.workers[0].reviewer_binding.clone().unwrap();
+    let parts = original.artifact_revision.split(':').collect::<Vec<_>>();
+    assert_eq!(parts.len(), 4);
+    let next_revision = parts[1].parse::<u64>().unwrap() + 1;
+    team.dispatch_revision = next_revision;
+    team.workers[0].reviewer_binding.as_mut().unwrap().artifact_revision =
+        format!("{}:{}:{}:{}", parts[0], next_revision, parts[2], parts[3]);
+    store_team(&state, &mut team);
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    let error = reviewer_policy(&state.store.lock().unwrap(), &session, Some(&admission)).unwrap_err();
+    assert!(error.contains("reviewer_session_mismatch"), "{error}");
+}
+
+#[test]
 fn scoped_reviewer_grants_round_trip_into_native_run_config() {
     use reviewer_security::{ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy};
     let (state, sid) = council_state(on(9.0, 2, 2));
@@ -151,8 +172,20 @@ fn scoped_reviewer_grants_round_trip_into_native_run_config() {
     let policy = ReviewerToolPolicy::from_user_grants(
         ReviewerPhase::Review, "user-approval-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
     ).unwrap();
+    // A valid policy created from inputs is still not authority. It must be
+    // committed by the native trusted-user path, independent of worker JSON.
+    let binding = team.workers[0].reviewer_binding.clone().unwrap();
     team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.tool_policy = policy.clone();
     store_team(&state, &mut team);
+    let session = team.workers[0].session_id.clone();
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    assert!(reviewer_policy(&state.store.lock().unwrap(), &session, Some(&admission)).is_err());
+    let actually_issued = reviewer_security::authorize_user_grants(
+        &state.store.lock().unwrap(), &sid, &binding, ReviewerPhase::Review,
+        "user-approval-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
+    ).unwrap();
+    assert_eq!(actually_issued, policy);
+    assert_eq!(reviewer_policy(&state.store.lock().unwrap(), &session, Some(&admission)).unwrap(), Some(policy.clone()));
     let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     let (run, _) = claim(&state, action);
     assert_eq!(run.config.reviewer_policy, Some(policy));

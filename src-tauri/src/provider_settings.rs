@@ -179,6 +179,17 @@ pub fn environment(provider: &str) -> Vec<(String, String)> {
     effective_environment(&runtime.settings, provider)
 }
 
+/// Explicit per-provider variables are part of that harness's user configuration.
+/// Unlike normal launches, Council reviewers never inherit global shared secrets.
+pub(crate) fn reviewer_environment(provider: &str) -> Vec<(String, String)> {
+    let Some(runtime) = CONFIG.get().and_then(|runtime| runtime.lock().ok()) else {
+        return Vec::new();
+    };
+    runtime.settings.environment.get(provider)
+        .map(|vars| vars.iter().map(|(key, value)| (key.clone(), value.clone())).collect())
+        .unwrap_or_default()
+}
+
 /// Applies the provider's saved environment to a command about to start its CLI.
 /// Provider sign-in and endpoint configuration is applied after this and wins.
 pub fn apply_environment(provider: &str, command: &mut impl crate::child_env::EnvTarget) {

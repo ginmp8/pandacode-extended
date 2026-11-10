@@ -217,3 +217,23 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [x] Import five exact upstream source blobs and reconcile two CI/release workflows without losing manual publication or adding npm publish; update the voice/privacy/release documentation unchanged from source.
 - [x] Add release-gate source-object/run-ID regression assertions and update the exact source-baseline release-notes blob hash.
 - [ ] Review exact-SHA CI after publication, complete native Voice/Settings On/Off/Connect/MCP/bots/cloud/VM/credential, migration and installer acceptance, and semantically classify every divergent shared hunk.
+
+## Exact-SHA CI and sampled shared-difference inspection — 2026-11-10
+
+- [x] Re-read the frozen fork main `9437b3a92cc3d41e899770f645f8a08449ce6bbf` and Extended base/development `e7361c1c22355718cbbbf0e7ec4202a3e9673f61`; their Git tree objects are `5b8666849fcd7f3cbba918754efbfaedbc8fef41` and `d560b10f0d9daf1273ef1d1effc8a4306ec0b6bc`, respectively.
+- [x] Verify full nontruncated inventories: 1,696 upstream tracked blobs and 1,753 Extended tracked blobs; 1,615 shared byte-exact, 81 shared divergent, 57 Extended-exclusive, zero upstream missing, zero mode/type discrepancies.
+- [x] Verify the last **code** SHA `e7361c1c22355718cbbbf0e7ec4202a3e9673f61` passed [push CI #42892078107](https://github.com/ginmp8/pandacode-extended/actions/runs/42892078107) (11/11) and [PR CI #42892089259](https://github.com/ginmp8/pandacode-extended/actions/runs/42892089259) (11/11). All 22 GitHub check runs for that exact SHA completed successfully, including npm/RustSec, TypeScript, Linux Rust, five Clippy targets, Expo and ONNX.
+- [x] Inspect source and Extended blobs and changed lines in **18 of 81** inherited shared-path differences. Provisional categories, **not** completed full functional acceptance:
+  - `EXTENDED_CONTROL` (13): `src-tauri/src/providers/mcp_host.rs` (default-off strict MCP fixture), `src/about-settings.ts` (update mode UI), `src-tauri/src/remote/catalog.rs` (Connect-enabled test fixture), `src-tauri/src/cloud_agents/credentials.rs` (credential opt-in), `src-tauri/src/vm/tools.rs` (agent VM/cloud write control), `src-tauri/src/remote/routes.rs` (Connect and direct routes), `src-tauri/src/bots/tools.rs` (opt-in fresh-context delivery), `src-tauri/src/bots/schedule.rs` (pause), `src-tauri/src/context_recovery.rs` (fresh-context replay), `src-tauri/src/headless.rs` (headless Connect opt-in), `src-tauri/src/providers/warm.rs` (external MCP setting), `src-tauri/src/remote/socket.rs` (Connect listener gating), `src-tauri/src/cloud/deploy.rs` (cloud-management opt-in).
+  - `EXTENDED_DEPENDENCY` (2): `src-tauri/src/cloud/cloudflare_worker/Dockerfile` and `src-tauri/src/cloud/cloudflare_worker/package.json` use the same upgraded Cloudflare sandbox version `1.0.3`; this is a version divergence, **not a newly proven vulnerability fix**.
+  - `EXTENDED_ONLY` integration/compatibility (3 shared paths): `.gitattributes` (line-ending stability), `src-tauri/src/remote/orchestrate/tests.rs` and `src-tauri/src/schedules/tests.rs` (Extended SQLite schema version 37).
+- [ ] Complete hunk-level causal review of **all 81** shared differences (63 paths not sampled in this pass); verify actual provider/agent, updater, credential, MCP, Connect, bot pause, cloud/VM, Voice, fresh-context, SQLite migration and native installer On/Off behavior. The 18 provisional classifications above do not prove complete functional parity.
+- [ ] Verify CI of any later documentation-only commit at its own SHA. Passing code-SHA CI does not constitute approval of Extended release 0.12.0.
+
+## Mobile node-forge advisory remediation — 2026-11-10
+
+- [x] Identify failure in [exact-SHA push CI `c7c14606`](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289): mobile node-forge 1.4.2, while root, website and relay npm audits succeeded.
+- [x] Verify patched version **1.4.3** from GitHub-reviewed advisories and its tarball integrity from the official npm registry.
+- [x] Update only `mobile/package.json` override and the matching `mobile/package-lock.json` entry; preserve all unrelated dependency versions and upstream files.
+- [ ] Validate **new published SHA** using `npm audit --prefix mobile --audit-level=low`, Expo/mobile compatibility and all other CI jobs.
+- [ ] Validate native/mobile runtime and SDK compatibility independently; the advisory fix alone does not approve a release.

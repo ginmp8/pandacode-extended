@@ -48,7 +48,22 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   await expect(pausedBot).toBeDisabled();
   const pausedName = panel(page).getByText('Dozy');
   await pausedName.scrollIntoViewIfNeeded();
-  await expect(pausedName).toBeVisible();
+  await expect(pausedName).toBeVisible().catch(async cause => {
+    const geometry = await page.evaluate(() => {
+      const name = [...document.querySelectorAll('.council-panel strong')].find(e => e.textContent === 'Dozy');
+      const chain = [];
+      for (let node = name; node && chain.length < 7; node = node.parentElement) {
+        const box = node.getBoundingClientRect(), style = getComputedStyle(node);
+        chain.push({ tag: node.tagName, classes: node.className, hidden: (node as HTMLElement).hidden,
+          box: { x: box.x, y: box.y, width: box.width, height: box.height },
+          display: style.display, visibility: style.visibility, opacity: style.opacity, overflow: style.overflow,
+          scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, scrollTop: node.scrollTop });
+      }
+      return { chain, viewport: { width: innerWidth, height: innerHeight } };
+    });
+    console.log('Council paused-reviewer visibility geometry:', JSON.stringify(geometry));
+    throw cause;
+  });
   await expect(panel(page).getByText('Paused')).toBeVisible();
   // The sample's current executor is timing-dependent; never select a forbidden reviewer.
   await expect.poll(async () => eligibleReviewers(page).count()).toBeGreaterThanOrEqual(2);

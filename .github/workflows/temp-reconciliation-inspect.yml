@@ -124,7 +124,7 @@ jobs:
           done
 
   publish:
-    needs: [web, rust]
+    needs: [web, rust, quick-browser]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     permissions:
@@ -147,11 +147,11 @@ jobs:
           source_sha="$(git ls-remote --heads origin refs/heads/base/development | cut -f1)"
           target_sha="$(git ls-remote --heads origin refs/heads/extended/development | cut -f1)"
           topic_sha="$(git ls-remote --heads origin refs/heads/chore/pr120-reconcile-base-20261110 | cut -f1)"
-          test "$source_sha" = "50b2d8bfd25ba2f885a9f060bfb93fcc4111cc34"
+          test "$source_sha" = "4ef18f0fe5fda72190c6754711ae8d7fbc4ab200"
           test "$target_sha" = "6467995ea3b533b039bcd393e4e6a15e847f5464"
           test "$topic_sha" = "$EXPECTED_HEAD"
           test -n "${CANDIDATE_TREE:-}"
-          integrated="$(git commit-tree "$CANDIDATE_TREE" -p "$EXPECTED_HEAD" -m "chore(reconcile): integrate upstream 0.3.107 and retain Extended features")"
+          integrated="$(git commit-tree "$CANDIDATE_TREE" -p "$EXPECTED_HEAD" -m "chore(reconcile): integrate upstream 0.3.108 and retain Extended features")"
           test "$(git cat-file -p "$integrated" | grep -c '^parent ')" -eq 1
           test "$(git rev-parse "$integrated^{tree}")" = "$CANDIDATE_TREE"
           git push origin "$integrated:refs/heads/chore/pr120-reconcile-base-20261110"

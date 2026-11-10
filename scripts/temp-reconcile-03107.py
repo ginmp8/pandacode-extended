@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned, reviewable upstream 0.3.107 / Extended integration candidate.
+"""Pinned, reviewable upstream 0.3.108 / Extended integration candidate.
 
 This script runs in an isolated CI checkout. It does not touch original refs.
 Unhandled conflicts fail closed; no ours/theirs blanket conflict policy.
@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 
-SOURCE="f0c1cf82ff3261845eb2cd004088cc912cf4bf8f"
+SOURCE="4ef18f0fe5fda72190c6754711ae8d7fbc4ab200"
 TARGET="6467995ea3b533b039bcd393e4e6a15e847f5464"
 PREVIOUS="4f777ec3414a9c46d07ea58debb99c87fcf4e74f"
 BRANCH="chore/pr120-reconcile-base-20261110"
@@ -68,6 +68,16 @@ def integrate_block(path,old,new,n):
         if n<=8: return old
         if n==9: return old
         if n==10: return old+"\n"+new
+    # Extended keeps its typed progress event; upstream adds voice lifecycle events.
+    if path=="src/bridge.ts" and n==1:
+        if "skills-operation-progress" not in old or "voice-event" not in new or "voice://transcript" not in new:
+            raise RuntimeError("Unexpected bridge event conflict")
+        return old.rstrip("\n")+"\n"+new
+    # Both branches added the Unix guard; Extended also documents the fixture.
+    if path=="src-tauri/src/providers/claude_stream_tests.rs" and n==1:
+        if "fixture invokes POSIX sh" not in old or "#[cfg(unix)]" not in old or "#[cfg(unix)]" not in new:
+            raise RuntimeError("Unexpected Claude fixture guard conflict")
+        return old
     if path=="src/preview.ts" and n==1:
         return checked_replace(old,"case 'skills_deactivate':","case 'skills_deactivate_all': case 'skills_deactivate':")
     if path=="src/preview-skills.ts":
@@ -430,7 +440,9 @@ def main():
       "src-tauri/src/lib.rs","src-tauri/src/providers.rs","src-tauri/src/skills.rs",
       "src-tauri/src/skills/catalog.rs","src-tauri/src/skills/catalog_tests.rs",
       "src-tauri/tauri.conf.json","src/main.ts","src/preview-skills.ts",
-      "src/preview.ts","src/skills-library.ts","website/src/data/release-dates.json"}
+      "src/preview.ts","src/skills-library.ts","website/src/data/release-dates.json",
+      "docs/screenshots/settings.webp","src-tauri/src/providers/claude_stream_tests.rs",
+      "src/bridge.ts"}
     if set(conflicts)!=expect:
         raise RuntimeError("Conflict inventory changed: missing "+str(sorted(expect-set(conflicts)))+" extra "+str(sorted(set(conflicts)-expect)))
     special={"src/skills-library.ts","docs/skills-library.md","website/src/data/release-dates.json"}
@@ -439,6 +451,11 @@ def main():
         if p in keep_extended_catalog:
             Path(p).write_text(source_file_from(TARGET,p))
             print("PRESERVED_EXTENDED_CATALOG",p)
+        elif p=="docs/screenshots/settings.webp":
+            # The upstream screenshot illustrates the upstream Settings/Skills UI.
+            # It is binary: select that complete, exact source blob, never text-merge.
+            git("checkout",SOURCE,"--",p)
+            print("PRESERVED_UPSTREAM_SETTINGS_SCREENSHOT",p)
         elif p not in special:
             resolve_conflict_file(p)
     adapt_rules_library()
@@ -449,13 +466,8 @@ def main():
     adapt_native_ui()
     adapt_tests()
     docs()
-    # Preserve this topic branch's inspection tools for continued test and repair.
-    # Never introduce them into the upstream or Extended destination branch.
-    for tracked in ("scripts/temp-reconcile-03107.py",
-                    ".github/workflows/temp-reconciliation-inspect.yml"):
-        f=Path(tracked)
-        f.parent.mkdir(parents=True,exist_ok=True)
-        f.write_text(source_file_from(git("rev-parse","origin/"+BRANCH),tracked))
+    # The completed application tree deliberately excludes temporary CI tooling.
+    # Publishing this tree removes the diagnostic workflow from the PR branch.
     git("add","-A")
     if git("diff","--name-only","--diff-filter=U"): raise RuntimeError("Unmerged paths remain")
     tree=git("write-tree")

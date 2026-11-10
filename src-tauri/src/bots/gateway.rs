@@ -127,13 +127,18 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
     if image_ids.len() > 4 {
         return Err("Attach up to four images per message.".into());
     }
-    let busy = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
-    if busy {
+    let running = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
+    let team_busy = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        super::team_state(&store, session_id)?
+            .is_some_and(|status| matches!(status.as_str(), "running" | "waiting" | "paused"))
+    };
+    if running || team_busy {
         let fresh = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
             super::extended::enabled_for_session(&store, session_id)?
         };
-        if !force_queue && steer_while_busy(bot, &image_ids, sender_id, fresh)
+        if !force_queue && !team_busy && steer_while_busy(bot, &image_ids, sender_id, fresh)
             && crate::message_queue::steer_task(app.clone(), app.state::<AppState>(), session_id.to_owned(), text.clone()).await.is_ok()
         {
             return Ok(());
@@ -344,7 +349,21 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         super::failover::before_turn(app, &bot, session_id);
         let (context, image_ids) = queued_prompt(&entry.attachments);
         super::failover::remember_images(session_id, &image_ids);
-        let launched = crate::launch_task_in_project(app.clone(), app.state::<AppState>(), session_id.to_owned(), Some(format!("{}{context}", entry.text)), Some(image_ids), Some(bot.project_id.clone())).await;
+        // Queued Team messages must use the native Architect admission path.
+        let team = state.store.lock().map_err(|e| e.to_string())
+            .and_then(|store| super::team_state(&store, session_id));
+        let prompt = format!("{}{context}", entry.text);
+        let launched = match team {
+            Ok(Some(_)) => crate::architect::architect_start_in_project(
+                app.clone(), app.state::<AppState>(), session_id.to_owned(),
+                prompt, Some(image_ids), Some(bot.project_id.clone()),
+            ).await,
+            Ok(None) => crate::launch_task_in_project(
+                app.clone(), app.state::<AppState>(), session_id.to_owned(),
+                Some(prompt), Some(image_ids), Some(bot.project_id.clone()),
+            ).await,
+            Err(error) => Err(error),
+        };
         // A channel Stop that landed between the take and the launch stops the turn it missed.
         let stopped = launched.is_ok() && delivery.as_ref().is_some_and(|request| state.store.lock().is_ok_and(|store| super::shared_channels::delivery_stopped(&store, request)));
         if stopped {

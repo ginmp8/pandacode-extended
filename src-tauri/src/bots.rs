@@ -1153,16 +1153,67 @@ pub(crate) async fn pause_all(app: &tauri::AppHandle) {
     }
 }
 
+/// A Shared Channel Council delivery is not finished merely because the latest
+/// harness turn ended. Only the matching native Council terminal verdict can
+/// authorize a final reply. Ordinary bot conversations retain per-turn delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelCouncilOutcome {
+    Ordinary,
+    Waiting,
+    Approved,
+    Denied(&'static str),
+}
+
+pub(crate) fn team_state(store: &Store, session_id: &str) -> Result<Option<String>> {
+    Ok(crate::architect::load(store, session_id)?.map(|team| team.status))
+}
+
+pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result<ChannelCouncilOutcome> {
+    let active: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if active == 0 { return Ok(ChannelCouncilOutcome::Ordinary); }
+    if active != 1 { return Ok(ChannelCouncilOutcome::Waiting); }
+    let Some(team) = crate::architect::load(store, session_id)? else {
+        return Ok(ChannelCouncilOutcome::Denied("Council delivery has no native team."));
+    };
+    if team.config.council.is_none() {
+        return Ok(ChannelCouncilOutcome::Denied("Council was removed from the delivery."));
+    }
+    match team.status.as_str() {
+        "completed" => match team.council_status.as_ref() {
+            Some(status) if status.state == "passed" && !status.stale => Ok(ChannelCouncilOutcome::Approved),
+            Some(status) if status.state == "limit" => Ok(ChannelCouncilOutcome::Denied("Council reached the round limit without approval.")),
+            Some(status) if status.state == "accepted" => Ok(ChannelCouncilOutcome::Denied("Council user exception requires attributed acceptance and a reason.")),
+            _ => Ok(ChannelCouncilOutcome::Denied("Council has no verified, current passing review.")),
+        },
+        "failed" | "stopped" | "interrupted" => Ok(ChannelCouncilOutcome::Denied("Council team ended without approval.")),
+        _ => Ok(ChannelCouncilOutcome::Waiting),
+    }
+}
+
 /// Called when any task's run ends; replies for bot conversations go back to their channel.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) {
     let app = app.clone();
     let session_id = session_id.to_owned();
     tauri::async_runtime::spawn(async move {
+        let gate = app.state::<AppState>().store.lock().ok()
+            .and_then(|store| channel_council_outcome(&store, &session_id).ok())
+            .unwrap_or(ChannelCouncilOutcome::Waiting);
+        if gate == ChannelCouncilOutcome::Waiting {
+            // An intermediate lead turn cannot drain the queue or emit a callback.
+            return;
+        }
         let reply = app.state::<AppState>().store.lock().ok()
             .and_then(|store| shared_channels::latest_reply(&store, &session_id).ok())
             .unwrap_or_default();
-        if gateway::run_finished(&app, &session_id, successful).await {
-            shared_channels::run_finished(&app, &session_id, successful, &reply).await;
+        let denied = matches!(gate, ChannelCouncilOutcome::Denied(_));
+        // Terminal Council denial is not a provider failure requiring failover.
+        if gateway::run_finished(&app, &session_id, successful || denied).await {
+            shared_channels::run_finished(&app, &session_id, successful && !denied, &reply).await;
         }
     });
 }

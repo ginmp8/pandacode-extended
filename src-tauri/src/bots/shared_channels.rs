@@ -317,7 +317,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
     // interrupted Architect snapshot still says a reviewer is working.
     let state = match delivery_status {
         "stopped" => "Stopped".into(),
-        "failed" => "Failed".into(),
+        "failed" if state != "Limit reached" => "Failed".into(),
         _ => state,
     };
     Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers }))
@@ -644,6 +644,48 @@ pub(crate) fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?.join("\n\n").trim().to_owned())
 }
 
+/// Atomically claim one terminal delivery and its channel message. A duplicate
+/// callback, stale Council verdict or Stop that already won cannot publish again.
+/// The returned bool permits an ordinary collaboration callback; None means no
+/// terminal transition was made.
+pub(super) fn settle_channel_delivery(
+    store: &Store, session_id: &str, delivery_id: &str, channel_id: &str,
+    message_id: &str, bot_id: &str, successful: bool, reply: &str,
+) -> Result<Option<bool>> {
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    // Re-read under the same SQLite transaction as the terminal claim:
+    // a changed review/revision must not pass on a stale pre-gateway decision.
+    let gate = super::channel_council_outcome(store, session_id)?;
+    if gate == super::ChannelCouncilOutcome::Waiting { return Ok(None); }
+    let denial = match gate {
+        super::ChannelCouncilOutcome::Denied(reason) => Some(reason),
+        _ => None,
+    };
+    let approved = successful && denial.is_none();
+    let changed = store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3
+         WHERE id=?1 AND session_id=?4 AND status='in_progress'",
+        params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id],
+    ).map_err(|e| e.to_string())?;
+    if changed == 0 { return Ok(None); }
+    if let Some(reason) = denial {
+        store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,created_at)
+             VALUES(?1,?2,'council_status',?3,?4)",
+            params![crate::storage::id(),channel_id,reason,crate::storage::now()],
+        ).map_err(|e| e.to_string())?;
+    } else if approved && !reply.trim().is_empty() {
+        store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at)
+             VALUES(?1,?2,'reply',?3,?4,?5)",
+            params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()],
+        ).map_err(|e| e.to_string())?;
+    }
+    update_message_status(store, message_id)?;
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(Some(denial.is_none()))
+}
+
 /// Finalize the assignment whose turn just ended, copy its result into the channel or sender
 /// thread, then promote the next queued collaboration request if the ordinary gateway started it.
 pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool, reply: &str) {
@@ -674,17 +716,19 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         let _=app.emit("bot-messages-changed",());
     }
     if let Some((delivery_id,channel_id,message_id,bot_id)) = channel {
-        {
+        let callback = {
             let store = match state.store.lock() { Ok(store)=>store, Err(_)=>return };
-        let status=if successful {"completed"} else {"failed"};
-        let _=store.db.execute("UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3 WHERE id=?1",params![delivery_id,status,crate::storage::now()]);
-        if successful && !reply.trim().is_empty() {
-            let _=store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at) VALUES(?1,?2,'reply',?3,?4,?5)",params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()]);
-        }
-        let _=update_message_status(&store,&message_id);
-            let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
-        }
-        collaboration::finish_delivery(app, &delivery_id, reply).await;
+            match settle_channel_delivery(&store, session_id, &delivery_id, &channel_id, &message_id, &bot_id, successful, reply) {
+                Ok(Some(callback)) => callback,
+                Ok(None) => return,
+                Err(error) => {
+                    eprintln!("Channel delivery settlement failed: {error}");
+                    return;
+                }
+            }
+        };
+        let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
+        if callback { collaboration::finish_delivery(app, &delivery_id, reply).await; }
     }
     // The window may have sent the next queued entry itself; credit it to its request.
     let running=state.agents.lock().map(|agents|agents.contains_key(session_id)).unwrap_or(false);

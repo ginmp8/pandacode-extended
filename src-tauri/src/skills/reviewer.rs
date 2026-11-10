@@ -13,6 +13,8 @@ const SKILL_CHARS: usize = 16_384;
 const TOTAL_CHARS: usize = 65_536;
 const STAGE_ROOT: &str = ".council-reviewer-snapshots";
 
+fn required_by_default() -> bool { true }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SkillPin {
@@ -24,6 +26,9 @@ pub(crate) struct SkillPin {
     pub content_sha256: String,
     pub file_sha256: BTreeMap<String, String>,
     pub dependencies: Vec<String>,
+    /// Frozen per-skill acceptance role; old mandatory receipts stay mandatory.
+    #[serde(default = "required_by_default")]
+    pub required_for_acceptance: bool,
     pub delivery_mode: String,
     pub staged_path: Option<String>,
     pub imported: bool,
@@ -329,7 +334,7 @@ pub(crate) fn freeze_with_optional(
     let mut state = ResolveState {
         seen: HashSet::new(), visiting: HashSet::new(), pins: Vec::new(), prompt: String::new(),
     };
-    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, state: &mut ResolveState) -> Result<(), String> {
+    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, required: bool, state: &mut ResolveState) -> Result<(), String> {
         if state.seen.contains(id) { return Ok(()); }
         if !state.visiting.insert(id.to_owned()) {
             return Err(format!("reviewer_skill_cycle: dependency cycle at {id}."));
@@ -349,7 +354,7 @@ pub(crate) fn freeze_with_optional(
             }
             let (files, hashes) = trusted_package(library, &meta)?;
             for dependency in &meta.required_skills {
-                visit(library, dependency, assigned, harness, state)?;
+                visit(library, dependency, assigned, harness, required, state)?;
             }
             let main = files.iter().find(|(path, _)| path == "SKILL.md")
                 .ok_or_else(|| format!("reviewer_skill_unavailable: no SKILL.md for {id}."))?;
@@ -388,7 +393,7 @@ pub(crate) fn freeze_with_optional(
                 source_location: meta.source.location, source_ref: meta.source.git_ref,
                 source_commit: meta.source.commit, content_sha256: meta.sha256,
                 file_sha256: hashes, dependencies: meta.required_skills,
-                delivery_mode: mode.into(), staged_path,
+                required_for_acceptance: required, delivery_mode: mode.into(), staged_path,
                 imported: true, bot_assigned: assigned.iter().any(|x| x == id),
                 eligible: true, supplied: true,
                 invoked: false, check_executed: false, evidence_verified: false,
@@ -399,19 +404,21 @@ pub(crate) fn freeze_with_optional(
         state.visiting.remove(id);
         result
     }
+    // Materialize mandatory closures first regardless of the order in Bot.skills.
+    // Otherwise an optional root could pin a shared mandatory dependency as optional,
+    // or roll back that dependency when optional provisioning fails.
+    for id in assigned.iter().filter(|id| !known_optional.contains(*id)) {
+        visit(library, id, assigned, harness, true, &mut state)?;
+    }
     let mut skipped = Vec::new();
-    for id in assigned {
-        if known_optional.contains(id) {
-            let before = state.clone();
-            if let Err(reason) = visit(library, id, assigned, harness, &mut state) {
-                state = before;
-                skipped.push(SkippedSkill {
-                    id: id.clone(), reason, bot_assigned: true,
-                    eligible: false, supplied: false,
-                });
-            }
-        } else {
-            visit(library, id, assigned, harness, &mut state)?;
+    for id in assigned.iter().filter(|id| known_optional.contains(*id)) {
+        let before = state.clone();
+        if let Err(reason) = visit(library, id, assigned, harness, false, &mut state) {
+            state = before;
+            skipped.push(SkippedSkill {
+                id: id.clone(), reason, bot_assigned: true,
+                eligible: false, supplied: false,
+            });
         }
     }
     let result = ReviewerSkills { pins: state.pins, prompt: state.prompt, skipped };
@@ -531,6 +538,47 @@ mod tests {
         assert!(freeze(&library, &assigned, "kimi").unwrap_err().contains("unavailable"));
         assert!(freeze_with_optional(&library, &assigned, "kimi", &["unassigned".into()])
             .unwrap_err().contains("not an unique bot assignment"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mandatory_and_optional_skill_roles_are_frozen_independent_of_assignment_order() {
+        let (library, root) = fixture();
+        add(&library, "shared", "Shared dependency.", &[]);
+        add(&library, "mandatory", "Mandatory criteria.", &["shared"]);
+        add(&library, "optional", "Optional method.", &["shared"]);
+        let assigned = vec!["optional".into(), "mandatory".into()];
+        let snapshot = freeze_with_optional(&library, &assigned, "kimi", &["optional".into()]).unwrap();
+        assert!(snapshot.skipped.is_empty());
+        assert_eq!(snapshot.pins.iter().map(|pin| pin.id.as_str()).collect::<Vec<_>>(),
+            ["shared", "mandatory", "optional"]);
+        assert!(snapshot.pins[0].required_for_acceptance);
+        assert!(snapshot.pins[1].required_for_acceptance);
+        assert!(!snapshot.pins[2].required_for_acceptance);
+        assert_eq!(snapshot.pins[2].bot_assigned, true);
+        let old_receipt = serde_json::json!({"requiredForAcceptance": true});
+        assert_eq!(old_receipt["requiredForAcceptance"], true);
+        let mut legacy = serde_json::to_value(&snapshot.pins[1]).unwrap();
+        legacy.as_object_mut().unwrap().remove("requiredForAcceptance");
+        let parsed: SkillPin = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.required_for_acceptance, "historical pins must not silently become optional");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn optional_failure_keeps_shared_mandatory_dependencies() {
+        let (library, root) = fixture();
+        add(&library, "shared", "Required verification.", &[]);
+        add(&library, "mandatory", "Use shared.", &["shared"]);
+        add(&library, "optional", "Optional absent branch.", &["missing"]);
+        let assigned = vec!["optional".into(), "mandatory".into()];
+        let result = freeze_with_optional(&library, &assigned, "kimi", &["optional".into()]).unwrap();
+        assert_eq!(result.pins.iter().map(|pin| pin.id.as_str()).collect::<Vec<_>>(),
+            ["shared", "mandatory"]);
+        assert!(result.pins.iter().all(|pin| pin.required_for_acceptance));
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].id, "optional");
+        assert!(result.verify().is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 

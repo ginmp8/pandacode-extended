@@ -707,13 +707,16 @@ pub async fn resolve_with_library(
 ) -> Result<Resolution, String> {
     let Some((name, _)) = split_command(text) else { return Ok(plain_resolution(text)) };
     if is_local_control(name) { return resolve_from_catalog(provider, text, &Catalog::default()) }
-    let mut commands = catalog(provider, cwd, false).await?;
+    // Add Extended library commands before applying the native skill switches.
+    // Filtering only the upstream catalog would let a disabled library skill be
+    // reintroduced by the overlay and resolved as executable prompt content.
+    let mut commands = unfiltered(provider, cwd, false).await?;
     let app = app.clone();
     let provider_id = provider.to_owned();
-    let cwd = cwd.to_owned();
-    let skills = crate::blocking(move || crate::skills::active_slash_skills(&app, &provider_id, &cwd)).await?;
+    let cwd_for_library = cwd.to_owned();
+    let skills = crate::blocking(move || crate::skills::active_slash_skills(&app, &provider_id, &cwd_for_library)).await?;
     append_library_skills(&mut commands, skills);
-    resolve_from_catalog(provider, text, &commands)
+    skill_switches::resolve_at(provider, text, commands, cwd).await
 }
 
 /// A command may be removed after the picker cached it. Claude's fresh
@@ -910,6 +913,43 @@ mod tests {
         let codex = resolve_from_catalog("codex", "/local-review check these changes", &commands).unwrap();
         assert_eq!(codex.skill, Some(("local-review".into(), skill_path.clone())));
         assert_eq!(codex.prompt, "$local-review check these changes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extended_library_overlay_cannot_restore_a_skill_switched_off_in_native_manager() {
+        let root = std::env::temp_dir().join(format!("pandacode-extended-switch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("SKILL.md");
+        std::fs::write(&file, "---\nname: extended-review\ndescription: Extended reviewer\n---\nReview carefully.").unwrap();
+        let mut overlay = native_catalog(&[]);
+        append_library_skills(&mut overlay, vec![crate::skills::SlashSkill {
+            id: "extended-review".into(),
+            description: "Native switch regression".into(),
+            path: file.clone(),
+        }]);
+        let disabled = std::collections::BTreeSet::from(["extended-review".into()]);
+        for harness in ["codex", "claude", "deepseek"] {
+            let denied = skill_switches::resolve_with(
+                harness, "/extended-review now", overlay.clone(), &disabled,
+                || std::collections::BTreeSet::from(["extended-review".into()]),
+            ).unwrap_err();
+            assert_eq!(
+                denied, "extended-review is switched off in Settings → Tools → Skills.",
+                "{harness}",
+            );
+            // The source remains available when its switch is turned back on.
+            let allowed = skill_switches::resolve_with(
+                harness, "/extended-review now", overlay.clone(), &Default::default(),
+                || panic!("Enabled skills must not scan the installed list"),
+            ).unwrap();
+            if harness == "codex" {
+                assert_eq!(allowed.prompt, "$extended-review now");
+                assert_eq!(allowed.skill, Some(("extended-review".into(), file.clone())));
+            } else {
+                assert!(allowed.prompt.contains("Review carefully."), "{harness}");
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

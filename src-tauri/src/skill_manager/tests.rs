@@ -127,10 +127,15 @@ fn extended_library_activation_and_native_skill_switches_share_the_installed_ski
     let after = switches::set_counted(&home, None, None, &prefs, "release-notes", false, &homes).unwrap();
     assert!(after.skills.iter().any(|skill| skill.name == "release-notes" && skill.off_in_panda_code));
     let disabled = read_prefs(&prefs).unwrap().disabled(None, None);
-    assert!(check_prompt("codex", "/release-notes", &disabled, || BTreeSet::from(["release-notes".into()])).is_err());
+    // Codex's native skills are selected with $name, not slash commands.
+    // Its launch-time exact-name deny is therefore the authoritative guard.
+    let codex_args = codex_arguments(&disabled);
+    assert_eq!(codex_args.first().map(String::as_str), Some("-c"));
+    assert!(codex_args.iter().any(|arg| arg.contains("release-notes") && arg.contains("enabled=false")));
     assert!(skill_file.is_file(), "The switch must not delete the Extended harness copy");
     switches::set_counted(&home, None, None, &prefs, "release-notes", true, &homes).unwrap();
-    assert!(check_prompt("codex", "/release-notes", &BTreeSet::new(), || BTreeSet::from(["release-notes".into()])).is_ok());
+    let enabled = read_prefs(&prefs).unwrap().disabled(None, None);
+    assert!(codex_arguments(&enabled).is_empty());
     assert!(skill_file.is_file());
 }
 

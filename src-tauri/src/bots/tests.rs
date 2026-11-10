@@ -73,6 +73,65 @@ fn shared_channel_council_is_opt_in_and_never_selects_outsiders_or_executors() {
 }
 
 #[test]
+fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_history() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let lead = bot(&f);
+    let peer = create(&f.store, &input("Peer"), &f.root).unwrap();
+    let channel = shared_channels::create(&f.store, "quality", &[lead.id.clone(),peer.id.clone()]).unwrap();
+    let original = thread_session(&f.store,&lead,DESKTOP,DESKTOP,"Scout · You").unwrap().0;
+    let message_id = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user','Review work','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    let council = crate::architect::CouncilConfig::default();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at) VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&council).unwrap(),
+            serde_json::to_string(&vec![lead.id.clone(),peer.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    let first_id = crate::storage::id();
+    let (_,_,first_prompt,first_thread) = shared_channels::provision_channel_delivery(
+        &f.store,&channel.id,&message_id,&lead.id,"Review work",crate::storage::now(),0,&first_id,
+    ).unwrap();
+    let second_id = crate::storage::id();
+    let (_,_,second_prompt,second_thread) = shared_channels::provision_channel_delivery(
+        &f.store,&channel.id,&message_id,&peer.id,"Review work",crate::storage::now(),0,&second_id,
+    ).unwrap();
+    assert_ne!(first_thread,second_thread);
+    assert_ne!(first_thread,DESKTOP);
+    assert_ne!(second_thread,DESKTOP);
+    assert!(first_prompt.contains("Review work") && second_prompt.contains("Review work"));
+    let owned: Vec<(String,String)> = {
+        let mut stmt=f.store.db.prepare(
+            "SELECT bot_id,session_id FROM bot_shared_channel_deliveries WHERE message_id=?1 ORDER BY bot_id",
+        ).unwrap();
+        stmt.query_map([&message_id],|row|Ok((row.get(0)?,row.get(1)?)))
+            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(owned.len(),2);
+    assert_ne!(owned[0].1,owned[1].1,"one Council cycle per executor delivery");
+    for (bot_id, sid) in &owned {
+        let team = crate::architect::load(&f.store,sid).unwrap().unwrap();
+        assert_eq!(team.config.council,Some(council.clone()));
+        assert_eq!(team.session_id,*sid);
+        assert!(channel.member_ids.contains(bot_id));
+    }
+    let existing: String=f.store.db.query_row(
+        "SELECT session_id FROM bot_threads WHERE bot_id=?1 AND channel_id=?2 AND external_id=?2",
+        params![lead.id,DESKTOP],|row|row.get(0),
+    ).unwrap();
+    assert_eq!(existing,original,"ordinary bot desktop thread must never be replaced");
+    let cycles: i64=f.store.db.query_row(
+        "SELECT COUNT(DISTINCT cycle_id) FROM extended_channel_council_deliveries WHERE source_message_id=?1",
+        [&message_id],|row|row.get(0),
+    ).unwrap();
+    assert_eq!(cycles,2,"delivery cycles must be distinct and persisted");
+    assert!(shared_channels::council_view(&f.store,&first_id,&owned.iter().find(|(bot_id,_)| bot_id==&lead.id).unwrap().1).unwrap().is_some());
+}
+
+#[test]
 fn creates_a_bot_with_its_own_workspace_project() {
     let f = fixture();
     let bot = bot(&f);

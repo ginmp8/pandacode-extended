@@ -424,15 +424,12 @@ fn prompt_matches(content: &str, sender_prefix: &str, text: &str) -> bool {
     body == text || body.strip_prefix(text).is_some_and(|suffix| suffix.starts_with("\n\n"))
 }
 
-/// `created_at` is shared by every delivery of one post or retry, so a failure early in a
-/// post's fan-out never counts as superseded by its sibling (see `message_status`).
-pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, message_id: &str, bot_id: &str, text: &str, created_at: i64, depth: u8) -> Result<()> {
-    let state = app.state::<AppState>();
-    // The delivery starts queued; the gateway marks it in progress when its turn launches
-    // (`promote_taken`), so a finished run is credited only to the work it actually ran.
-    let delivery_id = crate::storage::id();
-    let (channel, bot, prompt, thread) = {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
+/// Durable admission for one channel delivery, shared by native dispatch and
+/// isolated-context regression tests. No model/harness execution occurs here.
+pub(super) fn provision_channel_delivery(
+    store: &Store, channel_id: &str, message_id: &str, bot_id: &str,
+    text: &str, created_at: i64, depth: u8, delivery_id: &str,
+) -> Result<(SharedChannel, Bot, String, String)> {
         let channel = shared_channel(&store, channel_id)?;
         if channel.archived { return Err("This channel is deleted.".into()); }
         if !channel.member_ids.iter().any(|id| id == bot_id) { return Err("Choose a bot that belongs to this channel.".into()); }
@@ -468,6 +465,18 @@ pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: 
         }
         transaction.commit().map_err(|e| e.to_string())?;
         (channel, bot, prompt, thread)
+}
+
+/// `created_at` is shared by every delivery of one post or retry, so a failure early in a
+/// post's fan-out never counts as superseded by its sibling (see `message_status`).
+pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: &str, message_id: &str, bot_id: &str, text: &str, created_at: i64, depth: u8) -> Result<()> {
+    let state = app.state::<AppState>();
+    // The delivery starts queued; the gateway marks it in progress when its turn launches
+    // (`promote_taken`), so a finished run is credited only to the work it actually ran.
+    let delivery_id = crate::storage::id();
+    let (channel, bot, prompt, thread) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        provision_channel_delivery(&store, channel_id, message_id, bot_id, text, created_at, depth, &delivery_id)?
     };
     let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread, sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
     if let Err(error) = gateway::deliver(app, inbound).await {

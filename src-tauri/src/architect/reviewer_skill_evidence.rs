@@ -123,3 +123,23 @@ pub(super) fn dispatch_state(
         "note": "A native input-integrity check is not proof of project tests or methodological adherence."
     }), changed.then_some(team)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn native_readonly_host_rejects_any_unlisted_tool_at_dispatch() {
+        let mut catalog = tools();
+        catalog.push(tool("dispatch_workers", "Unavailable to reviewers",
+            json!({"assignments":{"type":"array"}}), &["assignments"]));
+        let raw = ToolHost {
+            tools: catalog, approval_tools: HashSet::new(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({"executed": true})) })),
+        };
+        let filtered = readonly_host(raw).unwrap();
+        assert_eq!(filtered.tools.len(), 2);
+        assert!(!filtered.tools.iter().any(|spec| spec["name"] == "pandacode_dispatch_workers"));
+        assert!((filtered.handler)("pandacode_dispatch_workers".into(), json!({})).await.is_err());
+        assert!((filtered.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"safe"})).await.is_ok());
+    }
+}

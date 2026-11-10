@@ -4331,6 +4331,7 @@ pub fn run() {
                 bots::shared_channels::bot_shared_channel_update,
                 bots::shared_channels::bot_shared_channel_archive,
                 bots::shared_channels::bot_shared_channel_post,
+            bots::shared_channels::bot_shared_channel_council_accept,
                 bots::shared_channels::bot_shared_channel_stop,
                 bots::shared_channels::bot_shared_channel_continue,
                 bots::shared_channels::bot_shared_channel_reassign,

@@ -7045,6 +7045,14 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
     case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
+    case 'channel-council-accept': {
+      const deliveryId = element.dataset.deliveryId;
+      if (deliveryId) {
+        const { openSharedChannelCouncilAcceptance } = await import('./bot-shared-channels');
+        openSharedChannelCouncilAcceptance(deliveryId, sharedChannelUi());
+      }
+      break;
+    }
     case 'channel-council-report': {
       const taskId = element.dataset.sessionId;
       if (!taskId) break;

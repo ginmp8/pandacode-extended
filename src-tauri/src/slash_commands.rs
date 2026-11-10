@@ -933,7 +933,7 @@ mod tests {
             let denied = skill_switches::resolve_with(
                 harness, "/extended-review now", overlay.clone(), &disabled,
                 || std::collections::BTreeSet::from(["extended-review".into()]),
-            ).unwrap_err();
+            ).err().expect("Disabled Extended skill must be denied");
             assert_eq!(
                 denied, "extended-review is switched off in Settings → Tools → Skills.",
                 "{harness}",

@@ -264,6 +264,12 @@ fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activati
     let mut worker = worker;
     worker.reviewer_binding = Some(binding);
     team.workers.push(worker);
+    let issued = team.workers[0].reviewer_binding.as_ref().unwrap().clone();
+    assert!(reviewer_security::validate_issued_authority(&store, &team.session_id, &issued).is_ok());
+    let mut tampered = issued;
+    tampered.snapshot.skills.as_mut().unwrap().prompt.push_str("\nForged instruction");
+    assert!(reviewer_security::validate_issued_authority(&store, &team.session_id, &tampered)
+        .unwrap_err().contains("reviewer_session_mismatch"));
 
     // A library replacement between separately dispatched seats cannot alter this round.
     library.import(

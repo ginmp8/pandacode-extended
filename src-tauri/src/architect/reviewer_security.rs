@@ -199,6 +199,8 @@ struct ReviewerAuthority {
     reviewer_bot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bot_context: Option<ReviewerBotContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skills: Option<crate::skills::reviewer::ReviewerSkills>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     roster_bot_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +215,7 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
+        skills: binding.snapshot.skills.clone(),
         roster_bot_ids: binding.roster_bot_ids.clone(),
         required_reviewers: binding.required_reviewers,
     };
@@ -239,6 +242,7 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.tool_policy != binding.snapshot.tool_policy
                 || original.reviewer_bot_id != binding.reviewer_bot_id
                 || original.bot_context != binding.snapshot.bot_context
+                || original.skills != binding.snapshot.skills
                 || original.roster_bot_ids != binding.roster_bot_ids
                 || original.required_reviewers != binding.required_reviewers
             {
@@ -275,6 +279,7 @@ pub(crate) fn authorize_user_grants(
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
+        skills: binding.snapshot.skills.clone(),
         roster_bot_ids: binding.roster_bot_ids.clone(),
         required_reviewers: binding.required_reviewers,
     };
@@ -302,6 +307,9 @@ pub(crate) struct ReviewerSnapshot {
     /// Frozen user-configured persona for S2; never a live bot profile or a permission grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_context: Option<ReviewerBotContext>,
+    /// Immutable reviewer-assigned library inputs, never the bot's global skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<crate::skills::reviewer::ReviewerSkills>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +426,7 @@ impl ReviewerBinding {
                 lens: seat.lens.clone(),
                 tool_policy: ReviewerToolPolicy::NativeReadOnly,
                 bot_context: None,
+                skills: None,
             },
         }
     }

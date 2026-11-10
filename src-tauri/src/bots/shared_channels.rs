@@ -741,6 +741,74 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let _=app.emit("bot-messages-changed",());
 }
 
+/// Accept below-target Council work only from an explicit local user action.
+/// A model message, ordinary Council acceptance or a stale cycle cannot issue
+/// the durable channel approval proof needed by the callback gate.
+#[tauri::command]
+pub async fn bot_shared_channel_council_accept(
+    app: tauri::AppHandle, state: State<'_,AppState>, delivery_id: String, reason: String,
+) -> Result<()> {
+    let reason = reason.trim();
+    if !(8..=1024).contains(&reason.chars().count()) || reason.chars().any(char::is_control) {
+        return Err("Enter an acceptance reason between 8 and 1024 printable characters.".into());
+    }
+    let (channel_id, session_id, cycle_id) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let (channel_id, session_id, cycle_id): (String, String, String) = store.db.query_row(
+            "SELECT c.channel_id,d.session_id,c.cycle_id
+             FROM extended_channel_council_deliveries c
+             JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+             WHERE d.id=?1 AND d.status='in_progress'",
+            [&delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).map_err(|_| "Council delivery is not active or does not exist.".to_string())?;
+        let channel = shared_channel(&store, &channel_id)?;
+        if channel.archived { return Err("This channel is archived.".into()); }
+        let team = crate::architect::load(&store, &session_id)?
+            .ok_or("Council delivery has no native team.")?;
+        let config = team.config.council.as_ref().ok_or("Council is disabled.")?;
+        validate_delivery_reviewers(&store, &session_id, &config.reviewer_bot_ids)?;
+        let status = team.council_status.as_ref().ok_or("Council has no review.")?;
+        if status.round == 0 || status.lowest.is_none() || status.stale
+            || !matches!(team.status.as_str(), "running" | "waiting" | "ready" | "completed")
+        {
+            return Err("A current Council review with recorded scores is required before exceptional acceptance.".into());
+        }
+        (channel_id, session_id, cycle_id)
+    };
+    let team = crate::architect::accept_channel_delivery(&app, &state, &session_id)?;
+    // Do not let a concurrent reassignment, stop or newer reviewer revision
+    // rebind a local user's approval to a different delivery.
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let current_cycle: String = store.db.query_row(
+            "SELECT c.cycle_id FROM extended_channel_council_deliveries c
+             JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+             WHERE d.id=?1 AND d.session_id=?2 AND d.status='in_progress'",
+            params![delivery_id,session_id], |r| r.get(0),
+        ).map_err(|_| "Council delivery changed during acceptance.".to_string())?;
+        if current_cycle != cycle_id || team.council_accepted != Some(team.council_since)
+            || team.council_status.as_ref().is_none_or(|s| s.state != "accepted" || s.stale)
+        {
+            return Err("Council approval no longer matches the current review.".into());
+        }
+        store.db.execute(
+            "INSERT OR IGNORE INTO extended_channel_council_acceptances
+             (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
+             VALUES(?1,?2,?3,?4,?5,'local_user',?6,?7)",
+            params![delivery_id,cycle_id,team.council_since,team.dispatch_revision as i64,
+                team.changed_at,reason,crate::storage::now()],
+        ).map_err(|e| e.to_string())?;
+        transaction.commit().map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
+    if team.status == "completed" {
+        // A completed at-limit lead has no future harness turn to call back.
+        super::run_finished(&app, &session_id, true);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn bot_shared_channels(state: State<'_,AppState>) -> Result<Vec<SharedChannel>> {
     let store = state.store.lock().map_err(|e|e.to_string())?;

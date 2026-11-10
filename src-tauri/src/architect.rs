@@ -1020,6 +1020,16 @@ pub async fn architect_council_accept(app: tauri::AppHandle, state: State<'_, Ap
     wake(app);
     Ok(team)
 }
+/// Complete an explicitly reasoned Shared Channel acceptance through the same
+/// native Council state transition used by direct tasks.
+pub(crate) fn accept_channel_delivery(
+    app: &tauri::AppHandle, state: &AppState, session_id: &str,
+) -> Result<TeamSnapshot> {
+    let team = council::accept(state, session_id)?;
+    emit(app, &team);
+    wake(app.clone());
+    Ok(team)
+}
 /// A task on another computer runs its team there (docs/remote-access.md): this computer
 /// only shows it, so nothing may configure, start or control a local team for it.
 pub(crate) fn refuse_mirror(store: &Store, session_id: &str) -> Result<()> {

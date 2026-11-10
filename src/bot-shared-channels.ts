@@ -89,7 +89,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     const description = message.kind === "direct_delegation"
       ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
     const council = message.council;
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}</span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
@@ -197,3 +197,28 @@ export async function openSharedChannelSettings(channelId: string, options: Shar
   catch (error) { options.notify(error instanceof Error ? error.message : String(error)); }
 }
 
+
+/** This is a local user action, not a model instruction or a bot tool. */
+export function openSharedChannelCouncilAcceptance(deliveryId: string, options: SharedChannelUiOptions): void {
+  const dialog = options.modal('Accept Council exception', `<form class="bc-council-accept-form">
+    <p class="dialog-description">The Council has not passed. Accept this review as a user exception only with an explicit reason. The result will be attributed to the local user.</p>
+    <label for="bc-council-accept-reason">Acceptance reason</label>
+    <textarea id="bc-council-accept-reason" name="reason" required minlength="8" maxlength="1024" rows="4" placeholder="Explain why you accept this result despite the Council findings"></textarea>
+    <div class="dialog-footer"><button type="button" class="secondary-button" data-shared-action="accept-cancel">Cancel</button>
+    <button type="submit" class="primary-button">Accept with reason</button></div>
+  </form>`, 'bot-shared-dialog');
+  const form = dialog.querySelector<HTMLFormElement>('.bc-council-accept-form')!;
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    const reason = String(new FormData(form).get('reason') ?? '').trim();
+    if (reason.length < 8 || reason.length > 1024) { options.notify('Enter an acceptance reason (8–1024 characters).'); return; }
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    void options.call('bot_shared_channel_council_accept', { deliveryId, reason }).then(async () => {
+      options.closeModal();
+      await options.changed();
+    }).catch(error => options.notify(error instanceof Error ? error.message : String(error)))
+      .finally(() => { if (submit?.isConnected) submit.disabled = false; });
+  });
+  dialog.querySelector('[data-shared-action="accept-cancel"]')?.addEventListener('click', options.closeModal);
+}

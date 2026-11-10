@@ -214,7 +214,16 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
             cycle_id TEXT NOT NULL UNIQUE,
             objective TEXT NOT NULL,
             artifact_revision TEXT NOT NULL,
-            created_at INTEGER NOT NULL);",
+            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_acceptances(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            cycle_id TEXT NOT NULL,
+            council_since INTEGER NOT NULL,
+            dispatch_revision INTEGER NOT NULL,
+            changed_at INTEGER NOT NULL,
+            actor TEXT NOT NULL CHECK(actor='local_user'),
+            reason TEXT NOT NULL CHECK(length(reason) BETWEEN 8 AND 1024),
+            accepted_at INTEGER NOT NULL);",
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1334,8 +1343,23 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
     match team.status.as_str() {
         "completed" => match team.council_status.as_ref() {
             Some(status) if status.state == "passed" && !status.stale => Ok(ChannelCouncilOutcome::Approved),
-            Some(status) if status.state == "limit" => Ok(ChannelCouncilOutcome::Denied("Council reached the round limit without approval.")),
-            Some(status) if status.state == "accepted" => Ok(ChannelCouncilOutcome::Denied("Council user exception requires attributed acceptance and a reason.")),
+            Some(status) if status.state == "limit" => Ok(ChannelCouncilOutcome::Waiting),
+            Some(status) if status.state == "accepted" && !status.stale => {
+                let proof: Option<(String, i64, i64, i64)> = store.db.query_row(
+                    "SELECT a.cycle_id,a.council_since,a.dispatch_revision,a.changed_at
+                     FROM extended_channel_council_acceptances a
+                     JOIN extended_channel_council_deliveries c ON c.delivery_id=a.delivery_id
+                     JOIN bot_shared_channel_deliveries d ON d.id=a.delivery_id
+                     WHERE d.session_id=?1 AND d.status='in_progress' AND a.cycle_id=c.cycle_id",
+                    [session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                ).optional().map_err(|error| error.to_string())?;
+                if proof.is_some_and(|(_, since, revision, changed)| {
+                    team.council_accepted == Some(since) && team.council_since == since
+                        && team.dispatch_revision as i64 == revision && team.changed_at == changed
+                }) { Ok(ChannelCouncilOutcome::Approved) }
+                else { Ok(ChannelCouncilOutcome::Waiting) }
+            },
+            Some(status) if status.state == "accepted" => Ok(ChannelCouncilOutcome::Waiting),
             _ => Ok(ChannelCouncilOutcome::Denied("Council has no verified, current passing review.")),
         },
         "failed" | "stopped" | "interrupted" => Ok(ChannelCouncilOutcome::Denied("Council team ended without approval.")),

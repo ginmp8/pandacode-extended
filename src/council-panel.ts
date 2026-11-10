@@ -209,9 +209,10 @@ export function createCouncil(host: CouncilHost) {
       let selected: HTMLElement | null = null;
       const buttons = [...group.querySelectorAll<HTMLElement>('button')];
       for (const option of buttons) {
+        const selectingBots = selection(sessionId).selected;
         const on = option.dataset.reviewersSource === 'selected'
-          ? draft.selected
-          : !draft.selected || key !== 'reviewers' ? Number(option.dataset.value) === values[key] : false;
+          ? selectingBots
+          : key !== 'reviewers' || !selectingBots ? Number(option.dataset.value) === values[key] : false;
         option.setAttribute('aria-pressed', String(on));
         if (on) selected = option;
       }

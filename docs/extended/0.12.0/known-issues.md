@@ -80,3 +80,7 @@ Native microphone permission, on-device model integrity, restart/cancellation, c
 ## Post-0.3.108 source regression and assurance status — 2026-11-10
 
 Fork [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) hardens its voice-model tamper test for coarse timestamp filesystems and introduces a green-CI release gate. These are inherited changes, **not a confirmed new Extended defect**. Manual-only publishing is preserved. Native voice download checks, all relevant Feature controls On/Off paths, and the 80 historically divergent source files still require independent semantic/runtime acceptance.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+No new source-code defect or vulnerability identified. Manual publication intentionally fails when only PR/non-main CI exists for the SHA or when main push CI is pending, failed or cancelled. This gate has not been independently exercised in a live manual run. Native controls, Voice, installers and 80 shared-file semantic differences remain open; no release approval.

@@ -59,3 +59,7 @@ Voice is an additional upstream Settings page. It must not replace or alter the 
 ## Upstream 0.3.108 release gate follow-up — 2026-11-10
 
 The [post-version source `57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) checks CI for the exact commit before publication. Extended scopes the inherited gate to an **explicit manual publish** (`workflow_dispatch` and `publish=true`); tag pushes continue to build artifacts only. No user-facing update, Voice, bot, MCP, Connect, cloud/VM, credential or Skills switch changes. Native On/Off acceptance remains open.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+The updated release gate checks exact-SHA successful push-to-main CI only when manual `workflow_dispatch` has `publish=true`. Tag builds remain artifact-only. No Voice, Skills, update, bot, Connect, MCP, cloud/VM, or credential Feature control changes; independent enabled/disabled acceptance remains outstanding.

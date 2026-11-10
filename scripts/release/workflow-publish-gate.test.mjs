@@ -31,11 +31,18 @@ test('Extended and upstream release tag identities are resolved separately', () 
 });
 
 
-test('manual release requires successful CI for the exact commit', () => {
+test('manual publishing requires main push CI for the exact commit', () => {
   const prepare = workflow.split('  prepare:')[1].split('\n  build:')[0];
   assert.match(prepare, /actions: read/);
   assert.match(prepare, /Require a green CI run for this commit/);
   assert.match(prepare, /if: github\.event_name == 'workflow_dispatch' && inputs\.publish == true/);
   assert.match(prepare, /gh run list .*--workflow ci\.yml --commit "\$GITHUB_SHA"/);
-  assert.match(prepare, /\[ "\$conclusion" != success \]/);
+  assert.match(prepare, /--event push --branch main\b/);
+  assert.match(prepare, /status=\$\(jq -r/);
+  assert.match(prepare, /conclusion=\$\(jq -r/);
+  assert.match(prepare, /url=\$\(jq -r/);
+  assert.match(prepare, /case "\$conclusion" in/);
+  assert.match(prepare, /cancelled\)/);
+  assert.match(prepare, /Re-run CI for this commit/);
+  assert.match(prepare, /No CI run from a push to main/);
 });

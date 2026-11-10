@@ -72,3 +72,5 @@ Do not copy these statements into upstream release notes or claim they apply to 
 
 
 **Current pinned source snapshot (2026-11-10):** [PandaCode 0.3.108 `57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1), tree `6d7f582267471080a5752e243769a4684e1994a3`. Two post-version commits change seven paths, including six exact upstream blob updates and one adapted manual-publication CI guard. Expected complete inventory: **1,696 source / 1,753 Extended, 1,616 shared exact, 80 extended-modified shared, 57 Extended-only and zero missing/mode mismatches**. Extended planned distribution remains **0.12.0 draft**; native acceptance is pending.
+
+**Current pinned post-0.3.108 source (2026-11-10):** [source `8682acaf97dc`](https://github.com/ginmp8/pandacode/commit/8682acaf97dcd57217087d07deaa21e1dc6bb751), tree `9405c4f98758a73fb559066bda62acd920fe75fd`, four changed paths (three exact, one adapted CI guard), app version **0.3.108** and Extended planned release **0.12.0 draft**. Full inventory zero missing; CI of newly published SHA and native functional parity are separate.

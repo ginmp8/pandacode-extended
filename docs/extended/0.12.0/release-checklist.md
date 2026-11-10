@@ -167,3 +167,11 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [x] Verify untruncated source Git inventory (1,696 paths), and reconcile against 1,753 Extended paths with no missing/mode mismatches.
 - [ ] Verify CI on the **published destination SHA** and distinguish pending, skipped, successful and failed jobs.
 - [ ] Verify native Voice, Settings On/Off, Connect/MCP/bots/cloud/VM, credentials, SQLite migration and installer behavior; classify 80 longstanding shared-file differences by hunk.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+- [x] Freeze source `8682acaf97dcd57217087d07deaa21e1dc6bb751`, tree `9405c4f98758a73fb559066bda62acd920fe75fd`, version **0.3.108**, Extended planned documentation **0.12.0**.
+- [x] Reconcile four upstream paths: three exact, one manual-release guard adaptation; preserve no automatic publish/npm.
+- [ ] Verify CI of the newly published destination SHA (prior `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` was green in 11/11 push and 11/11 PR jobs).
+- [ ] Exercise release gate for green/pending/failed/cancelled/PR-only/non-main CI without publishing a release.
+- [ ] Verify native Settings, Voice, Connect/MCP/bots/cloud/VM/credentials, SQLite migrations, installers and 80 historic shared-file divergences.

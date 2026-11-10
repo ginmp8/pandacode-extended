@@ -556,9 +556,7 @@ mod tests {
         assert!(snapshot.pins[0].required_for_acceptance);
         assert!(snapshot.pins[1].required_for_acceptance);
         assert!(!snapshot.pins[2].required_for_acceptance);
-        assert_eq!(snapshot.pins[2].bot_assigned, true);
-        let old_receipt = serde_json::json!({"requiredForAcceptance": true});
-        assert_eq!(old_receipt["requiredForAcceptance"], true);
+        assert!(snapshot.pins[2].bot_assigned);
         let mut legacy = serde_json::to_value(&snapshot.pins[1]).unwrap();
         legacy.as_object_mut().unwrap().remove("requiredForAcceptance");
         let parsed: SkillPin = serde_json::from_value(legacy).unwrap();

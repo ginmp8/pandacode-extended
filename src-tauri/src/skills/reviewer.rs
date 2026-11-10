@@ -215,9 +215,10 @@ fn stage(library: &Library, meta: &Meta, files: &super::Files, hashes: &BTreeMap
     Ok(target.to_string_lossy().into_owned())
 }
 
-/// Reclaim only materialized reviewer packages no longer referenced by any
-/// persisted round. Call while holding the app store lock, so a Council cannot
-/// create an unfinished round between the reference scan and removal.
+/// Reclaim materialized packages not referenced by a resumable Council round.
+/// Completed teams retain their immutable provenance receipts, not temporary
+/// working copies. Call while holding the app store lock so in-flight rounds
+/// cannot lose a staged package between the reference scan and removal.
 pub(crate) fn cleanup_orphaned(library: &Library, store: &crate::storage::Store) -> Result<usize, String> {
     let root = library.dir.join(STAGE_ROOT);
     if !root.exists() { return Ok(0); }
@@ -225,14 +226,31 @@ pub(crate) fn cleanup_orphaned(library: &Library, store: &crate::storage::Store)
     let mut retained = HashSet::new();
     {
         let mut statement = store.db.prepare(
-            "SELECT content FROM architect_requests WHERE kind='reviewer_round'",
+            "SELECT r.content, t.content FROM architect_requests r
+             LEFT JOIN architect_teams t ON t.session_id=r.parent_session_id
+             WHERE r.kind='reviewer_round'",
         ).map_err(|e| e.to_string())?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        }).map_err(|e| e.to_string())?;
         for row in rows {
-            let raw = row.map_err(|e| e.to_string())?;
+            let (raw, team_json) = row.map_err(|e| e.to_string())?;
             let round: Vec<serde_json::Value> = serde_json::from_str(&raw)
                 .map_err(|_| "reviewer_skill_cleanup_blocked: invalid native round metadata.".to_owned())?;
+            // A completed, settled team cannot resume this round. Never reclaim
+            // paused/failed/in-flight/unknown team state, including legacy rows.
+            let completed = team_json.as_deref().and_then(|raw|
+                serde_json::from_str::<serde_json::Value>(raw).ok()
+            ).is_some_and(|team|
+                team.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                && team.get("workers").and_then(serde_json::Value::as_array).is_some_and(|workers|
+                    workers.iter().all(|worker|
+                        matches!(worker.get("status").and_then(serde_json::Value::as_str),
+                            Some("completed" | "failed" | "stopped"))
+                    )
+                )
+            );
+            if completed { continue; }
             for seat in round {
                 let Some(skills) = seat.get("skills").filter(|s| !s.is_null()) else { continue };
                 let inputs: ReviewerSkills = serde_json::from_value(skills.clone())
@@ -613,11 +631,26 @@ mod tests {
             rusqlite::params![session.id, serde_json::json!([{"skills": pinned}]).to_string()],
         ).unwrap();
         assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 0);
-        assert!(dir.exists(), "a persisted round must never lose its immutable files");
+        assert!(dir.exists(), "unknown or resumable persisted rounds retain their immutable files");
 
+        // A real terminal team no longer needs the transient content-addressed
+        // materialization. Its frozen receipt stays in the completed snapshot.
+        store.db.execute(
+            "INSERT INTO architect_teams(session_id,content) VALUES(?1,?2)",
+            rusqlite::params![session.id, r#"{"status":"paused","workers":[]}"#],
+        ).unwrap();
+        assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 0);
+        store.db.execute("UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+            rusqlite::params![session.id, r#"{"status":"completed","workers":[{"status":"completed"}]}"#],
+        ).unwrap();
+        assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 1);
+        assert!(!dir.exists(), "completed reviewer materialization is reclaimed");
+
+        let pinned = freeze(&library, &["stable".into()], "codex").unwrap();
+        assert!(Path::new(pinned.pins[0].staged_path.as_ref().unwrap()).exists());
         store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1", [&session.id]).unwrap();
         assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 1);
-        assert!(!dir.exists(), "unused read-only snapshots must be reclaimed safely");
+        assert!(!dir.exists(), "unreferenced read-only snapshots must be reclaimed safely");
         assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 0);
         fs::remove_dir_all(root).unwrap();
     }

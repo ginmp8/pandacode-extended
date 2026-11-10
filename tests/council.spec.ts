@@ -58,6 +58,25 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
 
+test('scoped reviewer action is explicitly granted only to one relative file', async ({ page }) => {
+  await open(page, '/?bots=sample');
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
+  await panel(page).getByRole('checkbox', { name: /Writer/ }).check();
+  await panel(page).getByRole('checkbox', { name: /Allow one exact native host action/ }).check();
+  await expect(panel(page).getByRole('textbox', { name: 'Allowed reviewer file path' })).toBeVisible();
+  await panel(page).getByRole('textbox', { name: 'Allowed reviewer file path' }).fill('src/example.ts');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const config = (await calls(page))[0];
+  expect(config.reviewPermissions?.authorizationId).toMatch(/^[a-f0-9-]{36}$/);
+  expect(config.reviewPermissions.grants).toEqual([{tool:'pandacode_open_file', action:'call', resourceArgument:'path', resource:'src/example.ts'}]);
+  await panel(page).getByRole('button', { name: 'Auto: the lead picks reviewers for the work' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1].reviewPermissions).toBeUndefined();
+});
+
 test('selected reviewers can be chosen using keyboard controls', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();

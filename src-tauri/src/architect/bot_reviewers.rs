@@ -13,8 +13,9 @@ fn executor(store: &Store, session_id: &str) -> Result<Option<String>> {
         [session_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if linked.is_some() { return Ok(linked); }
-    let project = store.session(session_id)?.project_id;
-    Ok(bots::list(store)?.into_iter().find(|b| b.project_id == project).map(|b| b.id))
+    // Project membership is not executor identity: several bots may share a project.
+    // Only explicit bot task/thread ownership proves who is executing this session.
+    Ok(None)
 }
 
 fn valid_bot(bot: &bots::Bot, executor: Option<&str>, check_executable: bool) -> Result<()> {
@@ -65,7 +66,10 @@ pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replace
         return Err("reviewer_session_mismatch: a selected seat cannot replace a native reviewer.".into());
     }
     let occupied: HashSet<&str> = team.workers.iter()
+        .filter(|w| w.created_at >= team.council_since)
         .filter(|w| w.council.as_ref().is_some_and(|s| s.round == round))
+        // An abandoned, unscored seat can be reissued to the same bot; a score stands.
+        .filter(|w| !w.abandoned || w.council.as_ref().is_some_and(|s| s.score.is_some()))
         .filter(|w| Some(w.id.as_str()) != replaces)
         .filter_map(|w| w.reviewer_binding.as_ref()?.reviewer_bot_id.as_deref())
         .collect();
@@ -98,8 +102,7 @@ pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConf
     let new_ids = next.as_ref().map(|c| &c.reviewer_bot_ids);
     if old_ids == new_ids || next.is_none() { return Ok(()); }
     let current = team.workers.iter().filter(|w| w.created_at >= team.council_since).filter_map(|w| w.council.as_ref()).map(|seat| seat.round).max().unwrap_or(0);
-    let incomplete = current > 0
-        && !matches!(team.council_status.as_ref().map(|s| s.state.as_str()), Some("passed" | "fixing" | "limit" | "asking" | "accepted"));
+    let incomplete = current > 0 && super::council::current_round_incomplete(team);
     if incomplete {
         return Err("Finish or stop the current Council round before changing selected reviewer bots.".into());
     }

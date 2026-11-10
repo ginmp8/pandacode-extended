@@ -1042,6 +1042,12 @@ pub(super) fn configure_state(
         config: config.clone(),
     };
     setup.validate()?;
+    // The alternate team-setup path must enforce the same roster rules as architect_set_council.
+    let incoming = with_council(config.clone(), &team.config);
+    bot_reviewers::allow_roster_change(&team, &incoming.council)?;
+    if let Some(council) = &incoming.council {
+        bot_reviewers::validate_roster(&store, session_id, council)?;
+    }
     let used: bool = store
         .db
         .query_row(
@@ -1097,6 +1103,11 @@ fn with_council(mut config: TeamConfig, current: &TeamConfig) -> TeamConfig {
 /// carry their own immutable selection, including queued workers and follow-ups.
 fn apply_setup(store: &Store, team: &mut TeamSnapshot, setup: &profiles::TeamSetup) -> Result<()> {
     setup.validate()?;
+    let incoming = with_council(setup.config.clone(), &team.config);
+    bot_reviewers::allow_roster_change(team, &incoming.council)?;
+    if let Some(council) = &incoming.council {
+        bot_reviewers::validate_roster(store, &team.session_id, council)?;
+    }
     let session = store.session(&team.session_id)?;
     if setup.architect.provider != session.provider {
         crate::context_recovery::queue(store, &team.session_id)?;
@@ -2047,6 +2058,7 @@ fn dispatch_as(
                     );
                     if let Some(bot) = &selected_bot {
                         binding.reviewer_bot_id = Some(bot.id.clone());
+                        binding.roster_bot_ids = team.config.council.as_ref().map_or_else(Vec::new, |c| c.reviewer_bot_ids.clone());
                         binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext::from_bot(bot));
                     }
                     binding

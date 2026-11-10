@@ -190,6 +190,10 @@ struct ReviewerAuthority {
     reviewer_bot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bot_context: Option<ReviewerBotContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roster_bot_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    required_reviewers: Option<usize>,
 }
 fn authority_key(seat: &str) -> String { format!("native-reviewer-authority:{seat}") }
 pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
@@ -200,6 +204,8 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
+        roster_bot_ids: binding.roster_bot_ids.clone(),
+        required_reviewers: binding.required_reviewers,
     };
     let body = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     store.db.execute(
@@ -224,6 +230,8 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.tool_policy != binding.snapshot.tool_policy
                 || original.reviewer_bot_id != binding.reviewer_bot_id
                 || original.bot_context != binding.snapshot.bot_context
+                || original.roster_bot_ids != binding.roster_bot_ids
+                || original.required_reviewers != binding.required_reviewers
             {
                 return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
             }
@@ -258,6 +266,8 @@ pub(crate) fn authorize_user_grants(
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
+        roster_bot_ids: binding.roster_bot_ids.clone(),
+        required_reviewers: binding.required_reviewers,
     };
     let mut new = old.clone();
     new.tool_policy = policy.clone();
@@ -294,6 +304,9 @@ pub(crate) struct ReviewerBotContext {
     pub goals: String,
     pub soul: String,
     pub reasoning_effort: String,
+    /// Assigned skill references only. S3 owns pinning/materialization/verification.
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
 }
 
 impl ReviewerBotContext {
@@ -301,6 +314,7 @@ impl ReviewerBotContext {
         Self {
             name: bot.name.clone(), role: bot.role.clone(), instructions: bot.instructions.clone(),
             goals: bot.goals.clone(), soul: bot.soul.clone(), reasoning_effort: bot.reasoning_effort.clone(),
+            skill_ids: bot.skills.clone(),
         }
     }
 }
@@ -315,6 +329,11 @@ pub(crate) struct ReviewerBinding {
     pub seat_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_bot_id: Option<String>,
+    /// Frozen seat roster; original council round history is independent of future selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roster_bot_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_reviewers: Option<usize>,
     /// Native identity/revision token, not evidence of a content checksum.
     pub artifact_revision: String,
     pub snapshot: ReviewerSnapshot,
@@ -380,6 +399,8 @@ impl ReviewerBinding {
             round: seat.round,
             seat_id: worker_id.to_owned(),
             reviewer_bot_id: None,
+            roster_bot_ids: Vec::new(),
+            required_reviewers: team.config.council.as_ref().map(|c| c.needed()),
             artifact_revision: format!("{}:{}:{}:{}", team.council_since, team.dispatch_revision, created_at, worker_id),
             snapshot: ReviewerSnapshot {
                 provider: provider.to_owned(),
@@ -410,6 +431,9 @@ impl ReviewerBinding {
             || self.delivery_id.is_some()
             || self.reviewer_bot_id.is_some() != self.snapshot.bot_context.is_some()
             || self.reviewer_bot_id.as_deref().is_some_and(|id| !super::valid_id(id))
+            || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))
+            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(self.roster_bot_ids.len())
+                || self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id))))
         {
             return Err("reviewer_session_mismatch: immutable reviewer binding differs from scheduled worker.".into());
         }

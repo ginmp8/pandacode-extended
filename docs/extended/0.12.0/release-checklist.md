@@ -175,3 +175,12 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [ ] Verify CI of the newly published destination SHA (prior `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` was green in 11/11 push and 11/11 PR jobs).
 - [ ] Exercise release gate for green/pending/failed/cancelled/PR-only/non-main CI without publishing a release.
 - [ ] Verify native Settings, Voice, Connect/MCP/bots/cloud/VM/credentials, SQLite migrations, installers and 80 historic shared-file divergences.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+- [x] Pin upstream `979b7d4e3c073e9bebf74f70bf80440a27564237`, tree `ba33a37daed7860854926617c90197d3182bd8ed`, app **0.3.108**; preserve planned Extended **0.12.0 DRAFT**.
+- [x] Stage five exact upstream blobs and one Extended-preserving workflow adaptation; add the malformed CI-lookup regression assertion.
+- [x] Preserve Extended controls, dependency remediation, source original release notes, and manual-only release publishing.
+- [ ] Verify **new destination SHA** push/PR CI by job; the preceding `4ef18f0f` push had a cancelled ONNX/macOS job while PR CI passed.
+- [ ] Independently test manual publish CI lookup failure/pending/green paths without publishing, native voice behavior, Settings On/Off, Connect, MCP, bots, cloud/VM, credentials, platform installers and all 80 historic divergent shared-file hunks.
+- [ ] Approve a release separately; no tag, installer publication or npm release is authorized here.

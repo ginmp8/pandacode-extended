@@ -46,3 +46,9 @@ test('manual publishing requires main push CI for the exact commit', () => {
   assert.match(prepare, /Re-run CI for this commit/);
   assert.match(prepare, /No CI run from a push to main/);
 });
+
+test('failed or malformed CI lookup aborts manual publication with a diagnostic', () => {
+  const prepare = workflow.split('  prepare:')[1].split('\n  build:')[0];
+  assert.match(prepare, /if \[ -z "\$runs" \] \|\| ! jq -e 'type == "array"'/);
+  assert.match(prepare, /CI lookup for \$GITHUB_SHA failed: gh did not return a list of runs/);
+});

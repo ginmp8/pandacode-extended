@@ -63,3 +63,7 @@ The [post-version source `57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/com
 ## Post-0.3.108 source follow-up — 2026-11-10
 
 The updated release gate checks exact-SHA successful push-to-main CI only when manual `workflow_dispatch` has `publish=true`. Tag builds remain artifact-only. No Voice, Skills, update, bot, Connect, MCP, cloud/VM, or credential Feature control changes; independent enabled/disabled acceptance remains outstanding.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+This source update affects upstream Voice documentation and the release-gating workflow, **not** the Extended update/bot-pause/Connect/direct-route/MCP/cloud/VM/credential switches. The inherited empty/malformed CI lookup guard is incorporated exclusively into manually authorized GitHub Release publication. Tag pushes still produce build artifacts without publishing. Native enabled/disabled feature paths and actual manual publish acceptance remain unverified.

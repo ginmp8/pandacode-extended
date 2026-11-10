@@ -84,3 +84,7 @@ Fork [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc3541
 ## Post-0.3.108 source follow-up — 2026-11-10
 
 No new source-code defect or vulnerability identified. Manual publication intentionally fails when only PR/non-main CI exists for the SHA or when main push CI is pending, failed or cancelled. This gate has not been independently exercised in a live manual run. Native controls, Voice, installers and 80 shared-file semantic differences remain open; no release approval.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+The upstream update adds clearer documentation of x64 on-device voice CPU requirements, Windows on Arm limitations, transcription cancellation/retention behavior and a diagnostic for an unavailable/malformed GitHub Actions CI response. These are source clarifications, **not** confirmed Extended product defects. The preceding destination SHA `4ef18f0fe5fda72190c6754711ae8d7fbc4ab200` had a [failed push workflow](https://github.com/ginmp8/pandacode-extended/actions/runs/42862512017) due to a cancelled ONNX/macOS job, while its [PR workflow succeeded](https://github.com/ginmp8/pandacode-extended/actions/runs/42862529729). Check the new exact SHA; do not mislabel prior PR success as push-CI success. The 80 historical divergent shared paths and installed-app feature acceptance remain open.

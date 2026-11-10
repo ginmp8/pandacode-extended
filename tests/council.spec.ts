@@ -92,6 +92,9 @@ test('optional selected-bot skill remains optional after Council configuration i
   await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
 
   await page.reload();
+  // A browser reload restarts the preview app; wait for the same boot-ready
+  // composer condition as open() before asserting persisted Council settings.
+  await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeVisible({ timeout: 30_000 });
   await expect(button(page)).toBeVisible();
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();

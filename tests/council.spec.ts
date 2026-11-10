@@ -546,12 +546,32 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
   for (let step = 0; step < order.length; step++) { seen.push(await where()); await page.keyboard.press('Tab'); }
   expect(seen).toEqual(order);
   expect(await where()).toBe('switch');
+  // Record actual focus transitions instead of crossing the Playwright boundary after
+  // each key. All transitions still have to follow the exact sequence, including both wraps.
+  await page.evaluate(() => {
+    (window as any).__councilFocusTrail = [] as string[];
+    document.addEventListener('focusin', event => {
+      const active = event.target as HTMLElement;
+      const field = active.closest<HTMLElement>('[data-field]');
+      const location = !active.closest('.council-panel') ? `outside:${active.tagName}`
+        : active.classList.contains('council-switch') ? 'switch'
+        : active.classList.contains('council-new-threads') ? 'new'
+        : field?.dataset.field ?? 'unmapped';
+      (window as any).__councilFocusTrail.push(location);
+    }, true);
+  });
   for (const start of order) {
     for (const key of ['Tab', 'Shift+Tab']) {
-      // Start on that control, then go round twice.
+      // Start on that control, then traverse two full rounds using real key events.
       for (let step = 0; step < order.length && await where() !== start; step++) await page.keyboard.press('Tab');
       expect(await where()).toBe(start);
-      for (let step = 0; step < order.length * 2; step++) { await page.keyboard.press(key); expect(await where()).not.toMatch(/^outside/); }
+      await page.evaluate(() => { (window as any).__councilFocusTrail = []; });
+      for (let step = 0; step < order.length * 2; step++) await page.keyboard.press(key);
+      const visited: string[] = await page.evaluate(() => (window as any).__councilFocusTrail);
+      const direction = key === 'Tab' ? 1 : -1;
+      const expected = Array.from({ length: order.length * 2 }, (_, step) =>
+        order[(order.indexOf(start) + direction * (step + 1) + order.length * 2) % order.length]);
+      expect(visited).toEqual(expected);
       expect(await where()).toBe(start);
     }
   }

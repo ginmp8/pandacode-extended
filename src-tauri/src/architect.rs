@@ -907,6 +907,47 @@ pub(super) fn new_team(session_id: String, config: TeamConfig) -> TeamSnapshot {
         council_reopened: None,
     }
 }
+/// Configure a single opt-in Shared Channel delivery in its isolated bot-owned
+/// task without writing a reusable Architect profile or ordinary bot settings.
+pub(crate) fn configure_channel_delivery(store: &Store, session_id: &str, council: CouncilConfig) -> Result<()> {
+    council.validate()?;
+    if load(store, session_id)?.is_some() || parent_of(store, session_id)?.is_some() {
+        return Err("channel_council_conflict: delivery does not own a fresh task.".into());
+    }
+    bot_reviewers::validate_roster(store, session_id, &council)?;
+    let config = TeamConfig {
+        auto: true, roster_only: false, name: None,
+        workers: Vec::new(), catalog: Vec::new(), max_parallel: 0,
+        max_rounds: council.max_rounds, max_assignments: 0,
+        workspace: "shared".into(), summary_limit: 0,
+        lead_guidance: None, council: Some(council),
+    };
+    config.validate()?;
+    let mut team = new_team(session_id.to_owned(), config);
+    save(store, &mut team)
+}
+
+/// Check every selected reviewer against the complete originating message's
+/// executor roster and current channel membership, also on retries/reassignment.
+pub(crate) fn validate_channel_reviewers(
+    store: &Store, council: &CouncilConfig, members: &[String], executors: &[String],
+) -> Result<()> {
+    council.validate()?;
+    for id in &council.reviewer_bot_ids {
+        if !members.contains(id) {
+            return Err("reviewer_unavailable: selected reviewer is not a Shared Channel member.".into());
+        }
+        if executors.contains(id) {
+            return Err("reviewer_unavailable: a message executor cannot review this channel delivery.".into());
+        }
+        let bot = crate::bots::get(store, id)?;
+        if bot.paused {
+            return Err("reviewer_unavailable: a selected Shared Channel reviewer is paused.".into());
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn architect_get(
     state: State<'_, AppState>,

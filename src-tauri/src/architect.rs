@@ -1118,6 +1118,7 @@ fn apply_setup(store: &Store, team: &mut TeamSnapshot, setup: &profiles::TeamSet
     if let Some(council) = &incoming.council {
         bot_reviewers::validate_roster(store, &team.session_id, council)?;
     }
+    bot_reviewers::recover_roster_change(team, &incoming.council);
     let session = store.session(&team.session_id)?;
     if setup.architect.provider != session.provider {
         crate::context_recovery::queue(store, &team.session_id)?;
@@ -2024,7 +2025,7 @@ fn dispatch_as(
                 } else { None };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
                 let profile = if let Some(bot) = &selected_bot {
-                    bot_reviewers::profile(bot)
+                    bot.profile.clone()
                 } else if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
                     let (profile, note) = routing::staff(&team.config, &parent, &assignment, routes)?;
                     routed.push(format!("{shown}: {note}"));
@@ -2032,7 +2033,7 @@ fn dispatch_as(
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
-                let shown = selected_bot.as_ref().map_or(shown, |bot| bot.name.clone());
+                let shown = selected_bot.as_ref().map_or(shown, |bot| bot.context.name.clone());
                 // ZCode has no worker-management tool bridge. It can return a
                 // Council score, which needs no Architect host callbacks.
                 validate_worker_role(&profile.provider, seat.is_some())?;
@@ -2068,11 +2069,10 @@ fn dispatch_as(
                     );
                     if let Some(bot) = &selected_bot {
                         binding.reviewer_bot_id = Some(bot.id.clone());
-                        binding.roster_bot_ids = team.config.council.as_ref().map_or_else(Vec::new, |c| c.reviewer_bot_ids.clone());
-                        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext::from_bot(bot));
-                        if let Some(permissions) = team.config.council.as_ref().and_then(|c| c.review_permissions.as_ref()) {
-                            binding.snapshot.tool_policy = bot_reviewers::review_policy(bot, permissions)?;
-                        }
+                        binding.roster_bot_ids = bot.roster_bot_ids.clone();
+                        binding.required_reviewers = Some(bot.roster_bot_ids.len());
+                        binding.snapshot.bot_context = Some(bot.context.clone());
+                        binding.snapshot.tool_policy = bot.tool_policy.clone();
                     }
                     Ok(binding)
                 }).transpose()?;

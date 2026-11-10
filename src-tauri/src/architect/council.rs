@@ -91,6 +91,9 @@ pub struct CouncilSeat {
     pub round: usize,
     pub lens: String,
     pub score: Option<f64>,
+    /// The user explicitly closed this incomplete round by changing its reviewer selection.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed_by_selection: bool,
     /// When this seat first ran (`storage::now`); its round is timed from its seats' first runs, so a
     /// reviewer that waits on a dependency or a free slot is not out of date before it reads anything.
     #[serde(skip_serializing_if = "is_zero")]
@@ -157,6 +160,7 @@ pub(super) fn set(state: &AppState, session_id: &str, council: Option<CouncilCon
     // A team resting with nothing for Council to refuse (passed, or at its round limit).
     let resting = matches!(team.status.as_str(), "ready" | "completed") && old.is_none();
     let old_rounds = team.config.council.as_ref().map(|c| c.max_rounds);
+    super::bot_reviewers::recover_roster_change(&mut team, &council);
     team.config.council = council;
     super::refresh_council(&store, &mut team);
     // The team's error shows the refusal as it now stands; a lifted one leaves only the rest (a pause note).
@@ -320,11 +324,8 @@ impl Rounds {
         for round in 1..=latest {
             let seated = in_round(team, round).filter(|(w, seat)| counts(w, seat)).count();
             let count = scored(team, round).count();
-            // Every started round uses its own issued quorum, never the current editable roster.
-            let required = in_round(team, round)
-                .filter_map(|(w, _)| w.reviewer_binding.as_ref()?.required_reviewers)
-                .next().unwrap_or_else(|| config.needed());
-            let complete = count == seated && count >= required && view.missing(team, round).is_empty();
+            let required = required_reviewers(team, config, round);
+            let complete = !reconfigured(team, round) && count == seated && count >= required && view.missing(team, round).is_empty();
             view.done.push(complete);
             view.started += usize::from(in_round(team, round).any(|(_, seat)| seat.started_at > 0));
         }
@@ -344,7 +345,32 @@ impl Rounds {
         self.lenses.iter().filter(|lens| !in_round(team, round).any(|(w, seat)| counts(w, seat) && same_lens(&seat.lens, lens))).cloned().collect()
     }
 }
-/// Disallow roster mutation until each active seat has settled and its original quorum is met.
+/// S2 selected rounds freeze their quorum. Automatic/native rounds retain pre-S2 count edits,
+/// including automatic seats saved by versions that erroneously issued a frozen quorum.
+fn required_reviewers(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> usize {
+    in_round(team, round).filter_map(|(w, _)| w.reviewer_binding.as_ref())
+        .find(|binding| !binding.roster_bot_ids.is_empty())
+        .and_then(|binding| binding.required_reviewers).unwrap_or_else(|| config.needed())
+}
+pub(super) fn fixed_lens_count(team: &TeamSnapshot) -> usize {
+    team.config.council.as_ref().map_or(0, |config| Rounds::of(team, config).lenses.len())
+}
+fn reconfigured(team: &TeamSnapshot, round: usize) -> bool {
+    in_round(team, round).any(|(_, seat)| seat.closed_by_selection)
+}
+/// A validated user selection change closes an incomplete, settled round. Its reports and lenses
+/// remain in history; unscored seats cannot run again, and the next dispatch opens a fresh round.
+pub(super) fn recover_round(team: &mut TeamSnapshot) {
+    let round = latest_round(team);
+    if !current_round_incomplete(team) { return; }
+    let ids: Vec<String> = in_round(team, round).filter(|(_, seat)| seat.score.is_none()).map(|(w, _)| w.id.clone()).collect();
+    stop_seats(team, &ids, "Stopped: the user changed the Council reviewer selection; dispatch a new round.");
+    let since = team.council_since;
+    for seat in team.workers.iter_mut().filter(|w| w.created_at >= since).filter_map(|w| w.council.as_mut()).filter(|s| s.round == round) {
+        seat.closed_by_selection = true;
+    }
+}
+/// Whether the latest round still needs scores or lenses, under its original selected quorum.
 pub(super) fn current_round_incomplete(team: &TeamSnapshot) -> bool {
     let Some(config) = &team.config.council else { return false };
     let round = latest_round(team);
@@ -377,7 +403,7 @@ fn stale(team: &TeamSnapshot, round: usize) -> bool {
 pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: Option<&str>) -> Result<usize> {
     let view = Rounds::of(team, config);
     let latest = view.latest;
-    let current = latest > 0 && !stale(team, latest);
+    let current = latest > 0 && !stale(team, latest) && !reconfigured(team, latest);
     let replaced = replaces.is_some_and(|id| in_round(team, latest).any(|(w, _)| w.id == id));
     let done = view.complete(latest);
     // Abandoned seats take room too, so dropping and re-dispatching cannot go on forever.
@@ -415,15 +441,20 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
             return Err(format!("A replacement keeps the lens of the seat it replaces ({old}): omit councilLens or use that one."));
         }
     }
-    let Some(lens) = lens.or(inherited) else {
+    let Some(lens) = inherited.or(lens) else {
         return Ok(None);
     };
     let round = round_for(team, config, replaces)?;
     let fixed = Rounds::of(team, config).lenses;
+    if round == 1 && !config.reviewer_bot_ids.is_empty() && fixed.len() >= config.reviewer_bot_ids.len()
+        && !fixed.iter().any(|known| same_lens(known, lens))
+    {
+        return Err("The selected reviewer roster cannot cover another fixed Council lens.".into());
+    }
     if round > 1 && !fixed.is_empty() && !fixed.iter().any(|known| same_lens(known, lens)) {
         return Err(format!("Council lenses are fixed by round 1: {}. Use one of them for {lens:?}.", fixed.join(", ")));
     }
-    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0 }))
+    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false }))
 }
 
 /// When a new round opens over an incomplete one (changes overtook it), that round's unscored
@@ -503,13 +534,16 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
         return None;
     }
     let round = view.latest;
-    let needed = config.needed();
+    let needed = required_reviewers(team, config, round);
     if round == 0 {
         return has_writer(team).then(|| (format!("No Council round yet. Once writers settle, dispatch at least {needed} reviewers in one batch with councilLens."), false));
     }
+    if reconfigured(team, round) && !view.at_limit(config) {
+        return Some((format!("Council round {round} was closed by the user's reviewer selection change. Dispatch a new round with councilLens."), false));
+    }
     // The limit is the user's brake: no further round can open. The lead finishes once nothing is live
     // and the last round is complete, out of date, or full; a current round it can still fill comes first.
-    if view.at_limit(config) && !live(team, round) && (view.complete(round) || stale(team, round) || in_round(team, round).count() >= MAX_REVIEWERS) {
+    if view.at_limit(config) && !live(team, round) && (reconfigured(team, round) || view.complete(round) || stale(team, round) || in_round(team, round).count() >= MAX_REVIEWERS) {
         return None;
     }
     if !view.complete(round) {

@@ -409,7 +409,8 @@ impl ReviewerBinding {
             seat_id: worker_id.to_owned(),
             reviewer_bot_id: None,
             roster_bot_ids: Vec::new(),
-            required_reviewers: team.config.council.as_ref().map(|c| c.needed()),
+            // Automatic Council keeps its editable count. Only selected bot rounds pin quorum.
+            required_reviewers: team.config.council.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()).map(|c| c.needed()),
             artifact_revision: format!("{}:{}:{}:{}", team.council_since, team.dispatch_revision, created_at, worker_id),
             snapshot: ReviewerSnapshot {
                 provider: provider.to_owned(),

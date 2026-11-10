@@ -57,9 +57,191 @@ fn selected_bot_quorum_is_frozen_when_later_round_chooses_more_bots() {
     let mut expanded = original.clone();
     expanded.reviewer_bot_ids.push("bot-3".into());
     assert!(council::complete(&team, &expanded, 1));
+    team.workers[1].council.as_mut().unwrap().score = None;
+    team.config.council = Some(expanded);
+    assert!(finish_refusal(&team).unwrap().contains("at least 2 needed"), "the refusal must report the issued quorum too");
     assert!(!bot_reviewers::occupied_bot_ids(&team, 2, None).contains("bot-1"));
     team.council_since += 20;
     assert!(bot_reviewers::occupied_bot_ids(&team, 1, None).is_empty());
+}
+
+#[test]
+fn automatic_quorum_edits_apply_to_issued_and_legacy_s2_seats() {
+    let original = on(9.0, 10, 3);
+    let mut team = team_with(original.clone(), vec![
+        seat("a", 1, Some(9.0), SINCE + 1), seat("b", 1, Some(9.0), SINCE + 2),
+    ]);
+    for index in 0..team.workers.len() {
+        let worker = &team.workers[index];
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider, &worker.model, worker.council.as_ref().unwrap(),
+        );
+        assert_eq!(binding.required_reviewers, None);
+        // Previously issued S2 automatic bindings incorrectly froze this count.
+        binding.required_reviewers = Some(3);
+        team.workers[index].reviewer_binding = Some(binding);
+    }
+    assert!(!council::complete(&team, &original, 1));
+    team.config.council = Some(on(9.0, 10, 2));
+    assert!(finish_refusal(&team).is_none(), "lowering the automatic count completes the round");
+    team.config.council = Some(on(9.0, 10, 4));
+    assert!(finish_refusal(&team).unwrap().contains("at least 4 needed"));
+}
+
+#[test]
+fn selected_roster_change_recovers_a_settled_incomplete_round_without_losing_history() {
+    let mut original = on(9.0, 10, 0);
+    original.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    let mut team = team_with(original.clone(), vec![
+        seat("a", 1, Some(5.0), SINCE + 1), seat("b", 1, None, SINCE + 2),
+    ]);
+    team.workers[1].status = "running".into();
+    let mut next = original.clone();
+    next.reviewer_bot_ids[1] = "bot-c".into();
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(next.clone())).unwrap_err().contains("Finish or stop"));
+    team.workers[1].status = "stopped".into();
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(next.clone())).is_ok());
+    bot_reviewers::recover_roster_change(&mut team, &Some(next.clone()));
+    team.config.council = Some(next.clone());
+    assert!(team.workers[1].abandoned);
+    assert!(!team.workers[0].abandoned);
+    assert_eq!(team.workers[0].council.as_ref().unwrap().score, Some(5.0));
+    assert!(finish_refusal(&team).unwrap().contains("closed by the user's reviewer selection change"));
+    assert_eq!(council::round_for(&team, &next, None).unwrap(), 2, "a user selection change explicitly recovers, even after a low score");
+    assert!(council::seat_for(&team, Some("new lens"), None).unwrap_err().contains("fixed"));
+    let saved = serde_json::to_string(&team).unwrap();
+    let restored: TeamSnapshot = serde_json::from_str(&saved).unwrap();
+    assert_eq!(council::round_for(&restored, &next, None).unwrap(), 2);
+    next.max_rounds = 1;
+    team.config.council = Some(next.clone());
+    assert!(council::round_for(&team, &next, None).unwrap_err().contains("limit"));
+    assert_eq!(finish_refusal(&team), None, "recovery cannot bypass the native round limit");
+}
+
+#[test]
+fn selected_roster_cannot_shrink_below_the_cycles_fixed_lenses() {
+    let mut original = on(9.0, 10, 0);
+    original.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into(), "bot-c".into()];
+    let mut team = team_with(original.clone(), vec![
+        seat("a", 1, Some(9.0), SINCE + 1), seat("b", 1, Some(9.0), SINCE + 2), seat("c", 1, Some(9.0), SINCE + 3),
+    ]);
+    let mut smaller = original;
+    smaller.reviewer_bot_ids.pop();
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(smaller.clone())).unwrap_err().contains("fixed 3 lenses"));
+    team.council_since += 100;
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(smaller.clone())).is_ok(), "previous-cycle lenses do not constrain a new roster");
+    team.council_since = SINCE;
+    team.config.council = Some(smaller);
+    team.workers.pop();
+    team.workers[1].council.as_mut().unwrap().score = None;
+    team.workers[1].abandoned = true;
+    assert!(council::seat_for(&team, Some("third lens"), None).unwrap_err().contains("cannot cover"));
+}
+
+#[test]
+fn recovering_an_automatic_round_with_a_smaller_selected_quorum_needs_fresh_scores() {
+    let mut team = team_with(on(9.0, 10, 3), vec![
+        seat("a", 1, Some(9.0), SINCE + 1), seat("b", 1, Some(9.0), SINCE + 2),
+    ]);
+    let mut selected = on(9.0, 10, 0);
+    selected.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    bot_reviewers::allow_roster_change(&team, &Some(selected.clone())).unwrap();
+    bot_reviewers::recover_roster_change(&mut team, &Some(selected.clone()));
+    team.config.council = Some(selected.clone());
+    assert!(!council::complete(&team, &selected, 1));
+    assert_eq!(council::status(&team).unwrap().state, "dispatch");
+    assert!(finish_refusal(&team).unwrap().contains("closed"));
+    assert_eq!(council::round_for(&team, &selected, None).unwrap(), 2);
+}
+
+#[test]
+fn selected_round_freezes_all_profiles_before_split_dispatch_and_replacement() {
+    let (store, mut team) = fixture();
+    let project = store.session(&team.session_id).unwrap().project_id;
+    for id in ["bot-a", "bot-b"] {
+        store.db.execute("INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'QA','Original instructions','Original goals','Original soul',?2,'codex','frozen-model','full',1,1,'[\"original-skill\"]')", params![id, project]).unwrap();
+    }
+    let mut config = on(9.0, 10, 0);
+    config.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    config.review_permissions = Some(reviewer_security::ReviewerPermissionSelection {
+        authorization_id: "user-task-grant".into(),
+        grants: vec![reviewer_security::ReviewerCapabilityGrant {
+            tool: "pandacode_open_file".into(), action: "call".into(), action_argument: None,
+            resource_argument: "path".into(), resource: "src/main.ts".into(),
+        }],
+    });
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    // Only executable discovery is disabled: this test executes the real DB resolver and policy.
+    let first = bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap().unwrap();
+    let mut worker = seat("first", 1, None, SINCE + 1);
+    worker.status = "failed".into();
+    worker.provider = first.profile.provider.clone();
+    worker.model = first.profile.model.clone();
+    let mut binding = reviewer_security::ReviewerBinding::native(&team, &worker.id, worker.created_at, &worker.provider, &worker.model, worker.council.as_ref().unwrap());
+    binding.reviewer_bot_id = Some(first.id.clone());
+    binding.roster_bot_ids = first.roster_bot_ids.clone();
+    binding.snapshot.bot_context = Some(first.context.clone());
+    binding.snapshot.tool_policy = first.tool_policy.clone();
+    reviewer_security::record_native_authority(&store, &team.session_id, &binding).unwrap();
+    worker.reviewer_binding = Some(binding);
+    team.workers.push(worker);
+    store.db.execute("UPDATE bots SET provider='claude',model='edited-model',name='Edited',instructions='Edited instructions',goals='Edited goals',soul='Edited soul',reasoning_effort='high',skills='[\"edited-skill\"]'", []).unwrap();
+    // Simulate a persisted reload between separate dispatches and an unrelated setting edit.
+    team = serde_json::from_str(&serde_json::to_string(&team).unwrap()).unwrap();
+    team.config.council.as_mut().unwrap().review_permissions = None;
+    let second = bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap().unwrap();
+    assert_eq!(second.id, "bot-b");
+    assert_eq!(second.profile.provider, "codex");
+    assert_eq!(second.profile.model, "frozen-model");
+    assert_eq!(second.profile.reasoning_effort, None);
+    assert_eq!(second.context.instructions, "Original instructions");
+    assert_eq!(second.context.goals, "Original goals");
+    assert_eq!(second.context.soul, "Original soul");
+    assert_eq!(second.context.skill_ids, vec!["original-skill"]);
+    assert_eq!(second.tool_policy, first.tool_policy);
+    let replacement = bot_reviewers::seat_bot_inner(&store, &team, 1, Some("first"), false).unwrap().unwrap();
+    assert_eq!(replacement, first, "replacements retain persona, model, identity and task grants");
+    let ordinary = crate::bots::get(&store, "bot-a").unwrap();
+    assert_eq!(ordinary.model, "edited-model", "resolving frozen seats never rewrites the ordinary bot profile");
+    assert_eq!(ordinary.instructions, "Edited instructions");
+    let fresh = bot_reviewers::seat_bot_inner(&store, &team, 2, None, false).unwrap().unwrap();
+    assert_eq!(fresh.profile.model, "edited-model", "a fresh round may adopt profile edits");
+    assert_eq!(fresh.tool_policy, reviewer_security::ReviewerToolPolicy::NativeReadOnly);
+    store.db.execute("UPDATE bots SET paused=1 WHERE id='bot-b'", []).unwrap();
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap_err().contains("paused"));
+    store.db.execute("DELETE FROM bots WHERE id='bot-b'", []).unwrap();
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap_err().contains("removed"));
+    team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.bot_context.as_mut().unwrap().instructions = "forged".into();
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, Some("first"), false).unwrap_err().contains("native authorization"));
+}
+
+#[test]
+fn both_native_configuration_paths_recover_stopped_selected_rounds() {
+    for use_setup in [false, true] {
+        let (state, sid) = council_state(on(9.0, 10, 0));
+        let mut team = saved(&state, &sid);
+        team.config.council.as_mut().unwrap().reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+        team.workers = vec![seat("stopped", 1, None, storage::now())];
+        team.workers[0].status = "stopped".into();
+        team.status = "paused".into();
+        store_team(&state, &mut team);
+        let recovered = if use_setup {
+            let store = state.store.lock().unwrap();
+            let mut config = team.config.clone();
+            config.council.as_mut().unwrap().reviewer_bot_ids.clear();
+            let setup = profiles::TeamSetup { architect: profiles::ModelSelection::from_session(&store.session(&sid).unwrap()), config };
+            apply_setup(&store, &mut team, &setup).unwrap();
+            save(&store, &mut team).unwrap();
+            team
+        } else {
+            council::set(&state, &sid, Some(on(9.0, 10, 0))).unwrap()
+        };
+        assert_eq!(recovered.status, "paused", "the user still controls Resume");
+        assert!(recovered.workers[0].abandoned);
+        assert!(recovered.workers[0].council.as_ref().unwrap().closed_by_selection);
+        assert_eq!(council::round_for(&recovered, recovered.config.council.as_ref().unwrap(), None).unwrap(), 2);
+    }
 }
 
 #[test]
@@ -93,7 +275,7 @@ fn seat(id: &str, round: usize, score: Option<f64>, created: i64) -> Worker {
     reviewer.read_only = true;
     reviewer.created_at = created;
     reviewer.updated_at = created;
-    reviewer.council = Some(CouncilSeat { round, lens: format!("lens {id}"), score, started_at: created });
+    reviewer.council = Some(CouncilSeat { round, lens: format!("lens {id}"), score, started_at: created, closed_by_selection: false });
     reviewer
 }
 fn writer(id: &str, wrote_at: i64) -> Worker {
@@ -475,7 +657,7 @@ fn a_replacement_joins_the_seat_it_replaces_and_keeps_its_lens() {
     let team = saved(&state, &sid);
     let new = team.workers.last().unwrap();
     assert!(new.read_only);
-    assert_eq!(new.council, Some(CouncilSeat { round: 1, lens: "lens b".into(), score: None, started_at: 0 }));
+    assert_eq!(new.council, Some(CouncilSeat { round: 1, lens: "lens b".into(), score: None, started_at: 0, closed_by_selection: false }));
     assert!(team.workers[2].abandoned);
 }
 

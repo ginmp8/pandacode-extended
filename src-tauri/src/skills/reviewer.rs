@@ -64,6 +64,11 @@ impl ReviewerSkills {
                         return Err(format!("reviewer_skill_drift: staged file changed for {}.", pin.id));
                     }
                 }
+                let observed = super::read_local(root, true)
+                    .map_err(|_| format!("reviewer_skill_drift: staged package unavailable for {}.", pin.id))?;
+                if observed.len() != pin.file_sha256.len() || content_hash(&observed) != pin.content_sha256 {
+                    return Err(format!("reviewer_skill_drift: staged package file set changed for {}.", pin.id));
+                }
             }
         }
         Ok(())
@@ -116,6 +121,9 @@ fn trusted_package(library: &Library, meta: &Meta) -> Result<(super::Files, BTre
     }).collect::<Result<BTreeMap<_, _>, String>>()?;
     if content_hash(&files) != meta.sha256 || (!meta.file_hashes.is_empty() && meta.file_hashes != hashes) {
         return Err(format!("reviewer_skill_drift: library contents changed for {}.", meta.id));
+    }
+    if super::peer_dependencies(&files).map_err(|_| format!("reviewer_skill_drift: invalid dependency manifest for {}.", meta.id))? != meta.required_skills {
+        return Err(format!("reviewer_skill_drift: dependency metadata changed for {}.", meta.id));
     }
     let findings = files.iter().flat_map(|(name, bytes)| {
         super::safety::scan(name, &String::from_utf8_lossy(bytes))
@@ -333,6 +341,11 @@ mod tests {
         let path = Path::new(pinned.staged_path.as_deref().unwrap()).join("SKILL.md");
         assert!(path.starts_with(&library.dir));
         assert!(fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(snapshot.verify().is_ok());
+        let unrelated = Path::new(pinned.staged_path.as_deref().unwrap()).join("unexpected.md");
+        fs::write(&unrelated, "Unpinned instructions").unwrap();
+        assert!(snapshot.verify().unwrap_err().contains("reviewer_skill_drift"));
+        fs::remove_file(unrelated).unwrap();
         assert!(snapshot.verify().is_ok());
         // A different version must never be silently used in a live reviewer.
         #[cfg(unix)]

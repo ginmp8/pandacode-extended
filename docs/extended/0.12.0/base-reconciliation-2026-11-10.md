@@ -1,6 +1,6 @@
 # Upstream-to-Extended reconciliation — 2026-11-10
 
-> **Status:** integrated topic-branch candidate; exact-commit CI and native acceptance must be verified before merging or releasing.
+> **Status:** Upstream tree reconciliation and automated validation passed on `fb67a0eb3af3b6c41a56917dc2aa16ff134afc9c` ([18/18 jobs](https://github.com/ginmp8/pandacode-extended/actions/runs/42910685007)). A follow-up integration hardening commit must pass its own exact-SHA CI; installed-app/manual acceptance remains separate.
 
 ## Frozen refs and constraints
 
@@ -20,9 +20,9 @@
 
 ## Verification gates
 
-- [ ] Confirm source and target ref stability and one-parent ancestry on the published reconciliation commit.
-- [ ] Inspect exact-SHA TypeScript build, Node tests, release tests and Playwright Skills/bot/Council suites.
-- [ ] Inspect exact-SHA Rust tests, Clippy and relevant Windows, macOS, Linux and mobile jobs.
-- [ ] Test native Voice stop/close/crash paths, Settings/Skills/Catalogs persistence, agent activation and bot isolation, Connect/MCP/cloud/VM controls and release-gate failure modes where required.
-- [ ] Recheck upstream path/mode inventory and source-only and Extended-only invariants.
-- [ ] Resolve any actual CI or native regression without removing Extended functionality; only then consider marking PR ready. Do not tag, merge or publish from this reconciliation.
+- [x] Confirm frozen source and target ref stability and single-parent ancestry at `fb67a0e`.
+- [x] Exact-SHA CI on `fb67a0e`: 18/18 jobs passed, including TypeScript, Node/release, browser Skills/bot/Council, Rust, Clippy, Windows, macOS, Linux and mobile checks.
+- [x] Recheck upstream path/mode inventory: no missing upstream tracked files, Extended-only paths retained.
+- [ ] Run exact-SHA CI for subsequent integration fixes before marking them verified.
+- [ ] Separately accept installed-app native Voice stop/close/crash paths, Settings/Skills/Catalogs persistence, real agent activation and bot isolation, Connect/MCP/cloud/VM controls and release failure modes where required.
+- [ ] No merge, tag or release publication was authorized in this reconciliation.

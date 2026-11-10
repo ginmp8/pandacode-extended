@@ -86,3 +86,59 @@ Council's review loop and imported test files establish source coverage, not rel
 - [x] Preserve original [0.3.104 upstream release notes](../../../releases/0.3.104.md), Git file modes, Extended-only files, dependency remediations and existing control paths.
 - [ ] Complete 80 shared customized-file hunk classifications and native app control-state testing; do not use absence of missing paths as proof of functional parity.
 - [ ] Verify final exact-SHA CI jobs and native installed-app/mobile/Connect/MCP/cloud/VM/credential scenarios. The integration-commit [push](https://github.com/ginmp8/pandacode-extended/actions/runs/42503275362) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/42503280072) were in progress on first inspection; local tests did not run.
+
+## PandaCode 0.3.105 source checkpoint — 2026-11-08
+
+- [x] Pin the exact [fork `main` SHA `f28c4df0`](https://github.com/ginmp8/pandacode/commit/f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665), tree `49077426e74a7134da8f3393a6abff32b9cc07c4`, and read native app version **0.3.105** from source manifests.
+- [x] Publish [Extended integration `36228b94`](https://github.com/ginmp8/pandacode-extended/commit/36228b949aaf8648109e2f8f8da441a8735cee41) as a single-parent non-forced commit on `base/development`: 4 added upstream paths, 26 source-exact replacements, 8 adapted paths, original release notes preserved, source provenance updated; 1,565 source/1,622 candidate blobs, zero missing source paths or mode changes.
+- [x] Preserve Extended-only prior customizations, dependency remediations, /btw slash-resolution test and separate 0.12.0 planned release identity while aligning six upstream application-version fields.
+- [x] Recheck the code-commit CI: [push #42554247514](https://github.com/ginmp8/pandacode-extended/actions/runs/42554247514) and [PR #42554252219](https://github.com/ginmp8/pandacode-extended/actions/runs/42554252219) both finished **cancelled**, with mixed successful/cancelled jobs; neither is a green CI receipt.
+- [x] Verify [documentation commit `002e433fb0bf`](https://github.com/ginmp8/pandacode-extended/commit/002e433fb0bfe5d51bdf89ed8cde5cc21ba3a4da) exact-SHA CI: [push #42554384509](https://github.com/ginmp8/pandacode-extended/actions/runs/42554384509) and [PR #42554389369](https://github.com/ginmp8/pandacode-extended/actions/runs/42554389369) each completed **successfully (6/6 jobs)**. The follow-up documentation commit needs its own CI; native functional acceptance remains unchecked.
+- [ ] Independently validate account pool, identity/usage/fallback, real credentials and account-switch message persistence, and existing Extended Settings On/Off, MCP, Connect, cloud/VM, bot/channel and native platform behavior.
+- [ ] Classify each remaining shared-file divergence by hunk and verify final documentation-commit CI separately. Neither source coverage nor CI is release approval; `0.12.0` is still planned.
+
+
+## Upstream 0.3.106 source checkpoint — 2026-11-09
+
+- [x] Freeze [fork main `0bfd5738`](https://github.com/ginmp8/pandacode/commit/0bfd57383621d5aa001d3871018920855cabec39), tree `391951e2d59e81946195ed2d66281991b33294a0`, application version **0.3.106**; compare to the previous fork source pin `f28c4df0` across all ten new commits.
+- [x] Reconcile all 34 upstream-changed paths (26 verbatim source files, eight uniquely applicable three-way patches) and preserve the original `releases/0.3.106.md`, Extended-only files, configurable controls and dependency remediation.
+- [x] Inspect complete nontruncated candidate trees: **1,567 source paths / 1,624 Extended**, **1,487 exact**, **80 divergent shared**, **57 Extended-only**, **zero missing**, **no mode mismatches**.
+- [ ] Complete semantic hunk review and behavioral acceptance of all 80 shared divergences; validate task tools across harnesses/team leads/workers and all Extended control On/Off paths.
+- [ ] Check exact final Extended publication SHA against npm/Node/website, Rust check/test/Clippy, RustSec, mobile/Expo, ONNX and release tests. A staged candidate tree and previous green CI do **not** count as final CI success.
+- [ ] Execute native Windows/macOS/Linux, two-device Connect, authenticated MCP/cloud/VM/credential, RTL/IME and browser scroll/inspector tests. They were **not** run locally due to inaccessible GitHub DNS.
+- [ ] Keep **Extended 0.12.0** a documentation-only planned distribution until separate release authorization, independent of upstream app version **0.3.106**.
+
+## Exact-SHA CI security finding — 2026-11-09
+
+- [x] Inspect exact-SHA [push #42644925066](https://github.com/ginmp8/pandacode-extended/actions/runs/42644925066) and [PR #42644937837](https://github.com/ginmp8/pandacode-extended/actions/runs/42644937837) for [`34d8fb4c`](https://github.com/ginmp8/pandacode-extended/commit/34d8fb4caa985f2ceb4815945dc58ed3042c8353): **five of six jobs passed in each run; RustSec failed in both**. These are **not green** runs.
+- [x] Identify the inherited, **bundled** `libsqlite3-sys 0.36.0` vulnerability [RUSTSEC-2026-0459](https://github.com/RustSec/advisory-db/blob/main/crates/libsqlite3-sys/RUSTSEC-2026-0459.md), exposed through `rusqlite 0.38.0` in the pinned Cargo lockfile. Record the 6.8-severity finding without suppressing audit.
+- [ ] Upgrade the compatible `rusqlite` graph to a release supporting patched `libsqlite3-sys >=0.39.0`, regenerate `Cargo.lock` with Cargo, verify Rust >=1.89/toolchain compatibility, and test SQLite storage/migration behavior; then rerun locked Rust build/tests and RustSec on the **new SHA**.
+- [ ] Verify CI for the documentation-only follow-up SHA separately; exact prior failures do not become passing merely because notes were updated.
+- [ ] Complete 80 shared-path semantic reconciliations and native Settings, Connect, MCP, bots, cloud/VM, credentials, cross-platform installation and release checks. No 0.12.0 publication approval is implied.
+
+## Post-0.3.106 upstream HEAD synchronization — 2026-11-09
+
+- [x] Pin source [`7cadfdbeb7006573897a16e1d9c15ac0a59febad`](https://github.com/ginmp8/pandacode/commit/7cadfdbeb7006573897a16e1d9c15ac0a59febad), app version **0.3.106**, and identify the sole post-release source file modification.
+- [x] Mirror `scripts/release/sbom.test.mjs` exactly (CRLF and workflow section parsing) and preserve the Extended controls and dependency overrides.
+- [x] Compare nontruncated Git trees: 1,567 source / 1,624 Extended, 1,487 exact shared, 80 divergent shared, 57 Extended-only, zero missing or mode mismatches.
+- [ ] Execute the release Node tests including Windows CRLF behavior; no local clone was available to run them here.
+- [ ] Fix the existing RustSec failure with a Cargo-generated lockfile and compatible SQLite/rusqlite graph, then validate Rust build/tests/audit on the newly published SHA.
+- [ ] Verify final SHA CI and independent Settings On/Off, Connect/MCP/cloud/VM, credential and installer workflows; **0.12.0** remains a draft, not a release.
+
+## SQLite dependency remediation candidate — 2026-11-09
+
+- [x] Verify advisory [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html) against the original bundled SQLite graph.
+- [x] Port the existing, CI-checked `rusqlite 0.41.1` / `libsqlite3-sys 0.39.1` graph from the read-only [`extended/development` commit `d0100f72`](https://github.com/ginmp8/pandacode-extended/commit/d0100f72c25e3ccff58c294d624505af8a216b48), retaining app version `0.3.106` and all 686 package records.
+- [ ] Inspect RustSec and `cargo test --locked`/Clippy jobs on the **new exact base/development SHA**, not just the source branch's [CI #42651770546](https://github.com/ginmp8/pandacode-extended/actions/runs/42651770546).
+- [ ] Verify native SQLite storage, upgrades/migrations, rollback and Rust >=1.89 compatibility on the supported platforms; the local environment has no Cargo.
+- [ ] Complete 80 shared source-file hunk reviews and Settings On/Off, Connect/MCP, bots, cloud/VM and credential runtime checks. Extended `0.12.0` remains an unapproved candidate.
+
+## Exact-SHA CI completion evidence — 2026-11-09
+
+- [x] Verify [push #42680289120](https://github.com/ginmp8/pandacode-extended/actions/runs/42680289120) and [PR #42680300162](https://github.com/ginmp8/pandacode-extended/actions/runs/42680300162) for code SHA [`06cb9b0c0141`](https://github.com/ginmp8/pandacode-extended/commit/06cb9b0c0141e964d43d0c462cbd30e9fc44ec1c): all six jobs passed in both runs.
+- [x] Verify RustSec audit against the remediated lockfile, `cargo test --locked --lib`, Clippy with warnings denied, Node/release tests, website build, npm audits, mobile/Expo and macOS ONNX in those exact-SHA jobs.
+- [ ] Independently validate native SQLite storage migrations, upgrade/rollback, installer behavior and supported Rust/platform compatibility.
+- [ ] Classify the remaining 80 divergent shared files hunk by hunk and execute Settings On/Off, Connect/MCP, bots, cloud/VM and credential integrations end to end.
+- [ ] Approve Extended `0.12.0` release separately; passing CI does not authorize tagging or distribution.
+
+The earlier unchecked CI items were authored while the remediation jobs were pending. They are superseded only for the verified code SHA above. Any new documentation commit has its own CI identity.

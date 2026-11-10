@@ -121,7 +121,7 @@ test('selected reviewer skill receipts show native supply and optional failures 
           snapshot: { skills: {
             pins: [{
               id: 'required-scan', contentSha256: 'a'.repeat(64),
-              supplied: true, invoked: false, checkExecuted: false, evidenceVerified: false,
+              supplied: true, invoked: false, checkExecuted: false, evidenceVerified: false, checkRequired: true,
             }],
             skipped: [{ id: 'optional-scan', reason: 'reviewer_skill_unavailable: missing package <untrusted>' }],
           } },
@@ -141,10 +141,45 @@ test('selected reviewer skill receipts show native supply and optional failures 
   expect(status.text).toContain('1 supplied, 1 skipped');
   expect(status.text).toContain('optional-scan');
   expect(status.text).toContain('reviewer_skill_unavailable');
-  expect(status.title).toContain('required-scan: supplied; invocation not verified; check not verified');
+  expect(status.title).toContain('required-scan: supplied; native retrieval not verified; pinned input integrity required; not verified');
   expect(status.title).toContain('optional-scan: skipped');
   expect(status.label).toContain('optional-scan');
   expect(status.injectedElementCount).toBe(0);
+});
+
+test('native reviewer evidence requires matching content and artifact revision', async ({ page }) => {
+  await open(page, '/?council=fixing');
+  const observed = await page.evaluate(async () => {
+    const { councilSummaryHtml } = await import('/src/council-panel.ts');
+    const team: any = {
+      sessionId: 'native-observed', status: 'completed', councilSince: 1,
+      config: { council: { target: 9, maxRounds: 10, reviewers: 2 } },
+      councilStatus: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+      workers: [{
+        id: 'observed', name: 'Reviewer', status: 'completed', createdAt: 2,
+        council: { round: 1, lens: 'Integrity', score: 9.5 },
+        reviewerBinding: {
+          reviewerBotId: 'reviewer-bot', artifactRevision: 'cycle:1:2:observed',
+          skillEvidence: { 'skill-a': {
+            contentSha256: 'c'.repeat(64), artifactRevision: 'cycle:1:2:observed',
+            invoked: true, checkExecuted: true, evidenceVerified: true,
+            checkKind: 'pinned_input_integrity',
+          } },
+          snapshot: { skills: { pins: [{
+            id: 'skill-a', contentSha256: 'c'.repeat(64), supplied: true, checkRequired: true,
+            invoked: false, checkExecuted: false, evidenceVerified: false,
+          }], skipped: [] } },
+        },
+      }],
+    };
+    const receipt = () => new DOMParser().parseFromString(councilSummaryHtml(team), 'text/html')
+      .querySelector('.council-row-skills')?.getAttribute('title') ?? '';
+    const valid = receipt();
+    team.workers[0].reviewerBinding.skillEvidence['skill-a'].artifactRevision = 'unrelated';
+    return { valid, stale: receipt() };
+  });
+  expect(observed.valid).toContain('native retrieval recorded; pinned input integrity verified');
+  expect(observed.stale).toContain('native retrieval not verified; pinned input integrity required; not verified');
 });
 
 test('scoped reviewer action is explicitly granted only to one relative file', async ({ page }) => {

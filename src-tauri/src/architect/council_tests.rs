@@ -75,6 +75,79 @@ fn mandatory_skill_check_without_native_evidence_cannot_pass_on_scores_alone() {
 }
 
 #[test]
+fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports() {
+    let (state, sid) = state_fixture();
+    let mut team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    team.config.council = Some(on(9.0, 10, 2));
+    team.council_since = SINCE;
+    let mut reviewer = seat("native-seat", 1, Some(9.8), SINCE + 1);
+    reviewer.status = "running".into();
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+        pins: vec![crate::skills::reviewer::SkillPin {
+            id: "native-check".into(), source_kind: "folder".into(),
+            source_location: "test".into(), source_ref: None, source_commit: None,
+            content_sha256: "b".repeat(64), file_sha256: Default::default(),
+            dependencies: vec![], required_for_acceptance: true, check_required: true,
+            delivery_mode: "bounded_prompt".into(), staged_path: None,
+            imported: true, bot_assigned: true, eligible: true, supplied: true,
+            invoked: false, check_executed: false, evidence_verified: false,
+        }],
+        prompt: "Frozen reviewer skill methodology.".into(), skipped: vec![],
+    });
+    {
+        let store = state.store.lock().unwrap();
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    }
+    reviewer.reviewer_binding = Some(binding);
+    team.workers.push(reviewer);
+    team.workers.push(seat("peer", 1, Some(9.7), SINCE + 2));
+    {
+        let store = state.store.lock().unwrap();
+        save(&store, &mut team).unwrap();
+    }
+    let generation = team.generation;
+    let actor = coordination::Actor::Worker { id: "native-seat".into(), attempt: 1 };
+    let args = || json!({"skillId": "native-check"});
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_verify", args()).unwrap_err().contains("first open"));
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_open", json!({"skillId": "missing"}))
+        .unwrap_err().contains("not supplied"));
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_open", json!({"skillId": "native-check", "verified": true}))
+        .unwrap_err().contains("invalid arguments"));
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &coordination::Actor::Architect, "pandacode_reviewer_skill_open", args()).is_err());
+    let (opened, _) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_open", args()).unwrap();
+    assert!(opened["lowerTrustInstructions"].as_str().unwrap().contains("Frozen reviewer"));
+    assert_eq!(opened["nativeRetrievalRecorded"], true);
+    let (checked, _) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_verify", args()).unwrap();
+    assert_eq!(checked["pinnedInputIntegrityVerified"], true);
+    let (_, duplicate) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_verify", args()).unwrap();
+    assert!(duplicate.is_none(), "duplicate native calls are idempotent");
+    let mut persisted = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    persisted.workers[0].status = "completed".into();
+    {
+        let store = state.store.lock().unwrap();
+        save(&store, &mut persisted).unwrap();
+    }
+    assert_eq!(council::status(&persisted).unwrap().state, "passed");
+    let evidence = persisted.workers[0].reviewer_binding.as_ref().unwrap()
+        .skill_evidence.get("native-check").unwrap();
+    assert!(evidence.invoked && evidence.check_executed && evidence.evidence_verified);
+    persisted.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
+        .get_mut("native-check").unwrap().content_sha256 = "stale".into();
+    assert_eq!(council::status(&persisted).unwrap().state, "fixing");
+}
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

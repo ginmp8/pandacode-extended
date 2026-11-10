@@ -128,9 +128,15 @@ jobs:
             npx playwright test tests/council.spec.ts --grep 'selected|scoped reviewer|panel places itself|an action that fails|motion: nothing on load' --workers=1
 
   council-bot-reviewers-browser:
-    name: Council selected bot reviewers (Playwright)
+    # Run every Council browser test, partitioned across independent CI runners to
+    # stay within the job timeout without relaxing assertions or test coverage.
+    name: Council selected bot reviewers (Playwright, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -142,7 +148,7 @@ jobs:
       - name: Exercise selected bot reviewer UI and native Council preview regression
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
-            npx playwright test tests/council.spec.ts --workers=1
+            npx playwright test tests/council.spec.ts --workers=1 --shard=${{ matrix.shard }}/3
 
   customize-skills-browser:
     # Run the Skills regressions independently, even when an unrelated Bots test fails.

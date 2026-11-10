@@ -1,7 +1,8 @@
 //! Task-scoped Council reviewer identity and native capability enforcement.
 //! S2/S4 will supply user-authorized grants; S5 owns post-acceptance effects.
 use super::{council::CouncilSeat, TeamSnapshot, Worker};
-use crate::{providers::ToolHost, Result};
+use crate::{providers::ToolHost, storage::Store, Result};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashSet, sync::Arc};
@@ -174,6 +175,91 @@ impl ReviewerCapabilityGrant {
     fn clone_key(&self) -> String {
         format!("{}:{}:{}:{}", self.tool, self.action, self.resource_argument, self.resource)
     }
+}
+
+/// Authenticated native-issued identity, independent of the mutable worker snapshot.
+/// User-scope authorization (S2/S4) must update this via trusted native code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewerAuthority {
+    council_cycle_id: String,
+    seat_id: String,
+    artifact_revision: String,
+    tool_policy: ReviewerToolPolicy,
+}
+fn authority_key(seat: &str) -> String { format!("native-reviewer-authority:{seat}") }
+pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
+    let record = ReviewerAuthority {
+        council_cycle_id: binding.council_cycle_id.clone(),
+        seat_id: binding.seat_id.clone(),
+        artifact_revision: binding.artifact_revision.clone(),
+        tool_policy: ReviewerToolPolicy::NativeReadOnly,
+    };
+    let body = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    store.db.execute(
+        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id) VALUES(?1,?2,'reviewer_authority',?3,?4)",
+        params![parent, authority_key(&binding.seat_id), body, binding.seat_id],
+    ).map_err(|e| format!("Cannot record reviewer authority: {e}"))?;
+    Ok(())
+}
+pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
+    let row: Option<(String, String, String)> = store.db.query_row(
+        "SELECT kind,content,worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        params![parent, authority_key(&binding.seat_id)],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    match row {
+        Some((kind, raw, worker_id)) if kind == "reviewer_authority" && worker_id == binding.seat_id => {
+            let original: ReviewerAuthority = serde_json::from_str(&raw)
+                .map_err(|_| "reviewer_session_mismatch: invalid native authorization record.".to_string())?;
+            if original.council_cycle_id != binding.council_cycle_id
+                || original.seat_id != binding.seat_id
+                || original.artifact_revision != binding.artifact_revision
+                || original.tool_policy != binding.snapshot.tool_policy
+            {
+                return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
+            }
+            Ok(())
+        }
+        // Backward-compatible S1/native seats issued before authority records;
+        // they can never acquire a scoped grant through this fallback.
+        None if binding.snapshot.tool_policy == ReviewerToolPolicy::NativeReadOnly => Ok(()),
+        _ => Err("capability_not_authorized: no matching native reviewer authorization.".into()),
+    }
+}
+
+/// Called by the future S2/S4 trusted user-action adapter; never from a model
+/// prompt. Both the user's requested grants and bot-configured grants must match.
+#[allow(dead_code)]
+pub(crate) fn authorize_user_grants(
+    store: &Store,
+    parent: &str,
+    binding: &ReviewerBinding,
+    phase: ReviewerPhase,
+    authorization_id: &str,
+    configured: &[ReviewerCapabilityGrant],
+    requested: &[ReviewerCapabilityGrant],
+) -> Result<ReviewerToolPolicy> {
+    validate_issued_authority(store, parent, binding)?;
+    let policy = ReviewerToolPolicy::from_user_grants(phase, authorization_id, configured, requested)?;
+    let old = ReviewerAuthority {
+        council_cycle_id: binding.council_cycle_id.clone(),
+        seat_id: binding.seat_id.clone(),
+        artifact_revision: binding.artifact_revision.clone(),
+        tool_policy: binding.snapshot.tool_policy.clone(),
+    };
+    let mut new = old.clone();
+    new.tool_policy = policy.clone();
+    let old = serde_json::to_string(&old).map_err(|e| e.to_string())?;
+    let next = serde_json::to_string(&new).map_err(|e| e.to_string())?;
+    let count = store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2 AND key=?3 AND kind='reviewer_authority' AND content=?4",
+        params![next, parent, authority_key(&binding.seat_id), old],
+    ).map_err(|e| e.to_string())?;
+    if count != 1 {
+        return Err("capability_not_authorized: reviewer authority was changed or is absent.".into());
+    }
+    Ok(policy)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

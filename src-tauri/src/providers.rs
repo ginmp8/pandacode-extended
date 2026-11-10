@@ -174,9 +174,18 @@ fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), Str
     let policy = config.reviewer_policy.as_ref()
         .ok_or("read_only_policy_violation: reviewer authority was not validated.")?;
     policy.validate()?;
-    // A tool allowlist alone cannot sandbox shell/hooks on other CLI adapters.
-    if config.provider != "codex" {
-        return Err(format!("read_only_unsupported: {} has no verified native reviewer boundary.", config.provider));
+    // Reviewers use each local harness's native Plan/read-only adapter plus
+    // protocol-level denial of write/escalation requests. A generic prompt-only
+    // fallback is never sufficient for a new provider.
+    if !PROVIDERS.iter().any(|(name, _)| *name == config.provider.as_str()) {
+        return Err("read_only_unsupported: unknown reviewer harness.".into());
+    }
+    // ZCode cannot receive scoped native host tools yet (no MCP bridge).
+    if config.provider == "zcode" && matches!(
+        config.reviewer_policy.as_ref(),
+        Some(ReviewerToolPolicy::Scoped(_))
+    ) {
+        return Err("policy_unsupported: ZCode does not expose scoped native host tools.".into());
     }
     if config.mode != "plan" || config.skill.is_some()
         || config.goal.is_some() || config.codex_settings.is_some()
@@ -2097,12 +2106,28 @@ impl Protocol {
             );
             let claude_permission = value["type"] == "control_request"
                 && value["request"]["subtype"] == "can_use_tool";
-            if codex_permission || claude_permission {
+            // Provider-independent reviewer approval gate: the native Plan
+            // posture is not equivalent across ACP, Pi, ZCode, Muse and Claude.
+            // Do not turn a reviewer escalation into a user-overridable approval.
+            let acp_permission = method == "session/request_permission";
+            let zcode_permission = method == "interaction/requestPermission";
+            let muse_permission = method == "approval/request";
+            let pi_permission = value["type"] == "extension_ui_request"
+                && value["method"] == "confirm";
+            if codex_permission || claude_permission || acp_permission
+                || zcode_permission || muse_permission || pi_permission
+            {
+                let original_rpc_id = value["id"].clone();
                 let request_id = uuid::Uuid::new_v4().to_string();
                 self.pending.insert(request_id.clone(), value);
                 let denial = self.approve(&request_id, false)
                     .ok_or("read_only_policy_violation: could not deny reviewer permission request.")?;
                 let mut step = Step::default();
+                if muse_permission {
+                    // Muse requires acknowledgment of the approval request and
+                    // then a separate denial through approval/decide.
+                    step.write.push(json!({"jsonrpc":"2.0","id":original_rpc_id,"result":{}}));
+                }
                 step.write.push(denial);
                 step.events.push(self.event("status", "Reviewer tool authorization denied", None));
                 return Ok(step);
@@ -3319,7 +3344,7 @@ fn reviewer_codex_project_tools_absent(cwd: &Path) -> Result<(), String> {
 
 /// Launch a Council harness with only runtime essentials and Codex authentication.
 /// Ordinary bot launches retain their existing user-configured environment.
-fn sanitize_reviewer_environment(command: &mut Command) {
+fn sanitize_reviewer_environment(command: &mut Command, provider: &str) {
     const ALLOWED: &[&str] = &[
         "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
         "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "SYSTEMDRIVE",
@@ -3328,14 +3353,35 @@ fn sanitize_reviewer_environment(command: &mut Command) {
         "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-        "CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-        "OPENAI_ORGANIZATION", "OPENAI_PROJECT",
         "DO_NOT_TRACK", "OTEL_SDK_DISABLED",
     ];
     let overrides: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = command
         .as_std().get_envs().map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned))).collect();
     command.env_clear();
-    for key in ALLOWED {
+    // Read-only reviewers still need their selected model's authentication.
+    // The list is provider-specific, never a wildcard like *_TOKEN or *_KEY.
+    let model_auth: &[&str] = match provider {
+        "codex" => &["CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT"],
+        "claude" | "glm" | "mimo" => &[
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+            "ANTHROPIC_PROFILE", "ANTHROPIC_IDENTITY_TOKEN_FILE",
+            "ZAI_API_KEY", "MIMO_API_KEY",
+        ],
+        "github-copilot" => &["GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN"],
+        "kimi" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "grok" => &["XAI_API_KEY", "GROK_API_KEY"],
+        "commandcode" => &["COMMANDCODE_API_KEY"],
+        "opencode" | "pi" | "omp" | "cline" | "kilo" | "antigravity" | "zcode" | "hermes" | "devin" => &[
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVE_AI_API_KEY", "OPENROUTER_API_KEY",
+            "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY",
+        ],
+        _ => &[],
+    };
+    for key in ALLOWED.iter().chain(model_auth.iter()) {
         let override_value = overrides.iter().find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case(key));
         let value = match override_value {
             Some((_, value)) => value.clone(),
@@ -3343,13 +3389,18 @@ fn sanitize_reviewer_environment(command: &mut Command) {
         };
         if let Some(value) = value { command.env(key, value); }
     }
+    // Only provider-specific variables the user intentionally configured for
+    // this harness. Do not inherit global environment or unrelated Connections.
+    for (key, value) in crate::provider_settings::reviewer_environment(provider) {
+        command.env(key, value);
+    }
 }
 
 /// No runnable reviewer until the native executable confirms no MCP servers.
 async fn verify_reviewer_codex_external_tools(path: &Path, cwd: &Path) -> Result<(), String> {
     reviewer_codex_project_tools_absent(cwd)?;
     let mut command = provider_command("codex", path)?;
-    sanitize_reviewer_environment(&mut command);
+    sanitize_reviewer_environment(&mut command, "codex");
     command
         .args(["mcp", "list", "--json", "-c", "mcp_servers={}"])
         .current_dir(cwd)
@@ -3397,7 +3448,23 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
                 command.args(["-c", "mcp_servers={}"]);
             }
         }
-        "pi" | "omp" => pi::configure(command, config),
+        "pi" | "omp" => {
+            pi::configure(command, config);
+            if config.reviewer_boundary {
+                // Explicit PandaCode's bridge still loads with --no-extensions,
+                // while ambient extensions and prompt/resource discovery do not.
+                // OMP does not reliably support Pi's --no-mcp flag; its native
+                // bridge enforces Plan and external MCPs require runtime checks.
+                if config.provider == "pi" {
+                    command.args([
+                        "--no-extensions", "--no-skills", "--no-prompt-templates",
+                        "--no-mcp", "--tools", "read,grep,find,ls",
+                    ]);
+                } else {
+                    command.args(["--no-extensions", "--no-skills", "--no-rules", "--no-context-files"]);
+                }
+            }
+        },
         "zcode" => zcode::configure(command),
         "muse" => muse::configure(command, config),
         "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" => acp::configure(command, config),
@@ -3438,7 +3505,9 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             // user has moved from full access back to standard approvals.
             command.args(["--permission-mode", permission_mode]);
             if config.reviewer_boundary {
-                // Native CLI tool catalog (not prompt): no shell, edits, scripts or subagents.
+                // Restrict user/project/local settings and hooks; preserve
+                // credentials and managed organization rules.
+                command.args(["--setting-sources", ""]);
                 command.args(["--tools", "Read,Glob,Grep"]);
                 command.args(["--settings", r#"{"disableAllHooks":true}"#]);
             }
@@ -3535,7 +3604,7 @@ async fn run_inner(
     let image_blocks = attachments::load(&config.provider, &config.images).await?;
     let mut command = provider_command(&config.provider, &path)?;
     if config.reviewer_boundary {
-        sanitize_reviewer_environment(&mut command);
+        sanitize_reviewer_environment(&mut command, &config.provider);
     }
     configure_command(&mut command, &config);
     // A named connection's arguments and environment win over the global setup.
@@ -4148,7 +4217,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_policy_blocks_unsupported_harnesses_and_privilege_inheritance() {
+    fn reviewer_policy_supports_every_registered_harness_without_permanent_bot_changes() {
         use crate::architect::reviewer_security::{
             ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy,
         };
@@ -4156,16 +4225,15 @@ mod tests {
         cfg.mode = "plan".into();
         cfg.reviewer_boundary = true;
         cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
-        assert!(enforce_reviewer_policy(&cfg, false).is_ok());
-        assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("read_only_policy_violation"));
+        for (provider, _) in PROVIDERS {
+            cfg.provider = provider.into();
+            assert!(enforce_reviewer_policy(&cfg, false).is_ok(), "{provider}");
+            assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("read_only_policy_violation"), "{provider}");
+        }
+        cfg.provider = "codex".into();
         cfg.mode = "full".into();
         assert!(enforce_reviewer_policy(&cfg, false).is_err());
         cfg.mode = "plan".into();
-        for provider in ["claude", "glm", "mimo", "opencode", "kimi", "pi", "github-copilot", "zcode", "hermes"] {
-            cfg.provider = provider.into();
-            assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
-        }
-        cfg.provider = "codex".into();
         let grant = ReviewerCapabilityGrant {
             tool: "pandacode_github_issue".into(), action: "create".into(),
             action_argument: Some("action".into()), resource_argument: "repository".into(),
@@ -4176,6 +4244,10 @@ mod tests {
         ).unwrap());
         assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("policy_unsupported"));
         assert!(enforce_reviewer_policy(&cfg, true).is_ok());
+        cfg.provider = "claude".into();
+        assert!(enforce_reviewer_policy(&cfg, true).is_ok());
+        cfg.provider = "zcode".into();
+        assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("policy_unsupported"));
         cfg.reviewer_boundary = false;
         assert!(enforce_reviewer_policy(&cfg, false).is_err());
     }
@@ -4187,7 +4259,7 @@ mod tests {
         command.env("GITHUB_TOKEN", "private-github");
         command.env("AWS_SECRET_ACCESS_KEY", "private-aws");
         command.env("PATH", "/usr/bin");
-        sanitize_reviewer_environment(&mut command);
+        sanitize_reviewer_environment(&mut command, "codex");
         let set: std::collections::HashMap<_, _> = command.as_std().get_envs()
             .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
             .collect();
@@ -4251,19 +4323,20 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_claude_family_still_fails_closed_despite_defensive_read_flags() {
+    fn reviewer_claude_family_uses_native_plan_and_restricted_settings_without_user_write() {
         for provider in ["claude", "glm", "mimo"] {
             let mut cfg = config(provider);
             cfg.reviewer_boundary = true;
             cfg.reviewer_policy = Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
             cfg.mode = "plan".into();
-            assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
+            assert!(enforce_reviewer_policy(&cfg, false).is_ok());
             let mut command = Command::new(provider);
             configure_command(&mut command, &cfg);
             let args: Vec<_> = command.as_std().get_args()
                 .map(|arg| arg.to_string_lossy().into_owned()).collect();
-            assert!(args.windows(2).any(|a| a[0] == "--permission-mode" && a[1] == "plan"));
-            assert!(args.windows(2).any(|a| a[0] == "--tools" && a[1] == "Read,Glob,Grep"));
+            assert!(args.windows(2).any(|a| a == ["--permission-mode", "plan"]));
+            assert!(args.windows(2).any(|a| a == ["--tools", "Read,Glob,Grep"]));
+            assert!(args.windows(2).any(|a| a == ["--setting-sources", ""]));
             assert!(args.windows(2).any(|a| a[0] == "--settings" && a[1].contains("disableAllHooks")));
             assert!(!args.iter().any(|arg| arg == "--allow-dangerously-skip-permissions"));
         }
@@ -4298,6 +4371,90 @@ mod tests {
         })).unwrap();
         assert_eq!(shell.write[0]["response"]["response"]["behavior"], "deny");
         assert!(shell.events.iter().all(|e| e.kind != "approval"));
+    }
+
+    #[test]
+    fn reviewer_denies_escalation_across_acp_zcode_pi_and_muse_protocols() {
+        use crate::architect::reviewer_security::ReviewerToolPolicy;
+        for provider in ["kimi", "opencode", "grok", "deepseek", "commandcode", "cline", "kilo",
+            "github-copilot", "devin", "hermes", "antigravity"]
+        {
+            let mut cfg = config(provider);
+            cfg.mode = "plan".into();
+            cfg.reviewer_boundary = true;
+            cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+            let mut protocol = Protocol::new(cfg);
+            let attempt = json!({
+                "jsonrpc":"2.0","id":"blocked","method":"session/request_permission",
+                "params":{"toolCall":{"title":"Modify files","kind":"edit"},
+                    "options":[{"optionId":"allow","kind":"allow_once"},
+                               {"optionId":"deny","kind":"reject_once"}]}
+            });
+            let denied = protocol.receive(attempt).unwrap();
+            assert_eq!(denied.write.len(), 1, "{provider}");
+            assert_eq!(denied.write[0]["result"]["outcome"]["optionId"], "deny", "{provider}");
+            assert!(denied.events.iter().all(|event| event.kind != "approval"), "{provider}");
+        }
+        let mut cfg = config("zcode");
+        cfg.mode = "plan".into();
+        cfg.reviewer_boundary = true;
+        cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        let mut zcode = Protocol::new(cfg);
+        let denied = zcode.receive(json!({
+            "id":"request","method":"interaction/requestPermission",
+            "params":{"options":[{"kind":"deny_once","response":{"decision":"deny"}}]}
+        })).unwrap();
+        assert_eq!(denied.write[0]["result"]["decision"], "deny");
+
+        let mut cfg = config("pi");
+        cfg.mode = "plan".into();
+        cfg.reviewer_boundary = true;
+        cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        let mut pi = Protocol::new(cfg);
+        let denied = pi.receive(json!({
+            "type":"extension_ui_request","id":"ui","method":"confirm","title":"Write files"
+        })).unwrap();
+        assert_eq!(denied.write[0]["confirmed"], false);
+
+        let mut cfg = config("muse");
+        cfg.mode = "plan".into();
+        cfg.reviewer_boundary = true;
+        cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        let mut muse = Protocol::new(cfg);
+        let denied = muse.receive(json!({
+            "jsonrpc":"2.0","id":9,"method":"approval/request",
+            "params":{"sessionId":"s","approvalId":"a",
+                "currentRequirementId":{"approvalId":"a","sourceIndex":0},
+                "availableChoices":[{"choiceId":"abort","decision":"abort","scope":"once"}]}
+        })).unwrap();
+        assert_eq!(denied.write.len(), 2);
+        assert_eq!(denied.write[0]["id"], 9);
+        assert_eq!(denied.write[0]["result"], json!({}));
+        assert_eq!(denied.write[1]["method"], "approval/decide");
+        assert_eq!(denied.write[1]["params"]["choiceId"], "abort");
+        assert!(denied.events.iter().all(|event| event.kind != "approval"));
+    }
+
+    #[test]
+    fn reviewer_uses_only_discovered_pi_bridge_and_no_ambient_extensions() {
+        use crate::architect::reviewer_security::ReviewerToolPolicy;
+        for provider in ["pi", "omp"] {
+            let mut cfg = config(provider);
+            cfg.mode = "plan".into();
+            cfg.reviewer_boundary = true;
+            cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+            let mut cmd = Command::new(provider);
+            configure_command(&mut cmd, &cfg);
+            let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert!(args.contains(&"--no-extensions".to_string()), "{provider}");
+            assert!(args.contains(&"--no-skills".to_string()), "{provider}");
+            if provider == "pi" {
+                assert!(args.contains(&"--no-mcp".to_string()));
+                assert!(args.windows(2).any(|x| x == ["--tools", "read,grep,find,ls"]));
+            } else {
+                assert!(args.contains(&"--no-rules".to_string()));
+            }
+        }
     }
 
     pub(super) fn config(provider: &str) -> RunConfig {

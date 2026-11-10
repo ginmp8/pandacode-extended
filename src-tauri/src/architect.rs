@@ -632,6 +632,7 @@ pub(crate) fn reviewer_policy(
     }
     let policy = if let Some(binding) = &worker.reviewer_binding {
         binding.validate(&team, worker)?;
+        reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
         binding.snapshot.tool_policy.clone()
     } else {
         reviewer_security::ReviewerToolPolicy::NativeReadOnly
@@ -2023,6 +2024,9 @@ fn dispatch_as(
                         &team, &id, now, &profile.provider, &profile.model, seat,
                     )
                 });
+                if let Some(binding) = &reviewer_binding {
+                    reviewer_security::record_native_authority(&store, sid, binding)?;
+                }
                 ids.push(id.clone());
                 team.workers.push(Worker {
                     id,

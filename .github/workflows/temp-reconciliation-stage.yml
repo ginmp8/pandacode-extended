@@ -90,7 +90,8 @@ jobs:
           stage_tree="$(git write-tree)"
           test -z "$(git diff --name-only "$GITHUB_SHA" "$stage_tree" -- .github/workflows)"
           test "$(git rev-parse "$stage_tree")" != "$CANDIDATE_TREE"
-          git diff --check "$GITHUB_SHA" "$stage_tree"
+          # Exported workflow blobs are verbatim transport objects, not new source diffs.
+          git diff --check "$GITHUB_SHA" "$stage_tree" -- . ':!.reconciliation-staging/'
           staged_commit="$(git -c user.name='PandaCode Object Staging' -c user.email='146494242+ginmp8@users.noreply.github.com' commit-tree "$stage_tree" -p "$GITHUB_SHA" -m 'chore: transport verified integration objects [skip ci]')"
           test "$(git cat-file -p "$staged_commit" | grep -c '^parent ')" -eq 1
           git push origin "$staged_commit:refs/heads/chore/pr138-object-stage-20261110"

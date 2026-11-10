@@ -540,7 +540,7 @@ mod tests {
         add(&library, "stable", "Review the pinned source.", &[]);
         let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
         let project = store.add_project(&std::env::temp_dir()).unwrap();
-        let session = store.create_session(&project, "codex", "default", "full").unwrap();
+        let session = store.create_session(&project.id, "codex", "default", "full").unwrap();
         let pinned = freeze(&library, &["stable".into()], "codex").unwrap();
         let dir = PathBuf::from(pinned.pins[0].staged_path.as_ref().unwrap());
         assert!(dir.exists());

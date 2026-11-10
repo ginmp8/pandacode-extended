@@ -19,6 +19,16 @@ export interface SharedChannelMessage {
   text: string;
   status: 'Queued' | 'In progress' | 'Completed' | 'Failed' | 'Stopped' | null;
   createdAt: number;
+  council?: ChannelCouncilView;
+}
+export interface ChannelCouncilView {
+  cycleId: string;
+  state: string;
+  round: number;
+  target: number;
+  lowest: number | null;
+  artifactRevision: string;
+  reviewers: { botId: string | null; name: string; score: number | null }[];
 }
 export interface SharedChannelDetail extends SharedChannelSummary {
   messages: SharedChannelMessage[];
@@ -76,7 +86,9 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     const bot = bots.find(item => item.id === message.authorBotId);
     const description = message.kind === "direct_delegation"
       ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
-    return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}</div>`;
+    const council = message.council;
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)}${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span></span>` : '';
+    return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
   const name = bot?.name ?? (message.kind === 'user' ? 'You' : 'Bot');
@@ -121,9 +133,21 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
   return stop || stoppedRow ? `<div class="bc-channel-actions" role="group" aria-label="Channel activity">${stop}${stoppedRow}</div>` : '';
 }
 
-export function sharedChannelComposerHtml(channel: SharedChannelDetail): string {
+export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bot[] = []): string {
   if (channel.archived || !channel.memberIds.length) return '';
-  return `<form id="shared-channel-composer" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea><div class="composer-toolbar"><span></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div></form>`;
+  const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
+  const options = members.map(bot => `<label><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}"><span>${escape(bot.name)}</span></label>`).join('');
+  return `<form id="shared-channel-composer" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
+    <div class="bc-council-controls"><label class="bc-council-toggle"><input type="checkbox" name="councilEnabled">Council review this message</label>
+      <fieldset class="bc-council-options"><legend>Council settings (this message only)</legend>
+        <div class="bc-council-numbers"><label>Target score <input type="number" name="councilTarget" min="1" max="10" step="0.5" value="9"></label>
+        <label>Max rounds <input type="number" name="councilMaxRounds" min="1" max="100" step="1" value="10"></label></div>
+        <label><input type="radio" name="councilMode" value="auto" checked> Automatic native reviewers</label>
+        <label><input type="radio" name="councilMode" value="selected"> Selected channel bots</label>
+        <div class="bc-council-reviewer-options"><p>Choose 2–8 members other than any bot assigned this message.</p>${options}</div>
+      </fieldset>
+    </div>
+    <div class="composer-toolbar"><span></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div></form>`;
 }
 
 async function editChannel(options: SharedChannelUiOptions, channel: SharedChannelDetail): Promise<void> {

@@ -1,6 +1,41 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('bot collaboration', () => {
+  test('Council opt-in is isolated to one message and statuses are per-delivery', async ({ page }) => {
+    await page.goto('/tests/fixtures/bot-manifests.html');
+    await page.evaluate(async () => {
+      const { sharedChannelThreadHtml, sharedChannelComposerHtml } = await import('/src/bot-shared-channels.ts');
+      const bots = [
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
+      ] as any;
+      const channel = {
+        id: 'quality', name: 'quality', memberIds: ['executor', 'reviewer'],
+        leadBotId: 'executor', archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [
+          { id: 'one', kind: 'assigned', authorBotId: 'executor', text: 'Assigned', status: 'In progress', createdAt: 1,
+            council: { cycleId: 'isolated-one', state: 'Reviewing', round: 1, target: 9, lowest: null,
+              artifactRevision: '1:2', reviewers: [{ botId: 'reviewer', name: 'Reviewer', score: null }] } },
+          { id: 'two', kind: 'assigned', authorBotId: 'reviewer', text: 'Assigned', status: 'Completed', createdAt: 2 },
+        ],
+      } as any;
+      const root = document.createElement('div');
+      root.id = 'channel-council-fixture';
+      root.innerHTML = sharedChannelThreadHtml(channel, bots) + sharedChannelComposerHtml(channel, bots);
+      document.body.append(root);
+    });
+    const fixture = page.locator('#channel-council-fixture');
+    await expect(fixture.locator('input[name="councilEnabled"]')).not.toBeChecked();
+    await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Council: Reviewing');
+    await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Reviewer');
+    await expect(fixture.locator('.bc-assigned[data-message-id="two"]')).not.toContainText('Council:');
+    await fixture.locator('input[name="councilEnabled"]').check();
+    await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
+    await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('9');
+    await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('10');
+    await expect(fixture.locator('input[name="councilReviewer"]')).toHaveCount(2);
+  });
+
   test('renders attributed bot posts, explicit recipients, and direct delegation status in one channel', async ({ page }) => {
     await page.goto('/tests/fixtures/bot-manifests.html');
     await page.evaluate(async () => {

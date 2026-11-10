@@ -3,6 +3,8 @@ import { expect, test, type Page } from '@playwright/test';
 const button = (page: Page) => page.locator('.composer-council-button');
 const panel = (page: Page) => page.locator('.council-panel');
 const toggle = (page: Page) => panel(page).getByRole('switch', { name: 'Council' });
+/** Eligible reviewer identities, excluding the current task executor and unavailable bots. */
+const eligibleReviewers = (page: Page) => panel(page).locator('.council-bots input[data-reviewer-bot]:not(:disabled)');
 const option = (page: Page, field: string, name: string) => panel(page).locator(`[data-field="${field}"]`).getByRole('button', { name, exact: true });
 
 // The first paint can be slow on a busy machine; what is under test is what happens after it.
@@ -41,34 +43,24 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   await button(page).click();
   await expect(option(page, 'reviewers', 'Auto: the lead picks reviewers for the work')).toHaveAttribute('aria-pressed', 'true');
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
-  await expect(panel(page).getByText('Dozy')).toBeVisible().catch(async cause => {
-    const diagnostic = await page.evaluate(() => {
-      const panel = document.querySelector('.council-panel') as HTMLElement | null;
-      const list = panel?.querySelector('.council-bots') as HTMLElement | null;
-      const dozy = [...(panel?.querySelectorAll('strong') ?? [])].find(node => node.textContent === 'Dozy') as HTMLElement | undefined;
-      const selected = panel?.querySelector('[data-reviewers-source="selected"]');
-      return {
-        panelCompact: panel?.dataset.compact, panelVisible: panel && getComputedStyle(panel).display,
-        listHidden: list?.hidden, listDisplay: list && getComputedStyle(list).display, listMarkup: list?.outerHTML.slice(0, 1500),
-        sourcePressed: selected?.getAttribute('aria-pressed'), textDisplay: dozy && getComputedStyle(dozy).display,
-        labelDisplay: dozy && getComputedStyle(dozy.parentElement!).display,
-        error: panel?.querySelector('.council-error')?.textContent,
-      };
-    });
-    console.log('Council selected reviewer visibility diagnostic:', JSON.stringify(diagnostic));
-    throw cause;
-  });
+  // An unavailable bot may be below the scrollable panel's fold; scrolling must expose it.
+  const pausedBot = panel(page).getByRole('checkbox', { name: /Dozy/ });
+  await expect(pausedBot).toBeDisabled();
+  const pausedName = panel(page).getByText('Dozy');
+  await pausedName.scrollIntoViewIfNeeded();
+  await expect(pausedName).toBeVisible();
   await expect(panel(page).getByText('Paused')).toBeVisible();
-  await expect(panel(page).getByRole('checkbox', { name: /Dozy/ })).toBeDisabled();
-  await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
-  await panel(page).getByRole('checkbox', { name: /Writer/ }).check();
+  // The sample's current executor is timing-dependent; never select a forbidden reviewer.
+  await expect.poll(async () => eligibleReviewers(page).count()).toBeGreaterThanOrEqual(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
   expect(await calls(page)).toEqual([]);
   await toggle(page).click();
   await expect.poll(async () => (await calls(page)).length).toBe(1);
   const [selected] = await calls(page);
   expect(selected.reviewerBotIds).toHaveLength(2);
   expect(new Set(selected.reviewerBotIds).size).toBe(2);
-  await expect(panel(page).getByRole('checkbox', { name: /Scout/ })).toBeChecked();
+  await expect(eligibleReviewers(page).nth(0)).toBeChecked();
   await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
@@ -78,8 +70,9 @@ test('scoped reviewer action is explicitly granted only to one relative file', a
   await open(page, '/?bots=sample');
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
-  await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
-  await panel(page).getByRole('checkbox', { name: /Writer/ }).check();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBeGreaterThanOrEqual(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
   await panel(page).getByRole('checkbox', { name: /Allow one exact native host action/ }).check();
   await expect(panel(page).getByRole('textbox', { name: 'Allowed reviewer file path' })).toBeVisible();
   await panel(page).getByRole('textbox', { name: 'Allowed reviewer file path' }).fill('src/example.ts');
@@ -101,14 +94,15 @@ test('selected reviewers can be chosen using keyboard controls', async ({ page }
   await expect(panel(page).getByRole('button', { name: 'Selected bots' })).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(panel(page).getByRole('button', { name: 'Selected bots' })).toHaveAttribute('aria-pressed', 'true');
-  const scout = panel(page).getByRole('checkbox', { name: /Scout/ });
-  await scout.focus();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBeGreaterThanOrEqual(2);
+  const first = eligibleReviewers(page).nth(0);
+  await first.focus();
   await page.keyboard.press('Space');
-  await expect(scout).toBeChecked();
-  const writer = panel(page).getByRole('checkbox', { name: /Writer/ });
-  await writer.focus();
+  await expect(first).toBeChecked();
+  const second = eligibleReviewers(page).nth(1);
+  await second.focus();
   await page.keyboard.press('Space');
-  await expect(writer).toBeChecked();
+  await expect(second).toBeChecked();
   await expect(panel(page).getByText('2 of 2–8 reviewers selected')).toBeVisible();
 });
 
@@ -116,7 +110,8 @@ test('selected reviewer mode refuses to launch with fewer than two bots', async 
   await open(page, '/?bots=sample');
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
-  await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBeGreaterThanOrEqual(2);
+  await eligibleReviewers(page).first().check();
   await toggle(page).click();
   await expect(panel(page).getByRole('alert')).toContainText('Select 2 to 8 distinct reviewer bots');
   await expect(toggle(page)).not.toBeChecked();

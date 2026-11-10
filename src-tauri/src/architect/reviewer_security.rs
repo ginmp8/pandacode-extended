@@ -231,7 +231,8 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
         }
         // Backward-compatible S1/native seats issued before authority records;
         // they can never acquire a scoped grant through this fallback.
-        None if binding.snapshot.tool_policy == ReviewerToolPolicy::NativeReadOnly => Ok(()),
+        None if binding.snapshot.tool_policy == ReviewerToolPolicy::NativeReadOnly
+            && binding.reviewer_bot_id.is_none() && binding.snapshot.bot_context.is_none() => Ok(()),
         _ => Err("capability_not_authorized: no matching native reviewer authorization.".into()),
     }
 }

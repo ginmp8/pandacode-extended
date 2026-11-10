@@ -632,7 +632,7 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         }
     };
     let models: std::collections::HashSet<_> = team.config.workers.iter().map(|p| (&p.provider, &p.model)).collect();
-    let models = if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
+    let models = if selected { "native selected-bot seats" } else if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
     let limit = format!("Never finish below the target unless the limit of {} rounds is reached; after the last round make no more changes, and say so plainly.", config.max_rounds);
     let selected_note = if selected {
         format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each fresh reviewer seat to one of those bots, using that bot's frozen model and review persona. Dispatch one unique Council lens per bot; never substitute a worker or claim unavailable bots reviewed. Provider/model/profileId fields in reviewer assignments cannot override the selected bot.", config.reviewer_bot_ids.join(", "))

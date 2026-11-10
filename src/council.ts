@@ -143,7 +143,7 @@ function savedDefaults(): Record<string, unknown> {
 }
 export function saveCouncilDefaults(council: CouncilConfig): void {
   // Reviewer bot identities belong to one task, never global defaults for new threads.
-  const { reviewerBotIds: _taskReviewers, ...safeDefaults } = council;
+  const safeDefaults = { target: council.target, maxRounds: council.maxRounds, reviewers: council.reviewers };
   try { localStorage.setItem(COUNCIL_KEY, JSON.stringify({ ...savedDefaults(), ...safeDefaults, reviewerBotIds: undefined })); } catch { /* Kept for this window only. */ }
 }
 /** Whether a new thread starts with Council on (when its team starts, or on its first send). Stored with the defaults. */

@@ -6,6 +6,44 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 
 const SINCE: i64 = 1000;
 
+#[test]
+fn selected_bot_config_requires_distinct_bounded_identity_roster() {
+    let mut c = on(9.0, 10, 0);
+    c.reviewer_bot_ids = vec!["bot-1".into()];
+    assert!(c.validate().unwrap_err().contains("2 to 8"));
+    c.reviewer_bot_ids.push("bot-1".into());
+    assert!(c.validate().unwrap_err().contains("unique"));
+    c.reviewer_bot_ids[1] = "bot-2".into();
+    assert!(c.validate().is_ok());
+    assert_eq!(c.needed(), 2);
+    c.reviewer_bot_ids.extend((3..=9).map(|i| format!("bot-{i}")));
+    assert!(c.validate().unwrap_err().contains("2 to 8"));
+    c.reviewer_bot_ids.clear();
+    assert!(c.validate().is_ok());
+    assert_eq!(c.needed(), 2);
+}
+
+#[test]
+fn selected_bot_authority_cannot_be_forged_in_a_legacy_reviewer() {
+    let (state, sid) = council_state(on(9.0, 2, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments": [reviewer_assignment("review", "security")]})).unwrap();
+    let mut team = saved(&state, &sid);
+    let session = team.workers[0].session_id.clone();
+    let id = team.workers[0].id.clone();
+    let binding = team.workers[0].reviewer_binding.as_mut().unwrap();
+    binding.reviewer_bot_id = Some("forged-bot".into());
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Forged".into(), role: "Reviewer".into(), instructions: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+    });
+    let store = state.store.lock().unwrap();
+    store.db.execute("DELETE FROM architect_requests WHERE worker_id=?1 AND kind='reviewer_authority'", [&id]).unwrap();
+    save(&store, &mut team).unwrap();
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    assert!(reviewer_policy(&store, &session, Some(&admission)).unwrap_err().contains("capability_not_authorized"));
+}
+
+
 /// `max_rounds` 0 here stands for the most a config allows.
 fn on(target: f64, max_rounds: usize, reviewers: usize) -> CouncilConfig {
     CouncilConfig { target, max_rounds: if max_rounds == 0 { 100 } else { max_rounds }, reviewers, ..CouncilConfig::default() }

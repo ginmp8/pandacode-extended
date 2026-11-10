@@ -36,6 +36,39 @@ const settle = async (page: Page) => { await ready(page); await expect(button(pa
 
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
+test('selected configured bots are task-scoped, attributed by ID, and automatic reviewers remain the default', async ({ page }) => {
+  await open(page, '/?bots=sample');
+  await button(page).click();
+  await expect(panel(page).getByRole('radio', { name: 'Automatic / native workers' })).toBeChecked();
+  await panel(page).getByRole('radio', { name: 'Selected bots' }).check();
+  await expect(panel(page).getByText('Dozy')).toBeVisible();
+  await expect(panel(page).getByText('Paused')).toBeVisible();
+  await expect(panel(page).getByRole('checkbox', { name: /Dozy/ })).toBeDisabled();
+  await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
+  await panel(page).getByRole('checkbox', { name: /Writer/ }).check();
+  expect(await calls(page)).toEqual([]);
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const [selected] = await calls(page);
+  expect(selected.reviewerBotIds).toHaveLength(2);
+  expect(new Set(selected.reviewerBotIds).size).toBe(2);
+  await expect(panel(page).getByRole('checkbox', { name: /Scout/ })).toBeChecked();
+  await panel(page).getByRole('radio', { name: 'Automatic / native workers' }).check();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
+});
+
+test('selected reviewer mode refuses to launch with fewer than two bots', async ({ page }) => {
+  await open(page, '/?bots=sample');
+  await button(page).click();
+  await panel(page).getByRole('radio', { name: 'Selected bots' }).check();
+  await panel(page).getByRole('checkbox', { name: /Scout/ }).check();
+  await toggle(page).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Select 2 to 8 distinct reviewer bots');
+  await expect(toggle(page)).not.toBeChecked();
+  expect(await calls(page)).toEqual([]);
+});
+
 test('while off, a choice only sets what council starts with', async ({ page }) => {
   await open(page);
   await button(page).click();

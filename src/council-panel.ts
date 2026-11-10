@@ -645,8 +645,15 @@ function rowsHtml(progress: CouncilProgress, team: TeamSnapshot): string {
   return round.seats.map(seat => {
     const lens = seat.council.lens.trim() || seat.name, lowest = seatScore(seat) !== null && seatScore(seat) === round.lowest && !provisional(progress, round);
     const reviewerLabel = seat.reviewerBinding?.reviewerBotId ? `${seat.name} · ${lens}` : lens;
+    const skillReceipt = seat.reviewerBinding?.snapshot?.skills;
+    const supplied = skillReceipt?.pins ?? [], skipped = skillReceipt?.skipped ?? [];
+    const skillSummary = [
+      ...supplied.map(pin => `${pin.id}: supplied; invocation ${pin.invoked ? 'recorded' : 'not verified'}; check ${pin.checkExecuted && pin.evidenceVerified ? 'verified' : 'not verified'}; SHA-256 ${pin.contentSha256}`),
+      ...skipped.map(skill => `${skill.id}: skipped (${skill.reason})`),
+    ];
+    const skillNote = skillSummary.length ? `<small class="council-row-skills" title="${escape(skillSummary.join('; '))}">${escape(`Skills: ${supplied.length} supplied, ${skipped.length} skipped`)}${skipped.length ? ` · ${escape(skipped.map(skill => `${skill.id}: ${skill.reason}`).join('; '))}` : ''}</small>` : '';
     const s = seatStatus(seat, status.target, teamActive(team), () => false, firsts?.get(lens), { lowest, accepted: state === 'accepted' });
-    return `<button type="button" class="council-row" data-id="${escape(seat.id)}" data-action="open-team-worker" data-worker-id="${escape(seat.id)}" aria-label="${escape(`${reviewerLabel}: ${s.spoken}. Open reviewer`)}"><span class="council-row-mark"${s.tone ? ` data-state-tone="${s.tone}"` : ''}>${s.mark}</span><span class="council-row-lens">${escape(reviewerLabel)}</span><span class="council-row-score"${s.scored ? ` data-scored="${formatScore(seatScore(seat)!)}"` : ''}>${s.html}</span></button>`;
+    return `<button type="button" class="council-row" data-id="${escape(seat.id)}" data-action="open-team-worker" data-worker-id="${escape(seat.id)}" aria-label="${escape(`${reviewerLabel}${skillSummary.length ? `; ${skillSummary.join('; ')}` : ''}: ${s.spoken}. Open reviewer`)}"><span class="council-row-mark"${s.tone ? ` data-state-tone="${s.tone}"` : ''}>${s.mark}</span><span class="council-row-lens">${escape(reviewerLabel)}${skillNote}</span><span class="council-row-score"${s.scored ? ` data-scored="${formatScore(seatScore(seat)!)}"` : ''}>${s.html}</span></button>`;
   }).join('');
 }
 /** The strip's state line: the state, then the lowest against the target ("so far" while the round is open). */

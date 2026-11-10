@@ -98,12 +98,9 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 }
 
 /* Configured bot reviewers extend the existing Council panel, never a second Council surface. */
-.council-reviewer-source{min-width:0;padding:8px 0 0;border:0;border-top:1px solid var(--border);display:grid;gap:7px}
-.council-reviewer-source legend{padding:0 4px;color:var(--text);font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
-.council-reviewer-source>label{display:flex;gap:8px;align-items:center;min-height:26px;font-size:var(--ds-text-ui);cursor:pointer}
-.council-reviewer-source input{accent-color:var(--ds-primary-bg)}
-.council-bots{display:grid;gap:5px;max-height:212px;overflow:auto;padding:2px}
-.council-bots[hidden],.council-panel[data-compact] .council-reviewer-source{display:none}
+.council-bots{display:grid;gap:5px;max-height:212px;overflow:auto;padding:8px 2px 2px;border-top:1px solid var(--border)}
+.council-bots[hidden],.council-panel[data-compact] .council-bots{display:none}
+.council-panel p.council-bot-heading{color:var(--text);font-weight:var(--weight-medium)}
 .council-bot-choice{display:flex;align-items:center;gap:8px;min-width:0;padding:7px;border:1px solid var(--border);border-radius:var(--ds-radius-control);cursor:pointer}
 .council-bot-choice:focus-within{outline:2px solid var(--focus);outline-offset:1px}
 .council-bot-choice.is-unavailable{opacity:.65;cursor:not-allowed}

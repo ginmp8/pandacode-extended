@@ -173,18 +173,22 @@ export function createCouncil(host: CouncilHost) {
     panel.querySelector<HTMLInputElement>('.council-switch')!.checked = Boolean(shown);
     if (!panel.dataset.compact) {
       const draft = selection(sessionId), bots = reviewerBots.get(sessionId) ?? [], executor = host.executorBotId?.(sessionId);
-      for (const control of panel.querySelectorAll<HTMLInputElement>('[name="council-source"]')) control.checked = control.value === (draft.selected ? 'selected' : 'automatic');
       const list = panel.querySelector<HTMLElement>('.council-bots')!;
-      const markup = draft.selected ? `${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
+      const markup = draft.selected ? `<p class="council-bot-heading">Task reviewers · 2–8 distinct bots</p>${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
         const disabled = bot.paused || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
         const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
         return `<label class="council-bot-choice${disabled ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${draft.ids.includes(bot.id) ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${reason}</span></label>`;
-      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size === 1 ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}` : '';
+      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}` : '';
       const focusedBot = (document.activeElement as HTMLElement | null)?.closest<HTMLInputElement>('[data-reviewer-bot]')?.dataset.reviewerBot;
-      if (list.innerHTML !== markup) morph(list, markup);
+      if (list.innerHTML !== markup) {
+        // A checked input's property is not always reconciled by a DOM attribute morph.
+        // Recreate only the bot rows; preserve keyboard focus and scroll position.
+        const scroll = list.scrollTop;
+        list.innerHTML = markup;
+        list.scrollTop = scroll;
+      }
       if (focusedBot && !list.contains(document.activeElement)) list.querySelector<HTMLInputElement>(`[data-reviewer-bot="${CSS.escape(focusedBot)}"]`)?.focus({ preventScroll: true });
       list.hidden = !draft.selected;
-      panel.querySelector<HTMLElement>('[data-field-row="reviewers"]')!.hidden = draft.selected;
     }
     // Which row had focus before this paint (its focused option may be hidden below).
     const hadFocus = document.activeElement?.closest<HTMLElement>('.council-panel [data-field]') ?? null;
@@ -205,7 +209,9 @@ export function createCouncil(host: CouncilHost) {
       let selected: HTMLElement | null = null;
       const buttons = [...group.querySelectorAll<HTMLElement>('button')];
       for (const option of buttons) {
-        const on = Number(option.dataset.value) === values[key];
+        const on = option.dataset.reviewersSource === 'selected'
+          ? draft.selected
+          : !draft.selected || key !== 'reviewers' ? Number(option.dataset.value) === values[key] : false;
         option.setAttribute('aria-pressed', String(on));
         if (on) selected = option;
       }
@@ -323,6 +329,9 @@ export function createCouncil(host: CouncilHost) {
         // Only the newest request's outcome is shown; an older one's was overtaken.
         if (--entry.count) return;
         pending.delete(sessionId);
+        // Keep the UI synchronized with the native snapshot after success or refusal.
+        // A rejected optimistic selected roster must not remain as though it were persisted.
+        reviewerDraft.delete(sessionId);
         if (reason) {
           failures.set(sessionId, reason);
           // Closed since: say it now, and show it when the panel opens again for this thread.
@@ -359,7 +368,7 @@ export function createCouncil(host: CouncilHost) {
     if (anchor.closest('.council-strip')) panel.dataset.compact = focusField ?? 'target';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-labelledby', 'council-title');
-    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}</div></div>`).join('')}<fieldset class="council-reviewer-source"><legend>Reviewer source</legend><label><input type="radio" name="council-source" value="automatic" checked> Automatic / native workers</label><label><input type="radio" name="council-source" value="selected"> Selected bots</label><div class="council-bots" aria-label="Select reviewer bots" hidden></div></fieldset><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
+    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
     document.body.append(panel);
     // Compact (from the strip): only the row it opened on, titled by what it does (a heading, no longer the switch's label).
     if (panel.dataset.compact) {
@@ -404,16 +413,6 @@ export function createCouncil(host: CouncilHost) {
     const onChange = (event: Event) => {
       const input = event.target as HTMLInputElement;
       if (input.classList.contains('council-new-threads')) { setCouncilForNewThreads(input.checked); return; }
-      if (input.name === 'council-source') {
-        const draft = selection(sessionId);
-        reviewerDraft.set(sessionId, { selected: input.value === 'selected', ids: [...draft.ids] });
-        failures.delete(sessionId);
-        if (shownConfig(sessionId) && input.value === 'automatic') void apply(sessionId, selectionConfig(sessionId), remember);
-        else if (shownConfig(sessionId) && draft.ids.length >= 2 && input.value === 'selected') {
-          try { void apply(sessionId, selectionConfig(sessionId), remember); } catch (cause) { selectedError(sessionId, String(cause)); }
-        } else paint(sessionId);
-        return;
-      }
       if (input.hasAttribute('data-reviewer-bot')) {
         const id = input.dataset.reviewerBot!, draft = selection(sessionId), ids = input.checked ? [...draft.ids, id] : draft.ids.filter(item => item !== id);
         if (ids.length > 8) { input.checked = false; selectedError(sessionId, 'Council allows at most 8 reviewer bots.'); return; }
@@ -435,12 +434,28 @@ export function createCouncil(host: CouncilHost) {
       catch (cause) { input.checked = false; selectedError(sessionId, cause instanceof Error ? cause.message : String(cause)); }
     };
     const onClick = (event: MouseEvent) => {
-      const option = (event.target as Element).closest<HTMLElement>('[data-value]');
+      const option = (event.target as Element).closest<HTMLElement>('[data-value], [data-reviewers-source]');
       if (!option) return;
-      const key = option.closest<HTMLElement>('[data-field]')!.dataset.field as Field, value = Number(option.dataset.value);
+      const key = option.closest<HTMLElement>('[data-field]')!.dataset.field as Field;
       const current = shownConfig(sessionId);
-      // While council is off, this only sets what it starts with.
-      if (current) apply(sessionId, { ...current, [key]: value }, remember);
+      if (option.dataset.reviewersSource === 'selected') {
+        const draft = selection(sessionId);
+        reviewerDraft.set(sessionId, { selected: true, ids: [...draft.ids] });
+        failures.delete(sessionId);
+        // Configure once the user has actually chosen a valid roster; no partial request.
+        if (current && draft.ids.length >= 2) {
+          try { void apply(sessionId, selectionConfig(sessionId), remember); }
+          catch (cause) { selectedError(sessionId, String(cause)); }
+        } else paint(sessionId);
+        return;
+      }
+      const value = Number(option.dataset.value);
+      if (key === 'reviewers') {
+        const draft = selection(sessionId);
+        reviewerDraft.set(sessionId, { selected: false, ids: [...draft.ids] });
+      }
+      // While Council is off, a reviewer-count click only sets what starts next.
+      if (current) apply(sessionId, { ...current, [key]: value, ...(key === 'reviewers' ? { reviewerBotIds: undefined } : {}) }, remember);
       else { saveCouncilDefaults({ ...councilDefaults(), [key]: value }); paint(sessionId); }
     };
     const onKey = (event: KeyboardEvent) => {
@@ -458,7 +473,7 @@ export function createCouncil(host: CouncilHost) {
       // Tab and Shift+Tab always move inside the panel, in document order (the switch, each row's stop, the footer
       // checkbox), wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
       if (event.key !== 'Tab' || !panel?.contains(document.activeElement)) return;
-      const controls = [...panel.querySelectorAll<HTMLElement>('input, button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement), dir = event.shiftKey ? -1 : 1;

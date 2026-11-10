@@ -38,7 +38,7 @@ const FIELDS: readonly { key: Field; label: string; options: readonly number[]; 
   { key: 'reviewers', label: 'Reviewers', options: COUNCIL_REVIEWERS, name: value => value ? String(value) : 'Auto' },
 ];
 /** Wide enough that "10.0" keeps clear of its segment's edge. */
-const PANEL_WIDTH = 340;
+const PANEL_WIDTH = 300;
 const BUTTON = '.composer-council-button';
 /** A balance: reviewers weighing the work. Its own glyph, apart from the sidebar's Agent usage. */
 const COUNCIL_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg>';
@@ -376,7 +376,7 @@ export function createCouncil(host: CouncilHost) {
       // Anchored to the control that opened it; the composer button again if that one is gone (a redraw).
       const current = opener?.isConnected ? opener : document.querySelector<HTMLElement>(BUTTON);
       if (!panel || !current) return;
-      const rect = current.getBoundingClientRect(), width = Math.min(PANEL_WIDTH, window.innerWidth - 24);
+      const rect = current.getBoundingClientRect(), width = Math.min(selection(sessionId).selected && !panel.dataset.compact ? 340 : PANEL_WIDTH, window.innerWidth - 24);
       panel.style.width = `${width}px`;
       panel.style.left = `${Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2))}px`;
       // Above it when it fits (the composer), else on the roomier side; never over the opener: capped to the space and

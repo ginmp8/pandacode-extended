@@ -162,6 +162,19 @@ def adapt_rust():
     if "pub async fn skills_deactivate_all" not in data:
         body=rust_function(upstream,"pub async fn skills_deactivate_all(")
         data=checked_replace(data,"#[tauri::command]\npub async fn skills_matrix(","#[tauri::command]\n"+body+"\n#[tauri::command]\npub async fn skills_matrix(")
+    # The virtual-base conflict ends inside Extended's final preview command.
+    # Restore the complete Extended command, then append the native upstream
+    # test modules without splicing a module into an open function body.
+    preview_anchor="#[tauri::command]\\npub async fn skills_github_preview_file("
+    native_tests_anchor="#[cfg(test)]\\nmod folder_tests {"
+    original=git("show",TARGET+":"+str(f))
+    if data.count(preview_anchor)!=1 or original.count(preview_anchor)!=1 or native_tests_anchor not in upstream:
+        raise RuntimeError("Unexpected Rust skills preview/test layout")
+    data=(data[:data.index(preview_anchor)]
+          +original[original.index(preview_anchor):].rstrip()
+          +"\\n\\n"
+          +upstream[upstream.index(native_tests_anchor):].rstrip()
+          +"\\n")
     f.write_text(data)
     f=Path("src-tauri/src/slash_commands.rs")
     data=f.read_text()

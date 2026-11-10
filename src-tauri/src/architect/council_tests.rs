@@ -43,6 +43,17 @@ fn reviewer_assignment(key: &str, lens: &str) -> Value {
     json!({"key":key,"profileId":"fast","name":key,"prompt":format!("Review {key}."),"files":[],"councilLens":lens})
 }
 #[test]
+fn zcode_can_be_selected_as_a_council_reviewer_but_not_a_normal_architect_worker() {
+    assert!(HARNESSES.contains(&"zcode"));
+    assert!(validate_worker_role("zcode", true).is_ok());
+    assert!(validate_worker_role("zcode", false).unwrap_err().contains("reviewer seats"));
+    for name in ["codex", "claude", "opencode", "github-copilot", "muse", "pi", "omp", "hermes"] {
+        assert!(validate_worker_role(name, true).is_ok());
+        assert!(validate_worker_role(name, false).is_ok());
+    }
+}
+
+#[test]
 fn full_access_parent_council_reviewer_enforces_native_read_only_without_profile_mutation() {
     let (state, sid) = council_state(on(9.0, 2, 2));
     {

@@ -110,9 +110,9 @@ fn failed_body(team: &TeamSnapshot) -> String {
 }
 const FAILED_PREFIX: &str = "A worker failed while other workers are still running, for this objective: ";
 const FAILED_BODY: &str = "\n\nRead the failed worker's error and result. Retry it with followup_worker, dispatch a replacement (set replaces to its ID; with profileId \"auto\" Panda Router escalates past the models that failed it, at most 2 retries per assignment, then report the failure to the user; a replacement starts from the old worker's changes in the shared checkout, so revert them or say what to keep), or leave it for the final review. Other workers are still active: do not edit their files, repeat completed assignments, or poll. You may end this turn after you act; settled work will trigger review.\n\n";
-// ZCode stays out until `mcpServers` bridging lands in session/create: an
-// architect needs the host-tools dispatch/followup_worker tools.
-pub(crate) const HARNESSES: [&str; 18] = [
+// ZCode supports read-only Council reviewer seats. It cannot perform ordinary
+// Architect worker assignments until its native host-tool bridge exists.
+pub(crate) const HARNESSES: [&str; 19] = [
     "claude",
     "codex",
     "kimi",
@@ -131,6 +131,7 @@ pub(crate) const HARNESSES: [&str; 18] = [
     "muse",
     "devin",
     "hermes",
+    "zcode",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1728,6 +1729,14 @@ fn summaries(team: &TeamSnapshot, offset: usize, owner: Option<&str>) -> Value {
     let next = offset + workers.len();
     json!({"status":team.status,"round":team.round,"nextOffset":if next<visible{Some(next)}else{None},"workers":workers})
 }
+/// ZCode has read-only reviewer protocol support but no Architect worker tool bridge.
+fn validate_worker_role(provider: &str, is_council_reviewer: bool) -> Result<()> {
+    if provider == "zcode" && !is_council_reviewer {
+        return Err("ZCode currently supports Council reviewer seats only; ordinary Architect workers need the native host-tool bridge.".into());
+    }
+    Ok(())
+}
+
 /// The worker model for one assignment. Configured teams must name a profile. Auto
 /// teams may name a roster profile, a provider and model chosen by the lead (or asked
 /// for in the user's prompt), or nothing, which reuses the lead's own selection.
@@ -1993,6 +2002,9 @@ fn dispatch_as(
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
+                // ZCode has no worker-management tool bridge. It can return a
+                // Council score, which needs no Architect host callbacks.
+                validate_worker_role(&profile.provider, seat.is_some())?;
                 let profile = &profile;
                 let session = store.create_session(
                     &parent.project_id,

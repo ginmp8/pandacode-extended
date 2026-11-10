@@ -38,10 +38,23 @@ pub(crate) struct SkillPin {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SkippedSkill {
+    pub id: String,
+    /// Exact resolver failure; unlike a model self-report, this is a native decision.
+    pub reason: String,
+    pub bot_assigned: bool,
+    pub eligible: bool,
+    pub supplied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ReviewerSkills {
     pub pins: Vec<SkillPin>,
     /// Exact lower-trust instructions captured at admission; never regenerate from live library.
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedSkill>,
 }
 
 impl ReviewerSkills {
@@ -49,6 +62,13 @@ impl ReviewerSkills {
     pub fn verify(&self) -> Result<(), String> {
         if self.prompt.chars().count() > TOTAL_CHARS {
             return Err("reviewer_skill_drift: frozen skill prompt exceeds its budget.".into());
+        }
+        for skipped in &self.skipped {
+            if skipped.id.is_empty() || skipped.reason.is_empty() || !skipped.bot_assigned
+                || skipped.eligible || skipped.supplied || self.pins.iter().any(|pin| pin.id == skipped.id)
+            {
+                return Err("reviewer_skill_drift: invalid skipped skill receipt.".into());
+            }
         }
         for pin in &self.pins {
             if !pin.eligible || !pin.supplied || pin.invoked || pin.check_executed || pin.evidence_verified {
@@ -190,9 +210,25 @@ fn stage(library: &Library, meta: &Meta, files: &super::Files, hashes: &BTreeMap
 /// Resolve only explicitly bot-assigned skill IDs plus their required dependencies.
 /// A missing/unsafe/drifted/truncated mandatory input fails closed, never silently truncates.
 pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> Result<ReviewerSkills, String> {
+    freeze_with_optional(library, assigned, harness, &[])
+}
+
+/// A caller explicitly designates optional bot assignments per review task.
+/// Required dependencies of an optional skill must resolve together or the whole
+/// optional package is skipped; required skills still fail closed.
+pub(crate) fn freeze_with_optional(
+    library: &Library, assigned: &[String], harness: &str, optional: &[String],
+) -> Result<ReviewerSkills, String> {
+    let mut known_optional = HashSet::new();
+    for id in optional {
+        if !assigned.contains(id) || !known_optional.insert(id) {
+            return Err(format!("reviewer_skill_unavailable: optional skill {id} is not an unique bot assignment."));
+        }
+    }
     if !adapter::known(harness) {
         return Err("reviewer_skill_unavailable: unknown reviewer harness.".into());
     }
+    #[derive(Clone)]
     struct ResolveState {
         seen: HashSet<String>,
         visiting: HashSet<String>,
@@ -272,8 +308,22 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
         state.visiting.remove(id);
         result
     }
-    for id in assigned { visit(library, id, assigned, harness, &mut state)?; }
-    let result = ReviewerSkills { pins: state.pins, prompt: state.prompt };
+    let mut skipped = Vec::new();
+    for id in assigned {
+        if known_optional.contains(id) {
+            let before = state.clone();
+            if let Err(reason) = visit(library, id, assigned, harness, &mut state) {
+                state = before;
+                skipped.push(SkippedSkill {
+                    id: id.clone(), reason, bot_assigned: true,
+                    eligible: false, supplied: false,
+                });
+            }
+        } else {
+            visit(library, id, assigned, harness, &mut state)?;
+        }
+    }
+    let result = ReviewerSkills { pins: state.pins, prompt: state.prompt, skipped };
     result.verify()?;
     Ok(result)
 }
@@ -368,6 +418,28 @@ mod tests {
             .contains("reviewer_skill_untrusted"));
         fs::write(&metadata_path, original).unwrap();
         assert!(freeze(&library, &["review".into()], "codex").is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn optional_missing_or_invalid_skills_are_disclosed_without_dropping_required_criteria() {
+        let (library, root) = fixture();
+        add(&library, "required", "Required review criteria.", &[]);
+        add(&library, "optional", "Optional review criteria.", &["unavailable"]);
+        let assigned = vec!["optional".into(), "required".into()];
+        let frozen = freeze_with_optional(&library, &assigned, "kimi", &["optional".into()]).unwrap();
+        assert_eq!(frozen.skipped.len(), 1);
+        assert_eq!(frozen.skipped[0].id, "optional");
+        assert!(frozen.skipped[0].reason.contains("unavailable"));
+        assert_eq!(frozen.pins.len(), 1);
+        assert_eq!(frozen.pins[0].id, "required");
+        assert!(frozen.prompt.contains("Required review criteria"));
+        assert!(!frozen.prompt.contains("Optional review criteria"));
+        assert!(frozen.verify().is_ok());
+
+        assert!(freeze(&library, &assigned, "kimi").unwrap_err().contains("unavailable"));
+        assert!(freeze_with_optional(&library, &assigned, "kimi", &["unassigned".into()])
+            .unwrap_err().contains("not an unique bot assignment"));
         fs::remove_dir_all(root).unwrap();
     }
 

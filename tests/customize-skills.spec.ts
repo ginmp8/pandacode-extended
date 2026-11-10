@@ -15,8 +15,13 @@ async function openCustomize(page: Page, slow = false): Promise<void> {
         window.__progressEvents = [];
         window.__trySkillRequests = [];
         window.__holdSkillsList = new URLSearchParams(location.search).has('slow');
+        window.__managerOffSkills = new Set();
         mountCustomizeSkills(document.getElementById('host'), {
           call: async (command, args = {}) => {
+            if (command === 'skill_manager_list') {
+              return {projectId:null,harnesses:[],skills:skills.call('skills_list').filter(item=>item.kind==='skill')
+                .map(item=>({name:item.name,offInPandaCode:window.__managerOffSkills.has(item.name),offInProject:false}))};
+            }
             if (command === 'skills_list' && window.__holdSkillsList) {
               await new Promise(resolve => {window.__releaseSkillsList = () => {window.__holdSkillsList=false;resolve();};});
             }
@@ -342,6 +347,41 @@ test('installed skill can be enabled and disabled with visible feedback', async 
   await expect(toggle).not.toBeChecked();
   await expect(page.locator('.customize-toast')).toContainText('disabled for Codex');
   await expect(detail.getByRole('button',{name:'Try in chat'})).toBeDisabled();
+});
+
+test('Skills Manager switches cannot be bypassed by Customize activations or Try in chat', async ({page}) => {
+  await openCustomize(page);
+  await page.getByRole('button',{name:'Inspect Release notes'}).click();
+  const detail=page.getByRole('region',{name:'Read-only skill preview'});
+  const toggle=detail.getByRole('checkbox',{name:'Enable Release notes for Codex'});
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeEnabled();
+  await page.evaluate(() => {
+    (window as any).__managerOffSkills.add('Release notes');
+    window.dispatchEvent(new CustomEvent('pandacode:skill-manager-changed'));
+  });
+  await expect(detail.getByText('Switched off in Settings → Tools → Skills for all projects.',{exact:false})).toBeVisible();
+  await expect(toggle).toBeChecked();
+  await expect(detail.getByText('Installed; off in Skills')).toBeVisible();
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Inspect Release notes'})).toContainText('Off in Settings → Tools → Skills');
+  await toggle.uncheck();
+  await expect(toggle).not.toBeChecked();
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  await expect(page.locator('.customize-toast')).toContainText('Still switched off in Settings → Tools → Skills.');
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__trySkillRequests)).toEqual([]);
+  await page.evaluate(() => {
+    (window as any).__managerOffSkills.delete('Release notes');
+    window.dispatchEvent(new CustomEvent('pandacode:skill-manager-changed'));
+  });
+  await expect(detail.getByText('Installed; off in Skills')).toHaveCount(0);
+  await expect(detail.getByRole('button',{name:'Try in chat'})).toBeEnabled();
+  await detail.getByRole('button',{name:'Try in chat'}).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__trySkillRequests))
+    .toEqual([{id:'release-notes',harness:'codex'}]);
 });
 
 test('Try in chat uses the enabled harness and never submits the skill automatically', async ({page}) => {

@@ -97,6 +97,44 @@ fn inventory_follows_symlinks_and_reads_nested_skill_collections_with_a_cap() {
 }
 
 #[test]
+fn extended_library_activation_and_native_skill_switches_share_the_installed_skill() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let library = crate::skills::Library::new(f.0.join("library"), home.clone());
+    let item = library
+        .import(
+            crate::skills::Kind::Skill,
+            vec![("SKILL.md".into(), b"---\nname: release-notes\ndescription: Notes\n---\nReview the release notes.".to_vec())],
+            "release-notes",
+            crate::skills::Source {
+                kind: "folder".into(),
+                location: "test fixture".into(),
+                git_ref: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+    library
+        .activate(&item.meta.id, "codex", crate::skills::Scope::User, None, false)
+        .unwrap();
+    let skill_file = home.join(".codex/skills/release-notes/SKILL.md");
+    assert!(skill_file.is_file(), "Extended activation installs the harness copy");
+    let prefs = f.0.join("skill-manager.json");
+    let homes = Homes::default();
+    let before = list_at(&home, None, None, &prefs, &homes).unwrap();
+    assert!(before.skills.iter().any(|skill| skill.name == "release-notes" && !skill.off_in_panda_code));
+    let after = switches::set_counted(&home, None, None, &prefs, "release-notes", false, &homes).unwrap();
+    assert!(after.skills.iter().any(|skill| skill.name == "release-notes" && skill.off_in_panda_code));
+    let disabled = read_prefs(&prefs).unwrap().disabled(None, None);
+    assert!(check_prompt("codex", "/release-notes", &disabled, || BTreeSet::from(["release-notes".into()])).is_err());
+    assert!(skill_file.is_file(), "The switch must not delete the Extended harness copy");
+    switches::set_counted(&home, None, None, &prefs, "release-notes", true, &homes).unwrap();
+    assert!(check_prompt("codex", "/release-notes", &BTreeSet::new(), || BTreeSet::from(["release-notes".into()])).is_ok());
+    assert!(skill_file.is_file());
+}
+
+#[test]
 fn prefs_updates_are_immutable_atomic_and_scoped_to_project_id() {
     let f = Fixture::new();
     let project = f.0.join("checkout");

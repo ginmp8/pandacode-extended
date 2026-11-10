@@ -2,7 +2,8 @@
  * the native skills_* commands share one library with Settings -> Skills & rules. */
 import './customize-skills.css';
 import { escape, fileIcon, icon, markdownHtml } from './dom';
-import type { SkillItem, CatalogSkill, SkillMatrix } from './skills-library';
+import { switchedOff, type SkillItem, type CatalogSkill, type SkillMatrix } from './skills-library';
+import { SKILLS_CHANGED_EVENT, type SkillInventory } from './skill-manager-model';
 
 type SavedSource = {
   id: string; repo: string; path: string; gitRef: string | null;
@@ -79,6 +80,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   let sources: SavedSource[] = [];
   let policy = initialPolicy;
   let matrix: SkillMatrix = {project:null,harnesses:[]};
+  let managerOff: ReadonlyMap<string,string> = new Map();
+  let managerReadSerial = 0;
   let syncReport: SyncReport = {checkedAt:0,installed:[],updated:[],skipped:[],events:[]};
   let changingRefSource: string | null = null;
   let tab: 'installed' | 'sources' = 'installed';
@@ -143,6 +146,21 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   const collapsedFiles = new Set<string>();
   let pendingUninstall: string|null = null, tryHarness = '';
   const esc = (s: unknown) => escape(s);
+  const offInSkills = (item: SkillItem): boolean => managerOff.has(item.name) || managerOff.has(item.id);
+  async function readManager(): Promise<ReadonlyMap<string,string> | null> {
+    try {
+      return switchedOff(await options.call<SkillInventory>('skill_manager_list'), '');
+    } catch {
+      // Preserve last known switches. Native send-time enforcement still applies.
+      return null;
+    }
+  }
+  const onManagerChange = () => {
+    const serial = ++managerReadSerial;
+    void readManager().then(next => {
+      if (!disposed && serial === managerReadSerial && next !== null) { managerOff = next; draw(); }
+    });
+  };
 
   function success(text: string): void {
     toast = text;
@@ -185,7 +203,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
         ? enabled ? ` ${change.kept.join(' ')}.`
           : ` ${plural(change.kept.length,'edited file')} preserved on disk.`
         : '';
-      success(`${item.name} ${enabled?'enabled':'disabled'} for ${harnessLabel(harness)}.${kept}`);
+      success(`${item.name} ${enabled?'enabled':'disabled'} for ${harnessLabel(harness)}.${kept}${enabled && offInSkills(item) ? ' Still switched off in Settings → Tools → Skills.' : ''}`);
     } catch (cause) {
       const detail=message(cause);
       if(enabled && !replaceExisting && detail.includes('already exists and PandaCode did not create it.')) {
@@ -218,7 +236,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   async function tryInstalledSkill(id: string): Promise<void> {
     if (busy || operation?.state === 'running') return;
     const item=installed.find(entry=>entry.id===id);
-    const available=item ? matrix.harnesses.filter(row=>row.installed && currentUserActivation(item,row.harness)) : [];
+    const available=item && !offInSkills(item) ? matrix.harnesses.filter(row=>row.installed && currentUserActivation(item,row.harness)) : [];
     const harness=available.find(row=>row.harness===tryHarness)?.harness ?? available[0]?.harness;
     if (!item || !harness) return;
     busy=true; busyLabel=`Opening ${item.name} in chat…`; error=''; draw();
@@ -453,7 +471,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       const active = item.activations?.length ?? 0;
       const statuses = matrix.harnesses.flatMap(row=>row.cells.filter(cell=>cell.id===item.id && cell.status!=='off')
         .map(cell=>({label:`${harnessLabel(row.harness)}: ${cell.status}`, live:cell.status==='active'||cell.status==='prompt'})));
-      const live=statuses.some(status=>status.live);
+      const off=offInSkills(item);
+      const live=statuses.some(status=>status.live) && !off;
       const missingPeers = (item.requiredSkills??[]).filter(id=>!installed.some(entry=>entry.id===id));
       const last = syncReport.events.find(event=>event.id===item.id);
       const update = !last ? 'Update status not checked'
@@ -467,7 +486,8 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
           <span class="customize-skill-description"><span class="customize-skill-title"><strong>${esc(item.name)}</strong>${item.findings?.length ? `<small class="customize-warning">${plural(item.findings.length, 'safety finding')}</small>` : ''}</span><span>${esc(item.description || item.id)}</span><small>${esc(item.id)} · ${esc(type)}${item.source.commit ? ` · ${esc(shaShort(item.source.commit))}` : ''}${item.source.gitRef ? ` · ref ${esc(item.source.gitRef)}` : ''}</small>
           ${item.source.kind==='github' ? `<small>${esc(update)}</small>` : ''}
           ${missingPeers.length ? `<small class="customize-warning">Missing dependencies: ${esc(missingPeers.join(', '))}</small>` : ''}
-          ${statuses.length ? `<small class="customize-harness-statuses">${statuses.map(status=>`<span class="${status.live?'customize-active-text':''}">${esc(status.label)}</span>`).join('<span aria-hidden="true"> · </span>')}</small>` : ''}</span>
+          ${off ? '<small class="customize-warning">Off in Settings → Tools → Skills</small>' : ''}
+          ${statuses.length ? `<small class="customize-harness-statuses">${statuses.map(status=>`<span class="${status.live && !off?'customize-active-text':''}">${esc(status.label)}</span>`).join('<span aria-hidden="true"> · </span>')}</small>` : ''}</span>
         </button>
         <span class="customize-skill-trailing">
           <small class="customize-skill-activity ${active && live ? 'customize-active-text' : ''}">${active ? plural(active,'activation') : 'Not enabled'}</small>
@@ -541,13 +561,14 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
   function lifecycleHtml(item: SkillItem): string {
     const selectable = matrix.harnesses.filter(row => row.installed || item.activations.some(a => a.harness === row.harness));
     const projectCount = item.activations.filter(a=>a.scope==='project').length;
-    const available = selectable.filter(row=>row.installed && currentUserActivation(item,row.harness));
+    const switchedOffInSkills = offInSkills(item);
+    const available = selectable.filter(row=>row.installed && !switchedOffInSkills && currentUserActivation(item,row.harness));
     const picked = available.find(row=>row.harness===tryHarness)?.harness ?? available[0]?.harness ?? '';
     const harnesses = selectable.map(row => {
       const enabled = item.activations.some(a=>a.harness===row.harness && a.scope==='user');
       const state = row.cells.find(c=>c.id===item.id && c.scope==='user')?.status ?? 'off';
       const status = !row.installed ? 'Harness unavailable' : !enabled ? 'Not enabled' :
-        state === 'active' || state === 'prompt' ? 'Enabled' :
+        state === 'active' || state === 'prompt' ? (switchedOffInSkills ? 'Installed; off in Skills' : 'Enabled') :
         state === 'outdated' ? 'Update requires reactivation' : state === 'drifted' ? 'Edited on disk' : 'Missing harness files';
       return `<div class="customize-harness-row">
         <label><span><strong>${esc(harnessLabel(row.harness))}</strong><small>${esc(status)}</small></span>
@@ -575,7 +596,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     const confirm = pendingUninstall === item.id ? `<div class="customize-uninstall-confirm" role="alert">
       <strong>Uninstall ${esc(item.name)}?</strong>
       <p>${item.activations.length ?
-        `Disable all ${plural(item.activations.length,'activation')} (including project scopes in Settings → Skills & rules) before uninstalling.` :
+        `Disable all ${plural(item.activations.length,'activation')} before uninstalling. Rules & library can turn off legacy activations everywhere, including project scopes.` :
         'This removes the skill package from the central library. Saved GitHub sources remain configured, but removed skills are not automatically reinstalled.'}</p>
       <div class="customize-inline-actions">
         <button type="button" class="secondary-button" data-customize="cancel-uninstall">Cancel uninstall</button>
@@ -583,9 +604,10 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
       </div>
     </div>` : '';
     return `<div class="customize-lifecycle" aria-label="Manage installed skill">
-      <div class="customize-section-head"><div><h3>Activation by harness</h3><p>Enable at user scope for new chats and tasks. Project-specific activations remain managed in Settings → Skills & rules.</p></div></div>
+      <div class="customize-section-head"><div><h3>Activation by harness</h3><p>Manage user-scope library copies here. For project-specific installs and switches, use Settings → Tools → Skills.</p></div></div>
+      ${switchedOffInSkills ? '<p class="customize-help" role="status">Switched off in Settings → Tools → Skills for all projects. The harness copy stays installed, but Try in chat is unavailable until you turn the skill back on there.</p>' : ''}
       ${harnesses ? `<div class="customize-harness-grid">${harnesses}</div>` : '<p class="customize-help">No supported harness is installed. Install a harness to enable this skill.</p>'}
-      ${projectCount ? `<p class="customize-help">${plural(projectCount,'project activation')} configured separately in Settings.</p>` : ''}
+      ${projectCount ? `<p class="customize-help">${plural(projectCount,'legacy project activation')} recorded. Use Rules & library to turn off legacy activations everywhere.</p>` : ''}
       ${consent}
       ${replacement}
       <div class="customize-skill-footer">
@@ -773,18 +795,21 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
 
   async function refresh(): Promise<void> {
     const serial = ++refreshSerial;
+    const managerSerial = ++managerReadSerial;
     refreshing = true;
     draw();
     try {
-      const [items, saved, current, statuses, recent, icons] = await Promise.all([
+      const [items, saved, current, statuses, recent, icons, managerSwitches] = await Promise.all([
         options.call<SkillItem[]>('skills_list'), options.call<SavedSource[]>('skills_source_list'),
         options.call<Policy>('skills_sync_policy'),
         options.call<SkillMatrix>('skills_matrix').catch(()=>({project:null,harnesses:[]} as SkillMatrix)),
         options.call<SyncReport>('skills_sync_report').catch(()=>({checkedAt:0,installed:[],updated:[],skipped:[],events:[]} as SyncReport)),
         options.call<Record<string,string>>('skills_icons').catch(()=>({})),
+        readManager(),
       ]);
       if (disposed || serial !== refreshSerial) return;
       installed=items; installedIcons=icons; sources=saved; policy=current; matrix=statuses; syncReport=recent;
+      if (managerSerial === managerReadSerial && managerSwitches !== null) managerOff=managerSwitches;
       pruneUninstalledTabs();
       loadFailed=false;
     } catch (cause) {
@@ -1172,6 +1197,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     }
     if (event.key === 'Escape' && detail) { event.preventDefault(); closeSkillDetail(); }
   };
+  window.addEventListener(SKILLS_CHANGED_EVENT,onManagerChange);
   host.addEventListener('keydown',keydown);
   host.addEventListener('pointerdown',resizePointerDown);
   host.addEventListener('pointermove',resizePointerMove);
@@ -1193,6 +1219,7 @@ export function mountCustomizeSkills(host: HTMLElement, options: CustomizeSkills
     host.classList.remove('customize-skills-root','customize-detail-open','customize-side-resizing');
     host.style.removeProperty('--customize-inspector-width');
     if(toastTimer !== undefined)clearTimeout(toastTimer);
+    window.removeEventListener(SKILLS_CHANGED_EVENT,onManagerChange);
     host.removeEventListener('keydown',keydown);
     host.removeEventListener('pointerdown',resizePointerDown);
     host.removeEventListener('pointermove',resizePointerMove);

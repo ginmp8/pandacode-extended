@@ -97,7 +97,7 @@ pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConf
     let old_ids = team.config.council.as_ref().map(|c| &c.reviewer_bot_ids);
     let new_ids = next.as_ref().map(|c| &c.reviewer_bot_ids);
     if old_ids == new_ids || next.is_none() { return Ok(()); }
-    let current = team.workers.iter().filter_map(|w| w.council.as_ref()).map(|seat| seat.round).max().unwrap_or(0);
+    let current = team.workers.iter().filter(|w| w.created_at >= team.council_since).filter_map(|w| w.council.as_ref()).map(|seat| seat.round).max().unwrap_or(0);
     let incomplete = current > 0
         && !matches!(team.council_status.as_ref().map(|s| s.state.as_str()), Some("passed" | "fixing" | "limit" | "asking" | "accepted"));
     if incomplete {

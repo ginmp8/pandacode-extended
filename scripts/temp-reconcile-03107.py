@@ -340,7 +340,13 @@ def adapt_tests():
 
 def docs():
     f=Path("docs/skills-library.md")
-    f.write_text(source_file(str(f))+"\n## PandaCode Extended Customize Skills\n\nThe separate [Customize → Skills workspace](customize-skills.md) retains ZIP imports, GitHub sources, multiselect, per-harness installation, replacement, and sync progress. The upstream Skills Manager governs runtime enabled/disabled status.\n")
+    f.write_text(source_file(str(f))+"\n## PandaCode Extended catalogs and Customize Skills\n\nUnlike vanilla upstream, PandaCode Extended preserves its saved GitHub catalog discovery, repository scanning, selection, and library imports here. Importing a catalog skill does not activate it or override runtime switches. The separate [Customize → Skills workspace](customize-skills.md) retains ZIP/GitHub sources, multiselect, per-harness installation, replacement, and sync progress. The upstream Skills Manager governs runtime enabled/disabled status.\n")
+    f=Path("docs/skill-manager.md")
+    data=source_file(str(f))
+    start=data.index("The old skill **Catalogs**")
+    end=data.index("\n\n## Behaviour",start)
+    data=data[:start]+("**Extended compatibility:** Saved GitHub catalogs remain in Rules & library for discovery, repository refresh, multi-select and library-only imports; none of these activate installed agent skills. Customize → Skills retains its separate GitHub/ZIP installer and per-harness configuration. The new native Skills Manager remains authoritative for all-project and per-project runtime skill switches.")+data[end:]
+    f.write_text(data)
     f=Path("website/src/data/release-dates.json")
     old=json.loads(git("show",TARGET+":"+str(f)))
     new=json.loads(git("show",SOURCE+":"+str(f)))
@@ -369,7 +375,7 @@ def verify_inventory(candidate):
                 "src-tauri/src/skills/scoped.rs","src-tauri/src/skill_manager/library.rs",
                 "src-tauri/src/skill_manager/enforcement.rs","src-tauri/src/skill_manager/matrix_tests.rs",
                 "src-tauri/src/skill_manager/harness_tests.rs","src-tauri/src/skill_manager/lifecycle_tests.rs",
-                "src-tauri/src/skill_manager/tests.rs","src-tauri/src/bots.rs","src/main.ts"}
+                "src-tauri/src/skill_manager/tests.rs","src-tauri/src/bots.rs","src/main.ts","docs/skill-manager.md"}
     for p in set(b)|set(s)|set(t):
         base,source,target=b.get(p),s.get(p),t.get(p)
         group=("unchanged" if base==source else "both_same") if source==target else ("source_only" if base==target else ("target_only" if base==source else "both_changed"))
@@ -432,6 +438,13 @@ def main():
     adapt_native_ui()
     adapt_tests()
     docs()
+    # Preserve this topic branch's inspection tools for continued test and repair.
+    # Never introduce them into the upstream or Extended destination branch.
+    for tracked in ("scripts/temp-reconcile-03107.py",
+                    ".github/workflows/temp-reconciliation-inspect.yml"):
+        f=Path(tracked)
+        f.parent.mkdir(parents=True,exist_ok=True)
+        f.write_text(source_file_from(git("rev-parse","origin/"+BRANCH),tracked))
     git("add","-A")
     if git("diff","--name-only","--diff-filter=U"): raise RuntimeError("Unmerged paths remain")
     tree=git("write-tree")

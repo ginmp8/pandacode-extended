@@ -217,8 +217,8 @@ pub(super) fn council_request(store: &Store, message_id: &str) -> Result<Option<
     ).optional().map_err(|e| e.to_string())?;
     row.map(|(config, executors)| {
         Ok(ChannelCouncilRequest {
-            council: serde_json::from_str(&config).map_err(|_| "channel_council_invalid: saved Council config is invalid.")?,
-            executors: serde_json::from_str(&executors).map_err(|_| "channel_council_invalid: saved executor roster is invalid.")?,
+            council: serde_json::from_str(&config).map_err(|_| "channel_council_invalid: saved Council config is invalid.".to_string())?,
+            executors: serde_json::from_str(&executors).map_err(|_| "channel_council_invalid: saved executor roster is invalid.".to_string())?,
         })
     }).transpose()
 }

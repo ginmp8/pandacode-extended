@@ -107,7 +107,10 @@ export type CatalogImport = { items: SkillItem[]; imported: string[]; skipped: {
 def adapt_preview():
     f=Path("src/preview-skills.ts")
     data=f.read_text()
-    data=checked_replace(data,"import type { CatalogImport,","import { LIBRARY_DIR } from './preview-skill-manager';\nimport type { CatalogImport,")
+    if "import { LIBRARY_DIR }" not in data:
+        data="import { LIBRARY_DIR } from './preview-skill-manager';\n"+data
+    if "import type { CatalogImport," not in data:
+        data=checked_replace(data,"import type { SkillActivation,","import type { CatalogImport, CatalogSkill, CatalogSource, SkillCatalogs, SkillActivation,")
     data=checked_replace(data,"id, name, kind, description:","id, name, kind, ...(kind === 'skill' ? { folder: LIBRARY_DIR + '/' + id } : {}), description:")
     extra="""    /** Shared with native Skills → Add skill → Bot library. */
     importSkills(source: string, skills: readonly { name: string; description: string }[]) {

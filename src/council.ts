@@ -142,7 +142,9 @@ function savedDefaults(): Record<string, unknown> {
   try { const saved = JSON.parse(localStorage.getItem(COUNCIL_KEY) ?? 'null'); return saved && typeof saved === 'object' ? saved : {}; } catch { return {}; }
 }
 export function saveCouncilDefaults(council: CouncilConfig): void {
-  try { localStorage.setItem(COUNCIL_KEY, JSON.stringify({ ...savedDefaults(), ...council })); } catch { /* Kept for this window only. */ }
+  // Reviewer bot identities belong to one task, never global defaults for new threads.
+  const { reviewerBotIds: _taskReviewers, ...safeDefaults } = council;
+  try { localStorage.setItem(COUNCIL_KEY, JSON.stringify({ ...savedDefaults(), ...safeDefaults, reviewerBotIds: undefined })); } catch { /* Kept for this window only. */ }
 }
 /** Whether a new thread starts with Council on (when its team starts, or on its first send). Stored with the defaults. */
 export const councilForNewThreads = (): boolean => savedDefaults().newThreads === true;

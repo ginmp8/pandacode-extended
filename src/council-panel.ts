@@ -2,6 +2,7 @@ import { escape, icon, isImeKey, morph } from './dom';
 import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type CouncilConfig, type TeamSnapshot } from './architect-types';
+import type { ProviderId } from './types';
 import { COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilDefaults, councilForNewThreads, setCouncilForNewThreads, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
@@ -9,6 +10,9 @@ import { COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilDefaults, co
 
 export type CouncilHost = {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+  /** The executor is never an eligible reviewer; native validates this independently. */
+  executorBotId?(sessionId: string): string | null;
+  harnessAvailable?(provider: ProviderId): boolean;
   team(sessionId: string): TeamSnapshot | null;
   /** Whether the thread's team (or that it has none) is known yet: false while it still loads. */
   loaded(sessionId: string): boolean;
@@ -25,14 +29,16 @@ export type CouncilHost = {
   announce(text: string): void;
 };
 
-type Field = keyof CouncilConfig;
+type Field = 'target' | 'maxRounds' | 'reviewers';
+type ReviewerBot = { id: string; name: string; role: string; provider: ProviderId; model: string; paused: boolean };
+type ReviewerSelection = { selected: boolean; ids: string[] };
 const FIELDS: readonly { key: Field; label: string; options: readonly number[]; name(value: number): string }[] = [
   { key: 'target', label: 'Target score', options: COUNCIL_TARGETS, name: formatScore },
   { key: 'maxRounds', label: 'Max rounds', options: COUNCIL_ROUNDS, name: String },
   { key: 'reviewers', label: 'Reviewers', options: COUNCIL_REVIEWERS, name: value => value ? String(value) : 'Auto' },
 ];
 /** Wide enough that "10.0" keeps clear of its segment's edge. */
-const PANEL_WIDTH = 300;
+const PANEL_WIDTH = 340;
 const BUTTON = '.composer-council-button';
 /** A balance: reviewers weighing the work. Its own glyph, apart from the sidebar's Agent usage. */
 const COUNCIL_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg>';
@@ -73,6 +79,41 @@ export function createCouncil(host: CouncilHost) {
   /** Per thread: requests in flight, in order (one thread never waits on another's), with the newest asked-for council
    *  shown until they all answer; and a refusal not yet seen in the panel. */
   const pending = new Map<string, { tail: Promise<void>; count: number; asked: CouncilConfig | null }>(), failures = new Map<string, string>();
+  const reviewerBots = new Map<string, ReviewerBot[]>();
+  const reviewerLoads = new Map<string, string>();
+  const reviewerDraft = new Map<string, ReviewerSelection>();
+  const selection = (sessionId: string): ReviewerSelection => reviewerDraft.get(sessionId) ?? {
+    selected: Boolean(shownConfig(sessionId)?.reviewerBotIds?.length),
+    ids: [...(shownConfig(sessionId)?.reviewerBotIds ?? [])],
+  };
+  function selectionConfig(sessionId: string): CouncilConfig {
+    const draft = selection(sessionId), council = shownConfig(sessionId) ?? councilDefaults();
+    if (!draft.selected) return { ...council, reviewerBotIds: undefined };
+    if (draft.ids.length < 2 || draft.ids.length > 8 || new Set(draft.ids).size !== draft.ids.length) throw new Error('Select 2 to 8 distinct reviewer bots.');
+    const available = reviewerBots.get(sessionId) ?? [];
+    const executor = host.executorBotId?.(sessionId);
+    for (const id of draft.ids) {
+      const bot = available.find(bot => bot.id === id);
+      if (!bot || bot.paused || bot.id === executor || host.harnessAvailable?.(bot.provider) === false) throw new Error('A selected reviewer bot is unavailable or is the executor. Choose another bot.');
+    }
+    return { ...council, reviewerBotIds: [...draft.ids] };
+  }
+  function selectedError(sessionId: string, error: string): void {
+    failures.set(sessionId, error);
+    host.announce(notChanged(error));
+    paint(sessionId);
+  }
+  function loadReviewerBots(sessionId: string): void {
+    reviewerLoads.set(sessionId, 'Loading available bots…');
+    void host.call<ReviewerBot[]>('bots_list').then(bots => {
+      reviewerBots.set(sessionId, bots);
+      reviewerLoads.delete(sessionId);
+      if (panelSession === sessionId) paint(sessionId);
+    }).catch(cause => {
+      reviewerLoads.set(sessionId, `Cannot load bots: ${cause instanceof Error ? cause.message : String(cause)}`);
+      if (panelSession === sessionId) paint(sessionId);
+    });
+  }
   /** The rounds this cycle has run: Raise max rounds offers only more than that. */
   const roundsUsed = (sessionId: string): number => { const team = host.team(sessionId), progress = team && councilProgress(team); return Math.max(progress?.status.round ?? 0, progress?.latest?.number ?? 0); };
   const shownConfig = (sessionId: string): CouncilConfig | null => pending.has(sessionId) ? pending.get(sessionId)!.asked : host.team(sessionId)?.config.council ?? null;
@@ -130,6 +171,21 @@ export function createCouncil(host: CouncilHost) {
     }
     const failure = failures.get(sessionId) ?? '';
     panel.querySelector<HTMLInputElement>('.council-switch')!.checked = Boolean(shown);
+    if (!panel.dataset.compact) {
+      const draft = selection(sessionId), bots = reviewerBots.get(sessionId) ?? [], executor = host.executorBotId?.(sessionId);
+      for (const control of panel.querySelectorAll<HTMLInputElement>('[name="council-source"]')) control.checked = control.value === (draft.selected ? 'selected' : 'automatic');
+      const list = panel.querySelector<HTMLElement>('.council-bots')!;
+      const markup = draft.selected ? `${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
+        const disabled = bot.paused || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
+        const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
+        return `<label class="council-bot-choice${disabled ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${draft.ids.includes(bot.id) ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${reason}</span></label>`;
+      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>` : '';
+      const focusedBot = (document.activeElement as HTMLElement | null)?.closest<HTMLInputElement>('[data-reviewer-bot]')?.dataset.reviewerBot;
+      if (list.innerHTML !== markup) morph(list, markup);
+      if (focusedBot && !list.contains(document.activeElement)) list.querySelector<HTMLInputElement>(`[data-reviewer-bot="${CSS.escape(focusedBot)}"]`)?.focus({ preventScroll: true });
+      list.hidden = !draft.selected;
+      panel.querySelector<HTMLElement>('[data-field-row="reviewers"]')!.hidden = draft.selected;
+    }
     // Which row had focus before this paint (its focused option may be hidden below).
     const hadFocus = document.activeElement?.closest<HTMLElement>('.council-panel [data-field]') ?? null;
     for (const { key, options, name } of FIELDS) {
@@ -303,7 +359,7 @@ export function createCouncil(host: CouncilHost) {
     if (anchor.closest('.council-strip')) panel.dataset.compact = focusField ?? 'target';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-labelledby', 'council-title');
-    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}</div></div>`).join('')}<p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
+    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}</div></div>`).join('')}<fieldset class="council-reviewer-source"><legend>Reviewer source</legend><label><input type="radio" name="council-source" value="automatic" checked> Automatic / native workers</label><label><input type="radio" name="council-source" value="selected"> Selected bots</label><div class="council-bots" aria-label="Select reviewer bots" hidden></div></fieldset><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
     document.body.append(panel);
     // Compact (from the strip): only the row it opened on, titled by what it does (a heading, no longer the switch's label).
     if (panel.dataset.compact) {
@@ -334,6 +390,7 @@ export function createCouncil(host: CouncilHost) {
       panel.style.top = above ? '' : `${rect.bottom + 10}px`;
       panel.dataset.placement = above ? 'above' : 'below';
     };
+    loadReviewerBots(sessionId);
     paint(sessionId);
     place(); placeNow = place;
     showPopover(panel, anchor);
@@ -347,13 +404,35 @@ export function createCouncil(host: CouncilHost) {
     const onChange = (event: Event) => {
       const input = event.target as HTMLInputElement;
       if (input.classList.contains('council-new-threads')) { setCouncilForNewThreads(input.checked); return; }
+      if (input.name === 'council-source') {
+        const draft = selection(sessionId);
+        reviewerDraft.set(sessionId, { selected: input.value === 'selected', ids: [...draft.ids] });
+        failures.delete(sessionId);
+        if (shownConfig(sessionId) && input.value === 'automatic') void apply(sessionId, selectionConfig(sessionId), remember);
+        else if (shownConfig(sessionId) && draft.ids.length >= 2 && input.value === 'selected') {
+          try { void apply(sessionId, selectionConfig(sessionId), remember); } catch (cause) { selectedError(sessionId, String(cause)); }
+        } else paint(sessionId);
+        return;
+      }
+      if (input.hasAttribute('data-reviewer-bot')) {
+        const id = input.dataset.reviewerBot!, draft = selection(sessionId), ids = input.checked ? [...draft.ids, id] : draft.ids.filter(item => item !== id);
+        if (ids.length > 8) { input.checked = false; selectedError(sessionId, 'Council allows at most 8 reviewer bots.'); return; }
+        reviewerDraft.set(sessionId, { selected: true, ids });
+        failures.delete(sessionId);
+        if (shownConfig(sessionId) && ids.length >= 2) {
+          try { void apply(sessionId, selectionConfig(sessionId), remember); } catch (cause) { selectedError(sessionId, String(cause)); }
+        } else paint(sessionId);
+        return;
+      }
       // Classic team setup and no team yet: the user sets the team up first, rather than an automatic team starting.
       if (input.checked && !host.team(sessionId) && host.classicSetup()) {
         input.checked = false; close();
         host.openClassicSetup(document.querySelector<HTMLElement>(BUTTON) ?? anchor);
         return;
       }
-      apply(sessionId, input.checked ? councilDefaults() : null, remember);
+      if (!input.checked) { void apply(sessionId, null, remember); return; }
+      try { void apply(sessionId, selectionConfig(sessionId), remember); }
+      catch (cause) { input.checked = false; selectedError(sessionId, cause instanceof Error ? cause.message : String(cause)); }
     };
     const onClick = (event: MouseEvent) => {
       const option = (event.target as Element).closest<HTMLElement>('[data-value]');

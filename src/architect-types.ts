@@ -8,7 +8,7 @@ export interface WorkerProfile {
   reasoningEffort?: string | null;
 }
 /** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
-export interface CouncilConfig { target: number; maxRounds: number; reviewers: number }
+export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[] }
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */

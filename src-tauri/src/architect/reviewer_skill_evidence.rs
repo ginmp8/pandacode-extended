@@ -62,6 +62,7 @@ pub(super) fn dispatch_state(
     let revision = binding.artifact_revision.clone();
     let mode = pin.delivery_mode.clone();
     let staged_path = pin.staged_path.clone();
+    let lower_trust_instructions = frozen.prompt.clone();
     let previous = binding.skill_evidence.get(&request.skill_id).cloned();
     let mut observed = previous.clone().unwrap_or_else(|| ObservedSkillEvidence {
         content_sha256: sha.clone(), artifact_revision: revision.clone(),
@@ -93,7 +94,10 @@ pub(super) fn dispatch_state(
     Ok((json!({
         "skillId": request.skill_id, "contentSha256": sha,
         "artifactRevision": revision, "deliveryMode": mode,
-        "readOnlyPath": staged_path, "nativeRetrievalRecorded": observed.invoked,
+        "readOnlyPath": staged_path,
+        // A native open delivers frozen lower-trust input, not merely a model claim.
+        "lowerTrustInstructions": (name == "pandacode_reviewer_skill_open").then_some(lower_trust_instructions),
+        "nativeRetrievalRecorded": observed.invoked,
         "pinnedInputIntegrityVerified": observed.check_executed && observed.evidence_verified,
         "note": "A native input-integrity check is not proof of project tests or methodological adherence."
     }), changed.then_some(team)))

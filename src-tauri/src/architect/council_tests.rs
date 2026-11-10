@@ -49,6 +49,11 @@ fn selected_bot_quorum_is_frozen_when_later_round_chooses_more_bots() {
         team.workers[index].reviewer_binding = Some(binding);
     }
     assert!(council::complete(&team, &original, 1));
+    let mut changed_while_open = original.clone();
+    changed_while_open.reviewer_bot_ids.push("bot-3".into());
+    // A completed round can be followed by an explicitly selected new roster,
+    // but the previous issued quorum remains two.
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(changed_while_open.clone())).is_ok());
     let mut expanded = original.clone();
     expanded.reviewer_bot_ids.push("bot-3".into());
     assert!(council::complete(&team, &expanded, 1));

@@ -62,6 +62,16 @@ pub(super) fn review_policy(
     permissions: &super::reviewer_security::ReviewerPermissionSelection,
 ) -> Result<super::reviewer_security::ReviewerToolPolicy> {
     use super::reviewer_security::{ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy};
+    // The bot's normal native host catalog is the configured capability source,
+    // never the untrusted request. ZCode has no host-tool bridge.
+    if bot.provider == "zcode"
+        || !crate::agent_tools::catalog().iter().any(|tool| {
+            tool["name"] == "pandacode_open_file"
+                && tool["inputSchema"]["properties"]["path"]["type"] == "string"
+        })
+    {
+        return Err("policy_unsupported: this bot has no enforceable host-tool bridge.".into());
+    }
     let mut configured: Vec<ReviewerCapabilityGrant> = Vec::new();
     for grant in &permissions.grants {
         // Opening one exact project-relative file in the app inspector cannot mutate
@@ -78,9 +88,8 @@ pub(super) fn review_policy(
         }
         configured.push(grant.clone());
     }
-    // The native app exposes this host-only read action to every configured bot's
-    // ordinary project session. The reviewer receives no additional ambient host tools.
-    let _ = bot;
+    // No ambient tool grants: the configured host manifest and exact S1 wrapper
+    // intersect with the user's explicit task authorization on every invocation.
     ReviewerToolPolicy::from_user_grants(
         ReviewerPhase::Review, &permissions.authorization_id, &configured, &permissions.grants,
     )
@@ -156,7 +165,9 @@ pub(super) fn profile(bot: &bots::Bot) -> WorkerProfile {
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
     let old_ids = team.config.council.as_ref().map(|c| &c.reviewer_bot_ids);
     let new_ids = next.as_ref().map(|c| &c.reviewer_bot_ids);
-    if old_ids == new_ids || next.is_none() { return Ok(()); }
+    let old_policy = team.config.council.as_ref().and_then(|c| c.review_permissions.as_ref());
+    let new_policy = next.as_ref().and_then(|c| c.review_permissions.as_ref());
+    if (old_ids == new_ids && old_policy == new_policy) || next.is_none() { return Ok(()); }
     let current = team.workers.iter().filter(|w| w.created_at >= team.council_since).filter_map(|w| w.council.as_ref()).map(|seat| seat.round).max().unwrap_or(0);
     let incomplete = current > 0 && super::council::current_round_incomplete(team);
     if incomplete {

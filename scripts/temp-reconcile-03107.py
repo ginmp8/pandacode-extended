@@ -111,7 +111,11 @@ def adapt_preview():
         data="import { LIBRARY_DIR } from './preview-skill-manager';\n"+data
     if "import type { CatalogImport," not in data:
         data=checked_replace(data,"import type { SkillActivation,","import type { CatalogImport, CatalogSkill, CatalogSource, SkillCatalogs, SkillActivation,")
-    data=checked_replace(data,"id, name, kind, description:","id, name, kind, ...(kind === 'skill' ? { folder: LIBRARY_DIR + '/' + id } : {}), description:")
+    head=data.split("    const item: SkillItem = {",1)
+    if len(head)!=2: raise RuntimeError("Missing preview item constructor")
+    item=head[1].split("};",1)[0]
+    if "folder:" not in item:
+        data=checked_replace(data,"    const item: SkillItem = {","    const item: SkillItem = {\n      ...(kind === 'skill' ? { folder: LIBRARY_DIR + '/' + id } : {}),")
     extra="""    /** Shared with native Skills → Add skill → Bot library. */
     importSkills(source: string, skills: readonly { name: string; description: string }[]) {
       const kind = source.startsWith('/') ? 'folder' as const : 'skills' as const;

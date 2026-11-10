@@ -48,6 +48,7 @@ pub struct ChannelCouncilView {
     pub target: f64,
     pub lowest: Option<f64>,
     pub artifact_revision: String,
+    pub notice: Option<String>,
     pub reviewers: Vec<ChannelCouncilReviewer>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +56,8 @@ pub struct ChannelCouncilView {
 pub struct ChannelCouncilReviewer {
     pub bot_id: Option<String>,
     pub name: String,
+    pub lens: String,
+    pub round: usize,
     pub score: Option<f64>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -223,14 +226,14 @@ pub(super) fn council_request(store: &Store, message_id: &str) -> Result<Option<
     }).transpose()
 }
 
-fn council_view(store: &Store, delivery_id: &str, session_id: &str) -> Result<Option<ChannelCouncilView>> {
+fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String)> = store.db.query_row(
         "SELECT cycle_id,artifact_revision FROM extended_channel_council_deliveries WHERE delivery_id=?1",
         [delivery_id], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((cycle_id, original_revision)) = cycle else { return Ok(None) };
     let team = crate::architect::load(store, session_id)?;
-    let (state, round, target, lowest, revision, reviewers) = if let Some(team) = team {
+    let (state, round, target, lowest, revision, notice, reviewers) = if let Some(team) = team {
         let status = team.council_status.as_ref();
         let state = match team.status.as_str() {
             "stopped" => "Stopped",
@@ -247,16 +250,25 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str) -> Result<Op
         let reviewers = team.workers.iter().filter_map(|worker| {
             worker.council.as_ref().map(|seat| ChannelCouncilReviewer {
                 bot_id: worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.clone()),
-                name: worker.name.clone(), score: seat.score,
+                name: worker.name.clone(), lens: seat.lens.clone(),
+                round: seat.round, score: seat.score,
             })
         }).collect();
         (state.to_owned(), status.map_or(0, |s| s.round),
             status.map_or(9.0, |s| s.target), status.and_then(|s| s.lowest),
-            format!("{}:{}", team.council_since, team.dispatch_revision), reviewers)
+            format!("{}:{}", team.council_since, team.dispatch_revision),
+            status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect()), reviewers)
     } else {
-        ("Inconclusive".into(), 0, 9.0, None, original_revision, Vec::new())
+        ("Inconclusive".into(), 0, 9.0, None, original_revision, None, Vec::new())
     };
-    Ok(Some(ChannelCouncilView { cycle_id, state, round, target, lowest, artifact_revision: revision, reviewers }))
+    // The native delivery is authoritative for Stop and failure even when an
+    // interrupted Architect snapshot still says a reviewer is working.
+    let state = match delivery_status {
+        "stopped" => "Stopped".into(),
+        "failed" => "Failed".into(),
+        _ => state,
+    };
+    Ok(Some(ChannelCouncilView { cycle_id, state, round, target, lowest, artifact_revision: revision, notice, reviewers }))
 }
 
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.
@@ -279,7 +291,7 @@ pub(crate) fn detail(store: &Store, id: &str, limit: usize) -> Result<SharedChan
         for row in rows {
             let (delivery_id, bot_id, bot_name, status, created_at, session_id) = row.map_err(|e| e.to_string())?;
             messages.push(SharedChannelMessage {
-                council: council_view(store, &delivery_id, &session_id)?,
+                council: council_view(store, &delivery_id, &session_id, &status)?,
                 id: delivery_id, kind: "assigned".into(), author_bot_id: Some(bot_id),
                 text: format!("Assigned to {bot_name}"), status: Some(status_label(status)),
                 created_at, recipient_ids: Vec::new(),

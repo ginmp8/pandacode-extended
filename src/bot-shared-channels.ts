@@ -28,7 +28,8 @@ export interface ChannelCouncilView {
   target: number;
   lowest: number | null;
   artifactRevision: string;
-  reviewers: { botId: string | null; name: string; score: number | null }[];
+  notice?: string | null;
+  reviewers: { botId: string | null; name: string; lens: string; round: number; score: number | null }[];
 }
 export interface SharedChannelDetail extends SharedChannelSummary {
   messages: SharedChannelMessage[];
@@ -87,7 +88,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     const description = message.kind === "direct_delegation"
       ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
     const council = message.council;
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)}${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span></span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;

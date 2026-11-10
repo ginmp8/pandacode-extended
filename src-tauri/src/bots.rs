@@ -198,6 +198,24 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
     }
     extended::upgrade(db)?;
     collaboration::upgrade(db)?;
+    // Council is an immutable opt-in on an individual message. Separate
+    // sidecars preserve older channel/bot schemas, threads and import payloads.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS extended_channel_council_requests(
+            message_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_messages(id) ON DELETE CASCADE,
+            council_json TEXT NOT NULL CHECK(json_valid(council_json)),
+            executor_ids TEXT NOT NULL CHECK(json_valid(executor_ids)),
+            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_deliveries(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            channel_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            executor_bot_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL UNIQUE,
+            objective TEXT NOT NULL,
+            artifact_revision TEXT NOT NULL,
+            created_at INTEGER NOT NULL);",
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 

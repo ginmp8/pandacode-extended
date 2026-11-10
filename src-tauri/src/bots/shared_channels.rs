@@ -4,7 +4,7 @@
 use super::{collaboration, gateway, Bot, DESKTOP};
 use crate::{message_queue, storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
@@ -33,8 +33,30 @@ pub struct SharedChannelMessage {
     pub status: Option<String>,
     pub created_at: i64,
     pub recipient_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub council: Option<ChannelCouncilView>,
 }
 
+/// A channel-visible, attributed verdict; private reviewer transcripts and
+/// credentials are deliberately excluded from this value.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCouncilView {
+    pub cycle_id: String,
+    pub state: String,
+    pub round: usize,
+    pub target: f64,
+    pub lowest: Option<f64>,
+    pub artifact_revision: String,
+    pub reviewers: Vec<ChannelCouncilReviewer>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCouncilReviewer {
+    pub bot_id: Option<String>,
+    pub name: String,
+    pub score: Option<f64>,
+}
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedChannelDetail {
@@ -176,6 +198,61 @@ pub(crate) fn set_archived(store: &Store, id: &str, archived: bool) -> Result<()
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ChannelCouncilRequest {
+    pub(super) council: crate::architect::CouncilConfig,
+    pub(super) executors: Vec<String>,
+}
+
+pub(super) fn council_request(store: &Store, message_id: &str) -> Result<Option<ChannelCouncilRequest>> {
+    let row: Option<(String, String)> = store.db.query_row(
+        "SELECT council_json,executor_ids FROM extended_channel_council_requests WHERE message_id=?1",
+        [message_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    row.map(|(config, executors)| {
+        Ok(ChannelCouncilRequest {
+            council: serde_json::from_str(&config).map_err(|_| "channel_council_invalid: saved Council config is invalid.")?,
+            executors: serde_json::from_str(&executors).map_err(|_| "channel_council_invalid: saved executor roster is invalid.")?,
+        })
+    }).transpose()
+}
+
+fn council_view(store: &Store, delivery_id: &str, session_id: &str) -> Result<Option<ChannelCouncilView>> {
+    let cycle: Option<(String, String)> = store.db.query_row(
+        "SELECT cycle_id,artifact_revision FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [delivery_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((cycle_id, original_revision)) = cycle else { return Ok(None) };
+    let team = crate::architect::load(store, session_id)?;
+    let (state, round, target, lowest, revision, reviewers) = if let Some(team) = team {
+        let status = team.council_status.as_ref();
+        let state = match team.status.as_str() {
+            "stopped" => "Stopped",
+            "failed" => "Failed",
+            _ => match status.map(|s| s.state.as_str()) {
+                Some("passed") => "Passed",
+                Some("accepted") => "Accepted by user",
+                Some("limit") => "Limit reached",
+                Some("fixing" | "asking") => "Needs correction",
+                Some("waiting" | "reviewing" | "dispatch") => "Reviewing",
+                _ => "Inconclusive",
+            },
+        };
+        let reviewers = team.workers.iter().filter_map(|worker| {
+            worker.council.as_ref().map(|seat| ChannelCouncilReviewer {
+                bot_id: worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.clone()),
+                name: worker.name.clone(), score: seat.score,
+            })
+        }).collect();
+        (state.to_owned(), status.map_or(0, |s| s.round),
+            status.map_or(9.0, |s| s.target), status.and_then(|s| s.lowest),
+            format!("{}:{}", team.council_since, team.dispatch_revision), reviewers)
+    } else {
+        ("Inconclusive".into(), 0, 9.0, None, original_revision, Vec::new())
+    };
+    Ok(Some(ChannelCouncilView { cycle_id, state, round, target, lowest, artifact_revision: revision, reviewers }))
+}
+
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.
 pub(crate) fn detail(store: &Store, id: &str, limit: usize) -> Result<SharedChannelDetail> {
     let limit = limit.clamp(1, 10_000);
@@ -183,16 +260,25 @@ pub(crate) fn detail(store: &Store, id: &str, limit: usize) -> Result<SharedChan
     let mut messages = Vec::new();
     {
         let mut statement = store.db.prepare("SELECT m.id,CASE a.kind WHEN 'post' THEN 'bot_post' WHEN 'assignment' THEN 'bot_request' ELSE m.kind END,m.author_bot_id,m.text,m.status,m.created_at,COALESCE(a.recipients,'[]') FROM bot_shared_channel_messages m LEFT JOIN extended_bot_channel_actions a ON a.message_id=m.id WHERE m.channel_id=?1 ORDER BY m.created_at DESC,m.id DESC LIMIT ?2").map_err(|e| e.to_string())?;
-        let rows = statement.query_map(params![id,limit as i64+1], |r| Ok(SharedChannelMessage { id:r.get(0)?, kind:r.get(1)?, author_bot_id:r.get(2)?, text:r.get(3)?, status:r.get::<_,Option<String>>(4)?.map(status_label), created_at:r.get(5)?, recipient_ids:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default() })).map_err(|e| e.to_string())?;
+        let rows = statement.query_map(params![id,limit as i64+1], |r| Ok(SharedChannelMessage { id:r.get(0)?, kind:r.get(1)?, author_bot_id:r.get(2)?, text:r.get(3)?, status:r.get::<_,Option<String>>(4)?.map(status_label), created_at:r.get(5)?, recipient_ids:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(), council:None })).map_err(|e| e.to_string())?;
         messages.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
     }
     {
-        let mut statement = store.db.prepare("SELECT d.id,d.bot_id,b.name,d.status,d.created_at FROM bot_shared_channel_deliveries d JOIN bots b ON b.id=d.bot_id WHERE d.channel_id=?1 ORDER BY d.created_at DESC,d.id DESC LIMIT ?2").map_err(|e| e.to_string())?;
+        let mut statement = store.db.prepare("SELECT d.id,d.bot_id,b.name,d.status,d.created_at,d.session_id FROM bot_shared_channel_deliveries d JOIN bots b ON b.id=d.bot_id WHERE d.channel_id=?1 ORDER BY d.created_at DESC,d.id DESC LIMIT ?2").map_err(|e| e.to_string())?;
         let rows = statement.query_map(params![id,limit as i64+1], |r| {
             let bot_id: String = r.get(1)?; let bot_name: String = r.get(2)?;
-            Ok(SharedChannelMessage { id:r.get(0)?, kind:"assigned".into(), author_bot_id:Some(bot_id), text:format!("Assigned to {bot_name}"), status:Some(status_label(r.get::<_,String>(3)?)), created_at:r.get(4)?, recipient_ids:Vec::new() })
+            let delivery_id: String = r.get(0)?;
+            Ok((delivery_id, bot_id, bot_name, r.get::<_,String>(3)?, r.get::<_,i64>(4)?, r.get::<_,String>(5)?))
         }).map_err(|e| e.to_string())?;
-        messages.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
+        for row in rows {
+            let (delivery_id, bot_id, bot_name, status, created_at, session_id) = row.map_err(|e| e.to_string())?;
+            messages.push(SharedChannelMessage {
+                council: council_view(store, &delivery_id, &session_id)?,
+                id: delivery_id, kind: "assigned".into(), author_bot_id: Some(bot_id),
+                text: format!("Assigned to {bot_name}"), status: Some(status_label(status)),
+                created_at, recipient_ids: Vec::new(),
+            });
+        }
     }
     // Direct delegations started by a channel assignee appear as compact status rows only;
     // the private bot-to-bot request body and response never enter the channel transcript.
@@ -202,7 +288,7 @@ pub(crate) fn detail(store: &Store, id: &str, limit: usize) -> Result<SharedChan
             id:r.get(0)?, kind:"direct_delegation".into(), author_bot_id:Some(r.get(1)?),
             text:format!("Direct request to {}",r.get::<_,String>(2)?),
             status:Some(status_label(r.get(3)?)),created_at:r.get(4)?,
-            recipient_ids:vec![r.get(5)?],
+            recipient_ids:vec![r.get(5)?], council:None,
         })).map_err(|e| e.to_string())?;
         messages.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
     }
@@ -339,7 +425,7 @@ pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: 
     // The delivery starts queued; the gateway marks it in progress when its turn launches
     // (`promote_taken`), so a finished run is credited only to the work it actually ran.
     let delivery_id = crate::storage::id();
-    let (channel, bot, prompt) = {
+    let (channel, bot, prompt, thread) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let channel = shared_channel(&store, channel_id)?;
         if channel.archived { return Err("This channel is deleted.".into()); }
@@ -353,12 +439,26 @@ pub(crate) async fn send_channel_assignment(app: &tauri::AppHandle, channel_id: 
         }
         let bot = super::get(&store, bot_id)?;
         if bot.paused { return Err(format!("{} is paused.", bot.name)); }
-        let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, DESKTOP, &format!("{} · You", bot.name))?;
+        let requested = council_request(&store, message_id)?;
+        if let Some(request) = &requested {
+            let mut executors = request.executors.clone();
+            if !executors.iter().any(|id| id == bot_id) { executors.push(bot_id.to_owned()); }
+            crate::architect::validate_channel_reviewers(&store, &request.council, &channel.member_ids, &executors)?;
+        }
+        let thread = requested.as_ref().map(|_| format!("channel-council:{delivery_id}"))
+            .unwrap_or_else(|| DESKTOP.to_owned());
+        let (session_id, _) = super::thread_session(&store, &bot, DESKTOP, &thread, &format!("{} · Channel Council", bot.name))?;
+        if let Some(request) = &requested {
+            crate::architect::configure_channel_delivery(&store, &session_id, request.council.clone())?;
+        }
         let prompt = assignment_text(&store, &channel, &bot.id, message_id, text)?;
         store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7)", params![delivery_id,channel_id,message_id,bot_id,session_id,depth as i64,created_at]).map_err(|e| e.to_string())?;
-        (channel, bot, prompt)
+        if requested.is_some() {
+            store.db.execute("INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,'0',?7)", params![delivery_id,channel_id,message_id,bot_id,crate::storage::id(),text,created_at]).map_err(|e| e.to_string())?;
+        }
+        (channel, bot, prompt, thread)
     };
-    let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
+    let inbound = gateway::Inbound { bot_id: bot.id.clone(), channel_id: DESKTOP.into(), thread, sender_id: format!("channel:{channel_id}"), sender_name: format!("#{}", channel.name), text: prompt, trusted: true, image_ids: None, moodboard_ids: None };
     if let Err(error) = gateway::deliver(app, inbound).await {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.db.execute("UPDATE bot_shared_channel_deliveries SET status='failed',updated_at=?2 WHERE id=?1 AND status IN ('queued','in_progress')", params![delivery_id,crate::storage::now()]).map_err(|e|e.to_string())?;
@@ -553,7 +653,7 @@ pub async fn bot_shared_channel_archive(app:tauri::AppHandle,state:State<'_,AppS
 }
 
 #[tauri::command]
-pub async fn bot_shared_channel_post(app:tauri::AppHandle,state:State<'_,AppState>,channel_id:String,text:String,recipients:Option<Vec<String>>) -> Result<()> {
+pub async fn bot_shared_channel_post(app:tauri::AppHandle,state:State<'_,AppState>,channel_id:String,text:String,recipients:Option<Vec<String>>,council:Option<crate::architect::CouncilConfig>) -> Result<()> {
     let text=text.trim().to_owned();
     if text.is_empty() || text.chars().count()>MAX_TEXT { return Err("Write a channel message under 16,384 characters.".into()); }
     let (channel,message_id,recipients)={
@@ -561,8 +661,14 @@ pub async fn bot_shared_channel_post(app:tauri::AppHandle,state:State<'_,AppStat
         let channel=shared_channel(&store,&channel_id)?;
         if channel.archived { return Err("This channel is deleted.".into()); }
         let recipients=route_recipients(&channel.member_ids,channel.lead_bot_id.as_deref(),recipients.as_deref().unwrap_or_default())?;
+        if let Some(config) = &council {
+            crate::architect::validate_channel_reviewers(&store, config, &channel.member_ids, &recipients)?;
+        }
         let message_id=crate::storage::id();
         store.db.execute("INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user',?3,'in_progress',?4)",params![message_id,channel_id,text,crate::storage::now()]).map_err(|e|e.to_string())?;
+        if let Some(config) = &council {
+            store.db.execute("INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at) VALUES(?1,?2,?3,?4)",params![message_id,serde_json::to_string(config).map_err(|e|e.to_string())?,serde_json::to_string(&recipients).map_err(|e|e.to_string())?,crate::storage::now()]).map_err(|e|e.to_string())?;
+        }
         (channel,message_id,recipients)
     };
     let posted_at=crate::storage::now();

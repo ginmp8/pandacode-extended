@@ -33,6 +33,41 @@ fn bot(f: &Fixture) -> Bot {
 }
 
 #[test]
+fn shared_channel_council_is_opt_in_and_never_selects_outsiders_or_executors() {
+    let f = fixture();
+    let lead = bot(&f);
+    let peer = create(&f.store, &input("Peer"), &f.root).unwrap();
+    let outsider = create(&f.store, &input("Outsider"), &f.root).unwrap();
+    let channel = shared_channels::create(&f.store, "reviews", &[lead.id.clone(),peer.id.clone()]).unwrap();
+    let config = crate::architect::CouncilConfig::default();
+    assert!(crate::architect::validate_channel_reviewers(
+        &f.store,&config,&channel.member_ids,&[lead.id.clone()]).is_ok());
+    let mut selected = config.clone();
+    selected.reviewer_bot_ids = vec![peer.id.clone(), outsider.id.clone()];
+    assert!(crate::architect::validate_channel_reviewers(
+        &f.store,&selected,&channel.member_ids,&[lead.id.clone()]
+    ).unwrap_err().contains("member"));
+    selected.reviewer_bot_ids[1] = lead.id.clone();
+    assert!(crate::architect::validate_channel_reviewers(
+        &f.store,&selected,&channel.member_ids,&[lead.id.clone()]
+    ).unwrap_err().contains("executor"));
+    let message_id = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user','Review this','queued',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    assert!(shared_channels::council_request(&f.store,&message_id).unwrap().is_none());
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at) VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&config).unwrap(),
+            serde_json::to_string(&vec![lead.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    let frozen = shared_channels::council_request(&f.store,&message_id).unwrap().unwrap();
+    assert_eq!(frozen.council,config);
+    assert_eq!(frozen.executors,vec![lead.id]);
+}
+
+#[test]
 fn creates_a_bot_with_its_own_workspace_project() {
     let f = fixture();
     let bot = bot(&f);

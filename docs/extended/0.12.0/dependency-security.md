@@ -102,3 +102,9 @@ No package manifests or lockfiles changed in the six-path source delta. Existing
 ## Fork HEAD bc323966 integration — 2026-11-10
 
 No npm/Cargo manifests or lockfiles changed in the 11-path upstream delta. Native application version remains **0.3.108** and Extended preserves `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. The added Voice tests and CI gate changes do not claim a new vulnerability fix. Run RustSec, npm audits, Rust/Node locked checks and platform build verification against the **new destination SHA**; previous CI results cannot validate it.
+
+## Mobile node-forge advisory remediation — 2026-11-10
+
+The exact-SHA [push dependency-audit job](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289) on `c7c146067cfa6a176b2ee79a95f262b867ed175f` failed at `npm audit --prefix mobile --audit-level=low`: the mobile lockfile's **node-forge 1.4.2** is affected by [GHSA-6889-vf6x-f3g5](https://github.com/advisories/GHSA-6889-vf6x-f3g5), [GHSA-w4xr-hqv8-ch44](https://github.com/advisories/GHSA-w4xr-hqv8-ch44), [GHSA-6cv4-p8m7-4r25](https://github.com/advisories/GHSA-6cv4-p8m7-4r25), and [GHSA-j8rw-jp99-435v](https://github.com/advisories/GHSA-j8rw-jp99-435v). The GitHub-reviewed advisories specify **1.4.3** as the first fixed version. This is a confirmed dependency advisory and audit failure, not proof of a reachable application exploit.
+
+The Extended mobile override and the one resolved `node_modules/node-forge` lock entry now target **1.4.3**, preserving Expo/CLI dependencies and other Extended overrides. The exact integrity (`sha512-P6wzfh6t70avmV8FrVEAd/36sOPJQ+hkaJVX1Laap9J/77m7M0eyozDvc8SwnDf4P7MP94gwbAAo0rg3YVXT+g==`) is sourced from the [npm registry's published metadata](https://registry.npmjs.org/node-forge/1.4.3). Local package install/audit was blocked by registry DNS. Confirm remediation with the **new exact-SHA CI**; keep installed-app and runtime acceptance separate.

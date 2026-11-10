@@ -211,3 +211,11 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
   - `EXTENDED_ONLY` integration/compatibility (3 shared paths): `.gitattributes` (line-ending stability), `src-tauri/src/remote/orchestrate/tests.rs` and `src-tauri/src/schedules/tests.rs` (Extended SQLite schema version 37).
 - [ ] Complete hunk-level causal review of **all 81** shared differences (63 paths not sampled in this pass); verify actual provider/agent, updater, credential, MCP, Connect, bot pause, cloud/VM, Voice, fresh-context, SQLite migration and native installer On/Off behavior. The 18 provisional classifications above do not prove complete functional parity.
 - [ ] Verify CI of any later documentation-only commit at its own SHA. Passing code-SHA CI does not constitute approval of Extended release 0.12.0.
+
+## Mobile node-forge advisory remediation — 2026-11-10
+
+- [x] Identify failure in [exact-SHA push CI `c7c14606`](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289): mobile node-forge 1.4.2, while root, website and relay npm audits succeeded.
+- [x] Verify patched version **1.4.3** from GitHub-reviewed advisories and its tarball integrity from the official npm registry.
+- [x] Update only `mobile/package.json` override and the matching `mobile/package-lock.json` entry; preserve all unrelated dependency versions and upstream files.
+- [ ] Validate **new published SHA** using `npm audit --prefix mobile --audit-level=low`, Expo/mobile compatibility and all other CI jobs.
+- [ ] Validate native/mobile runtime and SDK compatibility independently; the advisory fix alone does not approve a release.

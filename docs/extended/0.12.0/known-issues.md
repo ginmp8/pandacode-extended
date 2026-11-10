@@ -96,3 +96,7 @@ The upstream fixes correct automatic recording-stop instructions (the visible bu
 ## Fork HEAD 9437b3a9 follow-up — 2026-11-10
 
 The fork documents inherited Voice constraints: a custom local transcription URL requires a literal loopback IP (not `localhost`), a path and no query/fragment/embedded credentials; speech-service uploads and local speech-model downloads do not use system/HTTP proxy settings, so proxy-only networks cannot reach them. It also clarifies when a recording stopping sends audio to the chosen service. These disclosures are **not** newly reproduced Extended defects. The release gate now reports CI run IDs and permits rerunning cancelled or infrastructure/flaky jobs; manual publishing remains opt-in only. Native platform and service integration has not been independently exercised. The 80+ shared-file divergences still need hunk-level and runtime acceptance.
+
+## Mobile node-forge advisory remediation — 2026-11-10
+
+**Confirmed:** the Extended `c7c14606` push CI's mobile npm audit failed for pinned `node-forge@1.4.2`; [job evidence](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289). GitHub-reviewed advisories identify **1.4.3** as patched. The narrow Extended mobile override/lockfile remediation is in the next candidate; new-SHA npm audit, Expo compatibility and full CI remain **pending**, not passed. No application exploitability has been demonstrated.

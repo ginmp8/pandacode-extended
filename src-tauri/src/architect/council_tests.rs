@@ -149,7 +149,7 @@ fn scoped_reviewer_grants_round_trip_into_native_run_config() {
         resource: "owner/repo".into(),
     };
     let policy = ReviewerToolPolicy::from_user_grants(
-        ReviewerPhase::Review, "user-approval-1", &[grant.clone()], &[grant],
+        ReviewerPhase::Review, "user-approval-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
     ).unwrap();
     team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.tool_policy = policy.clone();
     store_team(&state, &mut team);

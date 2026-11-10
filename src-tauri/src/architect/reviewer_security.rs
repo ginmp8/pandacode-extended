@@ -133,6 +133,11 @@ impl ReviewerToolPolicy {
         let mut tools = Vec::new();
         let mut seen = HashSet::new();
         for grant in &policy.grants {
+            // Some host operations always require fresh confirmation. A task grant
+            // may not silently override this stronger app-level policy.
+            if crate::cloud::deploy::ALWAYS_ASK.contains(&grant.tool.as_str()) {
+                return Err("policy_unsupported: this native tool always requires separate approval.".into());
+            }
             let spec = host.tools.iter().find(|spec| {
                 spec["type"] == "function" && spec["name"] == grant.tool
             }).ok_or("policy_unsupported: an authorized native tool is unavailable.")?;
@@ -309,15 +314,15 @@ mod tests {
     #[test]
     fn scoped_policy_requires_explicit_user_and_configured_bot_grants() {
         let grant = issue_grant();
-        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "", &[grant.clone()], &[grant.clone()]).is_err());
-        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", &[], &[grant.clone()]).is_err());
-        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", &[grant.clone()], &[grant.clone(),grant.clone()]).is_err());
-        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", &[grant.clone()], &[grant]).is_ok());
+        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).is_err());
+        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", &[], std::slice::from_ref(&grant)).is_err());
+        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), &[grant.clone(), grant.clone()]).is_err());
+        assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).is_ok());
     }
     #[tokio::test]
     async fn scoped_host_checks_tool_action_and_exact_resource_at_dispatch() {
         let grant = issue_grant();
-        let policy = ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", &[grant.clone()], &[grant]).unwrap();
+        let policy = ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).unwrap();
         let executed = Arc::new(AtomicUsize::new(0));
         let count = executed.clone();
         let host = ToolHost {
@@ -342,6 +347,19 @@ mod tests {
         assert_eq!(executed.load(Ordering::SeqCst), 0);
         assert!((host.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"owner/repo"})).await.is_ok());
         assert_eq!(executed.load(Ordering::SeqCst), 1);
+        // Even a preauthorized tool cannot bypass the app's ALWAYS_ASK policy.
+        let mut always = issue_grant();
+        always.tool = "pandacode_cloud_cli".into();
+        let special = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "user-2", std::slice::from_ref(&always), std::slice::from_ref(&always),
+        ).unwrap();
+        let special_host = ToolHost {
+            tools: vec![json!({"type":"function","name":"pandacode_cloud_cli","description":"Protected operation",
+                "inputSchema":{"type":"object","properties":{"action":{"type":"string"},"repository":{"type":"string"}}}})],
+            approval_tools: ["pandacode_cloud_cli".to_string()].into(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({})) })),
+        };
+        assert!(special.restrict_host(Some(special_host)).is_err());
         let other_phase = ReviewerToolPolicy::from_user_grants(ReviewerPhase::PostAcceptance, "user-1",
             &[issue_grant()], &[issue_grant()]).unwrap();
         assert!(other_phase.restrict_host(None).is_err());

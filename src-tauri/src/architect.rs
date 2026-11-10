@@ -35,8 +35,9 @@ use tauri::{Emitter, Manager, State};
 /// 9: no stated limits; read_worker and sub_workers read page the whole response and checkpoint;
 /// mailbox offsets name their message; note lists page by key.
 /// 10: dispatch_workers takes councilLens (Council reviewers); a few descriptions are shorter.
-/// 11: native reviewer host tools are removed. Old Codex worker contexts require
-/// history recovery so a prior writable tool catalog is never resumed.
+/// 11: native reviewer host tools were removed from inherited sessions.
+/// 12: scoped native Council tool catalogs require fresh Codex worker contexts
+/// so an older writable or differently scoped catalog is never resumed.
 const TOOL_CATALOG_VERSION: u32 = 12;
 /// Auto teams carry a roster of installed models the lead may choose from.
 const AUTO_ROSTER_MAX: usize = 24;

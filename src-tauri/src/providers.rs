@@ -4172,7 +4172,7 @@ mod tests {
             resource: "owner/repo".into(),
         };
         cfg.reviewer_policy = Some(ReviewerToolPolicy::from_user_grants(
-            ReviewerPhase::Review, "user-grant-1", &[grant.clone()], &[grant],
+            ReviewerPhase::Review, "user-grant-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
         ).unwrap());
         assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("policy_unsupported"));
         assert!(enforce_reviewer_policy(&cfg, true).is_ok());
@@ -4201,6 +4201,7 @@ mod tests {
     fn reviewer_codex_native_sandbox_and_mcp_roster_preflight() {
         let mut cfg = config("codex");
         cfg.reviewer_boundary = true;
+        cfg.reviewer_policy = Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
         cfg.mode = "plan".into();
         let mut command = Command::new("codex");
         configure_command(&mut command, &cfg);
@@ -4254,6 +4255,7 @@ mod tests {
         for provider in ["claude", "glm", "mimo"] {
             let mut cfg = config(provider);
             cfg.reviewer_boundary = true;
+            cfg.reviewer_policy = Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
             cfg.mode = "plan".into();
             assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("read_only_unsupported"));
             let mut command = Command::new(provider);
@@ -4272,6 +4274,7 @@ mod tests {
         let mut codex = config("codex");
         codex.mode = "plan".into();
         codex.reviewer_boundary = true;
+        codex.reviewer_policy = Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
         let mut protocol = Protocol::new(codex);
         let change = protocol.receive(json!({
             "id":77,"method":"item/fileChange/requestApproval",
@@ -4287,6 +4290,7 @@ mod tests {
         let mut claude = config("claude");
         claude.mode = "plan".into();
         claude.reviewer_boundary = true;
+        claude.reviewer_policy = Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
         let mut protocol = Protocol::new(claude);
         let shell = protocol.receive(json!({
             "type":"control_request","request_id":"unsafe",

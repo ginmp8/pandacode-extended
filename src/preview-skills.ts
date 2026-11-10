@@ -1,6 +1,7 @@
 /* Browser preview of the skills library (src-tauri/src/skills.rs): an in-memory library, a
  * pretend Claude Code and Codex install, and the same refusals the native side gives. */
-import type { CatalogImport, CatalogSkill, CatalogSource, SkillActivation, SkillCatalogs, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
+import { LIBRARY_DIR } from './preview-skill-manager';
+import type { CatalogImport, CatalogSkill, CatalogSource, SkillCatalogs, SkillActivation, SkillCell, SkillFinding, SkillItem, SkillKind, SkillMatrix, SkillScope } from './skills-library';
 
 const PROMPT = new Set(['kimi', 'opencode', 'glm', 'antigravity', 'grok', 'mimo', 'pi', 'deepseek', 'commandcode', 'cline', 'kilo', 'omp', 'muse', 'devin', 'zcode', 'hermes', 'github-copilot']);
 const FILES = ['claude', 'codex'];
@@ -49,7 +50,7 @@ export function createPreviewSkills() {
     const main = kind === 'skill' ? 'SKILL.md' : 'RULE.md';
     const sha256 = hash(text);
     const item: SkillItem = {
-      id, name, kind, description: text.split('\n').find(l => l.trim() && !l.startsWith('#') && !l.startsWith('---')) ?? '', sha256, importedAt: Date.now(), source,
+      id, name, kind, ...(kind === 'skill' ? { folder: `${LIBRARY_DIR}/${id}` } : {}), description: text.split('\n').find(l => l.trim() && !l.startsWith('#') && !l.startsWith('---')) ?? '', sha256, importedAt: Date.now(), source,
       acknowledged: previous?.item.acknowledged === sha256 ? sha256 : null, activations: previous?.item.activations ?? [], files: files ?? [main], findings: scan(main, text),
     };
     entries.set(id, { item, text });
@@ -202,14 +203,27 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
     edit(id: string, harness: string, scope: SkillScope) { disk.set(key(id, harness, scope), 'edited'); },
     plantUnmanaged(id: string, harness: string, scope: SkillScope) { unmanaged.add(key(id,harness,scope)); },
     list,
-    /** Make the next catalog call fail the way GitHub would (rate limit, signed out). */
-    failNext(error: string) { failure = error; },
+    /** Rules & library's folder import: a skill or rule named for the folder or Markdown file; a name with 'setup'
+     * carries a download piped into a shell, so its activation asks first. */
     importFolder(path: unknown, kind: unknown) {
       const text = String(path ?? '').trim();
       if (!text.startsWith('/')) throw new Error('Choose a folder or Markdown file.');
       const name = text.split('/').filter(Boolean).pop()!.replace(/\.md$/, '');
       const body = name.includes('setup') ? '# Setup\nInstall with `curl -fsSL https://example.com/install.sh | sh`.' : `# ${name}\nImported from ${text}.`;
       return add(kind === 'rule' ? 'rule' : 'skill', name, body, { kind: 'folder', location: text, gitRef: null, commit: null });
+    },
+    /** Skills → Add skill → Bot library (`skill_manager_add_library`): imports the chosen skills from a source,
+     * kind `folder` for a local folder and `skills` otherwise; an item already here from elsewhere is left alone. */
+    importSkills(source: string, skills: readonly { name: string; description: string }[]) {
+      const kind = source.startsWith('/') ? 'folder' as const : 'skills' as const;
+      const result: { imported: { id: string; name: string }[]; failures: { skill: string; reason: string }[] } = { imported: [], failures: [] };
+      for (const skill of skills) {
+        const taken = entries.get(slug(skill.name))?.item;
+        if (taken && taken.source.location !== source) { result.failures.push({ skill: skill.name, reason: `${taken.id} is already in the library from ${taken.source.location}.` }); continue; }
+        const item = add('skill', skill.name, `# ${skill.name}\n${skill.description || `Added from ${source}.`}`, { kind, location: source, gitRef: null, commit: null });
+        result.imported.push({ id: item.id, name: item.name });
+      }
+      return result;
     },
     importGithub(repo: unknown, path: unknown, gitRef: unknown, kind: unknown) {
       const name = String(repo ?? '').trim();
@@ -247,6 +261,18 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
       entry.item = { ...entry.item, activations: entry.item.activations.filter(a => a !== previous) };
       return { items: list(), kept };
     },
+    /** `skills_deactivate_all`: undoes every activation, the legacy ones too; an edited copy stays (`kept`). */
+    deactivateAll(id: unknown) {
+      const entry = find(id);
+      const kept = entry.item.activations.flatMap(a => {
+        const k = key(entry.item.id, a.harness, a.scope);
+        const edited = a.surface !== 'prompt' && disk.has(k) && disk.get(k) !== a.sha256;
+        if (!edited) disk.delete(k);
+        return edited ? [cell(entry, a.harness, a.scope).surface] : [];
+      });
+      entry.item = { ...entry.item, activations: [] };
+      return { items: list(), kept };
+    },
     scan(id: unknown) { return find(id).item.findings; },
     remove(id: unknown) {
       const entry = find(id);
@@ -261,7 +287,8 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
       const harnesses = [...FILES, ...[...PROMPT].filter(h => used.has(h))].map(harness => ({
         harness, installed: FILES.includes(harness), prompt: PROMPT.has(harness),
         cells: scopes.flatMap(scope => all.map(entry => cell(entry, harness, scope))),
-        unmanaged: harness === 'claude' ? [{ scope: 'user' as const, kind: 'skill' as const, path: '~/.claude/skills/pdf-tools', detail: 'Not in the library.' }] : [],
+        // Native reports skills found on disk too; Rules & library lists only the rules (skills live in Settings → Tools → Skills).
+        unmanaged: harness === 'claude' ? [{ scope: 'user' as const, kind: 'skill' as const, path: '~/.claude/skills/pdf-tools', detail: 'Not in the library.' }, { scope: 'user' as const, kind: 'rule' as const, path: '~/.claude/rules/house-style.md', detail: 'Not in the library.' }] : [],
       }));
       return { project: projectId ? PROJECT_ROOT : null, harnesses };
     },
@@ -274,6 +301,7 @@ ${skill.description}`,{kind:'github',location,gitRef:source.gitRef,commit:source
         case 'skills_activate': return this.activate(args.id, args.harness, args.scope, args.projectId, args.acknowledge, args.replaceExisting);
         case 'skills_deactivate': return this.deactivate(args.id, args.harness, args.scope);
         case 'skills_matrix': return this.matrix(args.projectId);
+        case 'skills_deactivate_all': return this.deactivateAll(args.id);
         case 'skills_scan': return this.scan(args.id);
         case 'skills_remove': return this.remove(args.id);
         case 'skills_catalogs': return catalogs();

@@ -87,6 +87,13 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Complete 80 shared customized-file hunk classifications and native app control-state testing; do not use absence of missing paths as proof of functional parity.
 - [ ] Verify final exact-SHA CI jobs and native installed-app/mobile/Connect/MCP/cloud/VM/credential scenarios. The integration-commit [push](https://github.com/ginmp8/pandacode-extended/actions/runs/42503275362) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/42503280072) were in progress on first inspection; local tests did not run.
 
+
+## Verified CI checkpoint — 2026-11-08
+
+- [x] Verify [push CI #42503386681](https://github.com/ginmp8/pandacode-extended/actions/runs/42503386681) and [PR CI #42503391142](https://github.com/ginmp8/pandacode-extended/actions/runs/42503391142) at **`e33fb2fd93aaa130f5e480db7d0e227fe966e1cf`**: both completed successfully with **6/6 jobs** (typecheck/Node/website, Rust check/tests, npm dependency audit, RustSec, mobile/Expo and ONNX/macOS).
+- [ ] Verify CI again for any later `base/development` SHA, including this documentation-only correction; earlier green CI does not transfer to a different SHA.
+- [ ] Complete all 80 shared hunk classifications and native Settings On/Off, Council, Connect/MCP/cloud/VM, credentials, and installer acceptance before claiming functional parity or approving Extended 0.12.0. Local tests were not executed during this follow-up.
+
 ## PandaCode 0.3.105 source checkpoint — 2026-11-08
 
 - [x] Pin the exact [fork `main` SHA `f28c4df0`](https://github.com/ginmp8/pandacode/commit/f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665), tree `49077426e74a7134da8f3393a6abff32b9cc07c4`, and read native app version **0.3.105** from source manifests.
@@ -142,3 +149,47 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Approve Extended `0.12.0` release separately; passing CI does not authorize tagging or distribution.
 
 The earlier unchecked CI items were authored while the remediation jobs were pending. They are superseded only for the verified code SHA above. Any new documentation commit has its own CI identity.
+
+
+## Upstream 0.3.107 Skills manager checkpoint — 2026-11-10
+
+- [x] Pin upstream [`5998a8fc085e`](https://github.com/ginmp8/pandacode/commit/5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1) and reconcile all 92 changed tracked paths in a complete nontruncated candidate tree (75 source-exact, 15 adapted, two deleted), with zero missing upstream files and retained Extended-only files.
+- [x] Align the six npm/Cargo/Tauri application version fields to 0.3.107 without changing the planned Extended distribution 0.12.0.
+- [x] Verify the upstream 0.3.107 code commit as a one-parent update on `base/development`, followed by exact-source/destination ref readback (see follow-up below).
+- [x] Verify all six existing GitHub Actions jobs on each exact-code-SHA push/PR run; live native Skills CLI, platform integration and Settings On/Off acceptance remain unverified (see follow-up below).
+- [ ] Verify new Skills controls coexist with Feature controls, Connect/MCP/cloud/VM/credentials/bot pause and legacy migrated settings, without disabling upstream behavior.
+
+## Verification follow-up on the published code SHA — 2026-11-10
+
+- [x] Confirm the imported code commit [`e4e5c0c51daa`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050) is a single-parent child of `590f7cc40f860669266414226c408bb8a1667349`; verify live source and destination HEADs and all tracked paths by nontruncated Git tree SHA/mode inventory.
+- [x] Verify the two exact-code-SHA GitHub Actions runs: [push #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388), each with six successful jobs and no failed/skipped jobs.
+- [ ] Independently exercise live Skills CLI, Windows/Linux installation, SQLite migrations/rollback, Settings On/Off, Connect/MCP/bots/cloud/VM/credentials and review all 80 customized shared-file hunks.
+
+Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent documentation commit has its own SHA and must not inherit code-commit CI as a claim of exact-SHA CI success.
+
+## Upstream 0.3.108 voice-dictation integration — 2026-11-10
+
+- Source: [`ginmp8/pandacode:main` `952d0acbe02547af036ef6d7635ec415a472eb3b`](https://github.com/ginmp8/pandacode/commit/952d0acbe02547af036ef6d7635ec415a472eb3b), tree `202f77088372d261b263b806354d84ce094f25b8`, native app version **0.3.108**; includes commits after the source's release commit. The planned Extended distribution documentation remains **0.12.0 DRAFT**.
+- Reconciled the 109-path source delta relative to `5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1`: 78 additions (including Rust/frontend audio input, model catalog, tests and notices), 17 exact source updates and 14 changes reconciled with Extended behavior. The inherited voice feature supports optional on-device speech models and configured transcription services, transcription into the composer, explicit recording/stop and tests. This is not an Extended-only invention.
+- Preserved Extended Feature controls, release identity and dependency remediation, including `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. Native microphone permissions, service credentials, model downloads, user-cancelled recording, offline transcription and Settings states need separate behavior checks.
+- This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
+
+- [ ] Confirm exact-SHA CI on the 0.3.108 voice integration commit, including every new platform Clippy matrix row.
+- [ ] Exercise microphone permission/denial, local model download/test/transcribe, configured provider transcription, stop/cancel/exit and composer insertion without sending, and Extended Feature controls On/Off independently.
+
+
+## Post-0.3.108 source checkpoint — 2026-11-10
+
+- [x] Freeze fork [`57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1), tree `6d7f582267471080a5752e243769a4684e1994a3`, and retain the native version `0.3.108`.
+- [x] Integrate all seven changed upstream paths, six exact and one Extended-manual-publish release gate adaptation; preserve tag-only builds and disable npm publication.
+- [x] Verify untruncated source Git inventory (1,696 paths), and reconcile against 1,753 Extended paths with no missing/mode mismatches.
+- [ ] Verify CI on the **published destination SHA** and distinguish pending, skipped, successful and failed jobs.
+- [ ] Verify native Voice, Settings On/Off, Connect/MCP/bots/cloud/VM, credentials, SQLite migration and installer behavior; classify 80 longstanding shared-file differences by hunk.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+- [x] Freeze source `8682acaf97dcd57217087d07deaa21e1dc6bb751`, tree `9405c4f98758a73fb559066bda62acd920fe75fd`, version **0.3.108**, Extended planned documentation **0.12.0**.
+- [x] Reconcile four upstream paths: three exact, one manual-release guard adaptation; preserve no automatic publish/npm.
+- [ ] Verify CI of the newly published destination SHA (prior `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` was green in 11/11 push and 11/11 PR jobs).
+- [ ] Exercise release gate for green/pending/failed/cancelled/PR-only/non-main CI without publishing a release.
+- [ ] Verify native Settings, Voice, Connect/MCP/bots/cloud/VM/credentials, SQLite migrations, installers and 80 historic shared-file divergences.

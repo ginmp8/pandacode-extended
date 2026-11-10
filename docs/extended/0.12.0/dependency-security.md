@@ -66,3 +66,32 @@ At [Extended integration `34d8fb4c`](https://github.com/ginmp8/pandacode-extende
 On Extended [`06cb9b0c0141`](https://github.com/ginmp8/pandacode-extended/commit/06cb9b0c0141e964d43d0c462cbd30e9fc44ec1c), [push CI #42680289120](https://github.com/ginmp8/pandacode-extended/actions/runs/42680289120) and [PR CI #42680300162](https://github.com/ginmp8/pandacode-extended/actions/runs/42680300162) each concluded **success (6/6)**. The committed `libsqlite3-sys 0.39.1` / `rusqlite 0.41.1` graph passed the RustSec audit in both runs; Linux `cargo test --locked --lib` and `cargo clippy --locked --all-targets -- -D warnings` also passed, as did the remaining npm, web, mobile, and ONNX jobs.
 
 This resolves the **CI audit failure at this exact code SHA**, not the separate native installation and SQLite migration/rollback acceptance gates. No Cargo commands were executed locally, no advisory suppression was introduced, and the upstream application version remains `0.3.106`. Future commits require their own exact-SHA checks.
+
+
+## Upstream 0.3.107 import dependency evidence
+
+The application manifests were synchronized to **0.3.107** while retaining Extended's existing compatible dependency remediation: `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`, including their lockfile graph. The new inherited Skills manager invokes the upstream-pinned Skills CLI `skills@1.7.6`; this is an upstream feature description, not an independent security approval. npm/RustSec audits, Rust locked tests/Clippy, and live CLI installation remain pending for the new destination commit. No unrelated dependency downgrade or advisory suppression was introduced.
+
+## Upstream 0.3.107 dependency CI follow-up — 2026-11-10
+
+Both [push CI #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR CI #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388) completed **successfully (6/6 jobs each)** on the reconciled code commit [`e4e5c0c51daa8a0149015bb26a00c8fb09bb2050`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050). All reported jobs passed: Linux Rust check/tests, RustSec, Node/TypeScript/unit tests and website, npm dependency audit, Expo/mobile compatibility and macOS ONNX parity.
+
+The RustSec and npm jobs passed with the Extended lockfiles at this exact code SHA; this replaces the earlier pending CI state for this commit only. Do not infer that live Skills CLI installations, native SQLite upgrade/rollback, Windows/Linux platform behavior or future commits have been validated. No new dependency remediation or security approval is claimed.
+
+## Upstream 0.3.108 voice-dictation integration — 2026-11-10
+
+- Source: [`ginmp8/pandacode:main` `952d0acbe02547af036ef6d7635ec415a472eb3b`](https://github.com/ginmp8/pandacode/commit/952d0acbe02547af036ef6d7635ec415a472eb3b), tree `202f77088372d261b263b806354d84ce094f25b8`, native app version **0.3.108**; includes commits after the source's release commit. The planned Extended distribution documentation remains **0.12.0 DRAFT**.
+- Reconciled the 109-path source delta relative to `5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1`: 78 additions (including Rust/frontend audio input, model catalog, tests and notices), 17 exact source updates and 14 changes reconciled with Extended behavior. The inherited voice feature supports optional on-device speech models and configured transcription services, transcription into the composer, explicit recording/stop and tests. This is not an Extended-only invention.
+- Preserved Extended Feature controls, release identity and dependency remediation, including `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. Native microphone permissions, service credentials, model downloads, user-cancelled recording, offline transcription and Settings states need separate behavior checks.
+- This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
+
+The new voice pipeline introduces native `cpal`, `rubato`, `transcribe-cpp` and platform audio/CMake dependencies. The Extended Rust lockfile retains the prior remediated SQLite versions and must pass `cargo check --locked`, RustSec and all platform CI rows before any distribution approval.
+
+
+## Upstream 0.3.108 post-version CI gate — 2026-11-10
+
+The seven changed source paths at [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) do **not** change package or Cargo manifests/lockfiles. Existing Extended SQLite remediation (`rusqlite 0.41.1`, `libsqlite3-sys 0.39.1`) remains in place. Revalidate RustSec, locked Rust tests/Clippy and npm audit on the **exact new destination SHA**, and test native model downloads plus SQLite upgrade/rollback separately.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+No npm/Cargo manifest or lockfile change; native app remains **0.3.108**, with Extended remediations `rusqlite 0.41.1` / `libsqlite3-sys 0.39.1` unchanged. Prior code SHA `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` passed both 11-job CI runs. Reverify RustSec, npm, and locked-build checks on the exact new destination commit; previous success is SHA-specific.

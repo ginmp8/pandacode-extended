@@ -5716,6 +5716,10 @@ async function tryCustomizeSkill(id: string, harnessId: string): Promise<void> {
     throw new Error('The selected harness is not installed or available for chats.');
   }
   if (state.view !== 'conversation') setWorkspaceView('conversation');
+  // Opening Customize during preview startup must not race a still-creating
+  // task; createChat would otherwise return early with no error until later.
+  if (bootPending) await bootPending.catch(() => undefined);
+  if (taskCreation) await taskCreation;
   const created = await createChat(undefined, harnessId);
   if (!created || created.provider !== harnessId) {
     throw new Error('Could not create a chat with the selected harness.');

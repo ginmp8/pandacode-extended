@@ -284,8 +284,14 @@ mod tests {
     fn add(library: &Library, id: &str, body: &str, required: &[&str]) {
         let dir = library.dir.join(id);
         fs::create_dir(&dir).unwrap();
-        let files = vec![("SKILL.md".to_owned(), body.as_bytes().to_vec())];
-        fs::write(dir.join("SKILL.md"), body).unwrap();
+        let mut files = vec![("SKILL.md".to_owned(), body.as_bytes().to_vec())];
+        if !required.is_empty() {
+            files.push(("skill-dependencies.json".into(),
+                serde_json::to_vec(&serde_json::json!({"requiredSkills": required})).unwrap()));
+        }
+        for (path, bytes) in &files {
+            fs::write(dir.join(path), bytes).unwrap();
+        }
         let hashes = files.iter().map(|(p, v)| (p.clone(), sha256_hex(v))).collect();
         let meta = Meta {
             id: id.into(), name: id.into(), kind: Kind::Skill, description: String::new(),
@@ -321,6 +327,19 @@ mod tests {
         assert!(freeze(&library, &["first".into()], "kimi").unwrap_err().contains("reviewer_skill_cycle"));
         fs::write(library.dir.join("second/SKILL.md"), "modified").unwrap();
         assert!(freeze(&library, &["second".into()], "kimi").unwrap_err().contains("reviewer_skill_drift"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mutated_dependency_metadata_cannot_bypass_required_closure() {
+        let (library, root) = fixture();
+        add(&library, "review", "Review against evidence.", &["mandatory"]);
+        add(&library, "mandatory", "Verify the checklist.", &[]);
+        let path = library.dir.join("review.json");
+        let mut meta: Meta = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        meta.required_skills.clear();
+        fs::write(path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        assert!(freeze(&library, &["review".into()], "kimi").unwrap_err().contains("reviewer_skill_drift"));
         fs::remove_dir_all(root).unwrap();
     }
 

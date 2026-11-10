@@ -107,8 +107,8 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
         let mut stmt=f.store.db.prepare(
             "SELECT bot_id,session_id FROM bot_shared_channel_deliveries WHERE message_id=?1 ORDER BY bot_id",
         ).unwrap();
-        stmt.query_map([&message_id],|row|Ok((row.get(0)?,row.get(1)?)))
-            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        let rows = stmt.query_map([&message_id],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
     };
     assert_eq!(owned.len(),2);
     assert_ne!(owned[0].1,owned[1].1,"one Council cycle per executor delivery");
@@ -128,7 +128,12 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
         [&message_id],|row|row.get(0),
     ).unwrap();
     assert_eq!(cycles,2,"delivery cycles must be distinct and persisted");
-    assert!(shared_channels::council_view(&f.store,&first_id,&owned.iter().find(|(bot_id,_)| bot_id==&lead.id).unwrap().1).unwrap().is_some());
+    let detail = shared_channels::detail(&f.store,&channel.id,100).unwrap();
+    let first = detail.messages.iter().find(|item| item.id==first_id).unwrap();
+    let second = detail.messages.iter().find(|item| item.id==second_id).unwrap();
+    assert_ne!(first.council.as_ref().unwrap().cycle_id,second.council.as_ref().unwrap().cycle_id);
+    assert_eq!(first.council.as_ref().unwrap().state,"Reviewing");
+    assert_eq!(second.council.as_ref().unwrap().state,"Reviewing");
 }
 
 #[test]

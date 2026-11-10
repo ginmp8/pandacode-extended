@@ -20,6 +20,27 @@ impl ObservedSkillEvidence {
             && self.check_kind.as_deref() == Some(INTEGRITY)
     }
 }
+/// A NativeReadOnly reviewer gets no general-purpose tools. Even an arbitrary
+/// handler call with a hidden name must be denied after catalog filtering.
+pub(super) fn readonly_host(host: ToolHost) -> Option<ToolHost> {
+    let allowed_specs = tools();
+    let exposed = host.tools.into_iter().filter(|spec| allowed_specs.contains(spec)).collect::<Vec<_>>();
+    if exposed.is_empty() { return None; }
+    let allowed = exposed.iter().filter_map(|spec| spec["name"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    let original = host.handler;
+    let handler = Arc::new(move |name: String, args: Value| {
+        if !allowed.contains(&name) {
+            let denied: crate::providers::ToolFuture = Box::pin(async {
+                Err("capability_not_authorized: this reviewer can use only native pinned-skill read-only tools.".into())
+            });
+            return denied;
+        }
+        (original)(name, args)
+    });
+    Some(ToolHost { tools: exposed, handler, approval_tools: HashSet::new() })
+}
+
 pub(super) fn tools() -> Vec<Value> {
     let properties = json!({"skillId":{"type":"string","description":"Exact assigned skill ID on this reviewer seat."}});
     vec![

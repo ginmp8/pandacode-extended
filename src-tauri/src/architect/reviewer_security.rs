@@ -154,10 +154,22 @@ impl ReviewerToolPolicy {
                 tools.push(spec.clone());
             }
         }
+        // Only these exact PandaCode-defined, immutable read-only skill tools
+        // may accompany scoped user grants. A skill cannot introduce tool names.
+        let mut native_skill_tools = HashSet::new();
+        for spec in super::reviewer_skill_evidence::tools() {
+            if host.tools.iter().any(|candidate| candidate == &spec) {
+                let name = spec["name"].as_str().unwrap_or_default().to_string();
+                if seen.insert(name.clone()) {
+                    tools.push(spec);
+                    native_skill_tools.insert(name);
+                }
+            }
+        }
         let grants = policy.grants.clone();
         let original = host.handler;
         let handler = Arc::new(move |name: String, args: Value| {
-            let allowed = grants.iter().any(|grant| grant.permits(&name, &args));
+            let allowed = native_skill_tools.contains(&name) || grants.iter().any(|grant| grant.permits(&name, &args));
             let original = original.clone();
             let future: crate::providers::ToolFuture = Box::pin(async move {
                 if !allowed {

@@ -2432,6 +2432,18 @@ async fn launch_operation_admitted(
                 } else {
                     (host, missing, None)
                 }
+            } else if matches!(
+                config.reviewer_policy.as_ref(),
+                Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+            ) {
+                // Read-only reviewers still need the two task-scoped, native skill
+                // retrieval/verification tools. Never expose Architect or bot tools.
+                let host = team.as_ref().and_then(|admission| {
+                    architect::reviewer_skill_host(
+                        app.clone(), session_id.clone(), stopped.clone(), admission,
+                    )
+                });
+                (host, false, None)
             } else {
                 (None, false, None)
             };

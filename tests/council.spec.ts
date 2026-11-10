@@ -41,7 +41,23 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   await button(page).click();
   await expect(option(page, 'reviewers', 'Auto: the lead picks reviewers for the work')).toHaveAttribute('aria-pressed', 'true');
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
-  await expect(panel(page).getByText('Dozy')).toBeVisible();
+  await expect(panel(page).getByText('Dozy')).toBeVisible().catch(async cause => {
+    const diagnostic = await page.evaluate(() => {
+      const panel = document.querySelector('.council-panel') as HTMLElement | null;
+      const list = panel?.querySelector('.council-bots') as HTMLElement | null;
+      const dozy = [...(panel?.querySelectorAll('strong') ?? [])].find(node => node.textContent === 'Dozy') as HTMLElement | undefined;
+      const selected = panel?.querySelector('[data-reviewers-source="selected"]');
+      return {
+        panelCompact: panel?.dataset.compact, panelVisible: panel && getComputedStyle(panel).display,
+        listHidden: list?.hidden, listDisplay: list && getComputedStyle(list).display, listMarkup: list?.outerHTML.slice(0, 1500),
+        sourcePressed: selected?.getAttribute('aria-pressed'), textDisplay: dozy && getComputedStyle(dozy).display,
+        labelDisplay: dozy && getComputedStyle(dozy.parentElement!).display,
+        error: panel?.querySelector('.council-error')?.textContent,
+      };
+    });
+    console.log('Council selected reviewer visibility diagnostic:', JSON.stringify(diagnostic));
+    throw cause;
+  });
   await expect(panel(page).getByText('Paused')).toBeVisible();
   await expect(panel(page).getByRole('checkbox', { name: /Dozy/ })).toBeDisabled();
   await panel(page).getByRole('checkbox', { name: /Scout/ }).check();

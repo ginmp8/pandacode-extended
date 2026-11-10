@@ -98,6 +98,48 @@ test('optional selected-bot skill remains optional after Council configuration i
   await expect(panel(page).getByRole('checkbox', { name: 'risk-scan' })).toBeChecked();
 });
 
+test('selected reviewer skill receipts show native supply and optional failures without claiming execution', async ({ page }) => {
+  await open(page, '/?council=fixing');
+  const status = await page.evaluate(async () => {
+    const { councilSummaryHtml } = await import('/src/council-panel.ts');
+    const team: any = {
+      sessionId: 'skills-seat', status: 'completed', councilSince: 1,
+      config: { council: { target: 9, maxRounds: 10, reviewers: 2 } },
+      councilStatus: { state: 'passed', round: 1, lowest: 9.2, target: 9, stale: false },
+      workers: [{
+        id: 'seat-1', name: 'Configured reviewer', status: 'completed', createdAt: 2,
+        council: { round: 1, lens: 'Security', score: 9.2 },
+        reviewerBinding: {
+          reviewerBotId: 'reviewer-1',
+          snapshot: { skills: {
+            pins: [{
+              id: 'required-scan', contentSha256: 'a'.repeat(64),
+              supplied: true, invoked: false, checkExecuted: false, evidenceVerified: false,
+            }],
+            skipped: [{ id: 'optional-scan', reason: 'reviewer_skill_unavailable: missing package <untrusted>' }],
+          } },
+        },
+      }],
+    };
+    const document = new DOMParser().parseFromString(councilSummaryHtml(team), 'text/html');
+    const row = document.querySelector('.council-row');
+    const detail = row?.querySelector('.council-row-skills');
+    return {
+      text: detail?.textContent ?? '',
+      title: detail?.getAttribute('title') ?? '',
+      label: row?.getAttribute('aria-label') ?? '',
+      injectedElementCount: document.querySelectorAll('untrusted').length,
+    };
+  });
+  expect(status.text).toContain('1 supplied, 1 skipped');
+  expect(status.text).toContain('optional-scan');
+  expect(status.text).toContain('reviewer_skill_unavailable');
+  expect(status.title).toContain('required-scan: supplied; invocation not verified; check not verified');
+  expect(status.title).toContain('optional-scan: skipped');
+  expect(status.label).toContain('optional-scan');
+  expect(status.injectedElementCount).toBe(0);
+});
+
 test('scoped reviewer action is explicitly granted only to one relative file', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();

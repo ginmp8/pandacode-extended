@@ -69,7 +69,13 @@ export function createPreviewArchitect(host: PreviewHost) {
         || new Set(optionalSkills).size !== optionalSkills.length) {
       throw new Error('Optional reviewer skills require selected bots and up to 32 distinct valid skill IDs.');
     }
-    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
+    const checks = council.requiredCheckSkillIds ?? [];
+    if (!Array.isArray(checks) || checks.length > 32 || (checks.length && !ids.length)
+        || checks.some(id => typeof id !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id) || optionalSkills.includes(id))
+        || new Set(checks).size !== checks.length) {
+      throw new Error('Native check requirements must name unique mandatory selected-bot skills.');
+    }
+    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
   }
   function validate(config: TeamConfig): TeamConfig {
     // Auto teams carry an optional roster (the lead picks models); configured teams name at least one profile.

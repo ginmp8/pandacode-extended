@@ -41,13 +41,16 @@ pub struct CouncilConfig {
     /// Explicitly user-optional bot-assigned skills, frozen per Council task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional_skill_ids: Vec<String>,
+    /// Explicitly required native integrity checks, distinct from mandatory methodology.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_check_skill_ids: Vec<String>,
     /// Explicit per-task host tool permissions; absent always means native read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_permissions: Option<super::reviewer_security::ReviewerPermissionSelection>,
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), optional_skill_ids: Vec::new(), review_permissions: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None }
     }
 }
 impl CouncilConfig {
@@ -68,6 +71,17 @@ impl CouncilConfig {
             let mut unique = std::collections::HashSet::new();
             if self.optional_skill_ids.iter().any(|id| !super::valid_id(id) || !unique.insert(id)) {
                 return Err("Optional reviewer skills must have unique valid IDs.".into());
+            }
+        }
+        if !self.required_check_skill_ids.is_empty() {
+            if self.reviewer_bot_ids.is_empty() || self.required_check_skill_ids.len() > 32 {
+                return Err("Native skill checks require selected bots and at most 32 IDs.".into());
+            }
+            let mut unique = std::collections::HashSet::new();
+            if self.required_check_skill_ids.iter().any(|id| !super::valid_id(id)
+                || self.optional_skill_ids.contains(id) || !unique.insert(id))
+            {
+                return Err("Required skill checks must be distinct, valid and non-optional.".into());
             }
         }
         if self.review_permissions.is_some() && self.reviewer_bot_ids.is_empty() {
@@ -320,13 +334,15 @@ fn unverified_required_skill_checks(team: &TeamSnapshot, round: usize) -> Vec<St
         if !counts(worker, seat) { continue; }
         if let Some(skills) = worker.reviewer_binding.as_ref().and_then(|binding| binding.snapshot.skills.as_ref()) {
             for pin in &skills.pins {
-                if pin.required_for_acceptance
-                    && !worker.reviewer_binding.as_ref()
-                        .and_then(|binding| binding.skill_evidence.get(&pin.id)
-                            .map(|evidence| evidence.valid_for(pin, &binding.artifact_revision)))
-                        .unwrap_or(false)
+                if pin.required_for_acceptance && !(pin.eligible && pin.supplied) {
+                    missing.push(format!("{} ({}: not supplied)", worker.name, pin.id));
+                }
+                if pin.check_required && !worker.reviewer_binding.as_ref()
+                    .and_then(|binding| binding.skill_evidence.get(&pin.id)
+                        .map(|evidence| evidence.valid_for(pin, &binding.artifact_revision)))
+                    .unwrap_or(false)
                 {
-                    missing.push(format!("{} ({})", worker.name, pin.id));
+                    missing.push(format!("{} ({}: native check unverified)", worker.name, pin.id));
                 }
             }
         }
@@ -596,7 +612,7 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     let unverified = unverified_required_skill_checks(team, round);
     if !unverified.is_empty() {
         return Some((format!(
-            "reviewer_skill_evidence_unverified: Council round {round} has mandatory reviewer skill checks without independently verified execution: {}. Native invocation, check and evidence receipts are required; reviewer claims or scores alone do not count.",
+            "reviewer_skill_evidence_unverified: Council round {round} has missing mandatory skill input or explicitly required native skill checks without independently verified execution: {}. Native invocation, check and evidence receipts are required; reviewer claims or scores alone do not count.",
             unverified.join(", ")
         ), false));
     }

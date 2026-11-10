@@ -29,6 +29,9 @@ pub(crate) struct SkillPin {
     /// Frozen per-skill acceptance role; old mandatory receipts stay mandatory.
     #[serde(default = "required_by_default")]
     pub required_for_acceptance: bool,
+    /// Execution of a native pinned-input check is an explicit task obligation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_required: bool,
     pub delivery_mode: String,
     pub staged_path: Option<String>,
     pub imported: bool,
@@ -307,7 +310,7 @@ fn remove_staged_dir(path: &Path) -> Result<(), String> {
 /// Resolve only explicitly bot-assigned skill IDs plus their required dependencies.
 /// A missing/unsafe/drifted/truncated mandatory input fails closed, never silently truncates.
 pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> Result<ReviewerSkills, String> {
-    freeze_with_optional(library, assigned, harness, &[])
+    freeze_with_checks(library, assigned, harness, &[], &[])
 }
 
 /// A caller explicitly designates optional bot assignments per review task.
@@ -316,10 +319,23 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
 pub(crate) fn freeze_with_optional(
     library: &Library, assigned: &[String], harness: &str, optional: &[String],
 ) -> Result<ReviewerSkills, String> {
+    freeze_with_checks(library, assigned, harness, optional, &[])
+}
+
+/// Required skill provisioning does not imply a required executed check.
+pub(crate) fn freeze_with_checks(
+    library: &Library, assigned: &[String], harness: &str, optional: &[String], checks: &[String],
+) -> Result<ReviewerSkills, String> {
     let mut known_optional = HashSet::new();
     for id in optional {
         if !assigned.contains(id) || !known_optional.insert(id) {
             return Err(format!("reviewer_skill_unavailable: optional skill {id} is not an unique bot assignment."));
+        }
+    }
+    let mut required_checks = HashSet::new();
+    for id in checks {
+        if !assigned.contains(id) || known_optional.contains(id) || !required_checks.insert(id.clone()) {
+            return Err(format!("reviewer_skill_unavailable: native check {id} must be an unique mandatory bot assignment."));
         }
     }
     if !adapter::known(harness) {
@@ -335,7 +351,7 @@ pub(crate) fn freeze_with_optional(
     let mut state = ResolveState {
         seen: HashSet::new(), visiting: HashSet::new(), pins: Vec::new(), prompt: String::new(),
     };
-    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, required: bool, state: &mut ResolveState) -> Result<(), String> {
+    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, required: bool, checks: &HashSet<String>, state: &mut ResolveState) -> Result<(), String> {
         if state.seen.contains(id) { return Ok(()); }
         if !state.visiting.insert(id.to_owned()) {
             return Err(format!("reviewer_skill_cycle: dependency cycle at {id}."));
@@ -355,7 +371,7 @@ pub(crate) fn freeze_with_optional(
             }
             let (files, hashes) = trusted_package(library, &meta)?;
             for dependency in &meta.required_skills {
-                visit(library, dependency, assigned, harness, required, state)?;
+                visit(library, dependency, assigned, harness, required, checks, state)?;
             }
             let main = files.iter().find(|(path, _)| path == "SKILL.md")
                 .ok_or_else(|| format!("reviewer_skill_unavailable: no SKILL.md for {id}."))?;
@@ -394,7 +410,7 @@ pub(crate) fn freeze_with_optional(
                 source_location: meta.source.location, source_ref: meta.source.git_ref,
                 source_commit: meta.source.commit, content_sha256: meta.sha256,
                 file_sha256: hashes, dependencies: meta.required_skills,
-                required_for_acceptance: required, delivery_mode: mode.into(), staged_path,
+                required_for_acceptance: required, check_required: checks.contains(id), delivery_mode: mode.into(), staged_path,
                 imported: true, bot_assigned: assigned.iter().any(|x| x == id),
                 eligible: true, supplied: true,
                 invoked: false, check_executed: false, evidence_verified: false,
@@ -409,12 +425,12 @@ pub(crate) fn freeze_with_optional(
     // Otherwise an optional root could pin a shared mandatory dependency as optional,
     // or roll back that dependency when optional provisioning fails.
     for id in assigned.iter().filter(|id| !known_optional.contains(*id)) {
-        visit(library, id, assigned, harness, true, &mut state)?;
+        visit(library, id, assigned, harness, true, &required_checks, &mut state)?;
     }
     let mut skipped = Vec::new();
     for id in assigned.iter().filter(|id| known_optional.contains(*id)) {
         let before = state.clone();
-        if let Err(reason) = visit(library, id, assigned, harness, false, &mut state) {
+        if let Err(reason) = visit(library, id, assigned, harness, false, &required_checks, &mut state) {
             state = before;
             skipped.push(SkippedSkill {
                 id: id.clone(), reason, bot_assigned: true,

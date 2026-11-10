@@ -4342,6 +4342,7 @@ pub fn run() {
                 architect::architect_get,
                 architect::architect_configure,
                 architect::architect_set_council,
+                architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
                 architect::architect_start,
                 architect::architect_control,

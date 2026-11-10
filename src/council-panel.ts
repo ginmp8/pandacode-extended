@@ -30,7 +30,7 @@ export type CouncilHost = {
 };
 
 type Field = 'target' | 'maxRounds' | 'reviewers';
-type ReviewerBot = { id: string; name: string; role: string; provider: ProviderId; model: string; paused: boolean };
+type ReviewerBot = { id: string; name: string; role: string; provider: ProviderId; model: string; paused: boolean; available?: boolean; reason?: string | null };
 type ReviewerSelection = { selected: boolean; ids: string[] };
 const FIELDS: readonly { key: Field; label: string; options: readonly number[]; name(value: number): string }[] = [
   { key: 'target', label: 'Target score', options: COUNCIL_TARGETS, name: formatScore },
@@ -94,7 +94,7 @@ export function createCouncil(host: CouncilHost) {
     const executor = host.executorBotId?.(sessionId);
     for (const id of draft.ids) {
       const bot = available.find(bot => bot.id === id);
-      if (!bot || bot.paused || bot.id === executor || host.harnessAvailable?.(bot.provider) === false) throw new Error('A selected reviewer bot is unavailable or is the executor. Choose another bot.');
+      if (!bot || bot.paused || bot.available === false || bot.id === executor || host.harnessAvailable?.(bot.provider) === false) throw new Error(bot?.reason || 'A selected reviewer bot is unavailable or is the executor. Choose another bot.');
     }
     return { ...council, reviewerBotIds: [...draft.ids] };
   }
@@ -105,7 +105,7 @@ export function createCouncil(host: CouncilHost) {
   }
   function loadReviewerBots(sessionId: string): void {
     reviewerLoads.set(sessionId, 'Loading available bots…');
-    void host.call<ReviewerBot[]>('bots_list').then(bots => {
+    void host.call<ReviewerBot[]>('architect_council_reviewer_options', { sessionId }).then(bots => {
       reviewerBots.set(sessionId, bots);
       reviewerLoads.delete(sessionId);
       if (panelSession === sessionId) paint(sessionId);
@@ -175,8 +175,8 @@ export function createCouncil(host: CouncilHost) {
       const draft = selection(sessionId), bots = reviewerBots.get(sessionId) ?? [], executor = host.executorBotId?.(sessionId);
       const list = panel.querySelector<HTMLElement>('.council-bots')!;
       const markup = draft.selected ? `<p class="council-bot-heading">Task reviewers · 2–8 distinct bots</p>${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
-        const disabled = bot.paused || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
-        const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
+        const disabled = bot.paused || bot.available === false || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
+        const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : bot.available === false ? (bot.reason || 'Unavailable') : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
         return `<label class="council-bot-choice${disabled ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${draft.ids.includes(bot.id) ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${reason}</span></label>`;
       }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}` : '';
       const focusedBot = (document.activeElement as HTMLElement | null)?.closest<HTMLInputElement>('[data-reviewer-bot]')?.dataset.reviewerBot;

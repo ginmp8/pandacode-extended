@@ -38,6 +38,23 @@ fn valid_bot(bot: &bots::Bot, executor: Option<&str>, check_executable: bool) ->
     Ok(())
 }
 
+/// Return the same server-side eligibility rules used for actual dispatch, including
+/// executable installation and model health. A UI can never authorize a bot itself.
+pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json::Value>> {
+    let executor = executor(store, session_id)?;
+    let mut result = Vec::new();
+    for bot in bots::list(store)? {
+        let reason = valid_bot(&bot, executor.as_deref(), true).err()
+            .map(|e| e.trim_start_matches("reviewer_unavailable: ").to_string());
+        result.push(serde_json::json!({
+            "id": bot.id, "name": bot.name, "role": bot.role,
+            "provider": bot.provider, "model": bot.model, "paused": bot.paused,
+            "available": reason.is_none(), "reason": reason
+        }));
+    }
+    Ok(result)
+}
+
 /// Called on a user setting change and again before dispatch, not by model output.
 pub(super) fn validate_roster(store: &Store, session_id: &str, council: &CouncilConfig) -> Result<()> {
     council.validate()?;

@@ -605,7 +605,7 @@ void tokenSaver.loadTools();
 /* Council: an automatic team whose reviewers score the work until they reach the user's target. */
 const council = createCouncil({
   call,
-  executorBotId: sessionId => taskBots.get(sessionId) ?? sidebarBots.find(bot => bot.desktopSession === sessionId || bot.projectId === state.sessions.find(task => task.id === sessionId)?.projectId)?.id ?? null,
+  executorBotId: sessionId => taskBots.get(sessionId) ?? sidebarBots.find(bot => bot.desktopSession === sessionId)?.id ?? null,
   harnessAvailable: provider => state.providers.some(item => item.id === provider && item.installed),
   team: sessionId => teams.get(sessionId) ?? null,
   loaded: sessionId => teams.has(sessionId),

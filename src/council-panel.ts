@@ -582,7 +582,16 @@ export function createCouncil(host: CouncilHost) {
   /** "Turn on for new threads": Council on for a new thread (its team starting, or its first send), with the defaults. */
   /** Resolves to the reason it failed, or '' (also when there was nothing to do). Classic team setup starts no automatic team. */
   const enableForNewThread = async (sessionId: string): Promise<string> => {
-    if (!councilForNewThreads() || host.classicSetup() || pending.has(sessionId) || host.team(sessionId)?.config.council) return '';
+    if (!councilForNewThreads() || host.classicSetup()) return '';
+    // Team startup and the first send can request Council concurrently. Join the
+    // already-started request so the send observes its refusal instead of treating
+    // an in-flight setup as a successful no-op.
+    const inFlight = pending.get(sessionId);
+    if (inFlight) {
+      await inFlight.tail;
+      return failures.get(sessionId) ?? '';
+    }
+    if (host.team(sessionId)?.config.council) return '';
     await apply(sessionId, councilDefaults(), false);
     return failures.get(sessionId) ?? '';
   };

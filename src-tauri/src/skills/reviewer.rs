@@ -210,6 +210,13 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
         let result = (|| -> Result<(), String> {
             let meta = library.load(id)
                 .map_err(|_| format!("reviewer_skill_unavailable: assigned skill {id} is missing."))?;
+            // The on-disk metadata is untrusted; never follow a different ID's folder.
+            if meta.id != id {
+                return Err(format!("reviewer_skill_drift: library metadata identity mismatch for {id}."));
+            }
+            if !matches!(meta.source.kind.as_str(), "folder" | "github") {
+                return Err(format!("reviewer_skill_untrusted: unsupported source kind for {id}."));
+            }
             if meta.kind != Kind::Skill {
                 return Err(format!("reviewer_skill_unavailable: {id} is not a skill."));
             }
@@ -340,6 +347,27 @@ mod tests {
         meta.required_skills.clear();
         fs::write(path, serde_json::to_vec(&meta).unwrap()).unwrap();
         assert!(freeze(&library, &["review".into()], "kimi").unwrap_err().contains("reviewer_skill_drift"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forged_library_metadata_cannot_redirect_a_review_to_another_package() {
+        let (library, root) = fixture();
+        add(&library, "review", "Check source evidence.", &[]);
+        let metadata_path = library.dir.join("review.json");
+        let original = fs::read(&metadata_path).unwrap();
+        let mut forged: Meta = serde_json::from_slice(&original).unwrap();
+        forged.id = "../unrelated".into();
+        fs::write(&metadata_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert!(freeze(&library, &["review".into()], "codex").unwrap_err()
+            .contains("reviewer_skill_drift"));
+        forged.id = "review".into();
+        forged.source.kind = "arbitrary".into();
+        fs::write(&metadata_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert!(freeze(&library, &["review".into()], "codex").unwrap_err()
+            .contains("reviewer_skill_untrusted"));
+        fs::write(&metadata_path, original).unwrap();
+        assert!(freeze(&library, &["review".into()], "codex").is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 

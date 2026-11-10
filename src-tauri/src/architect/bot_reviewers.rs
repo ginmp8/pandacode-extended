@@ -5,8 +5,8 @@ use crate::{bots, model_health, model_routing, providers, storage::Store, Result
 use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
-/// A direct bot conversation or an explicitly assigned task has an executor.
-/// A session in the bot's own project is also considered its execution context.
+/// Only a direct bot conversation or explicitly assigned bot task establishes
+/// executor identity. Sharing a project does not identify an executing bot.
 fn executor(store: &Store, session_id: &str) -> Result<Option<String>> {
     let linked: Option<String> = store.db.query_row(
         "SELECT bot_id FROM bot_threads WHERE session_id=?1 UNION ALL SELECT bot_id FROM bot_tasks WHERE session_id=?1 LIMIT 1",

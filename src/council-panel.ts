@@ -154,7 +154,7 @@ export function createCouncil(host: CouncilHost) {
     threadShown(sessionId);
     // The composer is drawing another thread: the panel belongs to the one it left.
     if (panel && panelSession !== sessionId) close();
-    if (host.loaded(sessionId)) loaded(sessionId);
+    if (host.team(sessionId)) loaded(sessionId);
     observe(sessionId);
     const { label, on, cue } = face(host.team(sessionId));
     // The composer mounts this markup after it returns.
@@ -164,6 +164,9 @@ export function createCouncil(host: CouncilHost) {
   /** The strip's slot inside the prompt box: always there (empty while hidden), so the strip updates in place. */
   function strip(sessionId: string): string {
     const team = host.team(sessionId), html = team ? stripHtml(team) : '';
+    // A missing team cache is not a loaded reviewer cycle: avoid beginning the
+    // motion quiet window until the first actual team snapshot is available.
+    if (team) loaded(sessionId);
     // An explicit empty strip is the baseline for future Council round entrance.
     // A strip already present on first paint is not a newly started review.
     if (!html) motion(sessionId, 'strip', '', null, () => []);
@@ -267,7 +270,7 @@ export function createCouncil(host: CouncilHost) {
   /** Keeps the composer's thread's button, strip and open panel on the true state without redrawing the composer. */
   function sync(sessionId: string): void {
     if (panel && panelSession !== sessionId) close();
-    if (host.loaded(sessionId)) loaded(sessionId);
+    if (host.team(sessionId)) loaded(sessionId);
     refresh(sessionId);
   }
   /** A compact panel belongs to the strip control that opened it. A redrawn strip hands it the same control; once the

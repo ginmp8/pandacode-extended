@@ -46,15 +46,15 @@ fn shared_channel_council_is_opt_in_and_never_selects_outsiders_or_executors() {
     assert_ne!(shared_channels::channel_delivery_thread("first",true),
         shared_channels::channel_delivery_thread("second",true));
     assert!(crate::architect::validate_channel_reviewers(
-        &f.store,&config,&channel.member_ids,&[lead.id.clone()]).is_ok());
+        &f.store,&config,&channel.member_ids,std::slice::from_ref(&lead.id)).is_ok());
     let mut selected = config.clone();
     selected.reviewer_bot_ids = vec![peer.id.clone(), outsider.id.clone()];
     assert!(crate::architect::validate_channel_reviewers(
-        &f.store,&selected,&channel.member_ids,&[lead.id.clone()]
+        &f.store,&selected,&channel.member_ids,std::slice::from_ref(&lead.id)
     ).unwrap_err().contains("member"));
     selected.reviewer_bot_ids[1] = lead.id.clone();
     assert!(crate::architect::validate_channel_reviewers(
-        &f.store,&selected,&channel.member_ids,&[lead.id.clone()]
+        &f.store,&selected,&channel.member_ids,std::slice::from_ref(&lead.id)
     ).unwrap_err().contains("executor"));
     let message_id = crate::storage::id();
     f.store.db.execute(
@@ -93,11 +93,11 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     ).unwrap();
     let first_id = crate::storage::id();
     let (_,_,first_prompt,first_thread) = shared_channels::provision_channel_delivery(
-        &f.store,&channel.id,&message_id,&lead.id,"Review work",crate::storage::now(),0,&first_id,
+        &f.store,&channel.id,&message_id,&lead.id,"Review work",shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },&first_id,
     ).unwrap();
     let second_id = crate::storage::id();
     let (_,_,second_prompt,second_thread) = shared_channels::provision_channel_delivery(
-        &f.store,&channel.id,&message_id,&peer.id,"Review work",crate::storage::now(),0,&second_id,
+        &f.store,&channel.id,&message_id,&peer.id,"Review work",shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },&second_id,
     ).unwrap();
     assert_ne!(first_thread,second_thread);
     assert_ne!(first_thread,DESKTOP);

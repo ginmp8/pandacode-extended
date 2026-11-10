@@ -4,7 +4,7 @@
 use super::{collaboration, gateway, Bot, DESKTOP};
 use crate::{message_queue, storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};

@@ -61,6 +61,22 @@
 .bc-reassign-menu button:hover { background: var(--ds-fill); }
 .bc-composer textarea { min-height: 58px; overflow-y: auto; resize: none; }
 .bc-composer textarea:focus-visible { outline: none; }
+.bc-council-controls { padding: 0 12px 8px; color: var(--muted); font-size: 12px; }
+.bc-council-toggle { display: flex; gap: 8px; align-items: center; width: fit-content; cursor: pointer; }
+.bc-council-controls input[type=checkbox], .bc-council-controls input[type=radio] { accent-color: var(--accent); }
+.bc-council-options { display: none; gap: 7px; margin: 9px 0 0; padding: 12px; border: 1px solid var(--ds-border, var(--faint)); border-radius: var(--radius-sm); }
+.bc-council-controls:has(input[name=councilEnabled]:checked) .bc-council-options { display: grid; }
+.bc-council-options legend { color: var(--text); font-weight: 600; }
+.bc-council-options label { display: flex; align-items: center; gap: 6px; }
+.bc-council-numbers { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 4px; }
+.bc-council-numbers input { width: 60px; min-height: 30px; padding: 4px; border: 1px solid var(--ds-border, var(--faint)); border-radius: 5px; background: var(--ds-fill); color: var(--text); }
+.bc-council-reviewer-options { display: none; flex-wrap: wrap; gap: 8px 12px; padding: 8px 0; }
+.bc-council-reviewer-options p { flex-basis: 100%; margin: 0; }
+.bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-reviewer-options { display: flex; }
+.bc-council-summary { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; color: var(--text); }
+.bc-council-summary strong { font-weight: 600; }
+.bc-council-reviewers { color: var(--muted); }
+.bc-assigned:has(.bc-council-summary) { flex-wrap: wrap; }
 .bc-create-form, .bc-settings-form { display: grid; gap: 11px; padding: 0 20px 18px; }
 .bc-create-form .dialog-description { margin: 0; }
 .bc-create-form input[name=name], .bc-settings-form input[name=name], .bc-settings-form select { min-height: 36px; padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: var(--fill-hover); color: var(--text); font: inherit; }

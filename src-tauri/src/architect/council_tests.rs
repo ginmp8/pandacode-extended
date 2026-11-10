@@ -217,6 +217,76 @@ fn selected_round_freezes_all_profiles_before_split_dispatch_and_replacement() {
 }
 
 #[test]
+fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activation() {
+    use crate::skills::{Kind, Library, Source};
+    let (store, mut team) = fixture();
+    let root = std::env::temp_dir().join(format!("council-s3-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let library = Library::new(root.join("skills"), root.clone());
+    let imported = library.import(
+        Kind::Skill,
+        vec![("SKILL.md".into(), b"Use a source-linked checklist for this review.".to_vec())],
+        "review-checklist",
+        Source { kind: "folder".into(), location: "review-checklist".into(), git_ref: None, commit: None },
+    ).unwrap();
+    let skill_id = imported.meta.id;
+    let project = store.session(&team.session_id).unwrap().project_id;
+    for id in ["bot-a", "bot-b"] {
+        store.db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Inspect sources','','',?2,'codex','frozen-model','full',1,1,?3)",
+            params![id, project, serde_json::json!([skill_id]).to_string()],
+        ).unwrap();
+    }
+    let mut config = on(9.0, 10, 0);
+    config.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    let first = bot_reviewers::seat_bot_inner_with_skills(&store, &team, 1, None, &library).unwrap().unwrap();
+    let initial = first.skills.as_ref().unwrap();
+    assert_eq!(initial.pins.len(), 1);
+    assert_eq!(initial.pins[0].id, skill_id);
+    assert_eq!(initial.pins[0].delivery_mode, "isolated_files");
+    assert!(initial.prompt.contains("source-linked checklist"));
+    assert!(initial.verify().is_ok());
+    assert!(library.list().unwrap().iter().all(|entry| entry.meta.activations.is_empty()));
+
+    let worker = seat("first", 1, None, SINCE + 1);
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider, &worker.model, worker.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some(first.id.clone());
+    binding.roster_bot_ids = first.roster_bot_ids.clone();
+    binding.required_reviewers = Some(first.roster_bot_ids.len());
+    binding.snapshot.bot_context = Some(first.context.clone());
+    binding.snapshot.tool_policy = first.tool_policy.clone();
+    binding.snapshot.skills = first.skills.clone();
+    reviewer_security::record_native_authority(&store, &team.session_id, &binding).unwrap();
+    let mut worker = worker;
+    worker.reviewer_binding = Some(binding);
+    team.workers.push(worker);
+
+    // A library replacement between separately dispatched seats cannot alter this round.
+    library.import(
+        Kind::Skill,
+        vec![("SKILL.md".into(), b"This new revision must wait for the next Council round.".to_vec())],
+        "review-checklist",
+        Source { kind: "folder".into(), location: "review-checklist".into(), git_ref: None, commit: None },
+    ).unwrap();
+    let second = bot_reviewers::seat_bot_inner_with_skills(&store, &team, 1, None, &library).unwrap().unwrap();
+    assert_eq!(second.id, "bot-b");
+    assert_eq!(second.skills, first.skills);
+    assert!(second.skills.as_ref().unwrap().prompt.contains("source-linked checklist"));
+    assert!(!second.skills.as_ref().unwrap().prompt.contains("new revision"));
+    assert!(library.list().unwrap().iter().all(|entry| entry.meta.activations.is_empty()));
+    let staged = initial.pins[0].staged_path.as_ref().unwrap();
+    let file = std::path::Path::new(staged).join("SKILL.md");
+    let mut writable = std::fs::metadata(&file).unwrap().permissions();
+    writable.set_readonly(false);
+    std::fs::set_permissions(&file, writable).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn both_native_configuration_paths_recover_stopped_selected_rounds() {
     for use_setup in [false, true] {
         let (state, sid) = council_state(on(9.0, 10, 0));

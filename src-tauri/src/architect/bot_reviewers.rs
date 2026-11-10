@@ -105,6 +105,18 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
     Ok(())
 }
 
+/// A previously scored bot reserves its identity; an abandoned unscored or
+/// historical-cycle seat does not. This must be identical for retries and new rounds.
+pub(super) fn occupied_bot_ids<'a>(team: &'a TeamSnapshot, round: usize, replaces: Option<&str>) -> HashSet<&'a str> {
+    team.workers.iter()
+        .filter(|w| w.created_at >= team.council_since)
+        .filter(|w| w.council.as_ref().is_some_and(|s| s.round == round))
+        .filter(|w| !w.abandoned || w.council.as_ref().is_some_and(|s| s.score.is_some()))
+        .filter(|w| Some(w.id.as_str()) != replaces)
+        .filter_map(|w| w.reviewer_binding.as_ref()?.reviewer_bot_id.as_deref())
+        .collect()
+}
+
 /// Resolve a selected persistent reviewer for one native seat. A replacement keeps its bot.
 /// Never silently use a native worker or another bot when the intended seat is unavailable.
 pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>) -> Result<Option<bots::Bot>> {
@@ -116,14 +128,7 @@ pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replace
     if old.is_some() && inherited.is_none() {
         return Err("reviewer_session_mismatch: a selected seat cannot replace a native reviewer.".into());
     }
-    let occupied: HashSet<&str> = team.workers.iter()
-        .filter(|w| w.created_at >= team.council_since)
-        .filter(|w| w.council.as_ref().is_some_and(|s| s.round == round))
-        // An abandoned, unscored seat can be reissued to the same bot; a score stands.
-        .filter(|w| !w.abandoned || w.council.as_ref().is_some_and(|s| s.score.is_some()))
-        .filter(|w| Some(w.id.as_str()) != replaces)
-        .filter_map(|w| w.reviewer_binding.as_ref()?.reviewer_bot_id.as_deref())
-        .collect();
+    let occupied = occupied_bot_ids(team, round, replaces);
     let selected = match inherited {
         Some(id) => id,
         None => config.reviewer_bot_ids.iter().find(|id| !occupied.contains(id.as_str()))
@@ -177,5 +182,24 @@ mod tests {
         };
         assert!(valid_bot(&bot, Some("reviewer-one"), false).unwrap_err().contains("own task"));
         assert!(valid_bot(&bots::Bot { paused: true, ..bot.clone() }, None, false).unwrap_err().contains("paused"));
+
+        let grant = super::super::reviewer_security::ReviewerCapabilityGrant {
+            tool: "pandacode_open_file".into(), action: "call".into(),
+            action_argument: None, resource_argument: "path".into(), resource: "src/main.ts".into(),
+        };
+        let user = super::super::reviewer_security::ReviewerPermissionSelection {
+            authorization_id: "user-selected-audit-review".into(), grants: vec![grant.clone()],
+        };
+        assert!(matches!(review_policy(&bot, &user), Ok(super::super::reviewer_security::ReviewerToolPolicy::Scoped(_))));
+        let escaped = super::super::reviewer_security::ReviewerPermissionSelection {
+            grants: vec![super::super::reviewer_security::ReviewerCapabilityGrant { resource: "../secrets".into(), ..grant.clone() }],
+            ..user.clone()
+        };
+        assert!(review_policy(&bot, &escaped).unwrap_err().contains("policy_unsupported"));
+        let unsupported = super::super::reviewer_security::ReviewerPermissionSelection {
+            grants: vec![super::super::reviewer_security::ReviewerCapabilityGrant { tool: "pandacode_create_task".into(), ..grant }],
+            ..user
+        };
+        assert!(review_policy(&bot, &unsupported).unwrap_err().contains("policy_unsupported"));
     }
 }

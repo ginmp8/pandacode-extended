@@ -8,9 +8,10 @@ The selector lists a bot's name, role, provider, model and availability. Identit
 
 ## Native execution
 
-- When the lead dispatches a Council reviewer, the native adapter chooses an unoccupied selected bot ID for the round, resolves the real bot provider/model/reasoning effort, and starts a fresh independent Architect worker session in read-only Council mode.
-- The S1 `ReviewerBinding` records the selected reviewer ID and a frozen, review-relevant bot persona. A separately persisted native authority record authenticates the exact identity and snapshot at admission; a forged persisted identity is rejected.
+- When the lead dispatches a Council reviewer, the native adapter chooses an unoccupied selected bot ID for the current cycle/round, resolves the real bot provider/model/reasoning effort, and starts a fresh independent Architect worker session under the S1 native reviewer policy.
+- The S1 `ReviewerBinding` records the selected reviewer ID, per-round roster/quorum and a frozen, review-relevant bot persona plus assigned skill IDs (the S3 resolver is deliberately not yet invoked). A separately persisted native authority record authenticates the exact identity and snapshot at admission; a forged persisted identity is rejected.
 - The selected persona informs the reviewer's lens and report. It does not grant the bot's ambient tools, shell, MCP access or ordinary workspace privileges. S1's native tool policy remains enforced. The reviewer receives no previous reviewer score or target.
+- **Review tool access** is task-scoped and defaults to native read-only. An explicit user choice can authorize `pandacode_open_file` for one exact, task-relative path via S1's `Scoped` host-tool wrapper. Arbitrary app tools, external MCP writes, shell and assessed-checkout modifications remain unsupported in this scope; unsupported requests fail visibly rather than claiming broader permission. S5 owns post-acceptance GitHub issue creation.
 - Original Council scoring, score parsing, round limits, correcting, final reports and exceptional acceptance stay unchanged. Automatic Council seats remain backward compatible.
 - A round in progress cannot be restaffed by changing the selection. Existing completed reports and authority snapshots remain associated with their original seats. Reconfiguration affects later rounds, not prior completed results.
 

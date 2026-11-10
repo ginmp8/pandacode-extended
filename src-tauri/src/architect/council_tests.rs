@@ -27,6 +27,37 @@ fn selected_bot_config_requires_distinct_bounded_identity_roster() {
 }
 
 #[test]
+fn selected_bot_quorum_is_frozen_when_later_round_chooses_more_bots() {
+    let mut original = on(9.0, 10, 0);
+    original.reviewer_bot_ids = vec!["bot-1".into(), "bot-2".into()];
+    let mut team = team_with(original.clone(), vec![
+        seat("worker-one", 1, Some(9.0), SINCE + 1),
+        seat("worker-two", 1, Some(9.0), SINCE + 2),
+    ]);
+    for index in 0..team.workers.len() {
+        let worker = &team.workers[index];
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider, &worker.model, worker.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some(original.reviewer_bot_ids[index].clone());
+        binding.roster_bot_ids = original.reviewer_bot_ids.clone();
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+            name: format!("Reviewer {}", index + 1), role: "QA".into(),
+            instructions: String::new(), goals: String::new(), soul: String::new(),
+            reasoning_effort: String::new(), skill_ids: vec![],
+        });
+        team.workers[index].reviewer_binding = Some(binding);
+    }
+    assert!(council::complete(&team, &original, 1));
+    let mut expanded = original.clone();
+    expanded.reviewer_bot_ids.push("bot-3".into());
+    assert!(council::complete(&team, &expanded, 1));
+    assert!(!bot_reviewers::occupied_bot_ids(&team, 2, None).contains("bot-1"));
+    team.council_since += 20;
+    assert!(bot_reviewers::occupied_bot_ids(&team, 1, None).is_empty());
+}
+
+#[test]
 fn selected_bot_authority_cannot_be_forged_in_a_legacy_reviewer() {
     let (state, sid) = council_state(on(9.0, 2, 2));
     call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments": [reviewer_assignment("review", "security")]})).unwrap();

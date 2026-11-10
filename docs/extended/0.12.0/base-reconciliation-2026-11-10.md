@@ -26,3 +26,11 @@
 - [ ] Run exact-SHA CI for subsequent integration fixes before marking them verified.
 - [ ] Separately accept installed-app native Voice stop/close/crash paths, Settings/Skills/Catalogs persistence, real agent activation and bot isolation, Connect/MCP/cloud/VM controls and release failure modes where required.
 - [ ] No merge, tag or release publication was authorized in this reconciliation.
+ 
+## Complete 0.3.108 source refresh — 2026-11-10
+
+- Newly pinned source: `base/development` at `ab6c99787bf8ece8eae70b51eb3d071b91353e41`, two commits ahead of the previous frozen source `e7361c1c22355718cbbbf0e7ec4202a3e9673f61`; the native application remains 0.3.108.
+- Upstream delta contains six modified paths: `mobile/package.json` and `mobile/package-lock.json` were already byte-identical to the patched 1.4.3 upstream dependency fix in this topic branch; the four remaining Extended 0.12.0 documentation appendices were integrated without replacing preexisting Extended status/history.
+- Complete Git tree inspection of this source and the prior topic candidate: 1,753 upstream blobs, 1,780 topic blobs; all upstream paths and modes present, 27 Extended-only blobs retained and 70 shared blobs intentionally divergent. Structural inclusion is not a guarantee of semantic equivalence for these shared files.
+- The prior topic candidate `5b1db3950d622a9fbc682311435a9bf2814607c1` passed all 18 jobs in [exact-SHA CI #42920188868](https://github.com/ginmp8/pandacode-extended/actions/runs/42920188868), including native Rust/Clippy, TypeScript, mobile, security audit and Skills/Council browser regressions. This new source-refresh commit requires its own exact-SHA CI to demonstrate automated verification.
+- The topic branch is strictly single-parent and the upstream and Extended development branches remain untouched. Installed-app/device and manually approved release acceptance remain outside automated CI. No merge, tags or publication are authorized.

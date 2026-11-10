@@ -55,6 +55,37 @@ pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json:
     Ok(result)
 }
 
+/// S2 admits only host actions whose scope is provable at the native boundary.
+/// A requested action cannot self-authorize a tool or inherit an external MCP server.
+pub(super) fn review_policy(
+    bot: &bots::Bot,
+    permissions: &super::reviewer_security::ReviewerPermissionSelection,
+) -> Result<super::reviewer_security::ReviewerToolPolicy> {
+    use super::reviewer_security::{ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy};
+    let mut configured: Vec<ReviewerCapabilityGrant> = Vec::new();
+    for grant in &permissions.grants {
+        // Opening one exact project-relative file in the app inspector cannot mutate
+        // the reviewed checkout, bot state or external account. Other native tool
+        // actions need a verified bot capability map and must fail closed here.
+        let valid_path = !grant.resource.starts_with('/')
+            && !grant.resource.starts_with('\\')
+            && !grant.resource.contains(':')
+            && !grant.resource.split(&['/', '\\'][..]).any(|part| part == ".." || part.is_empty());
+        if grant.tool != "pandacode_open_file" || grant.action != "call"
+            || grant.action_argument.is_some() || grant.resource_argument != "path" || !valid_path
+        {
+            return Err("policy_unsupported: no configured, enforceable scoped reviewer host action matches that grant.".into());
+        }
+        configured.push(grant.clone());
+    }
+    // The native app exposes this host-only read action to every configured bot's
+    // ordinary project session. The reviewer receives no additional ambient host tools.
+    let _ = bot;
+    ReviewerToolPolicy::from_user_grants(
+        ReviewerPhase::Review, &permissions.authorization_id, &configured, &permissions.grants,
+    )
+}
+
 /// Called on a user setting change and again before dispatch, not by model output.
 pub(super) fn validate_roster(store: &Store, session_id: &str, council: &CouncilConfig) -> Result<()> {
     council.validate()?;
@@ -67,6 +98,9 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
         }
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
         valid_bot(&bot, executor.as_deref(), true)?;
+        if let Some(permissions) = &council.review_permissions {
+            review_policy(&bot, permissions)?;
+        }
     }
     Ok(())
 }

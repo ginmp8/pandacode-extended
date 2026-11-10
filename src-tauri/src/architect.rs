@@ -2070,6 +2070,9 @@ fn dispatch_as(
                         binding.reviewer_bot_id = Some(bot.id.clone());
                         binding.roster_bot_ids = team.config.council.as_ref().map_or_else(Vec::new, |c| c.reviewer_bot_ids.clone());
                         binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext::from_bot(bot));
+                        if let Some(permissions) = team.config.council.as_ref().and_then(|c| c.review_permissions.as_ref()) {
+                            binding.snapshot.tool_policy = bot_reviewers::review_policy(bot, permissions)?;
+                        }
                     }
                     binding
                 });

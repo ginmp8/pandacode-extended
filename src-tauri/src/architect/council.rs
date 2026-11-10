@@ -321,7 +321,10 @@ fn unverified_required_skill_checks(team: &TeamSnapshot, round: usize) -> Vec<St
         if let Some(skills) = worker.reviewer_binding.as_ref().and_then(|binding| binding.snapshot.skills.as_ref()) {
             for pin in &skills.pins {
                 if pin.required_for_acceptance
-                    && !(pin.supplied && pin.invoked && pin.check_executed && pin.evidence_verified)
+                    && !worker.reviewer_binding.as_ref()
+                        .and_then(|binding| binding.skill_evidence.get(&pin.id)
+                            .map(|evidence| evidence.valid_for(pin, &binding.artifact_revision)))
+                        .unwrap_or(false)
                 {
                     missing.push(format!("{} ({})", worker.name, pin.id));
                 }

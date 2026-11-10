@@ -125,7 +125,7 @@ jobs:
       - name: Verify selected bot, scoped grant and keyboard acceptance
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
-            npx playwright test tests/council.spec.ts --grep 'selected|scoped reviewer' --workers=1
+            npx playwright test tests/council.spec.ts --grep 'selected|scoped reviewer|panel places itself|an action that fails|motion: nothing on load' --workers=1
 
   council-bot-reviewers-browser:
     name: Council selected bot reviewers (Playwright)

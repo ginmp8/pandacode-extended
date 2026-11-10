@@ -456,9 +456,14 @@ test('the panel places itself again when its content changes', async ({ page }) 
   await button(page).click();
   await toggle(page).click();
   await expect(toggle(page)).toBeChecked();
-  const [p, b] = await Promise.all([panel(page).boundingBox(), button(page).boundingBox()]);
-  expect(p!.y).toBeGreaterThanOrEqual(0);
-  expect(p!.y + p!.height).toBeLessThanOrEqual(b!.y);
+  // Turning on a team redraws the composer asynchronously. Verify placement
+  // after the native request and its replacement tray button have settled.
+  await expect.poll(() => calls(page).then(list => list.length)).toBe(1);
+  await expect(button(page)).toHaveAttribute('aria-busy', 'false');
+  await expect.poll(async () => {
+    const [p, b] = await Promise.all([panel(page).boundingBox(), button(page).boundingBox()]);
+    return Boolean(p && b && p.y >= 0 && p.y + p.height <= b.y);
+  }).toBe(true);
 });
 
 test('an open tooltip follows the composer button when its name changes', async ({ page }) => {
@@ -666,10 +671,18 @@ test('asking: Accept and finish, then the settled strip can be dismissed until t
 });
 
 test('an action that fails: all three busy while it runs, then its failure in the strip and focus back on it', async ({ page }) => {
-  await open(page, '/?council=asking', { architect_council_accept: 'Native refused.' }, 0, '', { architect_council_accept: 800 });
+  await open(page, '/?council=asking', { architect_council_accept: 'Native refused.' });
+  // Hold the native answer until the intermediate busy state is asserted.
+  // A fixed 800ms mock delay raced against slow CI browser instrumentation.
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__hold = w.__hold ?? {};
+    w.__hold.architect_council_accept = new Promise<void>(resolve => { w.__releaseCouncilAccept = resolve; });
+  });
   const accept = strip(page).getByRole('button', { name: 'Accept and finish' });
   await accept.focus(); await page.keyboard.press('Enter');
   for (const name of ['Keep fixing', 'Lower target', 'Accept and finish']) await expect(strip(page).getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true');
+  await page.evaluate(() => (window as any).__releaseCouncilAccept());
   await expect(strip(page).getByRole('alert')).toHaveText('Accept and finish did not go through: Native refused.');
   await expect(accept).toBeFocused();
   await expect(strip(page).getByRole('button', { name: 'Keep fixing' })).not.toHaveAttribute('aria-disabled', 'true');

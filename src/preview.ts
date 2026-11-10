@@ -1324,6 +1324,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'model_health_clear': previewHealth = previewHealth.filter(entry => (args.provider != null && entry.provider !== args.provider) || (args.model != null && entry.model !== args.model)); result = previewHealth.map(entry => ({ ...entry })); break;
     case 'model_routing_route': result = previewRoute(String(args.text), args.pool as any[]); break;
     case 'architect_get': result = architect.get(args.sessionId); break;
+    case 'architect_council_reviewer_options': {
+      const configured = await invoke<any[]>('bots_list', {});
+      result = configured.map(bot => ({
+        ...bot, available: !bot.paused, reason: bot.paused ? 'Paused' : null,
+      }));
+      break;
+    }
     case 'architect_configure': result = architect.configure(args.sessionId, args.config, args.architect, args.profileId); break;
     case 'architect_set_council': result = architect.setCouncil(args.sessionId, args.council); break;
     case 'architect_council_accept': result = architect.councilAccept(args.sessionId); break;

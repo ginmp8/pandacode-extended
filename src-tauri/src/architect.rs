@@ -936,6 +936,16 @@ pub async fn architect_configure(
     }
     Ok(changed)
 }
+/// Native source of truth for Council bot eligibility. No changes to bot state.
+#[tauri::command]
+pub async fn architect_council_reviewer_options(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<Value>> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    refuse_mirror(&store, &session_id)?;
+    bot_reviewers::options(&store, &session_id)
+}
 /// Turns Council on or off, or changes it, at once, including during a run.
 #[tauri::command]
 pub async fn architect_set_council(

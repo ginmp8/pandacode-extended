@@ -207,6 +207,97 @@ fn stage(library: &Library, meta: &Meta, files: &super::Files, hashes: &BTreeMap
     Ok(target.to_string_lossy().into_owned())
 }
 
+/// Reclaim only materialized reviewer packages no longer referenced by any
+/// persisted round. Call while holding the app store lock, so a Council cannot
+/// create an unfinished round between the reference scan and removal.
+pub(crate) fn cleanup_orphaned(library: &Library, store: &crate::storage::Store) -> Result<usize, String> {
+    let root = library.dir.join(STAGE_ROOT);
+    if !root.exists() { return Ok(0); }
+    safe_dir(&root)?;
+    let mut retained = HashSet::new();
+    {
+        let mut statement = store.db.prepare(
+            "SELECT content FROM architect_requests WHERE kind='reviewer_round'",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let raw = row.map_err(|e| e.to_string())?;
+            let round: Vec<serde_json::Value> = serde_json::from_str(&raw)
+                .map_err(|_| "reviewer_skill_cleanup_blocked: invalid native round metadata.".to_owned())?;
+            for seat in round {
+                let Some(skills) = seat.get("skills").filter(|s| !s.is_null()) else { continue };
+                let inputs: ReviewerSkills = serde_json::from_value(skills.clone())
+                    .map_err(|_| "reviewer_skill_cleanup_blocked: malformed frozen skill receipt.".to_owned())?;
+                for pin in &inputs.pins {
+                    if let Some(path) = &pin.staged_path {
+                        let path = Path::new(path);
+                        if path.parent() == Some(root.as_path()) {
+                            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                                retained.insert(name.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if retained.contains(&name) { continue; }
+        let candidate = entry.path();
+        let metadata = fs::symlink_metadata(&candidate).map_err(|e| e.to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(format!("reviewer_skill_cleanup_blocked: unsafe staged entry {name}."));
+        }
+        // Refuse all unknown names instead of interpreting arbitrary user folders
+        // as Council-created materialization.
+        let named_snapshot = name.rsplit_once('-').is_some_and(|(id, digest)|
+            super::valid_id(id) && digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let interrupted = name.starts_with(".pending-") && name.len() <= 64;
+        if !named_snapshot && !interrupted {
+            return Err(format!("reviewer_skill_cleanup_blocked: unknown staged entry {name}."));
+        }
+        remove_staged_dir(&candidate)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn remove_staged_dir(path: &Path) -> Result<(), String> {
+    safe_dir(path)?;
+    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let target = entry.path();
+        let metadata = fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("reviewer_skill_cleanup_blocked: unexpected staged symlink.".into());
+        }
+        if metadata.is_dir() {
+            remove_staged_dir(&target)?;
+        } else if metadata.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+                    .map_err(|e| e.to_string())?;
+            }
+            #[cfg(windows)]
+            {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(false);
+                fs::set_permissions(&target, permissions).map_err(|e| e.to_string())?;
+            }
+            fs::remove_file(&target).map_err(|e| e.to_string())?;
+        } else {
+            return Err("reviewer_skill_cleanup_blocked: unsupported staged file type.".into());
+        }
+    }
+    fs::remove_dir(path).map_err(|e| e.to_string())
+}
+
 /// Resolve only explicitly bot-assigned skill IDs plus their required dependencies.
 /// A missing/unsafe/drifted/truncated mandatory input fails closed, never silently truncates.
 pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> Result<ReviewerSkills, String> {
@@ -440,6 +531,31 @@ mod tests {
         assert!(freeze(&library, &assigned, "kimi").unwrap_err().contains("unavailable"));
         assert!(freeze_with_optional(&library, &assigned, "kimi", &["unassigned".into()])
             .unwrap_err().contains("not an unique bot assignment"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_cleanup_preserves_persisted_rounds_and_reclaims_orphans() {
+        let (library, root) = fixture();
+        add(&library, "stable", "Review the pinned source.", &[]);
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let session = store.create_session(&project, "codex", "default", "full").unwrap();
+        let pinned = freeze(&library, &["stable".into()], "codex").unwrap();
+        let dir = PathBuf::from(pinned.pins[0].staged_path.as_ref().unwrap());
+        assert!(dir.exists());
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,'round','reviewer_round',?2,'')",
+            rusqlite::params![session.id, serde_json::json!([{"skills": pinned}]).to_string()],
+        ).unwrap();
+        assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 0);
+        assert!(dir.exists(), "a persisted round must never lose its immutable files");
+
+        store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1", [&session.id]).unwrap();
+        assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 1);
+        assert!(!dir.exists(), "unused read-only snapshots must be reclaimed safely");
+        assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 

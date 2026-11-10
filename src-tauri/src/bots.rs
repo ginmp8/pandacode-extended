@@ -1101,7 +1101,15 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| {
         upgrade(&store.db)?;
         shared_channels::reconcile_in_progress(&store)?;
-        collaboration::reconcile_unsent_requests(&store)
+        collaboration::reconcile_unsent_requests(&store)?;
+        // Only remove immutable Council skill files after references in durable
+        // native round records are recovered. Never touch the assessed checkout.
+        if let Ok(library) = crate::skills::library(app) {
+            if let Err(error) = crate::skills::reviewer::cleanup_orphaned(&library, &store) {
+                eprintln!("Could not reclaim orphaned Council reviewer snapshots: {error}");
+            }
+        }
+        Ok(())
     });
     let is_upgraded = upgraded.is_ok();
     if let Err(error) = upgraded {

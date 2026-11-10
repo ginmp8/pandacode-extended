@@ -70,3 +70,9 @@ This resolves the **CI audit failure at this exact code SHA**, not the separate 
 ## Upstream 0.3.107 import dependency evidence
 
 The application manifests were synchronized to **0.3.107** while retaining Extended's existing compatible dependency remediation: `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`, including their lockfile graph. The new inherited Skills manager invokes the upstream-pinned Skills CLI `skills@1.7.6`; this is an upstream feature description, not an independent security approval. npm/RustSec audits, Rust locked tests/Clippy, and live CLI installation remain pending for the new destination commit. No unrelated dependency downgrade or advisory suppression was introduced.
+
+## Upstream 0.3.107 dependency CI follow-up — 2026-11-10
+
+Both [push CI #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR CI #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388) completed **successfully (6/6 jobs each)** on the reconciled code commit [`e4e5c0c51daa8a0149015bb26a00c8fb09bb2050`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050). All reported jobs passed: Linux Rust check/tests, RustSec, Node/TypeScript/unit tests and website, npm dependency audit, Expo/mobile compatibility and macOS ONNX parity.
+
+The RustSec and npm jobs passed with the Extended lockfiles at this exact code SHA; this replaces the earlier pending CI state for this commit only. Do not infer that live Skills CLI installations, native SQLite upgrade/rollback, Windows/Linux platform behavior or future commits have been validated. No new dependency remediation or security approval is claimed.

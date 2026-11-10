@@ -60,3 +60,9 @@ The former RustSec failure on `libsqlite3-sys 0.36.0` is **historical**, affecti
 ## New Skills manager acceptance gaps — upstream 0.3.107
 
 The upstream introduces a Skills manager with global/project switches, quarantine, local/link installation and uninstall/Undo. Upstream release notes explicitly report incomplete native Windows/Linux cross-volume and live CLI validation; these limitations are inherited, not confirmed Extended regressions. On this Extended candidate, interactions between skill switches and existing Feature controls, bots, shared channels, MCP/Connect and restart are unverified. The 80 previously divergent shared source files still require full semantic acceptance. CI on the new exact destination SHA, native installers and data migration are pending; do not interpret a complete file inventory as functional parity certification.
+
+## Upstream 0.3.107 exact-SHA CI follow-up — 2026-11-10
+
+Both [push CI #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR CI #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388) completed **successfully (6/6 jobs each)** on the reconciled code commit [`e4e5c0c51daa8a0149015bb26a00c8fb09bb2050`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050). All reported jobs passed: Linux Rust check/tests, RustSec, Node/TypeScript/unit tests and website, npm dependency audit, Expo/mobile compatibility and macOS ONNX parity.
+
+The pending-CI statement above is an earlier observation, now resolved for the referenced code SHA. Remaining acceptance gaps include native Skills CLI install/quarantine/restore/uninstall/Undo, cross-volume behavior, SQLite migration/rollback, Extended controls On/Off and a hunk-by-hunk reconciliation of all 80 customized shared files. A docs-only follow-up SHA requires its own CI verification.

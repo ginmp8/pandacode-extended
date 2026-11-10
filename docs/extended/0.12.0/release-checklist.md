@@ -137,6 +137,14 @@ The earlier unchecked CI items were authored while the remediation jobs were pen
 
 - [x] Pin upstream [`5998a8fc085e`](https://github.com/ginmp8/pandacode/commit/5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1) and reconcile all 92 changed tracked paths in a complete nontruncated candidate tree (75 source-exact, 15 adapted, two deleted), with zero missing upstream files and retained Extended-only files.
 - [x] Align the six npm/Cargo/Tauri application version fields to 0.3.107 without changing the planned Extended distribution 0.12.0.
-- [ ] Verify publication is a single-parent non-force update of `base/development`, followed by exact-source/destination ref readback.
-- [ ] Verify all CI jobs on the exact published destination SHA; independent Rust, JS, Playwright, mobile, npm/RustSec, native Skills CLI, platform behavior and Settings On/Off remain unverified at documentation time.
+- [x] Verify the upstream 0.3.107 code commit as a one-parent update on `base/development`, followed by exact-source/destination ref readback (see follow-up below).
+- [x] Verify all six existing GitHub Actions jobs on each exact-code-SHA push/PR run; live native Skills CLI, platform integration and Settings On/Off acceptance remain unverified (see follow-up below).
 - [ ] Verify new Skills controls coexist with Feature controls, Connect/MCP/cloud/VM/credentials/bot pause and legacy migrated settings, without disabling upstream behavior.
+
+## Verification follow-up on the published code SHA — 2026-11-10
+
+- [x] Confirm the imported code commit [`e4e5c0c51daa`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050) is a single-parent child of `590f7cc40f860669266414226c408bb8a1667349`; verify live source and destination HEADs and all tracked paths by nontruncated Git tree SHA/mode inventory.
+- [x] Verify the two exact-code-SHA GitHub Actions runs: [push #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388), each with six successful jobs and no failed/skipped jobs.
+- [ ] Independently exercise live Skills CLI, Windows/Linux installation, SQLite migrations/rollback, Settings On/Off, Connect/MCP/bots/cloud/VM/credentials and review all 80 customized shared-file hunks.
+
+Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent documentation commit has its own SHA and must not inherit code-commit CI as a claim of exact-SHA CI success.

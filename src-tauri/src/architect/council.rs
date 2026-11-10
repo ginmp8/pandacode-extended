@@ -66,7 +66,7 @@ impl CouncilConfig {
         }
         Ok(())
     }
-    fn needed(&self) -> usize {
+    pub(super) fn needed(&self) -> usize {
         if self.reviewer_bot_ids.is_empty() { self.reviewers.max(MIN_REVIEWERS) } else { self.reviewer_bot_ids.len() }
     }
 }
@@ -306,7 +306,11 @@ impl Rounds {
         for round in 1..=latest {
             let seated = in_round(team, round).filter(|(w, seat)| counts(w, seat)).count();
             let count = scored(team, round).count();
-            let complete = count == seated && count >= config.needed() && view.missing(team, round).is_empty();
+            // Every started round uses its own issued quorum, never the current editable roster.
+            let required = in_round(team, round)
+                .filter_map(|(w, _)| w.reviewer_binding.as_ref()?.required_reviewers)
+                .next().unwrap_or_else(|| config.needed());
+            let complete = count == seated && count >= required && view.missing(team, round).is_empty();
             view.done.push(complete);
             view.started += usize::from(in_round(team, round).any(|(_, seat)| seat.started_at > 0));
         }
@@ -325,6 +329,12 @@ impl Rounds {
         }
         self.lenses.iter().filter(|lens| !in_round(team, round).any(|(w, seat)| counts(w, seat) && same_lens(&seat.lens, lens))).cloned().collect()
     }
+}
+/// Disallow roster mutation until each active seat has settled and its original quorum is met.
+pub(super) fn current_round_incomplete(team: &TeamSnapshot) -> bool {
+    let Some(config) = &team.config.council else { return false };
+    let round = latest_round(team);
+    round > 0 && !accepted(team) && !Rounds::of(team, config).complete(round)
 }
 #[cfg(test)]
 pub(super) fn complete(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {

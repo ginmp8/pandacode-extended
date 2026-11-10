@@ -193,6 +193,10 @@ pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replace
 pub(super) fn seat_bot_inner(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool) -> Result<Option<SelectedReviewer>> {
     seat_bot_with_skills(store, team, round, replaces, check_executable, None)
 }
+#[cfg(test)]
+pub(super) fn seat_bot_inner_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: &crate::skills::Library) -> Result<Option<SelectedReviewer>> {
+    seat_bot_with_skills(store, team, round, replaces, false, Some(library))
+}
 fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     if config.reviewer_bot_ids.is_empty() { return Ok(None); }

@@ -53,7 +53,9 @@ export function createPreviewArchitect(host: PreviewHost) {
   /** Like the native command: a sane range, or a refusal. */
   function validCouncil(council: CouncilConfig): CouncilConfig {
     if (!council || typeof council.target !== 'number' || !(council.target > 0 && council.target <= 10)) throw new Error('A council target is between 0 and 10.');
-    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers') };
+    const ids = council.reviewerBotIds ?? [];
+    if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error('Select 2 to 8 distinct reviewer bots.');
+    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}) };
   }
   function validate(config: TeamConfig): TeamConfig {
     // Auto teams carry an optional roster (the lead picks models); configured teams name at least one profile.

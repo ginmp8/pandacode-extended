@@ -234,7 +234,7 @@ fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activati
     for id in ["bot-a", "bot-b"] {
         store.db.execute(
             "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Inspect sources','','',?2,'codex','frozen-model','full',1,1,?3)",
-            params![id, project, serde_json::json!([skill_id]).to_string()],
+            params![id, project, serde_json::json!([skill_id.clone()]).to_string()],
         ).unwrap();
     }
     let mut config = on(9.0, 10, 0);

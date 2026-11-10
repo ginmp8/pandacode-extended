@@ -83,3 +83,79 @@ jobs:
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
           npx playwright test tests/skill-manager.spec.ts tests/skills-library.spec.ts tests/customize-skills.spec.ts tests/council.spec.ts tests/bots.spec.ts tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts tests/skills-library.spec.ts --workers=2
+
+      - name: Display failing browser error contexts
+        if: failure()
+        shell: bash
+        run: |
+          find test-results -name error-context.md -type f | head -n 8 | while IFS= read -r file; do
+            echo "::group::$file"
+            sed -n '1,160p' "$file"
+            echo "::endgroup::"
+          done
+
+  quick-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+      - name: Reconstruct pinned candidate and verify tree inventory
+        run: EXPECTED_HEAD="$(git rev-parse HEAD)" python3 scripts/temp-reconcile-03107.py
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Focused Bots and Skills integration smoke
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+          npx playwright test tests/bots.spec.ts tests/skill-manager.spec.ts tests/council.spec.ts --grep "bot actions menu aligns|opens Skills through real Settings navigation|one thread.s slow change" --workers=1
+      - name: Display failing smoke error contexts
+        if: failure()
+        shell: bash
+        run: |
+          find test-results -name error-context.md -type f | head -n 5 | while IFS= read -r file; do
+            echo "::group::$file"
+            sed -n '1,160p' "$file"
+            echo "::endgroup::"
+          done
+
+  publish:
+    needs: [web, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reconstruct exact native and web tested candidate
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: python3 scripts/temp-reconcile-03107.py
+      - name: Publish single-parent integration on PR topic only
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git ls-remote --heads origin refs/heads/base/development | cut -f1)"
+          target_sha="$(git ls-remote --heads origin refs/heads/extended/development | cut -f1)"
+          topic_sha="$(git ls-remote --heads origin refs/heads/chore/pr120-reconcile-base-20261110 | cut -f1)"
+          test "$source_sha" = "50b2d8bfd25ba2f885a9f060bfb93fcc4111cc34"
+          test "$target_sha" = "6467995ea3b533b039bcd393e4e6a15e847f5464"
+          test "$topic_sha" = "$EXPECTED_HEAD"
+          test -n "${CANDIDATE_TREE:-}"
+          integrated="$(git commit-tree "$CANDIDATE_TREE" -p "$EXPECTED_HEAD" -m "chore(reconcile): integrate upstream 0.3.107 and retain Extended features")"
+          test "$(git cat-file -p "$integrated" | grep -c '^parent ')" -eq 1
+          test "$(git rev-parse "$integrated^{tree}")" = "$CANDIDATE_TREE"
+          git push origin "$integrated:refs/heads/chore/pr120-reconcile-base-20261110"
+          actual="$(git ls-remote --heads origin refs/heads/chore/pr120-reconcile-base-20261110 | cut -f1)"
+          test "$actual" = "$integrated"
+          echo "RECONCILIATION_PUBLISHED_COMMIT=$integrated"
+          echo "RECONCILIATION_PUBLISHED_TREE=$CANDIDATE_TREE"

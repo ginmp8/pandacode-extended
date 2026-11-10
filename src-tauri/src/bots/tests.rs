@@ -132,6 +132,9 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     let first = detail.messages.iter().find(|item| item.id==first_id).unwrap();
     let second = detail.messages.iter().find(|item| item.id==second_id).unwrap();
     assert_ne!(first.council.as_ref().unwrap().cycle_id,second.council.as_ref().unwrap().cycle_id);
+    assert_ne!(first.council.as_ref().unwrap().session_id,second.council.as_ref().unwrap().session_id);
+    assert!(owned.iter().any(|(_,sid)| sid == &first.council.as_ref().unwrap().session_id));
+    assert!(owned.iter().any(|(_,sid)| sid == &second.council.as_ref().unwrap().session_id));
     assert_eq!(first.council.as_ref().unwrap().state,"Reviewing");
     assert_eq!(second.council.as_ref().unwrap().state,"Reviewing");
     // Stopping one delivery cannot mark its sibling stopped or passed.

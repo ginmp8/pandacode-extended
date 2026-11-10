@@ -21,6 +21,59 @@ fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
 
 
 #[test]
+fn mandatory_skill_check_without_native_evidence_cannot_pass_on_scores_alone() {
+    let config = on(9.0, 10, 2);
+    let mut team = team_with(config, vec![
+        seat("reviewer-a", 1, Some(9.8), SINCE + 1),
+        seat("reviewer-b", 1, Some(9.7), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "ordinary Council without skill obligations keeps its native score gate");
+
+    let worker = &team.workers[0];
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+        worker.council.as_ref().unwrap(),
+    );
+    binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+        pins: vec![crate::skills::reviewer::SkillPin {
+            id: "required-check".into(),
+            source_kind: "folder".into(),
+            source_location: "local".into(),
+            source_ref: None,
+            source_commit: None,
+            content_sha256: "a".repeat(64),
+            file_sha256: Default::default(),
+            dependencies: vec![],
+            required_for_acceptance: true,
+            delivery_mode: "bounded_prompt".into(),
+            staged_path: None,
+            imported: true,
+            bot_assigned: true,
+            eligible: true,
+            supplied: true,
+            invoked: false,
+            check_executed: false,
+            evidence_verified: false,
+        }],
+        prompt: String::new(),
+        skipped: vec![],
+    });
+    team.workers[0].reviewer_binding = Some(binding);
+
+    assert_eq!(council::status(&team).unwrap().state, "fixing",
+        "an unverified mandatory check must never create an automatic passed verdict");
+    assert!(finish_refusal(&team).unwrap().contains("reviewer_skill_evidence_unverified"));
+    assert_eq!(review(&team).unwrap()["passed"].as_bool(), Some(false));
+
+    // Optional methodology does not secretly change native score acceptance.
+    team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.skills.as_mut().unwrap()
+        .pins[0].required_for_acceptance = false;
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+}
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

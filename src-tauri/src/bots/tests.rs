@@ -35,11 +35,16 @@ fn bot(f: &Fixture) -> Bot {
 #[test]
 fn shared_channel_council_is_opt_in_and_never_selects_outsiders_or_executors() {
     let f = fixture();
+    upgrade(&f.store.db).unwrap();
     let lead = bot(&f);
     let peer = create(&f.store, &input("Peer"), &f.root).unwrap();
     let outsider = create(&f.store, &input("Outsider"), &f.root).unwrap();
     let channel = shared_channels::create(&f.store, "reviews", &[lead.id.clone(),peer.id.clone()]).unwrap();
     let config = crate::architect::CouncilConfig::default();
+    assert_eq!(shared_channels::channel_delivery_thread("first",false), DESKTOP);
+    assert_ne!(shared_channels::channel_delivery_thread("first",true), DESKTOP);
+    assert_ne!(shared_channels::channel_delivery_thread("first",true),
+        shared_channels::channel_delivery_thread("second",true));
     assert!(crate::architect::validate_channel_reviewers(
         &f.store,&config,&channel.member_ids,&[lead.id.clone()]).is_ok());
     let mut selected = config.clone();

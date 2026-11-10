@@ -195,6 +195,10 @@ def adapt_native_compatibility():
     """Adapt native Skills Manager to Extended's existing library/reviewer contracts."""
     f=Path("src-tauri/src/skills.rs")
     data=f.read_text()
+    if "mod catalog;" not in data:
+        data=checked_replace(data,"mod adapter;\n","mod adapter;\nmod catalog;\n")
+    if "mod catalog_tests;" not in data:
+        data=checked_replace(data,"#[cfg(test)]\nmod tests;\n","#[cfg(test)]\nmod tests;\n#[cfg(test)]\nmod catalog_tests;\n")
     data=checked_replace(data,"fn read_local(path: &Path, include_hidden: bool)","pub(crate) fn read_local(path: &Path, include_hidden: bool)")
     f.write_text(data)
     f=Path("src-tauri/src/skill_manager/library.rs")
@@ -228,14 +232,53 @@ def adapt_native_compatibility():
         f=Path("src-tauri/src/skill_manager")/name
         data=f.read_text()
         import re
-        pattern=r"(?<!struct )(?<!impl )\b(?:crate::providers::)?RunConfig\s*\{"
+        pattern=r"\bcrate::providers::RunConfig\s*\{"
         def add_fields(m):
+            line=data[data.rfind("\n",0,m.start())+1:m.start()]
+            if "->" in line and "fn " in line:
+                return m.group(0)  # Return type, not a struct initializer
             return m.group(0)+"\n            reviewer_boundary: false,\n            reviewer_policy: None,"
         updated,count=re.subn(pattern,add_fields,data)
         if count<1: raise RuntimeError("No upstream test RunConfig fixture in "+str(f))
         f.write_text(updated)
     # Source-only test fixtures still use the old read_local signature.
     # The chosen flag excludes hidden files, as the original native importer did.
+
+def adapt_bots():
+    """Keep Extended's channels/reviewer context and import upstream skill-switch behavior."""
+    f=Path("src-tauri/src/bots.rs")
+    target=f.read_text()
+    upstream=source_file(str(f))
+    first="pub(crate) fn task_brief("
+    boundary="/// Starts the scheduler and channel connections once the app is ready."
+    if target.count(first)!=1 or target.count(boundary)!=1 or upstream.count(boundary)!=1:
+        raise RuntimeError("Bot brief integration anchors changed")
+    start=upstream.index("/// The app goes through `task_brief_shared`")
+    end=upstream.index(boundary,start)
+    replacement=upstream[start:end]
+    # Keep the existing Extended doc comment preceding the replaced implementation.
+    a=target.index(first)
+    b=target.index(boundary,a)
+    target=target[:a]+replacement+target[b:]
+    # Do not lose Extended callback resume/reconciliation in start(), which is outside the changed block.
+    upstream_tests="#[cfg(test)]\nmod skill_switch_tests {"
+    if upstream_tests not in target:
+        if upstream_tests not in upstream: raise RuntimeError("Missing upstream bot skill-switch regressions")
+        target+="\n"+upstream[upstream.index(upstream_tests):].rstrip()+"\n"
+    if "crate::skill_manager::projects_changed();" not in target:
+        target=checked_replace(target,"    let project = store.add_project(&folder)?;",
+           "    let project = store.add_project(&folder)?;\n    crate::skill_manager::projects_changed();")
+    f.write_text(target)
+
+def adapt_native_ui():
+    """Connect active workspace to native manager and keep separate Customize navigation."""
+    f=Path("src/main.ts")
+    data=f.read_text()
+    old="skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },"
+    new="skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })), activeProject: () => project()?.id ?? '' },"
+    if old in data: data=checked_replace(data,old,new)
+    elif new not in data: raise RuntimeError("Cannot wire active project in Settings skills")
+    f.write_text(data)
 
 def adapt_tests():
     for name in ("playwright.config.ts","playwright.webkit.config.ts"):
@@ -278,7 +321,7 @@ def verify_inventory(candidate):
                 "src-tauri/src/skills/scoped.rs","src-tauri/src/skill_manager/library.rs",
                 "src-tauri/src/skill_manager/enforcement.rs","src-tauri/src/skill_manager/matrix_tests.rs",
                 "src-tauri/src/skill_manager/harness_tests.rs","src-tauri/src/skill_manager/lifecycle_tests.rs",
-                "src-tauri/src/skill_manager/tests.rs"}
+                "src-tauri/src/skill_manager/tests.rs","src-tauri/src/bots.rs","src/main.ts"}
     for p in set(b)|set(s)|set(t):
         base,source,target=b.get(p),s.get(p),t.get(p)
         group=("unchanged" if base==source else "both_same") if source==target else ("source_only" if base==target else ("target_only" if base==source else "both_changed"))
@@ -337,6 +380,8 @@ def main():
     adapt_preview()
     adapt_rust()
     adapt_native_compatibility()
+    adapt_bots()
+    adapt_native_ui()
     adapt_tests()
     docs()
     git("add","-A")

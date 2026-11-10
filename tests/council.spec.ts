@@ -86,7 +86,7 @@ test('optional selected-bot skill remains optional after Council configuration i
   await eligibleReviewers(page).nth(1).check();
   await toggle(page).click();
   await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(1);
-  const optional = panel(page).getByRole('checkbox', { name: 'risk-scan' });
+  const optional = panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' });
   // Applying the setting replaces the input node; assert the persisted value, not the old element.
   await optional.click();
   await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
@@ -102,7 +102,8 @@ test('optional selected-bot skill remains optional after Council configuration i
   await expect(button(page)).toBeVisible();
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
-  await expect(panel(page).getByRole('checkbox', { name: 'risk-scan' })).toBeChecked();
+  await expect(panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' })).toBeChecked();
+  await expect(panel(page).getByRole('group', { name: 'Required native skill checks' }).getByRole('checkbox', { name: 'risk-scan' })).not.toBeChecked();
 });
 
 test('selected reviewer skill receipts show native supply and optional failures without claiming execution', async ({ page }) => {

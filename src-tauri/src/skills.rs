@@ -7,6 +7,7 @@ mod catalog;
 mod github;
 mod safety;
 pub(crate) mod scoped;
+pub(crate) mod reviewer;
 mod sync;
 mod sources;
 mod customize;

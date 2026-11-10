@@ -7,6 +7,20 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 const SINCE: i64 = 1000;
 
 #[test]
+fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
+    let mut council = on(9.0, 10, 0);
+    council.optional_skill_ids = vec!["optional".into()];
+    assert!(council.validate().unwrap_err().contains("selected bots"));
+    council.reviewer_bot_ids = vec!["reviewer-one".into(), "reviewer-two".into()];
+    assert!(council.validate().is_ok());
+    council.optional_skill_ids.push("optional".into());
+    assert!(council.validate().unwrap_err().contains("unique"));
+    council.optional_skill_ids = vec!["../escaped".into()];
+    assert!(council.validate().unwrap_err().contains("valid IDs"));
+}
+
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

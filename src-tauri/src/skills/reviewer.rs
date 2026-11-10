@@ -265,8 +265,7 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{Source, Scope};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use super::super::Source;
 
     fn fixture() -> (Library, PathBuf) {
         let dir = std::env::temp_dir().join(format!("pandacode-reviewer-skills-{}", uuid::Uuid::new_v4()));

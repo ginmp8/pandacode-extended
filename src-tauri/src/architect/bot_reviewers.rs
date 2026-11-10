@@ -118,6 +118,9 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
     if council.optional_skill_ids.iter().any(|id| !available_skills.contains(id)) {
         return Err("reviewer_skill_unavailable: optional skill must be assigned to at least one selected reviewer bot.".into());
     }
+    if council.required_check_skill_ids.iter().any(|id| !available_skills.contains(id)) {
+        return Err("reviewer_skill_unavailable: native check must name an assigned reviewer bot skill.".into());
+    }
     Ok(())
 }
 
@@ -180,11 +183,12 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
             let optional = config.optional_skill_ids.iter()
                 .filter(|id| bot.skills.contains(id))
                 .cloned().collect::<Vec<_>>();
-            Some(if optional.is_empty() {
-                crate::skills::reviewer::freeze(library, &bot.skills, &bot.provider)?
-            } else {
-                crate::skills::reviewer::freeze_with_optional(library, &bot.skills, &bot.provider, &optional)?
-            })
+            let checks = config.required_check_skill_ids.iter()
+                .filter(|id| bot.skills.contains(id))
+                .cloned().collect::<Vec<_>>();
+            Some(crate::skills::reviewer::freeze_with_checks(
+                library, &bot.skills, &bot.provider, &optional, &checks,
+            )?)
         } else if check_executable {
             return Err("reviewer_skill_unavailable: central Skills Library could not be opened.".into());
         } else { None };
@@ -262,6 +266,7 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
         || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
         || old.map(|c| &c.optional_skill_ids) != next.map(|c| &c.optional_skill_ids)
+        || old.map(|c| &c.required_check_skill_ids) != next.map(|c| &c.required_check_skill_ids)
 }
 
 /// Live rounds must settle first. A user change can explicitly recover a stopped/incomplete

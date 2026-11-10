@@ -46,6 +46,7 @@ fn mandatory_skill_check_without_native_evidence_cannot_pass_on_scores_alone() {
             file_sha256: Default::default(),
             dependencies: vec![],
             required_for_acceptance: true,
+            check_required: true,
             delivery_mode: "bounded_prompt".into(),
             staged_path: None,
             imported: true,
@@ -66,9 +67,9 @@ fn mandatory_skill_check_without_native_evidence_cannot_pass_on_scores_alone() {
     assert!(finish_refusal(&team).unwrap().contains("reviewer_skill_evidence_unverified"));
     assert_eq!(review(&team).unwrap()["passed"].as_bool(), Some(false));
 
-    // Optional methodology does not secretly change native score acceptance.
+    // A mandatory methodology skill need not imply a required executable check.
     team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.skills.as_mut().unwrap()
-        .pins[0].required_for_acceptance = false;
+        .pins[0].check_required = false;
     assert_eq!(council::status(&team).unwrap().state, "passed");
     assert!(finish_refusal(&team).is_none());
 }

@@ -20,7 +20,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/temp-reconcile-03107.py
-          test "$CANDIDATE_TREE" = "c66fbd6ed621ee1520e427e62a3ed2d34881abb2"
       - name: Transport non-workflow files and workflow blobs for connector finalization
         env:
           EXPECTED_TOPIC: 5a08e7526a42358e3855ad9e82d9707c212d121c
@@ -29,6 +28,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$CANDIDATE_TREE" = "c66fbd6ed621ee1520e427e62a3ed2d34881abb2"
           test "$(git ls-remote --heads origin refs/heads/chore/pr120-reconcile-base-20261110 | cut -f1)" = "$EXPECTED_TOPIC"
           test "$(git ls-remote --heads origin refs/heads/base/development | cut -f1)" = "$EXPECTED_SOURCE"
           test "$(git ls-remote --heads origin refs/heads/extended/development | cut -f1)" = "$EXPECTED_TARGET"

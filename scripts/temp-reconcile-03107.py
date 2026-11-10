@@ -143,8 +143,13 @@ def adapt_preview():
       return { items: list(), kept };
     },
 """
-    data=checked_replace(data,"    list,\n","    list,\n"+extra)
-    data=checked_replace(data,"case 'skills_remove':","case 'skills_deactivate_all': return this.deactivateAll(args.id);\n        case 'skills_remove':")
+    # Git may already merge these upstream methods outside the conflict sections.
+    if "importSkills(source:" not in data and "deactivateAll(id:" not in data:
+        data=checked_replace(data,"    list,\n","    list,\n"+extra)
+    elif "importSkills(source:" not in data or "deactivateAll(id:" not in data:
+        raise RuntimeError("Partially merged upstream preview contracts require manual review")
+    if "case 'skills_deactivate_all':" not in data:
+        data=checked_replace(data,"case 'skills_remove':","case 'skills_deactivate_all': return this.deactivateAll(args.id);\n        case 'skills_remove':")
     f.write_text(data)
 
 def adapt_rust():

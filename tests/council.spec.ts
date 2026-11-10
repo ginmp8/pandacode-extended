@@ -87,7 +87,8 @@ test('optional selected-bot skill remains optional after Council configuration i
   await toggle(page).click();
   await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(1);
   const optional = panel(page).getByRole('checkbox', { name: 'risk-scan' });
-  await optional.check();
+  // Applying the setting replaces the input node; assert the persisted value, not the old element.
+  await optional.click();
   await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
 
   await page.reload();

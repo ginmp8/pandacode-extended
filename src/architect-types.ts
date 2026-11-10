@@ -89,6 +89,8 @@ export interface TeamWorker extends WorkerProfile {
   abandoned?: boolean;
   checkpoint?: WorkerCheckpoint | null;
   council?: CouncilSeat | null;
+  /** S1/S2 native authority, with a pinned persistent bot ID where selected. */
+  reviewerBinding?: { reviewerBotId?: string | null } | null;
   /** When a writing run last started or ended; 0 or absent for one that never ran. */
   wroteAt?: number;
   createdAt: number;

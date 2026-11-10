@@ -574,8 +574,9 @@ function rowsHtml(progress: CouncilProgress, team: TeamSnapshot): string {
   const firsts = ended ? new Map(firstAndFinal(progress.rounds).map(({ lens, first }) => [lens, first])) : null;
   return round.seats.map(seat => {
     const lens = seat.council.lens.trim() || seat.name, lowest = seatScore(seat) !== null && seatScore(seat) === round.lowest && !provisional(progress, round);
+    const reviewerLabel = seat.reviewerBinding?.reviewerBotId ? `${seat.name} · ${lens}` : lens;
     const s = seatStatus(seat, status.target, teamActive(team), () => false, firsts?.get(lens), { lowest, accepted: state === 'accepted' });
-    return `<button type="button" class="council-row" data-id="${escape(seat.id)}" data-action="open-team-worker" data-worker-id="${escape(seat.id)}" aria-label="${escape(`${lens}: ${s.spoken}. Open reviewer`)}"><span class="council-row-mark"${s.tone ? ` data-state-tone="${s.tone}"` : ''}>${s.mark}</span><span class="council-row-lens">${escape(lens)}</span><span class="council-row-score"${s.scored ? ` data-scored="${formatScore(seatScore(seat)!)}"` : ''}>${s.html}</span></button>`;
+    return `<button type="button" class="council-row" data-id="${escape(seat.id)}" data-action="open-team-worker" data-worker-id="${escape(seat.id)}" aria-label="${escape(`${reviewerLabel}: ${s.spoken}. Open reviewer`)}"><span class="council-row-mark"${s.tone ? ` data-state-tone="${s.tone}"` : ''}>${s.mark}</span><span class="council-row-lens">${escape(reviewerLabel)}</span><span class="council-row-score"${s.scored ? ` data-scored="${formatScore(seatScore(seat)!)}"` : ''}>${s.html}</span></button>`;
   }).join('');
 }
 /** The strip's state line: the state, then the lowest against the target ("so far" while the round is open). */

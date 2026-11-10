@@ -22,6 +22,9 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # read CI runs for the release commit
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_version: ${{ steps.version.outputs.release_version }}
@@ -29,6 +32,44 @@ jobs:
       release_tag: ${{ steps.version.outputs.release_tag }}
       release_title: ${{ steps.version.outputs.release_title }}
     steps:
+      - name: Require a green CI run for this commit
+        # Tag pushes and publishing manual runs ship this commit, so its CI must have
+        # passed. A manual run with publish unchecked only builds artifacts and may skip.
+        if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Only push runs on main count: a pull request or branch run of the same commit
+          # did not test what main ships.
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+            --event push --branch main --limit 20 --json databaseId,status,conclusion,event,url)
+          if [ "$(jq length <<<"$runs")" -eq 0 ]; then
+            echo "::error::No CI run from a push to main found for $GITHUB_SHA. The commit must be on main and pushed; wait for its CI to pass before manually publishing (docs/extended/releasing.md)."
+            exit 1
+          fi
+          # gh lists the newest run first; that run decides. Read each field on its own:
+          # gh reports a pending conclusion as an empty string.
+          status=$(jq -r '.[0].status // ""' <<<"$runs")
+          conclusion=$(jq -r '.[0].conclusion // "" | if . == "" then "none" else . end' <<<"$runs")
+          url=$(jq -r '.[0].url // ""' <<<"$runs")
+          if [ "$status" != completed ]; then
+            echo "::error::CI for $GITHUB_SHA is still ${status:-pending} ($url). Wait for it to pass, then re-run this workflow."
+            exit 1
+          fi
+          case "$conclusion" in
+            success)
+              echo "CI passed for $GITHUB_SHA: $url"
+              ;;
+            cancelled)
+              echo "::error::CI for $GITHUB_SHA was cancelled ($url). Re-run CI for this commit (and push nothing newer to main until it completes), then re-run this workflow."
+              exit 1
+              ;;
+            *)
+              echo "::error::CI for $GITHUB_SHA concluded '$conclusion' ($url). Fix it in a new commit and release a higher version."
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
       - name: Verify pinned upstream source release identity
         run: node --test scripts/release/version-identity.test.mjs
@@ -40,19 +81,34 @@ jobs:
     needs: prepare
     strategy:
       fail-fast: false
+      # transcribe_cmake: TRANSCRIBE_CMAKE_ARGS for transcribe-cpp-sys 0.4.1 (its build.rs passes the
+      # variable to CMake when it builds ggml). Rule: never tune ggml to the runner's CPU.
+      # - x86_64 rows pin the baseline SSE4.2/AVX/F16C floor (no AVX2+, like ort).
+      # - Linux arm64 pins plain ARMv8-A (GGML_NATIVE=OFF + GGML_CPU_ARM_ARCH, ggml's -march).
+      # - Apple silicon: the crate's build.rs already sets GGML_NATIVE=OFF on macOS.
+      # - Windows arm64 is the one exception: ggml refuses GGML_NATIVE=OFF with MSVC on ARM
+      #   ("use clang"), and the clang-cl toolset cannot be chosen here because cmake-rs already
+      #   passes -Thost=x64 and CMake allows one -T. So it stays native: the build probes the
+      #   runner CPU (dotprod/i8mm on windows-11-arm), which sets that row's CPU floor (see
+      #   docs/agent-reference.md#voice-input). The same probe also tests SVE and SME, which
+      #   platform.rs does not check and Snapdragon X lacks, so the row pins their cached probe
+      #   results off (GGML_MACHINE_SUPPORTS_sve/_sme=OFF, read by ggml-cpu/CMakeLists.txt's
+      #   check_arm_feature). Keep ci.yml's Linux x86_64 job and rust-platforms rows in step.
       matrix:
         include:
-          - { os: macos-latest, target: darwin-aarch64, triple: aarch64-apple-darwin }
+          - { os: macos-latest, target: darwin-aarch64, triple: aarch64-apple-darwin, transcribe_cmake: '' }
           # Native Intel runner: build.mjs only builds on the target's own host architecture.
-          - { os: macos-15-intel, target: darwin-x86_64, triple: x86_64-apple-darwin }
-          - { os: windows-2022, target: windows-x86_64, triple: x86_64-pc-windows-msvc }
-          - { os: windows-11-arm, target: windows-aarch64, triple: aarch64-pc-windows-msvc }
-          - { os: ubuntu-22.04, target: linux-x86_64, triple: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: linux-aarch64, triple: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: darwin-x86_64, triple: x86_64-apple-darwin, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          - { os: windows-2022, target: windows-x86_64, triple: x86_64-pc-windows-msvc, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          - { os: windows-11-arm, target: windows-aarch64, triple: aarch64-pc-windows-msvc, transcribe_cmake: '-DGGML_MACHINE_SUPPORTS_sve=OFF -DGGML_MACHINE_SUPPORTS_sme=OFF' }
+          - { os: ubuntu-22.04, target: linux-x86_64, triple: x86_64-unknown-linux-gnu, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, triple: aarch64-unknown-linux-gnu, transcribe_cmake: '-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a' }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       RELEASE_TARGET: ${{ matrix.target }}
+      # Empty on Apple silicon: an empty value adds no CMake arguments.
+      TRANSCRIBE_CMAKE_ARGS: ${{ matrix.transcribe_cmake }}
       # Optional macOS signing. When APPLE_CERTIFICATE is not set, the app gets
       # an ad-hoc signature instead (see docs/releasing.md).
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -67,7 +123,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf squashfs-tools xvfb dbus-x11 xdg-utils
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf squashfs-tools xvfb dbus-x11 xdg-utils
       - run: npm ci
       - run: npm run test:release
       - name: Configure Apple signing keychain

@@ -66,3 +66,32 @@ The historical `libsqlite3-sys 0.36.0` RustSec failure remains a valid observati
 ## SQLite audit failure follow-up — 2026-11-09
 
 The former RustSec failure on `libsqlite3-sys 0.36.0` is **historical**, affecting previous commits rather than the current `base/development` dependency graph. Both [push #42680289120](https://github.com/ginmp8/pandacode-extended/actions/runs/42680289120) and [PR #42680300162](https://github.com/ginmp8/pandacode-extended/actions/runs/42680300162) passed RustSec and Linux locked Rust tests/Clippy on [code SHA `06cb9b0c0141`](https://github.com/ginmp8/pandacode-extended/commit/06cb9b0c0141e964d43d0c462cbd30e9fc44ec1c). **Remaining unverified release gates:** native SQLite data migration/upgrade/rollback, installed-app behavior across platforms, the 80 shared-file hunk reconciliations, and independent Settings On/Off, Connect/MCP, bots, cloud/VM, and credential workflows. Do not reopen the old audit result as a current CI failure, or interpret passing CI as installed-app release approval.
+
+
+## New Skills manager acceptance gaps — upstream 0.3.107
+
+The upstream introduces a Skills manager with global/project switches, quarantine, local/link installation and uninstall/Undo. Upstream release notes explicitly report incomplete native Windows/Linux cross-volume and live CLI validation; these limitations are inherited, not confirmed Extended regressions. On this Extended candidate, interactions between skill switches and existing Feature controls, bots, shared channels, MCP/Connect and restart are unverified. The 80 previously divergent shared source files still require full semantic acceptance. CI on the new exact destination SHA, native installers and data migration are pending; do not interpret a complete file inventory as functional parity certification.
+
+## Upstream 0.3.107 exact-SHA CI follow-up — 2026-11-10
+
+Both [push CI #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR CI #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388) completed **successfully (6/6 jobs each)** on the reconciled code commit [`e4e5c0c51daa8a0149015bb26a00c8fb09bb2050`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050). All reported jobs passed: Linux Rust check/tests, RustSec, Node/TypeScript/unit tests and website, npm dependency audit, Expo/mobile compatibility and macOS ONNX parity.
+
+The pending-CI statement above is an earlier observation, now resolved for the referenced code SHA. Remaining acceptance gaps include native Skills CLI install/quarantine/restore/uninstall/Undo, cross-volume behavior, SQLite migration/rollback, Extended controls On/Off and a hunk-by-hunk reconciliation of all 80 customized shared files. A docs-only follow-up SHA requires its own CI verification.
+
+## Upstream 0.3.108 voice-dictation integration — 2026-11-10
+
+- Source: [`ginmp8/pandacode:main` `952d0acbe02547af036ef6d7635ec415a472eb3b`](https://github.com/ginmp8/pandacode/commit/952d0acbe02547af036ef6d7635ec415a472eb3b), tree `202f77088372d261b263b806354d84ce094f25b8`, native app version **0.3.108**; includes commits after the source's release commit. The planned Extended distribution documentation remains **0.12.0 DRAFT**.
+- Reconciled the 109-path source delta relative to `5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1`: 78 additions (including Rust/frontend audio input, model catalog, tests and notices), 17 exact source updates and 14 changes reconciled with Extended behavior. The inherited voice feature supports optional on-device speech models and configured transcription services, transcription into the composer, explicit recording/stop and tests. This is not an Extended-only invention.
+- Preserved Extended Feature controls, release identity and dependency remediation, including `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. Native microphone permissions, service credentials, model downloads, user-cancelled recording, offline transcription and Settings states need separate behavior checks.
+- This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
+
+Native microphone permission, on-device model integrity, restart/cancellation, cloud speech-service configuration and differing CPU/OS build baselines have not received independent installed-app acceptance; no regression or vulnerability is asserted without evidence.
+
+
+## Post-0.3.108 source regression and assurance status — 2026-11-10
+
+Fork [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) hardens its voice-model tamper test for coarse timestamp filesystems and introduces a green-CI release gate. These are inherited changes, **not a confirmed new Extended defect**. Manual-only publishing is preserved. Native voice download checks, all relevant Feature controls On/Off paths, and the 80 historically divergent source files still require independent semantic/runtime acceptance.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+No new source-code defect or vulnerability identified. Manual publication intentionally fails when only PR/non-main CI exists for the SHA or when main push CI is pending, failed or cancelled. This gate has not been independently exercised in a live manual run. Native controls, Voice, installers and 80 shared-file semantic differences remain open; no release approval.

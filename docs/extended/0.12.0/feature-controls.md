@@ -45,3 +45,12 @@ The upstream source now registers app task tools for supported non-team harnesse
 ## Upstream 0.3.107 Skills manager and Extended settings
 
 The inherited Skills manager exposes per-project and global enable/disable switches, Skills CLI installation, quarantine/restore, uninstall/Undo and slash-command/bot enforcement. It occupies Settings → Tools → Skills; the upstream Rules & library page remains separate. Extended Feature controls remain an independent Settings section. A Skills switch does not replace or silently tighten the Extended Connect, MCP, bot pause, cloud/VM, credential-transfer or update controls. CLI installs, switch enforcement and native Windows/Linux/macOS behavior need independent acceptance tests.
+
+## Upstream 0.3.108 voice-dictation integration — 2026-11-10
+
+- Source: [`ginmp8/pandacode:main` `952d0acbe02547af036ef6d7635ec415a472eb3b`](https://github.com/ginmp8/pandacode/commit/952d0acbe02547af036ef6d7635ec415a472eb3b), tree `202f77088372d261b263b806354d84ce094f25b8`, native app version **0.3.108**; includes commits after the source's release commit. The planned Extended distribution documentation remains **0.12.0 DRAFT**.
+- Reconciled the 109-path source delta relative to `5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1`: 78 additions (including Rust/frontend audio input, model catalog, tests and notices), 17 exact source updates and 14 changes reconciled with Extended behavior. The inherited voice feature supports optional on-device speech models and configured transcription services, transcription into the composer, explicit recording/stop and tests. This is not an Extended-only invention.
+- Preserved Extended Feature controls, release identity and dependency remediation, including `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. Native microphone permissions, service credentials, model downloads, user-cancelled recording, offline transcription and Settings states need separate behavior checks.
+- This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
+
+Voice is an additional upstream Settings page. It must not replace or alter the Extended Feature controls section, its persisted values or the enable/disable semantics of bots, Connect, MCP, cloud/VM, credentials and updates.

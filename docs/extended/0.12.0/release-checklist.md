@@ -193,3 +193,27 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [ ] Verify CI of the newly published destination SHA (prior `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` was green in 11/11 push and 11/11 PR jobs).
 - [ ] Exercise release gate for green/pending/failed/cancelled/PR-only/non-main CI without publishing a release.
 - [ ] Verify native Settings, Voice, Connect/MCP/bots/cloud/VM/credentials, SQLite migrations, installers and 80 historic shared-file divergences.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+- [x] Pin upstream `979b7d4e3c073e9bebf74f70bf80440a27564237`, tree `ba33a37daed7860854926617c90197d3182bd8ed`, app **0.3.108**; preserve planned Extended **0.12.0 DRAFT**.
+- [x] Stage five exact upstream blobs and one Extended-preserving workflow adaptation; add the malformed CI-lookup regression assertion.
+- [x] Preserve Extended controls, dependency remediation, source original release notes, and manual-only release publishing.
+- [ ] Verify **new destination SHA** push/PR CI by job; the preceding `4ef18f0f` push had a cancelled ONNX/macOS job while PR CI passed.
+- [ ] Independently test manual publish CI lookup failure/pending/green paths without publishing, native voice behavior, Settings On/Off, Connect, MCP, bots, cloud/VM, credentials, platform installers and all 80 historic divergent shared-file hunks.
+- [ ] Approve a release separately; no tag, installer publication or npm release is authorized here.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+- [x] Pin [fork main `bc323966a0e0`](https://github.com/ginmp8/pandacode/commit/bc323966a0e0f24b13dfd5732cc300f791a965fe), source tree `74ac097cad986c31715b54553e2017ae978d1351`, application **0.3.108** and the existing planned Extended **0.12.0** documentation marker.
+- [x] Stage all 11 upstream path updates: 8 exact and 3 adapted for Extended's CI/manual release and agent guidance; extend regression tests.
+- [x] Preserve prior Extended controls, SQLite remediation and historical release files; make no PR, tag, public installer, GitHub Release or npm publication.
+- [ ] Verify published one-parent commit, complete source/destination path/mode/blob inventory, final statuses of all CI jobs and remaining shared-file differences.
+- [ ] Validate native Voice, Settings On/Off, Connect, MCP, bots, cloud/VM, credential workflows, installers, SQLite upgrade/rollback and release gate without actually publishing. Separate release approval required.
+
+## Fork HEAD 9437b3a9 follow-up — 2026-11-10
+
+- [x] Pin fork `9437b3a92cc3d41e899770f645f8a08449ce6bbf`, source tree `5b8666849fcd7f3cbba918754efbfaedbc8fef41`, native app **0.3.108**; keep Extended planned **0.12.0 DRAFT**.
+- [x] Import five exact upstream source blobs and reconcile two CI/release workflows without losing manual publication or adding npm publish; update the voice/privacy/release documentation unchanged from source.
+- [x] Add release-gate source-object/run-ID regression assertions and update the exact source-baseline release-notes blob hash.
+- [ ] Review exact-SHA CI after publication, complete native Voice/Settings On/Off/Connect/MCP/bots/cloud/VM/credential, migration and installer acceptance, and semantically classify every divergent shared hunk.

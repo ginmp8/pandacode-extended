@@ -1,83 +1,28 @@
-# Reconcile PandaCode upstream 0.3.107 into Extended 0.12.0
+# Upstream-to-Extended reconciliation — 2026-11-10
 
-> **Status: draft / not implemented.** This document records the frozen branch
-> comparison and required acceptance gates. It does not constitute an integration
-> commit or evidence of passing tests.
+> **Status:** integrated topic-branch candidate; exact-commit CI and native acceptance must be verified before merging or releasing.
 
-## Branches and verified checkpoints
+## Frozen refs and constraints
 
-- Destination: `extended/development`, PR #120, at
-  `6467995ea3b533b039bcd393e4e6a15e847f5464`.
-- Source: `base/development`, currently at
-  `50b2d8bfd25ba2f885a9f060bfb93fcc4111cc34`.
-- Feature-bearing source commit: `e4e5c0c51daa8a0149015bb26a00c8fb09bb2050`
-  (native upstream 0.3.107 Skills manager). The later source commit updates documentation.
-- Last previously imported source checkpoint for this comparison:
-  `4f777ec3414a9c46d07ea58debb99c87fcf4e74f`.
-- This PR's branch was created from the destination checkpoint. Neither
-  `extended/development` nor `base/development` is a publication target
-  for intermediate reconciliation work.
+- Source: `base/development` at `e7361c1c22355718cbbbf0e7ec4202a3e9673f61`, incorporating three commits since `4ef18f0fe5fda72190c6754711ae8d7fbc4ab200`; fork main at `9437b3a92cc3d41e899770f645f8a08449ce6bbf` (app 0.3.108).
+- Original target: `extended/development` / PR #120 at `6467995ea3b533b039bcd393e4e6a15e847f5464` (not modified).
+- Topic-branch prior integrated candidate: `bcf638821ee0295aa3bd1fe452dc7e1b965c746b` (one-parent, tree `c66fbd6ed621ee1520e427e62a3ed2d34881abb2`).
+- Reconciliation updates the topic branch only, with a single-parent commit and no merges, force push or source-branch modifications.
+- All original upstream and Extended capabilities remain in scope; a green CI result alone does not demonstrate native behavioral parity.
 
-Refresh the source and destination identities before implementation or
-publication if either ref advances.
+## Three-commit follow-up reconciliation
 
-## Required behavior
+- Inspected all **23 changed paths** between `4ef18f0fe5fda72190c6754711ae8d7fbc4ab200` and `e7361c1c22355718cbbbf0e7ec4202a3e9673f61`. Adopted **14 source-only upstream updates** by their exact blob SHA, including native Rust Voice changes/tests, native Voice and release documentation, release gate script tests and the manually gated Extended release workflow.
+- Semantically reconciled **9 concurrently modified paths**. Applied upstream release CI concurrency policy and its privacy wording to the existing Extended files. Retained both sets of Extended-specific release documentation rather than overwriting later Extended entries. In `docs/extended/README.md`, inserted the latest pinned source before the Extended-only ownership and documentation links; the remaining additions use matching source context.
+- Native source changes: `src-tauri/src/voice/capture.rs`, `src-tauri/src/voice/local/{worker.rs,tests/worker_child.rs}`, `src-tauri/src/voice/session.rs`, and `src-tauri/src/voice/tests/basics.rs`.
+- Preserved the user-controlled Extended **Catalogs** discovery/import experience in Rules & library while retaining upstream Skills Manager authority over per-harness installation and runtime state. Updated browser assertions to verify this intended difference and added explicit discovery/import/no-activation coverage. The native `skills_catalog*` contract remains opt-in.
+- Earlier upstream 0.3.107 integration and the initial 32 conflict resolutions were published at `bcf638821ee0295aa3bd1fe452dc7e1b965c746b`. Their complex shared-feature behavior still requires independent manual/native acceptance; this follow-up does not certify all prior semantic conflict decisions.
 
-Integrate **every new upstream feature** from `base/development`, not merely
-source-only files. When upstream changes an interface already customized by
-Extended, adapt the Extended integration to the new upstream contract. Do not
-silently prefer the Extended version of a conflict and omit new upstream behavior.
+## Verification gates
 
-In particular, retain the upstream native Skills manager (Settings, supported
-harness inventory, switches, installation, quarantine, recovery, native command
-integration, and tests), while adapting the separate Extended Customize Skills
-workspace, its GitHub/ZIP sources, install/replace/sync progress, and other
-Extended-specific behavior to coexist without duplicate or conflicting
-authority. Preserve Council reviewer isolation and existing bot, channel,
-feature-control, remote, and credential boundaries.
-
-## Conflict inventory
-
-The diagnostic three-way integration against the last imported source tree
-reported **29 unresolved paths**, including:
-
-- Rust/IPC: `src-tauri/src/lib.rs`, `src-tauri/src/skills.rs`,
-  `src-tauri/src/providers.rs`, `src-tauri/src/architect.rs`,
-  `src-tauri/src/bots.rs`, and `src-tauri/src/agent_tools.rs`.
-- Frontend/preview: `src/main.ts`, `src/skills-library.ts`,
-  `src/preview-skills.ts`, and `src/preview.ts`.
-- Manifests and tests: `package.json`, `package-lock.json`,
-  `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and Playwright configuration.
-- Two formerly shared files, `src-tauri/src/skills/catalog.rs` and
-  `src-tauri/src/skills/catalog_tests.rs`, were deleted upstream but changed
-  in Extended; their replacement contracts must be reviewed explicitly.
-- Documentation, release metadata, and the upstream baseline manifest.
-
-The diagnostic merge was performed in a disposable CI checkout. It was
-**not committed** to this branch.
-
-## Acceptance gates before marking ready
-
-- [ ] Re-freeze source/destination refs and review every source-only,
-      destination-only, and concurrently changed path, including deletions
-      and file modes.
-- [ ] Import all new upstream behavior and adapt Extended call sites, data
-      contracts, UI navigation, settings, and persistent-state transitions.
-- [ ] Preserve Extended behavior without retaining obsolete upstream
-      interfaces or bypassing native security controls.
-- [ ] Resolve every concurrent modification semantically; no unresolved
-      conflict markers, automatic ours/theirs conflict policy, placeholders,
-      or unexplained omitted source behavior.
-- [ ] Publish a single-parent reconciliation commit on this topic branch
-      without merging, squashing, rebasing, force-pushing, or modifying either
-      original branch.
-- [ ] Verify the committed tree, protected source/target invariants, and
-      parent count at the exact candidate SHA.
-- [ ] Run TypeScript build, Node and release tests, relevant Playwright
-      Skills/Council/bot UI tests, Rust tests and Clippy, and available platform
-      CI jobs. Repair real integration regressions without weakening tests.
-- [ ] Inspect all exact-SHA CI results; record any native Windows/macOS/Linux
-      acceptance still not executed.
-
-**Do not merge or mark this draft ready until implementation and
-verification have actually passed.**
+- [ ] Confirm source and target ref stability and one-parent ancestry on the published reconciliation commit.
+- [ ] Inspect exact-SHA TypeScript build, Node tests, release tests and Playwright Skills/bot/Council suites.
+- [ ] Inspect exact-SHA Rust tests, Clippy and relevant Windows, macOS, Linux and mobile jobs.
+- [ ] Test native Voice stop/close/crash paths, Settings/Skills/Catalogs persistence, agent activation and bot isolation, Connect/MCP/cloud/VM controls and release-gate failure modes where required.
+- [ ] Recheck upstream path/mode inventory and source-only and Extended-only invariants.
+- [ ] Resolve any actual CI or native regression without removing Extended functionality; only then consider marking PR ready. Do not tag, merge or publish from this reconciliation.

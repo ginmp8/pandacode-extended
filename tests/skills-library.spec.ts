@@ -62,10 +62,10 @@ test('opens through real Settings navigation and agrees with the Skills page', a
   await expect(tag).toHaveAttribute('title', 'Off in all projects in Settings → Tools → Skills: blocked or asked, per agent.');
   // One link to Skills, at the top, saying what the page holds; the rule import card has no second pointer.
   await expect(settings.locator('.skills-crosslink')).toHaveText('Import rules and turn them on per agent. The bot library holds skills for bots only. To add or switch skills, use Skills.');
-  // Skills are added in one place: no catalogs here (Add skill takes repositories, URLs and folders).
-  await expect(settings.getByRole('heading', { name: 'Catalogs' })).toHaveCount(0);
-  await expect(settings.getByRole('button', { name: 'Find my skill repositories' })).toHaveCount(0);
-  await expect(settings.getByRole('textbox', { name: 'Catalog repository' })).toHaveCount(0);
+  // Extended keeps the opt-in catalog registry without duplicating upstream agent installation.
+  await expect(settings.getByRole('heading', { name: 'Catalogs' })).toBeVisible();
+  await expect(settings.getByRole('button', { name: 'Find my skill repositories' })).toBeVisible();
+  await expect(settings.getByRole('textbox', { name: 'Catalog repository' })).toBeVisible();
   await expect(settings.getByRole('heading', { name: 'Bot library' })).toBeVisible();
   await expect(settings.getByRole('button', { name: 'Skills → Add skill' })).toHaveCount(0);
   await expect(settings.getByRole('form', { name: 'Import a rule' })).not.toContainText('Add skills');
@@ -276,10 +276,11 @@ test('GitHub import validates the repository and records the commit', async ({ p
   await expect(page.getByRole('textbox', { name: 'Repository', exact: true })).toHaveValue('');
 });
 
-test('no catalogs: the page never reads them, and an empty bot library leaves its heading and intro line out', async ({ page }) => {
+test('Extended catalog discovery coexists with Rules and an empty bot library hides only the bot section', async ({ page }) => {
   await open(page);
   await expect(page.getByRole('list', { name: 'Catalog sources' })).toHaveCount(0);
   await expect(page.locator('.skills-catalog')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Catalogs', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Rules', exact: true })).toBeVisible();
   // Removing the library's only skill takes the Bot library section and its intro sentence with it.
   await item(page, 'Release notes').getByRole('button', { name: 'Remove Release notes' }).click();
@@ -288,7 +289,22 @@ test('no catalogs: the page never reads them, and an empty bot library leaves it
   await expect(page.getByRole('heading', { name: 'Bot library' })).toHaveCount(0);
   await expect(page.locator('.skills-crosslink')).toHaveText('Import rules and turn them on per agent. To add or switch skills, use Skills.');
   await expect(page.getByRole('list', { name: 'Rules' }).locator('.skills-item', { hasText: 'No force push' })).toBeVisible();
-  expect(await page.evaluate(() => (window as any).__seen)).not.toContain('skills_catalogs');
+  expect(await page.evaluate(() => (window as any).__seen)).toContain('skills_catalogs');
+  await expect(page.getByRole('heading', { name: 'Catalogs', exact: true })).toBeVisible();
+});
+
+
+test('Extended catalog discovery imports a selected skill without activating a harness', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Find my skill repositories' }).click();
+  const sources = page.getByRole('list', { name: 'Catalog sources' });
+  await expect(sources).toContainText('you/agent-skills');
+  await sources.getByRole('checkbox', { name: 'Select Changelog from you/agent-skills' }).check();
+  await sources.getByRole('button', { name: 'Import selected from you/agent-skills' }).click();
+  const imported = page.getByRole('list', { name: 'Bot library' }).locator('.skills-item', { hasText: 'Changelog' });
+  await expect(imported).toBeVisible();
+  await expect(imported.getByRole('checkbox')).toHaveCount(0);
+  await expect(imported.getByRole('button', { name: 'Remove Changelog' })).toBeVisible();
 });
 
 test('Skills → Add skill → Bot library lands in the library here, for bots only', async ({ page }) => {

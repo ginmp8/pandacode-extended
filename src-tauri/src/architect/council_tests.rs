@@ -15,12 +15,15 @@ fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     assert!(c.validate().unwrap_err().contains("unique"));
     c.reviewer_bot_ids[1] = "bot-2".into();
     assert!(c.validate().is_ok());
-    assert_eq!(c.needed(), 2);
+    let two = team_with(c.clone(), vec![seat("first", 1, Some(9.0), SINCE + 1), seat("second", 1, Some(9.0), SINCE + 2)]);
+    assert!(council::complete(&two, &c, 1));
+    c.reviewer_bot_ids.push("bot-3".into());
+    assert!(!council::complete(&two, &c, 1));
     c.reviewer_bot_ids.extend((3..=9).map(|i| format!("bot-{i}")));
     assert!(c.validate().unwrap_err().contains("2 to 8"));
     c.reviewer_bot_ids.clear();
     assert!(c.validate().is_ok());
-    assert_eq!(c.needed(), 2);
+    assert!(council::complete(&two, &c, 1));
 }
 
 #[test]

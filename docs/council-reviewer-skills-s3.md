@@ -84,9 +84,22 @@ snapshots, and forged authority records.
 
 This document describes the implementation under review, **not a completed
 S3 acceptance certificate**. Source/automated tests and CI must pass at the
-exact HEAD before code sign-off. A model claim, displayed slash command or
-score cannot establish a skill invocation or executed check. Until native
-runtime telemetry proves those events, their receipt flags remain false.
+exact HEAD before code sign-off. A model claim, displayed slash command or score cannot establish actual
+skill invocation or executed checks. The original immutable skill input flags
+stay false. Instead, the native reviewer ToolHost now exposes two independent,
+task-scoped tools: `pandacode_reviewer_skill_open` returns the frozen lower-trust
+skill instructions and records native retrieval; `pandacode_reviewer_skill_verify`
+checks the pinned content integrity and records an independently observed
+native check. The mutable receipt is bound to the seat, reviewed artifact
+revision and package SHA-256, separate from the frozen native authority.
+Model-authored claims or slash-command availability do not create such events.
+
+Mandatory *supply* of skill methodology is independent from an explicitly
+required native integrity check. The former blocks on unavailable skill inputs;
+the latter blocks until an authentic native check is observed. A successful
+package-integrity check does NOT demonstrate that arbitrary skill scripts,
+project tests, or methodology-dependent behavior actually executed. Such
+additional checks require their own independent evidence.
 
 The current implementation has not yet demonstrated live harness discovery of
 staged paths or a complete lifecycle cleanup of old staged packages. These

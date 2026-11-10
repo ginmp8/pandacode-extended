@@ -134,6 +134,14 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     assert_ne!(first.council.as_ref().unwrap().cycle_id,second.council.as_ref().unwrap().cycle_id);
     assert_eq!(first.council.as_ref().unwrap().state,"Reviewing");
     assert_eq!(second.council.as_ref().unwrap().state,"Reviewing");
+    // Stopping one delivery cannot mark its sibling stopped or passed.
+    f.store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='stopped' WHERE id=?1",
+        [&first_id],
+    ).unwrap();
+    let updated = shared_channels::detail(&f.store,&channel.id,100).unwrap();
+    assert_eq!(updated.messages.iter().find(|item| item.id==first_id).unwrap().council.as_ref().unwrap().state,"Stopped");
+    assert_eq!(updated.messages.iter().find(|item| item.id==second_id).unwrap().council.as_ref().unwrap().state,"Reviewing");
 }
 
 #[test]

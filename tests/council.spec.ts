@@ -6,7 +6,7 @@ const toggle = (page: Page) => panel(page).getByRole('switch', { name: 'Council'
 /** Eligible reviewer identities, excluding the current task executor and unavailable bots. */
 const eligibleReviewers = (page: Page) => panel(page).locator('.council-bots input[data-reviewer-bot]:not(:disabled)');
 const option = (page: Page, field: string, name: string) => panel(page).locator(`[data-field="${field}"]`).getByRole('button', { name, exact: true });
-type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: string; provider: string; model: string; paused: boolean; available?: boolean; reason?: string }[] };
+type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: string; provider: string; model: string; paused: boolean; skills?: string[]; available?: boolean; reason?: string }[] };
 
 // The first paint can be slow on a busy machine; what is under test is what happens after it.
 test.setTimeout(60_000);
@@ -71,6 +71,27 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
+});
+
+test('optional selected-bot skill remains optional after Council configuration is reloaded', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/?bots=sample', {}, 0, '', {}, { ids: bots.map(bot => bot.id), bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(1);
+  const optional = panel(page).getByRole('checkbox', { name: 'risk-scan' });
+  await optional.check();
+  await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
+
+  await page.reload();
+  await expect(button(page)).toBeVisible();
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(panel(page).getByRole('checkbox', { name: 'risk-scan' })).toBeChecked();
 });
 
 test('scoped reviewer action is explicitly granted only to one relative file', async ({ page }) => {

@@ -160,8 +160,10 @@ fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignm
     let external_id = format!("channel-council:{delivery_id}");
     let session_id = thread_session(&f.store,&executor,DESKTOP,&external_id,"Scope").unwrap().0;
     let message_id = crate::storage::id();
-    let mut config = crate::architect::CouncilConfig::default();
-    config.reviewer_bot_ids = vec![a.id.clone(),b.id.clone()];
+    let config = crate::architect::CouncilConfig {
+        reviewer_bot_ids: vec![a.id.clone(), b.id.clone()],
+        ..Default::default()
+    };
     f.store.db.execute(
         "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user','Review','in_progress',?3)",
         params![message_id,channel.id,crate::storage::now()],
@@ -212,7 +214,7 @@ fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();
     let executor = bot(&f);
-    let channel = shared_channels::create(&f.store,"separate",&[executor.id.clone()]).unwrap();
+    let channel = shared_channels::create(&f.store,"separate",std::slice::from_ref(&executor.id)).unwrap();
     let mut contexts = Vec::new();
     for objective in ["Inspect alpha","Inspect beta"] {
         let message_id = crate::storage::id();

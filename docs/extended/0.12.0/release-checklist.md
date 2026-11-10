@@ -132,3 +132,11 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Approve Extended `0.12.0` release separately; passing CI does not authorize tagging or distribution.
 
 The earlier unchecked CI items were authored while the remediation jobs were pending. They are superseded only for the verified code SHA above. Any new documentation commit has its own CI identity.
+
+## Upstream 0.3.107 Skills manager checkpoint — 2026-11-10
+
+- [x] Pin upstream [`5998a8fc085e`](https://github.com/ginmp8/pandacode/commit/5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1) and reconcile all 92 changed tracked paths in a complete nontruncated candidate tree (75 source-exact, 15 adapted, two deleted), with zero missing upstream files and retained Extended-only files.
+- [x] Align the six npm/Cargo/Tauri application version fields to 0.3.107 without changing the planned Extended distribution 0.12.0.
+- [ ] Verify publication is a single-parent non-force update of `base/development`, followed by exact-source/destination ref readback.
+- [ ] Verify all CI jobs on the exact published destination SHA; independent Rust, JS, Playwright, mobile, npm/RustSec, native Skills CLI, platform behavior and Settings On/Off remain unverified at documentation time.
+- [ ] Verify new Skills controls coexist with Feature controls, Connect/MCP/cloud/VM/credentials/bot pause and legacy migrated settings, without disabling upstream behavior.

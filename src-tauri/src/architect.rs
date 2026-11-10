@@ -1617,6 +1617,18 @@ pub fn host(
         }),
     })
 }
+
+/// Build a strictly allowlisted native host for read-only selected reviewers.
+/// Skills never enable the Architect dispatcher or other bot/MCP commands.
+pub(crate) fn reviewer_skill_host(
+    app: tauri::AppHandle,
+    session_id: String,
+    stopped: Arc<AtomicBool>,
+    admission: &Admission,
+) -> Option<ToolHost> {
+    reviewer_skill_evidence::readonly_host(host(app, session_id, stopped, admission)?)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Assignment {

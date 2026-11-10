@@ -1,0 +1,99 @@
+name: Temporary PR138 object transport
+on:
+  push:
+    branches: [chore/pr138-object-stage-20261110]
+    paths: [.github/workflows/temp-reconciliation-stage.yml]
+permissions:
+  contents: write
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reconstruct the exact CI-verified integration tree
+        env:
+          EXPECTED_HEAD: 5a08e7526a42358e3855ad9e82d9707c212d121c
+        run: |
+          set -euo pipefail
+          python3 scripts/temp-reconcile-03107.py
+          test "$CANDIDATE_TREE" = "c66fbd6ed621ee1520e427e62a3ed2d34881abb2"
+      - name: Transport non-workflow files and workflow blobs for connector finalization
+        env:
+          EXPECTED_TOPIC: 5a08e7526a42358e3855ad9e82d9707c212d121c
+          EXPECTED_SOURCE: 4ef18f0fe5fda72190c6754711ae8d7fbc4ab200
+          EXPECTED_TARGET: 6467995ea3b533b039bcd393e4e6a15e847f5464
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote --heads origin refs/heads/chore/pr120-reconcile-base-20261110 | cut -f1)" = "$EXPECTED_TOPIC"
+          test "$(git ls-remote --heads origin refs/heads/base/development | cut -f1)" = "$EXPECTED_SOURCE"
+          test "$(git ls-remote --heads origin refs/heads/extended/development | cut -f1)" = "$EXPECTED_TARGET"
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          def git_bytes(*args):
+              return subprocess.check_output(['git', *args])
+
+          def workflow_blobs(revision):
+              entries = {}
+              for record in git_bytes('ls-tree', '-rz', revision, '--', '.github/workflows/').split(b'\x00'):
+                  if not record:
+                      continue
+                  metadata, path = record.split(b'\t', 1)
+                  mode, kind, sha = metadata.decode().split()
+                  if kind != 'blob':
+                      raise RuntimeError('Unexpected non-blob workflow path')
+                  name = os.fsdecode(path)
+                  if not name.startswith('.github/workflows/'):
+                      raise RuntimeError('Unexpected workflow prefix')
+                  entries[name] = (mode, sha)
+              return entries
+
+          remote = workflow_blobs(os.environ['GITHUB_SHA'])
+          desired = workflow_blobs(os.environ['CANDIDATE_TREE'])
+          changes = []
+          for path in sorted(set(remote) | set(desired)):
+              if remote.get(path) == desired.get(path):
+                  continue
+              mode, sha = desired.get(path, ('100644', None))
+              staged = None
+              if sha is not None:
+                  staged = '.reconciliation-staging/workflows/' + path.removeprefix('.github/workflows/')
+                  subprocess.run(['git', 'update-index', '--add', '--cacheinfo', f'{mode},{sha},{staged}'], check=True)
+              changes.append({'path': path, 'mode': mode, 'sha': sha, 'stage_path': staged})
+              if path in remote:
+                  old_mode, old_sha = remote[path]
+                  subprocess.run(['git', 'update-index', '--add', '--cacheinfo', f'{old_mode},{old_sha},{path}'], check=True)
+              else:
+                  subprocess.run(['git', 'update-index', '--force-remove', path], check=True)
+
+          root = pathlib.Path('.reconciliation-staging')
+          root.mkdir(exist_ok=True)
+          (root / 'manifest.json').write_text(json.dumps({
+              'candidate_tree': os.environ['CANDIDATE_TREE'],
+              'topic_sha': os.environ['EXPECTED_TOPIC'],
+              'source_sha': os.environ['EXPECTED_SOURCE'],
+              'target_sha': os.environ['EXPECTED_TARGET'],
+              'workflow_changes': changes,
+          }, indent=2) + '\n')
+          subprocess.run(['git', 'add', '.reconciliation-staging/manifest.json'], check=True)
+          print('TRANSPORT_WORKFLOW_BLOBS', len(changes))
+          print('TRANSPORT_WORKFLOW_PATHS', [x['path'] for x in changes])
+          PY
+          stage_tree="$(git write-tree)"
+          test -z "$(git diff --name-only "$GITHUB_SHA" "$stage_tree" -- .github/workflows)"
+          test "$(git rev-parse "$stage_tree")" != "$CANDIDATE_TREE"
+          git diff --check "$GITHUB_SHA" "$stage_tree"
+          staged_commit="$(git -c user.name='PandaCode Object Staging' -c user.email='146494242+ginmp8@users.noreply.github.com' commit-tree "$stage_tree" -p "$GITHUB_SHA" -m 'chore: transport verified integration objects [skip ci]')"
+          test "$(git cat-file -p "$staged_commit" | grep -c '^parent ')" -eq 1
+          git push origin "$staged_commit:refs/heads/chore/pr138-object-stage-20261110"
+          test "$(git ls-remote --heads origin refs/heads/chore/pr138-object-stage-20261110 | cut -f1)" = "$staged_commit"
+          echo "STAGED_COMMIT=$staged_commit"
+          echo "STAGED_TREE=$stage_tree"

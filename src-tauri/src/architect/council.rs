@@ -310,6 +310,26 @@ fn scored(team: &TeamSnapshot, round: usize) -> impl Iterator<Item = f64> + '_ {
 fn lowest(team: &TeamSnapshot, round: usize) -> Option<f64> {
     scored(team, round).reduce(f64::min)
 }
+
+/// A score is not evidence that a mandatory reviewer skill was invoked or a
+/// check was actually executed. Only independently verified native receipts
+/// can satisfy those obligations; optional skill pins never impose this gate.
+fn unverified_required_skill_checks(team: &TeamSnapshot, round: usize) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (worker, seat) in in_round(team, round) {
+        if !counts(worker, seat) { continue; }
+        if let Some(skills) = worker.reviewer_binding.as_ref().and_then(|binding| binding.snapshot.skills.as_ref()) {
+            for pin in &skills.pins {
+                if pin.required_for_acceptance
+                    && !(pin.supplied && pin.invoked && pin.check_executed && pin.evidence_verified)
+                {
+                    missing.push(format!("{} ({})", worker.name, pin.id));
+                }
+            }
+        }
+    }
+    missing
+}
 fn live(team: &TeamSnapshot, round: usize) -> bool {
     in_round(team, round).any(|(w, _)| unsettled(&w.status))
 }
@@ -570,6 +590,13 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     if stale(team, round) {
         return Some((format!("Council round {round} is out of date: changes landed after it started. Dispatch a new round with councilLens."), false));
     }
+    let unverified = unverified_required_skill_checks(team, round);
+    if !unverified.is_empty() {
+        return Some((format!(
+            "reviewer_skill_evidence_unverified: Council round {round} has mandatory reviewer skill checks without independently verified execution: {}. Native invocation, check and evidence receipts are required; reviewer claims or scores alone do not count.",
+            unverified.join(", ")
+        ), false));
+    }
     let low = lowest(team, round)?;
     if low >= config.target {
         return None;
@@ -610,7 +637,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
-    } else if view.complete(round) && !stale && low.is_some_and(|low| low >= config.target) {
+    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && low.is_some_and(|low| low >= config.target) {
         "passed"
     } else if view.at_limit(config) {
         "limit"

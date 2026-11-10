@@ -1925,6 +1925,17 @@ fn dispatch_as(
     }
     // Turns that ended since the last save may have changed the work: rounds are judged on that.
     refresh_council(&store, &mut team);
+    // Reclaim abandoned reviewer skill materializations before admitting another
+    // selected-bot dispatch. The app store lock spans reference discovery and
+    // removal, so a new Council round cannot lose its pinned files mid-flight.
+    // A persisted round remains protected, including across restarts.
+    if name == "pandacode_dispatch_workers"
+        && team.config.council.as_ref().is_some_and(|c| !c.reviewer_bot_ids.is_empty())
+    {
+        if let Some(library) = library {
+            crate::skills::reviewer::cleanup_orphaned(library, &store)?;
+        }
+    }
     let owner = caller.map(|(id, _)| id);
     // The calling direct worker as it is now: its scope bounds its sub-workers' scopes.
     let me = match caller {

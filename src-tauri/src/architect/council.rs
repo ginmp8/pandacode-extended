@@ -33,12 +33,15 @@ pub struct CouncilConfig {
     pub target: f64,
     /// Rounds that may start this cycle (a round starts when one of its seats runs), 1..=100.
     pub max_rounds: usize,
-    /// 0 = the lead decides.
+    /// 0 = the lead decides for automatic/native reviewers.
     pub reviewers: usize,
+    /// Persistent bot IDs for task-scoped selected reviewers; empty keeps native Council behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_bot_ids: Vec<String>,
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0 }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new() }
     }
 }
 impl CouncilConfig {
@@ -52,10 +55,19 @@ impl CouncilConfig {
         if self.reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
         }
+        if !self.reviewer_bot_ids.is_empty() {
+            if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {
+                return Err(format!("Select {MIN_REVIEWERS} to {MAX_REVIEWERS} distinct Council reviewer bots."));
+            }
+            let mut ids = std::collections::HashSet::new();
+            if self.reviewer_bot_ids.iter().any(|id| !super::valid_id(id) || !ids.insert(id)) {
+                return Err("Council reviewer bot IDs must be valid and unique.".into());
+            }
+        }
         Ok(())
     }
     fn needed(&self) -> usize {
-        self.reviewers.max(MIN_REVIEWERS)
+        if self.reviewer_bot_ids.is_empty() { self.reviewers.max(MIN_REVIEWERS) } else { self.reviewer_bot_ids.len() }
     }
 }
 

@@ -1,5 +1,6 @@
 //! Persistent, event-driven cross-harness delegation. Worker text stays in its own task.
 mod briefing;
+mod bot_reviewers;
 pub(crate) mod coordination;
 mod council;
 pub(crate) mod reviewer_security;

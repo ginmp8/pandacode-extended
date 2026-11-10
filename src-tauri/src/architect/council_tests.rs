@@ -8,7 +8,7 @@ const SINCE: i64 = 1000;
 
 /// `max_rounds` 0 here stands for the most a config allows.
 fn on(target: f64, max_rounds: usize, reviewers: usize) -> CouncilConfig {
-    CouncilConfig { target, max_rounds: if max_rounds == 0 { 100 } else { max_rounds }, reviewers }
+    CouncilConfig { target, max_rounds: if max_rounds == 0 { 100 } else { max_rounds }, reviewers, ..CouncilConfig::default() }
 }
 /// A settled reviewer of the current cycle.
 fn seat(id: &str, round: usize, score: Option<f64>, created: i64) -> Worker {

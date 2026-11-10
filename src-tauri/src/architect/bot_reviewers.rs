@@ -50,6 +50,7 @@ pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json:
         result.push(serde_json::json!({
             "id": bot.id, "name": bot.name, "role": bot.role,
             "provider": bot.provider, "model": bot.model, "paused": bot.paused,
+            "skills": bot.skills,
             "available": reason.is_none(), "reason": reason
         }));
     }
@@ -102,15 +103,20 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
     if council.reviewer_bot_ids.is_empty() { return Ok(()); }
     let executor = executor(store, session_id)?;
     let mut used = HashSet::new();
+    let mut available_skills = HashSet::new();
     for id in &council.reviewer_bot_ids {
         if !used.insert(id) {
             return Err("reviewer_unavailable: repeated reviewer bot ID.".into());
         }
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
         valid_bot(&bot, executor.as_deref(), true)?;
+        available_skills.extend(bot.skills.iter().cloned());
         if let Some(permissions) = &council.review_permissions {
             review_policy(&bot, permissions)?;
         }
+    }
+    if council.optional_skill_ids.iter().any(|id| !available_skills.contains(id)) {
+        return Err("reviewer_skill_unavailable: optional skill must be assigned to at least one selected reviewer bot.".into());
     }
     Ok(())
 }
@@ -171,7 +177,10 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
         valid_bot(&bot, executor.as_deref(), check_executable)?;
         let tool_policy = config.review_permissions.as_ref().map(|permissions| review_policy(&bot, permissions)).transpose()?.unwrap_or(super::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
         let skills = if bot.skills.is_empty() { None } else if let Some(library) = library {
-            Some(crate::skills::reviewer::freeze(library, &bot.skills, &bot.provider)?)
+            let optional = config.optional_skill_ids.iter()
+                .filter(|id| bot.skills.contains(id))
+                .cloned().collect::<Vec<_>>();
+            Some(crate::skills::reviewer::freeze_with_optional(library, &bot.skills, &bot.provider, &optional)?)
         } else if check_executable {
             return Err("reviewer_skill_unavailable: central Skills Library could not be opened.".into());
         } else { None };
@@ -248,6 +257,7 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     let next = next.as_ref();
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
         || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
+        || old.map(|c| &c.optional_skill_ids) != next.map(|c| &c.optional_skill_ids)
 }
 
 /// Live rounds must settle first. A user change can explicitly recover a stopped/incomplete

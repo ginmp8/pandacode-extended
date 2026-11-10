@@ -8,7 +8,8 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  # Never cancel push CI: each commit's result is needed for the release gate.
+  # A push run holding the slot (running or queued for a runner) is not cancelled; a pending push waiting for that slot may be superseded by a newer push.
+  # Keep completed push results for the exact-SHA manual release gate.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   dependency-audit:

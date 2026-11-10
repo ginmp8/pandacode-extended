@@ -28,3 +28,7 @@ A successful `ci.yml` run must match **both** the exact source commit SHA being 
 ## Upstream CI retention and failed API lookups — 2026-11-10
 
 [source `bc323966a0e0`](https://github.com/ginmp8/pandacode/commit/bc323966a0e0f24b13dfd5732cc300f791a965fe) retains main-push CI runs when newer commits are pushed, and the release gate now rejects a nonzero `gh run list` exit before parsing its output. The Extended workflow applies both protections while preserving manual `workflow_dispatch` `publish=true` as the only GitHub Release publication path. Tag pushes build artifacts only; npm publishing stays disabled. A successful rerun of failed/flaky CI jobs is eligible for the exact-SHA gate, while actual release approval and native testing remain separate.
+
+## Upstream CI gate follow-up — 2026-11-10
+
+At [fork `9437b3a9`](https://github.com/ginmp8/pandacode/commit/9437b3a92cc3d41e899770f645f8a08449ce6bbf), the upstream manual release gate checks that the newest CI lookup result is an object, identifies the cancelled or failing CI run by ID, and provides `gh run rerun <id>` or `gh run rerun <id> --failed` for appropriate recovery. A main push run holding the concurrency slot is retained; pending runs waiting for that slot may be superseded by later pushes. The Extended gate incorporates these diagnostics **only** for explicitly approved manual `workflow_dispatch` publication. Tag pushes still build artifacts without publication, and there is no npm publish job. This source documentation update is not release authorization.

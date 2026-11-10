@@ -192,3 +192,10 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [x] Preserve prior Extended controls, SQLite remediation and historical release files; make no PR, tag, public installer, GitHub Release or npm publication.
 - [ ] Verify published one-parent commit, complete source/destination path/mode/blob inventory, final statuses of all CI jobs and remaining shared-file differences.
 - [ ] Validate native Voice, Settings On/Off, Connect, MCP, bots, cloud/VM, credential workflows, installers, SQLite upgrade/rollback and release gate without actually publishing. Separate release approval required.
+
+## Fork HEAD 9437b3a9 follow-up — 2026-11-10
+
+- [x] Pin fork `9437b3a92cc3d41e899770f645f8a08449ce6bbf`, source tree `5b8666849fcd7f3cbba918754efbfaedbc8fef41`, native app **0.3.108**; keep Extended planned **0.12.0 DRAFT**.
+- [x] Import five exact upstream source blobs and reconcile two CI/release workflows without losing manual publication or adding npm publish; update the voice/privacy/release documentation unchanged from source.
+- [x] Add release-gate source-object/run-ID regression assertions and update the exact source-baseline release-notes blob hash.
+- [ ] Review exact-SHA CI after publication, complete native Voice/Settings On/Off/Connect/MCP/bots/cloud/VM/credential, migration and installer acceptance, and semantically classify every divergent shared hunk.

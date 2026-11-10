@@ -31,7 +31,7 @@ export type CouncilHost = {
 
 type Field = 'target' | 'maxRounds' | 'reviewers';
 type ReviewerBot = { id: string; name: string; role: string; provider: ProviderId; model: string; paused: boolean; skills?: string[]; available?: boolean; reason?: string | null };
-type ReviewerSelection = { selected: boolean; ids: string[]; optionalSkills?: string[]; checkSkills?: string[]; scoped?: boolean; fileScope?: string; authorizationId?: string };
+type ReviewerSelection = { selected: boolean; ids: string[]; idsEdited?: boolean; optionalSkills?: string[]; checkSkills?: string[]; scoped?: boolean; fileScope?: string; authorizationId?: string };
 const FIELDS: readonly { key: Field; label: string; options: readonly number[]; name(value: number): string }[] = [
   { key: 'target', label: 'Target score', options: COUNCIL_TARGETS, name: formatScore },
   { key: 'maxRounds', label: 'Max rounds', options: COUNCIL_ROUNDS, name: String },
@@ -82,14 +82,26 @@ export function createCouncil(host: CouncilHost) {
   const reviewerBots = new Map<string, ReviewerBot[]>();
   const reviewerLoads = new Map<string, string>();
   const reviewerDraft = new Map<string, ReviewerSelection>();
-  const selection = (sessionId: string): ReviewerSelection => reviewerDraft.get(sessionId) ?? {
-    selected: Boolean(shownConfig(sessionId)?.reviewerBotIds?.length),
-    ids: [...(shownConfig(sessionId)?.reviewerBotIds ?? [])],
-    optionalSkills: [...(shownConfig(sessionId)?.optionalSkillIds ?? [])],
-    checkSkills: [...(shownConfig(sessionId)?.requiredCheckSkillIds ?? [])],
-    scoped: Boolean(shownConfig(sessionId)?.reviewPermissions),
-    fileScope: shownConfig(sessionId)?.reviewPermissions?.grants[0]?.resource ?? '',
-    authorizationId: shownConfig(sessionId)?.reviewPermissions?.authorizationId,
+  const selection = (sessionId: string): ReviewerSelection => {
+    let draft = reviewerDraft.get(sessionId);
+    const persisted = shownConfig(sessionId);
+    // The panel may open before the saved team appears; never keep a provisional
+    // empty reviewer roster after native restoration, or override manual ID edits.
+    if (draft?.selected && !draft.idsEdited && draft.ids.length === 0 && persisted?.reviewerBotIds?.length) {
+      draft = { ...draft, ids: [...persisted.reviewerBotIds],
+        optionalSkills: [...(persisted.optionalSkillIds ?? [])],
+        checkSkills: [...(persisted.requiredCheckSkillIds ?? [])] };
+      reviewerDraft.set(sessionId, draft);
+    }
+    return draft ?? {
+      selected: Boolean(persisted?.reviewerBotIds?.length),
+      ids: [...(persisted?.reviewerBotIds ?? [])],
+      optionalSkills: [...(persisted?.optionalSkillIds ?? [])],
+      checkSkills: [...(persisted?.requiredCheckSkillIds ?? [])],
+      scoped: Boolean(persisted?.reviewPermissions),
+      fileScope: persisted?.reviewPermissions?.grants[0]?.resource ?? '',
+      authorizationId: persisted?.reviewPermissions?.authorizationId,
+    };
   };
   const scopedFile = (path: string): boolean => path.length > 0 && path.length <= 240
     && !path.startsWith('/') && !path.startsWith('\\') && !path.includes(':')
@@ -483,7 +495,7 @@ export function createCouncil(host: CouncilHost) {
       if (input.hasAttribute('data-reviewer-bot')) {
         const id = input.dataset.reviewerBot!, draft = selection(sessionId), ids = input.checked ? [...draft.ids, id] : draft.ids.filter(item => item !== id);
         if (ids.length > 8) { input.checked = false; selectedError(sessionId, 'Council allows at most 8 reviewer bots.'); return; }
-        reviewerDraft.set(sessionId, { ...draft, selected: true, ids });
+        reviewerDraft.set(sessionId, { ...draft, selected: true, ids, idsEdited: true });
         failures.delete(sessionId);
         if (shownConfig(sessionId) && ids.length >= 2) {
           try { void apply(sessionId, selectionConfig(sessionId), remember); } catch (cause) { selectedError(sessionId, String(cause)); }
@@ -668,8 +680,17 @@ function rowsHtml(progress: CouncilProgress, team: TeamSnapshot): string {
     const reviewerLabel = seat.reviewerBinding?.reviewerBotId ? `${seat.name} · ${lens}` : lens;
     const skillReceipt = seat.reviewerBinding?.snapshot?.skills;
     const supplied = skillReceipt?.pins ?? [], skipped = skillReceipt?.skipped ?? [];
+    const observed = seat.reviewerBinding?.skillEvidence ?? {};
     const skillSummary = [
-      ...supplied.map(pin => `${pin.id}: supplied; invocation ${pin.invoked ? 'recorded' : 'not verified'}; check ${pin.checkExecuted && pin.evidenceVerified ? 'verified' : 'not verified'}; SHA-256 ${pin.contentSha256}`),
+      ...supplied.map(pin => {
+        const evidence = observed[pin.id];
+        const matches = evidence?.contentSha256 === pin.contentSha256
+          && evidence?.artifactRevision === seat.reviewerBinding?.artifactRevision;
+        const retrieved = matches && evidence?.invoked;
+        const verified = retrieved && evidence?.checkExecuted && evidence?.evidenceVerified
+          && evidence?.checkKind === 'pinned_input_integrity';
+        return `${pin.id}: supplied; native retrieval ${retrieved ? 'recorded' : 'not verified'}; pinned input integrity ${verified ? 'verified' : pin.checkRequired ? 'required; not verified' : 'not verified'}; SHA-256 ${pin.contentSha256}`;
+      }),
       ...skipped.map(skill => `${skill.id}: skipped (${skill.reason})`),
     ];
     const skillNote = skillSummary.length ? `<small class="council-row-skills" title="${escape(skillSummary.join('; '))}">${escape(`Skills: ${supplied.length} supplied, ${skipped.length} skipped`)}${skipped.length ? ` · ${escape(skipped.map(skill => `${skill.id}: ${skill.reason}`).join('; '))}` : ''}</small>` : '';

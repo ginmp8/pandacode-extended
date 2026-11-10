@@ -94,6 +94,8 @@ export interface TeamWorker extends WorkerProfile {
   /** S1/S2 native authority, with a pinned persistent bot ID where selected. */
   reviewerBinding?: {
     reviewerBotId?: string | null;
+    artifactRevision?: string;
+    skillEvidence?: Record<string, { contentSha256: string; artifactRevision: string; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; checkKind?: string | null }>;
     snapshot?: {
       skills?: {
         pins: { id: string; contentSha256: string; supplied: boolean; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; requiredForAcceptance?: boolean; checkRequired?: boolean }[];

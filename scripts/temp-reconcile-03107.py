@@ -241,6 +241,16 @@ pub(crate) async fn filter_disabled(provider: &str, catalog: Catalog, cwd: &Path
 
 def adapt_native_compatibility():
     """Adapt native Skills Manager to Extended's existing library/reviewer contracts."""
+    # The new launch path calls configure_command_with_agents. The old
+    # two-argument wrapper is only a test helper, not a production function.
+    # Keep its test coverage without an unused production API (Clippy -D warnings).
+    f=Path("src-tauri/src/providers.rs")
+    data=f.read_text()
+    old_wrapper="\nfn configure_command(command: &mut Command, config: &RunConfig) {"
+    if data.count(old_wrapper)!=1: raise RuntimeError("Unexpected provider command adapter layout")
+    data=data.replace(old_wrapper,
+      "\n#[cfg(test)]\nfn configure_command(command: &mut Command, config: &RunConfig) {",1)
+    f.write_text(data)
     f=Path("src-tauri/src/skills.rs")
     data=f.read_text()
     if "mod catalog;" not in data:
@@ -375,7 +385,8 @@ def verify_inventory(candidate):
                 "src-tauri/src/skills/scoped.rs","src-tauri/src/skill_manager/library.rs",
                 "src-tauri/src/skill_manager/enforcement.rs","src-tauri/src/skill_manager/matrix_tests.rs",
                 "src-tauri/src/skill_manager/harness_tests.rs","src-tauri/src/skill_manager/lifecycle_tests.rs",
-                "src-tauri/src/skill_manager/tests.rs","src-tauri/src/bots.rs","src/main.ts","docs/skill-manager.md"}
+                "src-tauri/src/skill_manager/tests.rs","src-tauri/src/bots.rs","src/main.ts","docs/skill-manager.md",
+                "src-tauri/src/providers.rs"}
     for p in set(b)|set(s)|set(t):
         base,source,target=b.get(p),s.get(p),t.get(p)
         group=("unchanged" if base==source else "both_same") if source==target else ("source_only" if base==target else ("target_only" if base==source else "both_changed"))

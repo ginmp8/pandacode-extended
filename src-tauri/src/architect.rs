@@ -1858,6 +1858,9 @@ fn dispatch(
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
 ) -> Result<Value> {
+    // Resolve the central library outside the store lock held by dispatch_as.
+    // Missing library access fails closed only for reviewers with assigned skills.
+    let library = if name == "pandacode_dispatch_workers" { crate::skills::library(app).ok() } else { None };
     let (result, changed) = dispatch_as(
         &app.state::<AppState>(),
         sid,
@@ -1867,6 +1870,7 @@ fn dispatch(
         args,
         stopped,
         routes,
+        library.as_ref(),
     )?;
     if let Some(team) = changed {
         emit(app, &team);
@@ -1895,7 +1899,7 @@ fn dispatch_state_routed(
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
 ) -> Result<(Value, Option<TeamSnapshot>)> {
-    dispatch_as(state, sid, generation, None, name, args, stopped, routes)
+    dispatch_as(state, sid, generation, None, name, args, stopped, routes, None)
 }
 /// `routes` holds Panda Router's picks for this dispatch's `profileId: "auto"` assignments,
 /// computed before the team state was locked. `caller` is a direct worker's ID and run attempt
@@ -1910,6 +1914,7 @@ fn dispatch_as(
     mut args: Value,
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
+    library: Option<&crate::skills::Library>,
 ) -> Result<(Value, Option<TeamSnapshot>)> {
     crate::agent_tools::drop_nulls(&mut args);
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
@@ -2031,8 +2036,7 @@ fn dispatch_as(
                 // The request above keeps the name as sent, so a retry still matches it.
                 let shown: String = assignment.name.chars().take(NAME_CHARS).collect();
                 let selected_bot = if let Some(seat) = &seat {
-                    let library = crate::skills::library(app).ok();
-                    bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library.as_ref())?
+                    bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
                 } else { None };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
                 let profile = if let Some(bot) = &selected_bot {

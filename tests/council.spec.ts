@@ -78,7 +78,10 @@ test('optional selected-bot skill remains optional after Council configuration i
     { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },
     { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
   ];
-  await open(page, '/?bots=sample', {}, 0, '', {}, { ids: bots.map(bot => bot.id), bots });
+  // This test supplies its own reviewer fixtures. Use the stable project task,
+  // since ?bots=sample creates new random desktop session IDs on every reload.
+  await open(page, '/', {}, 0, '', {}, { ids: bots.map(bot => bot.id), bots });
+  await expect(button(page)).toHaveAttribute('data-session-id', 'session-1');
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
   await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);

@@ -384,7 +384,7 @@ fn large_checkpoints_page_through_read_worker_and_never_fill_a_result() {
     let summary = "s\"".repeat(30_000);
     let saved = call(&state, &parent, &a, "pandacode_checkpoint_worker", json!({"key":"big","summary":summary,"nextSteps":"Finish","blocker":"Stuck"})).unwrap();
     assert!(serde_json::to_string(&saved).unwrap().len() < 256, "{saved}");
-    let read = |args: Value| dispatch_as(&state, &parent, 1, None, "pandacode_read_worker", args, &AtomicBool::new(false), &routing::AutoRoutes::default()).unwrap().0;
+    let read = |args: Value| dispatch_as(&state, &parent, 1, None, "pandacode_read_worker", args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None).unwrap().0;
     let brief = read(json!({"workerId":"a"}));
     assert_eq!(brief["checkpointTruncated"], true);
     assert!(serde_json::to_string(&brief).unwrap().len() <= PAGE_BYTES);

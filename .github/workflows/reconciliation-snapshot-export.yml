@@ -1,4 +1,4 @@
-name: Temporary reconciliation snapshot export
+name: Temporary reconciliation diagnostics
 on:
   push:
     branches:
@@ -6,48 +6,47 @@ on:
 permissions:
   contents: read
 jobs:
-  snapshots:
+  merge-diagnostics:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout exact branch history
+      - name: Checkout history
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
-          submodules: false
-      - name: Freeze and export exact Git trees
+      - name: Inspect three-way merge without committing
         shell: bash
         env:
           SOURCE_SHA: e4e5c0c51daa8a0149015bb26a00c8fb09bb2050
           TARGET_SHA: 6467995ea3b533b039bcd393e4e6a15e847f5464
           BASE_SHA: dbd4e3f39685603bff21069439edf5e5201e021d
-          PREVIOUS_SOURCE_SHA: 4f777ec3414a9c46d07ea58debb99c87fcf4e74f
         run: |
           set -euo pipefail
           test "$(git merge-base "$SOURCE_SHA" "$TARGET_SHA")" = "$BASE_SHA"
-          root="$RUNNER_TEMP/reconciliation"
-          mkdir -p "$root"/snapshots
-          for name in source target base previous_source; do
-            case "$name" in
-              source) sha="$SOURCE_SHA" ;;
-              target) sha="$TARGET_SHA" ;;
-              base) sha="$BASE_SHA" ;;
-              previous_source) sha="$PREVIOUS_SOURCE_SHA" ;;
-            esac
-            mkdir -p "$root/snapshots/$name"
-            git archive --format=tar "$sha" | tar -xf - -C "$root/snapshots/$name"
-            printf '%s %s %s\n' "$name" "$sha" "$(git rev-parse "$sha^{tree}")" >> "$root/identities.txt"
-          done
-          git diff --name-status --no-renames "$BASE_SHA" "$SOURCE_SHA" > "$root/source-changes.txt"
-          git diff --name-status --no-renames "$BASE_SHA" "$TARGET_SHA" > "$root/target-changes.txt"
-          git diff --name-status --no-renames "$PREVIOUS_SOURCE_SHA" "$SOURCE_SHA" > "$root/incremental-source-changes.txt"
-          tar -czf "$RUNNER_TEMP/reconciliation-snapshots.tar.gz" -C "$root" .
-          sha256sum "$RUNNER_TEMP/reconciliation-snapshots.tar.gz"
-      - name: Upload snapshots for offline reconciliation
+          echo "::group::Merge tree summary"
+          git merge-tree --write-tree --name-only "$TARGET_SHA" "$SOURCE_SHA" > "$RUNNER_TEMP/merge-tree.txt" || true
+          head -220 "$RUNNER_TEMP/merge-tree.txt"
+          echo "::endgroup::"
+          git switch -c diagnostic-reconcile "$TARGET_SHA"
+          git -c user.name=Reconciler -c user.email=reconciler@users.noreply.github.com merge --no-commit --no-ff "$SOURCE_SHA" || true
+          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+          echo "::group::Unmerged paths"
+          cat "$RUNNER_TEMP/conflicts.txt"
+          echo "::endgroup::"
+          echo "conflicts=$(wc -l < "$RUNNER_TEMP/conflicts.txt")"
+          mkdir -p "$RUNNER_TEMP/conflict-files"
+          while IFS= read -r name; do
+            test -n "$name" || continue
+            mkdir -p "$RUNNER_TEMP/conflict-files/$(dirname "$name")"
+            cp "$name" "$RUNNER_TEMP/conflict-files/$name" || true
+          done < "$RUNNER_TEMP/conflicts.txt"
+          cp "$RUNNER_TEMP/merge-tree.txt" "$RUNNER_TEMP/conflict-files/merge-tree.txt"
+          cp "$RUNNER_TEMP/conflicts.txt" "$RUNNER_TEMP/conflict-files/conflicts.txt"
+      - name: Upload bounded diagnostics
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: reconciliation-snapshots
-          path: ${{ runner.temp }}/reconciliation-snapshots.tar.gz
+          name: reconciliation-diagnostics
+          path: ${{ runner.temp }}/conflict-files
           if-no-files-found: error
           retention-days: 3

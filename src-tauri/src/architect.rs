@@ -2062,7 +2062,7 @@ fn dispatch_as(
                         old.result_revision = team.dispatch_revision + 1;
                     }
                 }
-                let reviewer_binding = seat.as_ref().map(|seat| {
+                let reviewer_binding = seat.as_ref().map(|seat| -> Result<reviewer_security::ReviewerBinding> {
                     let mut binding = reviewer_security::ReviewerBinding::native(
                         &team, &id, now, &profile.provider, &profile.model, seat,
                     );
@@ -2074,8 +2074,8 @@ fn dispatch_as(
                             binding.snapshot.tool_policy = bot_reviewers::review_policy(bot, permissions)?;
                         }
                     }
-                    binding
-                });
+                    Ok(binding)
+                }).transpose()?;
                 if let Some(binding) = &reviewer_binding {
                     reviewer_security::record_native_authority(&store, sid, binding)?;
                 }

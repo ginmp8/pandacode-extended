@@ -3418,6 +3418,21 @@ async fn verify_reviewer_codex_external_tools(path: &Path, cwd: &Path) -> Result
     reviewer_codex_mcp_roster_empty(&output.stdout)
 }
 
+/// Run only the external-tool inventory check implemented for this provider.
+/// A Codex CLI command must never be sent to another harness. Other adapters
+/// retain their own native Plan/tool restrictions and protocol permission gate;
+/// this helper is not proof of universal external-MCP isolation.
+async fn verify_reviewer_external_tools(
+    config: &RunConfig,
+    path: &Path,
+    cwd: &Path,
+) -> Result<(), String> {
+    match (config.reviewer_boundary, config.provider.as_str()) {
+        (true, "codex") => verify_reviewer_codex_external_tools(path, cwd).await,
+        _ => Ok(()),
+    }
+}
+
 fn configure_command(command: &mut Command, config: &RunConfig) {
     claude_auth::configure(command, &config.provider);
     let use_model = !config.model.is_empty() && config.model != "default";
@@ -3598,9 +3613,7 @@ async fn run_inner(
             format!("{} CLI is not installed or is not on PATH", config.provider)
         })?;
     config.cwd = external_path(&config.cwd);
-    if config.reviewer_boundary {
-        verify_reviewer_codex_external_tools(&path, &config.cwd).await?;
-    }
+    verify_reviewer_external_tools(&config, &path, &config.cwd).await?;
     let image_blocks = attachments::load(&config.provider, &config.images).await?;
     let mut command = provider_command(&config.provider, &path)?;
     if config.reviewer_boundary {
@@ -4267,6 +4280,58 @@ mod tests {
         assert_eq!(set.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert!(!set.contains_key("GITHUB_TOKEN"));
         assert!(!set.contains_key("AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_external_tool_preflight_is_provider_scoped() {
+        let root = std::env::temp_dir().join(format!(
+            "pandacode-reviewer-provider-preflight-{}", uuid::Uuid::new_v4()
+        ));
+        let cwd = root.join("repo");
+        let settings = root.join(".codex");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&settings).unwrap();
+        // Codex must reject the project MCP settings before trying to launch
+        // the intentionally nonexistent executable. Non-Codex harnesses must
+        // never receive a Codex-specific "mcp list" probe.
+        std::fs::write(
+            settings.join("config.toml"),
+            "[mcp_servers.external]\ncommand = 'writable-tool'\n",
+        ).unwrap();
+        let unavailable_executable = root.join("no-provider-executable");
+        for (provider, _) in PROVIDERS {
+            let mut config = config(provider);
+            config.mode = "plan".into();
+            config.reviewer_boundary = true;
+            let result = verify_reviewer_external_tools(
+                &config, &unavailable_executable, &cwd,
+            ).await;
+            if provider == "codex" {
+                assert!(
+                    result.unwrap_err().contains("read_only_unsupported"),
+                    "Codex must reject its configured external MCP inventory",
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "{provider} must not invoke the Codex MCP preflight: {result:?}",
+                );
+            }
+        }
+        // With project tools absent, Codex must still attempt its own native
+        // CLI inventory check, instead of incorrectly skipping the preflight.
+        std::fs::remove_file(settings.join("config.toml")).unwrap();
+        let mut reviewer_codex = config("codex");
+        reviewer_codex.reviewer_boundary = true;
+        assert!(verify_reviewer_external_tools(
+            &reviewer_codex, &unavailable_executable, &cwd,
+        ).await.is_err());
+        // Normal Codex turns must not inherit the Council-only restrictions.
+        let config = config("codex");
+        assert!(verify_reviewer_external_tools(
+            &config, &unavailable_executable, &cwd,
+        ).await.is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

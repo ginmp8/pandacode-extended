@@ -1,52 +1,40 @@
-name: Temporary reconciliation conflict inspection
+name: Temporary upstream reconciliation candidate validation
 on:
   push:
     branches: [chore/pr120-reconcile-base-20261110]
 permissions:
   contents: read
+concurrency:
+  group: temporary-reconciliation-candidate
+  cancel-in-progress: true
 jobs:
-  inspect:
+  candidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare diagnostic virtual base
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+      - name: Freeze topic branch and reconstruct reviewed candidate
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "Reconciliation Diagnostics"
-          git config user.email "reconciliation@users.noreply.github.com"
-          prev=4f777ec3414a9c46d07ea58debb99c87fcf4e74f
-          source=50b2d8bfd25ba2f885a9f060bfb93fcc4111cc34
-          target=6467995ea3b533b039bcd393e4e6a15e847f5464
-          root=$(printf 'Virtual previously integrated upstream base\n' | git commit-tree "$(git rev-parse "$prev^{tree}")")
-          head=$(printf 'Virtual upstream\n' | git commit-tree "$(git rev-parse "$source^{tree}")" -p "$root")
-          dest=$(printf 'Virtual Extended\n' | git commit-tree "$(git rev-parse "$target^{tree}")" -p "$root")
-          git switch -c temporary-reconciliation "$dest"
-          git merge --no-commit --no-ff "$head" || true
-          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
-          python3 - "$RUNNER_TEMP/conflicts.txt" <<'PY'
-          from pathlib import Path
-          import sys
-          paths=Path(sys.argv[1]).read_text().splitlines()
-          print("CONFLICT_COUNT",len(paths))
-          for filename in paths:
-              if not filename.startswith(("src-tauri/src/", "src/", "src-tauri/Cargo", "package", "playwright")):
-                  continue
-              file=Path(filename)
-              if not file.is_file(): continue
-              data=file.read_text(errors="replace")
-              blocks=data.split("<<<<<<< HEAD")
-              print("FILE",filename,"BLOCKS",len(blocks)-1)
-              for idx,raw in enumerate(blocks[1:],1):
-                  conflict=raw.split(">>>>>>>",1)[0]
-                  lines=conflict.splitlines()
-                  print("BEGIN",filename,idx,"lines",len(lines))
-                  if len(lines)>400:
-                      lines=lines[:200]+["--- LARGE BLOCK TRUNCATED ---"]+lines[-60:]
-                  for line in lines: print("CONFLICT_LINE",line[:270])
-                  print("END",filename,idx)
-          PY
+          echo "EXPECTED_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          EXPECTED_HEAD="$(git rev-parse HEAD)" python3 scripts/temp-reconcile-03107.py
+          git diff --cached --stat | tail -40
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck and bundle
+        run: npm run build
+      - name: Node regression tests
+        run: npm test
+      - name: Release regression tests
+        run: npm run test:release
+      - name: Website build
+        run: |
+          npm ci --prefix website
+          npm run site:build

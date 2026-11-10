@@ -1,0 +1,32 @@
+{
+  "candidate_tree": "c66fbd6ed621ee1520e427e62a3ed2d34881abb2",
+  "topic_sha": "5a08e7526a42358e3855ad9e82d9707c212d121c",
+  "source_sha": "4ef18f0fe5fda72190c6754711ae8d7fbc4ab200",
+  "target_sha": "6467995ea3b533b039bcd393e4e6a15e847f5464",
+  "workflow_changes": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "sha": "7271e426a0586d8333fbc39b5a67518364fbb94f",
+      "stage_path": ".reconciliation-staging/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "mode": "100644",
+      "sha": "ae140cc16784d387cafd7b97541780aa29193488",
+      "stage_path": ".reconciliation-staging/workflows/release.yml"
+    },
+    {
+      "path": ".github/workflows/temp-reconciliation-inspect.yml",
+      "mode": "100644",
+      "sha": null,
+      "stage_path": null
+    },
+    {
+      "path": ".github/workflows/temp-reconciliation-stage.yml",
+      "mode": "100644",
+      "sha": null,
+      "stage_path": null
+    }
+  ]
+}

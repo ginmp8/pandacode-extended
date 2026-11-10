@@ -1,0 +1,308 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main, base/development]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  dependency-audit:
+    name: Dependency audit (npm lockfiles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
+        with:
+          node-version: '22'
+      - name: Audit desktop npm dependencies
+        run: npm audit --audit-level=low
+      - name: Audit website npm dependencies
+        run: npm audit --prefix website --audit-level=low
+      - name: Audit mobile npm dependencies
+        run: npm audit --prefix mobile --audit-level=low
+      - name: Audit relay npm dependencies
+        if: ${{ always() }}
+        run: npm audit --prefix relay --audit-level=low
+      - name: Audit Cloudflare sandbox Worker dependencies (unlocked boundary)
+        run: |
+          npm install --prefix src-tauri/src/cloud/cloudflare_worker --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm audit --prefix src-tauri/src/cloud/cloudflare_worker --audit-level=low
+
+  rust-dependency-audit:
+    name: RustSec audit (Cargo.lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - name: Install cargo-audit (pinned)
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit committed Rust lockfile
+        run: cargo audit --file src-tauri/Cargo.lock
+
+  mobile:
+    name: Mobile dependency and Expo compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Frozen mobile install (no dependency lifecycle scripts)
+        run: npm ci --prefix mobile --ignore-scripts
+      - name: Mobile typecheck
+        run: npm run typecheck --prefix mobile
+      - name: Mobile unit tests
+        run: npm test --prefix mobile
+      - name: Expo config compatibility
+        run: cd mobile && ./node_modules/.bin/expo config --json > /dev/null
+      - name: ESLint compatibility
+        run: npm run lint --prefix mobile
+      - name: Expo iOS JS export compatibility
+        run: cd mobile && ./node_modules/.bin/expo export --platform ios --output-dir /tmp/pandacode-extended-ios-export
+
+  web:
+    name: Typecheck, unit tests, website
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            website/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix website
+      # `npm run build` typechecks (tsc --noEmit) and writes dist/, which
+      # tests/bundle.test.mjs reads.
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:release
+      - run: npm run site:build
+
+  bot-workflow-browser:
+    name: Bot manifest and collaboration UI (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise Extended bot manifest, collaboration and history UI
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/bot-manifests.spec.ts tests/bot-collaboration.spec.ts tests/bots.spec.ts tests/bots-channels.spec.ts \
+            --grep "bot manifests|bot collaboration|bot actions menu aligns|switches directly from a shared channel to a bot conversation|resized bot settings textareas" --workers=1
+
+
+  council-bot-selected-browser:
+    name: Council configured reviewer selection (focused Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Verify selected bot, scoped grant and keyboard acceptance
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/council.spec.ts --grep 'selected|scoped reviewer|panel places itself|an action that fails|motion: nothing on load' --workers=1
+
+  council-bot-reviewers-browser:
+    # Run every Council browser test, partitioned across independent CI runners to
+    # stay within the job timeout without relaxing assertions or test coverage.
+    name: Council selected bot reviewers (Playwright, shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise selected bot reviewer UI and native Council preview regression
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/council.spec.ts --workers=1 --shard=${{ matrix.shard }}/3
+
+  customize-skills-browser:
+    # Run the Skills regressions independently, even when an unrelated Bots test fails.
+    name: Customize Skills UI (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise Customize Skills and ZIP/GitHub UI
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/customize-skills.spec.ts tests/skills-library.spec.ts --workers=1
+      - name: Publish Customize UI review screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: customize-issue-129-ui-review
+          path: test-results/customize-*.png
+          if-no-files-found: warn
+          retention-days: 30
+
+  rust:
+    name: Rust check and tests (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      # Same x86_64 transcribe-cpp floor as the linux-x86_64 release row (see release.yml).
+      TRANSCRIBE_CMAKE_ARGS: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
+        with: { node-version: '22', cache: npm }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils
+      # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - if: ${{ !cancelled() }}
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  customize-windows:
+    name: Customize Skills native contract (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with: { node-version: '22', cache: npm }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run build
+      - name: Exercise native source/import/progress on Windows
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- skills::catalog_tests
+      - name: Exercise ZIP and GitHub limits on Windows
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- skills::customize
+      - name: Exercise GitHub acquisition and ref handling on Windows
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- skills::github
+
+  router:
+    # x86_64 Linux builds without ONNX Runtime (see `panda_onnx` in src-tauri/build.rs), so Panda Router's
+    # ONNX parity tests run here, on a target that links it.
+    name: Panda Router ONNX parity (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
+        with: { node-version: '22', cache: npm }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run build
+      # Panda Router's ONNX profiler for the parity tests, pinned like panda_router::ASSETS.
+      # The tests fail rather than skip when CI is set and these are missing.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .panda-router
+          key: panda-router-v4-b52d463905808efd892c91917e3010985359e259fe7a514ae083967c98fa2216-ca870c678352403d107496dc78899fa666ed0f56fef63e88ae398fafe5d78c45
+      - name: Fetch Panda Router profiler
+        run: |
+          base=https://raw.githubusercontent.com/aicodeking/PandaOrchestrator/83e408c794ef1d09b6d13b6ad8734e984f552402/artifacts/panda-router-v4
+          mkdir -p .panda-router
+          while read -r sha file; do
+            [ -f ".panda-router/$file" ] || curl -fsSL --retry 3 -o ".panda-router/$file" "$base/$file"
+            echo "$sha  .panda-router/$file" | shasum -a 256 -c -
+          done <<'EOF'
+          b52d463905808efd892c91917e3010985359e259fe7a514ae083967c98fa2216 model.int8.onnx
+          ca870c678352403d107496dc78899fa666ed0f56fef63e88ae398fafe5d78c45 tokenizer.json
+          EOF
+          echo "PANDA_ROUTER_ASSETS=$PWD/.panda-router" >> "$GITHUB_ENV"
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- panda_router model_routing
+
+  rust-platforms:
+    # Builds the Rust library (and transcribe-cpp, the native speech engine) on the release targets the
+    # Linux job does not cover, so a platform-only break shows up in CI instead of first at release time.
+    # Each row copies its release.yml build row: same runner and TRANSCRIBE_CMAKE_ARGS (see the comment
+    # there; an empty value adds no CMake arguments). Clippy covers the same targets as the Linux job;
+    # tests stay on Linux. The Linux arm64 row installs the same native packages as the Linux job.
+    name: Rust clippy (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple silicon: the crate's build.rs already sets GGML_NATIVE=OFF on macOS.
+          - { os: macos-latest, target: darwin-aarch64, transcribe_cmake: '' }
+          # Intel Mac on its native runner, with the x86_64 SSE4.2/AVX/F16C floor.
+          - { os: macos-15-intel, target: darwin-x86_64, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          # Windows x64 on the release runner, with the baseline SSE4.2/AVX/F16C floor.
+          - { os: windows-2022, target: windows-x86_64, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          # Windows arm64 builds native (ggml refuses GGML_NATIVE=OFF with MSVC on ARM), as in release.yml:
+          # dotprod/i8mm from the runner, SVE and SME pinned off (platform.rs checks neither).
+          - { os: windows-11-arm, target: windows-aarch64, transcribe_cmake: '-DGGML_MACHINE_SUPPORTS_sve=OFF -DGGML_MACHINE_SUPPORTS_sme=OFF' }
+          # Linux arm64 pinned to plain ARMv8-A, never the runner's CPU.
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, transcribe_cmake: '-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TRANSCRIBE_CMAKE_ARGS: ${{ matrix.transcribe_cmake }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with: { node-version: '22', cache: npm }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils
+      # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
+      - run: npm ci
+      - run: npm run build
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

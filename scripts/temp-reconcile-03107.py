@@ -25,6 +25,9 @@ def git(*args):
 def source_file(path):
     return git("show",SOURCE+":"+path)+"\n"
 
+def source_file_from(rev,path):
+    return git("show",rev+":"+path)+"\n"
+
 def checked_replace(data,old,new):
     if old not in data: raise RuntimeError("Missing expected code: "+old[:110])
     return data.replace(old,new,1)
@@ -53,8 +56,7 @@ def integrate_block(path,old,new,n):
         if n==1:
             return checked_replace(old,"slash_commands::snapshot(&provider, &cwd)?","slash_commands::snapshot(&provider, &cwd).await?")
         if n==2: return old
-        if n==3:
-            return "\n".join(line for line in old.split("\n") if "skills::skills_catalog" not in line and "skills::skills_discover," not in line)
+        if n==3: return old
     if path=="src-tauri/src/providers.rs":
         if n==1: return old
         if n==2:
@@ -64,12 +66,8 @@ def integrate_block(path,old,new,n):
             return new+"\n    if config.reviewer_boundary {\n        sanitize_reviewer_environment(&mut command, &config.provider);\n    }\n"
     if path=="src-tauri/src/skills.rs":
         if n<=8: return old
-        if n==9:
-            a=old.find("#[tauri::command]\npub async fn skills_catalogs")
-            b=old.find("#[tauri::command]\npub async fn skills_source_preview")
-            if a<0 or b<a: raise RuntimeError("Failed to isolate obsolete catalog API")
-            return old[:a]+old[b:]
-        if n==10: return old.replace("mod catalog_tests;\n","")+"\n"+new
+        if n==9: return old
+        if n==10: return old+"\n"+new
     if path=="src/preview.ts" and n==1:
         return checked_replace(old,"case 'skills_deactivate':","case 'skills_deactivate_all': case 'skills_deactivate':")
     if path=="src/preview-skills.ts":
@@ -154,7 +152,7 @@ def adapt_preview():
 
 def adapt_rust():
     f=Path("src-tauri/src/skills.rs")
-    data=f.read_text().replace("mod catalog;\n","").replace("mod catalog_tests;\n","")
+    data=f.read_text()
     upstream=source_file(str(f))
     if "pub fn deactivate_all(&self" not in data:
         body=rust_function(upstream,"pub fn deactivate_all(&self")
@@ -191,6 +189,53 @@ pub(crate) async fn filter_disabled(provider: &str, catalog: Catalog, cwd: &Path
     data=f.read_text()
     data=checked_replace(data,"    Ok(catalog)\n","    slash_commands::filter_disabled(&provider, catalog, &cwd).await\n")
     f.write_text(data)
+
+
+def adapt_native_compatibility():
+    """Adapt native Skills Manager to Extended's existing library/reviewer contracts."""
+    f=Path("src-tauri/src/skills.rs")
+    data=f.read_text()
+    data=checked_replace(data,"fn read_local(path: &Path, include_hidden: bool)","pub(crate) fn read_local(path: &Path, include_hidden: bool)")
+    f.write_text(data)
+    f=Path("src-tauri/src/skill_manager/library.rs")
+    data=f.read_text()
+    data=checked_replace(data,"crate::skills::read_local(path)","crate::skills::read_local(path, false)")
+    data=checked_replace(data,"crate::skills::read_local(&theirs)","crate::skills::read_local(&theirs, false)")
+    f.write_text(data)
+    f=Path("src-tauri/src/skills/scoped.rs")
+    data=f.read_text()
+    data=checked_replace(data,"super::super::read_local(&source)","super::super::read_local(&source, false)")
+    f.write_text(data)
+    f=Path("src-tauri/src/lib.rs")
+    data=f.read_text()
+    data=checked_replace(data,
+       "    match blocking(move || skills::active_slash_skills(&app, &provider, &cwd)).await {",
+       "    let (provider_for_library, cwd_for_library) = (provider.clone(), cwd.clone());\n"
+       "    match blocking(move || skills::active_slash_skills(&app, &provider_for_library, &cwd_for_library)).await {")
+    native_commands=["skill_manager_list","skill_manager_set","skill_manager_reset",
+       "skill_manager_restore","skill_manager_uninstall","skill_manager_undo_uninstall",
+       "skill_manager_preview","skill_manager_add","skill_manager_add_library"]
+    extra="".join("                skill_manager::"+name+",\n" for name in native_commands
+                  if "skill_manager::"+name+"," not in data)
+    if "skills::skills_deactivate_all," not in data:
+        extra+="                skills::skills_deactivate_all,\n"
+    if extra:
+        data=checked_replace(data,"                skills::skills_list,\n",extra+"                skills::skills_list,\n")
+    f.write_text(data)
+    # Existing Extended reviewer boundaries remain required for upstream test fixtures.
+    for name in ("enforcement.rs","matrix_tests.rs","harness_tests.rs",
+                 "lifecycle_tests.rs","tests.rs"):
+        f=Path("src-tauri/src/skill_manager")/name
+        data=f.read_text()
+        import re
+        pattern=r"(?<!struct )(?<!impl )\b(?:crate::providers::)?RunConfig\s*\{"
+        def add_fields(m):
+            return m.group(0)+"\n            reviewer_boundary: false,\n            reviewer_policy: None,"
+        updated,count=re.subn(pattern,add_fields,data)
+        if count<1: raise RuntimeError("No upstream test RunConfig fixture in "+str(f))
+        f.write_text(updated)
+    # Source-only test fixtures still use the old read_local signature.
+    # The chosen flag excludes hidden files, as the original native importer did.
 
 def adapt_tests():
     for name in ("playwright.config.ts","playwright.webkit.config.ts"):
@@ -229,7 +274,11 @@ def verify_inventory(candidate):
     b,s,t,c=map(tree_map,(PREVIOUS,SOURCE,TARGET,candidate))
     counts={"source_only":0,"target_only":0,"both_same":0,"both_changed":0,"unchanged":0}
     exceptions={"src/skills-library.ts","docs/skills-library.md","website/src/data/release-dates.json",
-                "docs/extended/0.12.0/base-reconciliation-2026-11-10.md"}
+                "docs/extended/0.12.0/base-reconciliation-2026-11-10.md",
+                "src-tauri/src/skills/scoped.rs","src-tauri/src/skill_manager/library.rs",
+                "src-tauri/src/skill_manager/enforcement.rs","src-tauri/src/skill_manager/matrix_tests.rs",
+                "src-tauri/src/skill_manager/harness_tests.rs","src-tauri/src/skill_manager/lifecycle_tests.rs",
+                "src-tauri/src/skill_manager/tests.rs"}
     for p in set(b)|set(s)|set(t):
         base,source,target=b.get(p),s.get(p),t.get(p)
         group=("unchanged" if base==source else "both_same") if source==target else ("source_only" if base==target else ("target_only" if base==source else "both_changed"))
@@ -246,7 +295,7 @@ def verify_inventory(candidate):
     for p in must:
         if p not in c: raise RuntimeError("Missing feature "+p)
     for p in ("src-tauri/src/skills/catalog.rs","src-tauri/src/skills/catalog_tests.rs"):
-        if p in c: raise RuntimeError("Obsolete source catalog still present "+p)
+        if c.get(p)!=t.get(p): raise RuntimeError("Lost Extended catalog implementation "+p)
     print("INVENTORY",json.dumps(counts,sort_keys=True))
 
 def main():
@@ -277,16 +326,17 @@ def main():
     if set(conflicts)!=expect:
         raise RuntimeError("Conflict inventory changed: missing "+str(sorted(expect-set(conflicts)))+" extra "+str(sorted(set(conflicts)-expect)))
     special={"src/skills-library.ts","docs/skills-library.md","website/src/data/release-dates.json"}
-    drop={"src-tauri/src/skills/catalog.rs","src-tauri/src/skills/catalog_tests.rs"}
+    keep_extended_catalog={"src-tauri/src/skills/catalog.rs","src-tauri/src/skills/catalog_tests.rs"}
     for p in conflicts:
-        if p in drop:
-            git("rm","--",p)
-            print("RETIRED",p)
+        if p in keep_extended_catalog:
+            Path(p).write_text(source_file_from(TARGET,p))
+            print("PRESERVED_EXTENDED_CATALOG",p)
         elif p not in special:
             resolve_conflict_file(p)
     adapt_rules_library()
     adapt_preview()
     adapt_rust()
+    adapt_native_compatibility()
     adapt_tests()
     docs()
     git("add","-A")

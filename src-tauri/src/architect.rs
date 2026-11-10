@@ -39,7 +39,8 @@ use tauri::{Emitter, Manager, State};
 /// 11: native reviewer host tools were removed from inherited sessions.
 /// 12: scoped native Council tool catalogs require fresh Codex worker contexts
 /// so an older writable or differently scoped catalog is never resumed.
-const TOOL_CATALOG_VERSION: u32 = 12;
+/// 13: task tools are also available to team leads across supported harnesses.
+const TOOL_CATALOG_VERSION: u32 = 13;
 /// Auto teams carry a roster of installed models the lead may choose from.
 const AUTO_ROSTER_MAX: usize = 24;
 /// Team tools only change this team's own state, and every call is checked against the

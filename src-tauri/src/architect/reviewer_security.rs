@@ -18,7 +18,7 @@ pub(crate) enum ReviewerPhase {
 /// Exact host-tool grant, not an arbitrary MCP/shell privilege.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ReviewerCapabilityGrant {
+pub struct ReviewerCapabilityGrant {
     pub tool: String,
     /// "call" for an atomic tool; otherwise require a matching action argument.
     pub action: String,
@@ -29,7 +29,7 @@ pub(crate) struct ReviewerCapabilityGrant {
 }
 
 impl ReviewerCapabilityGrant {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let name = |s: &str| !s.is_empty() && s.len() <= 64
             && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
         if !name(&self.tool) || !name(&self.resource_argument)
@@ -169,6 +169,15 @@ impl ReviewerToolPolicy {
         });
         Ok(Some(ToolHost { tools, handler, approval_tools: HashSet::new() }))
     }
+}
+
+/// User's task-scoped choice. The native adapter must independently resolve the
+/// intersection with a bot's actual configured host tools before issuing a seat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReviewerPermissionSelection {
+    pub authorization_id: String,
+    pub grants: Vec<ReviewerCapabilityGrant>,
 }
 
 impl ReviewerCapabilityGrant {

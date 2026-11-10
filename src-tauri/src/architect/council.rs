@@ -38,10 +38,13 @@ pub struct CouncilConfig {
     /// Persistent bot IDs for task-scoped selected reviewers; empty keeps native Council behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_bot_ids: Vec<String>,
+    /// Explicit per-task host tool permissions; absent always means native read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_permissions: Option<super::reviewer_security::ReviewerPermissionSelection>,
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new() }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), review_permissions: None }
     }
 }
 impl CouncilConfig {
@@ -54,6 +57,17 @@ impl CouncilConfig {
         }
         if self.reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
+        }
+        if self.review_permissions.is_some() && self.reviewer_bot_ids.is_empty() {
+            return Err("Scoped Council reviewer permissions require selected bots.".into());
+        }
+        if let Some(permissions) = &self.review_permissions {
+            if permissions.authorization_id.trim().is_empty() || permissions.authorization_id.len() > 128
+                || permissions.grants.is_empty() || permissions.grants.len() > 16
+            {
+                return Err("A bounded user authorization and at least one grant are required.".into());
+            }
+            for grant in &permissions.grants { grant.validate()?; }
         }
         if !self.reviewer_bot_ids.is_empty() {
             if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {

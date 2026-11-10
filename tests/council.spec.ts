@@ -95,11 +95,10 @@ test('optional selected-bot skill remains optional after Council configuration i
   // A browser reload restarts the preview app; wait for the same boot-ready
   // composer condition as open() before asserting persisted Council settings.
   await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeVisible({ timeout: 30_000 });
-  // The composer renders before the persisted native team/Council snapshot loads.
-  // Wait for that Council state, not merely the composer, before opening its settings.
-  await expect(strip(page)).toBeVisible();
+  // A restored Council with no review rounds has no strip; its enabled button
+  // is the observable persisted state, not a review-progress indicator.
+  await expect(button(page)).toHaveAttribute('data-on', '', { timeout: 30_000 });
   await ready(page);
-  await expect(button(page)).toBeVisible();
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
   await expect(panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' })).toBeChecked();

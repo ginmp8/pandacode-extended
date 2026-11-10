@@ -261,7 +261,8 @@ pub(crate) fn cleanup_orphaned(library: &Library, store: &crate::storage::Store)
         // as Council-created materialization.
         let named_snapshot = name.rsplit_once('-').is_some_and(|(id, digest)|
             super::valid_id(id) && digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        let interrupted = name.starts_with(".pending-") && name.len() <= 64;
+        let interrupted = name.strip_prefix(".pending-")
+            .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok());
         if !named_snapshot && !interrupted {
             return Err(format!("reviewer_skill_cleanup_blocked: unknown staged entry {name}."));
         }
@@ -604,6 +605,20 @@ mod tests {
         assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 1);
         assert!(!dir.exists(), "unused read-only snapshots must be reclaimed safely");
         assert_eq!(cleanup_orphaned(&library, &store).unwrap(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_refuses_to_delete_unrecognized_pending_directories() {
+        let (library, root) = fixture();
+        let stage_root = library.dir.join(STAGE_ROOT);
+        fs::create_dir(&stage_root).unwrap();
+        let unrelated = stage_root.join(".pending-user-data");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join("keep.txt"), b"Do not delete this directory.").unwrap();
+        let store = crate::storage::Store::open(Path::new(":memory:")).unwrap();
+        assert!(cleanup_orphaned(&library, &store).unwrap_err().contains("cleanup_blocked"));
+        assert_eq!(fs::read(unrelated.join("keep.txt")).unwrap(), b"Do not delete this directory.");
         fs::remove_dir_all(root).unwrap();
     }
 

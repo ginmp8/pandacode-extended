@@ -100,6 +100,54 @@ export type CatalogImport = { items: SkillItem[]; imported: string[]; skipped: {
 
 """
     data=checked_replace(data,"export type SkillsLibraryHost = {",legacy+"export type SkillsLibraryHost = {")
+    # Keep Extended catalog discovery and selective GitHub imports beside upstream
+    # read-only bot library; do not revive the old duplicated skill toggles.
+    extended=source_file_from(TARGET,str(f))
+    def take(start,end):
+        if extended.count(start)!=1 or extended.count(end)!=1:
+            raise RuntimeError("Extended catalog UI anchor changed "+start)
+        return extended[extended.index(start):extended.index(end,extended.index(start))]
+    intro="const CATALOGS_HELP = 'Saved GitHub catalogs index skills without activating them.';\n"
+    data=checked_replace(data,"export function mountSkillsLibrary(",intro+"\nexport function mountSkillsLibrary(")
+    data=checked_replace(data,
+        "const STATUS_LABELS: Record<SkillCell['status'], string>",
+        "const plural = (count: number, word: string) => "+chr(96)+"${count} ${word}${count === 1 ? '' : 's'}"+chr(96)+";\nconst STATUS_LABELS: Record<SkillCell['status'], string>")
+    data=checked_replace(data,"  let items: SkillItem[] = [];",
+        "  let catalogs: SkillCatalogs = { sources: [], discovery: null };\n"
+        "  let selected = new Set<string>();\n  let items: SkillItem[] = [];")
+    data=checked_replace(data,
+        "[items, matrix, managerOff] = await Promise.all([",
+        "[items, matrix, managerOff, catalogs] = await Promise.all([")
+    data=checked_replace(data,"        readManager(),\n",
+        "        readManager(),\n        options.call<SkillCatalogs>('skills_catalogs'),\n")
+    funcs=take("  function catalogSkillHtml(","  function draw(): void {")
+    data=checked_replace(data,"  function draw(): void {",funcs+"  function draw(): void {")
+    data=checked_replace(data,
+        "    <h3 class=\"settings-heading\">By harness</h3>${matrixHtml()}"+chr(96)+";",
+        "    <div class=\"settings-heading\"><h3>Catalogs</h3>${infoMark(CATALOGS_HELP, 'About catalogs')}<span class=\"sr-only\">${CATALOGS_HELP}</span></div>${catalogsHtml()}\n"
+        "    <h3 class=\"settings-heading\">By harness</h3>${matrixHtml()}"+chr(96)+";")
+    ops=take("  function addCatalog(","  const onClick =")
+    data=checked_replace(data,"  const onClick = (event: Event) => {",ops+"  const onClick = (event: Event) => {")
+    data=checked_replace(data,
+        "    if (!button) return;\n    const id = button.closest<HTMLElement>('.skills-item')?.dataset.id;",
+        "    if (!button) return;\n"
+        "    if (button.dataset.action === 'discover') {\n"
+        "      void run(async () => {\n"
+        "        const found = (await options.call<SkillCatalogs>('skills_discover')).discovery;\n"
+        "        return found?.registered.length ? "+chr(96)+"Added ${found.registered.join(', ')}."+chr(96)+" : 'No new skill repositories found.';\n"
+        "      });\n      return;\n    }\n"
+        "    if (button.dataset.repo) { catalogAction(button.dataset.action!, button.dataset.repo, button.dataset.state); return; }\n"
+        "    const id = button.closest<HTMLElement>('.skills-item')?.dataset.id;")
+    data=checked_replace(data,
+        "    if (target instanceof HTMLInputElement && target.dataset.harness) toggle(target);",
+        "    if (target instanceof HTMLInputElement && target.dataset.harness) toggle(target);\n"
+        "    if (target instanceof HTMLInputElement && target.dataset.select) {\n"
+        "      const key = target.dataset.select;\n"
+        "      selected = target.checked ? new Set([...selected, key]) : new Set([...selected].filter(k => k !== key));\n"
+        "    }")
+    data=checked_replace(data,"    importItem(event.target as HTMLFormElement);",
+        "    const form = event.target as HTMLFormElement;\n"
+        "    if (form.classList.contains('skills-catalog-add')) addCatalog(form); else importItem(form);")
     f.write_text(data)
 
 def adapt_preview():

@@ -75,9 +75,12 @@ def integrate_block(path,old,new,n):
         return old.rstrip("\n")+"\n"+new
     # Both branches added the Unix guard; Extended also documents the fixture.
     if path=="src-tauri/src/providers/claude_stream_tests.rs" and n==1:
-        if "fixture invokes POSIX sh" not in old or "#[cfg(unix)]" not in old or "#[cfg(unix)]" not in new:
-            raise RuntimeError("Unexpected Claude fixture guard conflict")
-        return old
+        if "fixture invokes POSIX sh" not in old:
+            raise RuntimeError("Unexpected Claude fixture conflict "+repr((old,new)))
+        # The shared #[cfg(unix)] can land outside the Git conflict markers.
+        if new.strip() not in ("", "#[cfg(unix)]"):
+            raise RuntimeError("Unexpected upstream Claude fixture content "+repr(new))
+        return old if "#[cfg(unix)]" in old or "#[cfg(unix)]" not in new else old.rstrip("\n")+"\n"+new
     if path=="src/preview.ts" and n==1:
         return checked_replace(old,"case 'skills_deactivate':","case 'skills_deactivate_all': case 'skills_deactivate':")
     if path=="src/preview-skills.ts":
@@ -93,6 +96,11 @@ def resolve_conflict_file(path):
         return integrate_block(path,match.group(1),match.group(2),seen[0])
     data=MARKERS.sub(sub,data)
     if not seen[0] or "<<<<<<< " in data or ">>>>>>> " in data: raise RuntimeError("Unresolved "+path)
+    if path=="src-tauri/src/providers/claude_stream_tests.rs":
+        anchor="async fn stop_ends_the_long_wait_for_an_owed_prompt_at_once()"
+        excerpt=data[data.index(anchor)-250:data.index(anchor)]
+        if excerpt.count("#[cfg(unix)]") != 1 or "fixture invokes POSIX sh" not in excerpt:
+            raise RuntimeError("Lost or duplicated Unix test guard "+repr(excerpt))
     file.write_text(data)
     print("RESOLVED",path,"blocks",seen[0])
 

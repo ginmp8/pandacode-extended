@@ -350,6 +350,17 @@ def adapt_native_ui():
     """Connect active workspace to native manager and keep separate Customize navigation."""
     f=Path("src/main.ts")
     data=f.read_text()
+    # Unify voice and Extended bot/GitHub composer hints in the upstream shared descriptor.
+    old_aria="aria-description=\"${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}\""
+    if old_aria in data: data=data.replace(old_aria,"aria-description=\"${escape(promptDescription())}\"",1)
+    old_bot_description="    prompt.setAttribute('aria-description', `Enter to ${entersSteer ? 'steer current work' : 'queue for after it finishes'}. Command Enter to ${entersSteer ? 'queue for after it finishes' : 'steer now'}.`);\n"
+    if old_bot_description in data: data=data.replace(old_bot_description,'',1)
+    old_mentions="    const enter = running ? `Enter to queue for when the agent finishes.${!team ? ' Command Enter to steer the running turn.' : ''}` : 'Enter to send.';\n    prompt.setAttribute('aria-description', `${enter} Shift Enter for a new line. Type @ to mention a project file${github.connected(s.projectId) ? ', issue, or pull request' : ''}.`);\n"
+    if old_mentions in data: data=data.replace(old_mentions,'',1)
+    if data.count("Enter to queue for when the agent finishes")!=1 or "prompt.setAttribute('aria-description'" in data:
+        raise RuntimeError("Duplicated composer aria-description after voice integration")
+    if "aria-description=\"${escape(promptDescription())}\"" not in data or "describePrompt: promptDescription" not in data:
+        raise RuntimeError("Missing shared prompt description for voice and Extended")
     old="skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },"
     new="skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })), activeProject: () => project()?.id ?? '' },"
     if old in data: data=checked_replace(data,old,new)

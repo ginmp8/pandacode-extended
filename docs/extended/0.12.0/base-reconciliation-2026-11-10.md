@@ -26,7 +26,7 @@
 - [ ] Run exact-SHA CI for subsequent integration fixes before marking them verified.
 - [ ] Separately accept installed-app native Voice stop/close/crash paths, Settings/Skills/Catalogs persistence, real agent activation and bot isolation, Connect/MCP/cloud/VM controls and release failure modes where required.
 - [ ] No merge, tag or release publication was authorized in this reconciliation.
- 
+
 ## Complete 0.3.108 source refresh — 2026-11-10
 
 - Newly pinned source: `base/development` at `ab6c99787bf8ece8eae70b51eb3d071b91353e41`, two commits ahead of the previous frozen source `e7361c1c22355718cbbbf0e7ec4202a3e9673f61`; the native application remains 0.3.108.

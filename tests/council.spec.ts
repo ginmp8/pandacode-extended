@@ -81,6 +81,9 @@ test('optional selected-bot skill remains optional after Council configuration i
   await open(page, '/?bots=sample', {}, 0, '', {}, { ids: bots.map(bot => bot.id), bots });
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
   await toggle(page).click();
   await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(1);
   const optional = panel(page).getByRole('checkbox', { name: 'risk-scan' });

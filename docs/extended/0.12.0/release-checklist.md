@@ -158,3 +158,12 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 
 - [ ] Confirm exact-SHA CI on the 0.3.108 voice integration commit, including every new platform Clippy matrix row.
 - [ ] Exercise microphone permission/denial, local model download/test/transcribe, configured provider transcription, stop/cancel/exit and composer insertion without sending, and Extended Feature controls On/Off independently.
+
+
+## Post-0.3.108 source checkpoint — 2026-11-10
+
+- [x] Freeze fork [`57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1), tree `6d7f582267471080a5752e243769a4684e1994a3`, and retain the native version `0.3.108`.
+- [x] Integrate all seven changed upstream paths, six exact and one Extended-manual-publish release gate adaptation; preserve tag-only builds and disable npm publication.
+- [x] Verify untruncated source Git inventory (1,696 paths), and reconcile against 1,753 Extended paths with no missing/mode mismatches.
+- [ ] Verify CI on the **published destination SHA** and distinguish pending, skipped, successful and failed jobs.
+- [ ] Verify native Voice, Settings On/Off, Connect/MCP/bots/cloud/VM, credentials, SQLite migration and installer behavior; classify 80 longstanding shared-file differences by hunk.

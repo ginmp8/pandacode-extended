@@ -54,3 +54,8 @@ The inherited Skills manager exposes per-project and global enable/disable switc
 - This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
 
 Voice is an additional upstream Settings page. It must not replace or alter the Extended Feature controls section, its persisted values or the enable/disable semantics of bots, Connect, MCP, cloud/VM, credentials and updates.
+
+
+## Upstream 0.3.108 release gate follow-up — 2026-11-10
+
+The [post-version source `57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) checks CI for the exact commit before publication. Extended scopes the inherited gate to an **explicit manual publish** (`workflow_dispatch` and `publish=true`); tag pushes continue to build artifacts only. No user-facing update, Voice, bot, MCP, Connect, cloud/VM, credential or Skills switch changes. Native On/Off acceptance remains open.

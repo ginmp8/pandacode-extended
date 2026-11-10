@@ -29,3 +29,13 @@ test('Extended and upstream release tag identities are resolved separately', () 
   assert.match(workflow, /gh release create "\$RELEASE_TAG"/);
   assert.match(workflow, /updater-manifest\.mjs assets "\$VERSION" "\$RELEASE_NOTES" "\$RELEASE_TAG"/);
 });
+
+
+test('manual release requires successful CI for the exact commit', () => {
+  const prepare = workflow.split('  prepare:')[1].split('\n  build:')[0];
+  assert.match(prepare, /actions: read/);
+  assert.match(prepare, /Require a green CI run for this commit/);
+  assert.match(prepare, /if: github\.event_name == 'workflow_dispatch' && inputs\.publish == true/);
+  assert.match(prepare, /gh run list .*--workflow ci\.yml --commit "\$GITHUB_SHA"/);
+  assert.match(prepare, /\[ "\$conclusion" != success \]/);
+});

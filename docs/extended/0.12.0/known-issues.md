@@ -75,3 +75,8 @@ The pending-CI statement above is an earlier observation, now resolved for the r
 - This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
 
 Native microphone permission, on-device model integrity, restart/cancellation, cloud speech-service configuration and differing CPU/OS build baselines have not received independent installed-app acceptance; no regression or vulnerability is asserted without evidence.
+
+
+## Post-0.3.108 source regression and assurance status — 2026-11-10
+
+Fork [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) hardens its voice-model tamper test for coarse timestamp filesystems and introduces a green-CI release gate. These are inherited changes, **not a confirmed new Extended defect**. Manual-only publishing is preserved. Native voice download checks, all relevant Feature controls On/Off paths, and the 80 historically divergent source files still require independent semantic/runtime acceptance.

@@ -85,3 +85,8 @@ The RustSec and npm jobs passed with the Extended lockfiles at this exact code S
 - This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
 
 The new voice pipeline introduces native `cpal`, `rubato`, `transcribe-cpp` and platform audio/CMake dependencies. The Extended Rust lockfile retains the prior remediated SQLite versions and must pass `cargo check --locked`, RustSec and all platform CI rows before any distribution approval.
+
+
+## Upstream 0.3.108 post-version CI gate — 2026-11-10
+
+The seven changed source paths at [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) do **not** change package or Cargo manifests/lockfiles. Existing Extended SQLite remediation (`rusqlite 0.41.1`, `libsqlite3-sys 0.39.1`) remains in place. Revalidate RustSec, locked Rust tests/Clippy and npm audit on the **exact new destination SHA**, and test native model downloads plus SQLite upgrade/rollback separately.

@@ -147,6 +147,105 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     assert_eq!(updated.messages.iter().find(|item| item.id==second_id).unwrap().council.as_ref().unwrap().state,"Reviewing");
 }
 
+
+#[test]
+fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignment() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let a = create(&f.store,&input("Reviewer A"),&f.root).unwrap();
+    let b = create(&f.store,&input("Reviewer B"),&f.root).unwrap();
+    let channel = shared_channels::create(&f.store,"scope",&[executor.id.clone(),a.id.clone(),b.id.clone()]).unwrap();
+    let delivery_id = crate::storage::id();
+    let external_id = format!("channel-council:{delivery_id}");
+    let session_id = thread_session(&f.store,&executor,DESKTOP,&external_id,"Scope").unwrap().0;
+    let message_id = crate::storage::id();
+    let mut config = crate::architect::CouncilConfig::default();
+    config.reviewer_bot_ids = vec![a.id.clone(),b.id.clone()];
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user','Review','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at) VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&config).unwrap(),
+            serde_json::to_string(&vec![executor.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
+        params![delivery_id,channel.id,message_id,executor.id,session_id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,'Review','0',?6)",
+        params![delivery_id,channel.id,message_id,executor.id,crate::storage::id(),crate::storage::now()],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids).is_ok());
+    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&[])
+        .unwrap_err().contains("roster changed"));
+    f.store.db.execute(
+        "DELETE FROM bot_shared_channel_members WHERE channel_id=?1 AND bot_id=?2",
+        params![channel.id,b.id],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+        .unwrap_err().contains("no longer a channel member"));
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,2)",
+        params![channel.id,b.id],
+    ).unwrap();
+    let reassigned = crate::storage::id();
+    let other_session = thread_session(&f.store,&a,DESKTOP,DESKTOP,"Reassigned").unwrap().0;
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
+        params![reassigned,channel.id,message_id,a.id,other_session,crate::storage::now()],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+        .unwrap_err().contains("message executor"));
+    f.store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='stopped' WHERE id=?1",[&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+        .unwrap_err().contains("no longer active"));
+}
+
+#[test]
+fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let channel = shared_channels::create(&f.store,"separate",&[executor.id.clone()]).unwrap();
+    let mut contexts = Vec::new();
+    for objective in ["Inspect alpha","Inspect beta"] {
+        let message_id = crate::storage::id();
+        let delivery_id = crate::storage::id();
+        let council = crate::architect::CouncilConfig::default();
+        f.store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at) VALUES(?1,?2,'user',?3,'in_progress',?4)",
+            params![message_id,channel.id,objective,crate::storage::now()],
+        ).unwrap();
+        f.store.db.execute(
+            "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at) VALUES(?1,?2,?3,?4)",
+            params![message_id,serde_json::to_string(&council).unwrap(),
+                serde_json::to_string(&vec![executor.id.clone()]).unwrap(),crate::storage::now()],
+        ).unwrap();
+        let (_,_,_,thread) = shared_channels::provision_channel_delivery(
+            &f.store,&channel.id,&message_id,&executor.id,objective,
+            shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },&delivery_id,
+        ).unwrap();
+        let sid: String = f.store.db.query_row(
+            "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",[&delivery_id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(thread,format!("channel-council:{delivery_id}"));
+        assert_eq!(crate::architect::load(&f.store,&sid).unwrap().unwrap().config.council,Some(council));
+        contexts.push((delivery_id,sid));
+    }
+    assert_ne!(contexts[0].1,contexts[1].1);
+    let detail = shared_channels::detail(&f.store,&channel.id,100).unwrap();
+    let first = detail.messages.iter().find(|m| m.id==contexts[0].0).unwrap().council.as_ref().unwrap();
+    let second = detail.messages.iter().find(|m| m.id==contexts[1].0).unwrap().council.as_ref().unwrap();
+    assert_ne!(first.cycle_id,second.cycle_id);
+    assert_ne!(first.session_id,second.session_id);
+}
+
 #[test]
 fn creates_a_bot_with_its_own_workspace_project() {
     let f = fixture();

@@ -135,11 +135,25 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
   return stop || stoppedRow ? `<div class="bc-channel-actions" role="group" aria-label="Channel activity">${stop}${stoppedRow}</div>` : '';
 }
 
+
+/** Preserve unsent, per-message Council inputs across a channel refresh only. */
+export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | null, next: HTMLFormElement | null): void {
+  if (!previous || !next || previous.dataset.channelId !== next.dataset.channelId) return;
+  const oldInputs = [...previous.querySelectorAll<HTMLInputElement>('input[name^="council"]')];
+  for (const input of next.querySelectorAll<HTMLInputElement>('input[name^="council"]')) {
+    const old = oldInputs.find(item => item.name === input.name
+      && (item.type === 'checkbox' || item.type === 'radio' ? item.value === input.value : true));
+    if (!old) continue;
+    if (input.type === 'checkbox' || input.type === 'radio') input.checked = old.checked;
+    else input.value = old.value;
+  }
+}
+
 export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bot[] = []): string {
   if (channel.archived || !channel.memberIds.length) return '';
   const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
   const options = members.map(bot => `<label><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}"><span>${escape(bot.name)}</span></label>`).join('');
-  return `<form id="shared-channel-composer" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
+  return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
     <div class="bc-council-controls"><label class="bc-council-toggle"><input type="checkbox" name="councilEnabled">Council review this message</label>
       <fieldset class="bc-council-options"><legend>Council settings (this message only)</legend>
         <div class="bc-council-numbers"><label>Target score <input type="number" name="councilTarget" min="1" max="10" step="0.5" value="9"></label>

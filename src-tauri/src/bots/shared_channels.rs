@@ -228,6 +228,56 @@ pub(super) fn council_request(store: &Store, message_id: &str) -> Result<Option<
     }).transpose()
 }
 
+/** Recheck frozen per-message authority against current channel members and
+ * all message executors on every selected seat, including resumed rounds. */
+pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selected: &[String]) -> Result<()> {
+    let thread: Option<String> = store.db.query_row(
+        "SELECT external_id FROM bot_threads WHERE session_id=?1 AND external_id LIKE 'channel-council:%'",
+        [session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some(thread) = thread else { return Ok(()) }; // Native/direct Council is unchanged.
+    let delivery: Option<(String, String, String, String, String, String)> = store.db.query_row(
+        "SELECT c.delivery_id,c.channel_id,c.source_message_id,c.executor_bot_id,d.bot_id,d.status
+         FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1",
+        [session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((delivery_id, channel_id, message_id, executor, assigned_bot, status)) = delivery else {
+        return Err("channel_council_scope_missing: isolated reviewer delivery has no durable authorization.".into());
+    };
+    if thread != format!("channel-council:{delivery_id}") || executor != assigned_bot {
+        return Err("channel_council_scope_mismatch: reviewer delivery identity changed.".into());
+    }
+    if !matches!(status.as_str(), "queued" | "in_progress") {
+        return Err("channel_council_unavailable: delivery is no longer active.".into());
+    }
+    let channel = shared_channel(store, &channel_id)?;
+    if channel.archived || !channel.member_ids.contains(&executor) {
+        return Err("reviewer_unavailable: originating channel or executor is no longer eligible.".into());
+    }
+    let request = council_request(store, &message_id)?
+        .ok_or("channel_council_scope_missing: original Council opt-in is absent.")?;
+    if request.council.reviewer_bot_ids.as_slice() != selected {
+        return Err("channel_council_scope_mismatch: original message reviewer roster changed.".into());
+    }
+    let mut executors = request.executors;
+    let mut stmt = store.db.prepare("SELECT bot_id FROM bot_shared_channel_deliveries WHERE message_id=?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([&message_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    executors.extend(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?);
+    for id in selected {
+        if !channel.member_ids.contains(id) {
+            return Err("reviewer_unavailable: selected reviewer is no longer a channel member.".into());
+        }
+        if executors.contains(id) {
+            return Err("reviewer_unavailable: a message executor cannot review its channel delivery.".into());
+        }
+    }
+    Ok(())
+}
+
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String)> = store.db.query_row(
         "SELECT cycle_id,artifact_revision FROM extended_channel_council_deliveries WHERE delivery_id=?1",

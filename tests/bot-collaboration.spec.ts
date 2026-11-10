@@ -38,6 +38,46 @@ test.describe('bot collaboration', () => {
     await fixture.locator('input[name="councilMode"][value="selected"]').check();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toHaveCount(1);
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveCount(1);
+
+    await fixture.locator('input[name="councilTarget"]').fill('8.5');
+    await fixture.locator('input[name="councilMaxRounds"]').fill('4');
+    await fixture.locator('input[name="councilReviewer"][value="reviewer"]').check();
+    await fixture.locator('input[name="councilScopedFile"]').check();
+    await fixture.locator('input[name="councilFilePath"]').fill('src/entry.ts');
+    await page.evaluate(async () => {
+      const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs } = await import('/src/bot-shared-channels.ts');
+      const parent = document.getElementById('channel-council-fixture')!;
+      const old = parent.querySelector<HTMLFormElement>('form')!;
+      const render = (id: string) => {
+        const holder = document.createElement('div');
+        holder.innerHTML = sharedChannelComposerHtml({
+          id, name: id, memberIds: ['executor', 'reviewer'], archived: false,
+        } as any, [{ id: 'executor', name: 'Executor' }, { id: 'reviewer', name: 'Reviewer' }] as any);
+        return holder.querySelector<HTMLFormElement>('form')!;
+      };
+      const refreshed = render('quality');
+      restoreSharedChannelCouncilInputs(old, refreshed);
+      old.replaceWith(refreshed);
+    });
+    await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
+    await expect(fixture.locator('input[name="councilMode"][value="selected"]')).toBeChecked();
+    await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('8.5');
+    await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('4');
+    await expect(fixture.locator('input[name="councilReviewer"][value="reviewer"]')).toBeChecked();
+    await expect(fixture.locator('input[name="councilScopedFile"]')).toBeChecked();
+    await expect(fixture.locator('input[name="councilFilePath"]')).toHaveValue('src/entry.ts');
+    await page.evaluate(async () => {
+      const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs } = await import('/src/bot-shared-channels.ts');
+      const old = document.querySelector<HTMLFormElement>('#channel-council-fixture form')!;
+      const holder = document.createElement('div');
+      holder.innerHTML = sharedChannelComposerHtml({
+        id: 'other', name: 'other', memberIds: ['executor','reviewer'], archived: false,
+      } as any, [{ id: 'executor', name: 'Executor' }, { id: 'reviewer', name: 'Reviewer' }] as any);
+      const next = holder.querySelector<HTMLFormElement>('form')!;
+      restoreSharedChannelCouncilInputs(old, next);
+      old.replaceWith(next);
+    });
+    await expect(fixture.locator('input[name="councilEnabled"]')).not.toBeChecked();
   });
 
   test('renders attributed bot posts, explicit recipients, and direct delegation status in one channel', async ({ page }) => {

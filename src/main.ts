@@ -96,7 +96,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -2771,7 +2771,11 @@ function renderComposer(): void {
     const channel = state.sharedChannelDetail;
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
+    const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
+    if (!state.sharedChannelPosting.has(state.sharedChannelId)) {
+      restoreSharedChannelCouncilInputs(oldChannelComposer, document.querySelector<HTMLFormElement>('#shared-channel-composer'));
+    }
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');

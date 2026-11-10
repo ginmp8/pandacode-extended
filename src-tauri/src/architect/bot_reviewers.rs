@@ -2,7 +2,7 @@
 //! Never modify bot profiles, ordinary conversations, memories or permissions.
 use super::{council::CouncilConfig, TeamSnapshot, WorkerProfile, HARNESSES};
 use crate::{bots, model_health, model_routing, providers, storage::Store, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
 /// A direct bot conversation or an explicitly assigned task has an executor.
@@ -96,7 +96,7 @@ pub(super) fn profile(bot: &bots::Bot) -> WorkerProfile {
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
     let old_ids = team.config.council.as_ref().map(|c| &c.reviewer_bot_ids);
     let new_ids = next.as_ref().map(|c| &c.reviewer_bot_ids);
-    if old_ids == new_ids { return Ok(()); }
+    if old_ids == new_ids || next.is_none() { return Ok(()); }
     let current = team.workers.iter().filter_map(|w| w.council.as_ref()).map(|seat| seat.round).max().unwrap_or(0);
     let incomplete = current > 0
         && !matches!(team.council_status.as_ref().map(|s| s.state.as_str()), Some("passed" | "fixing" | "limit" | "asking" | "accepted"));

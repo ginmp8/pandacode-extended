@@ -116,6 +116,10 @@ pub(super) fn set(state: &AppState, session_id: &str, council: Option<CouncilCon
     let store = state.store.lock().map_err(|e| e.to_string())?;
     super::refuse_mirror(&store, session_id)?;
     let mut team = super::load(&store, session_id)?.ok_or("This task has no team.")?;
+    super::bot_reviewers::allow_roster_change(&team, &council)?;
+    if let Some(config) = &council {
+        super::bot_reviewers::validate_roster(&store, session_id, config)?;
+    }
     // Turning it off stops this cycle's reviewers that are still out: nothing waits for their scores.
     let stops = if council.is_none() {
         let since = team.council_since;
@@ -618,14 +622,22 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
     let Some(config) = team.config.council.as_ref() else {
         return String::new();
     };
-    let count = match config.reviewers {
-        0 => format!("at least {MIN_REVIEWERS}"),
-        n => format!("exactly {n}"),
+    let selected = !config.reviewer_bot_ids.is_empty();
+    let count = if selected {
+        format!("exactly {} selected configured bots", config.reviewer_bot_ids.len())
+    } else {
+        match config.reviewers {
+            0 => format!("at least {MIN_REVIEWERS}"),
+            n => format!("exactly {n}"),
+        }
     };
     let models: std::collections::HashSet<_> = team.config.workers.iter().map(|p| (&p.provider, &p.model)).collect();
     let models = if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
     let limit = format!("Never finish below the target unless the limit of {} rounds is reached; after the last round make no more changes, and say so plainly.", config.max_rounds);
-    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.", config.target)
+    let selected_note = if selected {
+        format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each fresh reviewer seat to one of those bots, using that bot's frozen model and review persona. Dispatch one unique Council lens per bot; never substitute a worker or claim unavailable bots reviewed. Provider/model/profileId fields in reviewer assignments cannot override the selected bot.", config.reviewer_bot_ids.join(", "))
+    } else { String::new() };
+    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}", config.target)
 }
 
 /// A reviewer's rules. They never carry the target or earlier scores.

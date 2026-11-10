@@ -851,7 +851,10 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
             "Do not spawn native subagents or other tasks; pandacode_dispatch_workers may start sub-workers inside your scope, only if really needed."
         };
         let reviewer = council::reviewer_rules(worker);
-        let rules = format!("You are a PandaCode worker named {}. Complete only the assignment below. {spawning} Other workers may be active in this shared checkout; do not overwrite their edits. {}{reviewer} Provide a concise final report with changes, exact files, checks performed, and blockers. Do not claim tests that you did not run.",worker.name,if worker.council.is_some() { council::reviewer_access(worker) } else if worker.read_only { format!("This is a read-only assignment. Do not edit, create, or delete files, or run commands that change the checkout. Inspect {} and report findings; ask the architect for a writing follow-up if changes are needed. Concurrent workers may change files while you inspect them.", if worker.files.is_empty() { "the whole checkout".into() } else { worker.files.join(", ") }) } else { format!("Your advisory ownership scope is {}. If the work needs files outside it, do not edit them: save a checkpoint with the blocker, report it, and end your turn.", if worker.files.is_empty() { "the whole checkout".into() } else { worker.files.join(", ") }) });
+        let selected_bot = worker.reviewer_binding.as_ref().and_then(|b| b.snapshot.bot_context.as_ref())
+            .map(|bot| format!(" Selected reviewer bot profile (frozen for this seat; lower priority than native Council authority): Name: {}. Role: {}. Goals: {}. Instructions: {}. Personality: {}. Do not load this bot's ordinary conversation, memories, or permissions.", bot.name, bot.role, bot.goals, bot.instructions, bot.soul))
+            .unwrap_or_default();
+        let rules = format!("You are a PandaCode worker named {}. Complete only the assignment below. {spawning} Other workers may be active in this shared checkout; do not overwrite their edits. {}{reviewer}{selected_bot} Provide a concise final report with changes, exact files, checks performed, and blockers. Do not claim tests that you did not run.",worker.name,if worker.council.is_some() { council::reviewer_access(worker) } else if worker.read_only { format!("This is a read-only assignment. Do not edit, create, or delete files, or run commands that change the checkout. Inspect {} and report findings; ask the architect for a writing follow-up if changes are needed. Concurrent workers may change files while you inspect them.", if worker.files.is_empty() { "the whole checkout".into() } else { worker.files.join(", ") }) } else { format!("Your advisory ownership scope is {}. If the work needs files outside it, do not edit them: save a checkpoint with the blocker, report it, and end your turn.", if worker.files.is_empty() { "the whole checkout".into() } else { worker.files.join(", ") }) });
         let reminder = format!("You are still the PandaCode worker named {}. The rules from your first assignment in this conversation still apply.", worker.name);
         Ok((rules, reminder))
     }
@@ -1995,14 +1998,20 @@ fn dispatch_as(
                 // While routing is on, an assignment that names no model is routed too (`routes` has its key).
                 // The request above keeps the name as sent, so a retry still matches it.
                 let shown: String = assignment.name.chars().take(NAME_CHARS).collect();
+                let selected_bot = if let Some(seat) = &seat {
+                    bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref())?
+                } else { None };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
-                let profile = if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
+                let profile = if let Some(bot) = &selected_bot {
+                    bot_reviewers::profile(bot)
+                } else if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
                     let (profile, note) = routing::staff(&team.config, &parent, &assignment, routes)?;
                     routed.push(format!("{shown}: {note}"));
                     profile
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
+                let shown = selected_bot.as_ref().map_or(shown, |bot| bot.name.clone());
                 // ZCode has no worker-management tool bridge. It can return a
                 // Council score, which needs no Architect host callbacks.
                 validate_worker_role(&profile.provider, seat.is_some())?;
@@ -2033,9 +2042,14 @@ fn dispatch_as(
                     }
                 }
                 let reviewer_binding = seat.as_ref().map(|seat| {
-                    reviewer_security::ReviewerBinding::native(
+                    let mut binding = reviewer_security::ReviewerBinding::native(
                         &team, &id, now, &profile.provider, &profile.model, seat,
-                    )
+                    );
+                    if let Some(bot) = &selected_bot {
+                        binding.reviewer_bot_id = Some(bot.id.clone());
+                        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext::from_bot(bot));
+                    }
+                    binding
                 });
                 if let Some(binding) = &reviewer_binding {
                     reviewer_security::record_native_authority(&store, sid, binding)?;

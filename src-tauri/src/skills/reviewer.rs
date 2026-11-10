@@ -185,17 +185,18 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
     if !adapter::known(harness) {
         return Err("reviewer_skill_unavailable: unknown reviewer harness.".into());
     }
-    let mut seen = HashSet::new();
-    let mut visiting = HashSet::new();
-    let mut pins = Vec::new();
-    let mut prompt = String::new();
-    fn visit(
-        library: &Library, id: &str, assigned: &[String], harness: &str,
-        seen: &mut HashSet<String>, visiting: &mut HashSet<String>,
-        pins: &mut Vec<SkillPin>, prompt: &mut String,
-    ) -> Result<(), String> {
-        if seen.contains(id) { return Ok(()); }
-        if !visiting.insert(id.to_owned()) {
+    struct ResolveState {
+        seen: HashSet<String>,
+        visiting: HashSet<String>,
+        pins: Vec<SkillPin>,
+        prompt: String,
+    }
+    let mut state = ResolveState {
+        seen: HashSet::new(), visiting: HashSet::new(), pins: Vec::new(), prompt: String::new(),
+    };
+    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, state: &mut ResolveState) -> Result<(), String> {
+        if state.seen.contains(id) { return Ok(()); }
+        if !state.visiting.insert(id.to_owned()) {
             return Err(format!("reviewer_skill_cycle: dependency cycle at {id}."));
         }
         let result = (|| -> Result<(), String> {
@@ -206,7 +207,7 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
             }
             let (files, hashes) = trusted_package(library, &meta)?;
             for dependency in &meta.required_skills {
-                visit(library, dependency, assigned, harness, seen, visiting, pins, prompt)?;
+                visit(library, dependency, assigned, harness, state)?;
             }
             let main = files.iter().find(|(path, _)| path == "SKILL.md")
                 .ok_or_else(|| format!("reviewer_skill_unavailable: no SKILL.md for {id}."))?;
@@ -236,11 +237,11 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
                 staged_path.as_deref().map_or_else(String::new, |path| format!("Read-only pinned files: {path}\n")),
                 contents
             );
-            if prompt.chars().count() + section.chars().count() > TOTAL_CHARS {
+            if state.prompt.chars().count() + section.chars().count() > TOTAL_CHARS {
                 return Err(format!("reviewer_skill_truncated: combined reviewer skills exceed {TOTAL_CHARS} characters."));
             }
-            prompt.push_str(&section);
-            pins.push(SkillPin {
+            state.prompt.push_str(&section);
+            state.pins.push(SkillPin {
                 id: id.to_owned(), source_kind: meta.source.kind,
                 source_location: meta.source.location, source_ref: meta.source.git_ref,
                 source_commit: meta.source.commit, content_sha256: meta.sha256,
@@ -250,14 +251,14 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
                 eligible: true, supplied: true,
                 invoked: false, check_executed: false, evidence_verified: false,
             });
-            seen.insert(id.to_owned());
+            state.seen.insert(id.to_owned());
             Ok(())
         })();
-        visiting.remove(id);
+        state.visiting.remove(id);
         result
     }
-    for id in assigned { visit(library, id, assigned, harness, &mut seen, &mut visiting, &mut pins, &mut prompt)?; }
-    let result = ReviewerSkills { pins, prompt };
+    for id in assigned { visit(library, id, assigned, harness, &mut state)?; }
+    let result = ReviewerSkills { pins: state.pins, prompt: state.prompt };
     result.verify()?;
     Ok(result)
 }
@@ -334,9 +335,17 @@ mod tests {
         assert!(fs::metadata(&path).unwrap().permissions().readonly());
         assert!(snapshot.verify().is_ok());
         // A different version must never be silently used in a live reviewer.
-        let mut writable = fs::metadata(&path).unwrap().permissions();
-        writable.set_readonly(false);
-        fs::set_permissions(&path, writable).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut writable = fs::metadata(&path).unwrap().permissions();
+            writable.set_readonly(false);
+            fs::set_permissions(&path, writable).unwrap();
+        }
         fs::write(&path, "changed").unwrap();
         assert!(snapshot.verify().unwrap_err().contains("reviewer_skill_drift"));
         fs::remove_dir_all(root).unwrap();

@@ -61,7 +61,15 @@ export function createPreviewArchitect(host: PreviewHost) {
         || !/^[^/:\\]+(?:\u002f[^/:\\]+)*$/.test(permissions.grants[0].resource)
         || permissions.grants[0].resource.split('/').some(part => part === '..' || !part))) throw new Error('Scoped reviewer access requires an exact relative file and native authorization.');
     if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error('Select 2 to 8 distinct reviewer bots.');
-    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
+    // Match native Council: optional skill roles are task-scoped and must survive reloads.
+    const optionalSkills = council.optionalSkillIds ?? [];
+    if (!Array.isArray(optionalSkills) || optionalSkills.length > 32
+        || (optionalSkills.length > 0 && ids.length === 0)
+        || optionalSkills.some(id => typeof id !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id))
+        || new Set(optionalSkills).size !== optionalSkills.length) {
+      throw new Error('Optional reviewer skills require selected bots and up to 32 distinct valid skill IDs.');
+    }
+    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
   }
   function validate(config: TeamConfig): TeamConfig {
     // Auto teams carry an optional roster (the lead picks models); configured teams name at least one profile.

@@ -492,6 +492,29 @@ mod tests {
             resource: "owner/repo".into(),
         }
     }
+    #[tokio::test]
+    async fn scoped_reviewer_keeps_only_preapproved_grants_and_native_skill_reads() {
+        let grant = issue_grant();
+        let policy = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "owner", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
+        ).unwrap();
+        let mut catalog = vec![json!({"type":"function","name":"pandacode_github_issue",
+            "inputSchema":{"type":"object","properties":{"action":{"type":"string"},"repository":{"type":"string"}}}})];
+        catalog.extend(super::super::reviewer_skill_evidence::tools());
+        let original = ToolHost {
+            tools: catalog,
+            approval_tools: HashSet::new(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({"executed": true})) })),
+        };
+        let filtered = policy.restrict_host(Some(original)).unwrap().unwrap();
+        assert_eq!(filtered.tools.len(), 3);
+        assert!((filtered.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"assigned"})).await.is_ok());
+        assert!((filtered.handler)("pandacode_reviewer_skill_verify".into(), json!({"skillId":"assigned"})).await.is_ok());
+        assert!((filtered.handler)("pandacode_unknown_tool".into(), json!({})).await.is_err());
+        assert!((filtered.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"other/repo"})).await.is_err());
+        assert!((filtered.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"owner/repo"})).await.is_ok());
+    }
+
     #[test]
     fn scoped_policy_requires_explicit_user_and_configured_bot_grants() {
         let grant = issue_grant();

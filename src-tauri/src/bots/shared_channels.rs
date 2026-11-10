@@ -476,7 +476,7 @@ pub(super) fn provision_channel_delivery(
             store.db.execute("INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,'0',?7)", params![delivery_id,channel_id,message_id,bot_id,crate::storage::id(),text,created_at]).map_err(|e| e.to_string())?;
         }
         transaction.commit().map_err(|e| e.to_string())?;
-        (channel, bot, prompt, thread)
+        Ok((channel, bot, prompt, thread))
 }
 
 /// `created_at` is shared by every delivery of one post or retry, so a failure early in a

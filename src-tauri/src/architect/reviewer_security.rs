@@ -354,6 +354,9 @@ pub(crate) struct ReviewerBinding {
     /// Native identity/revision token, not evidence of a content checksum.
     pub artifact_revision: String,
     pub snapshot: ReviewerSnapshot,
+    /// Native-observed skill events are separate from immutable reviewer authority.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skill_evidence: std::collections::BTreeMap<String, super::reviewer_skill_evidence::ObservedSkillEvidence>,
 }
 
 #[allow(dead_code)]
@@ -428,6 +431,7 @@ impl ReviewerBinding {
                 bot_context: None,
                 skills: None,
             },
+            skill_evidence: Default::default(),
         }
     }
 

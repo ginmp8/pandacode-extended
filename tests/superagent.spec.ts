@@ -18,6 +18,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await worker.selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Software Development');
+  await expect(dialog.locator('.sa-list .sa-counts')).toHaveText('0 tasks · 0 running · 0 blocked');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Export'}).click();
@@ -55,6 +56,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('button',{name:'Dispatch manually'}).click();
   const row=dialog.locator('.sa-tickets li',{hasText:'Inspect a disposable fixture'});
   await expect(row).toContainText('running');
+  await expect(dialog.locator('.sa-list .sa-counts')).toHaveText('1 tasks · 1 running · 0 blocked');
   await row.getByRole('button',{name:'View evidence'}).click();
   const details=dialog.getByRole('region',{name:'Ticket evidence'});
   await expect(details).toContainText('Ticket ID');
@@ -65,6 +67,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
+  await expect(dialog.locator('.sa-list .sa-counts')).toHaveText('1 tasks · 0 running · 0 blocked');
   await expect(details).toContainText('Revoked');
   await expect(details).toContainText('stopped');
   await expect(row.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);

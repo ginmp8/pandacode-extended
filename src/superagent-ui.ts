@@ -8,6 +8,7 @@ interface Bot { id: string; name: string; paused: boolean }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   enabled: boolean; policyRevision: number;
+  ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
@@ -35,7 +36,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const list = presets.map(item =>
       '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
       safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
-      '</small></div><span>' + (item.enabled ? 'Manual' : 'Off') + '</span>' +
+      '</small><small class="sa-counts" aria-label="Task counts">' +
+      (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
+      ' running · ' + (item.blockedCount ?? 0) + ' blocked</small></div><span>' +
+      (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button></li>').join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +

@@ -21,7 +21,13 @@ export async function invokeSuperagent<T>(
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
   let value:unknown;
   switch(command){
-    case 'superagent_list': value=[...configs.values()];break;
+    case 'superagent_list': value=[...configs.values()].map(config=>({
+      ...config,
+      ticketCount:(tickets.get(config.id)||[]).length,
+      runningCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='running').length,
+      blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
+      lastActivityAt:Date.now(),
+    }));break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
     case 'superagent_snapshot':
     case 'superagent_mandate':

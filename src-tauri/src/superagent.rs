@@ -197,6 +197,44 @@ fn orchestration_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Orchestration>
     })
 }
 
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrationOverview {
+    #[serde(flatten)]
+    pub config: Orchestration,
+    pub ticket_count: i64,
+    pub running_count: i64,
+    pub blocked_count: i64,
+    pub last_activity_at: i64,
+}
+
+/// Derive overview counts from durable tickets rather than a page of sessions.
+/// This is a read-only projection and does not change policy or admission.
+fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
+    let mut stmt = store.db.prepare(
+        "SELECT o.id,o.name,o.coordinator_bot_id,o.worker_bot_id,o.project_id,
+                o.enabled,o.policy_revision,
+                COUNT(t.id),
+                COALESCE(SUM(CASE WHEN t.state='running' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state='blocked' THEN 1 ELSE 0 END),0),
+                COALESCE(MAX(t.updated_at),o.updated_at)
+         FROM sa_orchestrations o
+         LEFT JOIN sa_tickets t ON t.orchestration_id=o.id
+         GROUP BY o.id ORDER BY o.created_at,o.id",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(OrchestrationOverview {
+            config: orchestration_row(row)?,
+            ticket_count: row.get(7)?,
+            running_count: row.get(8)?,
+            blocked_count: row.get(9)?,
+            last_activity_at: row.get(10)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
     store.db.query_row(
         "SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision FROM sa_orchestrations WHERE id=?1",
@@ -1172,14 +1210,10 @@ pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,App
 }
 
 #[tauri::command]
-pub async fn superagent_list(window: tauri::WebviewWindow, state: State<'_,AppState>) -> Result<Vec<Orchestration>> {
+pub async fn superagent_list(window: tauri::WebviewWindow, state: State<'_,AppState>) -> Result<Vec<OrchestrationOverview>> {
     require_main_window(&window)?;
-    let store=state.store.lock().map_err(|e|e.to_string())?;
-    let mut stmt=store.db.prepare("SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision FROM sa_orchestrations ORDER BY created_at")
-        .map_err(|e|e.to_string())?;
-    let rows = stmt.query_map([],orchestration_row).map_err(|e|e.to_string())?;
-    let configs = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
-    Ok(configs)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    orchestration_overview(&store)
 }
 
 #[tauri::command]
@@ -1785,6 +1819,52 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_overview_counts_all_durable_tickets_without_cross_preset_leaks() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Another preset".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+
+        let before = orchestration_overview(&store).unwrap();
+        assert_eq!(before.len(), 2);
+        for item in &before {
+            assert_eq!(item.ticket_count, 0);
+            assert_eq!(item.running_count, 0);
+            assert_eq!(item.blocked_count, 0);
+            assert!(item.last_activity_at > 0);
+        }
+        let (active, launched) = admit(
+            &mut store, &config.id, "Inspect disposable project",
+            "overview-active", false,
+        ).unwrap();
+        assert!(launched);
+        let active_counts = orchestration_overview(&store).unwrap();
+        let selected = active_counts.iter().find(|c| c.config.id == config.id).unwrap();
+        assert_eq!((selected.ticket_count, selected.running_count, selected.blocked_count), (1,1,0));
+        let unrelated = active_counts.iter().find(|c| c.config.id == other.id).unwrap();
+        assert_eq!((unrelated.ticket_count, unrelated.running_count, unrelated.blocked_count), (0,0,0));
+        let serialized = serde_json::to_value(selected).unwrap();
+        assert_eq!(serialized["coordinatorBotId"], "router");
+        assert_eq!(serialized["ticketCount"], 1);
+        assert_eq!(serialized["runningCount"], 1);
+
+        stop(&store, &active.id).unwrap();
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Blocked pending admission",
+            "overview-blocked", true,
+        ).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        let after = orchestration_overview(&store).unwrap();
+        let selected = after.iter().find(|c| c.config.id == config.id).unwrap();
+        assert_eq!((selected.ticket_count, selected.running_count, selected.blocked_count), (2,0,1));
+        assert!(selected.last_activity_at >= before[0].last_activity_at);
+    }
 
     #[test]
     fn native_ticket_snapshot_keeps_revocation_attempts_and_audit_consistent() {

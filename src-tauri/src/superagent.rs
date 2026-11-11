@@ -202,25 +202,22 @@ pub struct MandateSummary {
 
 fn mandate(store: &Store, ticket_id: &str) -> Result<MandateSummary> {
     get_ticket(store, ticket_id)?;
-    let data: (String, String, String, i64, String, i64, bool, String, bool, i64) = store.db.query_row(
+    let (mut grant, tools): (MandateSummary, String) = store.db.query_row(
         "SELECT ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,
                 revoked,allowed_tools,allowed_side_effects,created_at
          FROM sa_mandates WHERE ticket_id=?1",
         [ticket_id],
-        |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-            r.get(5)?, r.get::<_, i64>(6)? != 0, r.get(7)?,
-            r.get::<_, i64>(8)? != 0, r.get(9)?,
-        )),
+        |r| Ok((MandateSummary {
+            ticket_id: r.get(0)?, actor: r.get(1)?, authorization_id: r.get(2)?,
+            policy_revision: r.get(3)?, project_id: r.get(4)?,
+            expires_at: r.get(5)?, revoked: r.get::<_, i64>(6)? != 0,
+            allowed_tools: Vec::new(), allowed_side_effects: r.get::<_, i64>(8)? != 0,
+            created_at: r.get(9)?,
+        }, r.get(7)?)),
     ).map_err(|e| e.to_string())?;
-    let tools = serde_json::from_str::<Vec<String>>(&data.7)
+    grant.allowed_tools = serde_json::from_str::<Vec<String>>(&tools)
         .map_err(|_| "SuperAgent mandate contains invalid tool authorization.")?;
-    Ok(MandateSummary {
-        ticket_id: data.0, actor: data.1, authorization_id: data.2,
-        policy_revision: data.3, project_id: data.4,
-        expires_at: data.5, revoked: data.6, allowed_tools: tools,
-        allowed_side_effects: data.8, created_at: data.9,
-    })
+    Ok(grant)
 }
 
 #[derive(Debug, Clone, Serialize)]

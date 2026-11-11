@@ -131,8 +131,12 @@ fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orches
     }
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let worker = bots::get(store, &input.worker_bot_id)?;
-    if coordinator.paused || worker.paused || coordinator.project_id != worker.project_id {
-        return Err("Choose active bots in the same project for this manual orchestration.".into());
+    // Every native bot owns its own project/workspace. A coordinator is a separate
+    // existing bot, not a second profile inside the worker\'s checkout. The
+    // worker project is the initial execution scope; never require bot projects
+    // to coincide or silently switch one bot\'s global project.
+    if coordinator.paused || worker.paused {
+        return Err("Choose active coordinator and worker bots.".into());
     }
     let id = storage::id();
     let now = storage::now();
@@ -213,10 +217,8 @@ fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str,
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
-    if coordinator.paused || worker.paused
-        || coordinator.project_id != config.project_id || worker.project_id != config.project_id
-    {
-        return Err("A selected bot is paused, missing or outside the configured project.".into());
+    if coordinator.paused || worker.paused || worker.project_id != config.project_id {
+        return Err("A selected bot is paused, missing or outside the worker project scope.".into());
     }
     let occupied: bool = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE bot_id=?1 AND state='running')",
@@ -514,6 +516,43 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn real_existing_bots_in_distinct_workspaces_can_create_and_admit_a_manual_task() {
+        // Native bot creation always assigns a separate workspace project.
+        // A synthetic same-project fixture must not disguise this real behavior.
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!("pandacode-superagent-bots-{}", storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = |name: &str| bots::BotInput {
+            name: name.into(),
+            role: "Agent".into(),
+            provider: "codex".into(),
+            model: "default".into(),
+            mode: "plan".into(),
+            ..Default::default()
+        };
+        let coordinator = bots::create(&store, &input("Native coordinator"), &root).unwrap();
+        let worker = bots::create(&store, &input("Native worker"), &root).unwrap();
+        assert_ne!(coordinator.project_id, worker.project_id);
+        let config = create_configuration(&store, NewOrchestration {
+            name: "Native worker scope".into(),
+            coordinator_bot_id: coordinator.id.clone(),
+            worker_bot_id: worker.id.clone(),
+        }).unwrap();
+        assert_eq!(config.project_id, worker.project_id);
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&config.id],
+        ).unwrap();
+        let (ticket, ready) = admit(&mut store, &config.id, "Read-only inspection", "native-scope-1", false).unwrap();
+        assert!(ready);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_eq!(store.session(&session_id).unwrap().project_id, worker.project_id);
+        assert_eq!(ticket.state, "running");
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

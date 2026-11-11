@@ -372,6 +372,9 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
         params![sid,serde_json::to_string(&team).unwrap()],
     ).unwrap();
+    shared_channels::bind_delivery_cycle(&f.store,&sid,1234).unwrap();
+    assert!(shared_channels::bind_delivery_cycle(&f.store,&sid,9999).is_err(),
+        "a new cycle must not overwrite the original deliverable's authorization");
     assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Waiting,
         "a native Council acceptance without attributed reason never grants channel approval");
     f.store.db.execute(

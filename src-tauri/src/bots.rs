@@ -1203,6 +1203,15 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
     if team.config.council.is_none() {
         return Ok(ChannelCouncilOutcome::Denied("Council was removed from the delivery."));
     }
+    let frozen: String = store.db.query_row(
+        "SELECT c.artifact_revision FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    if frozen != format!("cycle:{}",team.council_since) {
+        return Ok(ChannelCouncilOutcome::Waiting);
+    }
     match team.status.as_str() {
         "completed" => match team.council_status.as_ref() {
             Some(status) if status.state == "passed" && !status.stale => Ok(ChannelCouncilOutcome::Approved),

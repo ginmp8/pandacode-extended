@@ -549,7 +549,23 @@ fn coordinator_plan_current(
          )",
         params![ticket_id,coordinator_id,project_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    Ok(!invalid)
+    if invalid { return Ok(false); }
+    // A provider's finished coordinator plan is still bound to the original
+    // native task thread. Removing or remapping that thread after settlement
+    // must not turn the old plan into an authority for a new worker attempt.
+    let mut statement = store.db.prepare(
+        "SELECT session_id FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2",
+    ).map_err(|e| e.to_string())?;
+    let session_ids = statement.query_map(params![ticket_id, coordinator_id],
+        |row| row.get::<_, String>(0),
+    ).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    for session_id in session_ids {
+        if !assignment_thread_current(store, &session_id, ticket_id)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn assignment_session(store: &Store, task_id: &str) -> Result<Option<String>> {
@@ -909,22 +925,25 @@ fn accept_with_pause(
     // native session and project are still attributable. A bot move, session
     // deletion, or replacement of stored result text must not turn an old
     // model reply into a new, human-approved task completion.
-    let worker_evidence_current: bool = tx.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM sa_assignments assignment
-            JOIN sessions original ON original.id=assignment.session_id
-            WHERE assignment.ticket_id=?1 AND assignment.bot_id=?2
-              AND assignment.state='finished'
-              AND assignment.attempt=(
-                  SELECT MAX(newest.attempt) FROM sa_assignments newest
-                  WHERE newest.ticket_id=?1
-              )
-              AND original.project_id=?3 AND assignment.result=?4
-        )",
+    let worker_evidence_session: Option<String> = tx.query_row(
+        "SELECT assignment.session_id FROM sa_assignments assignment
+         JOIN sessions original ON original.id=assignment.session_id
+         WHERE assignment.ticket_id=?1 AND assignment.bot_id=?2
+           AND assignment.state='finished'
+           AND assignment.attempt=(
+               SELECT MAX(newest.attempt) FROM sa_assignments newest
+               WHERE newest.ticket_id=?1
+           )
+           AND original.project_id=?3 AND assignment.result=?4",
         params![ticket_id,ticket_worker(store, ticket_id)?,mandate(store, ticket_id)?.project_id,
             ticket.evidence.as_deref().unwrap_or_default()],
         |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
+    ).optional().map_err(|e| e.to_string())?;
+    // The worker's result cannot be accepted after its task thread was
+    // detached or remapped, even if the provider session and text still exist.
+    let worker_evidence_current = worker_evidence_session.as_deref()
+        .map(|session_id| assignment_thread_current(store, session_id, ticket_id))
+        .transpose()?.unwrap_or(false);
     if !worker_evidence_current {
         return Err("Original worker evidence session is missing or outside its mandate.".into());
     }
@@ -2028,6 +2047,60 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn settled_worker_thread_remap_prevents_human_approval_without_replacing_evidence() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Check original thread", "thread-proof-worker", false,
+        ).unwrap();
+        assert!(started);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session_id, true, "Original worker evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+
+        // A session still exists, and its persisted evidence still matches.
+        // The native thread mapping, however, no longer proves task identity.
+        store.db.execute(
+            "UPDATE bot_threads SET external_id='foreign-task' WHERE session_id=?1",
+            [&session_id],
+        ).unwrap();
+        assert!(accept(&store, &ticket.id, waiting.revision).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        assert!(!history(&store, &ticket.id, 20).unwrap()
+            .iter().any(|event| event.kind == "human_accepted"));
+
+        // The unchanged original binding allows the same explicitly approved
+        // evidence. No replacement callback or renewed authorization is used.
+        store.db.execute(
+            "UPDATE bot_threads SET external_id=?2 WHERE session_id=?1",
+            params![session_id, ticket.id],
+        ).unwrap();
+        assert_eq!(accept(&store, &ticket.id, waiting.revision).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn settled_coordinator_thread_detachment_blocks_worker_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &cfg.id, "Coordinate exact task", "thread-proof-coord", false, true,
+        ).unwrap();
+        assert!(started);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &coordinator_session, true, "Inspect the assigned code").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+
+        store.db.execute(
+            "DELETE FROM bot_threads WHERE session_id=?1", [&coordinator_session],
+        ).unwrap();
+        assert!(!coordinator_plan_current(&store, &ticket.id, "router", "project").unwrap());
+        assert!(prepare_coordinated_worker(&mut store, &ticket.id, false).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        assert!(assignment_session(&store, &ticket.id).unwrap().is_none());
     }
 
     #[test]

@@ -355,6 +355,7 @@ pub(crate) fn clear_staged_readonly(path: &Path) -> Result<(), String> {
 
 /// Resolve only explicitly bot-assigned skill IDs plus their required dependencies.
 /// A missing/unsafe/drifted/truncated mandatory input fails closed, never silently truncates.
+#[cfg(test)]
 pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> Result<ReviewerSkills, String> {
     freeze_with_checks(library, assigned, harness, &[], &[])
 }
@@ -362,6 +363,7 @@ pub(crate) fn freeze(library: &Library, assigned: &[String], harness: &str) -> R
 /// A caller explicitly designates optional bot assignments per review task.
 /// Required dependencies of an optional skill must resolve together or the whole
 /// optional package is skipped; required skills still fail closed.
+#[cfg(test)]
 pub(crate) fn freeze_with_optional(
     library: &Library, assigned: &[String], harness: &str, optional: &[String],
 ) -> Result<ReviewerSkills, String> {
@@ -369,6 +371,7 @@ pub(crate) fn freeze_with_optional(
 }
 
 /// Required skill provisioning does not imply a required executed check.
+#[cfg(test)]
 pub(crate) fn freeze_with_checks(
     library: &Library, assigned: &[String], harness: &str, optional: &[String], checks: &[String],
 ) -> Result<ReviewerSkills, String> {
@@ -413,10 +416,15 @@ fn freeze_with_scope(
         pins: Vec<SkillPin>,
         prompt: String,
     }
+    struct VisitContext<'a> {
+        harness: &'a str,
+        checks: &'a HashSet<String>,
+        scope: Option<&'a str>,
+    }
     let mut state = ResolveState {
         seen: HashSet::new(), visiting: HashSet::new(), pins: Vec::new(), prompt: String::new(),
     };
-    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, required: bool, checks: &HashSet<String>, scope: Option<&str>, state: &mut ResolveState) -> Result<(), String> {
+    fn visit(library: &Library, id: &str, assigned: &[String], required: bool, context: &VisitContext<'_>, state: &mut ResolveState) -> Result<(), String> {
         if state.seen.contains(id) { return Ok(()); }
         if !state.visiting.insert(id.to_owned()) {
             return Err(format!("reviewer_skill_cycle: dependency cycle at {id}."));
@@ -436,7 +444,7 @@ fn freeze_with_scope(
             }
             let (files, hashes) = trusted_package(library, &meta)?;
             for dependency in &meta.required_skills {
-                visit(library, dependency, assigned, harness, required, checks, scope, state)?;
+                visit(library, dependency, assigned, required, context, state)?;
             }
             let main = files.iter().find(|(path, _)| path == "SKILL.md")
                 .ok_or_else(|| format!("reviewer_skill_unavailable: no SKILL.md for {id}."))?;
@@ -444,9 +452,9 @@ fn freeze_with_scope(
                 .map_err(|_| format!("reviewer_skill_unavailable: SKILL.md of {id} is not UTF-8."))?;
             let (_, _, body) = frontmatter(main_text);
             let mut contents = body.to_owned();
-            let mode = if adapter::FILE_HARNESSES.contains(&harness) { "isolated_files" } else { "bounded_prompt" };
+            let mode = if adapter::FILE_HARNESSES.contains(&context.harness) { "isolated_files" } else { "bounded_prompt" };
             let staged_path = if mode == "isolated_files" {
-                Some(stage(library, &meta, &files, &hashes, scope)?)
+                Some(stage(library, &meta, &files, &hashes, context.scope)?)
             } else {
                 for (name, bytes) in &files {
                     if name == "SKILL.md" { continue; }
@@ -475,7 +483,7 @@ fn freeze_with_scope(
                 source_location: meta.source.location, source_ref: meta.source.git_ref,
                 source_commit: meta.source.commit, content_sha256: meta.sha256,
                 file_sha256: hashes, dependencies: meta.required_skills,
-                required_for_acceptance: required, check_required: checks.contains(id), delivery_mode: mode.into(), staged_path,
+                required_for_acceptance: required, check_required: context.checks.contains(id), delivery_mode: mode.into(), staged_path,
                 imported: true, bot_assigned: assigned.iter().any(|x| x == id),
                 eligible: true, supplied: true,
                 invoked: false, check_executed: false, evidence_verified: false,
@@ -489,13 +497,14 @@ fn freeze_with_scope(
     // Materialize mandatory closures first regardless of the order in Bot.skills.
     // Otherwise an optional root could pin a shared mandatory dependency as optional,
     // or roll back that dependency when optional provisioning fails.
+    let context = VisitContext { harness, checks: &required_checks, scope };
     for id in assigned.iter().filter(|id| !known_optional.contains(*id)) {
-        visit(library, id, assigned, harness, true, &required_checks, scope, &mut state)?;
+        visit(library, id, assigned, true, &context, &mut state)?;
     }
     let mut skipped = Vec::new();
     for id in assigned.iter().filter(|id| known_optional.contains(*id)) {
         let before = state.clone();
-        if let Err(reason) = visit(library, id, assigned, harness, false, &required_checks, scope, &mut state) {
+        if let Err(reason) = visit(library, id, assigned, false, &context, &mut state) {
             state = before;
             skipped.push(SkippedSkill {
                 id: id.clone(), reason, bot_assigned: true,

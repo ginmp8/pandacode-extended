@@ -445,6 +445,46 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     Ok(result)
 }
 
+/// A one-shot local CLI inspector is deliberately read-only: it must not run
+/// Store::open's migration/restart settlement behind a live serve process.
+/// Return bounded operational metadata, never the task objective, worker result,
+/// private evidence, rejection reason, authorization token, or transcript.
+pub(crate) fn inspect_headless_status(
+    database_path: &std::path::Path, ticket_id: Option<&str>,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let value = if let Some(ticket_id) = ticket_id {
+        let snapshot = ticket_snapshot(&store, ticket_id, 50)?;
+        serde_json::json!({
+            "ticketId": &snapshot.ticket.id,
+            "orchestrationId": &snapshot.ticket.orchestration_id,
+            "state": &snapshot.ticket.state,
+            "revision": snapshot.ticket.revision,
+            "activeAssignmentId": &snapshot.ticket.active_assignment_id,
+            "hasEvidence": snapshot.ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
+            "mandate": {
+                "revoked": snapshot.mandate.revoked,
+                "policyRevision": snapshot.mandate.policy_revision,
+                "expiresAt": snapshot.mandate.expires_at,
+                "allowedSideEffects": snapshot.mandate.allowed_side_effects,
+                "allowedToolCount": snapshot.mandate.allowed_tools.len()
+            },
+            "assignments": snapshot.assignments.iter().map(|a| serde_json::json!({
+                "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
+                "state": &a.state, "attempt": a.attempt,
+                "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty())
+            })).collect::<Vec<_>>(),
+            "activity": snapshot.activity.iter().map(|a| serde_json::json!({
+                "kind": &a.kind, "at": a.at
+            })).collect::<Vec<_>>()
+        })
+    } else {
+        serde_json::to_value(orchestration_overview(&store)?)
+            .map_err(|e| e.to_string())?
+    };
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
 fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
     store.db.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
@@ -1819,6 +1859,53 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_inspection_is_read_only_redacted_and_safe_during_live_work() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Private objective must never reach CLI",
+            "headless-read-only", false,
+        ).unwrap();
+        assert!(launched);
+        let path = store.path.clone();
+        let summary: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, None).unwrap(),
+        ).unwrap();
+        assert_eq!(summary[0]["ticketCount"], 1);
+        assert_eq!(summary[0]["runningCount"], 1);
+
+        let live_status = inspect_headless_status(&path, Some(&ticket.id)).unwrap();
+        let live: serde_json::Value = serde_json::from_str(&live_status).unwrap();
+        assert_eq!(live["ticketId"], ticket.id);
+        assert_eq!(live["state"], "running");
+        assert_eq!(live["mandate"]["revoked"], false);
+        assert_eq!(live["assignments"][0]["state"], "running");
+        assert!(!live_status.contains("Private objective"));
+        // A second inspection must not invoke writable startup recovery,
+        // expire the assignment, or insert a restart audit record.
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), 1);
+
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &sid, true, "Sensitive provider evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        reject(&store, &ticket.id, waiting.revision, "Sensitive rejection reason").unwrap();
+        let final_status = inspect_headless_status(&path, Some(&ticket.id)).unwrap();
+        let final_view: serde_json::Value = serde_json::from_str(&final_status).unwrap();
+        assert_eq!(final_view["state"], "blocked");
+        assert_eq!(final_view["assignments"][0]["hasResult"], true);
+        assert_eq!(final_view["activity"][0]["kind"], "human_rejected");
+        for secret in ["Private objective", "Sensitive provider evidence", "Sensitive rejection reason"] {
+            assert!(!final_status.contains(secret), "CLI metadata leaked confidential content");
+        }
+        assert!(inspect_headless_status(&path, Some("nonexistent-ticket")).is_err());
+        let readonly = Store::open_read_only(&path).unwrap();
+        assert!(readonly.db.execute(
+            "UPDATE sa_tickets SET state='stopped' WHERE id=?1", [&ticket.id],
+        ).is_err());
+    }
 
     #[test]
     fn list_overview_counts_all_durable_tickets_without_cross_preset_leaks() {

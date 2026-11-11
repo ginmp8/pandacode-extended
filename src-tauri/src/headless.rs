@@ -28,6 +28,8 @@ enum Command {
     SyncBots { path: PathBuf },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
+    InspectOrchestrations,
+    InspectTicket { ticket_id: String },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -58,6 +60,28 @@ pub fn handle() -> bool {
 fn serve(command: Command, import: Option<PathBuf>) -> ! {
     let app = tauri::Builder::default()
         .setup(move |app| {
+            // A one-shot inspection must precede setup_common: its writable
+            // Store::open performs restart recovery and could interrupt a
+            // healthy concurrently running serve process.
+            let inspect = match &command {
+                Command::InspectOrchestrations => Some(None),
+                Command::InspectTicket { ticket_id } => Some(Some(ticket_id.as_str())),
+                _ => None,
+            };
+            if let Some(ticket_id) = inspect {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_status(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             let dir = crate::setup_common(app)?;
             // No window on a server: close the one from tauri.conf.json right away; the
             // run loop keeps the process alive (see on_run_event). Users watch from their
@@ -78,6 +102,11 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 /// Per-command startup, run from setup.
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
+        // Inspection exits before setup_common and must never reach this branch.
+        Command::InspectOrchestrations | Command::InspectTicket { .. } => {
+            eprintln!("SuperAgent inspection must use the read-only startup path.");
+            std::process::exit(2)
+        }
         Command::ImportOrchestrations { path } => {
             match crate::superagent::manifest::run_headless_import(app, &path) {
                 Ok(result) => {
@@ -404,6 +433,22 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--inspect-orchestrations" => {
+                command = Command::InspectOrchestrations;
+                ops += 1;
+            }
+            "--inspect-ticket" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket needs a ticket ID.\n\n{}", help()))?;
+                if value.is_empty() || value.len() > 128
+                    || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+                {
+                    return Err("Provide a bounded alphanumeric ticket ID.".into());
+                }
+                command = Command::InspectTicket { ticket_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--sync-bots" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--sync-bots needs a source registry path.\n\n{}", help()))?;
@@ -431,7 +476,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     }
     if ops > 1 {
         return Err(format!(
-            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots, --sync-bots, --import-orchestrations, --export-orchestrations.\n\n{}",
+            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots, --sync-bots, --import-orchestrations, --export-orchestrations, --inspect-orchestrations, --inspect-ticket.\n\n{}",
             help()
         ));
     }
@@ -453,7 +498,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-ticket <id>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -473,7 +518,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Explicitly import disabled SuperAgent presets after native validation
                          and a verified config-only backup; exit without starting tasks.
   --export-orchestrations <file>
-                         Export portable SuperAgent presets without tickets or secrets; exit."
+                         Export portable SuperAgent presets without tickets or secrets; exit.
+  --inspect-orchestrations
+                         List native orchestration status without modifying live tasks; exit.
+  --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit."
         .into()
 }
 
@@ -513,6 +561,12 @@ mod tests {
             Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
+        assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
+        assert_eq!(parsed("--inspect-ticket ticket_123"),
+            Ok(Command::InspectTicket { ticket_id: "ticket_123".into() }));
+        assert!(parsed("--inspect-ticket").is_err());
+        assert!(parsed("--inspect-ticket ../outside").is_err());
+        assert!(parsed("--inspect-ticket x --inspect-orchestrations").is_err());
         assert!(parsed("--wat").is_err());
         assert!(parsed("--import-orchestrations").is_err());
         assert!(parsed("--export-orchestrations").is_err());
@@ -550,6 +604,8 @@ mod tests {
             "--export-bots",
             "--import-orchestrations",
             "--export-orchestrations",
+            "--inspect-orchestrations",
+            "--inspect-ticket",
             "--sync-bots",
             "xvfb-run",
         ] {

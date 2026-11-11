@@ -232,3 +232,25 @@ Ticket is imported, and no remote unauthenticated management endpoint is
 opened. Repeating the same import is idempotent; headless errors produce a
 non-zero exit code. This is configuration administration, **not** headless
 task dispatch/approval parity; that remains a separate implementation gate.
+
+### Read-only task inspection (local CLI)
+
+```sh
+pandacode serve --inspect-orchestrations
+pandacode serve --inspect-ticket <ticket-id>
+```
+
+These one-shot local commands return bounded JSON operational metadata from the
+existing native orchestration and Ticket queries. Ticket inspection includes the
+state/revision, mandate revocation and policy version, assignment IDs/statuses,
+and audit event kinds/timestamps. It deliberately excludes objectives, message
+transcripts, worker results, rejection reasons, approval identifiers and secrets.
+Unknown Ticket IDs and incompatible database schemas fail with a nonzero exit
+code. Output is local stdout, not an unauthenticated remote API.
+
+Unlike import/export or ordinary serve startup, inspection opens
+`kingcode.sqlite3` **read-only before `setup_common`**. It neither starts bots
+nor runs the Store's migration/restart recovery; inspecting a live host must
+not mark a healthy worker as interrupted. These commands do not authorize
+headless task creation, approval, cancellation, or event automation; those
+remain pending native integration work.

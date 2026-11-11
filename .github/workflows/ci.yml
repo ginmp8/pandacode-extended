@@ -198,8 +198,18 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils
+          # ARM64 ports DNS failures can leave partial APT indexes that cause stale-package 404s.
+          # Retry update and install together, requiring every index refresh to succeed.
+          for attempt in 1 2 3; do
+            if sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update &&
+               sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
       # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
       - run: npm ci
       # The release startup smoke flaked on windows-11-arm (cold Node starts), so its tests run there too.

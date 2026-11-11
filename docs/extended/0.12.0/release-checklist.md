@@ -288,3 +288,10 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [x] Preserve the exact dependency list and Rust test/Clippy commands while replacing the Ubuntu 22.04 job's unreliable mirror and setting bounded APT retries and HTTP timeouts.
 - [ ] Confirm all required jobs in both PR and push CI for the **published remediation SHA**; a pending, cancelled or skipped job is not successful validation.
 - [ ] Continue independent native Settings On/Off, bots, Connect/MCP, cloud/VM, credentials, migration and installed-app acceptance; no new release approval.
+
+## Linux ARM64 APT resilience follow-up — 2026-11-11
+
+- [x] Inspect [PR CI #43055772877](https://github.com/ginmp8/pandacode-extended/actions/runs/43055772877) at `b21df4a7`: `Rust clippy (linux-aarch64)` failed at APT (DNS/index/404, exit 100) before Clippy; the PR Linux Rust job was cancelled during dependency acquisition. Do not report these as Rust assertion failures.
+- [x] Preserve the ARM64 runner, original native dependency list and Rust commands while adding bounded retries for both APT refresh and installation; require the refresh to succeed, avoiding silent stale-index reuse.
+- [ ] Verify both push and PR CI on the **new exact SHA**, including the Linux ARM64 job and Ubuntu 22.04 Rust test job; record jobs separately (queued/cancelled/failed is not green).
+- [ ] Complete all 81 shared-path semantic reviews and native Settings On/Off, Connect/MCP, bots, cloud/VM, credentials and installer acceptance before 0.12.0 release approval.

@@ -281,3 +281,10 @@ This is an integration **candidate**, not approval to distribute Extended `0.12.
 - [ ] Independently verify saved/non-default Linux microphone fallback, real hardware, installer behavior and Extended Settings On/Off, Connect/MCP, bots, cloud/VM, credentials, and the 81 carried shared differences before claiming functional release readiness.
 
 No release approval, tag, installer, npm publication or deployment is implied.
+
+## Linux Rust CI APT mirror recovery — 2026-11-11
+
+- [x] Diagnose [PR CI #43045852885](https://github.com/ginmp8/pandacode-extended/actions/runs/43045852885): the Linux Rust job was cancelled while APT was downloading from the Azure mirror, before application build or tests.
+- [x] Preserve the exact dependency list and Rust test/Clippy commands while replacing the Ubuntu 22.04 job's unreliable mirror and setting bounded APT retries and HTTP timeouts.
+- [ ] Confirm all required jobs in both PR and push CI for the **published remediation SHA**; a pending, cancelled or skipped job is not successful validation.
+- [ ] Continue independent native Settings On/Off, bots, Connect/MCP, cloud/VM, credentials, migration and installed-app acceptance; no new release approval.

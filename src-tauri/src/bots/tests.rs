@@ -250,6 +250,67 @@ fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
 
 
 #[test]
+fn missing_native_cycle_cannot_downgrade_opted_in_council_to_ordinary_delivery() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let channel = shared_channels::create(
+        &f.store, "missing-cycle", std::slice::from_ref(&executor.id),
+    ).unwrap();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    let session_id = thread_session(
+        &f.store, &executor, DESKTOP, DESKTOP, "Council with missing cycle",
+    ).unwrap().0;
+    let council = crate::architect::CouncilConfig::default();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review requested','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&council).unwrap(),
+            serde_json::to_string(&vec![executor.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries
+         (id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'in_progress',0,?6,?6)",
+        params![delivery_id,channel.id,message_id,executor.id,session_id,crate::storage::now()],
+    ).unwrap();
+
+    assert!(matches!(
+        channel_council_outcome(&f.store, &session_id).unwrap(),
+        ChannelCouncilOutcome::Denied(_),
+    ), "a Council opt-in without native cycle evidence must fail closed");
+    assert_eq!(
+        shared_channels::settle_channel_delivery(
+            &f.store, &session_id,
+            (&delivery_id, &channel.id, &message_id, &executor.id),
+            true, "Unreviewed work is not approved.",
+        ).unwrap(),
+        Some(false),
+    );
+    assert!(!shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "callback recovery cannot treat a broken Council link as Council-off");
+    let (delivery_status, message_status): (String, String) = f.store.db.query_row(
+        "SELECT d.status,m.status FROM bot_shared_channel_deliveries d
+         JOIN bot_shared_channel_messages m ON m.id=d.message_id
+         WHERE d.id=?1",
+        [&delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(delivery_status, "failed");
+    assert_eq!(message_status, "failed");
+    let replies: i64 = f.store.db.query_row(
+        "SELECT COUNT(*) FROM bot_shared_channel_messages WHERE channel_id=?1 AND kind='reply'",
+        [&channel.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(replies, 0);
+}
+
+#[test]
 fn council_channel_callback_waits_for_approval_and_terminal_claim_is_idempotent() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();

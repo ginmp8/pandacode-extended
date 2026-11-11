@@ -1343,7 +1343,20 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
          WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
         [session_id], |row| row.get(0),
     ).map_err(|error| error.to_string())?;
-    if active == 0 { return Ok(ChannelCouncilOutcome::Ordinary); }
+    if active == 0 {
+        // A Council-enabled assignment with a lost cycle link must never
+        // silently fall back to ordinary completion or callback behavior.
+        let requested: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_deliveries d
+             JOIN extended_channel_council_requests r ON r.message_id=d.message_id
+             WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+            [session_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if requested != 0 {
+            return Ok(ChannelCouncilOutcome::Denied("Council delivery is missing its native cycle."));
+        }
+        return Ok(ChannelCouncilOutcome::Ordinary);
+    }
     if active != 1 { return Ok(ChannelCouncilOutcome::Waiting); }
     let Some(team) = crate::architect::load(store, session_id)? else {
         return Ok(ChannelCouncilOutcome::Denied("Council delivery has no native team."));

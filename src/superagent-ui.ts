@@ -27,6 +27,14 @@ interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   activity: Activity[]; council?: CouncilObservation | null;
 }
+interface EventSource {
+  id: string; orchestrationId: string; repository: string; actorFilter: string;
+  eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
+}
+interface SourceDecision {
+  sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
+  decision: string; sequence: number; policyRevision: number; at: number;
+}
 
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
@@ -36,6 +44,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let taskKey = crypto.randomUUID();
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
+  let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
+  let decisions: SourceDecision[] = [];
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
@@ -93,6 +103,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           : '') +
         '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
+    const sourceRows = sources.map(src =>
+      '<li><div><strong>' + safe(src.repository) + '</strong><small>' +
+      safe(src.eventKind) + ' · ' + safe(src.actorFilter) + ' · Cursor ' +
+      src.lastSequence + ' · Revision ' + src.policyRevision + '</small></div>' +
+      '<span>' + safe(src.mode) + '</span>' +
+      '<button type="button" data-sa-source-mode="' + safe(src.id) +
+      '" data-sa-next-mode="' + (src.mode === 'off' ? 'observe' : 'off') + '">' +
+      (src.mode === 'off' ? 'Enable Observe' : 'Turn Off') + '</button>' +
+      '<button type="button" data-sa-source-decisions="' + safe(src.id) +
+      '">View decisions</button></li>').join('');
+    const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
+      '<h4>GitHub event sources</h4><p>Off/Observe only. No authenticated GitHub intake, Auto tasks or external writes.</p>' +
+      (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
+        : '<form data-sa-form="source"><div class="sa-grid">' +
+          '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
+          '<label>Exact actor<input name="actorFilter" maxlength="80" required></label></div>' +
+          '<label>Event class<select name="eventKind">' +
+          ['issues.opened','issues.edited','issue_comment.created','pull_request.opened',
+            'pull_request_review.submitted','check_run.completed']
+            .map(kind => '<option value="' + kind + '">' + kind + '</option>').join('') +
+          '</select></label><button type="submit">Add source (Off)</button></form>' +
+          '<ul class="sa-tickets sa-source-list">' +
+          (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
+          (decisionSourceId ? '<div role="region" aria-label="Source decisions">' +
+            '<h5>Recorded decisions</h5><ol>' +
+            (decisions.map(d => '<li>' + safe(activityTime(d.at)) + ' · ' +
+              safe(d.decision) + ' · ' + safe(d.eventKind) + ' · ' +
+              safe(d.subjectKey) + ' · Delivery ' + safe(d.deliveryId) +
+              ' · Revision ' + d.policyRevision + '</li>').join('') ||
+              '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
@@ -127,7 +167,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
-        details + '</section>' : '';
+        details + sourcePanel + '</section>' : '';
     host.innerHTML = '<div class="sa-ui">' +
       '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
@@ -188,6 +228,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = '';
+        sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
@@ -195,6 +236,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       ticketDetails = null;
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
+      if (sourcesLoaded && selected) {
+        sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
+        if (!sources.some(item => item.id === decisionSourceId)) {
+          decisionSourceId = ''; decisions = [];
+        } else {
+          decisions = await call<SourceDecision[]>('superagent_source_decisions',
+            {sourceId:decisionSourceId,limit:50});
+        }
+      }
       error = '';
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
     finally { loading = false; if (!busy) render(); }
@@ -240,6 +290,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       selected = next;
       tickets = [];
       inspectedTicket = ''; ticketDetails = null;
+      sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
       });
@@ -258,6 +309,33 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (c) ask('Delete unused preset ' + c.name + '? Ticket history cannot be deleted.', async () => {
         await call('superagent_delete',{ orchestrationId:c.id, expectedRevision:c.policyRevision });
         selected = ''; await reload();
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-sources')) {
+      if (selected) void work(async () => {
+        sources = await call<EventSource[]>('superagent_source_list',{orchestrationId:selected});
+        sourcesLoaded = true;
+      });
+      return;
+    }
+    if (target.dataset.saSourceMode) {
+      const src = sources.find(item => item.id === target.dataset.saSourceMode);
+      const mode = target.dataset.saNextMode;
+      if (src && (mode === 'off' || mode === 'observe'))
+        ask('Set this source to ' + mode + '? This never launches tasks.',async () => {
+          await call('superagent_source_set_mode',
+            {sourceId:src.id,expectedRevision:src.policyRevision,mode});
+          await reload();
+        });
+      return;
+    }
+    if (target.dataset.saSourceDecisions) {
+      const id = target.dataset.saSourceDecisions;
+      if (sources.some(item => item.id === id)) void work(async () => {
+        const loaded = await call<SourceDecision[]>('superagent_source_decisions',
+          {sourceId:id,limit:50});
+        decisionSourceId = id; decisions = loaded;
       });
       return;
     }
@@ -331,6 +409,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'source') {
+      const orchestrationId = selected;
+      const repository = String(data.get('repository') ?? '').trim();
+      const actorFilter = String(data.get('actorFilter') ?? '').trim();
+      const eventKind = String(data.get('eventKind') ?? '');
+      if (!sourcesLoaded || !orchestrationId || !repository || !actorFilter) return;
+      void work(async () => {
+        await call('superagent_source_create',{orchestrationId,repository,actorFilter,eventKind});
+        await reload();
+      });
+      return;
+    }
     if (form.dataset.saForm === 'edit') {
       const existing = current();
       if (!existing || existing.enabled) return;

@@ -4439,6 +4439,7 @@ pub fn run() {
                 superagent::superagent_create,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
+                superagent::events::superagent_source_decisions,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
                 superagent::superagent_list,

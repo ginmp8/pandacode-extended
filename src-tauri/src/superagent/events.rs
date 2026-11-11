@@ -88,6 +88,22 @@ pub struct EventDecision {
     pub duplicate: bool,
 }
 
+/// Bounded stored decisions only; the untrusted webhook body and private
+/// task transcripts are never persisted or returned by this view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventDecisionRecord {
+    pub source_id: String,
+    pub delivery_id: String,
+    pub actor: String,
+    pub event_kind: String,
+    pub subject_key: String,
+    pub sequence: i64,
+    pub decision: String,
+    pub policy_revision: i64,
+    pub at: i64,
+}
+
 fn token_ok(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max
         && value.is_ascii() && value.bytes().all(|b|
@@ -252,6 +268,40 @@ fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
         policy_revision:src.policy_revision,sequence:event.sequence,at,duplicate:false })
 }
 
+/// A source-scoped, restart-durable decision timeline. Neither the read nor
+/// its main-window command can change policy, admit tasks or dispatch work.
+fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<EventDecisionRecord>> {
+    if !(1..=100).contains(&limit) {
+        return Err("Event decision page size must be between 1 and 100.".into());
+    }
+    source(store, source_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT source_id,delivery_id,actor,event_kind,subject_key,sequence,
+                decision,policy_revision,at FROM sa_event_decisions
+         WHERE source_id=?1 ORDER BY sequence DESC,delivery_id DESC LIMIT ?2",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![source_id,limit], |row| {
+        Ok(EventDecisionRecord {
+            source_id:row.get(0)?, delivery_id:row.get(1)?,
+            actor:row.get(2)?, event_kind:row.get(3)?,
+            subject_key:row.get(4)?, sequence:row.get(5)?,
+            decision:row.get(6)?, policy_revision:row.get(7)?,
+            at:row.get(8)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn superagent_source_decisions(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, limit: i64,
+) -> Result<Vec<EventDecisionRecord>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_decisions(&store,&source_id,limit)
+}
+
 #[tauri::command]
 pub async fn superagent_source_create(
     window: tauri::WebviewWindow, state: State<'_,AppState>,
@@ -377,5 +427,31 @@ mod tests {
         store.db.execute_batch("DROP TRIGGER reject_observe").unwrap();
         assert_eq!(observe(&store,&event("failed",&cfg,1)).unwrap().decision,"observed_permitted");
         assert_eq!(source(&store,&cfg.id).unwrap().last_sequence,1);
+    }
+    #[test]
+    fn decision_timeline_is_bounded_source_scoped_and_restart_durable() {
+        let (store,path)=fixture();
+        let a=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        let b=create_source(&store,"orch","test/fixture","other-bot","issues.opened").unwrap();
+        let a=set_mode(&store,&a.id,a.policy_revision,"observe").unwrap();
+        let b=set_mode(&store,&b.id,b.policy_revision,"observe").unwrap();
+        observe(&store,&event("one",&a,1)).unwrap();
+        observe(&store,&event("two",&a,2)).unwrap();
+        let mut other=event("foreign",&b,1);
+        other.actor="other-bot".into();
+        observe(&store,&other).unwrap();
+        assert_eq!(list_decisions(&store,&a.id,1).unwrap()[0].delivery_id,"two");
+        assert_eq!(list_decisions(&store,&a.id,100).unwrap().len(),2);
+        assert_eq!(list_decisions(&store,&b.id,100).unwrap().len(),1);
+        for invalid in [0,-1,101] { assert!(list_decisions(&store,&a.id,invalid).is_err()); }
+        assert!(list_decisions(&store,"unknown",10).is_err());
+        let count:i64=store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        let timeline=list_decisions(&reopened,&a.id,100).unwrap();
+        assert_eq!(timeline.len(),2);
+        assert_eq!(timeline[0].delivery_id,"two");
+        assert_eq!(timeline[1].policy_revision,a.policy_revision);
     }
 }

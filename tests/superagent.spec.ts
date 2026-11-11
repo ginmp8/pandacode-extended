@@ -208,3 +208,67 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
 });
+
+
+test('Off and Observe source controls expose durable native receipts without Auto', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-source-test'; document.body.appendChild(host);
+    const sources: Array<Record<string, unknown>> = [];
+    const presets = ['one','two'].map(id => ({
+      id,name:id,coordinatorBotId:'router',workerBotId:'worker',
+      enabled:true,policyRevision:1
+    }));
+    mountSuperagent(host, async (command,args) => {
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return presets as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_source_list') return sources.filter(
+        s=>s.orchestrationId===args?.orchestrationId) as never;
+      if(command==='superagent_source_create') {
+        const s={id:'source',orchestrationId:args?.orchestrationId,
+          repository:args?.repository,actorFilter:args?.actorFilter,
+          eventKind:args?.eventKind,mode:'off',policyRevision:1,lastSequence:2};
+        sources.push(s); return s as never;
+      }
+      if(command==='superagent_source_set_mode') {
+        const s=sources.find(s=>s.id===args?.sourceId);
+        if(!s || s.policyRevision!==args?.expectedRevision ||
+          !['off','observe'].includes(String(args?.mode))) throw new Error('Revision mismatch');
+        s.mode=args?.mode; s.policyRevision=Number(s.policyRevision)+1;
+        return s as never;
+      }
+      if(command==='superagent_source_decisions') return [{
+        sourceId:args?.sourceId,deliveryId:'delivery-2',
+        eventKind:'issues.opened',subjectKey:'issue:42',sequence:2,
+        decision:'observed_permitted',policyRevision:2,at:1794444000000
+      }] as never;
+      throw new Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-source-test');
+  await expect(host.getByText('No authenticated GitHub intake',{exact:false})).toBeVisible();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await expect(host.getByText('No event sources configured.')).toBeVisible();
+  await host.getByRole('textbox',{name:'Repository (owner/name)'}).fill('test/fixture');
+  await host.getByRole('textbox',{name:'Exact actor'}).fill('trusted-bot');
+  await host.getByRole('button',{name:'Add source (Off)'}).click();
+  await expect(host.locator('.sa-source-list')).toContainText('test/fixture');
+  await expect(host.locator('.sa-source-list')).toContainText('off');
+  await host.getByRole('button',{name:'Enable Observe'}).click();
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.locator('.sa-source-list')).toContainText('observe');
+  await host.getByRole('button',{name:'View decisions'}).click();
+  await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('observed_permitted');
+  await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('issue:42');
+  await expect(host.locator('[data-sa-next-mode="auto"]')).toHaveCount(0);
+  await host.locator('[data-sa-select="two"]').click();
+  await expect(host.locator('.sa-source-list')).toHaveCount(0);
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await expect(host.getByText('No event sources configured.')).toBeVisible();
+  await expect(host.getByRole('region',{name:'Source decisions'})).toHaveCount(0);
+});

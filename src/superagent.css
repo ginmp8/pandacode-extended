@@ -20,3 +20,8 @@
 .sa-confirm{padding:12px;border:1px solid var(--border);border-radius:var(--radius-md)}
 .sa-confirm .sa-actions{margin-top:10px}
 @media(max-width:600px){.sa-grid{grid-template-columns:minmax(0,1fr)}.sa-pane header{align-items:flex-start;flex-direction:column}}
+
+.sa-event-sources{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.sa-event-sources h4,.sa-event-sources h5{margin:0}
+.sa-event-sources ol{padding-left:22px;overflow-wrap:anywhere;font-size:var(--text-sm)}
+.sa-source-list small{overflow-wrap:anywhere;white-space:normal}

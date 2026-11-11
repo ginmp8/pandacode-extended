@@ -321,16 +321,18 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
 /// A provider turn is evidence for a task, not its approval. The only successful
 /// transition here is running -> waiting_approval; native human acceptance is separate.
 pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool, text: &str) -> Result<bool> {
-    let task_id: Option<String> = store.db.query_row(
-        "SELECT ticket_id FROM sa_assignments WHERE session_id=?1 AND state='running'",
-        [session_id], |r| r.get(0),
+    // A callback may arrive twice, after Stop, or after process restart.
+    // Result, Ticket revision and audit must settle in one transaction; an
+    // injected storage failure cannot strand an assignment in a terminal state.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let assignment: Option<(String, String)> = tx.query_row(
+        "SELECT a.ticket_id,a.id FROM sa_assignments a
+         JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+         WHERE a.session_id=?1 AND a.state='running' AND t.state='running'",
+        [session_id], |r| Ok((r.get(0)?, r.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some(task_id) = task_id else { return Ok(false) };
-    let task = get_ticket(store, &task_id)?;
-    if task.state != "running" || assignment_session(store,&task_id)?.as_deref() != Some(session_id) {
-        return Ok(false); // stopped, stale, or a superseded callback
-    }
-    let authorized: bool = store.db.query_row(
+    let Some((task_id, assignment_id)) = assignment else { return Ok(false) };
+    let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
          FROM sa_mandates m JOIN sa_tickets t ON t.id=m.ticket_id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id WHERE t.id=?1",
@@ -342,15 +344,25 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         else if trimmed.is_empty() { "inconclusive" }
         else { "waiting_approval" };
     let now = storage::now();
-    store.db.execute(
-        "UPDATE sa_assignments SET state=?2,result=?3,updated_at=?4 WHERE session_id=?1 AND state='running'",
-        params![session_id,if successful { "finished" } else { "failed" },trimmed,now],
+    let moved = tx.execute(
+        "UPDATE sa_assignments SET state=?2,result=?3,updated_at=?4
+         WHERE id=?1 AND state='running'",
+        params![assignment_id,if successful { "finished" } else { "failed" },trimmed,now],
     ).map_err(|e| e.to_string())?;
-    store.db.execute(
-        "UPDATE sa_tickets SET state=?2,evidence=?3,active_assignment_id=NULL,revision=revision+1,updated_at=?4
-         WHERE id=?1 AND state='running'",params![task_id,next,trimmed,now],
+    if moved != 1 { return Err("SuperAgent assignment changed before settlement.".into()); }
+    let updated = tx.execute(
+        "UPDATE sa_tickets SET state=?2,evidence=?3,active_assignment_id=NULL,
+         revision=revision+1,updated_at=?4
+         WHERE id=?1 AND state='running' AND active_assignment_id=?5",
+        params![task_id,next,trimmed,now,assignment_id],
     ).map_err(|e| e.to_string())?;
-    record(store, &task_id, "turn_settled", next)?;
+    if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'turn_settled',?2,?3)",
+        params![task_id,next,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -639,6 +651,40 @@ mod tests {
         drop(store);
         let reopened=Store::open(&path).unwrap();
         assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
+    }
+
+    #[test]
+    fn failed_settlement_rolls_back_assignment_and_can_be_retried_once() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (task, _) = admit(&mut store, &cfg.id, "Document results", "settle-fault-1", false).unwrap();
+        let session = assignment_session(&store, &task.id).unwrap().unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_sa_settlement BEFORE UPDATE OF state ON sa_tickets
+             WHEN NEW.state='waiting_approval'
+             BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END;"
+        ).unwrap();
+        assert!(on_run_finished(&store, &session, true, "Result").is_err());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "running");
+        let assignment_state: String = store.db.query_row(
+            "SELECT state FROM sa_assignments WHERE session_id=?1",
+            [&session], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(assignment_state, "running");
+        let settled_events: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='turn_settled'",
+            [&task.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(settled_events, 0);
+        store.db.execute_batch("DROP TRIGGER reject_sa_settlement").unwrap();
+        assert!(on_run_finished(&store, &session, true, "Result").unwrap());
+        assert!(!on_run_finished(&store, &session, true, "Duplicated").unwrap());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
+        let settled_events: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='turn_settled'",
+            [&task.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(settled_events, 1);
     }
 
     #[test]

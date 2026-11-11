@@ -415,7 +415,10 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let _ = app.emit("bots-changed", ());
     // Send the next queued message natively, so bot threads keep moving without the window.
     // A failed run holds the queue until the next turn ends cleanly.
-    let next = if !successful { None } else { state.store.lock().ok().and_then(|store| message_queue::list(&store, Some(session_id)).ok()).and_then(|queue| queue.into_iter().next()) };
+    let next = if should_drain_queue(&thread.channel_id, successful) {
+        state.store.lock().ok().and_then(|store| message_queue::list(&store, Some(session_id)).ok())
+            .and_then(|queue| queue.into_iter().next())
+    } else { None };
     let taken = next.and_then(|entry| state.store.lock().ok().and_then(|store| {
         let entry = message_queue::take(&store, &entry.id).ok()?;
         let delivery = super::shared_channels::promote_taken(&store, session_id, &entry.text);
@@ -474,6 +477,13 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         }
     }
     settled
+}
+
+/// A SuperAgent session has exactly one native ticket assignment. Its turn
+/// must not drain an unrelated message into the same session after settlement,
+/// because ticket acceptance and any later retry require a fresh native lease.
+fn should_drain_queue(channel_id: &str, successful: bool) -> bool {
+    successful && channel_id != crate::superagent::CHANNEL
 }
 
 /// Prompt text and image ids for queued attachments, as the window's composer builds them.
@@ -614,6 +624,16 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superagent_assignment_never_drains_an_ordinary_message_queue() {
+        assert!(!should_drain_queue(crate::superagent::CHANNEL, true));
+        assert!(!should_drain_queue(crate::superagent::CHANNEL, false));
+        assert!(!should_drain_queue("schedule", false));
+        assert!(should_drain_queue("schedule", true));
+        assert!(should_drain_queue(super::super::DESKTOP, true));
+        assert!(should_drain_queue("telegram", true));
+    }
 
     #[test]
     fn ending_an_intermediate_council_turn_revokes_its_approval_requests() {

@@ -21,7 +21,7 @@ test.describe('bot collaboration', () => {
       bindSharedChannelCouncil(form);
     });
     const form = page.locator('#shared-channel-composer');
-    const trigger = form.getByRole('button', { name: 'Council: off' });
+    const trigger = form.locator('.bc-council-trigger');
     const panel = form.getByRole('dialog', { name: 'Council' });
     await expect(trigger).toBeVisible();
     await expect(panel).toBeHidden();
@@ -111,6 +111,7 @@ test.describe('bot collaboration', () => {
       document.body.append(root);
     });
     const fixture = page.locator('#channel-council-fixture');
+    await fixture.locator('.bc-council-trigger').scrollIntoViewIfNeeded();
     await page.evaluate(async () => {
       const { bindSharedChannelCouncil, toggleSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
       const form = document.querySelector<HTMLFormElement>('#channel-council-fixture form')!;

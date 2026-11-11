@@ -1420,7 +1420,19 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
             Some(status) if status.state == "accepted" => Ok(ChannelCouncilOutcome::Waiting),
             _ => Ok(ChannelCouncilOutcome::Denied("Council has no verified, current passing review.")),
         },
-        "failed" | "stopped" | "interrupted" => Ok(ChannelCouncilOutcome::Denied("Council team ended without approval.")),
+        // Store::open intentionally interrupts native running/waiting teams.
+        // This is a recoverable pause, NOT a failed Council verdict, but only
+        // when the task was interrupted by restart and not stopped by the user.
+        "interrupted" => {
+            let recoverable: bool = store.db.query_row(
+                "SELECT restart_interrupted=1 AND stop_requested=0
+                 FROM sessions WHERE id=?1 AND status='interrupted'",
+                [session_id], |row| row.get(0),
+            ).optional().map_err(|error| error.to_string())?.unwrap_or(false);
+            Ok(if recoverable { ChannelCouncilOutcome::Waiting }
+                else { ChannelCouncilOutcome::Denied("Council team ended without approval.") })
+        },
+        "failed" | "stopped" => Ok(ChannelCouncilOutcome::Denied("Council team ended without approval.")),
         _ => Ok(ChannelCouncilOutcome::Waiting),
     }
 }

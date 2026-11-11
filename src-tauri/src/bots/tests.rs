@@ -1286,6 +1286,15 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
                 "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
                 params![session_id,serde_json::to_string(&team).unwrap()],
             ).unwrap();
+            if index == 0 {
+                // A native turn was actually running before restart; Store::open
+                // must mark it restart_interrupted, unlike a user Stop.
+                store.db.execute(
+                    "UPDATE sessions SET status='running',stop_requested=0
+                     WHERE id=?1",
+                    [&session_id],
+                ).unwrap();
+            }
             deliveries.push((delivery_id,session_id,message_id));
         }
         (channel.id, deliveries)
@@ -1295,9 +1304,26 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     let store = Store::open(&db_path).unwrap();
     upgrade(&store.db).unwrap();
     let direct = &ids.1;
+    let resumed_session = store.session(&direct[0].1).unwrap();
+    assert_eq!(resumed_session.status, "interrupted");
+    assert!(resumed_session.restart_interrupted);
     assert_eq!(channel_council_outcome(&store, &direct[0].1).unwrap(),
         ChannelCouncilOutcome::Waiting,
         "a resumed native Council that has not passed remains pending");
+    // A user Stop is never recoverable authority, even if the same native
+    // snapshot still says interrupted.
+    store.db.execute(
+        "UPDATE sessions SET restart_interrupted=0,stop_requested=1 WHERE id=?1",
+        [&direct[0].1],
+    ).unwrap();
+    assert!(matches!(channel_council_outcome(&store, &direct[0].1).unwrap(),
+        ChannelCouncilOutcome::Denied(_)));
+    store.db.execute(
+        "UPDATE sessions SET restart_interrupted=1,stop_requested=0 WHERE id=?1",
+        [&direct[0].1],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&store, &direct[0].1).unwrap(),
+        ChannelCouncilOutcome::Waiting);
     assert_eq!(channel_council_outcome(&store, &direct[1].1).unwrap(),
         ChannelCouncilOutcome::Approved,
         "the matching accepted native Council must preserve its authorization");
@@ -1325,7 +1351,10 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     let pending_view = shared_channels::detail(&store,&channel_id,100).unwrap();
     let reviewing = pending_view.messages.iter()
         .find(|message| message.id == deliveries[0].0).unwrap();
-    assert!(reviewing.council.is_some());
+    let council = reviewing.council.as_ref().unwrap();
+    assert_eq!(council.state, "Paused");
+    assert!(council.notice.as_deref().unwrap_or_default().contains("resume"));
+    assert_eq!(council.session_id, deliveries[0].1);
     let resumed = crate::architect::load(&store,&deliveries[0].1).unwrap().unwrap();
     assert_eq!(resumed.council_since,1234);
 }

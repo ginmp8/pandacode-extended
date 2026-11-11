@@ -370,6 +370,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         let state = match team.status.as_str() {
             "stopped" => "Stopped",
             "failed" => "Failed",
+            "interrupted" => "Paused",
             _ => match status.map(|s| s.state.as_str()) {
                 Some("passed") if original_matches => "Passed",
                 Some("passed") => "Inconclusive",
@@ -431,6 +432,8 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         }).collect();
         let note = (!original_matches)
             .then(|| "Council settings or cycle differ from this channel delivery; approval is unavailable.".to_string())
+            .or_else(|| (team.status == "interrupted")
+                .then(|| "PandaCode restarted during Council review. Open the Council report and resume this task; no result has been approved.".to_string()))
             .or_else(|| status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect()))
             .or_else(|| (status.is_some_and(|s| s.state == "accepted") && !authorized_exception)
                 .then(|| "Council acceptance requires a reasoned user action in this channel.".into()));

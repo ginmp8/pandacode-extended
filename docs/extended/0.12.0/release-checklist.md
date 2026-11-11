@@ -305,3 +305,13 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [ ] Finish CI and audit jobs at the exact published Extended SHA; do not treat queued/cancelled jobs as success.
 - [ ] Independently validate real Linux microphone selection/failures and Windows/Linux ARM64 audio behavior.
 - [ ] Review all 81 older customized shared paths by hunk and exercise Settings On/Off, Connect/MCP, bots, cloud/VM and credentials.
+
+## Exact-SHA CI completion — 2026-11-11
+
+- [x] Confirm frozen source [`106b3852`](https://github.com/ginmp8/pandacode/commit/106b3852fcfc737922189cb3ef64b98b6b727c69) and published code SHA [`d3a59446`](https://github.com/ginmp8/pandacode-extended/commit/d3a59446bd9c208b89e8d999f3d001d5be2f6955), with single-parent lineage.
+- [x] Confirm [push CI #43075335735](https://github.com/ginmp8/pandacode-extended/actions/runs/43075335735) **11/11 passed** and [PR CI #43075350618](https://github.com/ginmp8/pandacode-extended/actions/runs/43075350618) **11/11 passed** on the same code SHA; all jobs were completed successfully, including Linux Rust/ARM64, platform Clippy, RustSec, npm, mobile/Expo and Node/website.
+- [x] Recompute nontruncated recursive inventories: 1,890 upstream, 1,948 Extended, 1,809 identical shared, 81 divergent shared, 58 Extended-only, zero missing or mode/type mismatches; version fields aligned at upstream `0.3.111`.
+- [x] Inspect added/source-only changed-line sets for all 81 divergent shared file versions; preliminary grouping does not establish full semantic acceptance or native behavior.
+- [ ] Review every shared divergence in context, including control-dependent callers, error/edge cases and native Settings On/Off transitions; resolve any independently reproduced regression without removing upstream features.
+- [ ] Perform native Voice, Connect/MCP, bots, cloud/VM, credential, SQLite migration/rollback and installer acceptance before any Extended `0.12.0` release approval.
+- [ ] Check CI for the separate documentation-only SHA after publication; passing code-SHA checks do not transfer to the new SHA.

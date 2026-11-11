@@ -147,3 +147,9 @@ The Extended-only CI candidate retains the exact native dependency list and Rust
 ## Source 106b3852 validation gaps — 2026-11-11
 
 The Linux microphone regression has unit coverage, but saved card/raw-ID failures, JACK/OSS fallback and probe behavior still require real native audio-device acceptance. Newly added Windows x64/Linux ARM64 release-profile smoke jobs may pass with no usable input; macOS explicitly requires recording. Windows and Linux coverage is therefore a build/runtime smoke rather than evidence of real microphone capture. The 81 pre-existing shared customized files remain semantically unclassified in full, and Settings On/Off, Connect/MCP, bots, cloud/VM and credential integrations remain unverified. No feature was intentionally removed.
+
+## Source-pinned CI resolution and remaining native acceptance — 2026-11-11
+
+The former CI-pending observation for integration code SHA [`d3a59446`](https://github.com/ginmp8/pandacode-extended/commit/d3a59446bd9c208b89e8d999f3d001d5be2f6955) is now resolved: [push #43075335735](https://github.com/ginmp8/pandacode-extended/actions/runs/43075335735) and [PR #43075350618](https://github.com/ginmp8/pandacode-extended/actions/runs/43075350618) each passed **11/11 jobs**, including the prior Linux/ARM64 CI failure points. This verifies those GitHub Actions workflows on that exact code SHA, not a real-device or installed-app run.
+
+All 81 shared file divergences were screened by changed-line sets. Their semantics, caller coverage and On/Off transitions are **not fully verified**, and no new definite runtime defect was established by this comparison. Real Linux microphone access, native Settings On/Off, Connect/MCP, bot delegation, cloud/VM, credential transfers, SQLite migration/rollback and installers remain outstanding acceptance gates. Extended **0.12.0 DRAFT** is not approved for release; CI of any subsequent documentation-only SHA must be evaluated independently.

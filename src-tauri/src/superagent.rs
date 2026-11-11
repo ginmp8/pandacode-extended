@@ -181,6 +181,49 @@ fn get_ticket(store: &Store, id: &str) -> Result<Ticket> {
         .ok_or_else(|| "SuperAgent ticket not found.".into())
 }
 
+/// A bounded native task index is required to recover a ticket when the
+/// original bot conversation has been deleted. Neither view depends on session
+/// or bot foreign keys.
+fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket>> {
+    if !(1..=200).contains(&limit) {
+        return Err("Ticket page size must be between 1 and 200.".into());
+    }
+    configuration(store, config_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,orchestration_id,request_key,objective,actor,state,revision,
+                active_assignment_id,evidence,created_at,updated_at
+         FROM sa_tickets WHERE orchestration_id=?1
+         ORDER BY created_at DESC,id DESC LIMIT ?2"
+    ).map_err(|e| e.to_string())?;
+    stmt.query_map(params![config_id,limit], ticket_row)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    pub id: i64,
+    pub kind: String,
+    pub detail: String,
+    pub at: i64,
+}
+
+fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>> {
+    if !(1..=200).contains(&limit) {
+        return Err("Activity page size must be between 1 and 200.".into());
+    }
+    get_ticket(store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,detail,at FROM sa_audit WHERE ticket_id=?1
+         ORDER BY id DESC LIMIT ?2"
+    ).map_err(|e| e.to_string())?;
+    stmt.query_map(params![ticket_id,limit], |r| Ok(AuditEntry {
+        id: r.get(0)?, kind: r.get(1)?, detail: r.get(2)?, at: r.get(3)?,
+    })).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
     store.db.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
@@ -562,6 +605,22 @@ fn change_enabled(
 pub async fn superagent_ticket(state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     get_ticket(&store, &ticket_id)
+}
+
+#[tauri::command]
+pub async fn superagent_tickets(
+    state: State<'_, AppState>, orchestration_id: String, limit: Option<i64>,
+) -> Result<Vec<Ticket>> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_tickets(&store, &orchestration_id, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+pub async fn superagent_activity(
+    state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
+) -> Result<Vec<AuditEntry>> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    history(&store, &ticket_id, limit.unwrap_or(100))
 }
 
 #[tauri::command]
@@ -1042,6 +1101,40 @@ mod tests {
         let (retried, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(session));
+    }
+
+    #[test]
+    fn native_ticket_index_and_audit_survive_restart_without_leaking_other_presets() {
+        let mut store = fixture();
+        let first_config = enabled(&store);
+        let other_config = create_configuration(&store, NewOrchestration {
+            name: "Another preset".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other_config = change_enabled(&store, &other_config.id, 1, true).unwrap();
+        let (first, _) = admit(&mut store, &first_config.id, "First task", "index-a", false).unwrap();
+        let (second, _) = admit(&mut store, &first_config.id, "Second task", "index-b", false).unwrap();
+        let (foreign, _) = admit(&mut store, &other_config.id, "Private preset task", "index-c", false).unwrap();
+        let listed = list_tickets(&store, &first_config.id, 200).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|ticket| ticket.id == first.id));
+        assert!(listed.iter().any(|ticket| ticket.id == second.id));
+        assert!(listed.iter().all(|ticket| ticket.id != foreign.id));
+        assert!(list_tickets(&store, &first_config.id, 0).is_err());
+        assert!(list_tickets(&store, "unknown-orchestration", 100).is_err());
+        assert_eq!(list_tickets(&store, &first_config.id, 1).unwrap().len(), 1);
+        let events = history(&store, &first.id, 100).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "admitted");
+        assert!(history(&store, &first.id, 201).is_err());
+        assert!(history(&store, "unknown-ticket", 100).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_tickets(&reopened, &first_config.id, 100).unwrap().len(), 2);
+        assert_eq!(history(&reopened, &first.id, 100).unwrap()[0].kind, "admitted");
+        assert_eq!(get_ticket(&reopened, &first.id).unwrap().state, "interrupted");
     }
 
     #[test]

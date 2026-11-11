@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -2814,9 +2814,11 @@ function renderComposer(): void {
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
     const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
+    const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
     if (!state.sharedChannelPosting.has(state.sharedChannelId)) {
-      restoreSharedChannelCouncilInputs(oldChannelComposer, document.querySelector<HTMLFormElement>('#shared-channel-composer'));
+      restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
     }
+    bindSharedChannelCouncil(channelComposer);
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
@@ -7151,6 +7153,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
     case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
+    case 'channel-council': toggleSharedChannelCouncil(element); break;
     case 'channel-council-accept': {
       const deliveryId = element.dataset.deliveryId;
       if (deliveryId) {

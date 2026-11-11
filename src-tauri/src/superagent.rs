@@ -519,8 +519,10 @@ pub(crate) fn guard_run_admission(
         "SELECT EXISTS(
             SELECT 1 FROM sa_assignments a
             JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+            LEFT JOIN sessions assigned ON assigned.id=a.session_id
             WHERE a.state='running' AND t.state='running'
-              AND t.project_id=?1 AND a.session_id<>?2
+              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL)
+              AND a.session_id<>?2
          )",
         params![session.project_id, session_id],
         |row| row.get(0),
@@ -1830,6 +1832,49 @@ mod tests {
             [&task.id], |r| r.get(0),
         ).unwrap();
         assert_eq!(settled_events, 1);
+    }
+
+    #[test]
+    fn native_coordinator_lease_also_protects_its_own_distinct_workspace() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('coordinator-project','Coordinator','/tmp/sa-coordinator')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='coordinator-project' WHERE id='router'",
+            [],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, launch) = admit_role(
+            &mut store, &config.id, "Plan read-only work", "coordinator-project-fence", false, true,
+        ).unwrap();
+        assert!(launch);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_eq!(store.session(&coordinator_session).unwrap().project_id, "coordinator-project");
+
+        let ordinary_coordinator = store.create_session(
+            "coordinator-project", "codex", "default", "plan",
+        ).unwrap();
+        let ordinary_worker = store.create_session("project", "codex", "default", "plan").unwrap();
+        assert!(guard_run_admission(&store, &coordinator_session, &[]).is_ok());
+        // The ticket's worker checkout is reserved, but so is the actual
+        // coordinator checkout. Normal direct sessions must not race either.
+        assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_err());
+        assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_err());
+
+        // A missing active session must fail closed instead of silently
+        // releasing the coordinator lease before restart reconciliation.
+        store.db.execute(
+            "DELETE FROM bot_threads WHERE session_id=?1", [&coordinator_session],
+        ).unwrap();
+        store.db.execute("DELETE FROM sessions WHERE id=?1", [&coordinator_session]).unwrap();
+        assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_err());
+        assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_err());
+
+        fail_launch(&store, &ticket.id, "original coordinator session disappeared").unwrap();
+        assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_ok());
+        assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_ok());
     }
 
     #[test]

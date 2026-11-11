@@ -668,6 +668,12 @@ pub(crate) fn read_only_policy(
         if !native_thread {
             return Err("policy_unsupported: SuperAgent session no longer matches its native thread.".into());
         }
+        // A valid native thread must also have the role originally authorized
+        // by the Ticket. Remapping both the assignment and the thread to a
+        // third existing bot cannot grant that bot access to this project.
+        if scope.bot_id != scope.coordinator_id && scope.bot_id != scope.worker_id {
+            return Err("policy_unsupported: assignment bot is not an authorized task role.".into());
+        }
         let active_bot = bots::get(store, &scope.bot_id)?;
         let coordinator = bots::get(store, &scope.coordinator_id)?;
         let assigned_session = store.session(session_id)?;
@@ -1851,6 +1857,42 @@ mod tests {
         assert!(guard_gateway_inbound(
             &store, "worker", &retry_thread, "local-user", true,
         ).is_ok());
+    }
+
+    #[test]
+    fn remapped_assignment_and_thread_cannot_admit_an_unselected_bot() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Authorized worker only", "role-proof", false,
+        ).unwrap();
+        assert!(started);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &sid).unwrap().is_some());
+
+        // Even changing both persisted links to a valid third bot is not a
+        // user-issued task assignment or an authorization to read this scope.
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('unselected','Unselected','project','codex','default','plan',?1,?1)",
+            params![storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_assignments SET bot_id='unselected' WHERE session_id=?1",
+            [&sid],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bot_threads SET bot_id='unselected' WHERE session_id=?1",
+            [&sid],
+        ).unwrap();
+        assert!(assignment_thread_current(&store, &sid, &ticket.id).unwrap());
+        assert!(read_only_policy(&store, &sid).is_err());
+        assert!(guard_gateway_inbound(&store, "unselected", &ticket.id, "local-user", true).is_err());
+        assert!(guard_run_admission(&store, &sid, &[]).is_err());
+        assert!(on_run_finished(&store, &sid, true, "Unauthorized third bot result").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
     }
 
     #[test]

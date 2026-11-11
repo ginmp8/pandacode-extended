@@ -1183,13 +1183,39 @@ pub async fn superagent_list(window: tauri::WebviewWindow, state: State<'_,AppSt
 }
 
 #[tauri::command]
-pub async fn superagent_set_enabled(window: tauri::WebviewWindow, 
-    state: State<'_,AppState>, orchestration_id: String,
+pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
+    app: tauri::AppHandle, state: State<'_,AppState>, orchestration_id: String,
     expected_revision: i64, enabled: bool,
 ) -> Result<Orchestration> {
     require_main_window(&window)?;
-    let store=state.store.lock().map_err(|e|e.to_string())?;
-    change_enabled(&store, &orchestration_id, expected_revision, enabled)
+    let (updated, sessions) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        // Capture only active attempts owned by this orchestration. Authority is
+        // revoked transactionally before any asynchronous provider cancellation.
+        let sessions = if enabled { Vec::new() } else {
+            let mut stmt = store.db.prepare(
+                "SELECT a.session_id FROM sa_assignments a
+                 JOIN sa_tickets t ON t.active_assignment_id=a.id
+                 WHERE t.orchestration_id=?1 AND t.state='running' AND a.state='running'"
+            ).map_err(|e| e.to_string())?;
+            stmt.query_map([&orchestration_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        (change_enabled(&store, &orchestration_id, expected_revision, enabled)?, sessions)
+    };
+    for session in sessions {
+        // Even if the provider cannot be stopped, the native mandate and
+        // assignment have already been revoked. Never restore authority on
+        // re-enable, and do not cancel sessions belonging to other presets.
+        if let Err(error) = crate::stop_session(
+            app.clone(), app.state::<AppState>(), session,
+        ).await {
+            eprintln!("SuperAgent disabled-session cancellation failed: {error}");
+        }
+    }
+    Ok(updated)
 }
 
 /// A policy edit must not silently overwrite an authorization change from
@@ -1213,14 +1239,48 @@ fn change_enabled(
         }
     }
     if current.enabled == enabled { return Ok(current); }
-    let updated=store.db.execute(
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let now = storage::now();
+    let updated = tx.execute(
         "UPDATE sa_orchestrations SET enabled=?2,policy_revision=policy_revision+1,
          updated_at=?3 WHERE id=?1 AND policy_revision=?4",
-        params![orchestration_id,enabled,storage::now(),expected_revision],
-    ).map_err(|e|e.to_string())?;
+        params![orchestration_id,enabled,now,expected_revision],
+    ).map_err(|e| e.to_string())?;
     if updated != 1 {
         return Err("Concurrent orchestration policy change; update rejected.".into());
     }
+    if !enabled {
+        // Off is a native revocation, not just a UI preference. Record the
+        // affected tickets before changing their state, then revoke all
+        // nonterminal grants and active leases in the same SQLite transaction.
+        const PENDING: &str = "('queued','running','waiting_approval','waiting_review','blocked')";
+        let audit = format!(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             SELECT id,'orchestration_disabled','Local-user disabled orchestration; mandate revoked',?2
+             FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING}"
+        );
+        tx.execute(&audit, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+        let grants = format!(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id IN (
+               SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING})"
+        );
+        tx.execute(&grants, [orchestration_id]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+             WHERE id IN (
+               SELECT active_assignment_id FROM sa_tickets
+               WHERE orchestration_id=?1 AND state='running')
+               AND state='running'",
+            params![orchestration_id,now],
+        ).map_err(|e| e.to_string())?;
+        let settle = format!(
+            "UPDATE sa_tickets SET state=CASE WHEN state='running' THEN 'interrupted' ELSE 'blocked' END,
+             active_assignment_id=NULL,revision=revision+1,updated_at=?2
+             WHERE orchestration_id=?1 AND state IN {PENDING}"
+        );
+        tx.execute(&settle, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     configuration(store,orchestration_id)
 }
 
@@ -2133,6 +2193,49 @@ mod tests {
         assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
         assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
+    }
+
+    #[test]
+    fn disabling_an_orchestration_atomically_revokes_active_and_pending_mandates() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (running, launched) = admit(
+            &mut store, &config.id, "Inspect disposable fixture", "disable-active", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &running.id).unwrap().unwrap();
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Pending independent task", "disable-pending", true,
+        ).unwrap();
+        assert!(!launched);
+        let updated = change_enabled(&store, &config.id, config.policy_revision, false).unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.policy_revision, config.policy_revision + 1);
+
+        let interrupted = ticket_snapshot(&store, &running.id, 20).unwrap();
+        assert_eq!(interrupted.ticket.state, "interrupted");
+        assert!(interrupted.ticket.active_assignment_id.is_none());
+        assert!(interrupted.mandate.revoked);
+        assert_eq!(interrupted.assignments[0].state, "interrupted");
+        assert_eq!(interrupted.activity[0].kind, "orchestration_disabled");
+        let pending = ticket_snapshot(&store, &blocked.id, 20).unwrap();
+        assert_eq!(pending.ticket.state, "blocked");
+        assert!(pending.mandate.revoked);
+        assert_eq!(pending.activity[0].kind, "orchestration_disabled");
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Late success").unwrap());
+
+        // Re-enabling the same preset is not a renewal of old task authority.
+        let restored = change_enabled(&store, &config.id, updated.policy_revision, true).unwrap();
+        assert!(restored.enabled);
+        assert!(retry_blocked(&mut store, &blocked.id, false).is_err());
+        assert!(accept(&store, &running.id, interrupted.ticket.revision).is_err());
+        assert!(read_only_policy(&store, &session).is_err());
+        let (fresh, started) = admit(
+            &mut store, &config.id, "Fresh user-authorized work", "disable-new", false,
+        ).unwrap();
+        assert!(started);
+        assert_eq!(fresh.state, "running");
     }
 
     #[test]

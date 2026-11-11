@@ -171,11 +171,20 @@ fn trusted_package(library: &Library, meta: &Meta) -> Result<(super::Files, BTre
 
 /// Immutable, content-addressed read-only copies outside the assessed checkout.
 /// A harness is told the exact path and never receives a global skill activation.
-fn stage(library: &Library, meta: &Meta, files: &super::Files, hashes: &BTreeMap<String, String>) -> Result<String, String> {
+fn stage(library: &Library, meta: &Meta, files: &super::Files, hashes: &BTreeMap<String, String>, scope: Option<&str>) -> Result<String, String> {
     let stage_root = library.dir.join(STAGE_ROOT);
     if stage_root.exists() { safe_dir(&stage_root)?; }
     else { fs::create_dir(&stage_root).map_err(|e| format!("reviewer_skill_unavailable: cannot stage skills: {e}"))?; }
-    let target = stage_root.join(format!("{}-{}", meta.id, meta.sha256));
+    // A reviewer round gets its own immutable staging directory even when
+    // another task selects the same bot and skill package. Scope is hashed so
+    // no session IDs or task text are embedded in the directory name.
+    // The final hash remains the pinned package digest for guarded cleanup.
+    let target_name = if let Some(scope) = scope {
+        format!("{}-{}", sha256_hex(format!("{scope}:{}", meta.id).as_bytes()), meta.sha256)
+    } else {
+        format!("{}-{}", meta.id, meta.sha256)
+    };
+    let target = stage_root.join(target_name);
     if target.exists() {
         safe_dir(&target)?;
     } else {
@@ -363,6 +372,25 @@ pub(crate) fn freeze_with_optional(
 pub(crate) fn freeze_with_checks(
     library: &Library, assigned: &[String], harness: &str, optional: &[String], checks: &[String],
 ) -> Result<ReviewerSkills, String> {
+    freeze_with_scope(library, assigned, harness, optional, checks, None)
+}
+
+/// The trusted Architect passes a stable, internal round/reviewer scope. No
+/// global activation or shared per-bot staging path is introduced.
+pub(crate) fn freeze_for_round(
+    library: &Library, assigned: &[String], harness: &str, optional: &[String],
+    checks: &[String], scope: &str,
+) -> Result<ReviewerSkills, String> {
+    if scope.is_empty() || scope.len() > 256 {
+        return Err("reviewer_skill_unavailable: invalid frozen Council seat scope.".into());
+    }
+    freeze_with_scope(library, assigned, harness, optional, checks, Some(scope))
+}
+
+fn freeze_with_scope(
+    library: &Library, assigned: &[String], harness: &str, optional: &[String],
+    checks: &[String], scope: Option<&str>,
+) -> Result<ReviewerSkills, String> {
     let mut known_optional = HashSet::new();
     for id in optional {
         if !assigned.contains(id) || !known_optional.insert(id) {
@@ -388,7 +416,7 @@ pub(crate) fn freeze_with_checks(
     let mut state = ResolveState {
         seen: HashSet::new(), visiting: HashSet::new(), pins: Vec::new(), prompt: String::new(),
     };
-    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, required: bool, checks: &HashSet<String>, state: &mut ResolveState) -> Result<(), String> {
+    fn visit(library: &Library, id: &str, assigned: &[String], harness: &str, required: bool, checks: &HashSet<String>, scope: Option<&str>, state: &mut ResolveState) -> Result<(), String> {
         if state.seen.contains(id) { return Ok(()); }
         if !state.visiting.insert(id.to_owned()) {
             return Err(format!("reviewer_skill_cycle: dependency cycle at {id}."));
@@ -408,7 +436,7 @@ pub(crate) fn freeze_with_checks(
             }
             let (files, hashes) = trusted_package(library, &meta)?;
             for dependency in &meta.required_skills {
-                visit(library, dependency, assigned, harness, required, checks, state)?;
+                visit(library, dependency, assigned, harness, required, checks, scope, state)?;
             }
             let main = files.iter().find(|(path, _)| path == "SKILL.md")
                 .ok_or_else(|| format!("reviewer_skill_unavailable: no SKILL.md for {id}."))?;
@@ -418,7 +446,7 @@ pub(crate) fn freeze_with_checks(
             let mut contents = body.to_owned();
             let mode = if adapter::FILE_HARNESSES.contains(&harness) { "isolated_files" } else { "bounded_prompt" };
             let staged_path = if mode == "isolated_files" {
-                Some(stage(library, &meta, &files, &hashes)?)
+                Some(stage(library, &meta, &files, &hashes, scope)?)
             } else {
                 for (name, bytes) in &files {
                     if name == "SKILL.md" { continue; }
@@ -462,12 +490,12 @@ pub(crate) fn freeze_with_checks(
     // Otherwise an optional root could pin a shared mandatory dependency as optional,
     // or roll back that dependency when optional provisioning fails.
     for id in assigned.iter().filter(|id| !known_optional.contains(*id)) {
-        visit(library, id, assigned, harness, true, &required_checks, &mut state)?;
+        visit(library, id, assigned, harness, true, &required_checks, scope, &mut state)?;
     }
     let mut skipped = Vec::new();
     for id in assigned.iter().filter(|id| known_optional.contains(*id)) {
         let before = state.clone();
-        if let Err(reason) = visit(library, id, assigned, harness, false, &required_checks, &mut state) {
+        if let Err(reason) = visit(library, id, assigned, harness, false, &required_checks, scope, &mut state) {
             state = before;
             skipped.push(SkippedSkill {
                 id: id.clone(), reason, bot_assigned: true,
@@ -693,6 +721,36 @@ mod tests {
         let (library, root) = fixture();
         add(&library, "oversized", &"x".repeat(SKILL_CHARS + 1), &[]);
         assert!(freeze(&library, &["oversized".into()], "kimi").unwrap_err().contains("reviewer_skill_truncated"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_same_skill_in_parallel_councils_has_distinct_immutable_staging() {
+        let (library, root) = fixture();
+        add(&library, "shared-skill", "Inspect isolated code.", &[]);
+        let assigned = vec!["shared-skill".to_owned()];
+        let first = freeze_for_round(
+            &library, &assigned, "codex", &[], &[], "session-a:100:1:reviewer-one",
+        ).unwrap();
+        let second = freeze_for_round(
+            &library, &assigned, "codex", &[], &[], "session-b:100:1:reviewer-one",
+        ).unwrap();
+        let first_path = first.pins[0].staged_path.as_ref().unwrap();
+        let second_path = second.pins[0].staged_path.as_ref().unwrap();
+        assert_ne!(first_path, second_path,
+            "concurrent review cycles cannot share materialized skill directories");
+        assert_eq!(first.pins[0].content_sha256, second.pins[0].content_sha256);
+        assert_eq!(first.pins[0].source_commit, second.pins[0].source_commit);
+        assert!(first.verify().is_ok() && second.verify().is_ok());
+        let reopened = freeze_for_round(
+            &library, &assigned, "codex", &[], &[], "session-a:100:1:reviewer-one",
+        ).unwrap();
+        assert_eq!(reopened.pins[0].staged_path, first.pins[0].staged_path,
+            "reopening the same frozen round must reuse only its own staging");
+        #[cfg(windows)]
+        for path in [first_path, second_path] {
+            clear_staged_readonly(&Path::new(path).join("SKILL.md")).unwrap();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

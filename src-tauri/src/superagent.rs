@@ -867,6 +867,10 @@ fn accept_with_pause(
             JOIN sessions original ON original.id=assignment.session_id
             WHERE assignment.ticket_id=?1 AND assignment.bot_id=?2
               AND assignment.state='finished'
+              AND assignment.attempt=(
+                  SELECT MAX(newest.attempt) FROM sa_assignments newest
+                  WHERE newest.ticket_id=?1
+              )
               AND original.project_id=?3 AND assignment.result=?4
         )",
         params![ticket_id,ticket.worker_bot_id,mandate(store, ticket_id)?.project_id,
@@ -1945,6 +1949,44 @@ mod tests {
             [&original_session],
         ).unwrap();
         assert_eq!(accept(&store, &ticket.id, waiting.revision).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn human_acceptance_cannot_reuse_evidence_from_a_rejected_previous_attempt() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, _) = admit(
+            &mut store, &cfg.id, "Review a bounded task", "accept-attempt-1", false,
+        ).unwrap();
+        let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &first_session, true, "First worker result").unwrap());
+        let first = get_ticket(&store, &ticket.id).unwrap();
+        let rejected = reject(&store, &ticket.id, first.revision, "Needs corrections").unwrap();
+        assert_eq!(rejected.state, "blocked");
+
+        let (running, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        assert_eq!(running.state, "running");
+        let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_ne!(first_session, second_session);
+        assert!(on_run_finished(&store, &second_session, true, "Second worker result").unwrap());
+        let latest = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(latest.state, "waiting_approval");
+
+        // Even if persisted current evidence is replaced to match the
+        // earlier accepted provider turn, that superseded attempt cannot
+        // satisfy the current Ticket's human acceptance gate.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='failed' WHERE session_id=?1",
+            [&second_session],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET evidence='First worker result' WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(accept(&store, &ticket.id, latest.revision).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        assert!(!history(&store, &ticket.id, 30).unwrap()
+            .iter().any(|entry| entry.kind == "human_accepted"));
     }
 
     #[test]

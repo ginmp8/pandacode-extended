@@ -1027,7 +1027,8 @@ pub(crate) fn accept_channel_delivery(
 ) -> Result<TeamSnapshot> {
     let team = council::accept(state, session_id)?;
     emit(app, &team);
-    wake(app.clone());
+    // The originating command must persist the user-acceptance audit record
+    // before waking the lead, or a fast finish could outrun authorization.
     Ok(team)
 }
 /// A task on another computer runs its team there (docs/remote-access.md): this computer

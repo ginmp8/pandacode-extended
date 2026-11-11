@@ -19,6 +19,23 @@ export interface SharedChannelMessage {
   text: string;
   status: 'Queued' | 'In progress' | 'Completed' | 'Failed' | 'Stopped' | null;
   createdAt: number;
+  council?: ChannelCouncilView;
+}
+export interface ChannelCouncilView {
+  cycleId: string;
+  sessionId: string;
+  state: string;
+  round: number;
+  target: number;
+  lowest: number | null;
+  artifactRevision: string;
+  notice?: string | null;
+  reviewers: { botId: string | null; name: string; lens: string; round: number; score: number | null }[];
+  followupStatus?: string | null;
+  followupUrl?: string | null;
+  followupError?: string | null;
+  acceptanceReason?: string | null;
+  acceptedBy?: string | null;
 }
 export interface SharedChannelDetail extends SharedChannelSummary {
   messages: SharedChannelMessage[];
@@ -76,7 +93,9 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     const bot = bots.find(item => item.id === message.authorBotId);
     const description = message.kind === "direct_delegation"
       ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
-    return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}</div>`;
+    const council = message.council;
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
   const name = bot?.name ?? (message.kind === 'user' ? 'You' : 'Bot');
@@ -121,9 +140,39 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
   return stop || stoppedRow ? `<div class="bc-channel-actions" role="group" aria-label="Channel activity">${stop}${stoppedRow}</div>` : '';
 }
 
-export function sharedChannelComposerHtml(channel: SharedChannelDetail): string {
+
+/** Preserve unsent, per-message Council inputs across a channel refresh only. */
+export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | null, next: HTMLFormElement | null): void {
+  if (!previous || !next || previous.dataset.channelId !== next.dataset.channelId) return;
+  const oldInputs = [...previous.querySelectorAll<HTMLInputElement>('input[name^="council"]')];
+  for (const input of next.querySelectorAll<HTMLInputElement>('input[name^="council"]')) {
+    const old = oldInputs.find(item => item.name === input.name
+      && (item.type === 'checkbox' || item.type === 'radio' ? item.value === input.value : true));
+    if (!old) continue;
+    if (input.type === 'checkbox' || input.type === 'radio') input.checked = old.checked;
+    else input.value = old.value;
+  }
+}
+
+export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bot[] = []): string {
   if (channel.archived || !channel.memberIds.length) return '';
-  return `<form id="shared-channel-composer" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea><div class="composer-toolbar"><span></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div></form>`;
+  const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
+  const options = members.map(bot => `<label><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}"><span>${escape(bot.name)}</span></label>`).join('');
+  return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
+    <div class="bc-council-controls"><label class="bc-council-toggle"><input type="checkbox" name="councilEnabled">Council review this message</label>
+      <fieldset class="bc-council-options"><legend>Council settings (this message only)</legend>
+        <div class="bc-council-numbers"><label>Target score <input type="number" name="councilTarget" min="1" max="10" step="0.5" value="9"></label>
+        <label>Max rounds <input type="number" name="councilMaxRounds" min="1" max="100" step="1" value="10"></label></div>
+        <label><input type="radio" name="councilMode" value="auto" checked> Automatic native reviewers</label>
+        <label><input type="radio" name="councilMode" value="selected"> Selected channel bots</label>
+        <div class="bc-council-reviewer-options"><p>Choose 2–8 members other than any bot assigned this message.</p>${options}</div>
+        <div class="bc-council-followup"><label><input type="checkbox" name="councilGithubIssue"> After Council approval, create one GitHub issue with accepted findings</label>
+          <label>Authorized repository (owner/name) <input type="text" name="councilGithubRepo" maxlength="201" placeholder="owner/repository" autocomplete="off"></label>
+          <small>Uses the existing signed-in GitHub CLI. A failed or uncertain external write is reported separately; it never changes the Council verdict.</small></div>
+        <div class="bc-council-selected-permissions"><label><input type="checkbox" name="councilScopedFile"> Allow one exact native file-inspection action</label><label>Authorized relative file path <input type="text" name="councilFilePath" maxlength="240" placeholder="src/example.ts" autocomplete="off"></label><small>Read-only by default. This does not authorize shell commands or checkout writes.</small></div>
+      </fieldset>
+    </div>
+    <div class="composer-toolbar"><span></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div></form>`;
 }
 
 async function editChannel(options: SharedChannelUiOptions, channel: SharedChannelDetail): Promise<void> {
@@ -156,3 +205,28 @@ export async function openSharedChannelSettings(channelId: string, options: Shar
   catch (error) { options.notify(error instanceof Error ? error.message : String(error)); }
 }
 
+
+/** This is a local user action, not a model instruction or a bot tool. */
+export function openSharedChannelCouncilAcceptance(deliveryId: string, options: SharedChannelUiOptions): void {
+  const dialog = options.modal('Accept Council exception', `<form class="bc-council-accept-form">
+    <p class="dialog-description">The Council has not passed. Accept this review as a user exception only with an explicit reason. The result will be attributed to the local user.</p>
+    <label for="bc-council-accept-reason">Acceptance reason</label>
+    <textarea id="bc-council-accept-reason" name="reason" required minlength="8" maxlength="1024" rows="4" placeholder="Explain why you accept this result despite the Council findings"></textarea>
+    <div class="dialog-footer"><button type="button" class="secondary-button" data-shared-action="accept-cancel">Cancel</button>
+    <button type="submit" class="primary-button">Accept with reason</button></div>
+  </form>`, 'bot-shared-dialog');
+  const form = dialog.querySelector<HTMLFormElement>('.bc-council-accept-form')!;
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    const reason = String(new FormData(form).get('reason') ?? '').trim();
+    if (reason.length < 8 || reason.length > 1024) { options.notify('Enter an acceptance reason (8–1024 characters).'); return; }
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    void options.call('bot_shared_channel_council_accept', { deliveryId, reason }).then(async () => {
+      options.closeModal();
+      await options.changed();
+    }).catch(error => options.notify(error instanceof Error ? error.message : String(error)))
+      .finally(() => { if (submit?.isConnected) submit.disabled = false; });
+  });
+  dialog.querySelector('[data-shared-action="accept-cancel"]')?.addEventListener('click', options.closeModal);
+}

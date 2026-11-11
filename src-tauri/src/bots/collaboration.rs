@@ -451,6 +451,11 @@ fn claim_callback(store: &Store, delivery_id: &str, reply: &str) -> Result<Optio
     let Some((origin, source_channel, external, _, name, channel, message_id, status, session_id)) = item else {
         return Ok(None);
     };
+    // Council callbacks require an actual current native pass or the exact
+    // attributable human exception, even when invoked by Stop/restart recovery.
+    if !shared_channels::council_callback_allowed(store, delivery_id)? {
+        return Ok(None);
+    }
     if !matches!(status.as_str(), "completed" | "failed" | "stopped") { return Ok(None); }
     let fresh = match status.as_str() {
         "completed" if !reply.trim().is_empty() => reply.trim().to_owned(),

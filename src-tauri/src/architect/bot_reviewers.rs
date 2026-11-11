@@ -50,6 +50,7 @@ pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json:
         result.push(serde_json::json!({
             "id": bot.id, "name": bot.name, "role": bot.role,
             "provider": bot.provider, "model": bot.model, "paused": bot.paused,
+            "skills": bot.skills,
             "available": reason.is_none(), "reason": reason
         }));
     }
@@ -102,15 +103,23 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
     if council.reviewer_bot_ids.is_empty() { return Ok(()); }
     let executor = executor(store, session_id)?;
     let mut used = HashSet::new();
+    let mut available_skills = HashSet::new();
     for id in &council.reviewer_bot_ids {
         if !used.insert(id) {
             return Err("reviewer_unavailable: repeated reviewer bot ID.".into());
         }
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
         valid_bot(&bot, executor.as_deref(), true)?;
+        available_skills.extend(bot.skills.iter().cloned());
         if let Some(permissions) = &council.review_permissions {
             review_policy(&bot, permissions)?;
         }
+    }
+    if council.optional_skill_ids.iter().any(|id| !available_skills.contains(id)) {
+        return Err("reviewer_skill_unavailable: optional skill must be assigned to at least one selected reviewer bot.".into());
+    }
+    if council.required_check_skill_ids.iter().any(|id| !available_skills.contains(id)) {
+        return Err("reviewer_skill_unavailable: native check must name an assigned reviewer bot skill.".into());
     }
     Ok(())
 }
@@ -136,16 +145,26 @@ pub(super) struct SelectedReviewer {
     pub profile: WorkerProfile,
     pub context: super::reviewer_security::ReviewerBotContext,
     pub tool_policy: super::reviewer_security::ReviewerToolPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<crate::skills::reviewer::ReviewerSkills>,
 }
 
-fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_executable: bool) -> Result<Vec<SelectedReviewer>> {
+fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Vec<SelectedReviewer>> {
     let key = format!("native-reviewer-round:{}:{round}", team.council_since);
     let saved: Option<String> = store.db.query_row(
         "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
         rusqlite::params![team.session_id, key], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(raw) = saved {
-        return serde_json::from_str(&raw).map_err(|_| "reviewer_session_mismatch: invalid frozen reviewer round.".into());
+        let frozen: Vec<SelectedReviewer> = serde_json::from_str(&raw)
+            .map_err(|_| "reviewer_session_mismatch: invalid frozen reviewer round.".to_string())?;
+        if check_executable && frozen.iter().any(|r| !r.context.skill_ids.is_empty() && r.skills.is_none()) {
+            return Err("reviewer_skill_unavailable: legacy round has assigned skills without immutable pins; start a new round.".into());
+        }
+        for reviewer in &frozen {
+            if let Some(skills) = &reviewer.skills { skills.verify()?; }
+        }
+        return Ok(frozen);
     }
     // Older S2 rounds only pinned profiles as seats were issued. Re-reading the remaining bots
     // would invent a snapshot; require explicit recovery instead.
@@ -160,9 +179,26 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
         valid_bot(&bot, executor.as_deref(), check_executable)?;
         let tool_policy = config.review_permissions.as_ref().map(|permissions| review_policy(&bot, permissions)).transpose()?.unwrap_or(super::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
+        let skills = if bot.skills.is_empty() { None } else if let Some(library) = library {
+            let optional = config.optional_skill_ids.iter()
+                .filter(|id| bot.skills.contains(id))
+                .cloned().collect::<Vec<_>>();
+            let checks = config.required_check_skill_ids.iter()
+                .filter(|id| bot.skills.contains(id))
+                .cloned().collect::<Vec<_>>();
+            Some(if checks.is_empty() && optional.is_empty() {
+                crate::skills::reviewer::freeze(library, &bot.skills, &bot.provider)?
+            } else if checks.is_empty() {
+                crate::skills::reviewer::freeze_with_optional(library, &bot.skills, &bot.provider, &optional)?
+            } else {
+                crate::skills::reviewer::freeze_with_checks(library, &bot.skills, &bot.provider, &optional, &checks)?
+            })
+        } else if check_executable {
+            return Err("reviewer_skill_unavailable: central Skills Library could not be opened.".into());
+        } else { None };
         reviewers.push(SelectedReviewer {
             id: id.clone(), roster_bot_ids: config.reviewer_bot_ids.clone(), profile: profile(&bot),
-            context: super::reviewer_security::ReviewerBotContext::from_bot(&bot), tool_policy,
+            context: super::reviewer_security::ReviewerBotContext::from_bot(&bot), tool_policy, skills,
         });
     }
     super::record_request(store, &team.session_id, &key, "reviewer_round", &serde_json::to_string(&reviewers).map_err(|e| e.to_string())?, "")?;
@@ -171,13 +207,22 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
 
 /// Resolve a frozen selected reviewer. Live deletion, pause, executor identity and frozen-model
 /// availability are still checked, without substituting a newly edited profile or another bot.
-pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>) -> Result<Option<SelectedReviewer>> {
-    seat_bot_inner(store, team, round, replaces, true)
+pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
+    seat_bot_with_skills(store, team, round, replaces, true, library)
 }
+#[cfg(test)]
 pub(super) fn seat_bot_inner(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool) -> Result<Option<SelectedReviewer>> {
+    seat_bot_with_skills(store, team, round, replaces, check_executable, None)
+}
+#[cfg(test)]
+pub(super) fn seat_bot_inner_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: &crate::skills::Library) -> Result<Option<SelectedReviewer>> {
+    seat_bot_with_skills(store, team, round, replaces, false, Some(library))
+}
+fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     if config.reviewer_bot_ids.is_empty() { return Ok(None); }
-    let reviewers = round_reviewers(store, team, round, check_executable)?;
+    crate::bots::shared_channels::validate_delivery_reviewers(store, &team.session_id, &config.reviewer_bot_ids)?;
+    let reviewers = round_reviewers(store, team, round, check_executable, library)?;
     let old = replaces.and_then(|id| team.workers.iter().find(|w| w.id == id));
     let inherited = old.and_then(|w| w.reviewer_binding.as_ref()).and_then(|b| b.reviewer_bot_id.as_deref());
     if old.is_some() && inherited.is_none() {
@@ -225,6 +270,8 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     let next = next.as_ref();
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
         || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
+        || old.map(|c| &c.optional_skill_ids) != next.map(|c| &c.optional_skill_ids)
+        || old.map(|c| &c.required_check_skill_ids) != next.map(|c| &c.required_check_skill_ids)
 }
 
 /// Live rounds must settle first. A user change can explicitly recover a stopped/incomplete

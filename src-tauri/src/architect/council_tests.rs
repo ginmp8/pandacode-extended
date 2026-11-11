@@ -6,6 +6,165 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 
 const SINCE: i64 = 1000;
 
+
+#[test]
+fn post_acceptance_github_action_requires_one_exact_repository_and_user_grant() {
+    let mut config = CouncilConfig {
+        post_acceptance_issue: Some(council::PostAcceptanceIssue {
+            authorization_id: "local-user-approval".into(),
+            repository: "owner/repo-name".into(),
+        }),
+        ..Default::default()
+    };
+    assert!(config.validate().is_ok());
+    config.post_acceptance_issue.as_mut().unwrap().repository = "owner/../other".into();
+    assert!(config.validate().unwrap_err().contains("owner/name"));
+    config.post_acceptance_issue.as_mut().unwrap().repository = "owner/repo-name".into();
+    config.post_acceptance_issue.as_mut().unwrap().authorization_id.clear();
+    assert!(config.validate().unwrap_err().contains("user-authorized"));
+}
+
+#[test]
+fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
+    let mut council = on(9.0, 10, 0);
+    council.optional_skill_ids = vec!["optional".into()];
+    assert!(council.validate().unwrap_err().contains("selected bots"));
+    council.reviewer_bot_ids = vec!["reviewer-one".into(), "reviewer-two".into()];
+    assert!(council.validate().is_ok());
+    council.optional_skill_ids.push("optional".into());
+    assert!(council.validate().unwrap_err().contains("unique"));
+    council.optional_skill_ids = vec!["../escaped".into()];
+    assert!(council.validate().unwrap_err().contains("valid IDs"));
+}
+
+
+#[test]
+fn mandatory_skill_check_without_native_evidence_cannot_pass_on_scores_alone() {
+    let config = on(9.0, 10, 2);
+    let mut team = team_with(config, vec![
+        seat("reviewer-a", 1, Some(9.8), SINCE + 1),
+        seat("reviewer-b", 1, Some(9.7), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "ordinary Council without skill obligations keeps its native score gate");
+
+    let worker = &team.workers[0];
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+        worker.council.as_ref().unwrap(),
+    );
+    binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+        pins: vec![crate::skills::reviewer::SkillPin {
+            id: "required-check".into(),
+            source_kind: "folder".into(),
+            source_location: "local".into(),
+            source_ref: None,
+            source_commit: None,
+            content_sha256: "a".repeat(64),
+            file_sha256: Default::default(),
+            dependencies: vec![],
+            required_for_acceptance: true,
+            check_required: true,
+            delivery_mode: "bounded_prompt".into(),
+            staged_path: None,
+            imported: true,
+            bot_assigned: true,
+            eligible: true,
+            supplied: true,
+            invoked: false,
+            check_executed: false,
+            evidence_verified: false,
+        }],
+        prompt: String::new(),
+        skipped: vec![],
+    });
+    team.workers[0].reviewer_binding = Some(binding);
+
+    assert_eq!(council::status(&team).unwrap().state, "fixing",
+        "an unverified mandatory check must never create an automatic passed verdict");
+    assert!(finish_refusal(&team).unwrap().contains("reviewer_skill_evidence_unverified"));
+    assert_eq!(review(&team).unwrap()["passed"].as_bool(), Some(false));
+
+    // A mandatory methodology skill need not imply a required executable check.
+    team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.skills.as_mut().unwrap()
+        .pins[0].check_required = false;
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+}
+
+#[test]
+fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports() {
+    let (state, sid) = state_fixture();
+    let mut team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    team.config.council = Some(on(9.0, 10, 2));
+    team.council_since = SINCE;
+    let mut reviewer = seat("native-seat", 1, Some(9.8), SINCE + 1);
+    reviewer.status = "running".into();
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+        pins: vec![crate::skills::reviewer::SkillPin {
+            id: "native-check".into(), source_kind: "folder".into(),
+            source_location: "test".into(), source_ref: None, source_commit: None,
+            content_sha256: "b".repeat(64), file_sha256: Default::default(),
+            dependencies: vec![], required_for_acceptance: true, check_required: true,
+            delivery_mode: "bounded_prompt".into(), staged_path: None,
+            imported: true, bot_assigned: true, eligible: true, supplied: true,
+            invoked: false, check_executed: false, evidence_verified: false,
+        }],
+        prompt: "Frozen reviewer skill methodology.".into(), skipped: vec![],
+    });
+    {
+        let store = state.store.lock().unwrap();
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    }
+    reviewer.reviewer_binding = Some(binding);
+    team.workers.push(reviewer);
+    team.workers.push(seat("peer", 1, Some(9.7), SINCE + 2));
+    {
+        let store = state.store.lock().unwrap();
+        save(&store, &mut team).unwrap();
+    }
+    let generation = team.generation;
+    let actor = coordination::Actor::Worker { id: "native-seat".into(), attempt: 1 };
+    let args = || json!({"skillId": "native-check"});
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_verify", args()).unwrap_err().contains("first open"));
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_open", json!({"skillId": "missing"}))
+        .unwrap_err().contains("not supplied"));
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_open", json!({"skillId": "native-check", "verified": true}))
+        .unwrap_err().contains("invalid arguments"));
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &coordination::Actor::Architect, "pandacode_reviewer_skill_open", args()).is_err());
+    let (opened, _) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_open", args()).unwrap();
+    assert!(opened["lowerTrustInstructions"].as_str().unwrap().contains("Frozen reviewer"));
+    assert_eq!(opened["nativeRetrievalRecorded"], true);
+    let (checked, _) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_verify", args()).unwrap();
+    assert_eq!(checked["pinnedInputIntegrityVerified"], true);
+    let (_, duplicate) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &actor, "pandacode_reviewer_skill_verify", args()).unwrap();
+    assert!(duplicate.is_none(), "duplicate native calls are idempotent");
+    let mut persisted = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    persisted.workers[0].status = "completed".into();
+    {
+        let store = state.store.lock().unwrap();
+        save(&store, &mut persisted).unwrap();
+    }
+    assert_eq!(council::status(&persisted).unwrap().state, "passed");
+    let evidence = persisted.workers[0].reviewer_binding.as_ref().unwrap()
+        .skill_evidence.get("native-check").unwrap();
+    assert!(evidence.invoked && evidence.check_executed && evidence.evidence_verified);
+    persisted.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
+        .get_mut("native-check").unwrap().content_sha256 = "stale".into();
+    assert_eq!(council::status(&persisted).unwrap().state, "fixing");
+}
+
 #[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
@@ -214,6 +373,86 @@ fn selected_round_freezes_all_profiles_before_split_dispatch_and_replacement() {
     assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap_err().contains("removed"));
     team.workers[0].reviewer_binding.as_mut().unwrap().snapshot.bot_context.as_mut().unwrap().instructions = "forged".into();
     assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, Some("first"), false).unwrap_err().contains("native authorization"));
+}
+
+#[test]
+fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activation() {
+    use crate::skills::{Kind, Library, Source};
+    let (store, mut team) = fixture();
+    let root = std::env::temp_dir().join(format!("council-s3-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let library = Library::new(root.join("skills"), root.clone());
+    let imported = library.import(
+        Kind::Skill,
+        vec![("SKILL.md".into(), b"Use a source-linked checklist for this review.".to_vec())],
+        "review-checklist",
+        Source { kind: "folder".into(), location: "review-checklist".into(), git_ref: None, commit: None },
+    ).unwrap();
+    let skill_id = imported.meta.id;
+    let project = store.session(&team.session_id).unwrap().project_id;
+    for id in ["bot-a", "bot-b"] {
+        store.db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Inspect sources','','',?2,'codex','frozen-model','full',1,1,?3)",
+            params![id, project, serde_json::json!([skill_id.clone()]).to_string()],
+        ).unwrap();
+    }
+    let mut config = on(9.0, 10, 0);
+    config.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    let first = bot_reviewers::seat_bot_inner_with_skills(&store, &team, 1, None, &library).unwrap().unwrap();
+    let initial = first.skills.as_ref().unwrap();
+    assert_eq!(initial.pins.len(), 1);
+    assert_eq!(initial.pins[0].id, skill_id);
+    assert_eq!(initial.pins[0].delivery_mode, "isolated_files");
+    assert!(initial.prompt.contains("source-linked checklist"));
+    assert!(initial.verify().is_ok());
+    assert!(library.list().unwrap().iter().all(|entry| entry.meta.activations.is_empty()));
+
+    let worker = seat("first", 1, None, SINCE + 1);
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider, &worker.model, worker.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some(first.id.clone());
+    binding.roster_bot_ids = first.roster_bot_ids.clone();
+    binding.required_reviewers = Some(first.roster_bot_ids.len());
+    binding.snapshot.bot_context = Some(first.context.clone());
+    binding.snapshot.tool_policy = first.tool_policy.clone();
+    binding.snapshot.skills = first.skills.clone();
+    reviewer_security::record_native_authority(&store, &team.session_id, &binding).unwrap();
+    let mut worker = worker;
+    worker.reviewer_binding = Some(binding);
+    team.workers.push(worker);
+    let issued = team.workers[0].reviewer_binding.as_ref().unwrap().clone();
+    assert!(reviewer_security::validate_issued_authority(&store, &team.session_id, &issued).is_ok());
+    let mut tampered = issued;
+    tampered.snapshot.skills.as_mut().unwrap().prompt.push_str("\nForged instruction");
+    assert!(reviewer_security::validate_issued_authority(&store, &team.session_id, &tampered)
+        .unwrap_err().contains("reviewer_session_mismatch"));
+
+    // A library replacement between separately dispatched seats cannot alter this round.
+    library.import(
+        Kind::Skill,
+        vec![("SKILL.md".into(), b"This new revision must wait for the next Council round.".to_vec())],
+        "review-checklist",
+        Source { kind: "folder".into(), location: "review-checklist".into(), git_ref: None, commit: None },
+    ).unwrap();
+    let second = bot_reviewers::seat_bot_inner_with_skills(&store, &team, 1, None, &library).unwrap().unwrap();
+    assert_eq!(second.id, "bot-b");
+    assert_eq!(second.skills, first.skills);
+    assert!(second.skills.as_ref().unwrap().prompt.contains("source-linked checklist"));
+    assert!(!second.skills.as_ref().unwrap().prompt.contains("new revision"));
+    assert!(library.list().unwrap().iter().all(|entry| entry.meta.activations.is_empty()));
+    let staged = initial.pins[0].staged_path.as_ref().unwrap();
+    let file = std::path::Path::new(staged).join("SKILL.md");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    crate::skills::reviewer::clear_staged_readonly(&file).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -906,7 +1145,7 @@ fn sub_workers_cannot_convene() {
     let (_run, actor) = running_worker(&state, &sid, "w", "src");
     let coordination::Actor::Worker { id, attempt } = actor else { panic!("a worker") };
     let team = saved(&state, &sid);
-    let refused = dispatch_as(&state, &sid, team.generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[reviewer_assignment("r", "ux")]}), &AtomicBool::new(false), &routing::AutoRoutes::default()).unwrap_err();
+    let refused = dispatch_as(&state, &sid, team.generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[reviewer_assignment("r", "ux")]}), &AtomicBool::new(false), &routing::AutoRoutes::default(), None).unwrap_err();
     assert!(refused.contains("lead"), "{refused}");
 }
 

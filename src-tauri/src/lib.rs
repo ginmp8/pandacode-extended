@@ -2432,6 +2432,18 @@ async fn launch_operation_admitted(
                 } else {
                     (host, missing, None)
                 }
+            } else if matches!(
+                config.reviewer_policy.as_ref(),
+                Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+            ) {
+                // Read-only reviewers still need the two task-scoped, native skill
+                // retrieval/verification tools. Never expose Architect or bot tools.
+                let host = team.as_ref().and_then(|admission| {
+                    architect::reviewer_skill_host(
+                        app.clone(), session_id.clone(), stopped.clone(), admission,
+                    )
+                });
+                (host, false, None)
             } else {
                 (None, false, None)
             };
@@ -2671,9 +2683,8 @@ async fn launch_operation_admitted(
         let restored = kind.is_some() && turn_message_id != 0 && store.lock().ok().is_some_and(|db| remote::orchestrate::restore_wake(&db, &session_id, turn_message_id).unwrap_or(false));
         // Settled machine threads wake this task now that it is idle.
         remote::orchestrate::parent_finished(&app, &session_id, was_stopped, restored);
-        // Bot conversations reply on their channel and send their next queued message.
+        // Schedules are independent of the bot's native Council completion gate.
         if !was_stopped {
-            bots::run_finished(&app, &session_id, successful);
             schedules::run_finished(&app, &session_id, successful);
         }
         // Serve has no window: link pull requests and send the next queued message natively.
@@ -2703,6 +2714,15 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // A turn's approval requests expire even if Council is still reviewing
+        // or the user stopped the run. This must precede deferred final callbacks.
+        bots::gateway::turn_ended(&session_id);
+        // The Architect must persist its final Council verdict before bot callbacks
+        // inspect it; otherwise an asynchronous bot finish may race the Team save
+        // and strand a genuinely completed Channel Council delivery.
+        if !was_stopped {
+            bots::run_finished(&app, &session_id, successful);
+        }
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
         if let (true, Some((mut next, (tools, approvals)))) = (successful && !was_stopped, warm_next) {
             // A turn that ended without any reply (seen after background commands) may have
@@ -4413,6 +4433,7 @@ pub fn run() {
                 bots::shared_channels::bot_shared_channel_update,
                 bots::shared_channels::bot_shared_channel_archive,
                 bots::shared_channels::bot_shared_channel_post,
+            bots::shared_channels::bot_shared_channel_council_accept,
                 bots::shared_channels::bot_shared_channel_stop,
                 bots::shared_channels::bot_shared_channel_continue,
                 bots::shared_channels::bot_shared_channel_reassign,

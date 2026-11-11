@@ -6,7 +6,7 @@ const toggle = (page: Page) => panel(page).getByRole('switch', { name: 'Council'
 /** Eligible reviewer identities, excluding the current task executor and unavailable bots. */
 const eligibleReviewers = (page: Page) => panel(page).locator('.council-bots input[data-reviewer-bot]:not(:disabled)');
 const option = (page: Page, field: string, name: string) => panel(page).locator(`[data-field="${field}"]`).getByRole('button', { name, exact: true });
-type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: string; provider: string; model: string; paused: boolean; available?: boolean; reason?: string }[] };
+type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: string; provider: string; model: string; paused: boolean; skills?: string[]; available?: boolean; reason?: string }[] };
 
 // The first paint can be slow on a busy machine; what is under test is what happens after it.
 test.setTimeout(60_000);
@@ -71,6 +71,118 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
+});
+
+test('optional selected-bot skill remains optional after Council configuration is reloaded', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  // This test supplies its own reviewer fixtures. Use the stable project task,
+  // since ?bots=sample creates new random desktop session IDs on every reload.
+  await open(page, '/', {}, 0, '', {}, { ids: bots.map(bot => bot.id), bots });
+  await expect(button(page)).toHaveAttribute('data-session-id', 'session-1');
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(1);
+  const optional = panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' });
+  // Applying the setting replaces the input node; assert the persisted value, not the old element.
+  await optional.click();
+  await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
+
+  await page.reload();
+  // A browser reload restarts the preview app; wait for the same boot-ready
+  // composer condition as open() before asserting persisted Council settings.
+  await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeVisible({ timeout: 30_000 });
+  // A restored Council with no review rounds has no strip; its enabled button
+  // is the observable persisted state, not a review-progress indicator.
+  await expect(button(page)).toHaveAttribute('data-on', '', { timeout: 30_000 });
+  await ready(page);
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' })).toBeChecked();
+  await expect(panel(page).getByRole('group', { name: 'Required native skill checks' }).getByRole('checkbox', { name: 'risk-scan' })).not.toBeChecked();
+});
+
+test('selected reviewer skill receipts show native supply and optional failures without claiming execution', async ({ page }) => {
+  await open(page, '/?council=fixing');
+  const status = await page.evaluate(async () => {
+    const { councilSummaryHtml } = await import('/src/council-panel.ts');
+    const team: any = {
+      sessionId: 'skills-seat', status: 'completed', councilSince: 1,
+      config: { council: { target: 9, maxRounds: 10, reviewers: 2 } },
+      councilStatus: { state: 'passed', round: 1, lowest: 9.2, target: 9, stale: false },
+      workers: [{
+        id: 'seat-1', name: 'Configured reviewer', status: 'completed', createdAt: 2,
+        council: { round: 1, lens: 'Security', score: 9.2 },
+        reviewerBinding: {
+          reviewerBotId: 'reviewer-1',
+          snapshot: { skills: {
+            pins: [{
+              id: 'required-scan', contentSha256: 'a'.repeat(64),
+              supplied: true, invoked: false, checkExecuted: false, evidenceVerified: false, checkRequired: true,
+            }],
+            skipped: [{ id: 'optional-scan', reason: 'reviewer_skill_unavailable: missing package <untrusted>' }],
+          } },
+        },
+      }],
+    };
+    const document = new DOMParser().parseFromString(councilSummaryHtml(team), 'text/html');
+    const row = document.querySelector('.council-row');
+    const detail = row?.querySelector('.council-row-skills');
+    return {
+      text: detail?.textContent ?? '',
+      title: detail?.getAttribute('title') ?? '',
+      label: row?.getAttribute('aria-label') ?? '',
+      injectedElementCount: document.querySelectorAll('untrusted').length,
+    };
+  });
+  expect(status.text).toContain('1 supplied, 1 skipped');
+  expect(status.text).toContain('optional-scan');
+  expect(status.text).toContain('reviewer_skill_unavailable');
+  expect(status.title).toContain('required-scan: supplied; native retrieval not verified; pinned input integrity required; not verified');
+  expect(status.title).toContain('optional-scan: skipped');
+  expect(status.label).toContain('optional-scan');
+  expect(status.injectedElementCount).toBe(0);
+});
+
+test('native reviewer evidence requires matching content and artifact revision', async ({ page }) => {
+  await open(page, '/?council=fixing');
+  const observed = await page.evaluate(async () => {
+    const { councilSummaryHtml } = await import('/src/council-panel.ts');
+    const team: any = {
+      sessionId: 'native-observed', status: 'completed', councilSince: 1,
+      config: { council: { target: 9, maxRounds: 10, reviewers: 2 } },
+      councilStatus: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+      workers: [{
+        id: 'observed', name: 'Reviewer', status: 'completed', createdAt: 2,
+        council: { round: 1, lens: 'Integrity', score: 9.5 },
+        reviewerBinding: {
+          reviewerBotId: 'reviewer-bot', artifactRevision: 'cycle:1:2:observed',
+          skillEvidence: { 'skill-a': {
+            contentSha256: 'c'.repeat(64), artifactRevision: 'cycle:1:2:observed',
+            invoked: true, checkExecuted: true, evidenceVerified: true,
+            checkKind: 'pinned_input_integrity',
+          } },
+          snapshot: { skills: { pins: [{
+            id: 'skill-a', contentSha256: 'c'.repeat(64), supplied: true, checkRequired: true,
+            invoked: false, checkExecuted: false, evidenceVerified: false,
+          }], skipped: [] } },
+        },
+      }],
+    };
+    const receipt = () => new DOMParser().parseFromString(councilSummaryHtml(team), 'text/html')
+      .querySelector('.council-row-skills')?.getAttribute('title') ?? '';
+    const valid = receipt();
+    team.workers[0].reviewerBinding.skillEvidence['skill-a'].artifactRevision = 'unrelated';
+    return { valid, stale: receipt() };
+  });
+  expect(observed.valid).toContain('native retrieval recorded; pinned input integrity verified');
+  expect(observed.stale).toContain('native retrieval not verified; pinned input integrity required; not verified');
 });
 
 test('scoped reviewer action is explicitly granted only to one relative file', async ({ page }) => {

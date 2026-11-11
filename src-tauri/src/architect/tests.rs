@@ -3081,7 +3081,7 @@ fn ranked_picks_say_their_tier() {
 fn sub_call(state: &AppState, sid: &str, caller: &str, name: &str, args: Value) -> Result<Value> {
     let team = load(&state.store.lock().unwrap(), sid)?.unwrap();
     let attempt = team.workers.iter().find(|w| w.id == caller).unwrap().attempt;
-    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default()).map(|x| x.0)
+    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None).map(|x| x.0)
 }
 fn team_of(state: &AppState, sid: &str) -> TeamSnapshot {
     load(&state.store.lock().unwrap(), sid).unwrap().unwrap()

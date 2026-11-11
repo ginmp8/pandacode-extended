@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -2812,7 +2812,11 @@ function renderComposer(): void {
     const channel = state.sharedChannelDetail;
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
-    $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel)}` : '';
+    const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
+    $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
+    if (!state.sharedChannelPosting.has(state.sharedChannelId)) {
+      restoreSharedChannelCouncilInputs(oldChannelComposer, document.querySelector<HTMLFormElement>('#shared-channel-composer'));
+    }
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
@@ -7147,6 +7151,23 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
     case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
+    case 'channel-council-accept': {
+      const deliveryId = element.dataset.deliveryId;
+      if (deliveryId) {
+        const { openSharedChannelCouncilAcceptance } = await import('./bot-shared-channels');
+        openSharedChannelCouncilAcceptance(deliveryId, sharedChannelUi());
+      }
+      break;
+    }
+    case 'channel-council-report': {
+      const taskId = element.dataset.sessionId;
+      if (!taskId) break;
+      if (!state.sessions.some(task => task.id === taskId)) await reloadSessions();
+      if (!state.sessions.some(task => task.id === taskId)) { notify('This Council delivery report is unavailable.'); break; }
+      await selectSession(taskId);
+      if (state.sessionId === taskId) (await ensureArchitectView()).open();
+      break;
+    }
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;
     case 'bot-pause': if (element.dataset.bot) { const bot = sidebarBots.find(item => item.id === element.dataset.bot); if (bot) await setBotPaused(bot, !bot.paused); } break;
     case 'toggle-hidden-bots': hiddenBotsOpen = !hiddenBotsOpen; try { localStorage.setItem('pandacode.botsHiddenOpen', String(hiddenBotsOpen)); } catch { /* Keep the choice for this window. */ } renderBots(); break;
@@ -7294,17 +7315,57 @@ document.addEventListener('click', event => {
 document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
   if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
-    const channelId = state.sharedChannelId, text = String(new FormData(form).get('text') ?? '').trim();
+    const channelId = state.sharedChannelId, data = new FormData(form), text = String(data.get('text') ?? '').trim();
     if (!text) return;
-    state.sharedChannelDrafts.delete(channelId);
+    const councilEnabled = data.get('councilEnabled') === 'on';
+    const councilMode = data.get('councilMode');
+    const reviewerBotIds = [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value);
+    const target = Number(data.get('councilTarget') ?? 9);
+    const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
+    if (councilEnabled && (!Number.isFinite(target) || target < 1 || target > 10
+      || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
+      || (councilMode === 'selected' && (reviewerBotIds.length < 2 || reviewerBotIds.length > 8)))) {
+      notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
+      return;
+    }
+    const scopedFile = data.get('councilScopedFile') === 'on' && councilMode === 'selected';
+    const filePath = String(data.get('councilFilePath') ?? '').trim();
+    const validFilePath = filePath.length > 0 && filePath.length <= 240 && !filePath.startsWith('/')
+      && !filePath.startsWith('\\') && !filePath.includes(':')
+      && filePath.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
+    if (councilEnabled && scopedFile && !validFilePath) {
+      notify('Choose one valid relative file path for the scoped reviewer action.');
+      return;
+    }
+    const issueEnabled = councilEnabled && data.get('councilGithubIssue') === 'on';
+    const issueRepo = String(data.get('councilGithubRepo') ?? '').trim();
+    const validIssueRepo = /^[a-zA-Z0-9_.-]{1,100}\/[a-zA-Z0-9_.-]{1,100}$/.test(issueRepo)
+      && !issueRepo.split('/').some(part => part === '.' || part === '..');
+    if (issueEnabled && !validIssueRepo) {
+      notify('Specify the exact authorized GitHub repository as owner/name.');
+      return;
+    }
+    const council = councilEnabled ? {
+      target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
+      ...(scopedFile ? { reviewPermissions: {
+        authorizationId: crypto.randomUUID(),
+        grants: [{ tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: filePath }],
+      } } : {}),
+    } : undefined;
     const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
+    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id)) && councilMode === 'selected') {
+      notify('A message executor cannot also be one of its Council reviewers.');
+      return;
+    }
+    state.sharedChannelDrafts.delete(channelId);
     state.sharedChannelPosting.add(channelId); renderComposer();
     // A failed post goes back to its own channel's draft, unless something new was typed there.
-    run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
+    run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}), ...(council ? { council } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
       state.sharedChannelPosting.delete(channelId);
       if (!state.sharedChannelDrafts.get(channelId)?.trim()) state.sharedChannelDrafts.set(channelId, text);
       notify(error instanceof Error ? error.message : String(error));

@@ -198,6 +198,44 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
     }
     extended::upgrade(db)?;
     collaboration::upgrade(db)?;
+    // Council is an immutable opt-in on an individual message. Separate
+    // sidecars preserve older channel/bot schemas, threads and import payloads.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS extended_channel_council_requests(
+            message_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_messages(id) ON DELETE CASCADE,
+            council_json TEXT NOT NULL CHECK(json_valid(council_json)),
+            executor_ids TEXT NOT NULL CHECK(json_valid(executor_ids)),
+            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_deliveries(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            channel_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            executor_bot_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL UNIQUE,
+            objective TEXT NOT NULL,
+            artifact_revision TEXT NOT NULL,
+            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_acceptances(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            cycle_id TEXT NOT NULL,
+            council_since INTEGER NOT NULL,
+            dispatch_revision INTEGER NOT NULL,
+            changed_at INTEGER NOT NULL,
+            actor TEXT NOT NULL CHECK(actor='local_user'),
+            reason TEXT NOT NULL CHECK(length(reason) BETWEEN 8 AND 1024),
+            accepted_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_followups(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            authorization_id TEXT NOT NULL,
+            repository TEXT NOT NULL,
+            revision TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending','sending','succeeded','failed','unknown')),
+            issue_url TEXT,
+            error TEXT,
+            updated_at INTEGER NOT NULL);",
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1249,7 +1287,15 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| {
         upgrade(&store.db)?;
         shared_channels::reconcile_in_progress(&store)?;
-        collaboration::reconcile_unsent_requests(&store)
+        collaboration::reconcile_unsent_requests(&store)?;
+        // Only remove immutable Council skill files after references in durable
+        // native round records are recovered. Never touch the assessed checkout.
+        if let Ok(library) = crate::skills::library(app) {
+            if let Err(error) = crate::skills::reviewer::cleanup_orphaned(&library, &store) {
+                eprintln!("Could not reclaim orphaned Council reviewer snapshots: {error}");
+            }
+        }
+        Ok(())
     });
     let is_upgraded = upgraded.is_ok();
     if let Err(error) = upgraded {
@@ -1275,16 +1321,117 @@ pub(crate) async fn pause_all(app: &tauri::AppHandle) {
     }
 }
 
+/// A Shared Channel Council delivery is not finished merely because the latest
+/// harness turn ended. Only the matching native Council terminal verdict can
+/// authorize a final reply. Ordinary bot conversations retain per-turn delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelCouncilOutcome {
+    Ordinary,
+    Waiting,
+    Approved,
+    Denied(&'static str),
+}
+
+pub(crate) fn team_state(store: &Store, session_id: &str) -> Result<Option<String>> {
+    Ok(crate::architect::load(store, session_id)?.map(|team| team.status))
+}
+
+pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result<ChannelCouncilOutcome> {
+    let active: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if active == 0 {
+        // A Council-enabled assignment with a lost cycle link must never
+        // silently fall back to ordinary completion or callback behavior.
+        let requested: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_deliveries d
+             JOIN extended_channel_council_requests r ON r.message_id=d.message_id
+             WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+            [session_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if requested != 0 {
+            return Ok(ChannelCouncilOutcome::Denied("Council delivery is missing its native cycle."));
+        }
+        return Ok(ChannelCouncilOutcome::Ordinary);
+    }
+    if active != 1 { return Ok(ChannelCouncilOutcome::Waiting); }
+    let Some(team) = crate::architect::load(store, session_id)? else {
+        return Ok(ChannelCouncilOutcome::Denied("Council delivery has no native team."));
+    };
+    let Some(config) = team.config.council.as_ref() else {
+        return Ok(ChannelCouncilOutcome::Denied("Council was removed from the delivery."));
+    };
+    let original: String = store.db.query_row(
+        "SELECT c.source_message_id FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    let requested = super::bots::shared_channels::council_request(store,&original)?;
+    if requested.is_none_or(|request| request.council != *config) {
+        return Ok(ChannelCouncilOutcome::Denied("Council settings changed after the channel message was authorized."));
+    }
+    let frozen: String = store.db.query_row(
+        "SELECT c.artifact_revision FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    if frozen != format!("cycle:{}",team.council_since) {
+        return Ok(ChannelCouncilOutcome::Waiting);
+    }
+    match team.status.as_str() {
+        "completed" if !crate::architect::council_evidence_is_current(store, &team) =>
+            Ok(ChannelCouncilOutcome::Denied("Council evidence changed after the last native review.")),
+        "completed" => match team.council_status.as_ref() {
+            Some(status) if status.state == "passed" && !status.stale
+                && crate::architect::verified_council_pass(store, &team) => Ok(ChannelCouncilOutcome::Approved),
+            Some(status) if status.state == "limit" => Ok(ChannelCouncilOutcome::Waiting),
+            Some(status) if status.state == "accepted" && !status.stale => {
+                let proof: Option<(String, i64, i64, i64)> = store.db.query_row(
+                    "SELECT a.cycle_id,a.council_since,a.dispatch_revision,a.changed_at
+                     FROM extended_channel_council_acceptances a
+                     JOIN extended_channel_council_deliveries c ON c.delivery_id=a.delivery_id
+                     JOIN bot_shared_channel_deliveries d ON d.id=a.delivery_id
+                     WHERE d.session_id=?1 AND d.status='in_progress' AND a.cycle_id=c.cycle_id",
+                    [session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                ).optional().map_err(|error| error.to_string())?;
+                if proof.is_some_and(|(_, since, revision, changed)| {
+                    team.council_accepted == Some(since) && team.council_since == since
+                        && team.dispatch_revision as i64 == revision && team.changed_at == changed
+                }) { Ok(ChannelCouncilOutcome::Approved) }
+                else { Ok(ChannelCouncilOutcome::Waiting) }
+            },
+            Some(status) if status.state == "accepted" => Ok(ChannelCouncilOutcome::Waiting),
+            _ => Ok(ChannelCouncilOutcome::Denied("Council has no verified, current passing review.")),
+        },
+        "failed" | "stopped" | "interrupted" => Ok(ChannelCouncilOutcome::Denied("Council team ended without approval.")),
+        _ => Ok(ChannelCouncilOutcome::Waiting),
+    }
+}
+
 /// Called when any task's run ends; replies for bot conversations go back to their channel.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) {
     let app = app.clone();
     let session_id = session_id.to_owned();
     tauri::async_runtime::spawn(async move {
+        let gate = app.state::<AppState>().store.lock().ok()
+            .and_then(|store| channel_council_outcome(&store, &session_id).ok())
+            .unwrap_or(ChannelCouncilOutcome::Waiting);
+        if gate == ChannelCouncilOutcome::Waiting {
+            // An intermediate lead turn cannot drain the queue or emit a callback.
+            return;
+        }
         let reply = app.state::<AppState>().store.lock().ok()
             .and_then(|store| shared_channels::latest_reply(&store, &session_id).ok())
             .unwrap_or_default();
-        if gateway::run_finished(&app, &session_id, successful).await {
-            shared_channels::run_finished(&app, &session_id, successful, &reply).await;
+        let denied = matches!(gate, ChannelCouncilOutcome::Denied(_));
+        // Terminal Council denial is not a provider failure requiring failover.
+        if gateway::run_finished(&app, &session_id, successful || denied).await {
+            shared_channels::run_finished(&app, &session_id, successful && !denied, &reply).await;
         }
     });
 }

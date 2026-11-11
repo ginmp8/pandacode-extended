@@ -184,13 +184,18 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
     if image_ids.len() > 4 {
         return Err("Attach up to four images per message.".into());
     }
-    let busy = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
-    if busy {
+    let running = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
+    let team_busy = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        super::team_state(&store, session_id)?
+            .is_some_and(|status| matches!(status.as_str(), "running" | "waiting" | "paused"))
+    };
+    if running || team_busy {
         let fresh = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
             super::extended::enabled_for_session(&store, session_id)?
         };
-        if !force_queue && steer_while_busy(bot, &image_ids, sender_id, fresh)
+        if !force_queue && !team_busy && steer_while_busy(bot, &image_ids, sender_id, fresh)
             && crate::message_queue::steer_task(app.clone(), app.state::<AppState>(), session_id.to_owned(), text.clone()).await.is_ok()
         {
             return Ok(());
@@ -345,6 +350,15 @@ fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
     Ok(parts.join("\n\n").trim().to_owned())
 }
 
+/// Clear approval prompts that belonged to the harness turn that just ended.
+/// Council may still be reviewing; turn completion must not forward a final
+/// result, but it must revoke authorization requests from that ended turn.
+pub(crate) fn turn_ended(session_id: &str) {
+    if let Ok(mut map) = pending().lock() {
+        map.remove(session_id);
+    }
+}
+
 /// Returns false while the turn's work is still underway on a backup model or on hold, so
 /// channel and bot-to-bot deliveries stay linked until that work really ends.
 pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) -> bool {
@@ -401,7 +415,21 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         super::failover::before_turn(app, &bot, session_id);
         let (context, image_ids) = queued_prompt(&entry.attachments);
         super::failover::remember_images(session_id, &image_ids);
-        let launched = crate::launch_task_in_project(app.clone(), app.state::<AppState>(), session_id.to_owned(), Some(format!("{}{context}", entry.text)), Some(image_ids), Some(bot.project_id.clone())).await;
+        // Queued Team messages must use the native Architect admission path.
+        let team = state.store.lock().map_err(|e| e.to_string())
+            .and_then(|store| super::team_state(&store, session_id));
+        let prompt = format!("{}{context}", entry.text);
+        let launched = match team {
+            Ok(Some(_)) => crate::architect::architect_start_in_project(
+                app.clone(), app.state::<AppState>(), session_id.to_owned(),
+                prompt, Some(image_ids), Some(bot.project_id.clone()),
+            ).await,
+            Ok(None) => crate::launch_task_in_project(
+                app.clone(), app.state::<AppState>(), session_id.to_owned(),
+                Some(prompt), Some(image_ids), Some(bot.project_id.clone()),
+            ).await,
+            Err(error) => Err(error),
+        };
         // A channel Stop that landed between the take and the launch stops the turn it missed.
         let stopped = launched.is_ok() && delivery.as_ref().is_some_and(|request| state.store.lock().is_ok_and(|store| super::shared_channels::delivery_stopped(&store, request)));
         if stopped {
@@ -569,6 +597,21 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ending_an_intermediate_council_turn_revokes_its_approval_requests() {
+        let session_id = format!("ended-council-turn-{}", crate::storage::id());
+        pending().lock().unwrap().insert(
+            session_id.clone(),
+            vec![("old-request".into(), "Use a privileged tool".into())],
+        );
+        assert!(pending().lock().unwrap().contains_key(&session_id));
+        turn_ended(&session_id);
+        assert!(!pending().lock().unwrap().contains_key(&session_id),
+            "approval from an ended turn must not authorize a later Council turn");
+        turn_ended(&session_id);
+    }
+
 
     #[test]
     fn queued_attachments_reach_the_prompt() {

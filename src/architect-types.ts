@@ -10,7 +10,7 @@ export interface WorkerProfile {
 /** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
 export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
 export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
-export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[]; reviewPermissions?: CouncilPermissionSelection | null }
+export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[]; optionalSkillIds?: string[]; requiredCheckSkillIds?: string[]; reviewPermissions?: CouncilPermissionSelection | null; postAcceptanceIssue?: { authorizationId: string; repository: string } | null }
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */
@@ -92,7 +92,17 @@ export interface TeamWorker extends WorkerProfile {
   checkpoint?: WorkerCheckpoint | null;
   council?: CouncilSeat | null;
   /** S1/S2 native authority, with a pinned persistent bot ID where selected. */
-  reviewerBinding?: { reviewerBotId?: string | null } | null;
+  reviewerBinding?: {
+    reviewerBotId?: string | null;
+    artifactRevision?: string;
+    skillEvidence?: Record<string, { contentSha256: string; artifactRevision: string; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; checkKind?: string | null }>;
+    snapshot?: {
+      skills?: {
+        pins: { id: string; contentSha256: string; supplied: boolean; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; requiredForAcceptance?: boolean; checkRequired?: boolean }[];
+        skipped?: { id: string; reason: string }[];
+      } | null;
+    };
+  } | null;
   /** When a writing run last started or ended; 0 or absent for one that never ran. */
   wroteAt?: number;
   createdAt: number;

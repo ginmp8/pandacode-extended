@@ -154,10 +154,22 @@ impl ReviewerToolPolicy {
                 tools.push(spec.clone());
             }
         }
+        // Only these exact PandaCode-defined, immutable read-only skill tools
+        // may accompany scoped user grants. A skill cannot introduce tool names.
+        let mut native_skill_tools = HashSet::new();
+        for spec in super::reviewer_skill_evidence::tools() {
+            if host.tools.iter().any(|candidate| candidate == &spec) {
+                let name = spec["name"].as_str().unwrap_or_default().to_string();
+                if seen.insert(name.clone()) {
+                    tools.push(spec);
+                    native_skill_tools.insert(name);
+                }
+            }
+        }
         let grants = policy.grants.clone();
         let original = host.handler;
         let handler = Arc::new(move |name: String, args: Value| {
-            let allowed = grants.iter().any(|grant| grant.permits(&name, &args));
+            let allowed = native_skill_tools.contains(&name) || grants.iter().any(|grant| grant.permits(&name, &args));
             let original = original.clone();
             let future: crate::providers::ToolFuture = Box::pin(async move {
                 if !allowed {
@@ -199,6 +211,8 @@ struct ReviewerAuthority {
     reviewer_bot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bot_context: Option<ReviewerBotContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skills: Option<crate::skills::reviewer::ReviewerSkills>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     roster_bot_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +227,7 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
+        skills: binding.snapshot.skills.clone(),
         roster_bot_ids: binding.roster_bot_ids.clone(),
         required_reviewers: binding.required_reviewers,
     };
@@ -239,6 +254,7 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.tool_policy != binding.snapshot.tool_policy
                 || original.reviewer_bot_id != binding.reviewer_bot_id
                 || original.bot_context != binding.snapshot.bot_context
+                || original.skills != binding.snapshot.skills
                 || original.roster_bot_ids != binding.roster_bot_ids
                 || original.required_reviewers != binding.required_reviewers
             {
@@ -275,6 +291,7 @@ pub(crate) fn authorize_user_grants(
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
+        skills: binding.snapshot.skills.clone(),
         roster_bot_ids: binding.roster_bot_ids.clone(),
         required_reviewers: binding.required_reviewers,
     };
@@ -302,6 +319,9 @@ pub(crate) struct ReviewerSnapshot {
     /// Frozen user-configured persona for S2; never a live bot profile or a permission grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_context: Option<ReviewerBotContext>,
+    /// Immutable reviewer-assigned library inputs, never the bot's global skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<crate::skills::reviewer::ReviewerSkills>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +366,9 @@ pub(crate) struct ReviewerBinding {
     /// Native identity/revision token, not evidence of a content checksum.
     pub artifact_revision: String,
     pub snapshot: ReviewerSnapshot,
+    /// Native-observed skill events are separate from immutable reviewer authority.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skill_evidence: std::collections::BTreeMap<String, super::reviewer_skill_evidence::ObservedSkillEvidence>,
 }
 
 #[allow(dead_code)]
@@ -418,7 +441,9 @@ impl ReviewerBinding {
                 lens: seat.lens.clone(),
                 tool_policy: ReviewerToolPolicy::NativeReadOnly,
                 bot_context: None,
+                skills: None,
             },
+            skill_evidence: Default::default(),
         }
     }
 
@@ -467,6 +492,29 @@ mod tests {
             resource: "owner/repo".into(),
         }
     }
+    #[tokio::test]
+    async fn scoped_reviewer_keeps_only_preapproved_grants_and_native_skill_reads() {
+        let grant = issue_grant();
+        let policy = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "owner", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
+        ).unwrap();
+        let mut catalog = vec![json!({"type":"function","name":"pandacode_github_issue",
+            "inputSchema":{"type":"object","properties":{"action":{"type":"string"},"repository":{"type":"string"}}}})];
+        catalog.extend(super::super::reviewer_skill_evidence::tools());
+        let original = ToolHost {
+            tools: catalog,
+            approval_tools: HashSet::new(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({"executed": true})) })),
+        };
+        let filtered = policy.restrict_host(Some(original)).unwrap().unwrap();
+        assert_eq!(filtered.tools.len(), 3);
+        assert!((filtered.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"assigned"})).await.is_ok());
+        assert!((filtered.handler)("pandacode_reviewer_skill_verify".into(), json!({"skillId":"assigned"})).await.is_ok());
+        assert!((filtered.handler)("pandacode_unknown_tool".into(), json!({})).await.is_err());
+        assert!((filtered.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"other/repo"})).await.is_err());
+        assert!((filtered.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"owner/repo"})).await.is_ok());
+    }
+
     #[test]
     fn scoped_policy_requires_explicit_user_and_configured_bot_grants() {
         let grant = issue_grant();

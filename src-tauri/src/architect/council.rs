@@ -24,6 +24,32 @@ pub(super) const NUDGE_PENDING: &str = "This reviewer has reported and its score
 pub(super) const RUNNING_SEAT: &str = "This reviewer is running. Wait for its report; PandaCode fails it if it goes silent.";
 pub(super) const SCORED_STANDS: &str = "A scored seat stands. Fix the work and convene a new round.";
 /// For the failed-worker turn and the retry cap, when the worker is a reviewer.
+/// Explicit local user grant to create at most one GitHub issue for a
+/// Council-approved channel delivery. The action is fixed to issue creation;
+/// no skill, model prompt or ambient bot capability can broaden the repo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostAcceptanceIssue {
+    pub authorization_id: String,
+    pub repository: String,
+}
+impl PostAcceptanceIssue {
+    fn validate(&self) -> Result<()> {
+        if self.authorization_id.is_empty() || self.authorization_id.len() > 128
+            || self.authorization_id.chars().any(char::is_control)
+        { return Err("A user-authorized GitHub follow-up is required.".into()); }
+        let Some((owner, repo)) = self.repository.split_once('/') else {
+            return Err("Choose a GitHub repository in owner/name format.".into());
+        };
+        let valid = |part: &str| !part.is_empty() && part.len() <= 100
+            && part != "." && part != ".."
+            && part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !valid(owner) || !valid(repo) || self.repository.matches('/').count() != 1 {
+            return Err("Choose a GitHub repository in owner/name format.".into());
+        }
+        Ok(())
+    }
+}
 pub(super) const FAILED_REVIEWER: &str = " A failed Council reviewer is never followed up: cancel it (it has no score) and dispatch a fresh reviewer with councilLens.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,13 +64,22 @@ pub struct CouncilConfig {
     /// Persistent bot IDs for task-scoped selected reviewers; empty keeps native Council behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_bot_ids: Vec<String>,
+    /// Explicitly user-optional bot-assigned skills, frozen per Council task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_skill_ids: Vec<String>,
+    /// Explicitly required native integrity checks, distinct from mandatory methodology.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_check_skill_ids: Vec<String>,
     /// Explicit per-task host tool permissions; absent always means native read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_permissions: Option<super::reviewer_security::ReviewerPermissionSelection>,
+    /// Per-message, user-authorized GitHub issue creation only after native Council approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_acceptance_issue: Option<PostAcceptanceIssue>,
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), review_permissions: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
     }
 }
 impl CouncilConfig {
@@ -58,6 +93,26 @@ impl CouncilConfig {
         if self.reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
         }
+        if !self.optional_skill_ids.is_empty() {
+            if self.reviewer_bot_ids.is_empty() || self.optional_skill_ids.len() > 32 {
+                return Err("Optional reviewer skills require selected bots and at most 32 IDs.".into());
+            }
+            let mut unique = std::collections::HashSet::new();
+            if self.optional_skill_ids.iter().any(|id| !super::valid_id(id) || !unique.insert(id)) {
+                return Err("Optional reviewer skills must have unique valid IDs.".into());
+            }
+        }
+        if !self.required_check_skill_ids.is_empty() {
+            if self.reviewer_bot_ids.is_empty() || self.required_check_skill_ids.len() > 32 {
+                return Err("Native skill checks require selected bots and at most 32 IDs.".into());
+            }
+            let mut unique = std::collections::HashSet::new();
+            if self.required_check_skill_ids.iter().any(|id| !super::valid_id(id)
+                || self.optional_skill_ids.contains(id) || !unique.insert(id))
+            {
+                return Err("Required skill checks must be distinct, valid and non-optional.".into());
+            }
+        }
         if self.review_permissions.is_some() && self.reviewer_bot_ids.is_empty() {
             return Err("Scoped Council reviewer permissions require selected bots.".into());
         }
@@ -69,6 +124,7 @@ impl CouncilConfig {
             }
             for grant in &permissions.grants { grant.validate()?; }
         }
+        if let Some(followup) = &self.post_acceptance_issue { followup.validate()?; }
         if !self.reviewer_bot_ids.is_empty() {
             if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {
                 return Err(format!("Select {MIN_REVIEWERS} to {MAX_REVIEWERS} distinct Council reviewer bots."));
@@ -297,6 +353,31 @@ fn scored(team: &TeamSnapshot, round: usize) -> impl Iterator<Item = f64> + '_ {
 }
 fn lowest(team: &TeamSnapshot, round: usize) -> Option<f64> {
     scored(team, round).reduce(f64::min)
+}
+
+/// A score is not evidence that a mandatory reviewer skill was invoked or a
+/// check was actually executed. Only independently verified native receipts
+/// can satisfy those obligations; optional skill pins never impose this gate.
+fn unverified_required_skill_checks(team: &TeamSnapshot, round: usize) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (worker, seat) in in_round(team, round) {
+        if !counts(worker, seat) { continue; }
+        if let Some(skills) = worker.reviewer_binding.as_ref().and_then(|binding| binding.snapshot.skills.as_ref()) {
+            for pin in &skills.pins {
+                if pin.required_for_acceptance && !(pin.eligible && pin.supplied) {
+                    missing.push(format!("{} ({}: not supplied)", worker.name, pin.id));
+                }
+                if pin.check_required && !worker.reviewer_binding.as_ref()
+                    .and_then(|binding| binding.skill_evidence.get(&pin.id)
+                        .map(|evidence| evidence.valid_for(pin, &binding.artifact_revision)))
+                    .unwrap_or(false)
+                {
+                    missing.push(format!("{} ({}: native check unverified)", worker.name, pin.id));
+                }
+            }
+        }
+    }
+    missing
 }
 fn live(team: &TeamSnapshot, round: usize) -> bool {
     in_round(team, round).any(|(w, _)| unsettled(&w.status))
@@ -558,6 +639,13 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     if stale(team, round) {
         return Some((format!("Council round {round} is out of date: changes landed after it started. Dispatch a new round with councilLens."), false));
     }
+    let unverified = unverified_required_skill_checks(team, round);
+    if !unverified.is_empty() {
+        return Some((format!(
+            "reviewer_skill_evidence_unverified: Council round {round} has missing mandatory skill input or explicitly required native skill checks without independently verified execution: {}. Native invocation, check and evidence receipts are required; reviewer claims or scores alone do not count.",
+            unverified.join(", ")
+        ), false));
+    }
     let low = lowest(team, round)?;
     if low >= config.target {
         return None;
@@ -598,7 +686,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
-    } else if view.complete(round) && !stale && low.is_some_and(|low| low >= config.target) {
+    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && low.is_some_and(|low| low >= config.target) {
         "passed"
     } else if view.at_limit(config) {
         "limit"

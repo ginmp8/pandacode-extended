@@ -313,11 +313,18 @@ fn council_channel_callback_waits_for_approval_and_terminal_claim_is_idempotent(
         [&channel.id],|r|r.get(0),
     ).unwrap();
     assert_eq!(replies,0,"neither intermediate nor denied Council may publish a bot reply");
-    let notices: i64 = f.store.db.query_row(
-        "SELECT COUNT(*) FROM bot_shared_channel_messages WHERE channel_id=?1 AND kind='council_status'",
-        [&channel.id],|r|r.get(0),
+    let detail = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let rejected = detail.messages.iter()
+        .find(|entry| entry.id == delivery_id).unwrap()
+        .council.as_ref().unwrap();
+    assert_eq!(rejected.state, "Failed");
+    assert!(rejected.notice.as_deref().unwrap_or_default().contains("without approval"),
+        "one native delivery-level denial is visible without inserting a forbidden message kind");
+    let message_count: i64 = f.store.db.query_row(
+        "SELECT COUNT(*) FROM bot_shared_channel_messages WHERE channel_id=?1",
+        [&channel.id], |r| r.get(0),
     ).unwrap();
-    assert_eq!(notices,1,"one terminal denial notice for repeated callbacks");
+    assert_eq!(message_count, 1, "a denied or replayed Council cannot forge a channel message");
 }
 
 

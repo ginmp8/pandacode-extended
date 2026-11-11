@@ -580,10 +580,16 @@ pub(crate) fn read_only_policy(
         project_id: String,
         ticket_id: String,
         started_at: i64,
+        side_effects: bool,
+        tools_json: String,
+        mandate_project: String,
+        mandate_actor: String,
+        ticket_actor: String,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
-                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at
+                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at,
+                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -597,6 +603,8 @@ pub(crate) fn read_only_policy(
             enabled: r.get::<_, i64>(6)? != 0, bot_id: r.get(7)?,
             coordinator_id: r.get(8)?, worker_id: r.get(9)?, project_id: r.get(10)?,
             ticket_id: r.get(11)?, started_at: r.get(12)?,
+            side_effects: r.get::<_, i64>(13)? != 0, tools_json: r.get(14)?,
+            mandate_project: r.get(15)?, mandate_actor: r.get(16)?, ticket_actor: r.get(17)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
@@ -604,6 +612,13 @@ pub(crate) fn read_only_policy(
             || scope.expiry <= storage::now()
             || scope.mandate_version != scope.config_version
             || !assignment_within_budget(scope.started_at, storage::now())
+            // The current task channel has only native read-only enforcement.
+            // A persisted write/tool grant must not be silently treated as a
+            // runnable permission (or as harmless metadata) until a separate
+            // user-issued, provider-enforced write adapter is implemented.
+            || scope.side_effects || scope.tools_json != "[]"
+            || scope.mandate_project != scope.project_id
+            || scope.mandate_actor != scope.ticket_actor
             || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
@@ -750,6 +765,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let Some((task_id, assignment_id, coordinator, started_at)) = assignment else { return Ok(false) };
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
+         AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
+         AND m.project_id=t.project_id AND m.actor=t.actor
          AND EXISTS (
            SELECT 1 FROM bots coordinator
            WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0
@@ -848,6 +865,8 @@ fn accept_with_pause(
             SELECT 1 FROM sa_mandates m JOIN sa_orchestrations o
             ON o.id=sa_tickets.orchestration_id
             WHERE m.ticket_id=sa_tickets.id AND m.revoked=0 AND m.expires_at>?3
+              AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
+              AND m.project_id=sa_tickets.project_id AND m.actor=sa_tickets.actor
               AND m.policy_revision=o.policy_revision AND o.enabled=1
               AND EXISTS (
                 SELECT 1 FROM bots worker JOIN bots coordinator
@@ -1229,7 +1248,7 @@ fn retry_blocked(
     }
     let mandate_ok: bool = store.db.query_row(
         "SELECT revoked=0 AND expires_at>?2 AND policy_revision=?3
-                AND project_id=?4 AND allowed_side_effects=0
+                AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
          FROM sa_mandates WHERE ticket_id=?1",
         params![ticket_id,storage::now(),config.policy_revision,config.project_id],
         |r| r.get(0),
@@ -1332,7 +1351,7 @@ fn prepare_coordinated_worker(
     };
     let mandate_ok: bool = store.db.query_row(
         "SELECT revoked=0 AND expires_at>?2 AND policy_revision=?3
-                AND project_id=?4 AND allowed_side_effects=0
+                AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
          FROM sa_mandates WHERE ticket_id=?1",
         params![ticket_id,storage::now(),config.policy_revision,config.project_id],
         |r| r.get(0),
@@ -1543,6 +1562,35 @@ mod tests {
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
     }
 
+
+
+    #[test]
+    fn unsupported_mandate_escalation_cannot_run_or_turn_into_human_approval() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        for (suffix, mutation) in [
+            ("side-effects", "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1"),
+            ("tool-grants", "UPDATE sa_mandates SET allowed_tools='[\"shell\"]' WHERE ticket_id=?1"),
+            ("project", "UPDATE sa_mandates SET project_id='other-project' WHERE ticket_id=?1"),
+            ("actor", "UPDATE sa_mandates SET actor='model-authored' WHERE ticket_id=?1"),
+        ] {
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Inspect with original read-only scope",
+                &format!("grant-escalation-{suffix}"), false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            store.db.execute(mutation, [&ticket.id]).unwrap();
+            assert!(read_only_policy(&store, &session).is_err(),
+                "Changed mandate must fail closed: {suffix}");
+            assert!(on_run_finished(&store, &session, true, "Untrusted success").unwrap());
+            let blocked = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(blocked.state, "blocked");
+            assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+            assert_eq!(history(&store, &ticket.id, 10).unwrap()[0].kind, "callback_rejected");
+            assert!(!on_run_finished(&store, &session, true, "Duplicate").unwrap());
+        }
+    }
 
     #[test]
     fn expired_assignment_budget_denies_native_tools_and_late_success() {

@@ -21,6 +21,13 @@ channels, task execution, permissions, and import/export must remain
 backward-compatible. Default autonomy is **Off**; proactive actions require
 explicit, versioned, task-scoped authority and native enforcement.
 
+## Source baseline and dependency map
+
+The implementation is anchored to the [S0 source audit](extended-superagent-source-map.md).
+That audit pins the exact branch SHA, entrypoints, native authorization and
+callback paths, durable-state gaps, test owners and integration gates. It
+intentionally distinguishes **source inspection** from **executed acceptance**.
+
 ## Delivery sequence
 
 | Stage | Code and evidence required |

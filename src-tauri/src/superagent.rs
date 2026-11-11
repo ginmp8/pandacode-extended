@@ -306,16 +306,36 @@ pub(crate) fn read_only_policy(
 }
 
 fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
-    store.db.execute(
+    // A failed gateway launch must release the worker lease, change the ticket
+    // and retain its audit receipt atomically. An audit/storage failure cannot
+    // leave a partially failed assignment or silently permit a second worker.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let now = storage::now();
+    let detail = reason.chars().take(500).collect::<String>();
+    let assignment = tx.execute(
         "UPDATE sa_assignments SET state='failed',updated_at=?2,result=?3
-         WHERE id=(SELECT active_assignment_id FROM sa_tickets WHERE id=?1) AND state='running'",
-        params![ticket_id,storage::now(),reason],
+         WHERE id=(SELECT active_assignment_id FROM sa_tickets
+                   WHERE id=?1 AND state='running') AND state='running'",
+        params![ticket_id, now, &detail],
     ).map_err(|e| e.to_string())?;
-    store.db.execute(
-        "UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,revision=revision+1,updated_at=?2
-         WHERE id=?1 AND state='running'",params![ticket_id,storage::now()],
+    if assignment != 1 {
+        return Err("SuperAgent launch failure no longer owns an active assignment.".into());
+    }
+    let ticket = tx.execute(
+        "UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,
+         revision=revision+1,updated_at=?2
+         WHERE id=?1 AND state='running' AND active_assignment_id IS NOT NULL",
+        params![ticket_id, now],
     ).map_err(|e| e.to_string())?;
-    record(store, ticket_id, "launch_failed", &reason.chars().take(500).collect::<String>())
+    if ticket != 1 {
+        return Err("SuperAgent ticket changed before launch failure settlement.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'launch_failed',?2,?3)",
+        params![ticket_id, &detail, now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// A provider turn is evidence for a task, not its approval. The only successful
@@ -814,7 +834,7 @@ mod tests {
         assert!(admit(&mut store,&cfg.id,"Different","stable-key",false).is_err());
         let sid=assignment_session(&store,&ticket.id).unwrap().unwrap();
         assert!(read_only_policy(&store,&sid).unwrap().is_some());
-        assert!(on_run_finished(&store,"wrong-session",true,"fake").unwrap()==false);
+        assert!(!on_run_finished(&store,"wrong-session",true,"fake").unwrap());
         assert!(on_run_finished(&store,&sid,true,"Documented evidence").unwrap());
         let waiting=get_ticket(&store,&ticket.id).unwrap();
         assert_eq!(waiting.state,"waiting_approval");
@@ -918,7 +938,7 @@ mod tests {
         assert_eq!(thread,format!("{}:attempt:1",second.id));
         let session_b=assignment_session(&store,&retried.id).unwrap().unwrap();
         assert_ne!(session_a,session_b);
-        assert!(on_run_finished(&store,&session_a,true,"late A").unwrap()==false);
+        assert!(!on_run_finished(&store,&session_a,true,"late A").unwrap());
         assert!(read_only_policy(&store,&session_b).unwrap().is_some());
         assert!(on_run_finished(&store,&session_b,false,"failed B").unwrap());
         assert_eq!(get_ticket(&store,&second.id).unwrap().state,"failed");
@@ -987,6 +1007,41 @@ mod tests {
         drop(store);
         let reopened=Store::open(&path).unwrap();
         assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
+    }
+
+    #[test]
+    fn failed_launch_audit_is_atomic_and_releases_the_worker_only_on_commit() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &config.id, "Retry native launch", "launch-fault-1", false).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_sa_launch_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='launch_failed'
+             BEGIN SELECT RAISE(ABORT,'injected launch audit failure'); END;"
+        ).unwrap();
+        assert!(fail_launch(&store, &ticket.id, "temporary provider failure").is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(assignment_session(&store, &ticket.id).unwrap(), Some(session.clone()));
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        let pending: String = store.db.query_row(
+            "SELECT state FROM sa_assignments WHERE session_id=?1", [&session], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(pending, "running");
+        store.db.execute_batch("DROP TRIGGER reject_sa_launch_audit").unwrap();
+        fail_launch(&store, &ticket.id, "temporary provider failure").unwrap();
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+        assert!(assignment_session(&store, &ticket.id).unwrap().is_none());
+        assert!(fail_launch(&store, &ticket.id, "stale duplicate").is_err());
+        let failures: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='launch_failed'",
+            [&ticket.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(failures, 1);
+        let (retried, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        assert_eq!(retried.state, "running");
+        assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(session));
     }
 
     #[test]

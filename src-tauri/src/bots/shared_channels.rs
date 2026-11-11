@@ -488,6 +488,22 @@ pub(crate) fn settle_posts(store: &Store, message_ids: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// A frozen Council authorization has no effect after a channel is archived,
+/// its executor is removed, or its executor is paused. Do not infer membership
+/// from a still-existing delivery row (the channel member list is authoritative).
+pub(super) fn council_scope_active(store: &Store, delivery_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM bot_shared_channel_deliveries d
+            JOIN bot_shared_channels c ON c.id=d.channel_id AND c.archived=0
+            JOIN bot_shared_channel_members m ON m.channel_id=d.channel_id AND m.bot_id=d.bot_id
+            JOIN bots b ON b.id=d.bot_id AND b.paused=0
+            WHERE d.id=?1
+        )",
+        [delivery_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
 /// Runs are not restored for bot deliveries, so a process restart must not leave
 /// old assignments permanently marked as active.
 pub(crate) fn reconcile_in_progress(store: &Store) -> Result<()> {
@@ -501,7 +517,47 @@ pub(crate) fn reconcile_in_progress(store: &Store) -> Result<()> {
         [crate::storage::now()],
     ).map_err(|e| e.to_string())?;
     store.db.execute("UPDATE bot_messages SET status='failed',result='Interrupted when PandaCode closed.',updated_at=?1 WHERE status='in_progress'", [crate::storage::now()]).map_err(|e| e.to_string())?;
-    store.db.execute("UPDATE bot_shared_channel_deliveries SET status='failed',updated_at=?1 WHERE status='in_progress'", [crate::storage::now()]).map_err(|e| e.to_string())?;
+    // The Architect persists its Council before callback admission. Recover
+    // those deliveries from that *native* verdict, not from a missing process:
+    // an active/at-limit review stays pending, a verified terminal review wins
+    // once, and a denied review settles without inventing a successful reply.
+    let council_deliveries: Vec<(String,String,String,String,String)> = {
+        let mut query = store.db.prepare(
+            "SELECT d.id,d.session_id,d.channel_id,d.message_id,d.bot_id
+             FROM bot_shared_channel_deliveries d
+             JOIN extended_channel_council_deliveries c ON c.delivery_id=d.id
+             WHERE d.status='in_progress' ORDER BY d.created_at,d.id",
+        ).map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |row| Ok((
+            row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
+        ))).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    for (id, session_id, channel_id, message_id, bot_id) in council_deliveries {
+        let outcome = super::channel_council_outcome(store, &session_id)?;
+        match outcome {
+            super::ChannelCouncilOutcome::Waiting => {} // Continue the same frozen native review.
+            super::ChannelCouncilOutcome::Approved => {
+                let reply = latest_reply(store, &session_id)?;
+                let _ = settle_channel_delivery(
+                    store, &session_id, (&id,&channel_id,&message_id,&bot_id), true, &reply,
+                )?;
+            }
+            super::ChannelCouncilOutcome::Denied(_) | super::ChannelCouncilOutcome::Ordinary => {
+                let _ = settle_channel_delivery(
+                    store, &session_id, (&id,&channel_id,&message_id,&bot_id), false, "",
+                )?;
+            }
+        }
+    }
+    // Legacy ordinary deliveries never had a persistent reviewer cycle and
+    // cannot be re-executed merely because an app restarted.
+    store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='failed',updated_at=?1
+         WHERE status='in_progress'
+           AND id NOT IN (SELECT delivery_id FROM extended_channel_council_deliveries)",
+        [crate::storage::now()],
+    ).map_err(|e| e.to_string())?;
     // A queued assignment whose queue entry is gone was taken just before PandaCode closed.
     let queued: Vec<(String,String,String,String)> = {
         let mut statement = store.db.prepare("SELECT d.id,d.session_id,c.name,m.text FROM bot_shared_channel_deliveries d JOIN bot_shared_channel_messages m ON m.id=d.message_id JOIN bot_shared_channels c ON c.id=d.channel_id WHERE d.status='queued'").map_err(|e| e.to_string())?;
@@ -743,7 +799,9 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
         ).map_err(|error| error.to_string())?;
         return Ok(requested == 0);
     };
-    if status != "completed" { return Ok(false); }
+    if status != "completed" || !council_scope_active(store, delivery_id)? {
+        return Ok(false);
+    }
     let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(false) };
     if team.status != "completed" || team.config.council.is_none()
         || frozen_cycle != format!("cycle:{}",team.council_since)
@@ -902,6 +960,29 @@ pub(super) fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> R
 
 pub(super) fn github_result_uncertain(error: &str) -> bool {
     error.contains("uncertain") || error.contains("timed out") || error.contains("truncated")
+}
+
+/// Only never-attempted 'pending' actions may resume after a restart.
+/// A claimed 'sending' action is already converted to 'unknown' and is never
+/// retried automatically, because GitHub may have committed its side effect.
+pub(crate) async fn resume_post_acceptance_issues(app: &tauri::AppHandle) {
+    let ids: Result<Vec<String>> = app.state::<AppState>().store.lock()
+        .map_err(|error| error.to_string()).and_then(|store| {
+            let mut query = store.db.prepare(
+                "SELECT delivery_id FROM extended_channel_council_followups
+                 WHERE state='pending' ORDER BY updated_at,delivery_id",
+            ).map_err(|error| error.to_string())?;
+            let rows = query.query_map([], |row| row.get::<_,String>(0))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())
+        });
+    match ids {
+        Ok(ids) => {
+            for id in ids { publish_post_acceptance_issue(app, &id).await; }
+        }
+        Err(error) => eprintln!("Could not resume Council GitHub follow-ups: {error}"),
+    }
 }
 
 /// Post on behalf of this delivery's configured executor, using the user's

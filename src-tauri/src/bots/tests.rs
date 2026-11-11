@@ -1123,6 +1123,115 @@ fn fresh_bot_message_keeps_active_desktop_queue_memory_and_schedules() {
 }
 
 #[test]
+fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
+    let f = fixture();
+    let db_path = f.root.join("council-restart.sqlite");
+    let ids = {
+        let store = Store::open(&db_path).unwrap();
+        upgrade(&store.db).unwrap();
+        let reviewer = create(&store, &input("Reviewer"), &f.root).unwrap();
+        let channel = shared_channels::create(&store, "restart", std::slice::from_ref(&reviewer.id)).unwrap();
+        let council = crate::architect::CouncilConfig::default();
+        let mut deliveries = Vec::new();
+        for index in 0..2 {
+            let message_id = crate::storage::id();
+            let delivery_id = crate::storage::id();
+            store.db.execute(
+                "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+                 VALUES(?1,?2,'user','Review pending work','in_progress',?3)",
+                params![message_id,channel.id,crate::storage::now()],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+                 VALUES(?1,?2,?3,?4)",
+                params![message_id,serde_json::to_string(&council).unwrap(),
+                    serde_json::to_string(&vec![reviewer.id.clone()]).unwrap(),crate::storage::now()],
+            ).unwrap();
+            shared_channels::provision_channel_delivery(
+                &store, &channel.id, &message_id, &reviewer.id, "Review pending work",
+                shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },
+                &delivery_id,
+            ).unwrap();
+            let session_id: String = store.db.query_row(
+                "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+                [&delivery_id], |row| row.get(0),
+            ).unwrap();
+            store.db.execute(
+                "UPDATE bot_shared_channel_deliveries SET status='in_progress' WHERE id=?1",
+                [&delivery_id],
+            ).unwrap();
+            let mut team = crate::architect::load(&store, &session_id).unwrap().unwrap();
+            team.council_since = 1234 + index;
+            shared_channels::bind_delivery_cycle(&store, &session_id, team.council_since).unwrap();
+            if index == 1 {
+                team.status = "completed".into();
+                team.council_accepted = Some(team.council_since);
+                team.changed_at = 1280;
+                team.dispatch_revision = 7;
+                team.council_status = Some(crate::architect::CouncilStatus {
+                    state: "accepted".into(),round:1,lowest:Some(8.0),target:9.0,
+                    stale:false,notice:None,
+                });
+                let cycle: String = store.db.query_row(
+                    "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+                    [&delivery_id], |row| row.get(0),
+                ).unwrap();
+                store.db.execute(
+                    "INSERT INTO extended_channel_council_acceptances
+                     (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
+                     VALUES(?1,?2,?3,7,1280,'local_user','Accepted after review',?4)",
+                    params![delivery_id,cycle,team.council_since,crate::storage::now()],
+                ).unwrap();
+                store.db.execute(
+                    "INSERT INTO messages(session_id,role,content,created_at)
+                     VALUES(?1,'assistant','Approved final result',?2)",
+                    params![session_id,crate::storage::now()],
+                ).unwrap();
+            } else {
+                team.status = "waiting".into();
+            }
+            store.db.execute(
+                "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+                params![session_id,serde_json::to_string(&team).unwrap()],
+            ).unwrap();
+            deliveries.push((delivery_id,session_id,message_id));
+        }
+        (channel.id, deliveries)
+    };
+    // Both the native Council and delivery records are genuinely reloaded
+    // from a new SQLite connection, not cloned in-memory Rust structs.
+    let store = Store::open(&db_path).unwrap();
+    upgrade(&store.db).unwrap();
+    for _ in 0..2 { shared_channels::reconcile_in_progress(&store).unwrap(); }
+    let (channel_id, deliveries) = ids;
+    let status = |id: &str| store.db.query_row(
+        "SELECT status FROM bot_shared_channel_deliveries WHERE id=?1",
+        [id],|row|row.get::<_,String>(0),
+    ).unwrap();
+    assert_eq!(status(&deliveries[0].0),"in_progress",
+        "a reviewing Council must retain its frozen native cycle after restart");
+    assert_eq!(status(&deliveries[1].0),"completed",
+        "the matching accepted terminal Council must complete after a restart");
+    assert_ne!(deliveries[0].1,deliveries[1].1,
+        "two deliveries to the same bot must never share a native Council session");
+    let replies: Vec<String> = {
+        let mut query = store.db.prepare(
+            "SELECT text FROM bot_shared_channel_messages
+             WHERE channel_id=?1 AND kind='reply' ORDER BY id",
+        ).unwrap();
+        query.query_map([&channel_id], |row| row.get::<_,String>(0))
+            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(replies,vec!["Approved final result"]);
+    let pending_view = shared_channels::detail(&store,&channel_id,100).unwrap();
+    let reviewing = pending_view.messages.iter()
+        .find(|message| message.id == deliveries[0].0).unwrap();
+    assert!(reviewing.council.is_some());
+    let resumed = crate::architect::load(&store,&deliveries[0].1).unwrap().unwrap();
+    assert_eq!(resumed.council_since,1234);
+}
+
+#[test]
 fn startup_reconciles_active_bot_deliveries_as_failed() {
     let f = fixture();
     let source = bot(&f);

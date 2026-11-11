@@ -1303,7 +1303,10 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     }
     if is_upgraded {
         let app = app.clone();
-        tauri::async_runtime::spawn(async move { collaboration::resume_callbacks(&app).await });
+        tauri::async_runtime::spawn(async move {
+            collaboration::resume_callbacks(&app).await;
+            shared_channels::resume_post_acceptance_issues(&app).await;
+        });
     }
     schedule::start(app.clone());
     channels::start_all(app.clone());
@@ -1358,6 +1361,15 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
         return Ok(ChannelCouncilOutcome::Ordinary);
     }
     if active != 1 { return Ok(ChannelCouncilOutcome::Waiting); }
+    let delivery_id: String = store.db.query_row(
+        "SELECT c.delivery_id FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !shared_channels::council_scope_active(store, &delivery_id)? {
+        return Ok(ChannelCouncilOutcome::Denied("Council delivery channel or executor is no longer available."));
+    }
     let Some(team) = crate::architect::load(store, session_id)? else {
         return Ok(ChannelCouncilOutcome::Denied("Council delivery has no native team."));
     };

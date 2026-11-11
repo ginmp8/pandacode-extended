@@ -195,9 +195,9 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
          FROM sa_tickets WHERE orchestration_id=?1
          ORDER BY created_at DESC,id DESC LIMIT ?2"
     ).map_err(|e| e.to_string())?;
-    stmt.query_map(params![config_id,limit], ticket_row)
-        .map_err(|e| e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let rows = stmt.query_map(params![config_id,limit], ticket_row)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,10 +218,10 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
         "SELECT id,kind,detail,at FROM sa_audit WHERE ticket_id=?1
          ORDER BY id DESC LIMIT ?2"
     ).map_err(|e| e.to_string())?;
-    stmt.query_map(params![ticket_id,limit], |r| Ok(AuditEntry {
+    let rows = stmt.query_map(params![ticket_id,limit], |r| Ok(AuditEntry {
         id: r.get(0)?, kind: r.get(1)?, detail: r.get(2)?, at: r.get(3)?,
-    })).map_err(|e| e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
 fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {

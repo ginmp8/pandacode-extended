@@ -66,11 +66,20 @@ fn channel_kind(store: &Store, channel_id: &str) -> String {
     match channel_id {
         super::DESKTOP => "desktop".into(),
         "schedule" => "schedule".into(),
+        crate::superagent::CHANNEL => crate::superagent::CHANNEL.into(),
         _ => channels::kind_of(store, channel_id).unwrap_or_else(|| "web".into()),
     }
 }
 
 /// The text a turn receives: the message, plus the brief when the thread has not seen this version.
+/// A native SuperAgent assignment has its own explicit context. It must not
+/// copy unrelated conversation memories, standing goals, MCP references or
+/// cause skill installation to mutate the assigned bot's checkout.
+fn scoped_turn_text(bot: &Bot, kind: &str, text: &str) -> Option<String> {
+    (kind == crate::superagent::CHANNEL)
+        .then(|| format!("{text}{}", brief::superagent(bot)))
+}
+
 fn compose(
     app: &tauri::AppHandle,
     store: &Store,
@@ -80,6 +89,9 @@ fn compose(
     sender: &str,
     text: &str,
 ) -> Result<String> {
+    if let Some(scoped) = scoped_turn_text(bot, kind, text) {
+        return Ok(scoped);
+    }
     let (skills, skipped) = workspace_skills(app, store, bot, session_id);
     let seen = super::brief_version_of(store, session_id)?;
     if !super::extended::enabled_for_session(store, session_id)?
@@ -303,7 +315,11 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         if inbound.channel_id != super::DESKTOP && inbound.channel_id != crate::superagent::CHANNEL {
             super::set_notify_target(&store, &bot.id, Some(&inbound.channel_id), Some(&inbound.thread))?;
         }
-        super::log(&store, &bot.id, "inbound", &format!("{} ({kind}): {}", inbound.sender_name, text.chars().take(160).collect::<String>()), json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}))?;
+        // Task objective/evidence belongs in the durable Ticket audit, never in
+        // the selected bot's unrelated global activity and private history.
+        if inbound.channel_id != crate::superagent::CHANNEL {
+            super::log(&store, &bot.id, "inbound", &format!("{} ({kind}): {}", inbound.sender_name, text.chars().take(160).collect::<String>()), json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}))?;
+        }
         let moodboard = inbound.moodboard_ids.as_deref().filter(|ids| !ids.is_empty())
             .map(|ids| crate::moodboards::resolve_refs(&store, &bot.project_id, ids))
             .transpose()?.unwrap_or_default();
@@ -629,6 +645,26 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superagent_task_context_omits_private_bot_state_and_ambient_skill_sync() {
+        let mut profile = bot("queue");
+        profile.role = "Code reviewer".into();
+        profile.instructions = "Inspect the authorized fixture only.".into();
+        profile.goals = "Private standing goal: do not export".into();
+        profile.soul = "Private conversational preference".into();
+        profile.mcp = vec!["private-provider".into()];
+        let scoped = scoped_turn_text(&profile, crate::superagent::CHANNEL, "Task: inspect")
+            .expect("native SuperAgent channel must be scoped");
+        assert!(scoped.contains("Task: inspect"));
+        assert!(scoped.contains("Code reviewer"));
+        assert!(scoped.contains("Inspect the authorized fixture only."));
+        for excluded in ["Private standing goal", "Private conversational preference",
+                         "private-provider", "saved memories", "pandacode_bot_notify"] {
+            assert!(!scoped.contains(excluded), "ambient bot data leaked: {excluded}");
+        }
+        assert!(scoped_turn_text(&profile, "desktop", "Normal conversation").is_none());
+    }
 
     #[test]
     fn superagent_assignment_never_drains_an_ordinary_message_queue() {

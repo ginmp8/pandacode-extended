@@ -1200,8 +1200,18 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
     let Some(team) = crate::architect::load(store, session_id)? else {
         return Ok(ChannelCouncilOutcome::Denied("Council delivery has no native team."));
     };
-    if team.config.council.is_none() {
+    let Some(config) = team.config.council.as_ref() else {
         return Ok(ChannelCouncilOutcome::Denied("Council was removed from the delivery."));
+    };
+    let original: String = store.db.query_row(
+        "SELECT c.source_message_id FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    let requested = super::bots::shared_channels::council_request(store,&original)?;
+    if requested.is_none_or(|request| request.council != *config) {
+        return Ok(ChannelCouncilOutcome::Denied("Council settings changed after the channel message was authorized."));
     }
     let frozen: String = store.db.query_row(
         "SELECT c.artifact_revision FROM extended_channel_council_deliveries c

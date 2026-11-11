@@ -384,6 +384,18 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         params![delivery_id,cycle,crate::storage::now()],
     ).unwrap();
     assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Approved);
+    team.config.council.as_mut().unwrap().target = 2.0;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    assert!(matches!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Denied(_)),
+        "changing the task Council target cannot bypass the message's frozen approval");
+    team.config.council.as_mut().unwrap().target = 9.0;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
     assert!(!shared_channels::council_callback_allowed(&f.store,&delivery_id).unwrap(),
         "an approved but nonterminal delivery may not publish a callback");
     team.changed_at = 1281;

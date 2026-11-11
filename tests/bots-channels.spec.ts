@@ -18,7 +18,7 @@ test.describe('shared bot channels', () => {
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     const composer = page.locator('#shared-channel-composer');
     const prompt = page.getByRole('textbox', { name: 'Message channel' });
-    const trigger = composer.getByRole('button', { name: 'Council: off' });
+    const trigger = composer.locator('.bc-council-trigger');
     const panel = composer.getByRole('dialog', { name: 'Council' });
 
     await expect(trigger).toBeVisible();

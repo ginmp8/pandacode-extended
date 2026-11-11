@@ -621,6 +621,55 @@ fn an_approved_council_with_no_text_still_posts_one_truthful_final_result() {
 }
 
 #[test]
+fn interrupted_github_issue_create_is_recovered_as_unknown_without_replay() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let channel = shared_channels::create(
+        &f.store, "unknown-issue", std::slice::from_ref(&executor.id),
+    ).unwrap();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    let session_id = thread_session(
+        &f.store, &executor, DESKTOP, DESKTOP, "Unknown issue",
+    ).unwrap().0;
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review findings','completed',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries
+         (id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'completed',0,?6,?6)",
+        params![delivery_id,channel.id,message_id,executor.id,session_id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_followups
+         (delivery_id,authorization_id,repository,revision,title,body,state,updated_at)
+         VALUES(?1,'user-grant','owner/repo','revision-1','Approved','Finding','sending',?2)",
+        params![delivery_id,crate::storage::now()],
+    ).unwrap();
+
+    shared_channels::reconcile_in_progress(&f.store).unwrap();
+    shared_channels::reconcile_in_progress(&f.store).unwrap();
+    let (state,error): (String,String) = f.store.db.query_row(
+        "SELECT state,error FROM extended_channel_council_followups WHERE delivery_id=?1",
+        [&delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(state,"unknown");
+    assert!(error.contains("interrupted"));
+    assert!(shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().is_none(),
+        "a restarted GitHub issue action must not be executed twice");
+    assert!(shared_channels::github_result_uncertain(
+        "GitHub CLI operation timed out. Check the repository before retrying."
+    ));
+    assert!(!shared_channels::github_result_uncertain(
+        "GitHub CLI is not installed."
+    ));
+}
+
+#[test]
 fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();

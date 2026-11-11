@@ -97,7 +97,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     host.setAttribute('aria-busy', String(busy));
   }
   async function reload(): Promise<void> {
-    loading = true; render();
+    loading = true;
+    // Keep updated controls hidden until the mutating operation has settled.
+    // Exposing them mid-reload would allow silently discarded submissions.
+    if (!busy) render();
     try {
       const [known, configs] = await Promise.all([call<Bot[]>('bots_list'), call<Config[]>('superagent_list')]);
       bots = known; presets = configs;
@@ -105,11 +108,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       error = '';
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
-    finally { loading = false; render(); }
+    finally { loading = false; if (!busy) render(); }
   }
   async function work(action: () => Promise<void>): Promise<void> {
     if (busy) return;
     busy = true; error = '';
+    host.setAttribute('aria-busy', 'true');
+    // Preserve any form fields while the native operation is in flight,
+    // but prevent a second click from being silently discarded.
+    host.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = true; });
     try { await action(); } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
     finally { busy = false; render(); }
   }

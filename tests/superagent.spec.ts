@@ -49,6 +49,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('button',{name:'Enable manual'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(dialog.getByRole('button',{name:'Disable'})).toBeVisible();
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false');
   await dialog.getByRole('textbox',{name:'Task objective'}).fill('Inspect a disposable fixture');
   await dialog.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
   await dialog.getByRole('button',{name:'Dispatch manually'}).click();

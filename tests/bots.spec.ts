@@ -62,7 +62,8 @@ test.describe('bots', () => {
     await showBotsView(page);
     await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
     const items = sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem');
-    await expect(items).toHaveCount(4);
+    await expect(items).toHaveCount(5);
+    await expect(items).toHaveText(['New bot', 'New channel', 'Orchestrations', 'Import / Sync bots…', 'Export bots…']);
     const positions = await items.evaluateAll(elements => elements.map(element => {
       const icon = element.querySelector('.icon');
       if (!icon) throw new Error('Bot action is missing its icon.');

@@ -1294,6 +1294,13 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     // from a new SQLite connection, not cloned in-memory Rust structs.
     let store = Store::open(&db_path).unwrap();
     upgrade(&store.db).unwrap();
+    let direct = &ids.1;
+    assert_eq!(channel_council_outcome(&store, &direct[0].1).unwrap(),
+        ChannelCouncilOutcome::Waiting,
+        "a resumed native Council that has not passed remains pending");
+    assert_eq!(channel_council_outcome(&store, &direct[1].1).unwrap(),
+        ChannelCouncilOutcome::Approved,
+        "the matching accepted native Council must preserve its authorization");
     for _ in 0..2 { shared_channels::reconcile_in_progress(&store).unwrap(); }
     let (channel_id, deliveries) = ids;
     let status = |id: &str| store.db.query_row(

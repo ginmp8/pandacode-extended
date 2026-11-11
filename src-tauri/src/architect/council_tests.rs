@@ -514,8 +514,15 @@ fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activati
     ).unwrap();
     let second = bot_reviewers::seat_bot_inner_with_skills(&store, &team, 1, None, &library).unwrap().unwrap();
     assert_eq!(second.id, "bot-b");
-    assert_eq!(second.skills, first.skills);
-    assert!(second.skills.as_ref().unwrap().prompt.contains("source-linked checklist"));
+    let second_skills = second.skills.as_ref().unwrap();
+    assert_eq!(second_skills.pins[0].content_sha256, initial.pins[0].content_sha256,
+        "an in-flight Council must retain its original pinned package digest");
+    assert_eq!(second_skills.pins[0].file_sha256, initial.pins[0].file_sha256,
+        "a replacement in the central library must not alter the frozen file set");
+    assert_ne!(second_skills.pins[0].staged_path, initial.pins[0].staged_path,
+        "distinct reviewers must not share an immutable staging directory");
+    assert!(second_skills.verify().is_ok());
+    assert!(second_skills.prompt.contains("source-linked checklist"));
     assert!(!second.skills.as_ref().unwrap().prompt.contains("new revision"));
     assert!(library.list().unwrap().iter().all(|entry| entry.meta.activations.is_empty()));
     let staged = initial.pins[0].staged_path.as_ref().unwrap();

@@ -13,7 +13,8 @@ test.describe('shared bot channels', () => {
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
     await page.goto('/?bots=sample');
     const html = await page.evaluate(async () => {
-      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const module = '/src/bot-shared-channels.ts';
+      const { sharedChannelThreadHtml } = await import(module);
       return sharedChannelThreadHtml({
         id: 'channel-one', name: 'isolated', memberIds: [], leadBotId: null,
         archived: false, updatedAt: 1, activeBotIds: [],
@@ -46,7 +47,7 @@ test.describe('shared bot channels', () => {
     await expect(receipt).toHaveAttribute('tabindex', '0');
     await expect(receipt).toHaveAttribute('title', /SHA-256 a{64}/);
     await expect(receipt).toContainText('Skills: 1');
-    await expect(page.getByRole('note', { name: 'Delivery Council status' })).toContainText('Selected bot');
+    await expect(page.locator('.bc-council-summary')).toContainText('Selected bot');
     expect(html).not.toContain('sensitive/path');
   });
 

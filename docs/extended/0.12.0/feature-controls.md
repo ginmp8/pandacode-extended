@@ -86,3 +86,7 @@ Preserve the Extended switches for auto/manual updates, Connect master/direct ro
 ## Fork Linux microphone and Windows ARM smoke update — 2026-11-11
 
 The source [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1d24eb083bc10779cb7034c4a0fd) modifies Voice, release smoke tests and CI, but changes no Extended-specific Settings implementation. The direct integration [`5beff6d8`](https://github.com/ginmp8/pandacode-extended/commit/5beff6d8737e952341023bfdf10aaeb38697fcae) leaves the existing optional update, Connect master/direct, bot pause, external MCP, cloud credential and agent cloud/VM controls intact in the 81 remaining shared divergences. This is a **static change-scope observation**, not an independent On/Off, restart, authorization or native integration test. Keep the upstream voice fallback enabled according to normal permissions; do not introduce a new restrictive toggle.
+
+## Source 106b3852 continuity — 2026-11-11
+
+Upstream microphone selection, Windows x64/Linux ARM64 release audio smoke and APT time bounds are incorporated without changing Extended feature-control semantics. Existing manual/automatic updates, global bot pause, Connect master/direct routing, external MCP, cloud/VM management, credential transfer and other Settings controls remain present and optional; no stricter default or blanket feature ban was introduced. This does not establish runtime acceptance: independent enabled/disabled tests and native integration checks are still pending.

@@ -111,6 +111,8 @@ jobs:
         with:
           workspaces: src-tauri
       - name: Install Linux native dependencies
+        # Bound the apt step as in the upstream CI; retain the Extended mirror recovery.
+        timeout-minutes: 10
         run: |
           # Avoid the runner's stalled Azure package mirror; keep all Tauri dependencies and tests.
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
@@ -164,7 +166,7 @@ jobs:
     # Linux job does not cover, so a platform-only break shows up in CI instead of first at release time.
     # Each row copies its release.yml build row: same runner and TRANSCRIBE_CMAKE_ARGS (see the comment
     # there; an empty value adds no CMake arguments). Clippy covers the same targets as the Linux job;
-    # tests stay on Linux, except a real-audio smoke on macOS. The Linux arm64 row installs the same native packages as the Linux job.
+    # tests stay on Linux, except release-profile real-audio smoke on macOS, Windows x64 and Linux arm64. The Linux arm64 row installs the same native packages as the Linux job.
     name: Rust clippy (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -197,6 +199,7 @@ jobs:
           workspaces: src-tauri
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
           # ARM64 ports DNS failures can leave partial APT indexes that cause stale-package 404s.
           # Retry update and install together, requiring every index refresh to succeed.
@@ -220,11 +223,12 @@ jobs:
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       # The real audio stack under the shipped release profile: cpal 0.16's undefined behaviour only
       # crashed optimised builds, so debug tests passed while the released app segfaulted.
+      # macOS requires actual capture; Windows x64 and Linux ARM64 may lack an input.
       - name: Real audio smoke (release profile)
-        if: runner.os == 'macOS'
-        # A cold optimized Intel macOS build can exceed 40 minutes after the clippy pass.
+        if: runner.os == 'macOS' || matrix.target == 'windows-x86_64' || matrix.target == 'linux-aarch64'
+        # Extended cold Intel builds can exceed the 55-minute upstream smoke allowance.
         timeout-minutes: 70
-        # Do not pass a real-audio smoke by skipping capture when the macOS runner lacks input.
+        # A missing macOS recording must fail; other platforms can enumerate devices.
         env:
-          PANDACODE_REQUIRE_REAL_MIC: '1'
+          PANDACODE_REQUIRE_REAL_MIC: ${{ runner.os == 'macOS' && '1' || '' }}
         run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib real_audio -- --ignored --nocapture

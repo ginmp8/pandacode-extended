@@ -131,3 +131,7 @@ At Extended [`d67a035d`](https://github.com/ginmp8/pandacode-extended/commit/d67
 ## Fork HEAD `961b43fa` dependency continuity — 2026-11-11
 
 The seven source-modified paths in [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1d24eb083bc10779cb7034c4a0fd) include **no npm/Cargo dependency manifests or lockfiles** and no version-field changes; upstream native version remains **0.3.111**. The integration [`5beff6d8`](https://github.com/ginmp8/pandacode-extended/commit/5beff6d8737e952341023bfdf10aaeb38697fcae) retains the Extended dependency overrides, patched lockfiles, application identity and security remediations from the previous snapshot without attempting a downgrade. These facts reflect the seven-path source diff and exact tree inventory, **not** a fresh npm audit or RustSec result. Check the new commit's CI before claiming any automated audit success.
+
+## Source 106b3852 dependency continuity — 2026-11-11
+
+The six upstream changed paths do not include application manifests or lockfiles. The inherited native application version remains **0.3.111** in npm, Cargo and Tauri, separate from the planned Extended **0.12.0** distribution. Previously remediated dependencies, overrides, and Extended audit jobs remain unchanged; no newly fixed vulnerability is claimed. Audit and build results must be checked on the exact published commit rather than borrowed from prior commits.

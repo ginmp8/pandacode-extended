@@ -295,3 +295,13 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [x] Preserve the ARM64 runner, original native dependency list and Rust commands while adding bounded retries for both APT refresh and installation; require the refresh to succeed, avoiding silent stale-index reuse.
 - [ ] Verify both push and PR CI on the **new exact SHA**, including the Linux ARM64 job and Ubuntu 22.04 Rust test job; record jobs separately (queued/cancelled/failed is not green).
 - [ ] Complete all 81 shared-path semantic reviews and native Settings On/Off, Connect/MCP, bots, cloud/VM, credentials and installer acceptance before 0.12.0 release approval.
+
+## Fork HEAD 106b3852 integration checkpoint — 2026-11-11
+
+- [x] Resolve the source at `106b3852fcfc737922189cb3ef64b98b6b727c69` (tree `155ab5c52bf39cfa6b0df48ede563e078297055a`) and destination at `bb360f4c0ef98dfe7a0afc61ea36a3d1d7d12f0e`; receive full recursive trees without truncation.
+- [x] Account for all six new upstream-modified paths: five source-exact blobs and one adapted CI workflow, with zero upstream paths omitted and no type/mode differences.
+- [x] Keep native app metadata at **0.3.111** and Extended planned notes at **0.12.0 DRAFT**.
+- [x] Retain Extended audit/mobile jobs, recovery of Linux APT downloads, source push-CI policy and Windows ARM64 startup tests while gaining new upstream audio-smoke targets.
+- [ ] Finish CI and audit jobs at the exact published Extended SHA; do not treat queued/cancelled jobs as success.
+- [ ] Independently validate real Linux microphone selection/failures and Windows/Linux ARM64 audio behavior.
+- [ ] Review all 81 older customized shared paths by hunk and exercise Settings On/Off, Connect/MCP, bots, cloud/VM and credentials.

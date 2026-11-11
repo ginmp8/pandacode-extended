@@ -56,6 +56,10 @@ pub struct ChannelCouncilView {
     pub followup_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub followup_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_by: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,14 +293,27 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
     ).optional().map_err(|e| e.to_string())?;
     let Some((cycle_id, original_revision)) = cycle else { return Ok(None) };
     let team = crate::architect::load(store, session_id)?;
-    let (state, round, target, lowest, revision, notice, reviewers) = if let Some(team) = team {
+    let proof: Option<(i64, i64, i64, String)> = store.db.query_row(
+        "SELECT council_since,dispatch_revision,changed_at,reason
+         FROM extended_channel_council_acceptances
+         WHERE delivery_id=?1 AND cycle_id=?2 AND actor='local_user'",
+        params![delivery_id,cycle_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let (state, round, target, lowest, revision, notice, reviewers, acceptance_reason) = if let Some(team) = team {
         let status = team.council_status.as_ref();
+        let authorized_exception = proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
+            team.council_accepted == Some(*since) && team.council_since == *since
+                && team.dispatch_revision as i64 == *dispatch && team.changed_at == *changed
+                && status.is_some_and(|s| s.state == "accepted" && !s.stale)
+        });
         let state = match team.status.as_str() {
             "stopped" => "Stopped",
             "failed" => "Failed",
             _ => match status.map(|s| s.state.as_str()) {
                 Some("passed") => "Passed",
-                Some("accepted") => "Accepted by user",
+                Some("accepted") if authorized_exception => "Accepted by user",
+                Some("accepted") => "Inconclusive",
                 Some("limit") => "Limit reached",
                 Some("fixing" | "asking") => "Needs correction",
                 Some("waiting" | "reviewing" | "dispatch") => "Reviewing",
@@ -310,12 +327,16 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                 round: seat.round, score: seat.score,
             })
         }).collect();
+        let note = status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect())
+            .or_else(|| (status.is_some_and(|s| s.state == "accepted") && !authorized_exception)
+                .then(|| "Council acceptance requires a reasoned user action in this channel.".into()));
         (state.to_owned(), status.map_or(0, |s| s.round),
             status.map_or(9.0, |s| s.target), status.and_then(|s| s.lowest),
             format!("{}:{}", team.council_since, team.dispatch_revision),
-            status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect()), reviewers)
+            note, reviewers,
+            if authorized_exception { proof.as_ref().map(|(_,_,_,reason)| reason.clone()) } else { None })
     } else {
-        ("Inconclusive".into(), 0, 9.0, None, original_revision, None, Vec::new())
+        ("Inconclusive".into(), 0, 9.0, None, original_revision, None, Vec::new(), None)
     };
     // The native delivery is authoritative for Stop and failure even when an
     // interrupted Architect snapshot still says a reviewer is working.
@@ -329,7 +350,8 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         [delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
     let (followup_status, followup_url) = followup.map_or((None,None), |(s,u)| (Some(s),u));
-    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url }))
+    let accepted_by = acceptance_reason.as_ref().map(|_| "local_user".to_string());
+    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, acceptance_reason, accepted_by }))
 }
 
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.

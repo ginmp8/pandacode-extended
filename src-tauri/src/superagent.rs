@@ -447,16 +447,44 @@ pub async fn superagent_list(state: State<'_,AppState>) -> Result<Vec<Orchestrat
 }
 
 #[tauri::command]
-pub async fn superagent_set_enabled(state: State<'_,AppState>, orchestration_id: String, enabled: bool) -> Result<Orchestration> {
+pub async fn superagent_set_enabled(
+    state: State<'_,AppState>, orchestration_id: String,
+    expected_revision: i64, enabled: bool,
+) -> Result<Orchestration> {
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    let current=configuration(&store,&orchestration_id)?;
-    if current.enabled != enabled {
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=?2,policy_revision=policy_revision+1,updated_at=?3 WHERE id=?1",
-            params![orchestration_id,enabled,storage::now()],
-        ).map_err(|e|e.to_string())?;
+    change_enabled(&store, &orchestration_id, expected_revision, enabled)
+}
+
+/// A policy edit must not silently overwrite an authorization change from
+/// another window. Even enabling is Off-mode only; it does not infer work.
+fn change_enabled(
+    store: &Store, orchestration_id: &str,
+    expected_revision: i64, enabled: bool,
+) -> Result<Orchestration> {
+    let current=configuration(store,orchestration_id)?;
+    if current.policy_revision != expected_revision {
+        return Err("Orchestration policy revision changed; reload before editing.".into());
     }
-    configuration(&store,&orchestration_id)
+    if enabled {
+        let coordinator=bots::get(store,&current.coordinator_bot_id)?;
+        let worker=bots::get(store,&current.worker_bot_id)?;
+        if coordinator.paused || worker.paused
+            || worker.project_id != current.project_id
+            || crate::feature_controls::get().bots_paused
+        {
+            return Err("Selected bots are paused or their worker scope has changed.".into());
+        }
+    }
+    if current.enabled == enabled { return Ok(current); }
+    let updated=store.db.execute(
+        "UPDATE sa_orchestrations SET enabled=?2,policy_revision=policy_revision+1,
+         updated_at=?3 WHERE id=?1 AND policy_revision=?4",
+        params![orchestration_id,enabled,storage::now(),expected_revision],
+    ).map_err(|e|e.to_string())?;
+    if updated != 1 {
+        return Err("Concurrent orchestration policy change; update rejected.".into());
+    }
+    configuration(store,orchestration_id)
 }
 
 #[tauri::command]
@@ -550,6 +578,25 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn revision_guard_and_bot_availability_prevent_stale_policy_enabling() {
+        let store = fixture();
+        let config = create_configuration(&store, NewOrchestration {
+            name: "Guarded".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        assert_eq!(config.policy_revision, 1);
+        let active = change_enabled(&store, &config.id, 1, true).unwrap();
+        assert!(active.enabled);
+        assert_eq!(active.policy_revision, 2);
+        assert!(change_enabled(&store, &config.id, 1, false).is_err());
+        assert_eq!(change_enabled(&store, &config.id, 2, true).unwrap().policy_revision, 2);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(change_enabled(&store, &config.id, 2, false).is_ok());
+        assert!(change_enabled(&store, &config.id, 3, true).is_err());
+        assert!(!configuration(&store, &config.id).unwrap().enabled);
     }
 
     #[test]

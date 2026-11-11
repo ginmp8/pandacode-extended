@@ -857,6 +857,25 @@ fn accept_with_pause(
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator plan is stale or its original session is unavailable.".into());
     }
+    // The worker's completed assignment is evidence only while its original
+    // native session and project are still attributable. A bot move, session
+    // deletion, or replacement of stored result text must not turn an old
+    // model reply into a new, human-approved task completion.
+    let worker_evidence_current: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_assignments assignment
+            JOIN sessions original ON original.id=assignment.session_id
+            WHERE assignment.ticket_id=?1 AND assignment.bot_id=?2
+              AND assignment.state='finished'
+              AND original.project_id=?3 AND assignment.result=?4
+        )",
+        params![ticket_id,ticket.worker_bot_id,mandate(store, ticket_id)?.project_id,
+            ticket.evidence.as_deref().unwrap_or_default()],
+        |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !worker_evidence_current {
+        return Err("Original worker evidence session is missing or outside its mandate.".into());
+    }
     let now = storage::now();
     let changed = tx.execute(
         "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?3
@@ -1881,6 +1900,51 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn human_acceptance_requires_original_worker_session_and_matching_evidence() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, _) = admit(
+            &mut store, &cfg.id, "Original worker evidence", "accept-provenance-1", false,
+        ).unwrap();
+        let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &original_session, true, "Verified worker result").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+
+        // Persisted evidence is not self-authenticating: the native completed
+        // assignment and the exact original provider result must still match.
+        store.db.execute(
+            "UPDATE sa_tickets SET evidence='Replaced by an unrelated result' WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(accept(&store, &ticket.id, waiting.revision).is_err());
+        store.db.execute(
+            "UPDATE sa_tickets SET evidence='Verified worker result' WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('other','Other','/tmp/sa-foreign-evidence')", [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET project_id='other' WHERE id=?1",
+            [&original_session],
+        ).unwrap();
+        assert!(accept(&store, &ticket.id, waiting.revision).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        assert!(!history(&store, &ticket.id, 20).unwrap()
+            .iter().any(|entry| entry.kind == "human_accepted"));
+
+        // A current, matching origin is sufficient for the explicitly
+        // attributed human decision; no extra owner/device step is required.
+        store.db.execute(
+            "UPDATE sessions SET project_id='project' WHERE id=?1",
+            [&original_session],
+        ).unwrap();
+        assert_eq!(accept(&store, &ticket.id, waiting.revision).unwrap().state, "completed");
     }
 
     #[test]

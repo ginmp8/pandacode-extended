@@ -6,6 +6,22 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 
 const SINCE: i64 = 1000;
 
+
+#[test]
+fn post_acceptance_github_action_requires_one_exact_repository_and_user_grant() {
+    let mut config = CouncilConfig::default();
+    config.post_acceptance_issue = Some(council::PostAcceptanceIssue {
+        authorization_id: "local-user-approval".into(),
+        repository: "owner/repo-name".into(),
+    });
+    assert!(config.validate().is_ok());
+    config.post_acceptance_issue.as_mut().unwrap().repository = "owner/../other".into();
+    assert!(config.validate().unwrap_err().contains("owner/name"));
+    config.post_acceptance_issue.as_mut().unwrap().repository = "owner/repo-name".into();
+    config.post_acceptance_issue.as_mut().unwrap().authorization_id.clear();
+    assert!(config.validate().unwrap_err().contains("user-authorized"));
+}
+
 #[test]
 fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
     let mut council = on(9.0, 10, 0);

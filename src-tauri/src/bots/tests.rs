@@ -315,6 +315,114 @@ fn council_channel_callback_waits_for_approval_and_terminal_claim_is_idempotent(
     assert_eq!(notices,1,"one terminal denial notice for repeated callbacks");
 }
 
+
+#[test]
+fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let channel = shared_channels::create(&f.store,"acceptance",std::slice::from_ref(&executor.id)).unwrap();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    let council = crate::architect::CouncilConfig {
+        post_acceptance_issue: Some(crate::architect::council::PostAcceptanceIssue {
+            authorization_id: "explicit-user-action".into(), repository: "owner/repo".into(),
+        }),
+        ..Default::default()
+    };
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review findings','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&council).unwrap(),
+            serde_json::to_string(&vec![executor.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    shared_channels::provision_channel_delivery(
+        &f.store,&channel.id,&message_id,&executor.id,"Review findings",
+        shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },
+        &delivery_id,
+    ).unwrap();
+    let sid: String = f.store.db.query_row(
+        "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+        [&delivery_id],|r|r.get(0),
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='in_progress' WHERE id=?1",
+        [&delivery_id],
+    ).unwrap();
+    let cycle: String = f.store.db.query_row(
+        "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [&delivery_id],|r|r.get(0),
+    ).unwrap();
+    let mut team = crate::architect::load(&f.store,&sid).unwrap().unwrap();
+    team.status = "completed".into();
+    team.council_since = 1234;
+    team.council_accepted = Some(1234);
+    team.changed_at = 1280;
+    team.dispatch_revision = 7;
+    team.council_status = Some(crate::architect::CouncilStatus {
+        state: "accepted".into(),round:1,lowest:Some(7.5),target:9.0,
+        stale:false,notice:None,
+    });
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Waiting,
+        "a native Council acceptance without attributed reason never grants channel approval");
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_acceptances
+         (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
+         VALUES(?1,?2,1234,7,1280,'local_user','Accepted limitations',?3)",
+        params![delivery_id,cycle,crate::storage::now()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Approved);
+    team.changed_at = 1281;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Waiting,
+        "changed evidence invalidates an earlier user exception");
+    team.changed_at = 1280;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    assert_eq!(shared_channels::settle_channel_delivery(
+        &f.store,&sid,&delivery_id,&channel.id,&message_id,&executor.id,true,
+        "Accepted finding: fix the permission boundary."
+    ).unwrap(),Some(true));
+    assert!(shared_channels::settle_channel_delivery(
+        &f.store,&sid,&delivery_id,&channel.id,&message_id,&executor.id,true,"Replay"
+    ).unwrap().is_none(),"a duplicate callback cannot settle or publish again");
+    let published: i64 = f.store.db.query_row(
+        "SELECT COUNT(*) FROM bot_shared_channel_messages WHERE channel_id=?1 AND kind='reply'",
+        [&channel.id],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(published,1);
+    let pending: (String,String,String) = f.store.db.query_row(
+        "SELECT repository,state,authorization_id FROM extended_channel_council_followups
+         WHERE delivery_id=?1",
+        [&delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).unwrap();
+    assert_eq!(pending,("owner/repo".into(),"pending".into(),"explicit-user-action".into()));
+    let first=shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().unwrap();
+    assert_eq!(first.0,"owner/repo");
+    assert!(first.2.contains("Accepted finding"));
+    assert!(shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().is_none(),
+        "the external GH CLI action is claimed once even if callback is replayed");
+    let state: String = f.store.db.query_row(
+        "SELECT state FROM extended_channel_council_followups WHERE delivery_id=?1",
+        [&delivery_id],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(state,"sending");
+}
+
 #[test]
 fn creates_a_bot_with_its_own_workspace_project() {
     let f = fixture();

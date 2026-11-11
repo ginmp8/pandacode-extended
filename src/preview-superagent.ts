@@ -23,20 +23,21 @@ export async function invokeSuperagent<T>(
   switch(command){
     case 'superagent_list': value=[...configs.values()];break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_snapshot':
     case 'superagent_mandate':
     case 'superagent_assignments':
     case 'superagent_activity':{
       const t=[...tickets.values()].flat().find(item=>item.id===args.ticketId);
       if(!t)throw Error('Ticket not found.');
+      const cfg=get(t.orchestrationId);
+      const mandate={ticketId:t.id,actor:'local-user',authorizationId:'preview-only-'+t.id,
+        policyRevision:cfg.policyRevision,projectId:cfg.projectId,
+        expiresAt:Date.now()+4*60*60*1000,revoked:t.state==='stopped',
+        allowedTools:[],allowedSideEffects:false,createdAt:Date.now()};
       if(command==='superagent_assignments')value=assignments.get(t.id)||[];
       else if(command==='superagent_activity')value=activity.get(t.id)||[];
-      else {
-        const cfg=get(t.orchestrationId);
-        value={ticketId:t.id,actor:'local-user',authorizationId:'preview-only-'+t.id,
-          policyRevision:cfg.policyRevision,projectId:cfg.projectId,
-          expiresAt:Date.now()+4*60*60*1000,revoked:t.state==='stopped',
-          allowedTools:[],allowedSideEffects:false,createdAt:Date.now()};
-      }
+      else if(command==='superagent_mandate')value=mandate;
+      else value={ticket:t,mandate,assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
       break;
     }
     case 'superagent_create':{

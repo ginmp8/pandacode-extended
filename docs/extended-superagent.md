@@ -1,8 +1,10 @@
 # Extended SuperAgent orchestration
 
-> **Implementation status:** Not implemented at this checkpoint. This document
-> establishes the source-of-truth scope for development in
-> `feat/issue-131-superagent`; it is not acceptance evidence.
+> **Implementation status:** Partial native implementation. S0 source mapping,
+> S1 manual read-only Ticket/Mandate/Assignment dispatch and audit, and part of
+> S2 presets/UI exist. S1 task-scoped writable authority, full S2 integration,
+> and S3–S6 remain incomplete. No overall acceptance is claimed.
+> All development remains on `feat/issue-131-superagent`.
 
 **Authoritative specification:** [Issue #131](https://github.com/ginmp8/pandacode-extended/issues/131)
 
@@ -67,9 +69,11 @@ intentionally distinguishes **source inspection** from **executed acceptance**.
 | Checkpoint | Status | Evidence |
 | --- | --- | --- |
 | Issue #131 specification and S0–S6 sequence | Recorded | GitHub issue #131 |
-| S0 source map | Pending implementation | — |
-| S1–S5 production functionality | Not started | — |
-| S6 AC-01–AC-31 automated evidence | Not started | — |
+| S0 source map | Source-authored; baseline CI tracked separately | `docs/extended-superagent-source-map.md` |
+| S1 native read-only manual task | Partially implemented; exact-HEAD CI required | `src-tauri/src/superagent.rs`; native `superagent_snapshot` |
+| S2 presets and task inspector | Partially implemented; browser tests cannot prove real provider execution | `src/superagent-ui.ts`; `tests/superagent.spec.ts` |
+| S3–S5 full integration | Incomplete | See issue #131 |
+| S6 AC-01–AC-31 automated evidence | Not yet complete | See issue #131 |
 | Authenticated/manual provider scenarios | Not run — user-deferred | Not a code-stage gate |
 
 **Note:** This file is the initial draft-PR scope declaration, not a substitute

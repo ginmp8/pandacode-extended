@@ -370,6 +370,33 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Consistent native read of a Ticket, its mandate, attempt history and audit.
+/// A single SQLite read transaction prevents a pre-Stop assignment being
+/// displayed alongside a post-Stop authority record.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSnapshot {
+    pub ticket: Ticket,
+    pub mandate: MandateSummary,
+    pub assignments: Vec<Assignment>,
+    pub activity: Vec<AuditEntry>,
+}
+
+fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSnapshot> {
+    if !(1..=200).contains(&limit) {
+        return Err("Snapshot page size must be between 1 and 200.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let result = TaskSnapshot {
+        ticket: get_ticket(store, ticket_id)?,
+        mandate: mandate(store, ticket_id)?,
+        assignments: assignments(store, ticket_id, limit)?,
+        activity: history(store, ticket_id, limit)?,
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
 fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
     store.db.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
@@ -1083,6 +1110,16 @@ pub async fn superagent_activity(window: tauri::WebviewWindow,
 }
 
 #[tauri::command]
+pub async fn superagent_snapshot(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, limit: Option<i64>,
+) -> Result<TaskSnapshot> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    ticket_snapshot(&store, &ticket_id, limit.unwrap_or(50))
+}
+
+#[tauri::command]
 pub async fn superagent_submit(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>,
     orchestration_id: String, objective: String, request_key: String,
@@ -1435,6 +1472,32 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_ticket_snapshot_keeps_revocation_attempts_and_audit_consistent() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Inspect a disposable fixture", "snapshot-1", false,
+        ).unwrap();
+        assert!(launched);
+        let before = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert_eq!(before.ticket.state, "running");
+        assert!(!before.mandate.revoked);
+        assert!(!before.mandate.allowed_side_effects);
+        assert_eq!(before.assignments.len(), 1);
+        assert_eq!(before.assignments[0].state, "running");
+        assert_eq!(before.activity[0].kind, "admitted");
+
+        stop(&store, &ticket.id).unwrap();
+        let after = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert_eq!(after.ticket.state, "stopped");
+        assert!(after.mandate.revoked);
+        assert_eq!(after.assignments[0].state, "stopped");
+        assert_eq!(after.activity[0].kind, "stopped");
+        assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
+        assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
 
     #[test]
     fn desktop_superagent_commands_require_a_trusted_main_window() {

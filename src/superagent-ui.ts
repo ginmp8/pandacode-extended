@@ -17,7 +17,7 @@ interface Mandate {
 }
 interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
 interface Activity { id: number; kind: string; detail: string; at: number }
-interface TicketDetails { mandate: Mandate; assignments: Assignment[]; activity: Activity[] }
+interface TicketDetails { ticket: Ticket; mandate: Mandate; assignments: Assignment[]; activity: Activity[] }
 
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
@@ -137,12 +137,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
-    const [mandate, assignments, activity] = await Promise.all([
-      call<Mandate>('superagent_mandate', { ticketId:id }),
-      call<Assignment[]>('superagent_assignments', { ticketId:id, limit:50 }),
-      call<Activity[]>('superagent_activity', { ticketId:id, limit:50 }),
-    ]);
-    if (inspectedTicket === id) ticketDetails = { mandate, assignments, activity };
+    const snapshot = await call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 });
+    if (inspectedTicket === id) {
+      ticketDetails = snapshot;
+      // Keep the ticket row and its grant/history pinned to one native revision.
+      const index = tickets.findIndex(ticket => ticket.id === id);
+      if (index >= 0) tickets[index] = snapshot.ticket;
+    }
   }
   async function reload(): Promise<void> {
     loading = true;

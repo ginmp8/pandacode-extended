@@ -880,7 +880,7 @@ fn accept_with_pause(
               )
               AND original.project_id=?3 AND assignment.result=?4
         )",
-        params![ticket_id,ticket.worker_bot_id,mandate(store, ticket_id)?.project_id,
+        params![ticket_id,ticket_worker(store, ticket_id)?,mandate(store, ticket_id)?.project_id,
             ticket.evidence.as_deref().unwrap_or_default()],
         |r| r.get(0),
     ).map_err(|e| e.to_string())?;

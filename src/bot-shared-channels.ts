@@ -13,7 +13,7 @@ export interface SharedChannelSummary {
 }
 export interface SharedChannelMessage {
   id: string;
-  kind: 'user' | 'reply' | 'assigned' | 'bot_post' | 'bot_request' | 'direct_delegation' | 'council_status';
+  kind: 'user' | 'reply' | 'assigned' | 'bot_post' | 'bot_request' | 'direct_delegation';
   authorBotId: string | null;
   recipientIds?: string[];
   text: string;
@@ -97,7 +97,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
-  const name = bot?.name ?? (message.kind === 'user' ? 'You' : message.kind === 'council_status' ? 'Council' : 'Bot');
+  const name = bot?.name ?? (message.kind === 'user' ? 'You' : 'Bot');
   const targets = (message.recipientIds ?? []).map(id => bots.find(item => item.id === id)?.name ?? 'Bot');
   const label = message.kind === 'bot_request' ? `Requested ${targets.join(' and ')}`
     : message.kind === 'bot_post' ? 'Channel update' : '';

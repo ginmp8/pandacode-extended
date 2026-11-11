@@ -381,6 +381,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         [delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
     let (followup_status, followup_url) = followup.map_or((None,None), |(s,u)| (Some(s),u));
+    let notice = if delivery_status == "failed" && notice.is_none() {
+        Some("Council delivery ended without approval. Review the report before retrying.".into())
+    } else { notice };
     let accepted_by = acceptance_reason.as_ref().map(|_| "local_user".to_string());
     Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, acceptance_reason, accepted_by }))
 }
@@ -759,24 +762,18 @@ pub(super) fn settle_channel_delivery(
     // a changed review/revision must not pass on a stale pre-gateway decision.
     let gate = super::channel_council_outcome(store, session_id)?;
     if gate == super::ChannelCouncilOutcome::Waiting { return Ok(None); }
-    let denial = match gate {
-        super::ChannelCouncilOutcome::Denied(reason) => Some(reason),
-        _ => None,
-    };
-    let approved = successful && denial.is_none();
+    let denied = matches!(gate, super::ChannelCouncilOutcome::Denied(_));
+    let approved = successful && !denied;
     let changed = store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3
          WHERE id=?1 AND session_id=?4 AND status='in_progress'",
         params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id],
     ).map_err(|e| e.to_string())?;
     if changed == 0 { return Ok(None); }
-    if let Some(reason) = denial {
-        store.db.execute(
-            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,created_at)
-             VALUES(?1,?2,'council_status',?3,?4)",
-            params![crate::storage::id(),channel_id,reason,crate::storage::now()],
-        ).map_err(|e| e.to_string())?;
-    } else if approved && !reply.trim().is_empty() {
+    // The legacy message schema accepts only user/reply, not synthetic
+    // Council notices. A denied delivery is visible through its native
+    // per-delivery status/notice, never as a fabricated bot response.
+    if approved && !reply.trim().is_empty() {
         store.db.execute(
             "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at)
              VALUES(?1,?2,'reply',?3,?4,?5)",
@@ -820,7 +817,7 @@ pub(super) fn settle_channel_delivery(
     }
     update_message_status(store, message_id)?;
     transaction.commit().map_err(|e| e.to_string())?;
-    Ok(Some(denial.is_none()))
+    Ok(Some(!denied))
 }
 
 /// Claim one post-acceptance GitHub issue attempt. A crash after 'sending'

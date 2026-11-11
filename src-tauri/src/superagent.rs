@@ -1195,13 +1195,16 @@ pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
         let sessions = if enabled { Vec::new() } else {
             let mut stmt = store.db.prepare(
                 "SELECT a.session_id FROM sa_assignments a
-                 JOIN sa_tickets t ON t.active_assignment_id=a.id
-                 WHERE t.orchestration_id=?1 AND t.state='running' AND a.state='running'"
+                 JOIN sa_tickets t ON t.id=a.ticket_id
+                 WHERE t.orchestration_id=?1
+                   AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')
+                   AND a.state='running'"
             ).map_err(|e| e.to_string())?;
-            stmt.query_map([&orchestration_id], |row| row.get::<_, String>(0))
+            let sessions = stmt.query_map([&orchestration_id], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            sessions
         };
         (change_enabled(&store, &orchestration_id, expected_revision, enabled)?, sessions)
     };
@@ -1244,9 +1247,16 @@ fn change_enabled(
         // assignments under a disabled configuration. Repeating Off must
         // revoke those grants rather than returning without settling them.
         let unsettled: bool = store.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sa_tickets
-             WHERE orchestration_id=?1 AND state IN
-             ('queued','running','waiting_approval','waiting_review','blocked'))",
+            "SELECT EXISTS(
+                SELECT 1 FROM sa_tickets t
+                JOIN sa_mandates m ON m.ticket_id=t.id
+                WHERE t.orchestration_id=?1
+                  AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')
+                  AND (m.revoked=0 OR t.state<>'blocked'
+                    OR t.active_assignment_id IS NOT NULL
+                    OR EXISTS(SELECT 1 FROM sa_assignments a
+                              WHERE a.ticket_id=t.id AND a.state='running'))
+             )",
             [orchestration_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if !unsettled { return Ok(current); }
@@ -1279,9 +1289,9 @@ fn change_enabled(
         tx.execute(&grants, [orchestration_id]).map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE sa_assignments SET state='interrupted',updated_at=?2
-             WHERE id IN (
-               SELECT active_assignment_id FROM sa_tickets
-               WHERE orchestration_id=?1 AND state='running')
+             WHERE ticket_id IN (
+               SELECT id FROM sa_tickets WHERE orchestration_id=?1
+               AND state IN ('queued','running','waiting_approval','waiting_review','blocked'))
                AND state='running'",
             params![orchestration_id,now],
         ).map_err(|e| e.to_string())?;
@@ -2343,6 +2353,76 @@ mod tests {
         // Once repaired, repeated Off is genuinely idempotent.
         let same = change_enabled(&store, &cfg.id, repaired.policy_revision, false).unwrap();
         assert_eq!(same.policy_revision, repaired.policy_revision);
+    }
+
+    #[test]
+    fn repeated_off_does_not_revise_an_already_revoked_blocked_ticket() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Pending worker", "off-idempotent-pending", true,
+        ).unwrap();
+        assert!(!launched);
+        let disabled = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        let settled = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(settled.state, "blocked");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        let history_count = history(&store, &ticket.id, 100).unwrap().len();
+
+        let same = change_enabled(&store, &cfg.id, disabled.policy_revision, false).unwrap();
+        assert_eq!(same.policy_revision, disabled.policy_revision);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, settled.revision);
+        assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), history_count);
+    }
+
+    #[test]
+    fn disable_settles_detached_running_assignment_without_reauthorizing_it() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Original assignment", "off-detached-assignment", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // A legacy interrupted state writer detached the running lease from
+        // the ticket; ordinary successful callbacks cannot settle this run.
+        store.db.execute(
+            "UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let _ = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        let assignment = assignments(&store, &ticket.id, 10).unwrap();
+        assert_eq!(assignment[0].state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "late result").unwrap());
+    }
+
+    #[test]
+    fn disable_rolls_back_policy_and_leases_when_audit_fails() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Audited stop", "off-atomic-failure", false,
+        ).unwrap();
+        assert!(launched);
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_off_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='orchestration_disabled'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, false).is_err());
+        assert!(configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision, cfg.policy_revision);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        store.db.execute_batch("DROP TRIGGER reject_off_audit").unwrap();
+        let disabled = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert!(!disabled.enabled);
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
     }
 
     #[test]

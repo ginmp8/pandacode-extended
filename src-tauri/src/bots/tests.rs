@@ -643,6 +643,29 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         [&delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).unwrap();
     assert_eq!(pending,("owner/repo".into(),"pending".into(),"explicit-user-action".into()));
+    // The durable pending flag alone must never authorize an external write.
+    f.store.db.execute(
+        "UPDATE extended_channel_council_followups SET repository='outside/scope' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().is_none(),
+        "the native tool boundary must reject a repository outside the frozen user grant");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_followups SET repository='owner/repo' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    team.changed_at = 1281;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    assert!(shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().is_none(),
+        "a stale Council exception cannot claim an external GitHub write");
+    team.changed_at = 1280;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![sid,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
     let first=shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().unwrap();
     assert_eq!(first.0,"owner/repo");
     assert!(first.2.contains("Accepted finding"));

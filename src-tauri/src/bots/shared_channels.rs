@@ -488,6 +488,15 @@ pub(crate) fn settle_posts(store: &Store, message_ids: &[String]) -> Result<()> 
 /// Runs are not restored for bot deliveries, so a process restart must not leave
 /// old assignments permanently marked as active.
 pub(crate) fn reconcile_in_progress(store: &Store) -> Result<()> {
+    // An external GitHub issue might already have been created before a crash.
+    // The 'sending' claim is never retried automatically; retain a truthful
+    // uncertain status so the same authorized delivery cannot publish twice.
+    store.db.execute(
+        "UPDATE extended_channel_council_followups
+         SET state='unknown',error='GitHub issue creation was interrupted; the result is unknown. Check the repository before retrying manually.',updated_at=?1
+         WHERE state='sending'",
+        [crate::storage::now()],
+    ).map_err(|e| e.to_string())?;
     store.db.execute("UPDATE bot_messages SET status='failed',result='Interrupted when PandaCode closed.',updated_at=?1 WHERE status='in_progress'", [crate::storage::now()]).map_err(|e| e.to_string())?;
     store.db.execute("UPDATE bot_shared_channel_deliveries SET status='failed',updated_at=?1 WHERE status='in_progress'", [crate::storage::now()]).map_err(|e| e.to_string())?;
     // A queued assignment whose queue entry is gone was taken just before PandaCode closed.
@@ -888,6 +897,10 @@ pub(super) fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> R
     Ok((changed==1).then_some(item))
 }
 
+fn github_result_uncertain(error: &str) -> bool {
+    error.contains("uncertain") || error.contains("timed out") || error.contains("truncated")
+}
+
 /// Post on behalf of this delivery's configured executor, using the user's
 /// existing gh CLI session. Only exact user-authorized owner/repo is allowed.
 pub(super) async fn publish_post_acceptance_issue(app: &tauri::AppHandle, delivery_id: &str) {
@@ -915,7 +928,8 @@ pub(super) async fn publish_post_acceptance_issue(app: &tauri::AppHandle, delive
     }).await.unwrap_or_else(|_| Err("GitHub issue creation result is uncertain; do not retry automatically.".into()));
     let (status,url,error) = match result {
         Ok(url) => ("succeeded",Some(url),None),
-        Err(error) if error.contains("uncertain") => ("unknown",None,Some("The GitHub result is unknown; check the repository before trying again.".to_string())),
+        // A timed-out CLI may have created the issue but lost the response.
+        Err(error) if github_result_uncertain(&error) => ("unknown",None,Some("The GitHub result is unknown; check the repository before trying again.".to_string())),
         Err(_) => ("failed",None,Some("The authorized GitHub issue could not be created; check the GitHub CLI and repository access.".to_string())),
     };
     if let Ok(store) = state.store.lock() {

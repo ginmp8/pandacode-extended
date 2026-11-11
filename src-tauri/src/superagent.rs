@@ -234,6 +234,40 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Immutable native assignment history, including completed and failed attempts.
+/// Never infer task success or authorization from an assignment's terminal state.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Assignment {
+    pub id: String,
+    pub ticket_id: String,
+    pub bot_id: String,
+    pub session_id: String,
+    pub state: String,
+    pub attempt: i64,
+    pub result: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn assignments(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Assignment>> {
+    if !(1..=200).contains(&limit) {
+        return Err("Assignment page size must be between 1 and 200.".into());
+    }
+    // Reject unknown tickets before enumerating any durable history.
+    get_ticket(store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,ticket_id,bot_id,session_id,state,attempt,result,created_at,updated_at
+         FROM sa_assignments WHERE ticket_id=?1 ORDER BY attempt DESC LIMIT ?2",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, limit], |row| Ok(Assignment {
+        id: row.get(0)?, ticket_id: row.get(1)?, bot_id: row.get(2)?,
+        session_id: row.get(3)?, state: row.get(4)?, attempt: row.get(5)?,
+        result: row.get(6)?, created_at: row.get(7)?, updated_at: row.get(8)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEntry {
@@ -674,6 +708,14 @@ pub async fn superagent_tickets(
 ) -> Result<Vec<Ticket>> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     list_tickets(&store, &orchestration_id, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+pub async fn superagent_assignments(
+    state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
+) -> Result<Vec<Assignment>> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    assignments(&store, &ticket_id, limit.unwrap_or(100))
 }
 
 #[tauri::command]
@@ -1369,6 +1411,43 @@ mod tests {
         let (retried, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(session));
+    }
+
+    #[test]
+    fn native_assignment_history_is_bounded_correlated_and_survives_restart() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Trace a failed launch", "assignment-history-1", false,
+        ).unwrap();
+        assert!(launched);
+        let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        fail_launch(&store, &ticket.id, "provider unavailable").unwrap();
+        let (_, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_ne!(first_session, second_session);
+        let attempts = assignments(&store, &ticket.id, 100).unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!((attempts[0].attempt, attempts[0].state.as_str()), (2, "running"));
+        assert_eq!((attempts[1].attempt, attempts[1].state.as_str()), (1, "failed"));
+        assert_eq!(attempts[1].session_id, first_session);
+        assert_eq!(attempts[1].result.as_deref(), Some("provider unavailable"));
+        assert!(attempts.iter().all(|a| a.ticket_id == ticket.id && a.bot_id == "worker"));
+        assert_eq!(assignments(&store, &ticket.id, 1).unwrap().len(), 1);
+        assert!(assignments(&store, &ticket.id, 0).is_err());
+        assert!(assignments(&store, &ticket.id, 201).is_err());
+        assert!(assignments(&store, "unknown-ticket", 20).is_err());
+
+        assert!(on_run_finished(&store, &second_session, true, "Result evidence").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let persisted = assignments(&reopened, &ticket.id, 200).unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0].state, "finished");
+        assert_eq!(persisted[0].result.as_deref(), Some("Result evidence"));
+        assert_eq!(persisted[1].state, "failed");
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "waiting_approval");
     }
 
     #[test]

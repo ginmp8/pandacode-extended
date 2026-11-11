@@ -4436,6 +4436,7 @@ pub fn run() {
                 superagent::superagent_set_enabled,
                 superagent::superagent_ticket,
                 superagent::superagent_tickets,
+                superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,

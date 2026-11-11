@@ -1346,7 +1346,12 @@ pub(crate) fn start_state(
         reserved_at: storage::now(),
         kind: None,
     });
+    // Commit the initial Council cycle identity and Team reservation together.
+    // Failure cannot leave an unbound or re-bound cycle after a launch.
+    let transaction = store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    crate::bots::shared_channels::bind_delivery_cycle(&store, session_id, team.council_since)?;
     save(&store, &mut team)?;
+    transaction.commit().map_err(|e|e.to_string())?;
     let admission = Admission {
         parent: session_id.to_owned(),
         generation: team.generation,

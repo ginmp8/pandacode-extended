@@ -236,6 +236,30 @@ pub(super) fn council_request(store: &Store, message_id: &str) -> Result<Option<
     }).transpose()
 }
 
+/// Bind the native Council's first cycle to the isolated channel delivery.
+/// A later cycle in that session may never authorize the original assignment.
+pub(crate) fn bind_delivery_cycle(store: &Store, session_id: &str, since: i64) -> Result<()> {
+    let linked: Option<(String,String)> = store.db.query_row(
+        "SELECT c.delivery_id,c.artifact_revision FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| Ok((r.get(0)?,r.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((id,existing)) = linked else { return Ok(()) };
+    let frozen = format!("cycle:{since}");
+    if existing == frozen { return Ok(()); }
+    if existing != "0" {
+        return Err("channel_council_scope_mismatch: a later Council cycle cannot approve an earlier delivery.".into());
+    }
+    let updated = store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET artifact_revision=?2
+         WHERE delivery_id=?1 AND artifact_revision='0'",
+        params![id,frozen],
+    ).map_err(|e|e.to_string())?;
+    if updated != 1 { return Err("channel_council_scope_mismatch: could not pin the original Council cycle.".into()); }
+    Ok(())
+}
+
 /** Recheck frozen per-message authority against current channel members and
  * all message executors on every selected seat, including resumed rounds. */
 pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selected: &[String]) -> Result<()> {
@@ -679,16 +703,19 @@ pub(crate) fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
 /// replay/restart/Stop callers that bypass the live run-finished gate.
 /// Ordinary (Council-off) collaboration retains its original callback behavior.
 pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Result<bool> {
-    let linked: Option<(String,String)> = store.db.query_row(
-        "SELECT d.session_id,d.status FROM extended_channel_council_deliveries c
+    let linked: Option<(String,String,String)> = store.db.query_row(
+        "SELECT d.session_id,d.status,c.artifact_revision
+         FROM extended_channel_council_deliveries c
          JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
          WHERE c.delivery_id=?1",
-        [delivery_id], |r| Ok((r.get(0)?,r.get(1)?)),
+        [delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((session_id,status)) = linked else { return Ok(true) };
+    let Some((session_id,status,frozen_cycle)) = linked else { return Ok(true) };
     if status != "completed" { return Ok(false); }
     let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(false) };
-    if team.status != "completed" || team.config.council.is_none() { return Ok(false); }
+    if team.status != "completed" || team.config.council.is_none()
+        || frozen_cycle != format!("cycle:{}",team.council_since)
+    { return Ok(false); }
     let Some(verdict) = team.council_status.as_ref() else { return Ok(false) };
     if verdict.stale { return Ok(false); }
     if verdict.state == "passed" { return Ok(true); }

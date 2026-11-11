@@ -11,12 +11,14 @@ async function showBots(page: Page): Promise<void> {
 
 test.describe('shared bot channels', () => {
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
-    // Sample bot bootstrapping creates several preview sessions. This end-to-end
-    // scenario includes two asynchronous navigation transitions on slow CI runners.
-    // Keep the complete navigation and draft-retention assertions unchanged.
+    // Sample bot bootstrapping may leave no initial conversation selected.
+    // Open a real bot conversation before asserting its composer and switching
+    // to the channel; keep the complete navigation and draft-retention checks.
     test.setTimeout(60_000);
     await showBots(page);
-    // The sample channel is seeded during asynchronous startup.
+    const initialBot = sidebar(page).getByRole('button', { name: /^Chat with Scout/ });
+    await expect(initialBot).toBeVisible();
+    await initialBot.click();
     await expect(page.locator('#composer-area #composer')).toBeVisible();
     const pageErrors: string[] = [];
     page.on('pageerror', error => pageErrors.push(error.message));

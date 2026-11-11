@@ -1,13 +1,14 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('bot collaboration', () => {
-  test('channel Council controls stay compact and aligned in desktop and narrow layouts', async ({ page }) => {
+  test('channel Council stays in a footer popover and fits desktop and narrow layouts', async ({ page }) => {
     await page.setViewportSize({ width: 1060, height: 780 });
     await page.goto('/tests/fixtures/bot-manifests.html');
-    await page.addStyleTag({ url: '/src/styles.css' });
-    await page.addStyleTag({ url: '/src/bot-shared-channels.css' });
+    for (const url of ['/src/styles.css', '/src/design-system.css', '/src/council.css', '/src/bot-shared-channels.css']) {
+      await page.addStyleTag({ url });
+    }
     await page.evaluate(async () => {
-      const { sharedChannelComposerHtml } = await import('/src/bot-shared-channels.ts');
+      const { sharedChannelComposerHtml, bindSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
       document.body.innerHTML = sharedChannelComposerHtml({
         id: 'lab-security', name: 'lab-security', memberIds: ['executor', 'reviewer'],
         archived: false, messages: [], activeBotIds: [],
@@ -15,27 +16,44 @@ test.describe('bot collaboration', () => {
         { id: 'executor', name: 'Executor' },
         { id: 'reviewer', name: 'Reviewer' },
       ] as any);
-      document.querySelector<HTMLFormElement>('#shared-channel-composer')!.style.cssText = 'max-width:830px;margin:24px auto';
+      const form = document.querySelector<HTMLFormElement>('#shared-channel-composer')!;
+      form.style.cssText = 'max-width:830px;margin:24px auto';
+      bindSharedChannelCouncil(form);
     });
     const form = page.locator('#shared-channel-composer');
-    const toggle = form.locator('input[name=councilEnabled]');
+    const trigger = form.getByRole('button', { name: 'Council: off' });
+    const panel = form.getByRole('dialog', { name: 'Council' });
+    await expect(trigger).toBeVisible();
+    await expect(panel).toBeHidden();
+    const triggerRect = await trigger.boundingBox();
+    expect(triggerRect!.width).toBeGreaterThanOrEqual(32);
+    expect(triggerRect!.width).toBeLessThanOrEqual(40);
+
+    await trigger.evaluate(async element => {
+      const { toggleSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
+      toggleSharedChannelCouncil(element as HTMLElement);
+    });
+    await expect(panel).toBeVisible();
+    const toggle = panel.getByRole('switch', { name: 'Council' });
     await expect(toggle).toBeVisible();
     const dims = await toggle.evaluate(element => {
       const rect = element.getBoundingClientRect();
       return { width: rect.width, height: rect.height };
     });
     expect(dims.width).toBeGreaterThanOrEqual(30);
-    expect(dims.width).toBeLessThanOrEqual(40);
-    expect(dims.height).toBeLessThanOrEqual(23);
+    expect(dims.width).toBeLessThanOrEqual(50);
+    expect(dims.height).toBeLessThanOrEqual(30);
     await toggle.check();
-    const options = form.locator('.bc-council-options');
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: on');
+
+    const options = panel.locator('.bc-council-options');
     await expect(options).toBeVisible();
     for (const name of ['councilGithubIssue', 'councilMode']) {
-      const control = form.locator(name === 'councilMode' ? 'input[name=councilMode][value=selected]' : `input[name=${name}]`);
+      const control = panel.locator(name === 'councilMode' ? 'input[name=councilMode][value=selected]' : 'input[name=' + name + ']');
       const width = await control.evaluate(element => element.getBoundingClientRect().width);
       expect(width, name).toBeLessThanOrEqual(20);
     }
-    const group = form.locator('.bc-council-modes');
+    const group = panel.locator('.bc-council-modes');
     const layout = await group.evaluate(element => {
       const labels = [...element.querySelectorAll('label')];
       const a = labels[0].getBoundingClientRect(), b = labels[1].getBoundingClientRect();
@@ -44,17 +62,20 @@ test.describe('bot collaboration', () => {
     });
     expect(layout.sameRow).toBe(true);
     expect(layout.contained).toBe(true);
-    await form.locator('input[name=councilMode][value=selected]').check();
-    await expect(form.locator('.bc-council-reviewer-options')).toBeVisible();
-    await expect(form.locator('.bc-council-selected-permissions')).toBeVisible();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    await expect(panel.locator('.bc-council-reviewer-options')).toBeVisible();
+    await expect(panel.locator('.bc-council-selected-permissions')).toBeVisible();
+
+    // Resizing an open popover must re-anchor it without making the composer grow.
     await page.setViewportSize({ width: 480, height: 640 });
-    const overflow = await form.evaluate(element => {
-      const root = element.getBoundingClientRect(), panel = element.querySelector('.bc-council-options')!.getBoundingClientRect();
-      return { root: root.width, panel: panel.width, right: panel.right, viewport: window.innerWidth, height: panel.height, footer: element.querySelector('.send-button')!.getBoundingClientRect().bottom };
+    const overflow = await panel.evaluate(element => {
+      const box = element.getBoundingClientRect(), footer = document.querySelector('.send-button')!.getBoundingClientRect();
+      return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, viewport: window.innerWidth, footer: footer.bottom };
     });
-    expect(overflow.panel).toBeLessThanOrEqual(overflow.root);
+    expect(overflow.left).toBeGreaterThanOrEqual(0);
     expect(overflow.right).toBeLessThanOrEqual(overflow.viewport);
-    expect(overflow.height).toBeLessThanOrEqual(340);
+    expect(overflow.top).toBeGreaterThanOrEqual(0);
+    expect(overflow.bottom).toBeLessThanOrEqual(640);
     expect(overflow.footer).toBeLessThanOrEqual(640);
     await expect(form.locator('.send-button')).toBeVisible();
   });
@@ -90,6 +111,13 @@ test.describe('bot collaboration', () => {
       document.body.append(root);
     });
     const fixture = page.locator('#channel-council-fixture');
+    await page.evaluate(async () => {
+      const { bindSharedChannelCouncil, toggleSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
+      const form = document.querySelector<HTMLFormElement>('#channel-council-fixture form')!;
+      bindSharedChannelCouncil(form);
+      toggleSharedChannelCouncil(form.querySelector<HTMLElement>('.bc-council-trigger')!);
+    });
+    await expect(fixture.getByRole('dialog', { name: 'Council' })).toBeVisible();
     await expect(fixture.locator('input[name="councilEnabled"]')).not.toBeChecked();
     await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Council: Reviewing');
     await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Reviewer');
@@ -118,7 +146,7 @@ test.describe('bot collaboration', () => {
     await fixture.locator('input[name="councilGithubIssue"]').check();
     await fixture.locator('input[name="councilGithubRepo"]').fill('owner/repo');
     await page.evaluate(async () => {
-      const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs } = await import('/src/bot-shared-channels.ts');
+      const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
       const parent = document.getElementById('channel-council-fixture')!;
       const old = parent.querySelector<HTMLFormElement>('form')!;
       const render = (id: string) => {
@@ -131,7 +159,10 @@ test.describe('bot collaboration', () => {
       const refreshed = render('quality');
       restoreSharedChannelCouncilInputs(old, refreshed);
       old.replaceWith(refreshed);
+      bindSharedChannelCouncil(refreshed);
     });
+    await expect(fixture.locator('.bc-council-trigger')).toHaveAttribute('aria-label', 'Council: on');
+    await expect(fixture.locator('.bc-council-panel')).toBeHidden();
     await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilMode"][value="selected"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('8.5');
@@ -142,7 +173,7 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilGithubIssue"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilGithubRepo"]')).toHaveValue('owner/repo');
     await page.evaluate(async () => {
-      const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs } = await import('/src/bot-shared-channels.ts');
+      const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
       const old = document.querySelector<HTMLFormElement>('#channel-council-fixture form')!;
       const holder = document.createElement('div');
       holder.innerHTML = sharedChannelComposerHtml({
@@ -151,7 +182,9 @@ test.describe('bot collaboration', () => {
       const next = holder.querySelector<HTMLFormElement>('form')!;
       restoreSharedChannelCouncilInputs(old, next);
       old.replaceWith(next);
+      bindSharedChannelCouncil(next);
     });
+    await expect(fixture.locator('.bc-council-trigger')).toHaveAttribute('aria-label', 'Council: off');
     await expect(fixture.locator('input[name="councilEnabled"]')).not.toBeChecked();
     await expect(fixture.locator('input[name="councilGithubIssue"]')).not.toBeChecked();
     await expect(fixture.locator('input[name="councilGithubRepo"]')).toHaveValue('');

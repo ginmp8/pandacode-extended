@@ -742,7 +742,7 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
     }
     let Some(verdict) = team.council_status.as_ref() else { return Ok(false) };
     if verdict.stale { return Ok(false); }
-    if verdict.state == "passed" { return Ok(true); }
+    if verdict.state == "passed" { return Ok(crate::architect::verified_council_pass(&team)); }
     if verdict.state != "accepted" { return Ok(false); }
     let proof: Option<(String,i64,i64,i64)> = store.db.query_row(
         "SELECT a.cycle_id,a.council_since,a.dispatch_revision,a.changed_at

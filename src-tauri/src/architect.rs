@@ -574,6 +574,19 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     }
     team.council_status = council::status(team);
 }
+/// Do not use a cached "passed" label as an authorization token. Recompute
+/// the native Council gate from frozen workers, scores, required skill receipts
+/// and the reviewed revision before publishing a successful channel result.
+pub(crate) fn verified_council_pass(team: &TeamSnapshot) -> bool {
+    let Some(stored) = team.council_status.as_ref() else { return false };
+    if stored.state != "passed" || stored.stale { return false; }
+    let Some(verified) = council::status(team) else { return false };
+    verified.state == "passed" && !verified.stale
+        && stored.round == verified.round
+        && stored.lowest == verified.lowest
+        && stored.target == verified.target
+}
+
 /// A settled run's save that fails is logged; the watchdog then reaps the worker that still reads
 /// as running (`watchdog::reconcile`), so nothing waits on it forever.
 fn save_settled(store: &Store, team: &mut TeamSnapshot) -> bool {

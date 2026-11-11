@@ -210,7 +210,8 @@ pub async fn superagent_manifest_export(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
 ) -> Result<serde_json::Value> {
     main_window(&window)?;
-    export(&state.store.lock().map_err(|e| e.to_string())?)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    export(&store)
 }
 
 #[tauri::command]
@@ -218,7 +219,8 @@ pub async fn superagent_manifest_preview(
     window: tauri::WebviewWindow, state: State<'_, AppState>, document: serde_json::Value,
 ) -> Result<ImportPreview> {
     main_window(&window)?;
-    preview(&state.store.lock().map_err(|e| e.to_string())?, &document)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    preview(&store, &document)
 }
 
 #[tauri::command]
@@ -227,7 +229,8 @@ pub async fn superagent_manifest_import(
     document: serde_json::Value, confirmed: bool,
 ) -> Result<ImportResult> {
     main_window(&window)?;
-    apply(&state.store.lock().map_err(|e| e.to_string())?, &document, confirmed)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    apply(&store, &document, confirmed)
 }
 
 #[cfg(test)]

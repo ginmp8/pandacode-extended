@@ -23,6 +23,16 @@ export async function invokeSuperagent<T>(
         workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1};
       configs.set(c.id,c);value=c;break;
     }
+    case 'superagent_update':{
+      const c=get(args.orchestrationId),input=args.input;
+      if(c.enabled||c.policyRevision!==args.expectedRevision||(tickets.get(c.id)?.length||0)>0)
+        throw Error('Preset cannot change after use or while enabled.');
+      const a=find(input.coordinatorBotId),b=find(input.workerBotId);
+      if(!input.name?.trim()||a.id===b.id||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
+        throw Error('Invalid or duplicate preset.');
+      c.name=input.name;c.coordinatorBotId=a.id;c.workerBotId=b.id;c.projectId=b.projectId;c.policyRevision++;
+      value=c;break;
+    }
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
       if(c.enabled!==args.enabled){c.enabled=args.enabled;c.policyRevision++;}

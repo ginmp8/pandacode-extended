@@ -30,15 +30,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</small></div><span>' + (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button></li>').join('');
-    const choices = bots.map(bot => '<option value="' + safe(bot.id) + '"' +
-      (bot.paused ? ' disabled' : '') + '>' + safe(bot.name) +
+    const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
+      (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
+    const choices = optionsFor('');
     const chosen = current();
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
       '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
+      '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
+      '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
+      optionsFor(chosen.coordinatorBotId) + '</select></label>' +
+      '<label>Edit worker<select name="workerBotId" required>' + optionsFor(chosen.workerBotId) +
+      '</select></label></div><button class="primary-button" type="submit"' +
+      (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
       '<label>Dispatch<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
@@ -201,6 +208,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'edit') {
+      const existing = current();
+      if (!existing || existing.enabled) return;
+      const input = {
+        name:String(data.get('name') ?? '').trim(),
+        coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
+        workerBotId:String(data.get('workerBotId') ?? ''),
+      };
+      void work(async () => {
+        await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });
+        await reload();
+      });
+    }
     if (form.dataset.saForm === 'create') {
       const input = { name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),

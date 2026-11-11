@@ -95,7 +95,7 @@ jobs:
 
   bot-workflow-browser:
     name: Bot manifest and collaboration UI (Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -114,7 +114,7 @@ jobs:
 
   superagent-browser:
     name: SuperAgent Orchestrations UI (Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -131,7 +131,7 @@ jobs:
 
   council-bot-selected-browser:
     name: Council configured reviewer selection (focused Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -150,7 +150,7 @@ jobs:
     # Run every Council browser test, partitioned across independent CI runners to
     # stay within the job timeout without relaxing assertions or test coverage.
     name: Council selected bot reviewers (Playwright, shard ${{ matrix.shard }}/3)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -172,7 +172,7 @@ jobs:
   customize-skills-browser:
     # Run the Skills regressions independently, even when an unrelated Bots test fails.
     name: Customize Skills UI (Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

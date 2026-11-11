@@ -599,7 +599,7 @@ fn accept(store: &Store, ticket_id: &str, expected_revision: i64) -> Result<Tick
                   AND worker.paused=0 AND coordinator.paused=0
                   AND worker.project_id=sa_tickets.project_id
               )
-         )
+         )",
         params![ticket_id,expected_revision,now],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {

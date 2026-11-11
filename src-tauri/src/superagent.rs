@@ -9,6 +9,22 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
+/// A desktop window is not itself a task mandate. It is nevertheless the
+/// trusted local-user entrypoint for issuing, revoking and inspecting manual
+/// tasks. Headless orchestration must use a separate authenticated native
+/// adapter, not an arbitrary Webview invoking these commands.
+fn require_main_window_label(label: &str) -> Result<()> {
+    if label == "main" {
+        Ok(())
+    } else {
+        Err("SuperAgent desktop commands require the main window.".into())
+    }
+}
+
+fn require_main_window(window: &tauri::WebviewWindow) -> Result<()> {
+    require_main_window_label(window.label())
+}
+
 pub(crate) const CHANNEL: &str = "superagent";
 /// The existing bot gateway accepts at most 32 KiB of inbound text. Reserve
 /// headroom for native task metadata, read-only instructions and coordinator
@@ -893,13 +909,15 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
 
 
 #[tauri::command]
-pub async fn superagent_create(state: State<'_,AppState>, input: NewOrchestration) -> Result<Orchestration> {
+pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,AppState>, input: NewOrchestration) -> Result<Orchestration> {
+    require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
     create_configuration(&store,input)
 }
 
 #[tauri::command]
-pub async fn superagent_list(state: State<'_,AppState>) -> Result<Vec<Orchestration>> {
+pub async fn superagent_list(window: tauri::WebviewWindow, state: State<'_,AppState>) -> Result<Vec<Orchestration>> {
+    require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
     let mut stmt=store.db.prepare("SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision FROM sa_orchestrations ORDER BY created_at")
         .map_err(|e|e.to_string())?;
@@ -909,10 +927,11 @@ pub async fn superagent_list(state: State<'_,AppState>) -> Result<Vec<Orchestrat
 }
 
 #[tauri::command]
-pub async fn superagent_set_enabled(
+pub async fn superagent_set_enabled(window: tauri::WebviewWindow, 
     state: State<'_,AppState>, orchestration_id: String,
     expected_revision: i64, enabled: bool,
 ) -> Result<Orchestration> {
+    require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
     change_enabled(&store, &orchestration_id, expected_revision, enabled)
 }
@@ -1002,65 +1021,73 @@ fn delete_configuration(store: &Store, id: &str, expected_revision: i64) -> Resu
 }
 
 #[tauri::command]
-pub async fn superagent_update(
+pub async fn superagent_update(window: tauri::WebviewWindow, 
     state: State<'_,AppState>, orchestration_id: String,
     expected_revision: i64, input: NewOrchestration,
 ) -> Result<Orchestration> {
+    require_main_window(&window)?;
     let store=state.store.lock().map_err(|e| e.to_string())?;
     update_configuration(&store,&orchestration_id,expected_revision,&input)
 }
 
 #[tauri::command]
-pub async fn superagent_delete(
+pub async fn superagent_delete(window: tauri::WebviewWindow, 
     state: State<'_,AppState>, orchestration_id: String, expected_revision: i64,
 ) -> Result<()> {
+    require_main_window(&window)?;
     let store=state.store.lock().map_err(|e| e.to_string())?;
     delete_configuration(&store,&orchestration_id,expected_revision)
 }
 
 #[tauri::command]
-pub async fn superagent_ticket(state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
+pub async fn superagent_ticket(window: tauri::WebviewWindow, state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     get_ticket(&store, &ticket_id)
 }
 
 #[tauri::command]
-pub async fn superagent_mandate(
+pub async fn superagent_mandate(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String,
 ) -> Result<MandateSummary> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     mandate(&store, &ticket_id)
 }
 
 #[tauri::command]
-pub async fn superagent_tickets(
+pub async fn superagent_tickets(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, orchestration_id: String, limit: Option<i64>,
 ) -> Result<Vec<Ticket>> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     list_tickets(&store, &orchestration_id, limit.unwrap_or(100))
 }
 
 #[tauri::command]
-pub async fn superagent_assignments(
+pub async fn superagent_assignments(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
 ) -> Result<Vec<Assignment>> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     assignments(&store, &ticket_id, limit.unwrap_or(100))
 }
 
 #[tauri::command]
-pub async fn superagent_activity(
+pub async fn superagent_activity(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
 ) -> Result<Vec<AuditEntry>> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     history(&store, &ticket_id, limit.unwrap_or(100))
 }
 
 #[tauri::command]
-pub async fn superagent_submit(
+pub async fn superagent_submit(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>,
     orchestration_id: String, objective: String, request_key: String,
 ) -> Result<Ticket> {
+    require_main_window(&window)?;
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
     }
@@ -1275,10 +1302,11 @@ fn prepare_coordinated_worker(
 }
 
 #[tauri::command]
-pub async fn superagent_submit_coordinated(
+pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_, AppState>,
     orchestration_id: String, objective: String, request_key: String,
 ) -> Result<Ticket> {
+    require_main_window(&window)?;
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are paused; coordinated dispatch is denied.".into());
     }
@@ -1311,9 +1339,10 @@ pub async fn superagent_submit_coordinated(
 }
 
 #[tauri::command]
-pub async fn superagent_dispatch_worker(
+pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_, AppState>, ticket_id: String,
 ) -> Result<Ticket> {
+    require_main_window(&window)?;
     let (ticket,thread,worker_id,plan) = {
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
@@ -1341,9 +1370,10 @@ pub async fn superagent_dispatch_worker(
 }
 
 #[tauri::command]
-pub async fn superagent_retry(
+pub async fn superagent_retry(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
 ) -> Result<Ticket> {
+    require_main_window(&window)?;
     let (ticket,thread,worker_id)={
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
@@ -1374,21 +1404,24 @@ pub async fn superagent_retry(
 
 
 #[tauri::command]
-pub async fn superagent_accept(state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
+pub async fn superagent_accept(window: tauri::WebviewWindow, state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     accept(&store, &ticket_id, expected_revision)
 }
 
 #[tauri::command]
-pub async fn superagent_reject(
+pub async fn superagent_reject(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, expected_revision: i64, reason: String,
 ) -> Result<Ticket> {
+    require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     reject(&store, &ticket_id, expected_revision, &reason)
 }
 
 #[tauri::command]
-pub async fn superagent_stop(app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
+pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
+    require_main_window(&window)?;
     let (ticket,session)={
         let store=state.store.lock().map_err(|e|e.to_string())?;
         stop(&store,&ticket_id)?
@@ -1402,6 +1435,18 @@ pub async fn superagent_stop(app: tauri::AppHandle, state: State<'_,AppState>, t
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_superagent_commands_require_a_trusted_main_window() {
+        assert!(require_main_window_label("main").is_ok());
+        for window in ["", "overlay", "mini", "bot", "main-secondary"] {
+            assert_eq!(
+                require_main_window_label(window).unwrap_err(),
+                "SuperAgent desktop commands require the main window."
+            );
+        }
+    }
+
 
     fn fixture() -> Store {
         let path=std::env::temp_dir().join(format!("pandacode-superagent-{}.sqlite3",storage::id()));

@@ -182,6 +182,47 @@ fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orches
     configuration(store, &id)
 }
 
+/// Durable, read-only description of an explicitly issued task mandate.
+/// Exposes the grant's native identity without introducing an edit or escalation
+/// endpoint; a model result never alters the original authorization.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MandateSummary {
+    pub ticket_id: String,
+    pub actor: String,
+    pub authorization_id: String,
+    pub policy_revision: i64,
+    pub project_id: String,
+    pub expires_at: i64,
+    pub revoked: bool,
+    pub allowed_tools: Vec<String>,
+    pub allowed_side_effects: bool,
+    pub created_at: i64,
+}
+
+fn mandate(store: &Store, ticket_id: &str) -> Result<MandateSummary> {
+    get_ticket(store, ticket_id)?;
+    let data: (String, String, String, i64, String, i64, bool, String, bool, i64) = store.db.query_row(
+        "SELECT ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,
+                revoked,allowed_tools,allowed_side_effects,created_at
+         FROM sa_mandates WHERE ticket_id=?1",
+        [ticket_id],
+        |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+            r.get(5)?, r.get::<_, i64>(6)? != 0, r.get(7)?,
+            r.get::<_, i64>(8)? != 0, r.get(9)?,
+        )),
+    ).map_err(|e| e.to_string())?;
+    let tools = serde_json::from_str::<Vec<String>>(&data.7)
+        .map_err(|_| "SuperAgent mandate contains invalid tool authorization.")?;
+    Ok(MandateSummary {
+        ticket_id: data.0, actor: data.1, authorization_id: data.2,
+        policy_revision: data.3, project_id: data.4,
+        expires_at: data.5, revoked: data.6, allowed_tools: tools,
+        allowed_side_effects: data.8, created_at: data.9,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ticket {
@@ -773,6 +814,14 @@ fn change_enabled(
 pub async fn superagent_ticket(state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     get_ticket(&store, &ticket_id)
+}
+
+#[tauri::command]
+pub async fn superagent_mandate(
+    state: State<'_, AppState>, ticket_id: String,
+) -> Result<MandateSummary> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    mandate(&store, &ticket_id)
 }
 
 #[tauri::command]
@@ -1484,6 +1533,37 @@ mod tests {
         let (retried, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(session));
+    }
+
+    #[test]
+    fn native_mandate_summary_retains_exact_grant_after_stop_and_restart() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id, "Inspect without effects", "mandate-view", false).unwrap();
+        assert!(launched);
+        let granted = mandate(&store, &ticket.id).unwrap();
+        assert_eq!(granted.ticket_id, ticket.id);
+        assert_eq!(granted.project_id, cfg.project_id);
+        assert_eq!(granted.actor, "local-user");
+        assert!(!granted.authorization_id.is_empty());
+        assert_eq!(granted.policy_revision, cfg.policy_revision);
+        assert!(granted.expires_at > granted.created_at);
+        assert!(!granted.revoked);
+        assert!(granted.allowed_tools.is_empty());
+        assert!(!granted.allowed_side_effects);
+        assert!(mandate(&store, "not-a-ticket").is_err());
+        let (stopped, _) = stop(&store, &ticket.id).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let after = mandate(&reopened, &ticket.id).unwrap();
+        assert!(after.revoked);
+        assert_eq!(after.authorization_id, granted.authorization_id);
+        assert_eq!(after.policy_revision, granted.policy_revision);
+        assert_eq!(after.project_id, granted.project_id);
+        assert!(!after.allowed_side_effects);
+        assert!(after.allowed_tools.is_empty());
     }
 
     #[test]

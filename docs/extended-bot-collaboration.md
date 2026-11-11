@@ -2,6 +2,10 @@
 
 Issue: [#122](https://github.com/ginmp8/pandacode-extended/issues/122). This feature is implemented only on `extended/development`, without changing upstream bot profiles or ordinary direct-message semantics.
 
+## Per-message Council UI
+
+The Shared Channel Council footer popover is a **separate Extended feature candidate** in [PR #145](https://github.com/ginmp8/pandacode-extended/pull/145), not part of the channel collaboration tool contracts below. It configures optional Council review for a single user message without embedding a large settings form in the composer. See the [illustrated user guide](shared-channel-council.md) and [engineering contract](shared-channel-council-engineering.md); their images are browser component previews rather than live Desktop screenshots.
+
 ## Tools and routing
 
 A bot can use these tools only in a bot-owned conversation, subject to its existing model, workspace, permission policy and channel membership:

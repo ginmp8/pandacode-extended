@@ -665,6 +665,18 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
 }
 
 fn accept(store: &Store, ticket_id: &str, expected_revision: i64) -> Result<Ticket> {
+    accept_with_pause(store, ticket_id, expected_revision, crate::feature_controls::get().bots_paused)
+}
+
+fn accept_with_pause(
+    store: &Store, ticket_id: &str, expected_revision: i64, bots_paused: bool,
+) -> Result<Ticket> {
+    // Native approval is still a state-changing orchestration action. A
+    // globally paused bot fleet cannot complete a waiting task merely because
+    // its worker had already produced evidence before the pause.
+    if bots_paused {
+        return Err("Bots are globally paused; SuperAgent acceptance is denied.".into());
+    }
     // Acceptance and its attributed audit entry are one durable decision.
     // No terminal state may be visible without matching acceptance evidence.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1371,6 +1383,36 @@ mod tests {
         assert!(read_only_policy(&store,&sid).is_err());
         assert!(!on_run_finished(&store,&sid,true,"late completion").unwrap());
         assert!(accept(&store,&a.id,stopped.revision).is_err());
+    }
+
+    #[test]
+    fn globally_paused_approval_keeps_pending_evidence_and_audit_unchanged() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store, &cfg.id, "Review evidence", "pause-approval-1", false).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Worker evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        let original_history = history(&store, &ticket.id, 200).unwrap();
+
+        // Inject the actual global-pause condition without mutating process
+        // settings shared by concurrently executing Rust tests.
+        assert!(accept_with_pause(&store, &ticket.id, waiting.revision, true).is_err());
+        let unchanged = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(unchanged.state, "waiting_approval");
+        assert_eq!(unchanged.revision, waiting.revision);
+        assert_eq!(unchanged.evidence, waiting.evidence);
+        assert_eq!(history(&store, &ticket.id, 200).unwrap().len(), original_history.len());
+
+        // Resuming does not widen the mandate: the same revision and live
+        // authorization are still required for a separate manual decision.
+        let accepted = accept_with_pause(&store, &ticket.id, waiting.revision, false).unwrap();
+        assert_eq!(accepted.state, "completed");
+        assert!(accept_with_pause(&store, &ticket.id, waiting.revision, false).is_err());
+        assert_eq!(history(&store, &ticket.id, 200).unwrap()
+            .iter().filter(|entry| entry.kind == "human_accepted").count(), 1);
     }
 
     #[test]

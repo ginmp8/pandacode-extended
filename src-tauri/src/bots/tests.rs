@@ -1225,7 +1225,7 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
         let channel = shared_channels::create(&store, "restart", std::slice::from_ref(&reviewer.id)).unwrap();
         let council = crate::architect::CouncilConfig::default();
         let mut deliveries = Vec::new();
-        for index in 0..2 {
+        for index in 0..3 {
             let message_id = crate::storage::id();
             let delivery_id = crate::storage::id();
             store.db.execute(
@@ -1281,6 +1281,15 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
                 ).unwrap();
             } else {
                 team.status = "waiting".into();
+                if index == 2 {
+                    // A distinct correction round must survive restart without
+                    // borrowing the approved neighboring delivery's verdict.
+                    team.council_status = Some(crate::architect::CouncilStatus {
+                        state: "fixing".into(), round: 1, lowest: Some(4.0),
+                        target: 9.0, stale: false,
+                        notice: Some("Corrections are still required.".into()),
+                    });
+                }
             }
             store.db.execute(
                 "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
@@ -1331,6 +1340,21 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     assert_eq!(channel_council_outcome(&store, &direct[1].1).unwrap(),
         ChannelCouncilOutcome::Approved,
         "the matching accepted native Council must preserve its authorization");
+    assert_eq!(channel_council_outcome(&store, &direct[2].1).unwrap(),
+        ChannelCouncilOutcome::Waiting,
+        "a correction in progress cannot reuse the other delivery's approval");
+    // Archiving the source channel revokes authority even when acceptance was
+    // persisted; restoring it does not invent a fresh approval.
+    store.db.execute(
+        "UPDATE bot_shared_channels SET archived=1 WHERE id=?1", [&ids.0],
+    ).unwrap();
+    assert!(matches!(channel_council_outcome(&store, &direct[1].1).unwrap(),
+        ChannelCouncilOutcome::Denied(_)));
+    store.db.execute(
+        "UPDATE bot_shared_channels SET archived=0 WHERE id=?1", [&ids.0],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&store, &direct[1].1).unwrap(),
+        ChannelCouncilOutcome::Approved);
     for _ in 0..2 { shared_channels::reconcile_in_progress(&store).unwrap(); }
     let (channel_id, deliveries) = ids;
     let status = |id: &str| store.db.query_row(
@@ -1341,6 +1365,11 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
         "a reviewing Council must retain its frozen native cycle after restart");
     assert_eq!(status(&deliveries[1].0),"completed",
         "the matching accepted terminal Council must complete after a restart");
+    assert_eq!(status(&deliveries[2].0),"in_progress",
+        "correction cannot settle as completed after a restart");
+    assert!(!shared_channels::council_callback_allowed(&store, &deliveries[0].0).unwrap());
+    assert!(!shared_channels::council_callback_allowed(&store, &deliveries[2].0).unwrap(),
+        "correction cannot publish a successful callback");
     assert_ne!(deliveries[0].1,deliveries[1].1,
         "two deliveries to the same bot must never share a native Council session");
     let replies: Vec<String> = {
@@ -1359,6 +1388,12 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     assert_eq!(council.state, "Paused");
     assert!(council.notice.as_deref().unwrap_or_default().contains("resume"));
     assert_eq!(council.session_id, deliveries[0].1);
+    let correcting = pending_view.messages.iter()
+        .find(|message| message.id == deliveries[2].0).unwrap();
+    let correction = correcting.council.as_ref().unwrap();
+    assert_eq!(correction.state, "Needs correction");
+    assert_eq!(correction.session_id, deliveries[2].1);
+    assert_ne!(correction.cycle_id, council.cycle_id);
     let resumed = crate::architect::load(&store,&deliveries[0].1).unwrap().unwrap();
     assert_eq!(resumed.council_since,1234);
 }

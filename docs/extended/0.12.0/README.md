@@ -141,3 +141,9 @@ Fork `ginmp8/pandacode:main` at [`a403c3d9`](https://github.com/ginmp8/pandacode
 
 New inherited functionality includes phone app navigation, screens, attachment pickers, background Connect reconnect and RPC, mobile administration and tasks, new Rust remote methods, and queuing/voice fixes. These are **upstream inheritance**, not new Extended-only features. The source release contains `releases/0.3.111.md`; no `releases/0.3.110.md` is present in the frozen source tree, and none was fabricated. No build/install release, tag or npm publication is approved.
 
+
+## Fork post-release source update — 2026-11-11
+
+Fork main [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1d24eb083bc10779cb7034c4a0fd) (Git tree `3506e38d545f11c57ebb3f2ebe3acdec449606bc`, native app **0.3.111**) adds one unreleased source commit after `a403c3d9`. Direct Extended integration [`5beff6d8`](https://github.com/ginmp8/pandacode-extended/commit/5beff6d8737e952341023bfdf10aaeb38697fcae) is a single-parent child of `7bd8ac1f`: **seven upstream-modified paths**, six copied with exact source blob SHA and mode, and `.github/workflows/ci.yml` reconciled to add Windows arm64 startup-smoke coverage while retaining Extended's 70-minute macOS audio-test and 120-minute matrix-job timeouts. Complete nontruncated inventory at the integration tree: **1,890 upstream / 1,947 Extended blobs; 1,809 exact shared, 81 divergent shared, 57 Extended-only, zero missing upstream paths and zero mode/type differences**.
+
+The added source behavior is Linux fallback to the default microphone on saved-device open failure, a Rust regression test, Windows ARM64 startup-smoke CI and its bounded PID retry. Upstream release notes are byte-identical in Extended; version **0.3.111** remains separate from planned Extended **0.12.0 DRAFT**. Exact new-SHA CI, native capture and configuration/remote acceptance remain unverified at this documentation checkpoint.

@@ -82,3 +82,7 @@ Fork `ginmp8/pandacode:main` at [`a403c3d9`](https://github.com/ginmp8/pandacode
 
 Preserve the Extended switches for auto/manual updates, Connect master/direct route, bot pause, MCP, cloud/VM and credential transfer, plus native fresh-context controls. The 15 shared-path reconciliations include native remote host/socket, bot delivery, headless, bridge and main-thread adaptations. The source feature remains eligible when enabled and normally authorized. No new restrictive default is proposed. On/Off scenarios and live two-host/device behavior were not executed in this integration candidate.
 
+
+## Fork Linux microphone and Windows ARM smoke update — 2026-11-11
+
+The source [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1d24eb083bc10779cb7034c4a0fd) modifies Voice, release smoke tests and CI, but changes no Extended-specific Settings implementation. The direct integration [`5beff6d8`](https://github.com/ginmp8/pandacode-extended/commit/5beff6d8737e952341023bfdf10aaeb38697fcae) leaves the existing optional update, Connect master/direct, bot pause, external MCP, cloud credential and agent cloud/VM controls intact in the 81 remaining shared divergences. This is a **static change-scope observation**, not an independent On/Off, restart, authorization or native integration test. Keep the upstream voice fallback enabled according to normal permissions; do not introduce a new restrictive toggle.

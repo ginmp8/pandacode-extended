@@ -127,3 +127,7 @@ No new confirmed runtime defect is claimed from the diff. The high-volume phone 
 ## Mobile npm clean-install regression — 2026-11-11
 
 At Extended `d67a035d`, push and PR jobs failed at `npm ci` under npm 10.9.9 because the mobile dependency override and lock resolved `brace-expansion` inconsistently. A scoped override candidate pins the existing patched 5.0.12 version for `minimatch` 11.0.3. The next exact-SHA CI must confirm installation and Expo tests before this issue can be closed.
+
+## Saved Linux microphone fallback — 2026-11-11
+
+Fork [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1d24eb083bc10779cb7034c4a0fd) adds fallback when a saved non-default ALSA device appears in the picker but fails to open. The new Rust helper test checks the fallback predicate, including `jack`, `oss`, a card name and raw PCM ID; it excludes System default and the explicit `default` choice. The code is mirrored in [`5beff6d8`](https://github.com/ginmp8/pandacode-extended/commit/5beff6d8737e952341023bfdf10aaeb38697fcae). Actual Linux device opening, sound quality, microphone permissions and native settings restart behavior are **not independently tested**, and no runtime regression is asserted. The Windows ARM64 startup-smoke retry is bounded to 16 seconds and newly enabled in CI; the exact new-SHA result is pending. All prior 81 shared-path semantic questions and Extended On/Off and remote acceptance gaps remain open.

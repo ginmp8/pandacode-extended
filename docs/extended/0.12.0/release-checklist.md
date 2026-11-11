@@ -270,3 +270,14 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 
 This is an integration **candidate**, not approval to distribute Extended `0.12.0`.
 
+
+## Fork `961b43fa` post-0.3.111 synchronization — 2026-11-11
+
+- [x] Pin fork HEAD [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1d24eb083bc10779cb7034c4a0fd), tree `3506e38d545f11c57ebb3f2ebe3acdec449606bc`, and verify its single new commit and seven modified source paths; native version remains **0.3.111**.
+- [x] Import six source-exact blobs (Voice, Rust test, release notes and startup-smoke script); reconcile CI to run startup smoke on Windows ARM64 while preserving Extended 70/120-minute timeouts.
+- [x] Publish direct single-parent integration [`5beff6d8`](https://github.com/ginmp8/pandacode-extended/commit/5beff6d8737e952341023bfdf10aaeb38697fcae) and verify commit/ref/tree readback.
+- [x] Compare complete nontruncated source and integration trees: 1,890/1,947 files, 1,809 exact shared, 81 divergent shared, 57 Extended-only, no missing source paths or mode/type mismatch.
+- [ ] Confirm final documentation SHA and **its exact-SHA** CI (Node/TS, Rust, Clippy, RustSec, npm, Expo and Windows ARM64 startup-smoke). [Code PR run #43045289031](https://github.com/ginmp8/pandacode-extended/actions/runs/43045289031) started; [code push run #43045275146](https://github.com/ginmp8/pandacode-extended/actions/runs/43045275146) pending at inspection.
+- [ ] Independently verify saved/non-default Linux microphone fallback, real hardware, installer behavior and Extended Settings On/Off, Connect/MCP, bots, cloud/VM, credentials, and the 81 carried shared differences before claiming functional release readiness.
+
+No release approval, tag, installer, npm publication or deployment is implied.

@@ -19,6 +19,8 @@ Three features have source implementations in [draft PR #120](https://github.com
 - [#122 — Multi-channel bot collaboration](../extended-bot-collaboration.md): Explicit `pandacode_bot_post_channel` and `pandacode_bot_request_channel` tools address selected local channels and members. No channel-wide or cross-channel implicit broadcast.
 - [#123 — Portable bot manifests and Git sync](../extended-bot-manifests.md): Desktop and headless configuration import/export, selected-bot export, optional Extended fields, Shared Channel topology, verified pre-import backups and manual SHA-pinned GitHub synchronization.
 
+A separate unreleased [PR #145](https://github.com/ginmp8/pandacode-extended/pull/145) candidate adds the [Shared Channel Council composer popover](../shared-channel-council.md), documented with four illustrative component screenshots and a [source/verification reference](../shared-channel-council-engineering.md). This per-message UI is distinct from the three PR #120 bot features and does not establish native-provider or desktop-release acceptance.
+
 The [0.12.0 development index](0.12.0/README.md) and [draft release notes](../../releases/extended/0.12.0.md) track scope and pending acceptance. Upstream synchronization is a separate `base/development` workflow.
 
 - [Extended 0.12.0 draft release notes](../../releases/extended/0.12.0.md)

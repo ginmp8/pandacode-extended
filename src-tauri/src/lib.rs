@@ -4436,6 +4436,7 @@ pub fn run() {
                 superagent::superagent_set_enabled,
                 superagent::superagent_ticket,
                 superagent::superagent_submit,
+                superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_stop,
                 bots::shared_channels::bot_shared_channels,

@@ -585,6 +585,117 @@ pub async fn superagent_submit(
     get_ticket(&store, &ticket.id)
 }
 
+/// An occupied worker leaves its ticket blocked, not discarded. Only another
+/// explicit local request may retry it, under the original immutable mandate.
+/// Each attempt uses a separate native session; a late callback from a failed
+/// attempt never becomes evidence for a successor.
+fn retry_blocked(
+    store: &mut Store, ticket_id: &str, busy: bool,
+) -> Result<(Ticket, String, String)> {
+    let ticket = get_ticket(store,ticket_id)?;
+    if ticket.state != "blocked" {
+        return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
+    }
+    let config = configuration(store,&ticket.orchestration_id)?;
+    if !config.enabled || crate::feature_controls::get().bots_paused {
+        return Err("SuperAgent remains disabled or globally paused.".into());
+    }
+    let coordinator=bots::get(store,&config.coordinator_bot_id)?;
+    let worker=bots::get(store,&config.worker_bot_id)?;
+    if coordinator.paused || worker.paused || worker.id != ticket_worker(store,ticket_id)?
+        || worker.project_id != config.project_id
+    {
+        return Err("Original worker or coordinator is unavailable or out of scope.".into());
+    }
+    let mandate_ok: bool = store.db.query_row(
+        "SELECT revoked=0 AND expires_at>?2 AND policy_revision=?3
+                AND project_id=?4 AND allowed_side_effects=0
+         FROM sa_mandates WHERE ticket_id=?1",
+        params![ticket_id,storage::now(),config.policy_revision,config.project_id],
+        |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
+    if !mandate_ok {
+        return Err("Original mandate expired, was revoked or differs from current policy.".into());
+    }
+    let attempts: i64 = store.db.query_row(
+        "SELECT COALESCE(MAX(attempt),0) FROM sa_assignments WHERE ticket_id=?1",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if attempts >= 2 {
+        return Err("Manual retry limit reached; create a new authorized ticket.".into());
+    }
+    let occupied: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE bot_id=?1 AND state='running')",
+        [&worker.id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if busy || occupied {
+        return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
+    }
+    let attempt=attempts+1;
+    let thread=format!("{ticket_id}:attempt:{attempt}");
+    let assignment_id=storage::id();
+    let tx=store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let session_id=bots::thread_session(store,&worker,CHANNEL,&thread,"SuperAgent · Manual retry")?.0;
+    let now=storage::now();
+    tx.execute(
+        "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,'running',?5,?6,?6)",
+        params![assignment_id,ticket_id,worker.id,session_id,attempt,now],
+    ).map_err(|e| e.to_string())?;
+    let changed=tx.execute(
+        "UPDATE sa_tickets SET state='running',active_assignment_id=?2,
+         revision=revision+1,updated_at=?3
+         WHERE id=?1 AND state='blocked' AND revision=?4",
+        params![ticket_id,assignment_id,now,ticket.revision],
+    ).map_err(|e| e.to_string())?;
+    if changed != 1 { return Err("Ticket changed before native retry admission.".into()); }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'manual_retry','user-requested bounded read-only worker attempt',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok((get_ticket(store,ticket_id)?,thread,worker.id))
+}
+
+fn ticket_worker(store: &Store, ticket_id: &str) -> Result<String> {
+    store.db.query_row("SELECT worker_bot_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| r.get(0)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn superagent_retry(
+    app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
+) -> Result<Ticket> {
+    let (ticket,thread,worker_id)={
+        let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
+            .keys().cloned().collect();
+        let mut store=state.store.lock().map_err(|e|e.to_string())?;
+        let bot_id=ticket_worker(&store,&ticket_id)?;
+        let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
+            .is_some_and(|(bot,_)|bot.id==bot_id));
+        retry_blocked(&mut store,&ticket_id,busy)?
+    };
+    let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
+        bot_id: worker_id,
+        channel_id: CHANNEL.into(),
+        thread,
+        sender_id: "local-user".into(),
+        sender_name: "Manual retry".into(),
+        text: format!("SuperAgent ticket {} (manual retry)\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
+        trusted: true,
+        image_ids: None,
+        moodboard_ids: None,
+    }).await;
+    if let Err(error)=delivered {
+        if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket.id,&error); }
+        return Err(format!("Retry dispatch failed; ticket {} retained: {error}",ticket.id));
+    }
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    get_ticket(&store,&ticket.id)
+}
+
+
 #[tauri::command]
 pub async fn superagent_accept(state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -786,6 +897,51 @@ mod tests {
         store.db.execute_batch("DROP TRIGGER reject_sa_accept").unwrap();
         let accepted = accept(&store, &task.id, waiting.revision).unwrap();
         assert_eq!(accepted.state, "completed");
+    }
+
+    #[test]
+    fn busy_worker_ticket_requires_manual_retry_and_uses_fresh_native_session() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (first,launch)=admit(&mut store,&cfg.id,"A","queue-a",false).unwrap();
+        assert!(launch);
+        let (second,launch)=admit(&mut store,&cfg.id,"B","queue-b",false).unwrap();
+        assert!(!launch);
+        assert_eq!(second.state,"blocked");
+        assert!(retry_blocked(&mut store,&second.id,true).is_err());
+        assert!(retry_blocked(&mut store,&second.id,false).is_err());
+        let session_a=assignment_session(&store,&first.id).unwrap().unwrap();
+        assert!(on_run_finished(&store,&session_a,true,"A evidence").unwrap());
+        let (retried,thread,worker)=retry_blocked(&mut store,&second.id,false).unwrap();
+        assert_eq!(retried.state,"running");
+        assert_eq!(worker,"worker");
+        assert_eq!(thread,format!("{}:attempt:1",second.id));
+        let session_b=assignment_session(&store,&retried.id).unwrap().unwrap();
+        assert_ne!(session_a,session_b);
+        assert!(on_run_finished(&store,&session_a,true,"late A").unwrap()==false);
+        assert!(read_only_policy(&store,&session_b).unwrap().is_some());
+        assert!(on_run_finished(&store,&session_b,false,"failed B").unwrap());
+        assert_eq!(get_ticket(&store,&second.id).unwrap().state,"failed");
+        assert!(retry_blocked(&mut store,&second.id,false).is_err());
+    }
+
+    #[test]
+    fn retry_after_launch_failure_is_bounded_and_does_not_widen_mandate() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (first,_)=admit(&mut store,&cfg.id,"Recover once","recover-1",false).unwrap();
+        fail_launch(&store,&first.id,"provider unavailable").unwrap();
+        let (retried,_,_)=retry_blocked(&mut store,&first.id,false).unwrap();
+        assert_eq!(retried.state,"running");
+        let sid=assignment_session(&store,&first.id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&sid).unwrap().is_some());
+        fail_launch(&store,&first.id,"provider unavailable again").unwrap();
+        assert!(retry_blocked(&mut store,&first.id,false).is_err());
+        let allowed:i64=store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&first.id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(allowed,0);
     }
 
     #[test]

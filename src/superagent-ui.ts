@@ -32,6 +32,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
+  const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
+    Number.isFinite(timestamp) && timestamp > 0
+    ? new Date(timestamp).toLocaleString() : 'Unavailable';
   function render(): void {
     if (!host.isConnected) return;
     const list = presets.map(item =>
@@ -39,7 +42,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
       '</small><small class="sa-counts" aria-label="Task counts">' +
       (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
-      ' running · ' + (item.blockedCount ?? 0) + ' blocked</small></div><span>' +
+      ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
+      '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
+      '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button></li>').join('');
@@ -67,8 +72,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
           safe(item.sessionId) + '</code></li>').join('') || '<li>No worker assigned.</li>') +
         '</ul><h5>Native activity</h5><ol>' +
-        (ticketDetails.activity.map(entry => '<li>' + safe(entry.kind) + ' · ' +
-          safe(entry.detail) + '</li>').join('') || '<li>No activity recorded.</li>') +
+        (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
+          safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
+          '<li>No activity recorded.</li>') +
         '</ol><button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +

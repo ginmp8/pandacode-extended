@@ -19,6 +19,8 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Software Development');
   await expect(dialog.locator('.sa-list .sa-counts')).toHaveText('0 tasks · 0 running · 0 blocked');
+  await expect(dialog.locator('.sa-list .sa-last-activity')).toContainText('Last activity: ');
+  await expect(dialog.locator('.sa-list .sa-last-activity')).not.toContainText('Unavailable');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Export'}).click();
@@ -65,6 +67,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details).toContainText('No side effects allowed');
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
+  await expect(details.locator('ol li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');

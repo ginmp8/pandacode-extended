@@ -1504,6 +1504,18 @@ pub async fn superagent_snapshot(
     ticket_snapshot(&store, &ticket_id, limit.unwrap_or(50))
 }
 
+/// Deliver the exact objective admitted and persisted by native authorization.
+/// Never send the raw Desktop input: whitespace outside the bounded objective
+/// must not bypass the gateway's maximum inbound-message size.
+fn initial_manual_packet(ticket: &Ticket, coordinated: bool) -> String {
+    let instructions = if coordinated {
+        "Read-only coordinator: recommend the assigned worker's approach and evidence. Your response cannot grant tools, change the worker or approve completion."
+    } else {
+        "Read-only assignment. Report evidence and remaining gaps; do not claim task approval."
+    };
+    format!("SuperAgent ticket {}\n\n{}\n\n{}", ticket.id, ticket.objective, instructions)
+}
+
 #[tauri::command]
 pub async fn superagent_submit(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>,
@@ -1532,7 +1544,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
             thread: ticket.id.clone(),
             sender_id: "local-user".into(),
             sender_name: "Manual task".into(),
-            text: format!("SuperAgent ticket {}\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim task approval.",ticket.id,objective),
+            text: initial_manual_packet(&ticket, false),
             trusted: true,
             image_ids: None,
             moodboard_ids: None,
@@ -1751,7 +1763,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
         thread: ticket.id.clone(),
         sender_id: "local-user".into(),
         sender_name: "Manual coordination".into(),
-        text: format!("SuperAgent ticket {}\n\n{}\n\nRead-only coordinator: recommend the assigned worker's approach and evidence. Your response cannot grant tools, change the worker or approve completion.",ticket.id,objective),
+        text: initial_manual_packet(&ticket, true),
         trusted: true, image_ids: None, moodboard_ids: None,
     }).await;
     if let Err(error) = delivered {
@@ -2590,6 +2602,33 @@ mod tests {
         let disabled = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
         assert!(!disabled.enabled);
         assert!(mandate(&store, &ticket.id).unwrap().revoked);
+    }
+
+    #[test]
+    fn manual_dispatch_uses_persisted_bounded_objectives_for_both_roles() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        // Native admission trims and bounds the objective. Raw Desktop input
+        // can have much more whitespace than the bot gateway accepts.
+        let raw = format!("{}Inspect fixture{}", " ".repeat(65_536), " ".repeat(65_536));
+        let (direct, launched) = admit(&mut store, &cfg.id, &raw, "trim-direct", false).unwrap();
+        assert!(launched);
+        assert_eq!(direct.objective, "Inspect fixture");
+        let direct_packet = initial_manual_packet(&direct, false);
+        assert!(direct_packet.contains("\n\nInspect fixture\n\n"));
+        assert!(direct_packet.contains("Read-only assignment"));
+        assert!(direct_packet.len() < 32 * 1024);
+
+        stop(&store, &direct.id).unwrap();
+        let (coordinated, launched) = admit_role(
+            &mut store, &cfg.id, &raw, "trim-coordinator", false, true,
+        ).unwrap();
+        assert!(launched);
+        assert_eq!(coordinated.objective, "Inspect fixture");
+        let coordinator_packet = initial_manual_packet(&coordinated, true);
+        assert!(coordinator_packet.contains("\n\nInspect fixture\n\n"));
+        assert!(coordinator_packet.contains("Read-only coordinator"));
+        assert!(coordinator_packet.len() < 32 * 1024);
     }
 
     #[test]

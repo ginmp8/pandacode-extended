@@ -71,3 +71,7 @@ This source update affects upstream Voice documentation and the release-gating w
 ## Fork HEAD bc323966 integration — 2026-11-10
 
 The new fork Voice changes and CI/release fixes do not change any Extended Feature control. The revised `AGENTS.md` includes upstream's push-main CI prerequisite but explicitly points to the Extended manual-publication override. Tag pushes remain artifact-only; publishing still requires separately authorized manual `workflow_dispatch` with `publish=true`. Automatic updates, Connect/direct routes, bots pause/resume, MCP, cloud/VM management and cloud credential controls retain prior semantics; independent On/Off acceptance remains outstanding.
+
+## Fork 0.3.109 controls checkpoint — 2026-11-11
+
+[Source `64996a1a`](https://github.com/ginmp8/pandacode/commit/64996a1a8b1d722eb10b0c4ec4b3c1ffef1fd197) adds Voice and CI fixes without adding or removing any Extended feature toggle. Keep automatic/manual updates, Connect master/direct paths, bot pause, external MCP, cloud-credential transfer, cloud/VM operations, fresh context and shared-channel behavior available under their current configuration. Runtime On/Off testing remains separate and unverified; the CI macOS audio smoke never authorizes publishing.

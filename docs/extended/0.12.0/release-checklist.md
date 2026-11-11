@@ -232,3 +232,12 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [ ] Complete semantic, hunk-level and caller/test validation for all **81** shared divergences. Together with the previous 18-path sample, **38 distinct paths have received preliminary line-difference inspection**, leaving **43 without even this preliminary sample**; none of the 81 is certified by that count.
 - [ ] Complete native/installed-app Settings On/Off, Connect/MCP, bot recovery and delegation, Voice, cloud/VM, credentials, SQLite upgrade/rollback and installer/release acceptance. CI does not approve distribution 0.12.0.
 - [ ] Check CI for any later documentation-only SHA separately; do not treat the code SHA's passing CI as a result for this documentation commit.
+
+## Fork HEAD 64996a1a checklist — 2026-11-11
+
+- [x] Freeze fork SHA `64996a1a8b1d722eb10b0c4ec4b3c1ffef1fd197` and tree `7be2186e18047098aedbbd18ff0b4ea11d50b806`; prior Extended SHA `05cd6fb123e96cd294be2c77f7d38eba002f3c27`.
+- [x] Reconcile all 17 changed upstream paths (12 exact copies including two additions, five Extended-preserving adaptations); retain original upstream release documentation and hardening versions.
+- [ ] Verify CI on the published Extended commit, including optimized macOS real-audio smoke, Rust check/test/Clippy, RustSec, Node/TS tests, npm audits, mobile/Expo and website.
+- [ ] Independently test installed macOS Voice capture, saved device IDs, and Extended Settings On/Off/manual/automatic behavior, plus native Connect/MCP/bots/cloud/VM/credential paths.
+- [ ] Complete behavioral review of the 81 historical shared-code differences; a complete Git path inventory is not functional parity proof.
+- [ ] Validate distribution artifacts and platform installers before approving Extended 0.12.0. No tags or GitHub Releases are authorized by this sync.

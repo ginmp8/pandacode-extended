@@ -100,3 +100,7 @@ The fork documents inherited Voice constraints: a custom local transcription URL
 ## Mobile node-forge advisory remediation — 2026-11-10
 
 **Confirmed:** the Extended `c7c14606` push CI's mobile npm audit failed for pinned `node-forge@1.4.2`; [job evidence](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289). GitHub-reviewed advisories identify **1.4.3** as patched. The narrow Extended mobile override/lockfile remediation is in the next candidate; new-SHA npm audit, Expo compatibility and full CI remain **pending**, not passed. No application exploitability has been demonstrated.
+
+## Fork 0.3.109 macOS Voice regression status — 2026-11-11
+
+[Source `64996a1a`](https://github.com/ginmp8/pandacode/commit/64996a1a8b1d722eb10b0c4ec4b3c1ffef1fd197) fixes an upstream 0.3.108 crash observed on macOS in optimized release builds when opening Voice settings or microphone selection. The imported cpal 0.17.3 device-name compatibility and real-audio regression test need exact-SHA CI, then installed-app testing with microphone permissions and actual device hardware; no Extended-native reproduction or final acceptance is asserted yet. Other Settings, Connect, bots, MCP, cloud/VM, credentials, SQLite migration and installer checks remain open.

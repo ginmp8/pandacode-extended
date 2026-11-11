@@ -112,6 +112,23 @@ jobs:
             --grep "bot manifests|bot collaboration|bot actions menu aligns|switches directly from a shared channel to a bot conversation|resized bot settings textareas" --workers=1
 
 
+  superagent-browser:
+    name: SuperAgent Orchestrations UI (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Verify SuperAgent native presets and manual orchestration UI
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/superagent.spec.ts --workers=1
+
   council-bot-selected-browser:
     name: Council configured reviewer selection (focused Playwright)
     runs-on: ubuntu-latest

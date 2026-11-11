@@ -19,7 +19,14 @@ interface Mandate {
 }
 interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
 interface Activity { id: number; kind: string; detail: string; at: number }
-interface TicketDetails { ticket: Ticket; mandate: Mandate; assignments: Assignment[]; activity: Activity[] }
+interface CouncilObservation {
+  nativeStatus: string; nativeRound: number; nativeStale: boolean;
+  nativePassVerified: boolean; ticketArtifactBound: boolean;
+}
+interface TicketDetails {
+  ticket: Ticket; mandate: Mandate; assignments: Assignment[];
+  activity: Activity[]; council?: CouncilObservation | null;
+}
 
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
@@ -75,7 +82,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
           safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
           '<li>No activity recorded.</li>') +
-        '</ol><button type="button" data-sa-close-details>Close evidence</button></section>'
+        '</ol>' +
+        (ticketDetails.council
+          ? '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
+            '<h5>Native Council (advisory)</h5><p>Native team status: ' +
+            safe(ticketDetails.council.nativeStatus) + ' · Round ' +
+            safe(ticketDetails.council.nativeRound) +
+            (ticketDetails.council.nativeStale ? ' · stale' : '') +
+            '. Not bound to this ticket artifact; cannot authorize SuperAgent completion.</p></section>'
+          : '') +
+        '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +

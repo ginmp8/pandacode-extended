@@ -142,6 +142,48 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
 });
 
+test('native Council observation is advisory and never authorizes task completion', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-council-readonly-test';
+    document.body.appendChild(host);
+    mountSuperagent(host, async command => {
+      if (command === 'bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [{
+        id:'preset',name:'Council example',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:2
+      }] as never;
+      if (command === 'superagent_tickets') return [{
+        id:'ticket-one',objective:'Review artifact',state:'waiting_approval',
+        revision:2,evidence:'worker evidence'
+      }] as never;
+      if (command === 'superagent_snapshot') return {
+        ticket:{id:'ticket-one',objective:'Review artifact',
+          state:'waiting_approval',revision:2,evidence:'worker evidence'},
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:2,
+          projectId:'fixture',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],
+        council:{nativeStatus:'unverified',nativeRound:1,nativeStale:false,
+          nativePassVerified:false,ticketArtifactBound:false}
+      } as never;
+      throw new Error('Unexpected readonly Council command: '+command);
+    });
+  });
+  const host = page.locator('#sa-council-readonly-test');
+  await expect(host.getByRole('button',{name:'View evidence'})).toBeVisible();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const note = host.getByRole('note',{name:'Native Council observation'});
+  await expect(note).toContainText('unverified');
+  await expect(note).toContainText('cannot authorize SuperAgent completion');
+  await expect(host.getByRole('heading',{name:'Native Council (advisory)'})).toBeVisible();
+});
+
 test('SuperAgent examples only fill names and leave all authorization disabled', async ({page}) => {
   await page.goto('/?bots=sample');
   const bar=page.locator('.sidebar-bots-bar');

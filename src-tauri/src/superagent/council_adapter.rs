@@ -87,6 +87,7 @@ mod tests {
                 params![id,name,storage::now()],
             ).unwrap();
         }
+        assert!(bots::get(&store,"worker").is_ok());
         store
     }
     fn settled(store: &mut Store, key: &str) -> (superagent::Ticket,String) {

@@ -64,7 +64,8 @@ test('nonzero CI lookup exit status blocks manual publication', () => {
   assert.match(prepare, /exit 1/);
 });
 
-test('main-push CI is not cancelled by later pushes', () => {
+test('main-push CI is preserved while non-push CI may be cancelled', () => {
   const ci = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(ci, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+  assert.match(ci, /^  push:\s*$/m, 'push CI must remain enabled');
+  assert.match(ci, /^  cancel-in-progress: \$\{\{ github\.event_name != 'push' \}\}$/m, 'active push CI must be preserved for the exact-SHA release gate');
 });

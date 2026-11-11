@@ -241,3 +241,10 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [ ] Independently test installed macOS Voice capture, saved device IDs, and Extended Settings On/Off/manual/automatic behavior, plus native Connect/MCP/bots/cloud/VM/credential paths.
 - [ ] Complete behavioral review of the 81 historical shared-code differences; a complete Git path inventory is not functional parity proof.
 - [ ] Validate distribution artifacts and platform installers before approving Extended 0.12.0. No tags or GitHub Releases are authorized by this sync.
+
+## 0.3.109 release-CI regression follow-up — 2026-11-11
+
+- [x] Review exact-SHA [push #42950948699](https://github.com/ginmp8/pandacode-extended/actions/runs/42950948699) and [PR #42950956081](https://github.com/ginmp8/pandacode-extended/actions/runs/42950956081) for `7a624076c0ed44b9ecf89861497e9ef4e697f9be`: each failed the single Extended release-workflow expectation while other jobs passed, including the macOS optimized real-audio smoke.
+- [x] Correct the stale `scripts/release/workflow-publish-gate.test.mjs` predicate to require the existing push-preserving CI policy `github.event_name != 'push'`; keep the real CI workflow unchanged and retain release publication restrictions.
+- [ ] Verify the correction in both push and PR CI at the **new exact commit SHA**, including all release tests and platform jobs. Do not carry forward success from earlier commits.
+- [ ] Complete hunk-level and native On/Off, installed-app/Voice, bots, Connect/MCP, cloud/VM, credentials and migration acceptance before release approval.

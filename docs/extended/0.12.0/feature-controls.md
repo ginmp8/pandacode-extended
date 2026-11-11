@@ -75,3 +75,10 @@ The new fork Voice changes and CI/release fixes do not change any Extended Featu
 ## Fork 0.3.109 controls checkpoint — 2026-11-11
 
 [Source `64996a1a`](https://github.com/ginmp8/pandacode/commit/64996a1a8b1d722eb10b0c4ec4b3c1ffef1fd197) adds Voice and CI fixes without adding or removing any Extended feature toggle. Keep automatic/manual updates, Connect master/direct paths, bot pause, external MCP, cloud-credential transfer, cloud/VM operations, fresh context and shared-channel behavior available under their current configuration. Runtime On/Off testing remains separate and unverified; the CI macOS audio smoke never authorizes publishing.
+
+## Upstream phone/Connect parity — 2026-11-11
+
+Fork `ginmp8/pandacode:main` at [`a403c3d9`](https://github.com/ginmp8/pandacode/commit/a403c3d9bfd67ad4bb70eff3f1d2d4befebfa40e), source tree `79a4d1aa2c8dc3537f98f0f5d6cd166837cf4565`, application version **0.3.111**, contains six source commits after `66a7df2f`. The integration candidate imports **293 source-exact new or changed paths** and semantically reconciles **15 concurrently modified paths** to retain Extended controls, dependency remediations and compatibility. Frozen recursive inventory: **1,890 upstream paths, 1,947 Extended paths; 1,809 exact common, 81 divergent common, 57 Extended-only, zero missing upstream, zero mode/type differences**. Native On/Off, remote/Connect, bot, MCP, cloud/VM and credential scenarios have not been independently accepted; GitHub CI is unverified for the integration candidate until its final SHA is published and checks complete.
+
+Preserve the Extended switches for auto/manual updates, Connect master/direct route, bot pause, MCP, cloud/VM and credential transfer, plus native fresh-context controls. The 15 shared-path reconciliations include native remote host/socket, bot delivery, headless, bridge and main-thread adaptations. The source feature remains eligible when enabled and normally authorized. No new restrictive default is proposed. On/Off scenarios and live two-host/device behavior were not executed in this integration candidate.
+

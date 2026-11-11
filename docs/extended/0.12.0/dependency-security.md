@@ -118,3 +118,8 @@ No new dependency version or advisory suppression was introduced by this documen
 ## Fork 0.3.109 audio dependency integration — 2026-11-11
 
 The current source moves `cpal` from 0.16 to 0.17 (resolved to 0.17.3) to address a reported macOS release-build microphone enumeration crash and updates the CoreAudio/ALSA/Objective-C dependency closure in Cargo.lock. The Extended adaptation deliberately preserves previously remediated `rusqlite 0.41.1`, `libsqlite3-sys 0.39.1`, other Rust security constraints and JS/mobile `node-forge 1.4.3`. Compatibility of the composed lockfile, macOS optimized tests, npm audits and RustSec must be evaluated on the exact integration SHA; this note is not evidence of an independent security audit or installed-client acceptance.
+
+## Fork application 0.3.111 and mobile package dependencies — 2026-11-11
+
+The current source is [`a403c3d9`](https://github.com/ginmp8/pandacode/commit/a403c3d9bfd67ad4bb70eff3f1d2d4befebfa40e), application `0.3.111`. The candidate aligns npm, Cargo and Tauri application identity with this native version; the separate **Extended 0.12.0** distribution cycle remains DRAFT. Mobile adds `expo-document-picker ~58.0.4` and `expo-image-picker ~58.0.10` with merged lock records while preserving Extended's `deepmerge` patch. Root npm/Cargo locks retain Extended dependency remediations, including their security overrides; the upstream application-version-only changes in Cargo files are applied without downgrading those packages. These are static source/manifest checks, **not** evidence of npm audit, RustSec, installed-client compatibility, or a new vulnerability remediation.
+

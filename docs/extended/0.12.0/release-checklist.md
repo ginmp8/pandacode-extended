@@ -257,3 +257,16 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [ ] Verify every source path and hash against the newly published destination SHA; document the complete list of 81 customized shared files with hunk-level behavior evidence.
 - [ ] Require new exact-SHA push and PR CI, including Rust, Clippy, Node/TypeScript, release tests, npm/RustSec, Expo and macOS real-audio.
 - [ ] Test Linux saved microphone selection and installed macOS capture, along with Extended Settings On/Off, bots, Connect/MCP, cloud/VM, credentials and release/installers. CI is not native acceptance.
+
+## Source `a403c3d9` (app 0.3.111) integration gate — 2026-11-11
+
+- [x] Fetch both recursive Git trees without truncation; inspect source blob hashes, modes and source deletions.
+- [x] Include all 191 new upstream paths and 102 upstream-only modifications; reconcile 15 additional jointly changed source paths in a single-parent candidate.
+- [x] Preserve 57 Extended-only paths and 81 allowed-or-pending-review shared divergences; no upstream path missing, no mode mismatch.
+- [x] Retain Extended-specific configuration and dependency overrides in source-reconciled manifests and native call paths.
+- [ ] Verify the **published** destination SHA, its single parent, source/target readback, and latest-source parity inventory.
+- [ ] Verify exact-SHA CI jobs: Node/TS, release/website, Rust check/test/Clippy, npm and RustSec, mobile/Expo and macOS.
+- [ ] Independently test mobile and remote RPC refactor, Settings On/Off, Connect/MCP, bots, cloud/VM, credentials, native installs and migrations; complete the remaining 81-file semantic audit.
+
+This is an integration **candidate**, not approval to distribute Extended `0.12.0`.
+

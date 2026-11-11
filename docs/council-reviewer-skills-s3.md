@@ -1,4 +1,6 @@
-# S3: Task-scoped reviewer skills (implementation in progress)
+# S3: Task-scoped reviewer skills
+
+S3 code and automated verification are recorded in issue #126 at `cfad39aeb26cc6bf1fbe0c0f81e566772b1db59f` (CI #42881606678). Live provider-credential and interactive Desktop checks remain unexecuted and are not implied by the automated result.
 
 ## Ownership and scope
 

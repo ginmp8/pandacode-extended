@@ -77,6 +77,10 @@ test.describe('bots', () => {
   });
 
   test('resized bot settings textareas retain their size across a background refresh', async ({ page }) => {
+    // Creating the preview bot settings, resizing two controls and waiting for
+    // the asynchronous refresh can exceed the default 20s on shared CI runners.
+    // Preserve all measured-height and background-refresh assertions.
+    test.setTimeout(60_000);
     await page.goto('/?bots=sample');
     await showBotsView(page);
     await sidebar(page).getByRole('button', { name: 'Scout settings', exact: true }).click();

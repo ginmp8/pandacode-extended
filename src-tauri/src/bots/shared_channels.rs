@@ -817,7 +817,9 @@ pub(super) fn settle_channel_delivery(
     }
     update_message_status(store, message_id)?;
     transaction.commit().map_err(|e| e.to_string())?;
-    Ok(Some(approved))
+    // Ordinary collaboration reports failures to its origin; Council-enabled
+    // deliveries only forward an approved, successful terminal result.
+    Ok(Some(matches!(gate, super::ChannelCouncilOutcome::Ordinary) || approved))
 }
 
 /// Claim one post-acceptance GitHub issue attempt. A crash after 'sending'

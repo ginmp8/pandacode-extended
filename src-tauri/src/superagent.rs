@@ -3,6 +3,8 @@
 //! not execute untrusted model proposals as authority or create another runner.
 
 use crate::{bots, storage::{self, Store}, AppState, Result};
+
+pub(crate) mod manifest;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};

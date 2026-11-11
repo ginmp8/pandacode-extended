@@ -78,6 +78,10 @@ CREATE INDEX IF NOT EXISTS sa_audit_ticket ON sa_audit(ticket_id,id);
 
 /// An active harness is not resumed automatically after process restart.
 pub(crate) const RECOVER: &str = "
+INSERT INTO sa_audit(ticket_id,kind,detail,at)
+ SELECT id,'restart_interrupted','Native worker session interrupted; no automatic replay',
+ CAST(strftime('%s','now') AS INTEGER)*1000
+ FROM sa_tickets WHERE state='running';
 UPDATE sa_assignments SET state='interrupted',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
  WHERE state='running';
 UPDATE sa_tickets SET state='interrupted',revision=revision+1,active_assignment_id=NULL,
@@ -1135,6 +1139,31 @@ mod tests {
         assert_eq!(list_tickets(&reopened, &first_config.id, 100).unwrap().len(), 2);
         assert_eq!(history(&reopened, &first.id, 100).unwrap()[0].kind, "admitted");
         assert_eq!(get_ticket(&reopened, &first.id).unwrap().state, "interrupted");
+    }
+
+    #[test]
+    fn startup_interruption_is_audited_once_and_old_callbacks_remain_denied() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, _) = admit(&mut store, &cfg.id, "Interrupted restart", "restart-ledger", false).unwrap();
+        let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let interrupted = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(interrupted.state, "interrupted");
+        assert!(interrupted.active_assignment_id.is_none());
+        assert!(!on_run_finished(&reopened, &original_session, true, "delayed success").unwrap());
+        let events = history(&reopened, &ticket.id, 200).unwrap();
+        assert_eq!(events.iter().filter(|event| event.kind == "restart_interrupted").count(), 1);
+        assert!(retry_blocked(&mut Store::open(&path).unwrap(), &ticket.id, false).is_err());
+        drop(reopened);
+
+        let again = Store::open(&path).unwrap();
+        let replayed = history(&again, &ticket.id, 200).unwrap();
+        assert_eq!(replayed.iter().filter(|event| event.kind == "restart_interrupted").count(), 1);
+        assert_eq!(get_ticket(&again, &ticket.id).unwrap().state, "interrupted");
     }
 
     #[test]

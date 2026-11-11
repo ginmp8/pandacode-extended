@@ -208,7 +208,10 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
 }
 
 /** Bind the per-message Council panel without changing the channel's native submission contract. */
+let activeCouncilPlacement: (() => void) | null = null;
 export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
+  if (activeCouncilPlacement) window.removeEventListener('resize', activeCouncilPlacement);
+  activeCouncilPlacement = null;
   if (!form) return;
   const panel = form.querySelector<HTMLElement>('.bc-council-panel');
   const trigger = form.querySelector<HTMLButtonElement>('.bc-council-trigger');
@@ -239,20 +242,26 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     panel.hidePopover();
     trigger.focus({ preventScroll: true });
   });
+  const place = () => positionSharedChannelCouncilPanel(trigger, panel);
   panel.addEventListener('toggle', event => {
-    trigger.setAttribute('aria-expanded', String(event.newState === 'open'));
+    const open = event.newState === 'open';
+    trigger.setAttribute('aria-expanded', String(open));
+    if (open) {
+      if (activeCouncilPlacement) window.removeEventListener('resize', activeCouncilPlacement);
+      activeCouncilPlacement = place;
+      window.addEventListener('resize', place);
+    } else if (activeCouncilPlacement === place) {
+      window.removeEventListener('resize', place);
+      activeCouncilPlacement = null;
+    }
   });
   form.addEventListener('change', sync);
   form.addEventListener('input', sync);
   sync();
 }
 
-/** Show Council above the channel tray as a non-modal popover, like the direct-chat Council. */
-export function toggleSharedChannelCouncil(trigger: HTMLElement): void {
-  const panel = trigger.closest<HTMLFormElement>('#shared-channel-composer')?.querySelector<HTMLElement>('.bc-council-panel');
-  if (!panel) return;
-  if (panel.matches(':popover-open')) { panel.hidePopover(); trigger.focus({ preventScroll: true }); return; }
-  panel.showPopover();
+/** Keep the floating Council panel within the viewport, including after a window resize. */
+function positionSharedChannelCouncilPanel(trigger: HTMLElement, panel: HTMLElement): void {
   const rect = trigger.getBoundingClientRect();
   const width = Math.max(0, Math.min(380, window.innerWidth - 24));
   const natural = Math.min(560, panel.scrollHeight);
@@ -264,6 +273,15 @@ export function toggleSharedChannelCouncil(trigger: HTMLElement): void {
   panel.style.maxHeight = height + 'px';
   panel.style.left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2)) + 'px';
   panel.style.top = (placeAbove ? Math.max(12, rect.top - 10 - Math.min(natural, height)) : rect.bottom + 10) + 'px';
+}
+
+/** Show Council above the channel tray as a non-modal popover, like the direct-chat Council. */
+export function toggleSharedChannelCouncil(trigger: HTMLElement): void {
+  const panel = trigger.closest<HTMLFormElement>('#shared-channel-composer')?.querySelector<HTMLElement>('.bc-council-panel');
+  if (!panel) return;
+  if (panel.matches(':popover-open')) { panel.hidePopover(); trigger.focus({ preventScroll: true }); return; }
+  panel.showPopover();
+  positionSharedChannelCouncilPanel(trigger, panel);
   trigger.setAttribute('aria-expanded', 'true');
   panel.querySelector<HTMLElement>('.council-switch')?.focus({ preventScroll: true });
 }

@@ -703,19 +703,23 @@ pub(crate) fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
 /// replay/restart/Stop callers that bypass the live run-finished gate.
 /// Ordinary (Council-off) collaboration retains its original callback behavior.
 pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Result<bool> {
-    let linked: Option<(String,String,String)> = store.db.query_row(
-        "SELECT d.session_id,d.status,c.artifact_revision
+    let linked: Option<(String,String,String,String)> = store.db.query_row(
+        "SELECT d.session_id,d.status,c.artifact_revision,c.source_message_id
          FROM extended_channel_council_deliveries c
          JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
          WHERE c.delivery_id=?1",
-        [delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        [delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((session_id,status,frozen_cycle)) = linked else { return Ok(true) };
+    let Some((session_id,status,frozen_cycle,message_id)) = linked else { return Ok(true) };
     if status != "completed" { return Ok(false); }
     let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(false) };
     if team.status != "completed" || team.config.council.is_none()
         || frozen_cycle != format!("cycle:{}",team.council_since)
     { return Ok(false); }
+    let requested = council_request(store, &message_id)?;
+    if requested.is_none_or(|original| team.config.council.as_ref() != Some(&original.council)) {
+        return Ok(false);
+    }
     let Some(verdict) = team.council_status.as_ref() else { return Ok(false) };
     if verdict.stale { return Ok(false); }
     if verdict.state == "passed" { return Ok(true); }

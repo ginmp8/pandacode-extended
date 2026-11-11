@@ -31,6 +31,16 @@ pub(crate) const CHANNEL: &str = "superagent";
 /// evidence; never persist an objective that is silently truncated at dispatch.
 const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 
+/// A native ceiling for each provider attempt, independent of the longer
+/// ticket mandate lifetime. A late provider result must never become newly
+/// approvable after its execution budget has elapsed.
+const MAX_ASSIGNMENT_RUN_MS: i64 = 30 * 60 * 1000;
+
+fn assignment_within_budget(started_at: i64, now: i64) -> bool {
+    started_at > 0 && now >= started_at
+        && now.saturating_sub(started_at) < MAX_ASSIGNMENT_RUN_MS
+}
+
 /// Global pause is an immediate native revocation of execution authority,
 /// even for an already-running read-only assignment. It never modifies the
 /// original user-issued mandate or silently renews it on resume.
@@ -569,10 +579,11 @@ pub(crate) fn read_only_policy(
         worker_id: String,
         project_id: String,
         ticket_id: String,
+        started_at: i64,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
-                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id
+                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -585,13 +596,14 @@ pub(crate) fn read_only_policy(
             mandate_version: r.get(4)?, config_version: r.get(5)?,
             enabled: r.get::<_, i64>(6)? != 0, bot_id: r.get(7)?,
             coordinator_id: r.get(8)?, worker_id: r.get(9)?, project_id: r.get(10)?,
-            ticket_id: r.get(11)?,
+            ticket_id: r.get(11)?, started_at: r.get(12)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
             || scope.mandate_version != scope.config_version
+            || !assignment_within_budget(scope.started_at, storage::now())
             || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
@@ -727,15 +739,15 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // Result, Ticket revision and audit must settle in one transaction; an
     // injected storage failure cannot strand an assignment in a terminal state.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let assignment: Option<(String, String, bool)> = tx.query_row(
-        "SELECT a.ticket_id,a.id,a.bot_id=o.coordinator_bot_id
+    let assignment: Option<(String, String, bool, i64)> = tx.query_row(
+        "SELECT a.ticket_id,a.id,a.bot_id=o.coordinator_bot_id,a.created_at
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE a.session_id=?1 AND a.state='running' AND t.state='running'",
-        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((task_id, assignment_id, coordinator)) = assignment else { return Ok(false) };
+    let Some((task_id, assignment_id, coordinator, started_at)) = assignment else { return Ok(false) };
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
          AND EXISTS (
@@ -764,8 +776,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let trimmed = text.trim().chars().take(4096).collect::<String>();
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
+    let within_budget = assignment_within_budget(started_at, storage::now());
     let authorized = execution_permitted(
-        authorized && provenance_ok, crate::feature_controls::get().bots_paused,
+        authorized && provenance_ok && within_budget, crate::feature_controls::get().bots_paused,
     );
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
@@ -792,7 +805,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,?2,?3,?4)",
-        params![task_id,if !authorized { "callback_rejected" }
+        params![task_id,if !within_budget { "assignment_timed_out" }
+            else if !authorized { "callback_rejected" }
             else if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -1527,6 +1541,50 @@ mod tests {
         assert_eq!(after.activity[0].kind, "stopped");
         assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
+
+
+    #[test]
+    fn expired_assignment_budget_denies_native_tools_and_late_success() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Bounded read-only fixture",
+            "assignment-timeout-1", false,
+        ).unwrap();
+        assert!(launched);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let now = storage::now();
+        assert!(!assignment_within_budget(now + 1, now), "future start must fail closed");
+        assert!(!assignment_within_budget(
+            now - MAX_ASSIGNMENT_RUN_MS, now,
+        ), "attempt deadline is exclusive");
+        let expired_at = now - MAX_ASSIGNMENT_RUN_MS - 1000;
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+            params![ticket.id, expired_at],
+        ).unwrap();
+        assert!(read_only_policy(&store, &session_id).is_err());
+        assert!(on_run_finished(
+            &store, &session_id, true, "Late provider success is not approval",
+        ).unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.active_assignment_id.is_none());
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "failed");
+        assert_eq!(history(&store, &ticket.id, 10).unwrap()[0].kind, "assignment_timed_out");
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(!on_run_finished(&store, &session_id, true, "Duplicate").unwrap());
+
+        // The timed-out attempt releases its native lease; it never resurrects
+        // on another ticket or silently extends its original authorization.
+        let (next, started) = admit(
+            &mut store, &config.id, "Independent authorized ticket",
+            "assignment-timeout-2", false,
+        ).unwrap();
+        assert!(started);
+        assert_eq!(next.state, "running");
     }
 
     #[test]

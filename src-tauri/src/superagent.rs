@@ -13,6 +13,13 @@ pub(crate) const CHANNEL: &str = "superagent";
 /// evidence; never persist an objective that is silently truncated at dispatch.
 const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 
+/// Global pause is an immediate native revocation of execution authority,
+/// even for an already-running read-only assignment. It never modifies the
+/// original user-issued mandate or silently renews it on resume.
+fn execution_permitted(orchestration_enabled: bool, bots_paused: bool) -> bool {
+    orchestration_enabled && !bots_paused
+}
+
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_orchestrations (
   id TEXT PRIMARY KEY,
@@ -371,8 +378,8 @@ fn admit_role(
         return Ok((ticket, false));
     }
     let config = configuration(store, config_id)?;
-    if !config.enabled {
-        return Err("Orchestration is disabled; opt in before submitting.".into());
+    if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused) {
+        return Err("Orchestration is disabled or bots are globally paused.".into());
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
@@ -482,7 +489,8 @@ pub(crate) fn read_only_policy(
     if let Some(scope) = scope {
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
-            || scope.mandate_version != scope.config_version || !scope.enabled
+            || scope.mandate_version != scope.config_version
+            || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
         }
@@ -608,6 +616,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,storage::now()], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     let trimmed = text.trim().chars().take(4096).collect::<String>();
+    // A stop-all transition may happen after admission but before the provider
+    // callback. A stale success must not become approvable after global pause.
+    let authorized = execution_permitted(authorized, crate::feature_controls::get().bots_paused);
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
@@ -1214,6 +1225,14 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn global_pause_is_an_execution_revocation_not_a_new_implicit_grant() {
+        assert!(execution_permitted(true, false));
+        assert!(!execution_permitted(false, false));
+        assert!(!execution_permitted(true, true));
+        assert!(!execution_permitted(false, true));
     }
 
     #[test]

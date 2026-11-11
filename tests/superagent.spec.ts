@@ -5,7 +5,8 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   const bar=page.locator('.sidebar-bots-bar');
   if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
   const sidebar=page.getByRole('region',{name:'Bots',exact:true});
-  await sidebar.getByRole('button',{name:'Add bot or channel'}).click();
+  await expect(sidebar).toBeVisible();
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('dialog',{name:'Orchestrations'});
   await expect(dialog).toBeVisible();
@@ -36,7 +37,8 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   const bar=page.locator('.sidebar-bots-bar');
   if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
   const sidebar=page.getByRole('region',{name:'Bots',exact:true});
-  await sidebar.getByRole('button',{name:'Add bot or channel'}).click();
+  await expect(sidebar).toBeVisible();
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('dialog',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
@@ -65,7 +67,8 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   const bar=page.locator('.sidebar-bots-bar');
   if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
   const sidebar=page.getByRole('region',{name:'Bots',exact:true});
-  await sidebar.getByRole('button',{name:'Add bot or channel'}).click();
+  await expect(sidebar).toBeVisible();
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('dialog',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');

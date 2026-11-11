@@ -856,7 +856,7 @@ pub async fn bot_shared_channel_council_accept(
     if !(8..=1024).contains(&reason.chars().count()) || reason.chars().any(char::is_control) {
         return Err("Enter an acceptance reason between 8 and 1024 printable characters.".into());
     }
-    let (channel_id, session_id, cycle_id) = {
+    let (channel_id, session_id, cycle_id, expected_since, expected_dispatch, expected_changed) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let (channel_id, session_id, cycle_id): (String, String, String) = store.db.query_row(
             "SELECT c.channel_id,d.session_id,c.cycle_id
@@ -877,7 +877,7 @@ pub async fn bot_shared_channel_council_accept(
         {
             return Err("A current Council review with recorded scores is required before exceptional acceptance.".into());
         }
-        (channel_id, session_id, cycle_id)
+        (channel_id, session_id, cycle_id, team.council_since, team.dispatch_revision, team.changed_at)
     };
     let team = crate::architect::accept_channel_delivery(&app, &state, &session_id)?;
     // Do not let a concurrent reassignment, stop or newer reviewer revision
@@ -892,10 +892,15 @@ pub async fn bot_shared_channel_council_accept(
             params![delivery_id,session_id], |r| r.get(0),
         ).map_err(|_| "Council delivery changed during acceptance.".to_string())?;
         if current_cycle != cycle_id || team.council_accepted != Some(team.council_since)
+            || team.council_since != expected_since || team.dispatch_revision != expected_dispatch
+            || team.changed_at != expected_changed
             || team.council_status.as_ref().is_none_or(|s| s.state != "accepted" || s.stale)
         {
             return Err("Council approval no longer matches the current review.".into());
         }
+        let selected = &team.config.council.as_ref()
+            .ok_or("Council is disabled.")?.reviewer_bot_ids;
+        validate_delivery_reviewers(&store, &session_id, selected)?;
         store.db.execute(
             "INSERT OR IGNORE INTO extended_channel_council_acceptances
              (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
@@ -909,6 +914,8 @@ pub async fn bot_shared_channel_council_accept(
     if team.status == "completed" {
         // A completed at-limit lead has no future harness turn to call back.
         super::run_finished(&app, &session_id, true);
+    } else {
+        crate::architect::wake(app.clone());
     }
     Ok(())
 }

@@ -7,8 +7,8 @@ use super::Orchestration;
 use crate::{bots, storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use tauri::State;
+use std::{collections::HashSet, path::Path};
+use tauri::{Manager, State};
 
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_PRESETS: usize = 64;
@@ -53,6 +53,8 @@ pub struct ImportPreview {
 pub struct ImportResult {
     pub created: Vec<String>,
     pub unchanged: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -148,7 +150,7 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
     }
     // Full dependency and conflict preflight precedes the first mutation.
     let resolved = resolve(store, document)?;
-    let mut result = ImportResult { created: Vec::new(), unchanged: Vec::new() };
+    let mut result = ImportResult { created: Vec::new(), unchanged: Vec::new(), backup_path: None };
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     for candidate in resolved {
         if candidate.existing {
@@ -166,6 +168,35 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
         result.created.push(candidate.name);
     }
     tx.commit().map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+
+/* Take a verified private configuration snapshot before applying a new preset.
+ * Existing native import remains transactional and rechecks dependencies.
+ */
+fn apply_with_backup(
+    store: &Store, data_dir: &Path, document: &serde_json::Value, confirmed: bool,
+) -> Result<ImportResult> {
+    if !confirmed {
+        return Err("Confirm the preview before importing SuperAgent presets.".into());
+    }
+    let plan = preview(store, document)?;
+    if plan.would_create.is_empty() {
+        return apply(store, document, true);
+    }
+    let folder = data_dir.join("bot-backups");
+    crate::extended_bot_manifest::set_private_directory(&folder)?;
+    let snapshot = export(store)?;
+    let mut bytes = serde_json::to_vec_pretty(&snapshot).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    let path = folder.join(format!(
+        "orchestrations-{}-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"), storage::id(),
+    ));
+    crate::extended_bot_manifest::atomic_write_new(&path, &bytes)?;
+    let mut result = apply(store, document, true)?;
+    result.backup_path = Some(path.display().to_string());
     Ok(result)
 }
 
@@ -225,12 +256,13 @@ pub async fn superagent_manifest_preview(
 
 #[tauri::command]
 pub async fn superagent_manifest_import(
-    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>,
     document: serde_json::Value, confirmed: bool,
 ) -> Result<ImportResult> {
     main_window(&window)?;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    apply(&store, &document, confirmed)
+    apply_with_backup(&store, &dir, &document, confirmed)
 }
 
 #[cfg(test)]
@@ -264,6 +296,45 @@ mod tests {
              "enabled":true,"autonomy":"off","maxConcurrentTasks":1,
              "maxAttemptsPerAssignment":2,"council":{"enabled":false}}
         ]})
+    }
+
+    #[test]
+    fn confirmed_import_preserves_private_configuration_snapshots_and_noop_reimport() {
+        let store = fixture();
+        let root = std::env::temp_dir().join(format!("sa-backup-test-{}", storage::id()));
+        let first = apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
+        let path = first.backup_path.unwrap();
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(path).unwrap(),
+        ).unwrap();
+        assert_eq!(snapshot["schemaVersion"], 1);
+        assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
+        let repeat = apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
+        assert_eq!(repeat.unchanged, vec!["Software Development"]);
+        assert!(repeat.backup_path.is_none());
+        let second = apply_with_backup(&store, &root, &document("Issue Resolution"), true).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(second.backup_path.unwrap()).unwrap(),
+        ).unwrap();
+        assert_eq!(snapshot["orchestrations"][0]["name"], "Software Development");
+        assert_eq!(snapshot["orchestrations"][0]["enabled"], false);
+        let count = std::fs::read_dir(root.join("bot-backups")).unwrap().count();
+        assert_eq!(count, 2);
+        assert!(apply_with_backup(&store, &root, &document("Not confirmed"), false).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_snapshot_never_partially_imports_a_preset() {
+        let store = fixture();
+        let blocked = std::env::temp_dir().join(format!("sa-blocked-backup-{}", storage::id()));
+        std::fs::write(&blocked, "file prevents private backup directory").unwrap();
+        assert!(apply_with_backup(&store, &blocked, &document("Not inserted"), true).is_err());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+        std::fs::remove_file(blocked).unwrap();
     }
 
     #[test]

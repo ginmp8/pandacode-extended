@@ -63,7 +63,7 @@ pub(crate) fn set_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn atomic_write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or("Choose a destination directory.")?;
     if !parent.is_dir() { return Err("The destination directory does not exist.".into()); }
     if path.exists() { return Err(format!("The destination already exists: {}", path.display())); }

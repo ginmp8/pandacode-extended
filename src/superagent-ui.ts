@@ -12,6 +12,7 @@ interface Config {
 }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
+interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
@@ -22,7 +23,7 @@ interface TicketDetails { ticket: Ticket; mandate: Mandate; assignments: Assignm
 
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
-  let selected = '', busy = false, loading = true, error = '', importText = '';
+  let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
@@ -109,6 +110,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
+      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
       (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
         safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
@@ -173,7 +175,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   }
   async function work(action: () => Promise<void>): Promise<void> {
     if (busy) return;
-    busy = true; error = '';
+    busy = true; error = ''; feedback = '';
     host.setAttribute('aria-busy', 'true');
     // Preserve any form fields while the native operation is in flight,
     // but prevent a second click from being silently discarded.
@@ -255,8 +257,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target.hasAttribute('data-sa-import') && inspected) {
       const document = inspected;
       ask('Import these configurations, disabled, without changing existing bots?', async () => {
-        await call('superagent_manifest_import',{ document, confirmed:true });
+        const result = await call<ImportResult>('superagent_manifest_import',{ document, confirmed:true });
         preview = null; inspected = null; await reload();
+        feedback = result.created.length + ' presets imported; ' + result.unchanged.length +
+          ' unchanged.' + (result.backupPath ? ' Recovery snapshot: ' + result.backupPath : '');
       }); return;
     }
     if (target.dataset.saAccept) {

@@ -78,3 +78,20 @@ intentionally distinguishes **source inspection** from **executed acceptance**.
 
 **Note:** This file is the initial draft-PR scope declaration, not a substitute
 for the feature implementation, tests, or later source-backed documentation.
+
+
+### Native companion-manifest recovery snapshots
+
+A confirmed desktop companion-manifest import preflights every referenced bot.
+If it will create presets, the native importer first writes and verifies a
+configuration-only snapshot to the existing private `bot-backups` directory
+as `orchestrations-*.json`, reusing the legacy backup's exclusive atomic
+writer. The command returns `backupPath` for the verified snapshot.
+An unchanged reimport does not create duplicate presets or backup files.
+Backup creation/verification failure causes no orchestration mutation.
+
+Snapshots contain no Ticket, Mandate, session, credential, memory, or approval
+state. Restoration requires a new explicit preview and confirmation, with
+imported presets disabled by default. Legacy bot manifest and Git sync remain
+separate: importing bots or shared channels never implicitly enables
+orchestrations.

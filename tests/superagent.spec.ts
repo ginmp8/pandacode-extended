@@ -29,6 +29,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await dialog.getByRole('button',{name:'Confirm import'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await expect(dialog.getByRole('status').filter({hasText:'0 presets imported; 1 unchanged.'})).toBeVisible();
 });
 
 

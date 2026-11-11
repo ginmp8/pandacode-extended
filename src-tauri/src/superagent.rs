@@ -1249,6 +1249,7 @@ fn retry_blocked(
     let mandate_ok: bool = store.db.query_row(
         "SELECT revoked=0 AND expires_at>?2 AND policy_revision=?3
                 AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
+                AND actor=(SELECT actor FROM sa_tickets WHERE id=?1)
          FROM sa_mandates WHERE ticket_id=?1",
         params![ticket_id,storage::now(),config.policy_revision,config.project_id],
         |r| r.get(0),
@@ -1352,6 +1353,7 @@ fn prepare_coordinated_worker(
     let mandate_ok: bool = store.db.query_row(
         "SELECT revoked=0 AND expires_at>?2 AND policy_revision=?3
                 AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
+                AND actor=(SELECT actor FROM sa_tickets WHERE id=?1)
          FROM sa_mandates WHERE ticket_id=?1",
         params![ticket_id,storage::now(),config.policy_revision,config.project_id],
         |r| r.get(0),
@@ -1563,6 +1565,55 @@ mod tests {
     }
 
 
+
+
+    #[test]
+    fn mutated_mandate_is_denied_before_retry_or_worker_session_provisioning() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Blocked task", "preflight-retry-1", true,
+        ).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        store.db.execute(
+            "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+            [&blocked.id],
+        ).unwrap();
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |r| r.get(0),
+        ).unwrap();
+        assert!(retry_blocked(&mut store, &blocked.id, false).is_err());
+        let after: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(after, before, "invalid retry must not allocate a session");
+
+        let (coordinated, launched) = admit_role(
+            &mut store, &config.id, "Coordinator plan",
+            "preflight-coordinate-2", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &coordinated.id)
+            .unwrap().unwrap();
+        assert!(on_run_finished(
+            &store, &coordinator_session, true, "Evidence-backed plan",
+        ).unwrap());
+        assert_eq!(get_ticket(&store, &coordinated.id).unwrap().state, "queued");
+        store.db.execute(
+            "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+            [&coordinated.id],
+        ).unwrap();
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |r| r.get(0),
+        ).unwrap();
+        assert!(prepare_coordinated_worker(&mut store, &coordinated.id, false).is_err());
+        let after: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(after, before, "invalid worker mandate must not allocate a session");
+        assert_eq!(get_ticket(&store, &coordinated.id).unwrap().state, "queued");
+    }
 
     #[test]
     fn unsupported_mandate_escalation_cannot_run_or_turn_into_human_approval() {

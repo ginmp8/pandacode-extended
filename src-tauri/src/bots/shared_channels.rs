@@ -311,11 +311,12 @@ pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selec
 }
 
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
-    let cycle: Option<(String, String)> = store.db.query_row(
-        "SELECT cycle_id,artifact_revision FROM extended_channel_council_deliveries WHERE delivery_id=?1",
-        [delivery_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    let cycle: Option<(String, String, String)> = store.db.query_row(
+        "SELECT cycle_id,artifact_revision,source_message_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [delivery_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((cycle_id, original_revision)) = cycle else { return Ok(None) };
+    let Some((cycle_id, original_revision, source_message_id)) = cycle else { return Ok(None) };
+    let original = council_request(store, &source_message_id)?.map(|request| request.council);
     let team = crate::architect::load(store, session_id)?;
     let proof: Option<(i64, i64, i64, String)> = store.db.query_row(
         "SELECT council_since,dispatch_revision,changed_at,reason
@@ -326,7 +327,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
     ).optional().map_err(|e| e.to_string())?;
     let (state, round, target, lowest, revision, notice, reviewers, acceptance_reason) = if let Some(team) = team {
         let status = team.council_status.as_ref();
-        let authorized_exception = proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
+        let original_matches = original.as_ref() == team.config.council.as_ref()
+            && original_revision == format!("cycle:{}",team.council_since);
+        let authorized_exception = original_matches && proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
             team.council_accepted == Some(*since) && team.council_since == *since
                 && team.dispatch_revision as i64 == *dispatch && team.changed_at == *changed
                 && status.is_some_and(|s| s.state == "accepted" && !s.stale)
@@ -335,10 +338,12 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             "stopped" => "Stopped",
             "failed" => "Failed",
             _ => match status.map(|s| s.state.as_str()) {
-                Some("passed") => "Passed",
+                Some("passed") if original_matches => "Passed",
+                Some("passed") => "Inconclusive",
                 Some("accepted") if authorized_exception => "Accepted by user",
                 Some("accepted") => "Inconclusive",
-                Some("limit") => "Limit reached",
+                Some("limit") if original_matches => "Limit reached",
+                Some("limit") => "Inconclusive",
                 Some("fixing" | "asking") => "Needs correction",
                 Some("waiting" | "reviewing" | "dispatch") => "Reviewing",
                 _ => "Inconclusive",
@@ -351,7 +356,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                 round: seat.round, score: seat.score,
             })
         }).collect();
-        let note = status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect())
+        let note = (!original_matches)
+            .then(|| "Council settings or cycle differ from this channel delivery; approval is unavailable.".to_string())
+            .or_else(|| status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect()))
             .or_else(|| (status.is_some_and(|s| s.state == "accepted") && !authorized_exception)
                 .then(|| "Council acceptance requires a reasoned user action in this channel.".into()));
         (state.to_owned(), status.map_or(0, |s| s.round),

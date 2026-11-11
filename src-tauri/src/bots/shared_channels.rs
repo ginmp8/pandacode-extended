@@ -897,7 +897,7 @@ pub(super) fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> R
     Ok((changed==1).then_some(item))
 }
 
-fn github_result_uncertain(error: &str) -> bool {
+pub(super) fn github_result_uncertain(error: &str) -> bool {
     error.contains("uncertain") || error.contains("timed out") || error.contains("truncated")
 }
 

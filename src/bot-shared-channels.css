@@ -61,21 +61,52 @@
 .bc-reassign-menu button:hover { background: var(--ds-fill); }
 .bc-composer textarea { min-height: 58px; overflow-y: auto; resize: none; }
 .bc-composer textarea:focus-visible { outline: none; }
-.bc-council-controls { padding: 0 12px 8px; color: var(--muted); font-size: 12px; }
-.bc-council-toggle { display: flex; gap: 8px; align-items: center; width: fit-content; cursor: pointer; }
-.bc-council-controls input[type=checkbox], .bc-council-controls input[type=radio] { accent-color: var(--accent); }
-.bc-council-options { display: none; gap: 7px; margin: 9px 0 0; padding: 12px; border: 1px solid var(--ds-border, var(--faint)); border-radius: var(--radius-sm); }
+/* Shared Channel Council uses the same compact grammar as the task Council tray.
+   Global input rules assign width:100% and control-height; native radios and
+   checkboxes MUST explicitly reset both or their labels disintegrate. */
+.bc-council-controls { padding: 2px 14px 8px; color: var(--muted); font-size: var(--ds-text-ui, 13px); min-width: 0; }
+.bc-council-toggle { display: inline-flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 36px; max-width: 260px; width: 100%; cursor: pointer; }
+.bc-council-toggle-text { display: grid; gap: 0; line-height: 1.3; min-width: 0; }
+.bc-council-toggle-text strong { color: var(--text); font-weight: var(--weight-medium, 600); }
+.bc-council-toggle-text small { font-size: var(--ds-text-meta, 11px); color: var(--muted); }
+.bc-council-controls input:is([type=checkbox],[type=radio]) { box-sizing: border-box; width: 15px; height: 15px; min-width: 15px; min-height: 15px; padding: 0; margin: 0; flex: 0 0 15px; accent-color: var(--ds-primary-bg, var(--accent)); cursor: pointer; }
+.bc-council-toggle input[type=checkbox] { appearance: none; position: relative; width: 34px; height: 20px; min-width: 34px; min-height: 20px; flex-basis: 34px; border: 1px solid var(--ds-border, var(--border)); border-radius: 99px; background: var(--raised); transition: background-color 160ms ease; }
+.bc-council-toggle input[type=checkbox]::after { content: ""; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform 160ms ease, background-color 160ms ease; }
+.bc-council-toggle input[type=checkbox]:checked { background: var(--ds-primary-bg, var(--accent)); border-color: var(--ds-primary-bg, var(--accent)); }
+.bc-council-toggle input[type=checkbox]:checked::after { transform: translateX(14px); background: var(--bg); }
+.bc-council-controls input:is([type=checkbox],[type=radio]):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.bc-council-options { display: none; min-inline-size: 0; gap: 12px; margin: 9px 0 0; padding: 13px 14px 14px; border: 1px solid var(--ds-border, var(--border)); border-radius: var(--radius-sm); max-height: min(48dvh, 410px); overflow-y: auto; overflow-x: hidden; }
 .bc-council-controls:has(input[name=councilEnabled]:checked) .bc-council-options { display: grid; }
-.bc-council-options legend { color: var(--text); font-weight: 600; }
-.bc-council-options label { display: flex; align-items: center; gap: 6px; }
-.bc-council-numbers { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 4px; }
-.bc-council-numbers input { width: 60px; min-height: 30px; padding: 4px; border: 1px solid var(--ds-border, var(--faint)); border-radius: 5px; background: var(--ds-fill); color: var(--text); }
-.bc-council-reviewer-options { display: none; flex-wrap: wrap; gap: 8px 12px; padding: 8px 0; }
-.bc-council-reviewer-options p { flex-basis: 100%; margin: 0; }
+.bc-council-options legend { padding: 0 5px; font-size: var(--ds-text-meta, 11px); color: var(--text); font-weight: var(--weight-medium, 600); }
+.bc-council-options label { display: flex; min-width: 0; align-items: center; gap: 9px; line-height: 1.4; cursor: pointer; }
+.bc-council-numbers { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; max-width: 480px; }
+.bc-council-numbers label { justify-content: space-between; gap: 8px; white-space: nowrap; }
+.bc-council-options :is(input[type=number],input[type=text]) { box-sizing: border-box; min-width: 0; min-height: 30px; height: 30px; padding: 4px 9px; border: 1px solid var(--ds-border, var(--border)); border-radius: var(--radius-sm); background: var(--ds-fill, var(--raised)); color: var(--text); }
+.bc-council-numbers input { width: 72px; flex: 0 0 72px; font-variant-numeric: tabular-nums; }
+.bc-council-mode-group { display: grid; gap: 7px; }
+.bc-council-section-label { color: var(--text); font-weight: var(--weight-medium, 600); }
+.bc-council-modes { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 5px; max-width: 480px; padding: 4px; border-radius: var(--radius-sm); background: var(--ds-fill, var(--raised)); }
+.bc-council-modes label { justify-content: center; min-height: 30px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius-sm); text-align: center; }
+.bc-council-modes label:has(input:checked) { background: var(--bg); border-color: var(--ds-border, var(--border)); color: var(--text); }
+.bc-council-reviewer-options { display: none; flex-wrap: wrap; gap: 8px 14px; padding: 3px 0; }
+.bc-council-reviewer-options p { flex-basis: 100%; margin: 0; font-size: var(--ds-text-meta, 11px); }
+.bc-council-reviewer-options label { padding: 5px 8px; border-radius: var(--radius-sm); background: var(--ds-fill, var(--raised)); }
 .bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-reviewer-options { display: flex; }
-.bc-council-selected-permissions { display: none; flex-direction: column; gap: 8px; }
-.bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-selected-permissions { display: flex; }
-.bc-council-selected-permissions input[type=text] { width: min(100%, 240px); padding: 4px; border: 1px solid var(--ds-border, var(--faint)); border-radius: 5px; background: var(--ds-fill); color: var(--text); }
+.bc-council-followup,.bc-council-selected-permissions { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--ds-border, var(--border)); }
+.bc-council-followup label:has(input[type=text]),.bc-council-selected-permissions label:has(input[type=text]) { display: grid; justify-items: start; gap: 6px; cursor: default; }
+.bc-council-followup input[type=text],.bc-council-selected-permissions input[type=text] { width: min(100%, 480px); }
+.bc-council-followup small,.bc-council-selected-permissions small { font-size: var(--ds-text-meta, 11px); line-height: 1.45; overflow-wrap: anywhere; }
+.bc-council-selected-permissions { display: none; }
+.bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-selected-permissions { display: grid; }
+@media(max-width:520px) {
+  .bc-council-controls { padding-inline: 10px; }
+  .bc-council-options { padding-inline: 10px; max-height: min(42dvh, 340px); }
+  .bc-council-numbers { grid-template-columns: minmax(0,1fr); gap: 8px; }
+  .bc-council-modes label { padding-inline: 4px; }
+}
+@media(prefers-reduced-motion:reduce) {
+  .bc-council-toggle input[type=checkbox],.bc-council-toggle input[type=checkbox]::after { transition: none; }
+}
 .bc-council-report { padding: 2px 8px; font-size: 12px; }
 .bc-council-summary { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; color: var(--text); }
 .bc-council-summary strong { font-weight: 600; }

@@ -1,6 +1,64 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('bot collaboration', () => {
+  test('channel Council controls stay compact and aligned in desktop and narrow layouts', async ({ page }) => {
+    await page.setViewportSize({ width: 1060, height: 780 });
+    await page.goto('/tests/fixtures/bot-manifests.html');
+    await page.addStyleTag({ url: '/src/styles.css' });
+    await page.addStyleTag({ url: '/src/bot-shared-channels.css' });
+    await page.evaluate(async () => {
+      const { sharedChannelComposerHtml } = await import('/src/bot-shared-channels.ts');
+      document.body.innerHTML = sharedChannelComposerHtml({
+        id: 'lab-security', name: 'lab-security', memberIds: ['executor', 'reviewer'],
+        archived: false, messages: [], activeBotIds: [],
+      } as any, [
+        { id: 'executor', name: 'Executor' },
+        { id: 'reviewer', name: 'Reviewer' },
+      ] as any);
+      document.querySelector<HTMLFormElement>('#shared-channel-composer')!.style.cssText = 'max-width:830px;margin:24px auto';
+    });
+    const form = page.locator('#shared-channel-composer');
+    const toggle = form.locator('input[name=councilEnabled]');
+    await expect(toggle).toBeVisible();
+    const dims = await toggle.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    });
+    expect(dims.width).toBeGreaterThanOrEqual(30);
+    expect(dims.width).toBeLessThanOrEqual(40);
+    expect(dims.height).toBeLessThanOrEqual(23);
+    await toggle.check();
+    const options = form.locator('.bc-council-options');
+    await expect(options).toBeVisible();
+    for (const name of ['councilGithubIssue', 'councilMode']) {
+      const control = form.locator(name === 'councilMode' ? 'input[name=councilMode][value=selected]' : `input[name=${name}]`);
+      const width = await control.evaluate(element => element.getBoundingClientRect().width);
+      expect(width, name).toBeLessThanOrEqual(20);
+    }
+    const group = form.locator('.bc-council-modes');
+    const layout = await group.evaluate(element => {
+      const labels = [...element.querySelectorAll('label')];
+      const a = labels[0].getBoundingClientRect(), b = labels[1].getBoundingClientRect();
+      const parent = element.getBoundingClientRect();
+      return { sameRow: Math.abs(a.top - b.top) < 2, contained: a.left >= parent.left && b.right <= parent.right };
+    });
+    expect(layout.sameRow).toBe(true);
+    expect(layout.contained).toBe(true);
+    await form.locator('input[name=councilMode][value=selected]').check();
+    await expect(form.locator('.bc-council-reviewer-options')).toBeVisible();
+    await expect(form.locator('.bc-council-selected-permissions')).toBeVisible();
+    await page.setViewportSize({ width: 480, height: 640 });
+    const overflow = await form.evaluate(element => {
+      const root = element.getBoundingClientRect(), panel = element.querySelector('.bc-council-options')!.getBoundingClientRect();
+      return { root: root.width, panel: panel.width, right: panel.right, viewport: window.innerWidth, height: panel.height, footer: element.querySelector('.send-button')!.getBoundingClientRect().bottom };
+    });
+    expect(overflow.panel).toBeLessThanOrEqual(overflow.root);
+    expect(overflow.right).toBeLessThanOrEqual(overflow.viewport);
+    expect(overflow.height).toBeLessThanOrEqual(340);
+    expect(overflow.footer).toBeLessThanOrEqual(640);
+    await expect(form.locator('.send-button')).toBeVisible();
+  });
+
   test('Council opt-in is isolated to one message and statuses are per-delivery', async ({ page }) => {
     await page.goto('/tests/fixtures/bot-manifests.html');
     await page.evaluate(async () => {

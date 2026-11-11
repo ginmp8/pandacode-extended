@@ -16,7 +16,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await coordinator.selectOption({label:'Scout'});
   await worker.selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
-  await expect(dialog.getByText('Software Development',{exact:true})).toBeVisible();
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Software Development');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Export'}).click();

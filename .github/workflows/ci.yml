@@ -208,4 +208,7 @@ jobs:
         if: runner.os == 'macOS'
         # A cold optimized Intel macOS build can exceed 40 minutes after the clippy pass.
         timeout-minutes: 70
+        # Do not pass a real-audio smoke by skipping capture when the macOS runner lacks input.
+        env:
+          PANDACODE_REQUIRE_REAL_MIC: '1'
         run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib real_audio -- --ignored --nocapture

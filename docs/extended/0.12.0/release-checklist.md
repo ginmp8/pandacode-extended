@@ -248,3 +248,12 @@ Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent 
 - [x] Correct the stale `scripts/release/workflow-publish-gate.test.mjs` predicate to require the existing push-preserving CI policy `github.event_name != 'push'`; keep the real CI workflow unchanged and retain release publication restrictions.
 - [ ] Verify the correction in both push and PR CI at the **new exact commit SHA**, including all release tests and platform jobs. Do not carry forward success from earlier commits.
 - [ ] Complete hunk-level and native On/Off, installed-app/Voice, bots, Connect/MCP, cloud/VM, credentials and migration acceptance before release approval.
+
+## Fork HEAD 66a7df2f synchronization — 2026-11-11
+
+- [x] Retrieve new fork HEAD and complete nontruncated recursive trees, including binary file SHA/mode inventory; locate the new upstream ALSA test absent from Extended.
+- [x] Import six source-exact files (five updates, one new test), plus one CI change adapted to Extended's validated longer macOS timeouts and push-CI policy.
+- [x] Retain upstream native version **0.3.109** across npm/Cargo/Tauri and the separate planned Extended **0.12.0 DRAFT**; preserve upstream release notes byte-exact.
+- [ ] Verify every source path and hash against the newly published destination SHA; document the complete list of 81 customized shared files with hunk-level behavior evidence.
+- [ ] Require new exact-SHA push and PR CI, including Rust, Clippy, Node/TypeScript, release tests, npm/RustSec, Expo and macOS real-audio.
+- [ ] Test Linux saved microphone selection and installed macOS capture, along with Extended Settings On/Off, bots, Connect/MCP, cloud/VM, credentials and release/installers. CI is not native acceptance.

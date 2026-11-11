@@ -381,6 +381,8 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         params![delivery_id,cycle,crate::storage::now()],
     ).unwrap();
     assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Approved);
+    assert!(!shared_channels::council_callback_allowed(&f.store,&delivery_id).unwrap(),
+        "an approved but nonterminal delivery may not publish a callback");
     team.changed_at = 1281;
     f.store.db.execute(
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
@@ -405,6 +407,8 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         [&channel.id],|r|r.get(0),
     ).unwrap();
     assert_eq!(published,1);
+    assert!(shared_channels::council_callback_allowed(&f.store,&delivery_id).unwrap(),
+        "only a completed native Council and matching proof may send a callback");
     let pending: (String,String,String) = f.store.db.query_row(
         "SELECT repository,state,authorization_id FROM extended_channel_council_followups
          WHERE delivery_id=?1",

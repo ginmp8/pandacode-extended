@@ -688,6 +688,20 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         "UPDATE extended_channel_council_followups SET repository='owner/repo' WHERE delivery_id=?1",
         [&delivery_id],
     ).unwrap();
+    let frozen_revision: String = f.store.db.query_row(
+        "SELECT revision FROM extended_channel_council_followups WHERE delivery_id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE extended_channel_council_followups SET revision='forged-revision' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::claim_post_acceptance_issue(&f.store,&delivery_id).unwrap().is_none(),
+        "GitHub issue publishing must reject a forged delivery/revision binding");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_followups SET revision=?2 WHERE delivery_id=?1",
+        params![delivery_id,frozen_revision],
+    ).unwrap();
     team.changed_at = 1281;
     f.store.db.execute(
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",

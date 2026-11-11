@@ -846,17 +846,24 @@ pub(super) fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> R
     // A persisted pending row is not a tool grant: recheck the final native
     // verdict and the exact per-message authorization at the write boundary.
     if !council_callback_allowed(store, delivery_id)? { return Ok(None); }
-    let scope: Option<(String, String)> = store.db.query_row(
-        "SELECT c.source_message_id, f.authorization_id
+    let scope: Option<(String, String, String, String, String)> = store.db.query_row(
+        "SELECT c.source_message_id, f.authorization_id, f.revision,
+                c.cycle_id, d.session_id
          FROM extended_channel_council_deliveries c
          JOIN extended_channel_council_followups f ON f.delivery_id=c.delivery_id
          JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
          WHERE c.delivery_id=?1 AND c.source_message_id=d.message_id
            AND c.executor_bot_id=d.bot_id AND d.status='completed'
            AND f.state='pending'",
-        [delivery_id], |r| Ok((r.get(0)?, r.get(1)?)),
+        [delivery_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((message_id, authorization_id)) = scope else { return Ok(None) };
+    let Some((message_id, authorization_id, revision, cycle, session_id)) = scope else {
+        return Ok(None);
+    };
+    let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(None) };
+    if revision != format!("{}:{}:{}", cycle, team.council_since, team.changed_at) {
+        return Ok(None);
+    }
     let grant = council_request(store, &message_id)?
         .and_then(|request| request.council.post_acceptance_issue);
     if grant.is_none_or(|grant| grant.authorization_id != authorization_id

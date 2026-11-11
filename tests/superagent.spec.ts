@@ -93,3 +93,44 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
 });
+
+test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    // The native read fails while switching presets: an old approval must
+    // not remain accessible under the newly selected configuration.
+    const { mountSuperagent } = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-isolation-test';
+    document.body.appendChild(host);
+    const configs = [
+      { id:'preset-one', name:'First preset', coordinatorBotId:'router',
+        workerBotId:'worker', enabled:true, policyRevision:1 },
+      { id:'preset-two', name:'Second preset', coordinatorBotId:'router',
+        workerBotId:'worker', enabled:true, policyRevision:1 },
+    ];
+    mountSuperagent(host, async (command, args) => {
+      if (command === 'bots_list') return [
+        { id:'router', name:'Router', paused:false },
+        { id:'worker', name:'Worker', paused:false },
+      ] as never;
+      if (command === 'superagent_list') return configs as never;
+      if (command === 'superagent_tickets') {
+        if (args?.orchestrationId === 'preset-two') throw new Error('Native ticket read failed');
+        return [{
+          id:'ticket-from-first-preset', objective:'First preset ticket',
+          state:'waiting_approval', revision:3, evidence:'old evidence'
+        }] as never;
+      }
+      throw new Error('Unexpected native command: ' + command);
+    });
+  });
+  const host = page.locator('#sa-isolation-test');
+  await expect(host.getByText('First preset ticket')).toBeVisible();
+  await expect(host.locator('[data-sa-accept="ticket-from-first-preset"]')).toHaveCount(1);
+  await host.locator('[data-sa-select="preset-two"]').click();
+  await expect(host.getByRole('alert')).toContainText('Native ticket read failed');
+  await expect(host.getByRole('heading', {name:'Second preset'})).toBeVisible();
+  await expect(host.getByText('First preset ticket')).toHaveCount(0);
+  await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
+});

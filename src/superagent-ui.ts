@@ -153,7 +153,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     try {
       const [known, configs] = await Promise.all([call<Bot[]>('bots_list'), call<Config[]>('superagent_list')]);
       bots = known; presets = configs;
-      if (!presets.some(config => config.id === selected)) selected = presets[0]?.id ?? '';
+      if (!presets.some(config => config.id === selected)) {
+        selected = presets[0]?.id ?? '';
+        inspectedTicket = '';
+      }
+      // A failed native read must not leave old ticket approval controls
+      // visible underneath a newly selected or reloaded preset.
+      tickets = [];
+      ticketDetails = null;
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
       error = '';
@@ -189,10 +196,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       return;
     }
     if (target.dataset.saSelect) {
-      selected = target.dataset.saSelect;
+      if (busy || loading || selected === target.dataset.saSelect) return;
+      const next = target.dataset.saSelect;
+      selected = next;
+      tickets = [];
       inspectedTicket = ''; ticketDetails = null;
       void work(async () => {
-        tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 });
+        tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
       });
       return;
     }

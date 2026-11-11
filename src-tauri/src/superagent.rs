@@ -431,6 +431,56 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
     Ok((get_ticket(store,ticket_id)?,session))
 }
 
+/// A native bot reset/delete invalidates in-flight SuperAgent ownership, but
+/// its Ticket/Mandate/Assignment evidence remains independent of bot history.
+/// Called inside the bot reset's existing transaction; never makes a new runner.
+pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Result<()> {
+    let sql = if removed {
+        "SELECT t.id,t.state FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1)
+         AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')"
+    } else {
+        "SELECT id,state FROM sa_tickets WHERE worker_bot_id=?1 AND state='running'"
+    };
+    let affected = {
+        let mut stmt = store.db.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([bot_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    let now = storage::now();
+    for (ticket_id, previous) in affected {
+        let next = if previous == "running" { "interrupted" } else { "blocked" };
+        store.db.execute(
+            "UPDATE sa_tickets SET state=?2,revision=revision+1,
+             active_assignment_id=NULL,updated_at=?3 WHERE id=?1",
+            params![ticket_id,next,now],
+        ).map_err(|e| e.to_string())?;
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+            [&ticket_id],
+        ).map_err(|e| e.to_string())?;
+        store.db.execute(
+            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+             WHERE ticket_id=?1 AND state='running'",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        record(store,&ticket_id, if removed { "bot_removed" } else { "bot_reset" },
+            "Native bot session unavailable; mandate revoked without replay")?;
+    }
+    if removed {
+        // A deleted local bot identity must not leave a runnable preset. The
+        // original names/IDs remain in history for audit, never cascaded away.
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1,
+             updated_at=?2 WHERE (coordinator_bot_id=?1 OR worker_bot_id=?1) AND enabled=1",
+            params![bot_id,now],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+
 #[tauri::command]
 pub async fn superagent_create(state: State<'_,AppState>, input: NewOrchestration) -> Result<Orchestration> {
     let store=state.store.lock().map_err(|e|e.to_string())?;
@@ -732,6 +782,34 @@ mod tests {
         store.db.execute_batch("DROP TRIGGER reject_sa_accept").unwrap();
         let accepted = accept(&store, &task.id, waiting.revision).unwrap();
         assert_eq!(accepted.state, "completed");
+    }
+
+    #[test]
+    fn native_bot_reset_and_deletion_invalidate_active_work_but_keep_history() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (running, _) = admit(&mut store, &cfg.id, "Interrupted by reset", "reset-work", false).unwrap();
+        let sid = assignment_session(&store, &running.id).unwrap().unwrap();
+        bots::reset(&store, "worker").unwrap();
+        assert_eq!(get_ticket(&store, &running.id).unwrap().state, "interrupted");
+        assert!(!on_run_finished(&store, &sid, true, "late worker result").unwrap());
+        let revoked: i64 = store.db.query_row(
+            "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
+            [&running.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(revoked, 1);
+        // Reset keeps the bot identity; a new manual request can be made.
+        let (next, launched) = admit(&mut store, &cfg.id, "New request", "delete-work", false).unwrap();
+        assert!(launched);
+        bots::delete(&store, "worker").unwrap();
+        assert_eq!(get_ticket(&store, &next.id).unwrap().state, "interrupted");
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(get_ticket(&store, &running.id).unwrap().state, "interrupted");
+        let history: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&running.id], |r| r.get(0),
+        ).unwrap();
+        assert!(history >= 2);
     }
 
     #[test]

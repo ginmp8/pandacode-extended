@@ -707,6 +707,7 @@ pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
 pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
     let bot = get(store, id)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    crate::superagent::invalidate_bot(store, id, false)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     shared_channels::settle_posts(store, &open)?;
@@ -721,6 +722,7 @@ pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
 
 /// Deletes the bot and its records. Its workspace folder stays on disk.
 pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
+    crate::superagent::invalidate_bot(store, id, true)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     let channels: Vec<String> = {

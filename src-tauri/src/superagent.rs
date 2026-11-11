@@ -949,6 +949,75 @@ fn change_enabled(
     configuration(store,orchestration_id)
 }
 
+/// Only disabled, unused configurations can change their bot identities.
+/// Existing tickets preserve immutable mandate/assignment history.
+fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration) -> Result<Orchestration> {
+    let current = configuration(store, id)?;
+    if current.policy_revision != expected_revision || current.enabled {
+        return Err("Disable the orchestration and reload its policy revision before editing.".into());
+    }
+    let used: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+        [id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if used { return Err("A preset with ticket history cannot be reconfigured; create a new preset.".into()); }
+    let name = input.name.trim();
+    if name.is_empty() || name.len()>120 || name.chars().any(char::is_control)
+        || input.coordinator_bot_id == input.worker_bot_id
+    {
+        return Err("Choose a valid name and two distinct existing bots.".into());
+    }
+    let coordinator = bots::get(store, &input.coordinator_bot_id)?;
+    let worker = bots::get(store, &input.worker_bot_id)?;
+    if coordinator.paused || worker.paused {
+        return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+    }
+    if current.name==name && current.coordinator_bot_id==coordinator.id
+        && current.worker_bot_id==worker.id && current.project_id==worker.project_id
+    { return Ok(current); }
+    let changed = store.db.execute(
+        "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
+            project_id=?5,policy_revision=policy_revision+1,updated_at=?6
+         WHERE id=?1 AND policy_revision=?7 AND enabled=0
+           AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+        params![id,name,coordinator.id,worker.id,worker.project_id,storage::now(),expected_revision],
+    ).map_err(|e| e.to_string())?;
+    if changed!=1 { return Err("Orchestration changed before its policy edit.".into()); }
+    configuration(store,id)
+}
+
+/// Never cascade deletion into durable ticket or mandate history.
+fn delete_configuration(store: &Store, id: &str, expected_revision: i64) -> Result<()> {
+    let current = configuration(store,id)?;
+    if current.enabled || current.policy_revision!=expected_revision {
+        return Err("Disable the orchestration and reload before deleting it.".into());
+    }
+    let count = store.db.execute(
+        "DELETE FROM sa_orchestrations WHERE id=?1 AND enabled=0 AND policy_revision=?2
+         AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+        params![id,expected_revision],
+    ).map_err(|e| e.to_string())?;
+    if count!=1 { return Err("Orchestration has ticket history or was updated; deletion denied.".into()); }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn superagent_update(
+    state: State<'_,AppState>, orchestration_id: String,
+    expected_revision: i64, input: NewOrchestration,
+) -> Result<Orchestration> {
+    let store=state.store.lock().map_err(|e| e.to_string())?;
+    update_configuration(&store,&orchestration_id,expected_revision,&input)
+}
+
+#[tauri::command]
+pub async fn superagent_delete(
+    state: State<'_,AppState>, orchestration_id: String, expected_revision: i64,
+) -> Result<()> {
+    let store=state.store.lock().map_err(|e| e.to_string())?;
+    delete_configuration(&store,&orchestration_id,expected_revision)
+}
+
 #[tauri::command]
 pub async fn superagent_ticket(state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -1359,6 +1428,38 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn unused_disabled_preset_is_revision_guarded_and_never_auto_enabled() {
+        let store=fixture();
+        let config=create_configuration(&store,NewOrchestration{
+            name:"Original".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        let input=NewOrchestration{
+            name:"Renamed".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        };
+        let updated=update_configuration(&store,&config.id,1,&input).unwrap();
+        assert_eq!(updated.policy_revision,2);
+        assert!(!updated.enabled);
+        assert!(update_configuration(&store,&config.id,1,&input).is_err());
+        assert_eq!(update_configuration(&store,&config.id,2,&input).unwrap().policy_revision,2);
+        delete_configuration(&store,&config.id,2).unwrap();
+        assert!(configuration(&store,&config.id).is_err());
+    }
+
+    #[test]
+    fn durable_ticket_blocks_reconfiguration_and_deletion_after_disable() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,_)=admit(&mut store,&config.id,"Immutable history","policy-guard",false).unwrap();
+        let disabled=change_enabled(&store,&config.id,config.policy_revision,false).unwrap();
+        let input=NewOrchestration{
+            name:"Changed".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        };
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
+        assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
     }
 
     #[test]

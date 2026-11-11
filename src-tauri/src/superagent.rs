@@ -782,6 +782,33 @@ fn accept_with_pause(
     get_ticket(store,ticket_id)
 }
 
+/// A negative human decision is not Council approval, completion, or a
+/// new grant. Preserve the rejected result in assignment history; only a
+/// separately authorized, bounded manual retry can produce fresh evidence.
+fn reject(store: &Store, ticket_id: &str, expected_revision: i64, reason: &str) -> Result<Ticket> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.len() > 500 || reason.chars().any(char::is_control) {
+        return Err("Provide a nonempty rejection reason of at most 500 bytes.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let now = storage::now();
+    let changed = tx.execute(
+        "UPDATE sa_tickets SET state='blocked',revision=revision+1,updated_at=?3
+         WHERE id=?1 AND state='waiting_approval' AND revision=?2",
+        params![ticket_id,expected_revision,now],
+    ).map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("Task is not awaiting a decision at the expected revision.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'human_rejected',?2,?3)",
+        params![ticket_id,reason,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_ticket(store,ticket_id)
+}
+
 fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
@@ -1066,7 +1093,7 @@ fn retry_blocked(
         params![assignment_id,ticket_id,worker.id,session_id,attempt,now],
     ).map_err(|e| e.to_string())?;
     let changed=tx.execute(
-        "UPDATE sa_tickets SET state='running',active_assignment_id=?2,
+        "UPDATE sa_tickets SET state='running',active_assignment_id=?2,evidence=NULL,
          revision=revision+1,updated_at=?3
          WHERE id=?1 AND state='blocked' AND revision=?4",
         params![ticket_id,assignment_id,now,ticket.revision],
@@ -1162,7 +1189,7 @@ fn prepare_coordinated_worker(
         params![assignment_id,ticket_id,worker.id,session_id,next_attempt,now],
     ).map_err(|e| e.to_string())?;
     let moved = tx.execute(
-        "UPDATE sa_tickets SET state='running',active_assignment_id=?2,revision=revision+1,updated_at=?3
+        "UPDATE sa_tickets SET state='running',active_assignment_id=?2,evidence=NULL,revision=revision+1,updated_at=?3
          WHERE id=?1 AND state='queued' AND revision=?4",
         params![ticket_id,assignment_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
@@ -1279,6 +1306,14 @@ pub async fn superagent_retry(
 pub async fn superagent_accept(state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     accept(&store, &ticket_id, expected_revision)
+}
+
+#[tauri::command]
+pub async fn superagent_reject(
+    state: State<'_, AppState>, ticket_id: String, expected_revision: i64, reason: String,
+) -> Result<Ticket> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    reject(&store, &ticket_id, expected_revision, &reason)
 }
 
 #[tauri::command]
@@ -1555,6 +1590,50 @@ mod tests {
         store.db.execute_batch("DROP TRIGGER reject_sa_accept").unwrap();
         let accepted = accept(&store, &task.id, waiting.revision).unwrap();
         assert_eq!(accepted.state, "completed");
+    }
+
+    #[test]
+    fn explicit_human_rejection_is_atomic_revisioned_and_retry_requires_fresh_evidence() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store, &cfg.id, "Review artifact", "reject-1", false).unwrap();
+        assert!(started);
+        let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &original_session, true, "Old rejected evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+
+        assert!(reject(&store, &ticket.id, waiting.revision - 1, "Wrong revision").is_err());
+        assert!(reject(&store, &ticket.id, waiting.revision, " ").is_err());
+        assert!(reject(&store, &ticket.id, waiting.revision, &"x".repeat(501)).is_err());
+
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER deny_rejection_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='human_rejected'
+             BEGIN SELECT RAISE(ABORT,'injected rejection audit failure'); END;"
+        ).unwrap();
+        assert!(reject(&store, &ticket.id, waiting.revision, "Needs changes").is_err());
+        let unchanged = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(unchanged.state, "waiting_approval");
+        assert_eq!(unchanged.revision, waiting.revision);
+        store.db.execute_batch("DROP TRIGGER deny_rejection_audit").unwrap();
+
+        let rejected = reject(&store, &ticket.id, waiting.revision, "Needs changes").unwrap();
+        assert_eq!(rejected.state, "blocked");
+        assert_eq!(rejected.evidence.as_deref(), Some("Old rejected evidence"));
+        assert!(accept(&store, &ticket.id, rejected.revision).is_err());
+        assert!(reject(&store, &ticket.id, rejected.revision, "Again").is_err());
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+            .filter(|entry| entry.kind == "human_rejected").count(), 1);
+
+        let (retry, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        assert_eq!(retry.state, "running");
+        assert_eq!(retry.evidence, None, "rejected evidence must not follow a new worker");
+        let fresh_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_ne!(fresh_session, original_session);
+        assert!(!on_run_finished(&store, &original_session, true, "Late old result").unwrap());
+        assert!(on_run_finished(&store, &fresh_session, true, "New evidence").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().evidence.as_deref(), Some("New evidence"));
     }
 
     #[test]

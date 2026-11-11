@@ -4449,6 +4449,7 @@ pub fn run() {
                 superagent::superagent_dispatch_worker,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
+                superagent::superagent_reject,
                 superagent::superagent_stop,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,

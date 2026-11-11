@@ -1384,9 +1384,11 @@ pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result
         return Ok(ChannelCouncilOutcome::Waiting);
     }
     match team.status.as_str() {
+        "completed" if !crate::architect::council_evidence_is_current(store, &team) =>
+            Ok(ChannelCouncilOutcome::Denied("Council evidence changed after the last native review.")),
         "completed" => match team.council_status.as_ref() {
             Some(status) if status.state == "passed" && !status.stale
-                && crate::architect::verified_council_pass(&team) => Ok(ChannelCouncilOutcome::Approved),
+                && crate::architect::verified_council_pass(store, &team) => Ok(ChannelCouncilOutcome::Approved),
             Some(status) if status.state == "limit" => Ok(ChannelCouncilOutcome::Waiting),
             Some(status) if status.state == "accepted" && !status.stale => {
                 let proof: Option<(String, i64, i64, i64)> = store.db.query_row(

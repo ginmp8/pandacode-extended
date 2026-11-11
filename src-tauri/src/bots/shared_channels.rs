@@ -740,9 +740,10 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
     if requested.is_none_or(|original| team.config.council.as_ref() != Some(&original.council)) {
         return Ok(false);
     }
+    if !crate::architect::council_evidence_is_current(store, &team) { return Ok(false); }
     let Some(verdict) = team.council_status.as_ref() else { return Ok(false) };
     if verdict.stale { return Ok(false); }
-    if verdict.state == "passed" { return Ok(crate::architect::verified_council_pass(&team)); }
+    if verdict.state == "passed" { return Ok(crate::architect::verified_council_pass(store, &team)); }
     if verdict.state != "accepted" { return Ok(false); }
     let proof: Option<(String,i64,i64,i64)> = store.db.query_row(
         "SELECT a.cycle_id,a.council_since,a.dispatch_revision,a.changed_at
@@ -992,6 +993,9 @@ pub async fn bot_shared_channel_council_accept(
         if channel.archived { return Err("This channel is archived.".into()); }
         let team = crate::architect::load(&store, &session_id)?
             .ok_or("Council delivery has no native team.")?;
+        if !crate::architect::council_evidence_is_current(&store, &team) {
+            return Err("Council evidence changed after the last native review.".into());
+        }
         let config = team.config.council.as_ref().ok_or("Council is disabled.")?;
         validate_delivery_reviewers(&store, &session_id, &config.reviewer_bot_ids)?;
         let status = team.council_status.as_ref().ok_or("Council has no review.")?;
@@ -1014,7 +1018,8 @@ pub async fn bot_shared_channel_council_accept(
              WHERE d.id=?1 AND d.session_id=?2 AND d.status='in_progress'",
             params![delivery_id,session_id], |r| r.get(0),
         ).map_err(|_| "Council delivery changed during acceptance.".to_string())?;
-        if current_cycle != cycle_id || team.council_accepted != Some(team.council_since)
+        if !crate::architect::council_evidence_is_current(&store, &team)
+            || current_cycle != cycle_id || team.council_accepted != Some(team.council_since)
             || team.council_since != expected_since || team.dispatch_revision != expected_dispatch
             || team.changed_at != expected_changed
             || team.council_status.as_ref().is_none_or(|s| s.state != "accepted" || s.stale)

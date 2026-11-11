@@ -451,11 +451,7 @@ fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activati
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     #[cfg(windows)]
-    {
-        let mut writable = std::fs::metadata(&file).unwrap().permissions();
-        writable.set_readonly(false);
-        std::fs::set_permissions(&file, writable).unwrap();
-    }
+    crate::skills::reviewer::clear_staged_readonly(&file).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 

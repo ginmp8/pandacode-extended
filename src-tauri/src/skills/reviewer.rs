@@ -312,17 +312,36 @@ fn remove_staged_dir(path: &Path) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
             }
             #[cfg(windows)]
-            {
-                let mut permissions = metadata.permissions();
-                permissions.set_readonly(false);
-                fs::set_permissions(&target, permissions).map_err(|e| e.to_string())?;
-            }
+            clear_staged_readonly(&target)?;
             fs::remove_file(&target).map_err(|e| e.to_string())?;
         } else {
             return Err("reviewer_skill_cleanup_blocked: unsupported staged file type.".into());
         }
     }
     fs::remove_dir(path).map_err(|e| e.to_string())
+}
+
+/// Clear the Windows read-only attribute on a verified staged file without
+/// widening Unix permissions (or suppressing Clippy's permission-safety lint).
+#[cfg(windows)]
+pub(crate) fn clear_staged_readonly(path: &Path) -> Result<(), String> {
+    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES,
+    };
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("reviewer_skill_cleanup_blocked: expected an ordinary staged file.".into());
+    }
+    let flags = metadata.file_attributes() & !FILE_ATTRIBUTE_READONLY.0;
+    let writable = if flags == 0 { FILE_ATTRIBUTE_NORMAL } else { FILE_FLAGS_AND_ATTRIBUTES(flags) };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: The UTF-16 path is NUL-terminated and the buffer lives for this
+    // synchronous call. Only the existing read-only file attribute is cleared.
+    unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), writable) }
+        .map_err(|error| error.to_string())
 }
 
 /// Resolve only explicitly bot-assigned skill IDs plus their required dependencies.
@@ -699,11 +718,7 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         }
         #[cfg(windows)]
-        {
-            let mut writable = fs::metadata(&path).unwrap().permissions();
-            writable.set_readonly(false);
-            fs::set_permissions(&path, writable).unwrap();
-        }
+        clear_staged_readonly(&path).unwrap();
         fs::write(&path, "changed").unwrap();
         assert!(snapshot.verify().unwrap_err().contains("reviewer_skill_drift"));
         fs::remove_dir_all(root).unwrap();

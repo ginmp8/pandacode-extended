@@ -367,49 +367,67 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
 }
 
 fn accept(store: &Store, ticket_id: &str, expected_revision: i64) -> Result<Ticket> {
+    // Acceptance and its attributed audit entry are one durable decision.
+    // No terminal state may be visible without matching acceptance evidence.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
     if ticket.state != "waiting_approval" || ticket.revision != expected_revision
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
     {
         return Err("Task has no current verified worker result to accept.".into());
     }
-    let granted: bool = store.db.query_row(
-        "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
-         FROM sa_mandates m JOIN sa_tickets t ON t.id=m.ticket_id
-         JOIN sa_orchestrations o ON o.id=t.orchestration_id WHERE t.id=?1",
-        params![ticket_id,storage::now()], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
-    if !granted {
-        return Err("Mandate was revoked, expired or changed; acceptance denied.".into());
-    }
-    let changed = store.db.execute(
+    let now = storage::now();
+    let changed = tx.execute(
         "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?3
-         WHERE id=?1 AND revision=?2 AND state='waiting_approval'",
-        params![ticket_id,expected_revision,storage::now()],
+         WHERE id=?1 AND revision=?2 AND state='waiting_approval'
+         AND EXISTS (
+            SELECT 1 FROM sa_mandates m JOIN sa_orchestrations o
+            ON o.id=sa_tickets.orchestration_id
+            WHERE m.ticket_id=sa_tickets.id AND m.revoked=0 AND m.expires_at>?3
+              AND m.policy_revision=o.policy_revision AND o.enabled=1
+         )",
+        params![ticket_id,expected_revision,now],
     ).map_err(|e| e.to_string())?;
-    if changed != 1 { return Err("Concurrent task state change; acceptance denied.".into()); }
-    record(store,ticket_id,"human_accepted","local-user explicitly accepted worker evidence")?;
+    if changed != 1 {
+        return Err("Mandate expired, was revoked or revised; acceptance denied.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'human_accepted','local-user explicitly accepted worker evidence',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     get_ticket(store,ticket_id)
 }
 
 fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
     if matches!(ticket.state.as_str(),"completed"|"failed"|"stopped"|"interrupted"|"inconclusive") {
         return Err("Task is already terminal.".into());
     }
     let session = assignment_session(store,ticket_id)?;
     let now = storage::now();
-    store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
+    let revoked = tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
         .map_err(|e| e.to_string())?;
-    store.db.execute(
-        "UPDATE sa_assignments SET state='stopped',updated_at=?2 WHERE id=?1 AND state='running'",
+    if revoked != 1 { return Err("SuperAgent mandate missing; Stop aborted.".into()); }
+    let updated = tx.execute(
+        "UPDATE sa_tickets SET state='stopped',active_assignment_id=NULL,revision=revision+1,updated_at=?2
+         WHERE id=?1 AND revision=?3",
+        params![ticket_id,now,ticket.revision],
+    ).map_err(|e| e.to_string())?;
+    if updated != 1 { return Err("SuperAgent ticket changed before Stop.".into()); }
+    tx.execute(
+        "UPDATE sa_assignments SET state='stopped',updated_at=?2
+         WHERE id=?1 AND state='running'",
         params![ticket.active_assignment_id,now],
     ).map_err(|e| e.to_string())?;
-    store.db.execute(
-        "UPDATE sa_tickets SET state='stopped',active_assignment_id=NULL,revision=revision+1,updated_at=?2
-         WHERE id=?1 AND revision=?3",params![ticket_id,now,ticket.revision],
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'stopped','local-user revoked mandate',?2)",
+        params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
-    record(store,ticket_id,"stopped","local-user revoked mandate")?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store,ticket_id)?,session))
 }
 
@@ -634,6 +652,39 @@ mod tests {
         assert!(read_only_policy(&store,&sid).is_err());
         assert!(!on_run_finished(&store,&sid,true,"late completion").unwrap());
         assert!(accept(&store,&a.id,stopped.revision).is_err());
+    }
+
+    #[test]
+    fn stop_and_accept_roll_back_on_audit_or_storage_failure() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (task, _) = admit(&mut store, &cfg.id, "Abort atomically", "guarded-stop-1", false).unwrap();
+        let session = assignment_session(&store, &task.id).unwrap().unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_sa_stop BEFORE UPDATE OF state ON sa_tickets
+             WHEN NEW.state='stopped'
+             BEGIN SELECT RAISE(ABORT,'injected stop failure'); END;"
+        ).unwrap();
+        assert!(stop(&store, &task.id).is_err());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "running");
+        let revoked: i64 = store.db.query_row(
+            "SELECT revoked FROM sa_mandates WHERE ticket_id=?1", [&task.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(revoked, 0, "failed Stop must not partially revoke a mandate");
+        store.db.execute_batch("DROP TRIGGER reject_sa_stop").unwrap();
+
+        assert!(on_run_finished(&store, &session, true, "Recorded evidence").unwrap());
+        let waiting = get_ticket(&store, &task.id).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_sa_accept BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='human_accepted'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;"
+        ).unwrap();
+        assert!(accept(&store, &task.id, waiting.revision).is_err());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
+        store.db.execute_batch("DROP TRIGGER reject_sa_accept").unwrap();
+        let accepted = accept(&store, &task.id, waiting.revision).unwrap();
+        assert_eq!(accepted.state, "completed");
     }
 
     #[test]

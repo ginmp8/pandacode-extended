@@ -160,6 +160,27 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
 
 /// An active harness is not resumed automatically after process restart.
 pub(crate) const RECOVER: &str = "
+-- A crash or legacy partial write may leave a running assignment on a
+-- waiting or terminal ticket. Revoke its grant and settle it once, before
+-- the ordinary running-ticket recovery handles the remaining assignments.
+INSERT INTO sa_audit(ticket_id,kind,detail,at)
+ SELECT t.id,'restart_inconsistent_assignment',
+  'Active assignment did not match ticket state; execution revoked',
+  CAST(strftime('%s','now') AS INTEGER)*1000
+ FROM sa_tickets t WHERE t.state<>'running' AND EXISTS (
+  SELECT 1 FROM sa_assignments a WHERE a.ticket_id=t.id AND a.state='running'
+ );
+UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
+ SELECT ticket_id FROM sa_assignments WHERE state='running'
+);
+UPDATE sa_tickets SET
+ state=CASE WHEN state IN ('completed','failed','stopped','inconclusive')
+  THEN state ELSE 'interrupted' END,
+ active_assignment_id=NULL,revision=revision+1,
+ updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+ WHERE state<>'running' AND EXISTS (
+  SELECT 1 FROM sa_assignments a WHERE a.ticket_id=sa_tickets.id AND a.state='running'
+ );
 INSERT INTO sa_audit(ticket_id,kind,detail,at)
  SELECT id,'restart_interrupted','Native worker session interrupted; no automatic replay',
  CAST(strftime('%s','now') AS INTEGER)*1000
@@ -3485,6 +3506,78 @@ mod tests {
         assert_eq!(get_ticket(&again,&ticket.id).unwrap().revision,revision);
         assert_eq!(history(&again,&ticket.id,100).unwrap().len(),audit_count);
         assert!(mandate(&again,&ticket.id).unwrap().revoked);
+    }
+
+    #[test]
+    fn restart_revokes_inconsistent_waiting_ticket_and_ignores_late_success() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Inspect a disposable project", "orphan-waiting", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Worker evidence").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        // Simulate a legacy partial settlement: the worker is still marked
+        // running although the ticket is already awaiting native acceptance.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='running' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let recovered = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(recovered.state, "interrupted");
+        assert!(recovered.active_assignment_id.is_none());
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert!(!on_run_finished(&reopened, &session, true, "Late success").unwrap());
+        assert!(accept(&reopened, &ticket.id, recovered.revision).is_err());
+        assert_eq!(history(&reopened, &ticket.id, 100).unwrap().iter()
+            .filter(|row| row.kind == "restart_inconsistent_assignment").count(), 1);
+        drop(reopened);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(history(&again, &ticket.id, 100).unwrap().iter()
+            .filter(|row| row.kind == "restart_inconsistent_assignment").count(), 1);
+    }
+
+    #[test]
+    fn restart_preserves_terminal_ticket_and_revokes_orphaned_worker() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Finished safely", "orphan-completed", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Finished evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(accept(&store, &ticket.id, waiting.revision).unwrap().state, "completed");
+        // A corrupted/legacy active assignment must never reopen a completed
+        // task; its stale permission must nevertheless be revoked.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='running' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=0 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let recovered = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(recovered.state, "completed");
+        assert!(recovered.active_assignment_id.is_none());
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert!(!on_run_finished(&reopened, &session, true, "Duplicate completion").unwrap());
+        assert_eq!(history(&reopened, &ticket.id, 100).unwrap().iter()
+            .filter(|row| row.kind == "restart_inconsistent_assignment").count(), 1);
     }
 
     #[test]

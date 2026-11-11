@@ -329,6 +329,65 @@ fn council_channel_callback_waits_for_approval_and_terminal_claim_is_idempotent(
 
 
 #[test]
+fn failed_channel_delivery_never_authorizes_a_success_callback() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let channel = shared_channels::create(
+        &f.store, "failed-delivery", std::slice::from_ref(&executor.id),
+    ).unwrap();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    let session_id = thread_session(
+        &f.store, &executor, DESKTOP, DESKTOP, "Failed delivery",
+    ).unwrap().0;
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Unsuccessful work','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries
+         (id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'in_progress',0,?6,?6)",
+        params![delivery_id,channel.id,message_id,executor.id,session_id,crate::storage::now()],
+    ).unwrap();
+    assert_eq!(
+        channel_council_outcome(&f.store, &session_id).unwrap(),
+        ChannelCouncilOutcome::Ordinary,
+    );
+    assert_eq!(
+        shared_channels::settle_channel_delivery(
+            &f.store, &session_id,
+            (&delivery_id, &channel.id, &message_id, &executor.id),
+            false, "An unfinished response must not be forwarded.",
+        ).unwrap(),
+        Some(false),
+        "an unsuccessful run must never authorize an onward success callback",
+    );
+    let status: String = f.store.db.query_row(
+        "SELECT status FROM bot_shared_channel_deliveries WHERE id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(status, "failed");
+    let replies: i64 = f.store.db.query_row(
+        "SELECT COUNT(*) FROM bot_shared_channel_messages
+         WHERE channel_id=?1 AND kind='reply'",
+        [&channel.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(replies, 0);
+    assert_eq!(
+        shared_channels::settle_channel_delivery(
+            &f.store, &session_id,
+            (&delivery_id, &channel.id, &message_id, &executor.id),
+            true, "Replay",
+        ).unwrap(),
+        None,
+        "a failed terminal delivery must not be converted into success by replay",
+    );
+}
+
+#[test]
 fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();

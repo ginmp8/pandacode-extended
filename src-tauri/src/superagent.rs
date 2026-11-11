@@ -588,6 +588,14 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
               AND assignment.ticket_id=?3 AND thread.channel_id=?2
               AND (
                 (assignment.attempt=1 AND thread.external_id=?3)
+                OR (assignment.attempt=1 AND thread.external_id=?3 || ':attempt:1'
+                    AND EXISTS (SELECT 1 FROM sa_audit initial
+                      WHERE initial.ticket_id=assignment.ticket_id
+                        AND initial.kind='admitted'
+                        AND initial.detail='blocked: worker occupied')
+                    AND EXISTS (SELECT 1 FROM sa_audit retry
+                      WHERE retry.ticket_id=assignment.ticket_id
+                        AND retry.kind='manual_retry'))
                 OR (assignment.attempt>1 AND
                     thread.external_id=?3 || ':attempt:' || assignment.attempt)
                 OR (assignment.attempt>1 AND
@@ -750,6 +758,14 @@ pub(crate) fn guard_gateway_inbound(
            AND ticket.state='running' AND ticket.active_assignment_id=assignment.id
            AND (
              (assignment.attempt=1 AND thread.external_id=ticket.id)
+              OR (assignment.attempt=1 AND thread.external_id=ticket.id || ':attempt:1'
+                  AND EXISTS (SELECT 1 FROM sa_audit initial
+                    WHERE initial.ticket_id=assignment.ticket_id
+                      AND initial.kind='admitted'
+                      AND initial.detail='blocked: worker occupied')
+                  AND EXISTS (SELECT 1 FROM sa_audit retry
+                    WHERE retry.ticket_id=assignment.ticket_id
+                      AND retry.kind='manual_retry'))
              OR (assignment.attempt>1 AND
                  thread.external_id=ticket.id || ':attempt:' || assignment.attempt)
              OR (assignment.attempt>1 AND
@@ -2489,10 +2505,36 @@ mod tests {
         let session_b=assignment_session(&store,&retried.id).unwrap().unwrap();
         assert_ne!(session_a,session_b);
         assert!(!on_run_finished(&store,&session_a,true,"late A").unwrap());
+        // The first allocated attempt belongs to a user-issued retry of an
+        // initially blocked ticket. Its suffixed thread must pass both gates.
+        assert!(guard_gateway_inbound(&store, "worker", &thread, "local-user", true).is_ok());
+        assert!(guard_gateway_inbound(&store, "worker", &second.id, "local-user", true).is_err());
         assert!(read_only_policy(&store,&session_b).unwrap().is_some());
         assert!(on_run_finished(&store,&session_b,false,"failed B").unwrap());
         assert_eq!(get_ticket(&store,&second.id).unwrap().state,"failed");
         assert!(retry_blocked(&mut store,&second.id,false).is_err());
+    }
+
+    #[test]
+    fn first_attempt_suffix_requires_an_actual_blocked_manual_retry() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (direct, started) = admit(&mut store, &cfg.id, "Direct", "suffix-reject", false).unwrap();
+        assert!(started);
+        let sid = assignment_session(&store, &direct.id).unwrap().unwrap();
+        let forged = format!("{}:attempt:1", direct.id);
+        // A forged suffix on a regular attempt-one thread cannot impersonate
+        // a user-issued retry of an originally blocked ticket.
+        store.db.execute(
+            "UPDATE bot_threads SET external_id=?2 WHERE session_id=?1",
+            params![sid, forged],
+        ).unwrap();
+        assert!(read_only_policy(&store, &sid).is_err());
+        assert!(guard_gateway_inbound(&store, "worker", &forged, "local-user", true).is_err());
+        assert!(on_run_finished(&store, &sid, true, "Forged result").unwrap());
+        assert_eq!(get_ticket(&store, &direct.id).unwrap().state, "blocked");
+        assert!(!history(&store, &direct.id, 10).unwrap()
+            .iter().any(|entry| entry.kind == "human_accepted"));
     }
 
     #[test]

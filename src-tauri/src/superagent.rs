@@ -598,6 +598,25 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
     ).map_err(|e| e.to_string())
 }
 
+/// A registered bot is not automatically authorized for every assignment
+/// phase. The original user-issued admission fixes whether attempt one is a
+/// coordinator plan or a direct worker. Later attempts can only be workers.
+fn assignment_role_authorized(
+    store: &Store, ticket_id: &str, bot_id: &str, attempt: i64,
+    coordinator_id: &str, worker_id: &str,
+) -> Result<bool> {
+    let admission: Option<String> = store.db.query_row(
+        "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='admitted' ORDER BY id LIMIT 1",
+        [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    Ok(match admission.as_deref() {
+        Some("manual readonly coordinator reserved") if attempt == 1 => bot_id == coordinator_id,
+        Some("manual readonly coordinator reserved" | "manual readonly worker reserved" | "blocked: worker occupied")
+            if attempt > 0 => bot_id == worker_id,
+        _ => false,
+    })
+}
+
 /// Only the active, user-admitted read-only assignment is allowed to run.
 /// Leverages the existing provider-level Council isolation (native plan,
 /// tool-host removal, external MCP checks and permission denial), not a prompt.
@@ -623,11 +642,12 @@ pub(crate) fn read_only_policy(
         mandate_project: String,
         mandate_actor: String,
         ticket_actor: String,
+        attempt: i64,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
                 a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at,
-                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor
+                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -643,6 +663,7 @@ pub(crate) fn read_only_policy(
             ticket_id: r.get(11)?, started_at: r.get(12)?,
             side_effects: r.get::<_, i64>(13)? != 0, tools_json: r.get(14)?,
             mandate_project: r.get(15)?, mandate_actor: r.get(16)?, ticket_actor: r.get(17)?,
+            attempt: r.get(18)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
@@ -671,8 +692,9 @@ pub(crate) fn read_only_policy(
         // A valid native thread must also have the role originally authorized
         // by the Ticket. Remapping both the assignment and the thread to a
         // third existing bot cannot grant that bot access to this project.
-        if scope.bot_id != scope.coordinator_id && scope.bot_id != scope.worker_id {
-            return Err("policy_unsupported: assignment bot is not an authorized task role.".into());
+        if !assignment_role_authorized(store, &scope.ticket_id, &scope.bot_id,
+            scope.attempt, &scope.coordinator_id, &scope.worker_id)? {
+            return Err("policy_unsupported: assignment bot does not match the original task role.".into());
         }
         let active_bot = bots::get(store, &scope.bot_id)?;
         let coordinator = bots::get(store, &scope.coordinator_id)?;
@@ -822,15 +844,19 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // Result, Ticket revision and audit must settle in one transaction; an
     // injected storage failure cannot strand an assignment in a terminal state.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let assignment: Option<(String, String, bool, i64)> = tx.query_row(
-        "SELECT a.ticket_id,a.id,a.bot_id=o.coordinator_bot_id,a.created_at
+    let assignment: Option<(String, String, String, bool, i64, i64)> = tx.query_row(
+        "SELECT a.ticket_id,a.id,a.bot_id,a.bot_id=o.coordinator_bot_id,a.created_at,a.attempt
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE a.session_id=?1 AND a.state='running' AND t.state='running'",
-        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((task_id, assignment_id, coordinator, started_at)) = assignment else { return Ok(false) };
+    let Some((task_id, assignment_id, bot_id, coordinator, started_at, attempt)) = assignment else { return Ok(false) };
+    let cfg = configuration(store, &get_ticket(store, &task_id)?.orchestration_id)?;
+    let role_current = assignment_role_authorized(
+        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &cfg.worker_bot_id,
+    )?;
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
          AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
@@ -853,7 +879,6 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,storage::now()], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     let provenance_ok = if coordinator { true } else {
-        let cfg = configuration(store, &get_ticket(store, &task_id)?.orchestration_id)?;
         bots::get(store, &cfg.coordinator_bot_id)
             .and_then(|bot| coordinator_plan_current(store, &task_id, &bot.id, &bot.project_id))
             .unwrap_or(false)
@@ -864,7 +889,7 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let within_budget = assignment_within_budget(started_at, storage::now());
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
     let authorized = execution_permitted(
-        authorized && provenance_ok && within_budget && thread_current,
+        authorized && role_current && provenance_ok && within_budget && thread_current,
         crate::feature_controls::get().bots_paused,
     );
     let next = if !authorized { "blocked" }
@@ -1857,6 +1882,33 @@ mod tests {
         assert!(guard_gateway_inbound(
             &store, "worker", &retry_thread, "local-user", true,
         ).is_ok());
+    }
+
+    #[test]
+    fn direct_worker_attempt_cannot_be_relabeled_as_coordinator_advice() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Direct worker only", "role-preservation", false,
+        ).unwrap();
+        assert!(started);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        // A coordinator is configured and valid, but the admitted task mode
+        // did not authorize a coordinator round or a change of bot identity.
+        store.db.execute(
+            "UPDATE sa_assignments SET bot_id='router' WHERE session_id=?1", [&sid],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bot_threads SET bot_id='router' WHERE session_id=?1", [&sid],
+        ).unwrap();
+        assert!(assignment_thread_current(&store, &sid, &ticket.id).unwrap());
+        assert!(read_only_policy(&store, &sid).is_err());
+        assert!(on_run_finished(&store, &sid, true, "Forged coordinator plan").unwrap());
+        let ticket = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(ticket.state, "blocked");
+        assert!(history(&store, &ticket.id, 30).unwrap()
+            .iter().all(|entry| entry.kind != "coordinator_planned"));
+        assert!(accept(&store, &ticket.id, ticket.revision).is_err());
     }
 
     #[test]

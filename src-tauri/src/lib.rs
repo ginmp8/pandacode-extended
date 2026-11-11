@@ -1646,6 +1646,11 @@ fn prepare_task_run_in_project(
         architect::validate_admission(&store, &session_id, admission.team.as_ref())?;
     }
     let mut session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    // Both admission and registration hold agents -> Store in the same order,
+    // so a running ordinary task cannot slip between SuperAgent's early busy
+    // snapshot and this final project/lease check.
+    let running_sessions = agents.keys().cloned().collect::<Vec<_>>();
+    superagent::guard_run_admission(&store, &session_id, &running_sessions)?;
     if admission.cloud_attach {
         return prepare_cloud_attach(&store, &mut agents, session, tx, stopped);
     }

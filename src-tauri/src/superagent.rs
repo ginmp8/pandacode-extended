@@ -440,6 +440,42 @@ pub(crate) fn read_only_policy(
     Ok(None)
 }
 
+/// Called while the shared running-agent mutex and then the Store mutex
+/// are held, immediately before native run registration. This is the second
+/// admission fence after a durable SuperAgent lease was reserved: a normal bot
+/// or direct task cannot start in the same project while that lease is active,
+/// and a SuperAgent cannot race a previously admitted ordinary session.
+pub(crate) fn guard_run_admission(
+    store: &Store, session_id: &str, running_sessions: &[String],
+) -> Result<()> {
+    let session = store.session(session_id)?;
+    let superagent_run = read_only_policy(store, session_id)?.is_some();
+    let leased_by_other: bool = store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_assignments a
+            JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+            WHERE a.state='running' AND t.state='running'
+              AND t.project_id=?1 AND a.session_id<>?2
+         )",
+        params![session.project_id, session_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if leased_by_other {
+        return Err("Project is reserved by another native SuperAgent assignment.".into());
+    }
+    if superagent_run {
+        for other_id in running_sessions {
+            if other_id == session_id { continue; }
+            // A disappeared active session is not proof that a lease is free.
+            let other = store.session(other_id)?;
+            if other.project_id == session.project_id {
+                return Err("Project has another active agent; SuperAgent dispatch denied.".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     // A failed gateway launch must release the worker lease, change the ticket
     // and retain its audit receipt atomically. An audit/storage failure cannot
@@ -1548,6 +1584,37 @@ mod tests {
         ).unwrap();
         assert_eq!(count,0);
         assert!(admit(&mut store,&config.id,&"x".repeat(MAX_OBJECTIVE_BYTES),"max-accepted",false).is_ok());
+    }
+
+    #[test]
+    fn native_run_admission_closes_cross_session_project_races() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, _) = admit(
+            &mut store, &config.id, "Read-only project inspection", "project-admission-1", false,
+        ).unwrap();
+        let superagent_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let worker = bots::get(&store, "worker").unwrap();
+        let (ordinary_session, _) = bots::thread_session(
+            &store, &worker, bots::DESKTOP, "ordinary-conversation", "Normal chat",
+        ).unwrap();
+        assert!(guard_run_admission(&store, &superagent_session, &[]).is_ok());
+        assert!(guard_run_admission(&store, &ordinary_session, &[]).is_err());
+        assert!(guard_run_admission(
+            &store, &superagent_session, &[ordinary_session.clone()],
+        ).is_err());
+
+        // Even an unrelated direct session in the same checkout is not safe
+        // to start during a SuperAgent lease.
+        let ordinary = store.create_session("project", "codex", "default", "plan").unwrap();
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        assert!(guard_run_admission(
+            &store, &superagent_session, &[ordinary.id.clone()],
+        ).is_err());
+        fail_launch(&store, &ticket.id, "leave the project untouched").unwrap();
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
+        assert!(guard_run_admission(&store, &ordinary_session, &[]).is_ok());
+        assert!(guard_run_admission(&store, &superagent_session, &[]).is_err());
     }
 
     #[test]

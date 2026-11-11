@@ -483,12 +483,13 @@ pub(crate) fn read_only_policy(
         config_version: i64,
         enabled: bool,
         bot_id: String,
+        coordinator_id: String,
         worker_id: String,
         project_id: String,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
-                a.bot_id,t.worker_bot_id,t.project_id
+                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -500,7 +501,7 @@ pub(crate) fn read_only_policy(
             expiry: r.get(2)?, revoked: r.get::<_, i64>(3)? != 0,
             mandate_version: r.get(4)?, config_version: r.get(5)?,
             enabled: r.get::<_, i64>(6)? != 0, bot_id: r.get(7)?,
-            worker_id: r.get(8)?, project_id: r.get(9)?,
+            coordinator_id: r.get(8)?, worker_id: r.get(9)?, project_id: r.get(10)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
@@ -512,8 +513,9 @@ pub(crate) fn read_only_policy(
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
         }
         let active_bot = bots::get(store, &scope.bot_id)?;
+        let coordinator = bots::get(store, &scope.coordinator_id)?;
         let assigned_session = store.session(session_id)?;
-        if active_bot.paused || active_bot.project_id != assigned_session.project_id
+        if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
             || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
         {
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
@@ -619,6 +621,10 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let Some((task_id, assignment_id, coordinator)) = assignment else { return Ok(false) };
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
+         AND EXISTS (
+           SELECT 1 FROM bots coordinator
+           WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0
+         )
          AND EXISTS (
            SELECT 1 FROM sa_assignments active
            JOIN bots current_bot ON current_bot.id=active.bot_id
@@ -2070,6 +2076,27 @@ mod tests {
         assert_eq!(get_ticket(&store, &task.id).unwrap().state, "blocked");
         assert!(prepare_coordinated_worker(&mut store, &task.id, false).is_err());
         assert!(!on_run_finished(&store, &session, true, "Late coordinator").unwrap());
+    }
+
+    #[test]
+    fn coordinator_pause_invalidates_an_active_worker_without_accepting_its_result() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store, &cfg.id, "Read only work", "coordinator-paused-worker", false).unwrap();
+        assert!(started);
+        let worker_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &worker_session).unwrap().is_some());
+
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='router'", []).unwrap();
+        assert!(read_only_policy(&store, &worker_session).is_err());
+        assert!(on_run_finished(&store, &worker_session, true, "Result after coordinator pause").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.active_assignment_id.is_none());
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(!on_run_finished(&store, &worker_session, true, "Duplicate stale result").unwrap());
+        assert!(!history(&store, &ticket.id, 200).unwrap()
+            .iter().any(|entry| entry.kind == "human_accepted"));
     }
 
     #[test]

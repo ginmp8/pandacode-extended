@@ -6,6 +6,7 @@ use crate::{bots, storage::{self, Store}, AppState, Result};
 
 pub(crate) mod manifest;
 pub(crate) mod events;
+pub(crate) mod council_adapter;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -429,6 +430,9 @@ pub struct TaskSnapshot {
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
     pub activity: Vec<AuditEntry>,
+    /// Advisory native Council status, never a SuperAgent approval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub council: Option<council_adapter::CouncilObservation>,
 }
 
 fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSnapshot> {
@@ -436,8 +440,10 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         return Err("Snapshot page size must be between 1 and 200.".into());
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let ticket = get_ticket(store, ticket_id)?;
     let result = TaskSnapshot {
-        ticket: get_ticket(store, ticket_id)?,
+        council: council_adapter::inspect(store, &ticket)?,
+        ticket,
         mandate: mandate(store, ticket_id)?,
         assignments: assignments(store, ticket_id, limit)?,
         activity: history(store, ticket_id, limit)?,

@@ -1306,7 +1306,11 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     let direct = &ids.1;
     let resumed_session = store.session(&direct[0].1).unwrap();
     assert_eq!(resumed_session.status, "interrupted");
-    assert!(resumed_session.restart_interrupted);
+    let restart_flag: bool = store.db.query_row(
+        "SELECT restart_interrupted FROM sessions WHERE id=?1",
+        [&direct[0].1], |row| row.get(0),
+    ).unwrap();
+    assert!(restart_flag);
     assert_eq!(channel_council_outcome(&store, &direct[0].1).unwrap(),
         ChannelCouncilOutcome::Waiting,
         "a resumed native Council that has not passed remains pending");

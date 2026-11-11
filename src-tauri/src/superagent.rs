@@ -1053,11 +1053,16 @@ fn prepare_coordinated_worker(
     {
         return Err("A selected bot is unavailable or outside the immutable project scope.".into());
     }
+    // Coordinator advice is tied to the original native session workspace.
+    // A later bot project change or deleted source session cannot make that
+    // older result an authorized plan for another checkout.
     let plan: Option<String> = store.db.query_row(
-        "SELECT result FROM sa_assignments
-         WHERE ticket_id=?1 AND bot_id=?2 AND state='finished'
-         ORDER BY attempt DESC LIMIT 1",
-        params![ticket_id,coordinator.id], |r| r.get(0),
+        "SELECT a.result FROM sa_assignments a
+         JOIN sessions coordinator_session ON coordinator_session.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.bot_id=?2 AND a.state='finished'
+           AND coordinator_session.project_id=?3
+         ORDER BY a.attempt DESC LIMIT 1",
+        params![ticket_id,coordinator.id,coordinator.project_id], |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
     let Some(plan) = plan.filter(|text| !text.trim().is_empty()) else {
         return Err("No successful coordinator evidence is available.".into());
@@ -2054,6 +2059,33 @@ mod tests {
         fail_launch(&store, &ticket.id, "original coordinator session disappeared").unwrap();
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_ok());
+    }
+
+    #[test]
+    fn settled_coordinator_plan_requires_its_original_workspace_and_session_at_dispatch() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &cfg.id, "Review original checkout", "settled-plan-project", false, true,
+        ).unwrap();
+        assert!(started);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &coordinator_session, true, "Current coordinator plan").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('other','Other','/tmp/sa-moved-plan')", [],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET project_id='other' WHERE id='router'", []).unwrap();
+        assert!(prepare_coordinated_worker(&mut store, &ticket.id, false).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        assert!(assignments(&store, &ticket.id, 100).unwrap()
+            .iter().all(|attempt| attempt.bot_id == "router"));
+
+        store.db.execute("UPDATE bots SET project_id='project' WHERE id='router'", []).unwrap();
+        store.db.execute("DELETE FROM sessions WHERE id=?1", [&coordinator_session]).unwrap();
+        assert!(prepare_coordinated_worker(&mut store, &ticket.id, false).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
     }
 
     #[test]

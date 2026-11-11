@@ -40,6 +40,29 @@ export async function invokeSuperagent<T>(
         state:'running',revision:0,evidence:null};
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);value=t;break;
     }
+    case 'superagent_stop':
+    case 'superagent_retry':
+    case 'superagent_dispatch_worker':
+    case 'superagent_accept':
+    case 'superagent_reject':{
+      const t=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!t)throw Error('Ticket not found.');
+      if(command==='superagent_stop') {
+        if(['completed','stopped','failed'].includes(t.state))throw Error('Ticket already finished.');
+        t.state='stopped';
+      }else if(command==='superagent_dispatch_worker') {
+        if(t.state!=='queued')throw Error('No coordinator plan.');
+        t.state='running';
+      }else if(command==='superagent_retry') {
+        if(t.state!=='blocked')throw Error('Ticket is not blocked.');
+        t.state='running';
+      }else {
+        if(t.state!=='waiting_approval'||t.revision!==args.expectedRevision)throw Error('Stale worker evidence.');
+        t.state=command==='superagent_accept'?'completed':'blocked';
+      }
+      t.revision++;
+      value=t;break;
+    }
     case 'superagent_manifest_export':{
       value={schemaVersion:1,orchestrations:[...configs.values()].map(c=>({
         name:c.name,coordinatorBot:find(c.coordinatorBotId).name,workerBot:find(c.workerBotId).name,

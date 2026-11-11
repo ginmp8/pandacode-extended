@@ -28,3 +28,32 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
+
+
+test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const bar=page.locator('.sidebar-bots-bar');
+  if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
+  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
+  await sidebar.getByRole('button',{name:'Add bot or channel'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const dialog=page.getByRole('dialog',{name:'Orchestrations'});
+  await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
+  await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await dialog.getByRole('button',{name:'Enable manual'}).click();
+  await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(dialog.getByRole('button',{name:'Disable'})).toBeVisible();
+  await dialog.getByRole('textbox',{name:'Task objective'}).fill('Inspect a disposable fixture');
+  await dialog.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await dialog.getByRole('button',{name:'Dispatch manually'}).click();
+  const row=dialog.locator('.sa-tickets li',{hasText:'Inspect a disposable fixture'});
+  await expect(row).toContainText('running');
+  await row.getByRole('button',{name:'Stop'}).click();
+  await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(row).toContainText('stopped');
+  await expect(row.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
+});

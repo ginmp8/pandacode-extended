@@ -18,6 +18,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
+  let rejectingTicket = '';
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
@@ -48,8 +49,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) + '</small></div>' +
         (ticket.state === 'waiting_approval'
-          ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' : '') +
-        '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul></section>' : '';
+          ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
+            '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
+        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' : '') +
+        (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
+        (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
+          ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
+        '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
+        (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
+          '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
+          '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
+        '</section>' : '';
     host.innerHTML = '<div class="sa-ui">' +
       '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
@@ -161,6 +171,29 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (t?.state === 'waiting_approval') ask('Accept the recorded worker evidence at ticket revision ' + t.revision + '?', async () => {
         await call('superagent_accept',{ ticketId:t.id, expectedRevision:t.revision }); await reload();
       });
+      return;
+    }
+    if (target.dataset.saReject) { rejectingTicket = target.dataset.saReject; render(); return; }
+    if (target.hasAttribute('data-sa-reject-cancel')) { rejectingTicket = ''; render(); return; }
+    if (target.dataset.saDispatch) {
+      const t = tickets.find(item => item.id === target.dataset.saDispatch);
+      if (t?.state === 'queued') ask('Dispatch the worker using the original coordinator evidence?', async () => {
+        await call('superagent_dispatch_worker',{ ticketId:t.id }); await reload();
+      });
+      return;
+    }
+    if (target.dataset.saRetry) {
+      const t = tickets.find(item => item.id === target.dataset.saRetry);
+      if (t?.state === 'blocked') ask('Retry the original mandate with unchanged permissions?', async () => {
+        await call('superagent_retry',{ ticketId:t.id }); await reload();
+      });
+      return;
+    }
+    if (target.dataset.saStop) {
+      const t = tickets.find(item => item.id === target.dataset.saStop);
+      if (t) ask('Stop the task and revoke its authorization?', async () => {
+        await call('superagent_stop',{ ticketId:t.id }); await reload();
+      });
     }
   });
   host.addEventListener('submit', event => {
@@ -177,6 +210,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
         const created = await call<Config>('superagent_create',{ input });
         selected = created.id; await reload();
+      });
+    }
+    if (form.dataset.saForm === 'reject') {
+      const ticket = tickets.find(item => item.id === rejectingTicket);
+      const reason = String(data.get('reason') ?? '').trim();
+      if (ticket?.state !== 'waiting_approval' || !reason) return;
+      void work(async () => {
+        await call('superagent_reject',{ ticketId:ticket.id, expectedRevision:ticket.revision, reason });
+        rejectingTicket = ''; await reload();
       });
     }
     if (form.dataset.saForm === 'run') {

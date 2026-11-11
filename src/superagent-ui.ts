@@ -11,6 +11,13 @@ interface Config {
 }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
+interface Mandate {
+  actor: string; authorizationId: string; policyRevision: number; projectId: string;
+  expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
+}
+interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
+interface Activity { id: number; kind: string; detail: string; at: number }
+interface TicketDetails { mandate: Mandate; assignments: Assignment[]; activity: Activity[] }
 
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
@@ -18,7 +25,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
-  let rejectingTicket = '';
+  let rejectingTicket = '', inspectedTicket = '';
+  let ticketDetails: TicketDetails | null = null;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
@@ -35,6 +43,29 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
     const choices = optionsFor('');
     const chosen = current();
+    const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
+    const details = inspected && ticketDetails
+      ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
+        '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
+        '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
+        '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
+        '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
+        '<dt>Authorization</dt><dd><code>' + safe(ticketDetails.mandate.authorizationId) + '</code></dd>' +
+        '<dt>Project / policy</dt><dd>' + safe(ticketDetails.mandate.projectId) + ' / ' +
+        ticketDetails.mandate.policyRevision + '</dd>' +
+        '<dt>Mandate</dt><dd>' + (ticketDetails.mandate.revoked ? 'Revoked' : 'Issued') +
+        ' · ' + (ticketDetails.mandate.allowedSideEffects ? 'Scoped side effects' : 'No side effects allowed') +
+        ' · Tools: ' + safe(ticketDetails.mandate.allowedTools.join(', ') || 'none') + '</dd>' +
+        '<dt>Expires</dt><dd>' + safe(new Date(ticketDetails.mandate.expiresAt).toLocaleString()) + '</dd></dl>' +
+        '<h5>Assignment attempts</h5><ul>' +
+        (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
+          safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
+          safe(item.sessionId) + '</code></li>').join('') || '<li>No worker assigned.</li>') +
+        '</ul><h5>Native activity</h5><ol>' +
+        (ticketDetails.activity.map(entry => '<li>' + safe(entry.kind) + ' · ' +
+          safe(entry.detail) + '</li>').join('') || '<li>No activity recorded.</li>') +
+        '</ol><button type="button" data-sa-close-details>Close evidence</button></section>'
+      : '';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
@@ -54,7 +85,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '>Dispatch manually</button></form>' +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
-        '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) + '</small></div>' +
+        '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
+        ' · Revision ' + ticket.revision + '</small></div>' +
+        '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
+        '" aria-expanded="' + (ticket.id === inspectedTicket) + '">View evidence</button>' +
         (ticket.state === 'waiting_approval'
           ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
@@ -66,7 +100,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
-        '</section>' : '';
+        details + '</section>' : '';
     host.innerHTML = '<div class="sa-ui">' +
       '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
@@ -96,6 +130,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</section></div>';
     host.setAttribute('aria-busy', String(busy));
   }
+  async function refreshTicketDetails(): Promise<void> {
+    const id = inspectedTicket;
+    if (!id || !tickets.some(ticket => ticket.id === id)) {
+      inspectedTicket = ''; ticketDetails = null; return;
+    }
+    // Use existing native read endpoints, not model-generated summaries. A
+    // revision change refreshes the snapshot before a later human decision.
+    const [mandate, assignments, activity] = await Promise.all([
+      call<Mandate>('superagent_mandate', { ticketId:id }),
+      call<Assignment[]>('superagent_assignments', { ticketId:id, limit:50 }),
+      call<Activity[]>('superagent_activity', { ticketId:id, limit:50 }),
+    ]);
+    if (inspectedTicket === id) ticketDetails = { mandate, assignments, activity };
+  }
   async function reload(): Promise<void> {
     loading = true;
     // Keep updated controls hidden until the mutating operation has settled.
@@ -106,6 +154,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) selected = presets[0]?.id ?? '';
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
+      await refreshTicketDetails();
       error = '';
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
     finally { loading = false; if (!busy) render(); }
@@ -139,7 +188,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       return;
     }
     if (target.dataset.saSelect) {
-      selected = target.dataset.saSelect; void work(async () => {
+      selected = target.dataset.saSelect;
+      inspectedTicket = ''; ticketDetails = null;
+      void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 });
       });
       return;
@@ -161,6 +212,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       return;
     }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
+    if (target.hasAttribute('data-sa-close-details')) {
+      inspectedTicket = ''; ticketDetails = null; render(); return;
+    }
+    if (target.dataset.saInspectTicket) {
+      const id = target.dataset.saInspectTicket;
+      if (inspectedTicket === id) {
+        inspectedTicket = ''; ticketDetails = null; render();
+      } else {
+        inspectedTicket = id; ticketDetails = null;
+        void work(refreshTicketDetails);
+      }
+      return;
+    }
     if (target.hasAttribute('data-sa-export')) {
       void work(async () => {
         importText = JSON.stringify(await call<unknown>('superagent_manifest_export'),null,2);

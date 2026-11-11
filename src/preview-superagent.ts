@@ -4,6 +4,9 @@ type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:str
   projectId:string; enabled:boolean; policyRevision:number };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
+type Activity = { id:number; kind:string; detail:string; at:number };
+type Assignment = { id:string; botId:string; sessionId:string; attempt:number; state:string };
+const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
@@ -20,6 +23,22 @@ export async function invokeSuperagent<T>(
   switch(command){
     case 'superagent_list': value=[...configs.values()];break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_mandate':
+    case 'superagent_assignments':
+    case 'superagent_activity':{
+      const t=[...tickets.values()].flat().find(item=>item.id===args.ticketId);
+      if(!t)throw Error('Ticket not found.');
+      if(command==='superagent_assignments')value=assignments.get(t.id)||[];
+      else if(command==='superagent_activity')value=activity.get(t.id)||[];
+      else {
+        const cfg=get(t.orchestrationId);
+        value={ticketId:t.id,actor:'local-user',authorizationId:'preview-only-'+t.id,
+          policyRevision:cfg.policyRevision,projectId:cfg.projectId,
+          expiresAt:Date.now()+4*60*60*1000,revoked:t.state==='stopped',
+          allowedTools:[],allowedSideEffects:false,createdAt:Date.now()};
+      }
+      break;
+    }
     case 'superagent_create':{
       const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
       if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');
@@ -52,7 +71,11 @@ export async function invokeSuperagent<T>(
       const c=get(args.orchestrationId);if(!c.enabled)throw Error('Orchestration disabled.');
       const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
         state:'running',revision:0,evidence:null};
-      tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);value=t;break;
+      tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
+      assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
+        sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
+      activity.set(t.id,[{id:1,kind:'admitted',detail:'Manual read-only preview assignment',at:Date.now()}]);
+      value=t;break;
     }
     case 'superagent_stop':
     case 'superagent_retry':
@@ -75,6 +98,13 @@ export async function invokeSuperagent<T>(
         t.state=command==='superagent_accept'?'completed':'blocked';
       }
       t.revision++;
+      if(command==='superagent_stop'){
+        for(const entry of assignments.get(t.id)||[])if(entry.state==='running')entry.state='stopped';
+      }
+      const events=activity.get(t.id)||[];
+      events.unshift({id:events.length+1,kind:command.slice('superagent_'.length),
+        detail:'Preview-only state transition',at:Date.now()});
+      activity.set(t.id,events);
       value=t;break;
     }
     case 'superagent_manifest_export':{

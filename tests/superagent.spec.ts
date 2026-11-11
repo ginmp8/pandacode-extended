@@ -55,9 +55,18 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('button',{name:'Dispatch manually'}).click();
   const row=dialog.locator('.sa-tickets li',{hasText:'Inspect a disposable fixture'});
   await expect(row).toContainText('running');
+  await row.getByRole('button',{name:'View evidence'}).click();
+  const details=dialog.getByRole('region',{name:'Ticket evidence'});
+  await expect(details).toContainText('Ticket ID');
+  await expect(details).toContainText('local-user');
+  await expect(details).toContainText('No side effects allowed');
+  await expect(details).toContainText('Attempt 1');
+  await expect(details).toContainText('admitted');
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
+  await expect(details).toContainText('Revoked');
+  await expect(details).toContainText('stopped');
   await expect(row.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
 });
 

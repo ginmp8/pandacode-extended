@@ -123,3 +123,7 @@ Fork `ginmp8/pandacode:main` at [`a403c3d9`](https://github.com/ginmp8/pandacode
 
 No new confirmed runtime defect is claimed from the diff. The high-volume phone and Rust Connect refactor requires full TypeScript/Expo and Rust compiler/test validation on the **published destination commit**. The 81 remaining shared-file divergences still require complete hunk-level semantic review; absence of missing paths does not independently prove enabled runtime parity. CI pending or absent, real mobile devices, two-host Connect, Settings On/Off, permission prompts, native installers and data migrations are unverified until executed.
 
+
+## Mobile npm clean-install regression — 2026-11-11
+
+At Extended `d67a035d`, push and PR jobs failed at `npm ci` under npm 10.9.9 because the mobile dependency override and lock resolved `brace-expansion` inconsistently. A scoped override candidate pins the existing patched 5.0.12 version for `minimatch` 11.0.3. The next exact-SHA CI must confirm installation and Expo tests before this issue can be closed.

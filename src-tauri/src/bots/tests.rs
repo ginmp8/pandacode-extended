@@ -284,20 +284,25 @@ fn council_channel_callback_waits_for_approval_and_terminal_claim_is_idempotent(
     ).unwrap();
     assert_eq!(channel_council_outcome(&f.store,&session_id).unwrap(), ChannelCouncilOutcome::Waiting);
     assert_eq!(shared_channels::settle_channel_delivery(
-        &f.store,&session_id,&delivery_id,&channel.id,&message_id,&executor.id,true,"Too early"
+        &f.store,&session_id,(&delivery_id,&channel.id,&message_id,&executor.id),true,"Too early"
     ).unwrap(),None);
     let mut team = crate::architect::load(&f.store,&session_id).unwrap().unwrap();
     team.status = "completed".into();
+    team.council_since = 1234;
     f.store.db.execute(
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
         params![session_id,serde_json::to_string(&team).unwrap()],
     ).unwrap();
-    assert!(matches!(channel_council_outcome(&f.store,&session_id).unwrap(),ChannelCouncilOutcome::Denied(_)));
+    assert_eq!(channel_council_outcome(&f.store,&session_id).unwrap(),ChannelCouncilOutcome::Waiting,
+        "an unbound original Council cycle cannot permit completion");
+    shared_channels::bind_delivery_cycle(&f.store,&session_id,team.council_since).unwrap();
+    assert!(matches!(channel_council_outcome(&f.store,&session_id).unwrap(),ChannelCouncilOutcome::Denied(_)),
+        "a bound but unreviewed Council is still denied");
     assert_eq!(shared_channels::settle_channel_delivery(
-        &f.store,&session_id,&delivery_id,&channel.id,&message_id,&executor.id,true,"False success"
+        &f.store,&session_id,(&delivery_id,&channel.id,&message_id,&executor.id),true,"False success"
     ).unwrap(),Some(false));
     assert_eq!(shared_channels::settle_channel_delivery(
-        &f.store,&session_id,&delivery_id,&channel.id,&message_id,&executor.id,true,"Replay"
+        &f.store,&session_id,(&delivery_id,&channel.id,&message_id,&executor.id),true,"Replay"
     ).unwrap(),None);
     let status: String = f.store.db.query_row(
         "SELECT status FROM bot_shared_channel_deliveries WHERE id=?1",[&delivery_id],|r|r.get(0),
@@ -411,11 +416,11 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         params![sid,serde_json::to_string(&team).unwrap()],
     ).unwrap();
     assert_eq!(shared_channels::settle_channel_delivery(
-        &f.store,&sid,&delivery_id,&channel.id,&message_id,&executor.id,true,
+        &f.store,&sid,(&delivery_id,&channel.id,&message_id,&executor.id),true,
         "Accepted finding: fix the permission boundary."
     ).unwrap(),Some(true));
     assert!(shared_channels::settle_channel_delivery(
-        &f.store,&sid,&delivery_id,&channel.id,&message_id,&executor.id,true,"Replay"
+        &f.store,&sid,(&delivery_id,&channel.id,&message_id,&executor.id),true,"Replay"
     ).unwrap().is_none(),"a duplicate callback cannot settle or publish again");
     let published: i64 = f.store.db.query_row(
         "SELECT COUNT(*) FROM bot_shared_channel_messages WHERE channel_id=?1 AND kind='reply'",

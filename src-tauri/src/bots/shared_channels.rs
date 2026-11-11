@@ -784,11 +784,19 @@ pub(super) fn settle_channel_delivery(
     // The legacy message schema accepts only user/reply, not synthetic
     // Council notices. A denied delivery is visible through its native
     // per-delivery status/notice, never as a fabricated bot response.
-    if approved && !reply.trim().is_empty() {
+    // A Council approval must produce exactly one visible final channel result,
+    // including when the lead completed with no text. Preserve Council-off
+    // behavior and never fabricate accepted findings for GitHub publishing.
+    if approved && (!reply.trim().is_empty() || !matches!(gate, super::ChannelCouncilOutcome::Ordinary)) {
+        let visible = if reply.trim().is_empty() {
+            "The assigned bot finished without a text reply."
+        } else {
+            reply.trim()
+        };
         store.db.execute(
             "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,created_at)
              VALUES(?1,?2,'reply',?3,?4,?5)",
-            params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()],
+            params![crate::storage::id(),channel_id,bot_id,visible,crate::storage::now()],
         ).map_err(|e| e.to_string())?;
     }
     // Keep authorization, target, accepted report and revision immutable before

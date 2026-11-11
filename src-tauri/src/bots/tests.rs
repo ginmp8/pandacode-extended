@@ -530,6 +530,97 @@ fn a_cached_pass_without_native_scores_cannot_approve_a_channel_delivery() {
 }
 
 #[test]
+fn an_approved_council_with_no_text_still_posts_one_truthful_final_result() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let channel = shared_channels::create(
+        &f.store, "empty-council-reply", std::slice::from_ref(&executor.id),
+    ).unwrap();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    let council = crate::architect::CouncilConfig::default();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Please review','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&council).unwrap(),
+            serde_json::to_string(&vec![executor.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    shared_channels::provision_channel_delivery(
+        &f.store, &channel.id, &message_id, &executor.id, "Please review",
+        shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },
+        &delivery_id,
+    ).unwrap();
+    let session_id: String = f.store.db.query_row(
+        "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='in_progress' WHERE id=?1",
+        [&delivery_id],
+    ).unwrap();
+    let cycle: String = f.store.db.query_row(
+        "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    let mut team = crate::architect::load(&f.store, &session_id).unwrap().unwrap();
+    team.status = "completed".into();
+    team.council_since = 1234;
+    team.council_accepted = Some(1234);
+    team.changed_at = 1280;
+    team.dispatch_revision = 7;
+    team.council_status = Some(crate::architect::CouncilStatus {
+        state: "accepted".into(), round: 1, lowest: Some(7.5),
+        target: 9.0, stale: false, notice: None,
+    });
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![session_id,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    shared_channels::bind_delivery_cycle(&f.store, &session_id, 1234).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_acceptances
+         (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
+         VALUES(?1,?2,1234,7,1280,'local_user','Reviewed and accepted',?3)",
+        params![delivery_id,cycle,crate::storage::now()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&f.store,&session_id).unwrap(),ChannelCouncilOutcome::Approved);
+    assert_eq!(
+        shared_channels::settle_channel_delivery(
+            &f.store, &session_id,
+            (&delivery_id, &channel.id, &message_id, &executor.id),
+            true, "  ",
+        ).unwrap(), Some(true)
+    );
+    assert_eq!(
+        shared_channels::settle_channel_delivery(
+            &f.store, &session_id,
+            (&delivery_id, &channel.id, &message_id, &executor.id),
+            true, "Replay",
+        ).unwrap(), None
+    );
+    let replies: Vec<String> = {
+        let mut query = f.store.db.prepare(
+            "SELECT text FROM bot_shared_channel_messages
+             WHERE channel_id=?1 AND kind='reply'",
+        ).unwrap();
+        query.query_map([&channel.id], |row| row.get::<_,String>(0))
+            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(replies, vec!["The assigned bot finished without a text reply."]);
+    let status: String = f.store.db.query_row(
+        "SELECT status FROM bot_shared_channel_deliveries WHERE id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(status,"completed");
+}
+
+#[test]
 fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();

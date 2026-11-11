@@ -623,6 +623,29 @@ pub(crate) fn read_only_policy(
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
         }
+        // A native assignment never inherits ambient bot permissions if its
+        // internal thread has been unlinked or remapped after admission.
+        // This guards direct session launch as well as the inbound gateway.
+        let native_thread: bool = store.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM bot_threads thread
+                JOIN sa_assignments assignment ON assignment.session_id=thread.session_id
+                WHERE assignment.session_id=?1 AND assignment.bot_id=thread.bot_id
+                  AND assignment.ticket_id=?3 AND thread.channel_id=?2
+                  AND (
+                    (assignment.attempt=1 AND thread.external_id=?3)
+                    OR (assignment.attempt>1 AND
+                        thread.external_id=?3 || ':attempt:' || assignment.attempt)
+                    OR (assignment.attempt>1 AND
+                        thread.external_id=?3 || ':worker:' || assignment.attempt)
+                  )
+            )",
+            params![session_id, CHANNEL, scope.ticket_id],
+            |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !native_thread {
+            return Err("policy_unsupported: SuperAgent session no longer matches its native thread.".into());
+        }
         let active_bot = bots::get(store, &scope.bot_id)?;
         let coordinator = bots::get(store, &scope.coordinator_id)?;
         let assigned_session = store.session(session_id)?;
@@ -635,6 +658,16 @@ pub(crate) fn read_only_policy(
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
         }
         return Ok(Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly));
+    }
+    // A settled or detached assignment still owns this provider session.
+    // Never interpret a missing bot_threads row as permission to fall back
+    // to a normal, potentially writable bot session.
+    let native_assignment: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)",
+        [session_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if native_assignment {
+        return Err("policy_unsupported: SuperAgent session has no active native authority.".into());
     }
     let internal: bool = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM bot_threads WHERE session_id=?1 AND channel_id=?2)",
@@ -1791,6 +1824,37 @@ mod tests {
         assert!(guard_gateway_inbound(
             &store, "worker", &retry_thread, "local-user", true,
         ).is_ok());
+    }
+
+    #[test]
+    fn detached_or_settled_superagent_session_never_falls_back_to_normal_bot_tools() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Scoped native session", "no-ambient-fallback", false,
+        ).unwrap();
+        assert!(launched);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &sid).unwrap().is_some());
+
+        // Deleting the channel binding cannot erase the durable Ticket's
+        // identity and accidentally restore the bot's normal tool permissions.
+        store.db.execute(
+            "DELETE FROM bot_threads WHERE session_id=?1", [&sid],
+        ).unwrap();
+        assert!(read_only_policy(&store, &sid).is_err());
+        assert!(guard_run_admission(&store, &sid, &[]).is_err());
+
+        // The same must hold after a successful native result or Stop,
+        // including a stale provider callback racing a future session.
+        assert!(on_run_finished(&store, &sid, true, "Read-only evidence").unwrap());
+        assert!(read_only_policy(&store, &sid).is_err());
+
+        let ordinary = bots::get(&store, "worker").unwrap();
+        let normal_sid = bots::thread_session(
+            &store, &ordinary, "desktop", "ordinary-session", "Ordinary bot chat",
+        ).unwrap().0;
+        assert!(read_only_policy(&store, &normal_sid).unwrap().is_none());
     }
 
     #[test]

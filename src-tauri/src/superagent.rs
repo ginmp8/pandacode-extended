@@ -98,7 +98,15 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_insert
    SELECT 1 FROM sa_assignments a
    JOIN sa_tickets previous ON previous.id=a.ticket_id
    JOIN sa_tickets incoming ON incoming.id=NEW.ticket_id
-   WHERE a.state='running' AND previous.project_id=incoming.project_id
+   LEFT JOIN sessions previous_session ON previous_session.id=a.session_id
+   LEFT JOIN sessions incoming_session ON incoming_session.id=NEW.session_id
+   WHERE a.state='running' AND (
+     previous.project_id=incoming.project_id
+     OR previous.project_id=incoming_session.project_id
+     OR previous_session.project_id=incoming.project_id
+     OR previous_session.project_id=incoming_session.project_id
+     OR previous_session.id IS NULL OR incoming_session.id IS NULL
+   )
  )
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
 CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
@@ -107,8 +115,15 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
    SELECT 1 FROM sa_assignments a
    JOIN sa_tickets previous ON previous.id=a.ticket_id
    JOIN sa_tickets incoming ON incoming.id=NEW.ticket_id
-   WHERE a.id<>NEW.id AND a.state='running'
-     AND previous.project_id=incoming.project_id
+   LEFT JOIN sessions previous_session ON previous_session.id=a.session_id
+   LEFT JOIN sessions incoming_session ON incoming_session.id=NEW.session_id
+   WHERE a.id<>NEW.id AND a.state='running' AND (
+     previous.project_id=incoming.project_id
+     OR previous.project_id=incoming_session.project_id
+     OR previous_session.project_id=incoming.project_id
+     OR previous_session.project_id=incoming_session.project_id
+     OR previous_session.id IS NULL OR incoming_session.id IS NULL
+   )
  )
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
 "#;
@@ -391,10 +406,12 @@ fn admit_role(
         "SELECT EXISTS(
            SELECT 1 FROM sa_assignments a
            JOIN sa_tickets previous ON previous.id=a.ticket_id
+           LEFT JOIN sessions active_session ON active_session.id=a.session_id
            WHERE a.state='running'
-             AND (a.bot_id=?1 OR previous.project_id=?2)
+             AND (a.bot_id=?1 OR previous.project_id IN (?2,?3)
+                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL)
          )",
-        params![candidate.id,config.project_id], |row| row.get(0),
+        params![candidate.id,config.project_id,candidate.project_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
@@ -1851,6 +1868,56 @@ mod tests {
             [&task.id], |r| r.get(0),
         ).unwrap();
         assert_eq!(settled_events, 1);
+    }
+
+    #[test]
+    fn durable_lease_blocks_other_workers_in_a_coordinators_checkout() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('coordinator-project','Separate coordinator','/tmp/sa-coordinator-lease')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='coordinator-project' WHERE id='router'",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Independent worker','coordinator-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let first_config = enabled(&store);
+        let (coordinated, launched) = admit_role(
+            &mut store, &first_config.id, "Read-only coordinator plan", "coordinator-lease-a", false, true,
+        ).unwrap();
+        assert!(launched);
+        let other_config = create_configuration(&store, NewOrchestration {
+            name: "Other worker in coordinator checkout".into(),
+            coordinator_bot_id: "worker".into(),
+            worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        let other_config = change_enabled(&store, &other_config.id, 1, true).unwrap();
+        let (blocked, launched) = admit(
+            &mut store, &other_config.id, "Independent task", "coordinator-lease-b", false,
+        ).unwrap();
+        assert!(!launched, "native admission must reserve the coordinator's actual workspace");
+        assert_eq!(blocked.state, "blocked");
+
+        // The SQLite trigger is a second line of defense against callers
+        // that attempt to bypass the normal occupied-workspace preflight.
+        let unrelated_session = store.create_session(
+            "coordinator-project", "codex", "default", "plan",
+        ).unwrap();
+        let bypass = store.db.execute(
+            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES('bypassing-lease',?1,'other-worker',?2,'running',1,?3,?3)",
+            params![blocked.id,unrelated_session.id,storage::now()],
+        );
+        assert!(bypass.is_err());
+        fail_launch(&store, &coordinated.id, "coordinator stopped").unwrap();
+        let (retried, _, worker) = retry_blocked(&mut store, &blocked.id, false).unwrap();
+        assert_eq!(retried.state, "running");
+        assert_eq!(worker, "other-worker");
     }
 
     #[test]

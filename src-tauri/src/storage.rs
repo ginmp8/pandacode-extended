@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 40;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -657,6 +657,17 @@ impl Store {
                 // including stores previously migrated to schema v38.
                 migration.execute_batch(crate::superagent::PROJECT_LEASE).map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=39;").map_err(|e| e.to_string())?;
+            }
+            if version < 40 {
+                // v39 compared ticket project only. A coordinator runs in its
+                // own existing bot workspace, which must also be serialized.
+                // Replacing just the two lease triggers is data-preserving.
+                migration.execute_batch(
+                    "DROP TRIGGER IF EXISTS sa_project_lease_insert;
+                     DROP TRIGGER IF EXISTS sa_project_lease_update;",
+                ).map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::PROJECT_LEASE).map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=40;").map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

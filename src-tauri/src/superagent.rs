@@ -664,7 +664,14 @@ pub(crate) fn guard_gateway_inbound(
          JOIN sa_tickets ticket ON ticket.id=assignment.ticket_id
          WHERE thread.bot_id=?1 AND thread.channel_id=?2 AND thread.external_id=?3
            AND assignment.bot_id=?1 AND assignment.state='running'
-           AND ticket.state='running' AND ticket.active_assignment_id=assignment.id",
+           AND ticket.state='running' AND ticket.active_assignment_id=assignment.id
+           AND (
+             (assignment.attempt=1 AND thread.external_id=ticket.id)
+             OR (assignment.attempt>1 AND
+                 thread.external_id=ticket.id || ':attempt:' || assignment.attempt)
+             OR (assignment.attempt>1 AND
+                 thread.external_id=ticket.id || ':worker:' || assignment.attempt)
+           )",
         params![bot_id, CHANNEL, external_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     let session_id = session_id.ok_or(
@@ -1745,6 +1752,45 @@ mod tests {
         assert_eq!(before, after, "rejected deliveries must not create bot conversations");
         stop(&store, &ticket.id).unwrap();
         assert!(guard_gateway_inbound(&store, "worker", &thread, "local-user", true).is_err());
+    }
+
+    #[test]
+    fn internal_gateway_rejects_remapped_threads_and_preserves_retry_identity() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Original task-scoped thread",
+            "native-thread-binding", false,
+        ).unwrap();
+        assert!(launched);
+        let original = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(guard_gateway_inbound(
+            &store, "worker", &ticket.id, "local-user", true,
+        ).is_ok());
+
+        // Existing thread ownership alone is insufficient when a stale or
+        // unrelated external ID is mapped onto this assigned session.
+        store.db.execute(
+            "UPDATE bot_threads SET external_id='foreign-ticket' WHERE session_id=?1",
+            [&original],
+        ).unwrap();
+        assert!(guard_gateway_inbound(
+            &store, "worker", "foreign-ticket", "local-user", true,
+        ).is_err());
+        store.db.execute(
+            "UPDATE bot_threads SET external_id=?2 WHERE session_id=?1",
+            params![original,ticket.id],
+        ).unwrap();
+        assert!(on_run_finished(&store, &original, true, "First attempt evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        reject(&store, &ticket.id, waiting.revision, "Requires a new attempt").unwrap();
+
+        let (_, retry_thread, bot_id) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        assert_eq!(bot_id, "worker");
+        assert!(retry_thread.ends_with(":attempt:2"));
+        assert!(guard_gateway_inbound(
+            &store, "worker", &retry_thread, "local-user", true,
+        ).is_ok());
     }
 
     #[test]

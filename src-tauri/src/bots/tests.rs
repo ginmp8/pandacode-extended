@@ -329,7 +329,7 @@ fn council_channel_callback_waits_for_approval_and_terminal_claim_is_idempotent(
 
 
 #[test]
-fn failed_channel_delivery_never_authorizes_a_success_callback() {
+fn failed_ordinary_channel_delivery_preserves_failure_callback_without_success() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();
     let executor = bot(&f);
@@ -362,14 +362,16 @@ fn failed_channel_delivery_never_authorizes_a_success_callback() {
             (&delivery_id, &channel.id, &message_id, &executor.id),
             false, "An unfinished response must not be forwarded.",
         ).unwrap(),
-        Some(false),
-        "an unsuccessful run must never authorize an onward success callback",
+        Some(true),
+        "ordinary collaboration still reports a failed delivery to its sender",
     );
     let status: String = f.store.db.query_row(
         "SELECT status FROM bot_shared_channel_deliveries WHERE id=?1",
         [&delivery_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(status, "failed");
+    assert!(shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "ordinary failed deliveries remain eligible for a failure callback");
     let replies: i64 = f.store.db.query_row(
         "SELECT COUNT(*) FROM bot_shared_channel_messages
          WHERE channel_id=?1 AND kind='reply'",

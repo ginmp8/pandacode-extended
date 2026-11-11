@@ -1476,6 +1476,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
   if (command.startsWith('agents_dock_')) return previewAgentsDock<T>(command, args);
   if (command.startsWith('jj_')) return (await import('./preview-jj')).invokeJj<T>(command, args);
   if (command.includes('moodboard')) return (await import('./preview-moodboards')).invokeMoodboards<T>(command, args);
+  if (command.startsWith('superagent_')) return (await import('./preview-superagent')).invokeSuperagent<T>(command, args, () => invoke<any[]>('bots_list', {}));
   if (command === 'bots_list' || command.startsWith('bot_')) return invokeBots<T>(command, args, {
     invoke, emit,
     addProject: name => { const p = { id: crypto.randomUUID(), name, path: `/Users/you/PandaCode Bots/${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` }; projects.push(p); return p; },

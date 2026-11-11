@@ -1,0 +1,22 @@
+.sa-ui{display:flex;flex-direction:column;gap:16px;padding:12px 18px 24px;overflow:auto;max-height:75dvh;color:var(--text)}
+.sa-intro,.sa-pane p{font-size:var(--text-sm);color:var(--muted);line-height:1.5}
+.sa-pane{border:1px solid var(--border);border-radius:var(--radius-md);padding:14px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.sa-pane h3,.sa-pane h4{margin:0;font-size:var(--text-md);font-weight:600}
+.sa-pane header,.sa-title{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.sa-pane form{display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+.sa-pane label{display:flex;flex-direction:column;gap:5px;width:100%;min-width:0;font-size:var(--text-sm);font-weight:500}
+.sa-pane input,.sa-pane select,.sa-pane textarea{width:100%;min-width:0;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:8px;box-sizing:border-box}
+.sa-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;width:100%}
+.sa-list,.sa-tickets{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.sa-item,.sa-tickets>li{display:flex;align-items:center;gap:10px;min-width:0;padding:8px 0;border-top:1px solid var(--border)}
+.sa-item>div,.sa-tickets>li>div{flex:1;display:flex;flex-direction:column;min-width:0;gap:3px}
+.sa-item strong,.sa-tickets strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--text-sm)}
+.sa-item small,.sa-tickets small,.sa-item>span{font-size:var(--text-xs);color:var(--muted)}
+.sa-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sa-ui button{cursor:pointer;min-height:30px}
+.sa-ui button:disabled{opacity:.45;cursor:default}
+.sa-empty{color:var(--muted);font-size:var(--text-sm)}
+.sa-error{color:var(--danger);font-size:var(--text-sm)}
+.sa-confirm{padding:12px;border:1px solid var(--border);border-radius:var(--radius-md)}
+.sa-confirm .sa-actions{margin-top:10px}
+@media(max-width:600px){.sa-grid{grid-template-columns:minmax(0,1fr)}.sa-pane header{align-items:flex-start;flex-direction:column}}

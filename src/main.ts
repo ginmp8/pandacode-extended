@@ -6274,6 +6274,19 @@ function botsOptions(providers: Provider[]): import('./bots').BotsOptions {
     openChat: id => run((async () => { closeModal(); await openBot(id); })()),
   };
 }
+async function showSuperagent(): Promise<void> {
+  const dialog = modal('Orchestrations', '<div id="superagent-host"><p role="status">Loading…</p></div>', 'superagent-dialog');
+  const host = dialog.querySelector<HTMLElement>('#superagent-host')!;
+  try {
+    const { mountSuperagent } = await import('./superagent-ui');
+    if (dialog.open && host.isConnected) mountSuperagent(host, call);
+  } catch (cause) {
+    if (dialog.open && host.isConnected) {
+      host.textContent = cause instanceof Error ? cause.message : String(cause);
+      host.setAttribute('role','alert');
+    }
+  }
+}
 async function showBots(open: { botId?: string; startNew?: boolean } = {}): Promise<void> {
   const dialog = modal(open.startNew ? 'New bot' : 'Bots', '<div id="bots-host"><p role="status">Loading bots…</p></div>', 'bots-dialog');
   const host = dialog.querySelector<HTMLElement>('#bots-host')!;
@@ -7148,6 +7161,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'new-bot': hideCreateBotMenu(); await showBots({ startNew: true }); break;
     case 'new-bot-menu': await showCreateBotMenu(element); break;
     case 'new-channel': hideCreateBotMenu(); await createSharedChannel(); break;
+    case 'orchestrations': hideCreateBotMenu(); await showSuperagent(); break;
     case 'import-sync-bots': hideCreateBotMenu(); await showBotManifestDialog('import'); break;
     case 'export-bots': hideCreateBotMenu(); await showBotManifestDialog('export'); break;
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;

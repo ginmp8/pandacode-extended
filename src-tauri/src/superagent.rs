@@ -1871,6 +1871,51 @@ mod tests {
     }
 
     #[test]
+    fn v39_upgrade_replaces_ticket_only_lease_without_losing_durable_history() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (task, _) = admit(
+            &mut store, &config.id, "Keep original objective", "lease-migration-1", false,
+        ).unwrap();
+        // Reproduce a v39 installation. The old trigger constrained only the
+        // ticket worker project and missed the coordinator's real checkout.
+        store.db.execute_batch(
+            "DROP TRIGGER IF EXISTS sa_project_lease_insert;
+             DROP TRIGGER IF EXISTS sa_project_lease_update;
+             CREATE TRIGGER sa_project_lease_insert
+             BEFORE INSERT ON sa_assignments
+             WHEN NEW.state='running' AND EXISTS(
+                SELECT 1 FROM sa_assignments a
+                JOIN sa_tickets previous ON previous.id=a.ticket_id
+                JOIN sa_tickets incoming ON incoming.id=NEW.ticket_id
+                WHERE a.state='running' AND previous.project_id=incoming.project_id
+             )
+             BEGIN SELECT RAISE(ABORT,'old lease'); END;
+             PRAGMA user_version=39;",
+        ).unwrap();
+        let path = store.path.clone();
+        drop(store);
+        let upgraded = Store::open(&path).unwrap();
+        let version: i64 = upgraded.db.pragma_query_value(
+            None, "user_version", |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, storage::SCHEMA_VERSION);
+        let trigger: String = upgraded.db.query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type='trigger' AND name='sa_project_lease_insert'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(trigger.contains("previous_session.project_id"));
+        assert!(trigger.contains("incoming_session.project_id"));
+        assert_eq!(get_ticket(&upgraded, &task.id).unwrap().objective, "Keep original objective");
+        assert_eq!(get_ticket(&upgraded, &task.id).unwrap().state, "interrupted");
+        assert!(!history(&upgraded, &task.id, 10).unwrap().is_empty());
+        drop(upgraded);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &task.id).unwrap().objective, "Keep original objective");
+    }
+
+    #[test]
     fn durable_lease_blocks_other_workers_in_a_coordinators_checkout() {
         let mut store = fixture();
         store.db.execute(

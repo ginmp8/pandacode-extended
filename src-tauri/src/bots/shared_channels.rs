@@ -52,6 +52,10 @@ pub struct ChannelCouncilView {
     pub artifact_revision: String,
     pub notice: Option<String>,
     pub reviewers: Vec<ChannelCouncilReviewer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub followup_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub followup_url: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -320,7 +324,12 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         "failed" if state != "Limit reached" => "Failed".into(),
         _ => state,
     };
-    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers }))
+    let followup: Option<(String, Option<String>)> = store.db.query_row(
+        "SELECT state,issue_url FROM extended_channel_council_followups WHERE delivery_id=?1",
+        [delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let (followup_status, followup_url) = followup.map_or((None,None), |(s,u)| (Some(s),u));
+    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url }))
 }
 
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.
@@ -681,9 +690,103 @@ pub(super) fn settle_channel_delivery(
             params![crate::storage::id(),channel_id,bot_id,reply.trim(),crate::storage::now()],
         ).map_err(|e| e.to_string())?;
     }
+    // Keep authorization, target, accepted report and revision immutable before
+    // any external GitHub action; a user opt-in is scoped to this delivery only.
+    if approved {
+        if let Some(grant) = council_request(store, message_id)?
+            .and_then(|request| request.council.post_acceptance_issue)
+        {
+            let cycle: String = store.db.query_row(
+                "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+                [delivery_id], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            let team = crate::architect::load(store, session_id)?
+                .ok_or("Council approval has no persisted team.")?;
+            let revision = format!("{}:{}:{}", cycle,team.council_since,team.changed_at);
+            let objective: String = store.db.query_row(
+                "SELECT objective FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+                [delivery_id], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            let excerpt = objective.split_whitespace().collect::<Vec<_>>().join(" ");
+            let title = format!("Council accepted: {}",excerpt.chars().take(100).collect::<String>());
+            let findings = reply.trim();
+            let ready = !findings.is_empty() && findings.chars().count() <= 16_384;
+            let body = if ready {
+                format!("Council-approved findings from delivery {} (revision {}):\n\n{}",delivery_id,revision,findings)
+            } else { String::new() };
+            store.db.execute(
+                "INSERT OR IGNORE INTO extended_channel_council_followups
+                 (delivery_id,authorization_id,repository,revision,title,body,state,error,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![delivery_id,grant.authorization_id,grant.repository,revision,title,body,
+                    if ready {"pending"} else {"failed"},
+                    if ready {None} else {Some("No complete accepted findings are available for GitHub publishing.")},
+                    crate::storage::now()],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
     update_message_status(store, message_id)?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(Some(denial.is_none()))
+}
+
+/// Claim one post-acceptance GitHub issue attempt. A crash after 'sending'
+/// leaves an explicitly uncertain result; it must never silently create twice.
+fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> Result<Option<(String,String,String)>> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let item: Option<(String,String,String)> = store.db.query_row(
+        "SELECT repository,title,body FROM extended_channel_council_followups
+         WHERE delivery_id=?1 AND state='pending'",
+        [delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some(item) = item else { return Ok(None) };
+    let changed = store.db.execute(
+        "UPDATE extended_channel_council_followups SET state='sending',updated_at=?2
+         WHERE delivery_id=?1 AND state='pending'",
+        params![delivery_id,crate::storage::now()],
+    ).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok((changed==1).then_some(item))
+}
+
+/// Post on behalf of this delivery's configured executor, using the user's
+/// existing gh CLI session. Only exact user-authorized owner/repo is allowed.
+pub(super) async fn publish_post_acceptance_issue(app: &tauri::AppHandle, delivery_id: &str) {
+    let state = app.state::<AppState>();
+    let item = state.store.lock().map_err(|e|e.to_string())
+        .and_then(|store| claim_post_acceptance_issue(&store,delivery_id));
+    let Ok(Some((repo,title,body))) = item else { return };
+    let repository = repo.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String> {
+        let args = [
+            "issue".to_string(), "create".to_string(),
+            format!("--repo={repo}"),format!("--title={title}"),format!("--body={body}"),
+        ];
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let captured = crate::github::run_gh(std::path::Path::new("."), &argv, crate::github::TIMEOUT)?;
+        if captured.truncated { return Err("GitHub response was truncated; the result is uncertain.".into()); }
+        let output = String::from_utf8_lossy(&captured.bytes);
+        let expected = format!("https://github.com/{repository}/issues/");
+        let url = output.trim();
+        if url.strip_prefix(&expected).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
+            Ok(url.to_string())
+        } else {
+            Err("GitHub issue creation result is uncertain; do not retry automatically.".into())
+        }
+    }).await.unwrap_or_else(|_| Err("GitHub issue creation result is uncertain; do not retry automatically.".into()));
+    let (status,url,error) = match result {
+        Ok(url) => ("succeeded",Some(url),None),
+        Err(error) if error.contains("uncertain") => ("unknown",None,Some("The GitHub result is unknown; check the repository before trying again.".to_string())),
+        Err(_) => ("failed",None,Some("The authorized GitHub issue could not be created; check the GitHub CLI and repository access.".to_string())),
+    };
+    if let Ok(store) = state.store.lock() {
+        let _ = store.db.execute(
+            "UPDATE extended_channel_council_followups SET state=?2,issue_url=?3,error=?4,updated_at=?5
+             WHERE delivery_id=?1 AND state='sending'",
+            params![delivery_id,status,url,error,crate::storage::now()],
+        );
+    }
+    let _=app.emit("bot-shared-channel-changed",serde_json::json!({}));
 }
 
 /// Finalize the assignment whose turn just ended, copy its result into the channel or sender
@@ -729,6 +832,7 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         };
         let _=app.emit("bot-shared-channel-changed",serde_json::json!({"channelId":channel_id}));
         if callback { collaboration::finish_delivery(app, &delivery_id, reply).await; }
+        publish_post_acceptance_issue(app, &delivery_id).await;
     }
     // The window may have sent the next queued entry itself; credit it to its request.
     let running=state.agents.lock().map(|agents|agents.contains_key(session_id)).unwrap_or(false);

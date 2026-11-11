@@ -7337,8 +7337,17 @@ document.addEventListener('submit', event => {
       notify('Choose one valid relative file path for the scoped reviewer action.');
       return;
     }
+    const issueEnabled = councilEnabled && data.get('councilGithubIssue') === 'on';
+    const issueRepo = String(data.get('councilGithubRepo') ?? '').trim();
+    const validIssueRepo = /^[a-zA-Z0-9_.-]{1,100}\/[a-zA-Z0-9_.-]{1,100}$/.test(issueRepo)
+      && !issueRepo.split('/').some(part => part === '.' || part === '..');
+    if (issueEnabled && !validIssueRepo) {
+      notify('Specify the exact authorized GitHub repository as owner/name.');
+      return;
+    }
     const council = councilEnabled ? {
       target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
       ...(scopedFile ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),
         grants: [{ tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: filePath }],

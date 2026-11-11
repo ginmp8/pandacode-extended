@@ -31,6 +31,8 @@ export interface ChannelCouncilView {
   artifactRevision: string;
   notice?: string | null;
   reviewers: { botId: string | null; name: string; lens: string; round: number; score: number | null }[];
+  followupStatus?: string | null;
+  followupUrl?: string | null;
 }
 export interface SharedChannelDetail extends SharedChannelSummary {
   messages: SharedChannelMessage[];
@@ -89,7 +91,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     const description = message.kind === "direct_delegation"
       ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
     const council = message.council;
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupUrl?.startsWith('https://github.com/') ? ` · ${escape(council.followupUrl)}` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
@@ -161,6 +163,9 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
         <label><input type="radio" name="councilMode" value="auto" checked> Automatic native reviewers</label>
         <label><input type="radio" name="councilMode" value="selected"> Selected channel bots</label>
         <div class="bc-council-reviewer-options"><p>Choose 2–8 members other than any bot assigned this message.</p>${options}</div>
+        <div class="bc-council-followup"><label><input type="checkbox" name="councilGithubIssue"> After Council approval, create one GitHub issue with accepted findings</label>
+          <label>Authorized repository (owner/name) <input type="text" name="councilGithubRepo" maxlength="201" placeholder="owner/repository" autocomplete="off"></label>
+          <small>Uses the existing signed-in GitHub CLI. A failed or uncertain external write is reported separately; it never changes the Council verdict.</small></div>
         <div class="bc-council-selected-permissions"><label><input type="checkbox" name="councilScopedFile"> Allow one exact native file-inspection action</label><label>Authorized relative file path <input type="text" name="councilFilePath" maxlength="240" placeholder="src/example.ts" autocomplete="off"></label><small>Read-only by default. This does not authorize shell commands or checkout writes.</small></div>
       </fieldset>
     </div>

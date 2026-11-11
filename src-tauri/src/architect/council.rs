@@ -24,6 +24,32 @@ pub(super) const NUDGE_PENDING: &str = "This reviewer has reported and its score
 pub(super) const RUNNING_SEAT: &str = "This reviewer is running. Wait for its report; PandaCode fails it if it goes silent.";
 pub(super) const SCORED_STANDS: &str = "A scored seat stands. Fix the work and convene a new round.";
 /// For the failed-worker turn and the retry cap, when the worker is a reviewer.
+/// Explicit local user grant to create at most one GitHub issue for a
+/// Council-approved channel delivery. The action is fixed to issue creation;
+/// no skill, model prompt or ambient bot capability can broaden the repo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostAcceptanceIssue {
+    pub authorization_id: String,
+    pub repository: String,
+}
+impl PostAcceptanceIssue {
+    fn validate(&self) -> Result<()> {
+        if self.authorization_id.is_empty() || self.authorization_id.len() > 128
+            || self.authorization_id.chars().any(char::is_control)
+        { return Err("A user-authorized GitHub follow-up is required.".into()); }
+        let Some((owner, repo)) = self.repository.split_once('/') else {
+            return Err("Choose a GitHub repository in owner/name format.".into());
+        };
+        let valid = |part: &str| !part.is_empty() && part.len() <= 100
+            && part != "." && part != ".."
+            && part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !valid(owner) || !valid(repo) || self.repository.matches('/').count() != 1 {
+            return Err("Choose a GitHub repository in owner/name format.".into());
+        }
+        Ok(())
+    }
+}
 pub(super) const FAILED_REVIEWER: &str = " A failed Council reviewer is never followed up: cancel it (it has no score) and dispatch a fresh reviewer with councilLens.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,10 +73,13 @@ pub struct CouncilConfig {
     /// Explicit per-task host tool permissions; absent always means native read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_permissions: Option<super::reviewer_security::ReviewerPermissionSelection>,
+    /// Per-message, user-authorized GitHub issue creation only after native Council approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_acceptance_issue: Option<PostAcceptanceIssue>,
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
     }
 }
 impl CouncilConfig {
@@ -95,6 +124,7 @@ impl CouncilConfig {
             }
             for grant in &permissions.grants { grant.validate()?; }
         }
+        if let Some(followup) = &self.post_acceptance_issue { followup.validate()?; }
         if !self.reviewer_bot_ids.is_empty() {
             if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {
                 return Err(format!("Select {MIN_REVIEWERS} to {MAX_REVIEWERS} distinct Council reviewer bots."));

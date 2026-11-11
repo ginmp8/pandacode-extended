@@ -223,7 +223,18 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
             changed_at INTEGER NOT NULL,
             actor TEXT NOT NULL CHECK(actor='local_user'),
             reason TEXT NOT NULL CHECK(length(reason) BETWEEN 8 AND 1024),
-            accepted_at INTEGER NOT NULL);",
+            accepted_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_followups(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            authorization_id TEXT NOT NULL,
+            repository TEXT NOT NULL,
+            revision TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending','sending','succeeded','failed','unknown')),
+            issue_url TEXT,
+            error TEXT,
+            updated_at INTEGER NOT NULL);",
     ).map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -412,7 +412,19 @@ fn assignment_session(store: &Store, task_id: &str) -> Result<Option<String>> {
 pub(crate) fn read_only_policy(
     store: &Store, session_id: &str,
 ) -> Result<Option<crate::architect::reviewer_security::ReviewerToolPolicy>> {
-    let scope: Option<(String, String, i64, i64, i64, i64, i64, String, String, String)> = store.db.query_row(
+    struct AssignmentPolicyScope {
+        ticket_state: String,
+        assignment_state: String,
+        expiry: i64,
+        revoked: bool,
+        mandate_version: i64,
+        config_version: i64,
+        enabled: bool,
+        bot_id: String,
+        worker_id: String,
+        project_id: String,
+    }
+    let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
                 a.bot_id,t.worker_bot_id,t.project_id
          FROM sa_assignments a
@@ -421,18 +433,23 @@ pub(crate) fn read_only_policy(
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE a.session_id=?1 AND t.active_assignment_id=a.id",
         [session_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,
-                r.get(7)?,r.get(8)?,r.get(9)?)),
+        |r| Ok(AssignmentPolicyScope {
+            ticket_state: r.get(0)?, assignment_state: r.get(1)?,
+            expiry: r.get(2)?, revoked: r.get::<_, i64>(3)? != 0,
+            mandate_version: r.get(4)?, config_version: r.get(5)?,
+            enabled: r.get::<_, i64>(6)? != 0, bot_id: r.get(7)?,
+            worker_id: r.get(8)?, project_id: r.get(9)?,
+        }),
     ).optional().map_err(|e| e.to_string())?;
-    if let Some((task_state,assignment_state,expiry,revoked,mandate_version,config_version,enabled,
-                 bot_id,worker_id,project_id)) = scope {
-        if task_state != "running" || assignment_state != "running" || revoked != 0
-            || expiry <= storage::now() || mandate_version != config_version || enabled == 0
+    if let Some(scope) = scope {
+        if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
+            || scope.expiry <= storage::now()
+            || scope.mandate_version != scope.config_version || !scope.enabled
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
         }
-        let active_bot = bots::get(store, &bot_id)?;
-        if active_bot.paused || (bot_id == worker_id && active_bot.project_id != project_id) {
+        let active_bot = bots::get(store, &scope.bot_id)?;
+        if active_bot.paused || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id) {
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
         }
         return Ok(Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly));
@@ -1621,7 +1638,7 @@ mod tests {
         assert!(guard_run_admission(&store, &superagent_session, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_session, &[]).is_err());
         assert!(guard_run_admission(
-            &store, &superagent_session, &[ordinary_session.clone()],
+            &store, &superagent_session, std::slice::from_ref(&ordinary_session),
         ).is_err());
 
         // Even an unrelated direct session in the same checkout is not safe
@@ -1629,7 +1646,7 @@ mod tests {
         let ordinary = store.create_session("project", "codex", "default", "plan").unwrap();
         assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
         assert!(guard_run_admission(
-            &store, &superagent_session, &[ordinary.id.clone()],
+            &store, &superagent_session, std::slice::from_ref(&ordinary.id),
         ).is_err());
         fail_launch(&store, &ticket.id, "leave the project untouched").unwrap();
         assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());

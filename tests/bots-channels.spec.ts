@@ -11,7 +11,7 @@ async function showBots(page: Page): Promise<void> {
 
 test.describe('shared bot channels', () => {
 
-  test('opens Council from the channel footer, keeps settings in the form and closes with Escape', async ({ page }) => {
+  test('bot collaboration: Council opens from the channel footer, keeps settings in the form and closes with Escape', async ({ page }) => {
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     const composer = page.locator('#shared-channel-composer');
@@ -51,7 +51,7 @@ test.describe('shared bot channels', () => {
     await expect(composer.locator('.bc-council-controls')).toBeHidden();
   });
 
-  test('restores Council selection after a channel refresh without showing the settings inline', async ({ page }) => {
+  test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     const composer = page.locator('#shared-channel-composer');

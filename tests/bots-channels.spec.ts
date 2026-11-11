@@ -10,6 +10,75 @@ async function showBots(page: Page): Promise<void> {
 }
 
 test.describe('shared bot channels', () => {
+
+  test('opens Council from the channel footer, keeps settings in the form and closes with Escape', async ({ page }) => {
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    const trigger = composer.getByRole('button', { name: 'Council: off' });
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+
+    await expect(trigger).toBeVisible();
+    await expect(panel).toBeHidden();
+    await expect(composer.locator('.bc-council-controls')).toBeHidden();
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    const enabled = panel.getByRole('switch', { name: 'Council' });
+    await expect(enabled).toBeFocused();
+    await enabled.check();
+    await panel.getByRole('button', { name: '8.5', exact: true }).click();
+    await panel.getByRole('button', { name: '5', exact: true }).click();
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: on');
+    await expect(panel.getByRole('button', { name: '8.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    const values = await composer.evaluate(form => {
+      const data = new FormData(form as HTMLFormElement);
+      return { enabled: data.get('councilEnabled'), target: data.get('councilTarget'), rounds: data.get('councilMaxRounds') };
+    });
+    expect(values).toEqual({ enabled: 'on', target: '8.5', rounds: '5' });
+
+    // The number fields still permit values outside the presets.
+    await panel.getByRole('spinbutton', { name: 'Custom target score' }).fill('6.5');
+    await expect(panel.getByRole('button', { name: '8.5', exact: true })).toHaveAttribute('aria-pressed', 'false');
+    await page.keyboard.press('Escape');
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: on');
+    await prompt.fill('Keep the message composer independent');
+    await expect(prompt).toHaveValue('Keep the message composer independent');
+    await expect(composer.locator('.bc-council-controls')).toBeHidden();
+  });
+
+  test('restores Council selection after a channel refresh without showing the settings inline', async ({ page }) => {
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('button', { name: '9.5', exact: true }).click();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const reviewers = panel.locator('input[name="councilReviewer"]');
+    await expect(reviewers.first()).toBeVisible();
+    await reviewers.first().check();
+    await page.keyboard.press('Escape');
+
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    const restored = page.locator('#shared-channel-composer');
+    await expect(restored.getByRole('button', { name: 'Council: on' })).toBeVisible();
+    await expect(restored.locator('.bc-council-panel')).toBeHidden();
+    await restored.getByRole('button', { name: 'Council: on' }).click();
+    const restoredPanel = restored.getByRole('dialog', { name: 'Council' });
+    await expect(restoredPanel.getByRole('switch', { name: 'Council' })).toBeChecked();
+    await expect(restoredPanel.getByRole('button', { name: '9.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(restoredPanel.getByRole('radio', { name: 'Bots' })).toBeChecked();
+    await expect(restoredPanel.locator('input[name="councilReviewer"]').first()).toBeChecked();
+  });
+
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
     await page.goto('/?bots=sample');
     const html = await page.evaluate(async () => {

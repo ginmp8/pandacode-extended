@@ -559,13 +559,13 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
 /// its Ticket/Mandate/Assignment evidence remains independent of bot history.
 /// Called inside the bot reset's existing transaction; never makes a new runner.
 pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Result<()> {
-    let sql = if removed {
+    // Resetting either selected bot invalidates every nonterminal mandate:
+    // coordinator sessions are just as ephemeral as worker sessions, and a
+    // previously finished plan must not authorize a worker after reset.
+    let sql =
         "SELECT t.id,t.state FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1)
-         AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')"
-    } else {
-        "SELECT id,state FROM sa_tickets WHERE worker_bot_id=?1 AND state='running'"
-    };
+         AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')";
     let affected = {
         let mut stmt = store.db.prepare(sql).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([bot_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
@@ -1275,6 +1275,51 @@ mod tests {
     }
 
     #[test]
+    fn resetting_coordinator_revokes_inflight_and_queued_plans_without_losing_history() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (running, launched) = admit_role(
+            &mut store, &config.id, "Plan before reset", "coordinator-reset-running", false, true,
+        ).unwrap();
+        assert!(launched);
+        let running_session = assignment_session(&store, &running.id).unwrap().unwrap();
+        assert_eq!(bots::owner_of(&store, &running_session).unwrap().unwrap().0.id, "router");
+
+        // A successful coordinator turn only produces advice and a queued task.
+        let (queued, _) = admit_role(
+            &mut store, &config.id, "Keep this plan", "coordinator-reset-queued", true, false,
+        ).unwrap();
+        assert_eq!(queued.state, "blocked");
+        assert!(on_run_finished(&store, &running_session, true, "Plan evidence").unwrap());
+        assert_eq!(get_ticket(&store, &running.id).unwrap().state, "queued");
+        assert!(assignment_session(&store, &running.id).unwrap().is_none());
+
+        bots::reset(&store, "router").unwrap();
+        let affected = get_ticket(&store, &running.id).unwrap();
+        assert_eq!(affected.state, "blocked");
+        let mandate_revoked: i64 = store.db.query_row(
+            "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
+            [&running.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(mandate_revoked, 1);
+        assert!(prepare_coordinated_worker(&mut store, &running.id, false).is_err());
+        assert!(!on_run_finished(&store, &running_session, true, "late plan").unwrap());
+        assert!(history(&store, &running.id, 100).unwrap()
+            .iter().any(|entry| entry.kind == "bot_reset"));
+
+        // A coordinator running without a settled plan is also revoked.
+        let (next, _) = admit_role(
+            &mut store, &config.id, "Another plan", "coordinator-reset-again", false, true,
+        ).unwrap();
+        let next_session = assignment_session(&store, &next.id).unwrap().unwrap();
+        bots::reset(&store, "router").unwrap();
+        assert_eq!(get_ticket(&store, &next.id).unwrap().state, "interrupted");
+        assert_eq!(get_ticket(&store, &queued.id).unwrap().state, "blocked");
+        assert!(!on_run_finished(&store, &next_session, true, "stale").unwrap());
+        assert_eq!(history(&store, &next.id, 100).unwrap()[0].kind, "bot_reset");
+    }
+
+    #[test]
     fn ticket_history_survives_bot_and_session_deletion_and_reopen() {
         let mut store=fixture();
         let cfg=enabled(&store);
@@ -1356,7 +1401,10 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert_eq!(list_tickets(&reopened, &first_config.id, 100).unwrap().len(), 2);
-        assert_eq!(history(&reopened, &first.id, 100).unwrap()[0].kind, "admitted");
+        let replay = history(&reopened, &first.id, 100).unwrap();
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].kind, "restart_interrupted");
+        assert_eq!(replay[1].kind, "admitted");
         assert_eq!(get_ticket(&reopened, &first.id).unwrap().state, "interrupted");
     }
 

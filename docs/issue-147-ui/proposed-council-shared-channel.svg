@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title description"><title id="title">PandaCode Shared Channel Council per-delivery UI proposal</title><desc id="description">Current channel Council inline form reconstructed from a user-provided screenshot versus proposed compact per-delivery Council controls with a dedicated modal, reviewer roles, nested bots, criteria, strategy and result preview.</desc><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101520"/><stop offset="1" stop-color="#17111e"/></linearGradient></defs>
+<rect x="0" y="0" width="1600" height="960" rx="0" fill="url(#bg)" stroke="none" stroke-width="1"/>
+<rect x="0" y="0" width="1600" height="70" rx="12" fill="#151920" stroke="none" stroke-width="1"/>
+<text x="32" y="43" fill="#eef1f8" font-size="26" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">PandaCode Extended</text>
+<rect x="304" y="18" width="177" height="33" rx="9" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="316" y="40" fill="#a0abbc" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">SHARED CHANNELS</text>
+<text x="1580" y="42" fill="#a0abbc" font-size="14" font-weight="600" text-anchor="end" font-family="Inter, Segoe UI, Arial, sans-serif">ISSUE #147 · CHANNEL DELIVERY UI PROPOSAL</text>
+<rect x="32" y="89" width="253" height="33" rx="9" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="44" y="111" fill="#eef1f8" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">CURRENT · reference</text>
+<rect x="724" y="89" width="303" height="33" rx="9" fill="#352551" stroke="#aa8fff" stroke-width="1"/>
+<text x="736" y="111" fill="#aa8fff" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">PROPOSED · cleaner entry</text>
+<text x="34" y="145" fill="#eef1f8" font-size="22" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Council options are inline today</text>
+<text x="726" y="145" fill="#eef1f8" font-size="22" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Compact channel composer + Council modal</text>
+<rect x="30" y="165" width="660" height="690" rx="18" fill="#151618" stroke="#343c4b" stroke-width="1"/>
+<text x="62" y="210" fill="#a0abbc" font-size="18" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Message #lab-security... @mention up to two bots</text>
+<rect x="61" y="262" width="22" height="22" rx="5" fill="#518ce8" stroke="none" stroke-width="1"/>
+<path d="M 65 273 l 5 5 l 9 -11" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="97" y="280" fill="#a0abbc" font-size="17" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Council review this message</text>
+<rect x="59" y="307" width="602" height="451" rx="9" fill="#18191b" stroke="#343c4b" stroke-width="1"/>
+<text x="75" y="335" fill="#eef1f8" font-size="16" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Council settings (this message only)</text>
+<text x="75" y="378" fill="#a0abbc" font-size="15" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Target score</text>
+<rect x="181" y="353" width="72" height="41" rx="8" fill="#24262a" stroke="#343c4b" stroke-width="1"/>
+<text x="215" y="380" fill="#eef1f8" font-size="17" font-weight="500" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif">9</text>
+<text x="283" y="378" fill="#a0abbc" font-size="15" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Max rounds</text>
+<rect x="390" y="353" width="75" height="41" rx="8" fill="#24262a" stroke="#343c4b" stroke-width="1"/>
+<text x="428" y="380" fill="#eef1f8" font-size="17" font-weight="500" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif">10</text>
+<circle cx="108" cy="432" r="11" fill="#518ce8" stroke="#518ce8" stroke-width="2"/><circle cx="108" cy="432" r="5.5" fill="#c3ddff"/>
+<text x="138" y="438" fill="#a0abbc" font-size="16" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Automatic native reviewers</text>
+<circle cx="108" cy="484" r="11" fill="#222833" stroke="#5e6370" stroke-width="2"/><circle cx="108" cy="484" r="5.5" fill="none"/>
+<text x="138" y="490" fill="#a0abbc" font-size="16" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Selected channel bots</text>
+<rect x="78" y="542" width="22" height="22" rx="5" fill="#151920" stroke="#343c4b" stroke-width="1"/>
+<text x="110" y="555" fill="#a0abbc" font-size="16" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">After Council approval, create a GitHub issue</text>
+<text x="110" y="577" fill="#a0abbc" font-size="14" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">using accepted findings</text>
+<text x="76" y="626" fill="#a0abbc" font-size="14" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Authorized repository (owner/name)</text>
+<rect x="76" y="640" width="545" height="41" rx="10" fill="#222427" stroke="none" stroke-width="1"/>
+<text x="93" y="667" fill="#81858f" font-size="15" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">owner/repository</text>
+<text x="75" y="714" fill="#a0abbc" font-size="12" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">External write failures do not modify the Council verdict.</text>
+<text x="640" y="817" fill="#518ce8" font-size="14" font-weight="600" text-anchor="end" font-family="Inter, Segoe UI, Arial, sans-serif">Send</text>
+<path d="M 696 493 L 715 493" stroke="#aa8fff" stroke-width="3" stroke-linecap="round"/><path d="M 709 484 L 720 493 L 709 502" stroke="#aa8fff" stroke-width="3" fill="none" stroke-linecap="round"/>
+<rect x="723" y="165" width="843" height="690" rx="18" fill="#151920" stroke="#343c4b" stroke-width="1"/>
+<text x="745" y="205" fill="#a0abbc" font-size="17" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Message #lab-security... @mention up to two bots</text>
+<rect x="745" y="240" width="799" height="112" rx="12" fill="#1d1f25" stroke="#343c4b" stroke-width="1"/>
+<text x="767" y="274" fill="#a0abbc" font-size="16" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Describe the task for selected channel bots...</text>
+<rect x="766" y="303" width="22" height="22" rx="5" fill="#518ce8" stroke="none" stroke-width="1"/>
+<path d="M 770 314 l 5 5 l 9 -11" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="796" y="320" fill="#eef1f8" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Council enabled for this message</text>
+<rect x="1186" y="294" width="198" height="39" rx="9" fill="#352551" stroke="#aa8fff" stroke-width="1"/>
+<text x="1285" y="320" fill="#f7efff" font-size="15" font-weight="600" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif">Configure Council</text>
+<rect x="1395" y="294" width="138" height="39" rx="9" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="1464" y="320" fill="#eef1f8" font-size="15" font-weight="600" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif">Send</text>
+<rect x="779" y="380" width="747" height="421" rx="15" fill="#1b2029" stroke="#6f559c" stroke-width="1.5"/>
+<text x="803" y="417" fill="#eef1f8" font-size="22" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Council · this channel message only</text>
+<text x="803" y="441" fill="#a0abbc" font-size="13" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">The selected mode applies to this delivery, not other bot chats.</text>
+<rect x="800" y="457" width="707" height="1" rx="0" fill="#343c4b" stroke="none" stroke-width="1"/>
+<text x="800" y="482" fill="#eef1f8" font-size="17" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Reviewer sources</text>
+<text x="800" y="503" fill="#a0abbc" font-size="12" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Channel membership and bot eligibility are enforced</text>
+<rect x="801" y="496" width="22" height="22" rx="5" fill="#518ce8" stroke="none" stroke-width="1"/>
+<path d="M 805 507 l 5 5 l 9 -11" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="835" y="513" fill="#eef1f8" font-size="15" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Architect reviewers (automatic)</text>
+<rect x="800" y="533" width="365" height="40" rx="8" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="814" y="559" fill="#eef1f8" font-size="16" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Security Bot</text>
+<rect x="1002" y="537" width="153" height="33" rx="9" fill="#352551" stroke="none" stroke-width="1"/>
+<text x="1014" y="559" fill="#aa8fff" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Own Council</text>
+<rect x="800" y="580" width="365" height="40" rx="8" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="814" y="606" fill="#eef1f8" font-size="16" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">QA Bot</text>
+<rect x="1015" y="584" width="140" height="33" rx="9" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="1027" y="606" fill="#eef1f8" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Direct review</text>
+<text x="1192" y="481" fill="#eef1f8" font-size="17" font-weight="700" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Criteria and strategy</text>
+<text x="1192" y="502" fill="#a0abbc" font-size="12" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Mandatory items remain visible</text>
+<rect x="1192" y="500" width="145" height="33" rx="9" fill="#352551" stroke="#aa8fff" stroke-width="1"/>
+<text x="1204" y="522" fill="#aa8fff" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Hybrid criteria</text>
+<text x="1192" y="560" fill="#eef1f8" font-size="13" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Security and authorization</text>
+<text x="1192" y="585" fill="#eef1f8" font-size="13" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Compatibility and regression</text>
+<rect x="1192" y="612" width="141" height="33" rx="9" fill="#352551" stroke="#aa8fff" stroke-width="1"/>
+<text x="1204" y="634" fill="#aa8fff" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Escalated</text>
+<rect x="801" y="654" width="702" height="66" rx="10" fill="#252037" stroke="#7154a4" stroke-width="1"/>
+<rect x="816" y="671" width="83" height="33" rx="9" fill="#352551" stroke="none" stroke-width="1"/>
+<text x="828" y="693" fill="#aa8fff" font-size="14" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Mode 7</text>
+<text x="912" y="692" fill="#eef1f8" font-size="16" font-weight="650" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Mixed bots + Architect · task-scoped</text>
+<text x="1251" y="691" fill="#a0abbc" font-size="14" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">Nested: 1</text>
+<rect x="1197" y="742" width="133" height="39" rx="9" fill="#222833" stroke="#343c4b" stroke-width="1"/>
+<text x="1263.5" y="768" fill="#eef1f8" font-size="15" font-weight="600" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif">Cancel</text>
+<rect x="1340" y="742" width="166" height="39" rx="9" fill="#352551" stroke="#aa8fff" stroke-width="1"/>
+<text x="1423" y="768" fill="#f7efff" font-size="15" font-weight="600" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif">Apply to message</text>
+<text x="32" y="889" fill="#a0abbc" font-size="13" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">CURRENT REFERENCE RECONSTRUCTED FROM A USER-PROVIDED SCREENSHOT</text>
+<text x="724" y="889" fill="#a0abbc" font-size="13" font-weight="600" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">PROPOSED UI CONCEPT · NOT A LIVE PRODUCT CAPTURE</text>
+<text x="32" y="927" fill="#a0abbc" font-size="14" font-weight="400" text-anchor="start" font-family="Inter, Segoe UI, Arial, sans-serif">This illustration changes no production images, app code or bot configuration.</text>
+</svg>

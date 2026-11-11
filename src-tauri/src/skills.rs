@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 use adapter::Surface;
+pub(crate) use safety::scan as scan_safety;
 pub use safety::Finding;
 
 /// Relative path and bytes of each file in a skill or rule.
@@ -111,6 +112,10 @@ pub struct Item {
     pub meta: Meta,
     pub files: Vec<String>,
     pub findings: Vec<Finding>,
+    /// The library copy's absolute folder, for skills only: Skills → Add skill installs it as a
+    /// local-folder source (Rules & library's **Install…**).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,16 +209,29 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id == slug(id)
 }
 /// `name:` and `description:` from leading `---` frontmatter, and the text after it.
-fn frontmatter(text: &str) -> (Option<String>, Option<String>, &str) {
-    let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else { return (None, None, text) };
-    let Some(end) = rest.find("\n---") else { return (None, None, text) };
+pub(crate) fn frontmatter(text: &str) -> (Option<String>, Option<String>, &str) {
+    let Some(rest) = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+    else {
+        return (None, None, text);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (None, None, text);
+    };
     let lines: Vec<&str> = rest[..end].lines().collect();
     let field = |key: &str| {
         let at = lines.iter().position(|line| line.starts_with(key))?;
         let value = lines[at][key.len()..].trim();
         // A YAML block scalar (`description: >-`) continues on the indented lines below it.
         let value = if matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+") {
-            lines[at + 1..].iter().take_while(|l| l.starts_with([' ', '\t']) || l.trim().is_empty()).map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+            lines[at + 1..]
+                .iter()
+                .take_while(|l| l.starts_with([' ', '\t']) || l.trim().is_empty())
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
         } else {
             value.trim_matches(['"', '\'']).to_string()
         };
@@ -267,13 +285,16 @@ fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
 
 /// Managed packages retain hidden supporting files; legacy local-folder imports
 /// exclude hidden files so unrelated dotfiles are not enrolled unexpectedly.
-fn read_local(path: &Path, include_hidden: bool) -> Result<Files, String> {
+pub(crate) fn read_local(path: &Path, include_hidden: bool) -> Result<Files, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
     if meta.is_file() {
         if meta.len() as usize > MAX_BYTES {
             return Err(format!("That file is larger than {} MiB.", MAX_BYTES >> 20));
         }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "SKILL.md".into());
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "SKILL.md".into());
         return Ok(vec![(name, fs::read(path).map_err(|e| e.to_string())?)]);
     }
     let mut files = Vec::new();
@@ -286,7 +307,9 @@ fn read_local(path: &Path, include_hidden: bool) -> Result<Files, String> {
             if name == ".git" || (!include_hidden && name.starts_with('.')) {
                 continue;
             }
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if kind.is_file() {
@@ -295,7 +318,12 @@ fn read_local(path: &Path, include_hidden: bool) -> Result<Files, String> {
                 if files.len() >= MAX_FILES || total > MAX_BYTES {
                     return Err(format!("That folder holds more than {MAX_FILES} files or {} MiB.", MAX_BYTES >> 20));
                 }
-                let relative = entry.path().strip_prefix(path).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
+                let relative = entry
+                    .path()
+                    .strip_prefix(path)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 files.push((relative, bytes));
             }
         }
@@ -341,8 +369,19 @@ impl Library {
     }
     fn item(&self, meta: Meta) -> Result<Item, String> {
         let files = self.files(&meta.id)?;
-        let findings = files.iter().flat_map(|(path, bytes)| safety::scan(path, &String::from_utf8_lossy(bytes))).collect();
-        Ok(Item { files: files.into_iter().map(|(p, _)| p).collect(), findings, meta })
+        let findings = files
+            .iter()
+            .flat_map(|(path, bytes)| safety::scan(path, &String::from_utf8_lossy(bytes)))
+            .collect();
+        let folder = Some(self.dir.join(&meta.id))
+            .filter(|dir| meta.kind == Kind::Skill && dir.is_absolute() && dir.is_dir())
+            .map(|dir| dir.to_string_lossy().into_owned());
+        Ok(Item {
+            files: files.into_iter().map(|(p, _)| p).collect(),
+            findings,
+            folder,
+            meta,
+        })
     }
 
     /// Recover an import interrupted after the previous folder was renamed but before its
@@ -378,11 +417,18 @@ impl Library {
         let Ok(entries) = fs::read_dir(&self.dir) else { return Ok(Vec::new()) };
         let mut ids: Vec<String> = entries
             .flatten()
-            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".json").map(str::to_string))
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()?
+                    .strip_suffix(".json")
+                    .map(str::to_string)
+            })
             .filter(|id| valid_id(id))
             .collect();
         ids.sort();
-        ids.into_iter().map(|id| self.load(&id).and_then(|meta| self.item(meta))).collect()
+        ids.into_iter()
+            .map(|id| self.load(&id).and_then(|meta| self.item(meta)))
+            .collect()
     }
 
     /// Optional package icons are bounded data. The webview checks SVG markup before display.
@@ -446,7 +492,13 @@ impl Library {
 
     /// Add or update an item. Updating keeps activations; they show as outdated until the
     /// user activates again, so a new version never reaches a harness without them.
-    pub fn import(&self, kind: Kind, files: Files, fallback_name: &str, source: Source) -> Result<Item, String> {
+    pub fn import(
+        &self,
+        kind: Kind,
+        files: Files,
+        fallback_name: &str,
+        source: Source,
+    ) -> Result<Item, String> {
         self.import_as(kind, files, fallback_name, source, false)
     }
 
@@ -462,10 +514,22 @@ impl Library {
         same_source_only: bool, require_absent: bool,
     ) -> Result<Item, String> {
         let files = normalize(kind, files)?;
-        let main = files.iter().find(|(p, _)| p == main_file(kind)).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+        let main = files
+            .iter()
+            .find(|(p, _)| p == main_file(kind))
+            .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
         let (name, description, body) = frontmatter(&main);
         let name = name.unwrap_or_else(|| fallback_name.trim_end_matches(".md").to_string());
-        let description = description.unwrap_or_else(|| body.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or_default().chars().take(200).collect());
+        let description = description.unwrap_or_else(|| {
+            body.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect()
+        });
         let id = slug(&name);
         if id.is_empty() {
             return Err("Give the skill a name in its frontmatter.".into());
@@ -639,36 +703,91 @@ impl Library {
             }
             Surface::Prompt => ("prompt", Vec::new()),
         };
-        let activation = Activation { harness: harness.into(), scope, project: project.clone(), surface: surface.into(), sha256: meta.sha256.clone(), files: written, excluded };
-        let activations = meta.activations.iter().filter(|a| !matches(a)).cloned().chain([activation]).collect();
-        self.save(&Meta { acknowledged, activations, ..meta })?;
+        let activation = Activation {
+            harness: harness.into(),
+            scope,
+            project: project.clone(),
+            surface: surface.into(),
+            sha256: meta.sha256.clone(),
+            files: written,
+            excluded,
+        };
+        let activations = meta
+            .activations
+            .iter()
+            .filter(|a| !matches(a))
+            .cloned()
+            .chain([activation])
+            .collect();
+        self.save(&Meta {
+            acknowledged,
+            activations,
+            ..meta
+        })?;
         drop(_guard);
-        Ok(Change { items: self.list()?, kept })
+        Ok(Change {
+            items: self.list()?,
+            kept,
+        })
     }
 
-    pub fn deactivate(&self, id: &str, harness: &str, scope: Scope, root: Option<&Path>) -> Result<Change, String> {
+    pub fn deactivate(
+        &self,
+        id: &str,
+        harness: &str,
+        scope: Scope,
+        root: Option<&Path>,
+    ) -> Result<Change, String> {
         let base = self.base(scope, root)?;
         let project = (scope == Scope::Project).then(|| base.to_string_lossy().into_owned());
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         let meta = self.load(id)?;
-        let matches = |a: &Activation| a.harness == harness && a.scope == scope && a.project == project;
+        let matches =
+            |a: &Activation| a.harness == harness && a.scope == scope && a.project == project;
         let Some(activation) = meta.activations.iter().find(|a| matches(a)).cloned() else {
             return Err(format!("{} is not active there.", meta.name));
         };
-        let kept = match activation.surface.as_str() {
-            "folder" => adapter::remove_folder(&activation.files),
-            "block" => activation.files.iter().filter(|w| !matches!(adapter::remove_block(w, id), Ok(true))).map(|w| w.path.clone()).collect(),
-            _ => Vec::new(),
-        };
-        if scope == Scope::Project && kept.is_empty() {
-            for entry in &activation.excluded {
-                adapter::unexclude(base, entry);
-            }
-        }
-        let activations = meta.activations.iter().filter(|a| !matches(a)).cloned().collect();
-        self.save(&Meta { activations, ..meta })?;
+        let kept = undo(id, &activation, Some(base));
+        let activations = meta
+            .activations
+            .iter()
+            .filter(|a| !matches(a))
+            .cloned()
+            .collect();
+        self.save(&Meta {
+            activations,
+            ..meta
+        })?;
         drop(_guard);
-        Ok(Change { items: self.list()?, kept })
+        Ok(Change {
+            items: self.list()?,
+            kept,
+        })
+    }
+
+    /// Turns an item off for every harness and scope it was activated in, including
+    /// activations an older build made that the page no longer offers a switch for. Each
+    /// project activation is undone in the checkout it recorded; edited files stay (`kept`).
+    pub fn deactivate_all(&self, id: &str) -> Result<Change, String> {
+        let _guard = LOCK.lock().map_err(|e| e.to_string())?;
+        let meta = self.load(id)?;
+        let mut kept = Vec::new();
+        for activation in &meta.activations {
+            let base = match activation.scope {
+                Scope::User => Some(self.home.as_path()),
+                Scope::Project => activation.project.as_deref().map(Path::new),
+            };
+            kept.extend(undo(id, activation, base));
+        }
+        self.save(&Meta {
+            activations: Vec::new(),
+            ..meta
+        })?;
+        drop(_guard);
+        Ok(Change {
+            items: self.list()?,
+            kept,
+        })
     }
 
     /// Refuses while anything is active, so no harness keeps files the library forgot.
@@ -755,39 +874,107 @@ impl Library {
                             unmanaged.push(Unmanaged { scope: *scope, kind: Kind::Rule, path: path.clone(), detail: format!("Has a PandaCode block for {id} that the library does not track.") });
                         }
                         if other {
-                            unmanaged.push(Unmanaged { scope: *scope, kind: Kind::Rule, path, detail: "Has instructions PandaCode does not manage.".into() });
+                            unmanaged.push(Unmanaged {
+                                scope: *scope,
+                                kind: Kind::Rule,
+                                path,
+                                detail: "Has instructions PandaCode does not manage.".into(),
+                            });
                         }
                     }
                 }
             }
-            harnesses.push(HarnessRow { harness: harness.to_string(), installed, prompt, cells, unmanaged });
+            harnesses.push(HarnessRow {
+                harness: harness.to_string(),
+                installed,
+                prompt,
+                cells,
+                unmanaged,
+            });
         }
         Ok(Matrix { project, harnesses })
     }
 }
 
-fn active_in<'m>(meta: &'m Meta, harness: &str, scope: Scope, project: &Option<String>) -> Option<&'m Activation> {
-    meta.activations.iter().find(|a| a.harness == harness && a.scope == scope && a.project == *project)
+/// Removes one activation's files (an edited file stays and is returned) and, when nothing
+/// was kept, the project exclude lines it added to `base`.
+fn undo(id: &str, activation: &Activation, base: Option<&Path>) -> Vec<String> {
+    let kept: Vec<String> = match activation.surface.as_str() {
+        "folder" => adapter::remove_folder(&activation.files),
+        "block" => activation
+            .files
+            .iter()
+            .filter(|w| !matches!(adapter::remove_block(w, id), Ok(true)))
+            .map(|w| w.path.clone())
+            .collect(),
+        _ => Vec::new(),
+    };
+    if let (Scope::Project, true, Some(base)) = (activation.scope, kept.is_empty(), base) {
+        for entry in &activation.excluded {
+            adapter::unexclude(base, entry);
+        }
+    }
+    kept
+}
+fn active_in<'m>(
+    meta: &'m Meta,
+    harness: &str,
+    scope: Scope,
+    project: &Option<String>,
+) -> Option<&'m Activation> {
+    meta.activations
+        .iter()
+        .find(|a| a.harness == harness && a.scope == scope && a.project == *project)
 }
 
 /// Whether a project activation's files sit outside the folder its harness reads now, as Codex
 /// skills recorded under `.codex/skills` do since it moved to `.agents/skills`.
 fn outside_surface(kind: Kind, activation: &Activation) -> bool {
-    let Some(project) = activation.project.as_deref().filter(|_| activation.surface == "folder") else { return false };
-    let Surface::Folder(dir) = adapter::surface(&activation.harness, kind, activation.scope, Path::new(project)) else { return false };
-    activation.files.iter().any(|file| !Path::new(&file.path).starts_with(&dir))
+    let Some(project) = activation
+        .project
+        .as_deref()
+        .filter(|_| activation.surface == "folder")
+    else {
+        return false;
+    };
+    let Surface::Folder(dir) = adapter::surface(
+        &activation.harness,
+        kind,
+        activation.scope,
+        Path::new(project),
+    ) else {
+        return false;
+    };
+    activation
+        .files
+        .iter()
+        .any(|file| !Path::new(&file.path).starts_with(&dir))
 }
 
 pub(crate) fn library(app: &AppHandle) -> Result<Library, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("skills");
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("skills");
     let home = crate::agent_usage_providers::home().ok_or("Could not find your home folder.")?;
     Ok(Library::new(dir, home))
 }
 fn repo_name(repo: &str) -> String {
-    repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').trim_end_matches(".git").to_string()
+    repo.trim()
+        .trim_start_matches("https://github.com/")
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string()
 }
-fn root(state: &AppState, project_id: Option<String>, session_id: Option<String>) -> Result<Option<PathBuf>, String> {
-    project_id.map(|id| state.root(&id, session_id.as_deref())).transpose()
+fn root(
+    state: &AppState,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<Option<PathBuf>, String> {
+    project_id
+        .map(|id| state.root(&id, session_id.as_deref()))
+        .transpose()
 }
 
 #[tauri::command]
@@ -818,7 +1005,13 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
     .await
 }
 #[tauri::command]
-pub async fn skills_import_github(app: AppHandle, repo: String, path: String, git_ref: Option<String>, kind: Kind) -> crate::Result<Item> {
+pub async fn skills_import_github(
+    app: AppHandle,
+    repo: String,
+    path: String,
+    git_ref: Option<String>,
+    kind: Kind,
+) -> crate::Result<Item> {
     crate::blocking(move || {
         let (repo, path, git_ref) = github::selection(&repo, &path, git_ref.as_deref())?;
         let (files, commit) = github::fetch(&repo, &path, git_ref.as_deref())?;
@@ -835,12 +1028,31 @@ pub async fn skills_activate(app: AppHandle, state: State<'_, AppState>, id: Str
     crate::blocking(move || library(&app)?.activate_with_replacement(&id, &harness, scope, root.as_deref(), acknowledge.unwrap_or(false), replace_existing.unwrap_or(false))).await
 }
 #[tauri::command]
-pub async fn skills_deactivate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>) -> crate::Result<Change> {
+pub async fn skills_deactivate(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    harness: String,
+    scope: Scope,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> crate::Result<Change> {
     let root = root(&state, project_id, session_id)?;
     crate::blocking(move || library(&app)?.deactivate(&id, &harness, scope, root.as_deref())).await
 }
+/// Turns a library item off everywhere it is active (Rules & library's way out of legacy
+/// activations before **Remove**).
 #[tauri::command]
-pub async fn skills_matrix(app: AppHandle, state: State<'_, AppState>, project_id: Option<String>, session_id: Option<String>) -> crate::Result<Matrix> {
+pub async fn skills_deactivate_all(app: AppHandle, id: String) -> crate::Result<Change> {
+    crate::blocking(move || library(&app)?.deactivate_all(&id)).await
+}
+#[tauri::command]
+pub async fn skills_matrix(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> crate::Result<Matrix> {
     let root = root(&state, project_id, session_id)?;
     crate::blocking(move || library(&app)?.matrix(root.as_deref())).await
 }
@@ -1058,6 +1270,7 @@ pub fn begin_startup_sync(app: AppHandle) {
 
 #[cfg(test)]
 mod tests;
+
 #[cfg(test)]
 mod catalog_tests;
 
@@ -1136,4 +1349,120 @@ pub async fn skills_preview_file(app: AppHandle, id: String, file: String) -> cr
 #[tauri::command]
 pub async fn skills_github_preview_file(repo: String, path: String, commit: String, file: String) -> crate::Result<customize::PreviewFile> {
     crate::blocking(move || customize::github_preview(&repo, &path, &commit, &file)).await
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    #[test]
+    fn skills_list_items_carry_the_library_copy_folder_for_skills_only() {
+        let base =
+            std::env::temp_dir().join(format!("pandacode-skills-folder-{}", uuid::Uuid::new_v4()));
+        let library = Library::new(base.join("library"), base.join("home"));
+        let source = |kind: &str| Source {
+            kind: kind.into(),
+            location: "/source".into(),
+            git_ref: None,
+            commit: None,
+        };
+        let skill = library
+            .import(
+                Kind::Skill,
+                vec![(
+                    "SKILL.md".into(),
+                    b"---\nname: Release\n---\nBody\n".to_vec(),
+                )],
+                "release",
+                source("folder"),
+            )
+            .unwrap();
+        let rule = library
+            .import(
+                Kind::Rule,
+                vec![(
+                    "guard.md".into(),
+                    b"---\nname: Guard\n---\nNever.\n".to_vec(),
+                )],
+                "guard",
+                source("folder"),
+            )
+            .unwrap();
+        let folder = PathBuf::from(skill.folder.as_deref().unwrap());
+        assert!(folder.is_absolute() && folder.join("SKILL.md").is_file());
+        assert!(rule.folder.is_none());
+        let listed = library.list().unwrap();
+        let value = serde_json::to_value(&listed).unwrap();
+        let by_id = |id: &str| {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            by_id(&skill.meta.id)["folder"],
+            folder.to_string_lossy().as_ref()
+        );
+        assert!(by_id(&rule.meta.id).get("folder").is_none());
+        let _ = fs::remove_dir_all(base);
+    }
+}
+#[cfg(test)]
+mod deactivate_all_tests {
+    use super::*;
+    #[test]
+    fn skills_deactivate_all_undoes_legacy_activations_everywhere_so_remove_succeeds() {
+        let base =
+            std::env::temp_dir().join(format!("pandacode-skills-off-{}", uuid::Uuid::new_v4()));
+        let home = base.join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let project = base.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let library = Library::new(base.join("library"), home.clone());
+        let source = Source {
+            kind: "folder".into(),
+            location: "/source".into(),
+            git_ref: None,
+            commit: None,
+        };
+        let item = library
+            .import(
+                Kind::Skill,
+                vec![(
+                    "SKILL.md".into(),
+                    b"---\nname: Release\n---\nBody\n".to_vec(),
+                )],
+                "release",
+                source,
+            )
+            .unwrap();
+        let id = item.meta.id.clone();
+        library
+            .activate(&id, "claude", Scope::User, None, false)
+            .unwrap();
+        library
+            .activate(&id, "codex", Scope::User, None, false)
+            .unwrap();
+        library
+            .activate(&id, "claude", Scope::Project, Some(&project), false)
+            .unwrap();
+        let user_copy = home.join(".claude/skills").join(&id).join("SKILL.md");
+        let project_copy = project.join(".claude/skills").join(&id).join("SKILL.md");
+        assert!(user_copy.is_file() && project_copy.is_file());
+        assert!(library.remove(&id).unwrap_err().contains("off everywhere"));
+        // An edited copy stays where it is and is reported.
+        fs::write(&project_copy, "my edit").unwrap();
+        let change = library.deactivate_all(&id).unwrap();
+        assert_eq!(change.kept, [project_copy.to_string_lossy().into_owned()]);
+        assert!(!user_copy.exists());
+        assert!(!home.join(".codex/skills").join(&id).exists());
+        assert_eq!(fs::read_to_string(&project_copy).unwrap(), "my edit");
+        assert!(change.items.iter().all(|i| i.meta.activations.is_empty()));
+        assert!(library.remove(&id).unwrap().is_empty());
+        assert!(library.deactivate_all("missing").is_err());
+        let _ = fs::remove_dir_all(base);
+    }
 }

@@ -87,6 +87,13 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Complete 80 shared customized-file hunk classifications and native app control-state testing; do not use absence of missing paths as proof of functional parity.
 - [ ] Verify final exact-SHA CI jobs and native installed-app/mobile/Connect/MCP/cloud/VM/credential scenarios. The integration-commit [push](https://github.com/ginmp8/pandacode-extended/actions/runs/42503275362) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/42503280072) were in progress on first inspection; local tests did not run.
 
+
+## Verified CI checkpoint — 2026-11-08
+
+- [x] Verify [push CI #42503386681](https://github.com/ginmp8/pandacode-extended/actions/runs/42503386681) and [PR CI #42503391142](https://github.com/ginmp8/pandacode-extended/actions/runs/42503391142) at **`e33fb2fd93aaa130f5e480db7d0e227fe966e1cf`**: both completed successfully with **6/6 jobs** (typecheck/Node/website, Rust check/tests, npm dependency audit, RustSec, mobile/Expo and ONNX/macOS).
+- [ ] Verify CI again for any later `base/development` SHA, including this documentation-only correction; earlier green CI does not transfer to a different SHA.
+- [ ] Complete all 80 shared hunk classifications and native Settings On/Off, Council, Connect/MCP/cloud/VM, credentials, and installer acceptance before claiming functional parity or approving Extended 0.12.0. Local tests were not executed during this follow-up.
+
 ## PandaCode 0.3.105 source checkpoint — 2026-11-08
 
 - [x] Pin the exact [fork `main` SHA `f28c4df0`](https://github.com/ginmp8/pandacode/commit/f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665), tree `49077426e74a7134da8f3393a6abff32b9cc07c4`, and read native app version **0.3.105** from source manifests.
@@ -142,3 +149,104 @@ Council's review loop and imported test files establish source coverage, not rel
 - [ ] Approve Extended `0.12.0` release separately; passing CI does not authorize tagging or distribution.
 
 The earlier unchecked CI items were authored while the remediation jobs were pending. They are superseded only for the verified code SHA above. Any new documentation commit has its own CI identity.
+
+
+## Upstream 0.3.107 Skills manager checkpoint — 2026-11-10
+
+- [x] Pin upstream [`5998a8fc085e`](https://github.com/ginmp8/pandacode/commit/5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1) and reconcile all 92 changed tracked paths in a complete nontruncated candidate tree (75 source-exact, 15 adapted, two deleted), with zero missing upstream files and retained Extended-only files.
+- [x] Align the six npm/Cargo/Tauri application version fields to 0.3.107 without changing the planned Extended distribution 0.12.0.
+- [x] Verify the upstream 0.3.107 code commit as a one-parent update on `base/development`, followed by exact-source/destination ref readback (see follow-up below).
+- [x] Verify all six existing GitHub Actions jobs on each exact-code-SHA push/PR run; live native Skills CLI, platform integration and Settings On/Off acceptance remain unverified (see follow-up below).
+- [ ] Verify new Skills controls coexist with Feature controls, Connect/MCP/cloud/VM/credentials/bot pause and legacy migrated settings, without disabling upstream behavior.
+
+## Verification follow-up on the published code SHA — 2026-11-10
+
+- [x] Confirm the imported code commit [`e4e5c0c51daa`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050) is a single-parent child of `590f7cc40f860669266414226c408bb8a1667349`; verify live source and destination HEADs and all tracked paths by nontruncated Git tree SHA/mode inventory.
+- [x] Verify the two exact-code-SHA GitHub Actions runs: [push #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388), each with six successful jobs and no failed/skipped jobs.
+- [ ] Independently exercise live Skills CLI, Windows/Linux installation, SQLite migrations/rollback, Settings On/Off, Connect/MCP/bots/cloud/VM/credentials and review all 80 customized shared-file hunks.
+
+Passing CI does not constitute Extended 0.12.0 release approval. Any subsequent documentation commit has its own SHA and must not inherit code-commit CI as a claim of exact-SHA CI success.
+
+## Upstream 0.3.108 voice-dictation integration — 2026-11-10
+
+- Source: [`ginmp8/pandacode:main` `952d0acbe02547af036ef6d7635ec415a472eb3b`](https://github.com/ginmp8/pandacode/commit/952d0acbe02547af036ef6d7635ec415a472eb3b), tree `202f77088372d261b263b806354d84ce094f25b8`, native app version **0.3.108**; includes commits after the source's release commit. The planned Extended distribution documentation remains **0.12.0 DRAFT**.
+- Reconciled the 109-path source delta relative to `5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1`: 78 additions (including Rust/frontend audio input, model catalog, tests and notices), 17 exact source updates and 14 changes reconciled with Extended behavior. The inherited voice feature supports optional on-device speech models and configured transcription services, transcription into the composer, explicit recording/stop and tests. This is not an Extended-only invention.
+- Preserved Extended Feature controls, release identity and dependency remediation, including `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. Native microphone permissions, service credentials, model downloads, user-cancelled recording, offline transcription and Settings states need separate behavior checks.
+- This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
+
+- [ ] Confirm exact-SHA CI on the 0.3.108 voice integration commit, including every new platform Clippy matrix row.
+- [ ] Exercise microphone permission/denial, local model download/test/transcribe, configured provider transcription, stop/cancel/exit and composer insertion without sending, and Extended Feature controls On/Off independently.
+
+
+## Post-0.3.108 source checkpoint — 2026-11-10
+
+- [x] Freeze fork [`57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1), tree `6d7f582267471080a5752e243769a4684e1994a3`, and retain the native version `0.3.108`.
+- [x] Integrate all seven changed upstream paths, six exact and one Extended-manual-publish release gate adaptation; preserve tag-only builds and disable npm publication.
+- [x] Verify untruncated source Git inventory (1,696 paths), and reconcile against 1,753 Extended paths with no missing/mode mismatches.
+- [ ] Verify CI on the **published destination SHA** and distinguish pending, skipped, successful and failed jobs.
+- [ ] Verify native Voice, Settings On/Off, Connect/MCP/bots/cloud/VM, credentials, SQLite migration and installer behavior; classify 80 longstanding shared-file differences by hunk.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+- [x] Freeze source `8682acaf97dcd57217087d07deaa21e1dc6bb751`, tree `9405c4f98758a73fb559066bda62acd920fe75fd`, version **0.3.108**, Extended planned documentation **0.12.0**.
+- [x] Reconcile four upstream paths: three exact, one manual-release guard adaptation; preserve no automatic publish/npm.
+- [ ] Verify CI of the newly published destination SHA (prior `f0c1cf82ff3261845eb2cd004088cc912cf4bf8f` was green in 11/11 push and 11/11 PR jobs).
+- [ ] Exercise release gate for green/pending/failed/cancelled/PR-only/non-main CI without publishing a release.
+- [ ] Verify native Settings, Voice, Connect/MCP/bots/cloud/VM/credentials, SQLite migrations, installers and 80 historic shared-file divergences.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+- [x] Pin upstream `979b7d4e3c073e9bebf74f70bf80440a27564237`, tree `ba33a37daed7860854926617c90197d3182bd8ed`, app **0.3.108**; preserve planned Extended **0.12.0 DRAFT**.
+- [x] Stage five exact upstream blobs and one Extended-preserving workflow adaptation; add the malformed CI-lookup regression assertion.
+- [x] Preserve Extended controls, dependency remediation, source original release notes, and manual-only release publishing.
+- [ ] Verify **new destination SHA** push/PR CI by job; the preceding `4ef18f0f` push had a cancelled ONNX/macOS job while PR CI passed.
+- [ ] Independently test manual publish CI lookup failure/pending/green paths without publishing, native voice behavior, Settings On/Off, Connect, MCP, bots, cloud/VM, credentials, platform installers and all 80 historic divergent shared-file hunks.
+- [ ] Approve a release separately; no tag, installer publication or npm release is authorized here.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+- [x] Pin [fork main `bc323966a0e0`](https://github.com/ginmp8/pandacode/commit/bc323966a0e0f24b13dfd5732cc300f791a965fe), source tree `74ac097cad986c31715b54553e2017ae978d1351`, application **0.3.108** and the existing planned Extended **0.12.0** documentation marker.
+- [x] Stage all 11 upstream path updates: 8 exact and 3 adapted for Extended's CI/manual release and agent guidance; extend regression tests.
+- [x] Preserve prior Extended controls, SQLite remediation and historical release files; make no PR, tag, public installer, GitHub Release or npm publication.
+- [ ] Verify published one-parent commit, complete source/destination path/mode/blob inventory, final statuses of all CI jobs and remaining shared-file differences.
+- [ ] Validate native Voice, Settings On/Off, Connect, MCP, bots, cloud/VM, credential workflows, installers, SQLite upgrade/rollback and release gate without actually publishing. Separate release approval required.
+
+## Fork HEAD 9437b3a9 follow-up — 2026-11-10
+
+- [x] Pin fork `9437b3a92cc3d41e899770f645f8a08449ce6bbf`, source tree `5b8666849fcd7f3cbba918754efbfaedbc8fef41`, native app **0.3.108**; keep Extended planned **0.12.0 DRAFT**.
+- [x] Import five exact upstream source blobs and reconcile two CI/release workflows without losing manual publication or adding npm publish; update the voice/privacy/release documentation unchanged from source.
+- [x] Add release-gate source-object/run-ID regression assertions and update the exact source-baseline release-notes blob hash.
+- [ ] Review exact-SHA CI after publication, complete native Voice/Settings On/Off/Connect/MCP/bots/cloud/VM/credential, migration and installer acceptance, and semantically classify every divergent shared hunk.
+
+## Exact-SHA CI and sampled shared-difference inspection — 2026-11-10
+
+- [x] Re-read the frozen fork main `9437b3a92cc3d41e899770f645f8a08449ce6bbf` and Extended base/development `e7361c1c22355718cbbbf0e7ec4202a3e9673f61`; their Git tree objects are `5b8666849fcd7f3cbba918754efbfaedbc8fef41` and `d560b10f0d9daf1273ef1d1effc8a4306ec0b6bc`, respectively.
+- [x] Verify full nontruncated inventories: 1,696 upstream tracked blobs and 1,753 Extended tracked blobs; 1,615 shared byte-exact, 81 shared divergent, 57 Extended-exclusive, zero upstream missing, zero mode/type discrepancies.
+- [x] Verify the last **code** SHA `e7361c1c22355718cbbbf0e7ec4202a3e9673f61` passed [push CI #42892078107](https://github.com/ginmp8/pandacode-extended/actions/runs/42892078107) (11/11) and [PR CI #42892089259](https://github.com/ginmp8/pandacode-extended/actions/runs/42892089259) (11/11). All 22 GitHub check runs for that exact SHA completed successfully, including npm/RustSec, TypeScript, Linux Rust, five Clippy targets, Expo and ONNX.
+- [x] Inspect source and Extended blobs and changed lines in **18 of 81** inherited shared-path differences. Provisional categories, **not** completed full functional acceptance:
+  - `EXTENDED_CONTROL` (13): `src-tauri/src/providers/mcp_host.rs` (default-off strict MCP fixture), `src/about-settings.ts` (update mode UI), `src-tauri/src/remote/catalog.rs` (Connect-enabled test fixture), `src-tauri/src/cloud_agents/credentials.rs` (credential opt-in), `src-tauri/src/vm/tools.rs` (agent VM/cloud write control), `src-tauri/src/remote/routes.rs` (Connect and direct routes), `src-tauri/src/bots/tools.rs` (opt-in fresh-context delivery), `src-tauri/src/bots/schedule.rs` (pause), `src-tauri/src/context_recovery.rs` (fresh-context replay), `src-tauri/src/headless.rs` (headless Connect opt-in), `src-tauri/src/providers/warm.rs` (external MCP setting), `src-tauri/src/remote/socket.rs` (Connect listener gating), `src-tauri/src/cloud/deploy.rs` (cloud-management opt-in).
+  - `EXTENDED_DEPENDENCY` (2): `src-tauri/src/cloud/cloudflare_worker/Dockerfile` and `src-tauri/src/cloud/cloudflare_worker/package.json` use the same upgraded Cloudflare sandbox version `1.0.3`; this is a version divergence, **not a newly proven vulnerability fix**.
+  - `EXTENDED_ONLY` integration/compatibility (3 shared paths): `.gitattributes` (line-ending stability), `src-tauri/src/remote/orchestrate/tests.rs` and `src-tauri/src/schedules/tests.rs` (Extended SQLite schema version 37).
+- [ ] Complete hunk-level causal review of **all 81** shared differences (63 paths not sampled in this pass); verify actual provider/agent, updater, credential, MCP, Connect, bot pause, cloud/VM, Voice, fresh-context, SQLite migration and native installer On/Off behavior. The 18 provisional classifications above do not prove complete functional parity.
+- [ ] Verify CI of any later documentation-only commit at its own SHA. Passing code-SHA CI does not constitute approval of Extended release 0.12.0.
+
+## Mobile node-forge advisory remediation — 2026-11-10
+
+- [x] Identify failure in [exact-SHA push CI `c7c14606`](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289): mobile node-forge 1.4.2, while root, website and relay npm audits succeeded.
+- [x] Verify patched version **1.4.3** from GitHub-reviewed advisories and its tarball integrity from the official npm registry.
+- [x] Update only `mobile/package.json` override and the matching `mobile/package-lock.json` entry; preserve all unrelated dependency versions and upstream files.
+- [ ] Validate **new published SHA** using `npm audit --prefix mobile --audit-level=low`, Expo/mobile compatibility and all other CI jobs.
+- [ ] Validate native/mobile runtime and SDK compatibility independently; the advisory fix alone does not approve a release.
+
+## Exact-SHA remediation CI and additional shared-path sample — 2026-11-10
+
+- [x] Re-read the current fork HEAD `9437b3a92cc3d41e899770f645f8a08449ce6bbf` (tree `5b8666849fcd7f3cbba918754efbfaedbc8fef41`) and pre-documentation Extended HEAD `ab6c99787bf8ece8eae70b51eb3d071b91353e41` (tree `45f1c61da42d6ac03655168458bf8d15d09e3a78`).
+- [x] Confirm nontruncated recursive Git inventories: **1,696 upstream / 1,753 Extended** tracked files, **1,615 shared exact, 81 shared divergent, 57 Extended-only, zero missing or mode/type changes**. No source import or version increment was warranted.
+- [x] Verify `mobile/package.json` override and `mobile/package-lock.json` resolve `node-forge@1.4.3` on the remediation SHA.
+- [x] Verify [push CI #42921416535](https://github.com/ginmp8/pandacode-extended/actions/runs/42921416535) and [PR CI #42921425457](https://github.com/ginmp8/pandacode-extended/actions/runs/42921425457): **11/11 jobs passed in each workflow on `ab6c99787bf8ece8eae70b51eb3d071b91353e41`**, including the npm dependency audit, Expo/mobile, RustSec, Rust check/tests, TypeScript/unit/website, five Clippy targets and ONNX/macOS. This supersedes the pending exact-SHA CI note in the mobile remediation entry for that SHA.
+- [x] Compare source and destination text at **20 additional distinct shared paths**, inspecting added/source-only line sets as provisional evidence rather than claiming finished hunk/caller/runtime validation:
+  - Extended control or bot-flow wiring: `src-tauri/src/lib.rs`, `src-tauri/src/bots.rs`, `src-tauri/src/remote.rs`, `src-tauri/src/bots/gateway.rs`, `src-tauri/src/bots/channels/mod.rs`, `src-tauri/src/bots/shared_channels.rs`, `src-tauri/src/providers.rs`, `src-tauri/src/remote/config.rs`, `src/bridge.ts`, `src/remote-settings.ts`, `src/settings.ts`, `src/settings-sections.ts`.
+  - Compatibility, tests or Extended-only integration: `src-tauri/src/storage.rs` (schema 37), `src-tauri/src/remote/host.rs` (Connect fixture), `src-tauri/src/cloud/cloudflare.rs` (sandbox-version fixture), `src-tauri/src/architect.rs` and `src-tauri/src/architect/coordination.rs` (tool catalogs/scopes), `src/main.ts` and `src/btw-panel.ts` (side-thread delivery), `mobile/src/ui/push.ts` (Expo notification import compatibility).
+- [ ] Complete semantic, hunk-level and caller/test validation for all **81** shared divergences. Together with the previous 18-path sample, **38 distinct paths have received preliminary line-difference inspection**, leaving **43 without even this preliminary sample**; none of the 81 is certified by that count.
+- [ ] Complete native/installed-app Settings On/Off, Connect/MCP, bot recovery and delegation, Voice, cloud/VM, credentials, SQLite upgrade/rollback and installer/release acceptance. CI does not approve distribution 0.12.0.
+- [ ] Check CI for any later documentation-only SHA separately; do not treat the code SHA's passing CI as a result for this documentation commit.

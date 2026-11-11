@@ -10,6 +10,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
+/// Internal task messages may carry only the assignment text; chat commands
+/// would mutate shared bot sessions or approvals outside the Ticket mandate.
+fn command_allowed_for_channel(channel_id: &str, command: &Command) -> bool {
+    channel_id != crate::superagent::CHANNEL || *command == Command::Message
+}
+
 /// A message for a bot from the desktop, the web UI or a chat channel.
 #[derive(Debug, Clone)]
 pub(crate) struct Inbound {
@@ -281,7 +287,14 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         (bot, session, created, kind)
     };
     let waiting = pending().lock().map_err(|e| e.to_string())?.get(&session_id).is_some_and(|list| !list.is_empty());
-    match parse_command(&text, waiting) {
+    let command = parse_command(&text, waiting);
+    // Internal assignments are controlled by the Ticket mandate and native
+    // Stop/approval commands. A bot-wide /stop, /new or persistent "always"
+    // approval from this channel would cross that task's authority boundary.
+    if !command_allowed_for_channel(&inbound.channel_id, &command) {
+        return Err("policy_unsupported: SuperAgent requires native task controls, not bot-wide chat commands.".into());
+    }
+    match command {
         Command::Stop => {
             stop_bot(app, &bot.id).await;
             reply(app, &bot, &inbound.channel_id, &inbound.thread, "Stopped. I'll wait for your next message.").await;
@@ -645,6 +658,19 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_superagent_gateway_rejects_bot_wide_commands_and_approval_escalation() {
+        let channel = crate::superagent::CHANNEL;
+        assert!(command_allowed_for_channel(channel, &Command::Message));
+        for text in ["/stop", "/new", "/reset", "/help", "always", "yes", "deny"] {
+            let command = parse_command(text, true);
+            assert_ne!(command, Command::Message);
+            assert!(!command_allowed_for_channel(channel, &command), "{text}");
+            assert!(command_allowed_for_channel(super::super::DESKTOP, &command));
+        }
+        assert!(command_allowed_for_channel("schedule", &Command::Stop));
+    }
 
     #[test]
     fn superagent_task_context_omits_private_bot_state_and_ambient_skill_sync() {

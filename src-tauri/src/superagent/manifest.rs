@@ -7,7 +7,7 @@ use super::Orchestration;
 use crate::{bots, storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, fs, path::Path};
 use tauri::{Manager, State};
 
 const MAX_BYTES: usize = 1024 * 1024;
@@ -227,6 +227,45 @@ fn export(store: &Store) -> Result<serde_json::Value> {
     }
     serde_json::to_value(Manifest { schema_version: 1, orchestrations: presets })
         .map_err(|e| e.to_string())
+}
+
+
+/* Headless configuration administration uses explicit local CLI actions and
+ * the exact same native preview, backup, import, and export contracts.
+ * Unlike desktop IPC, these entrypoints require no synthetic Webview.
+ */
+pub(crate) fn run_headless_import(
+    app: &tauri::AppHandle, path: &Path,
+) -> Result<ImportResult> {
+    let metadata = fs::metadata(path)
+        .map_err(|e| format!("Cannot inspect orchestration import: {e}"))?;
+    if metadata.len() > MAX_BYTES as u64 {
+        return Err("SuperAgent manifest exceeds the 1 MB limit.".into());
+    }
+    let bytes = fs::read(path)
+        .map_err(|e| format!("Cannot read orchestration import: {e}"))?;
+    if bytes.len() > MAX_BYTES {
+        return Err("SuperAgent manifest exceeds the 1 MB limit.".into());
+    }
+    let document: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Invalid orchestration manifest JSON: {e}"))?;
+    let state = app.state::<AppState>();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    apply_with_backup(&store, &dir, &document, true)
+}
+
+pub(crate) fn run_headless_export(
+    app: &tauri::AppHandle, path: &Path,
+) -> Result<()> {
+    let state = app.state::<AppState>();
+    let document = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        export(&store)?
+    };
+    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    crate::headless_bots::write_export_atomically(path, &bytes)
 }
 
 fn main_window(window: &tauri::WebviewWindow) -> Result<()> {

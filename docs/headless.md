@@ -212,3 +212,23 @@ native twin in serve mode (`headless.rs`), or server behavior silently diverges:
 - [ ] timers with side effects (limit resumes live in `headless.rs`; turn checks are
       deliberately desktop-only)
 - [ ] queue events (`queue-changed` emitters call `headless::queue_changed`)
+
+
+## Headless SuperAgent preset administration (Extended)
+
+The local operator can explicitly export or import the same portable
+configuration-only companion manifest used by the desktop UI:
+
+```sh
+pandacode serve --export-orchestrations orchestrations.json
+pandacode serve --import-orchestrations orchestrations.json
+```
+
+Each command exits after the local operation. Import parses and preflights the
+1 MB-bounded document, writes a verified private recovery snapshot before a
+new preset is inserted, commits native SQLite changes transactionally, and
+leaves every imported preset **Off**. No task starts, no credential or live
+Ticket is imported, and no remote unauthenticated management endpoint is
+opened. Repeating the same import is idempotent; headless errors produce a
+non-zero exit code. This is configuration administration, **not** headless
+task dispatch/approval parity; that remains a separate implementation gate.

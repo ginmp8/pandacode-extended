@@ -26,6 +26,8 @@ enum Command {
     FullAccess { enabled: bool },
     ExportBots { path: PathBuf },
     SyncBots { path: PathBuf },
+    ImportOrchestrations { path: PathBuf },
+    ExportOrchestrations { path: PathBuf },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -76,6 +78,34 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 /// Per-command startup, run from setup.
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
+        Command::ImportOrchestrations { path } => {
+            match crate::superagent::manifest::run_headless_import(app, &path) {
+                Ok(result) => {
+                    println!("Created {} disabled orchestration presets; {} unchanged.",
+                        result.created.len(), result.unchanged.len());
+                    if let Some(path) = result.backup_path {
+                        println!("Verified orchestration backup: {path}");
+                    }
+                    std::process::exit(0)
+                }
+                Err(error) => {
+                    eprintln!("Orchestration import failed: {error}");
+                    std::process::exit(1)
+                }
+            }
+        }
+        Command::ExportOrchestrations { path } => {
+            match crate::superagent::manifest::run_headless_export(app, &path) {
+                Ok(()) => {
+                    println!("Orchestration configuration written to {}.", path.display());
+                    std::process::exit(0)
+                }
+                Err(error) => {
+                    eprintln!("Orchestration export failed: {error}");
+                    std::process::exit(1)
+                }
+            }
+        }
         Command::SyncBots { path } => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -360,6 +390,20 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--import-orchestrations" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--import-orchestrations needs a file path.\n\n{}", help()))?;
+                command = Command::ImportOrchestrations { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
+            "--export-orchestrations" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--export-orchestrations needs a file path.\n\n{}", help()))?;
+                command = Command::ExportOrchestrations { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
             "--sync-bots" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--sync-bots needs a source registry path.\n\n{}", help()))?;
@@ -387,7 +431,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     }
     if ops > 1 {
         return Err(format!(
-            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots, --sync-bots.\n\n{}",
+            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots, --sync-bots, --import-orchestrations, --export-orchestrations.\n\n{}",
             help()
         ));
     }
@@ -409,7 +453,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -424,7 +468,12 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          (docs/headless.md), then serve. Re-applying a file converges.
   --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit.
   --sync-bots <file>     Fetch pinned GitHub manifests from a source registry, back up,
-                         import once, report results and exit (does not start serving)."
+                         import once, report results and exit (does not start serving).
+  --import-orchestrations <file>
+                         Explicitly import disabled SuperAgent presets after native validation
+                         and a verified config-only backup; exit without starting tasks.
+  --export-orchestrations <file>
+                         Export portable SuperAgent presets without tickets or secrets; exit."
         .into()
 }
 
@@ -460,7 +509,15 @@ mod tests {
             parsed("--export-bots bots.json"),
             Ok(Command::ExportBots { path: PathBuf::from("bots.json") })
         );
+        assert_eq!(parsed("--import-orchestrations presets.json"),
+            Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
+        assert_eq!(parsed("--export-orchestrations presets.json"),
+            Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert!(parsed("--wat").is_err());
+        assert!(parsed("--import-orchestrations").is_err());
+        assert!(parsed("--export-orchestrations").is_err());
+        assert!(parsed("--import-orchestrations a.json --export-bots b.json").is_err());
+        assert!(parsed("--import-orchestrations a.json --import-bots b.json").is_err());
         assert!(parsed("--device-name").is_err());
         assert!(parsed("--export-bots").is_err());
         assert_eq!(parsed("--sync-bots sources.json"), Ok(Command::SyncBots { path: PathBuf::from("sources.json") }));
@@ -491,6 +548,8 @@ mod tests {
             "--device-name",
             "--import-bots",
             "--export-bots",
+            "--import-orchestrations",
+            "--export-orchestrations",
             "--sync-bots",
             "xvfb-run",
         ] {

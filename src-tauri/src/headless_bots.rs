@@ -641,7 +641,7 @@ pub(crate) fn run_import(app: &tauri::AppHandle, path: &Path) {
 
 /// Stage a complete export beside its destination, then replace it atomically.
 /// Keep the headless CLI's original overwrite behavior, including bare filenames.
-fn write_export_atomically(path: &Path, bytes: &[u8]) -> crate::Result<()> {
+pub(crate) fn write_export_atomically(path: &Path, bytes: &[u8]) -> crate::Result<()> {
     use std::io::Write;
 
     let parent = path.parent()

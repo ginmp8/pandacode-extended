@@ -390,6 +390,23 @@ fn admit_role(
         if ticket.objective != objective {
             return Err("The manual-request key is already bound to another objective.".into());
         }
+        // A key identifies the original native dispatch intent as well as its
+        // objective. Replaying a direct worker request as a coordinator request
+        // (or vice versa) must never silently return the other execution mode.
+        // The admission audit is durable even after the assignment finishes.
+        let admission: String = store.db.query_row(
+            "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='admitted' ORDER BY id LIMIT 1",
+            [&ticket.id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?
+            .ok_or("Manual request admission audit missing.")?;
+        let originally_coordinated = match admission.as_str() {
+            "manual readonly coordinator reserved" => true,
+            "manual readonly worker reserved" | "blocked: worker occupied" => false,
+            _ => return Err("Manual request admission mode is unknown.".into()),
+        };
+        if originally_coordinated != coordinate {
+            return Err("Manual request key cannot change between direct and coordinated dispatch.".into());
+        }
         return Ok((ticket, false));
     }
     let config = configuration(store, config_id)?;
@@ -1389,6 +1406,47 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn request_key_replay_cannot_switch_native_dispatch_roles() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+
+        let (direct, launched) = admit(&mut store, &cfg.id, "Inspect", "direct-key", false).unwrap();
+        assert!(launched);
+        let (same, launched_again) = admit(&mut store, &cfg.id, "Inspect", "direct-key", true).unwrap();
+        assert_eq!(same.id, direct.id);
+        assert!(!launched_again);
+        assert!(admit_role(&mut store, &cfg.id, "Inspect", "direct-key", false, true)
+            .unwrap_err().contains("cannot change"));
+
+        // The admission receipt remains authoritative even when a direct
+        // ticket never acquired a session because the worker was occupied.
+        let (blocked, launched) = admit(&mut store, &cfg.id, "Blocked", "blocked-key", true).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        assert!(admit_role(&mut store, &cfg.id, "Blocked", "blocked-key", false, true)
+            .unwrap_err().contains("cannot change"));
+
+        stop(&store, &direct.id).unwrap();
+        let (coordinated, launched) = admit_role(
+            &mut store, &cfg.id, "Coordinate", "coordinated-key", false, true,
+        ).unwrap();
+        assert!(launched);
+        assert!(admit(&mut store, &cfg.id, "Coordinate", "coordinated-key", false)
+            .unwrap_err().contains("cannot change"));
+        let (same, repeated) = admit_role(
+            &mut store, &cfg.id, "Coordinate", "coordinated-key", true, true,
+        ).unwrap();
+        assert_eq!(coordinated.id, same.id);
+        assert!(!repeated);
+
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&cfg.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 3, "role-mismatched replay must not create another ticket");
     }
 
     #[test]

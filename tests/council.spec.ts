@@ -229,11 +229,20 @@ test('the panel follows its button when the window resizes', async ({ page }) =>
 });
 
 test('a refusal that lands after the panel closed is read aloud and shown on the next open', async ({ page }) => {
-  await open(page, '/?council', { architect_set_council: 'Council refused by native.' }, 800);
+  await open(page, '/?council', { architect_set_council: 'Council refused by native.' });
+  // Hold the native reply until the panel is actually closed. A fixed mock delay
+  // can expire before Playwright presses Escape on a busy CI runner.
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__hold = w.__hold ?? {};
+    w.__hold.architect_set_council = new Promise<void>(resolve => { w.__releaseCouncilSet = resolve; });
+  });
   await button(page).click();
   await option(page, 'target', '8.0').click();
+  await expect.poll(() => calls(page)).toHaveLength(1);
   await page.keyboard.press('Escape');
   await expect(panel(page)).toHaveCount(0);
+  await page.evaluate(() => (window as any).__releaseCouncilSet());
   await expect(page.locator('#composer-live')).toHaveText('Council was not changed: Council refused by native.');
   await button(page).click();
   await expect(panel(page).getByRole('alert')).toHaveText('Council was not changed: Council refused by native.');

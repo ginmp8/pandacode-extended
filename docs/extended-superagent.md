@@ -95,3 +95,10 @@ state. Restoration requires a new explicit preview and confirmation, with
 imported presets disabled by default. Legacy bot manifest and Git sync remain
 separate: importing bots or shared channels never implicitly enables
 orchestrations.
+
+### Safe editable examples
+
+The creation form provides **Software Development** and **Issue Resolution** name templates.
+These are configuration-only suggestions: they neither choose existing bots nor
+create profiles, enable a policy, grant tools or start a task. Both bot IDs
+must be chosen explicitly, and the created preset is disabled.

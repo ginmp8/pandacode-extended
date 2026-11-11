@@ -138,3 +138,28 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
   await expect(host.getByText('First preset ticket')).toHaveCount(0);
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
 });
+
+test('SuperAgent examples only fill names and leave all authorization disabled', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const bar=page.locator('.sidebar-bots-bar');
+  if(await bar.getAttribute('aria-pressed')!=='true') await bar.click();
+  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const dialog=page.getByRole('dialog',{name:'Orchestrations'});
+  const example=dialog.getByRole('combobox',{name:'Example preset'});
+  const name=dialog.getByRole('textbox',{name:'Name',exact:true});
+  await example.selectOption('Software Development');
+  await expect(name).toHaveValue('Software Development');
+  await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
+  await name.fill('Edited safe template');
+  await expect(name).toHaveValue('Edited safe template');
+  await example.selectOption('Issue Resolution');
+  await expect(name).toHaveValue('Issue Resolution');
+  await dialog.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
+  await dialog.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
+  await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+});

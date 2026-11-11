@@ -117,6 +117,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
       '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
+      '<label>Example preset<select data-sa-template aria-label="Example preset">' +
+      '<option value="">Custom</option>' +
+      '<option value="Software Development">Software Development</option>' +
+      '<option value="Issue Resolution">Issue Resolution</option></select></label>' +
       '<label>Name<input name="name" maxlength="120" placeholder="Software Development" required></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
       '<option value="">Choose bot</option>' + choices + '</select></label>' +
@@ -187,6 +191,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     confirm = { message, action }; render();
     host.querySelector<HTMLButtonElement>('[data-sa-cancel]')?.focus();
   }
+  // Templates populate editable names only; no bot, tool or task is selected.
+  host.addEventListener('change', event => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
+    const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
+    if (field) field.value = target.value;
+  });
   host.addEventListener('input', event => {
     const target = event.target;
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {

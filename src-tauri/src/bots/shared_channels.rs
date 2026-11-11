@@ -720,7 +720,17 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
          WHERE c.delivery_id=?1",
         [delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((session_id,status,frozen_cycle,message_id)) = linked else { return Ok(true) };
+    let Some((session_id,status,frozen_cycle,message_id)) = linked else {
+        // Missing Council metadata is not proof that this was an ordinary
+        // assignment. Recovery callbacks must fail closed for Council opt-ins.
+        let requested: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_deliveries d
+             JOIN extended_channel_council_requests r ON r.message_id=d.message_id
+             WHERE d.id=?1",
+            [delivery_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        return Ok(requested == 0);
+    };
     if status != "completed" { return Ok(false); }
     let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(false) };
     if team.status != "completed" || team.config.council.is_none()

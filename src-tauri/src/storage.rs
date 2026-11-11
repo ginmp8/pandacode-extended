@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -647,6 +647,11 @@ impl Store {
                 crate::bots::upgrade(&migration)?;
                 migration.execute_batch("PRAGMA user_version=37;").map_err(|e| e.to_string())?;
             }
+            if version < 38 {
+                // Additive, non-cascading Extended SuperAgent ticket/mandate history.
+                migration.execute_batch(crate::superagent::SCHEMA).map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=38;").map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
@@ -689,6 +694,8 @@ impl Store {
         recovery.execute_batch("UPDATE architect_teams SET content=json_set(content,'$.status','interrupted','$.pendingTurn',NULL,'$.error','PandaCode restarted. Resume explicitly to continue.','$.generation',COALESCE(json_extract(content,'$.generation'),0)+1,'$.revision',COALESCE(json_extract(content,'$.revision'),0)+1,
             '$.workers',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.status') IN ('running','waiting') THEN json_set(value,'$.status','stopped') ELSE value END)) FROM json_each(content,'$.workers') WHERE type='object')))
             WHERE CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END IN ('running','waiting');").map_err(|e|e.to_string())?;
+        // Reconcile SuperAgent-owned running assignments without replaying effects.
+        recovery.execute_batch(crate::superagent::RECOVER).map_err(|e| e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
         let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if ranked { rank_published_drafts(&db)?; }

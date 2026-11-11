@@ -295,7 +295,7 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
     let (turn, briefed) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         // Proactive messages go to the thread the user last wrote from.
-        if inbound.channel_id != super::DESKTOP {
+        if inbound.channel_id != super::DESKTOP && inbound.channel_id != crate::superagent::CHANNEL {
             super::set_notify_target(&store, &bot.id, Some(&inbound.channel_id), Some(&inbound.thread))?;
         }
         super::log(&store, &bot.id, "inbound", &format!("{} ({kind}): {}", inbound.sender_name, text.chars().take(160).collect::<String>()), json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}))?;
@@ -388,7 +388,17 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let settled = held.is_none();
     let text = held.unwrap_or(text);
     let text = if text.is_empty() && !successful { "I couldn't finish that. Check PandaCode for details.".to_owned() } else { text };
-    if thread.channel_id == "schedule" {
+    if thread.channel_id == crate::superagent::CHANNEL {
+        // Internal task results are retained by the native ticket gate, never sent
+        // as an external channel reply or an ambient bot notification.
+        if settled {
+            if let Ok(store) = state.store.lock() {
+                if let Err(error) = crate::superagent::on_run_finished(&store, session_id, successful, &text) {
+                    eprintln!("SuperAgent settlement failed: {error}");
+                }
+            }
+        }
+    } else if thread.channel_id == "schedule" {
         if text.trim() == NOTHING || text.trim().is_empty() {
             if let Ok(store) = state.store.lock() {
                 let _ = super::log(&store, &bot.id, "scheduled", "Nothing to report", json!({}));
@@ -497,6 +507,13 @@ pub(crate) async fn approval_requested(app: &tauri::AppHandle, session_id: &str,
     let state = app.state::<AppState>();
     let found = state.store.lock().ok().and_then(|store| owner_of(&store, session_id).ok().flatten());
     let Some((bot, thread)) = found else { return };
+    // No ambient bot approval rule can expand a SuperAgent read-only mandate.
+    if thread.channel_id == crate::superagent::CHANNEL {
+        if let Err(error) = answer(app, session_id, request_id, false).await {
+            eprintln!("SuperAgent approval denial failed: {error}");
+        }
+        return;
+    }
     // Allow rules answer without asking; deny rules refuse.
     let decision = state.store.lock().ok().and_then(|store| guard::decide(&store, &bot.id, text).ok());
     match decision {

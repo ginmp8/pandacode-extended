@@ -83,6 +83,7 @@ mod headless;
 mod headless_bots;
 mod extended_bot_manifest;
 mod extended_bot_git;
+mod superagent;
 
 pub use usage_keychain::handle_usage_keychain_helper;
 pub use cloud_agents::handle_cloud_bridge;
@@ -1805,7 +1806,10 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
-    let reviewer_policy = architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
+    let reviewer_policy = match superagent::read_only_policy(&store, &session_id).map_err(restore)? {
+        Some(policy) => Some(policy),
+        None => architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?,
+    };
     let reviewer_boundary = reviewer_policy.is_some();
     let config = RunConfig {
         session_id: session_id.clone(),
@@ -4427,6 +4431,13 @@ pub fn run() {
                 bots::bot_activity,
                 bots::bot_project_ids,
                 bots::bot_message,
+                superagent::superagent_create,
+                superagent::superagent_list,
+                superagent::superagent_set_enabled,
+                superagent::superagent_ticket,
+                superagent::superagent_submit,
+                superagent::superagent_accept,
+                superagent::superagent_stop,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,
                 bots::shared_channels::bot_shared_channel_create,

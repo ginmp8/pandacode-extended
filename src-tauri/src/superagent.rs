@@ -540,6 +540,35 @@ fn admit_role(
 fn coordinator_plan_current(
     store: &Store, ticket_id: &str, coordinator_id: &str, project_id: &str,
 ) -> Result<bool> {
+    // The original native admission fixes whether a coordinator was required.
+    // No coordinator on a direct ticket is valid; a coordinated ticket with a
+    // deleted/relabelled finished assignment is not a valid plan.
+    let original: Option<String> = store.db.query_row(
+        "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='admitted'
+         ORDER BY id LIMIT 1",
+        [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    match original.as_deref() {
+        Some("manual readonly coordinator reserved") => {
+            let proven: bool = store.db.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sa_assignments a
+                    JOIN sessions original ON original.id=a.session_id
+                    WHERE a.ticket_id=?1 AND a.bot_id=?2 AND a.attempt=1
+                      AND a.state='finished' AND original.project_id=?3
+                      AND length(trim(COALESCE(a.result,'')))>0
+                      AND EXISTS(
+                        SELECT 1 FROM sa_audit proof
+                        WHERE proof.ticket_id=a.ticket_id
+                          AND proof.kind='coordinator_planned')
+                )",
+                params![ticket_id,coordinator_id,project_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if !proven { return Ok(false); }
+        }
+        Some("manual readonly worker reserved" | "blocked: worker occupied") => {}
+        _ => return Ok(false),
+    }
     let invalid: bool = store.db.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM sa_assignments a
@@ -1898,6 +1927,41 @@ mod tests {
         assert!(guard_gateway_inbound(
             &store, "worker", &retry_thread, "local-user", true,
         ).is_ok());
+    }
+
+    #[test]
+    fn coordinated_retry_cannot_erase_original_coordinator_provenance() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &cfg.id, "Coordinate then delegate", "plan-provenance", false, true,
+        ).unwrap();
+        assert!(launched);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &sid, true, "Evidence-backed plan").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        assert!(coordinator_plan_current(&store, &ticket.id, "router", "project").unwrap());
+
+        // An assignment cannot become worker evidence by rewriting both
+        // bot IDs after a successful coordinator turn.
+        store.db.execute(
+            "UPDATE sa_assignments SET bot_id='worker' WHERE session_id=?1",
+            [&sid],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bot_threads SET bot_id='worker' WHERE session_id=?1",
+            [&sid],
+        ).unwrap();
+        assert!(!coordinator_plan_current(&store, &ticket.id, "router", "project").unwrap());
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+        assert!(prepare_coordinated_worker(&mut store, &ticket.id, false).is_err());
+        let after: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(before, after, "denied delegation must not allocate a worker session");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
     }
 
     #[test]

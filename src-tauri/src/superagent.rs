@@ -1238,7 +1238,19 @@ fn change_enabled(
             return Err("Selected bots are paused or their worker scope has changed.".into());
         }
     }
-    if current.enabled == enabled { return Ok(current); }
+    if current.enabled == enabled {
+        if enabled { return Ok(current); }
+        // A previous interrupted disable or legacy state may leave running
+        // assignments under a disabled configuration. Repeating Off must
+        // revoke those grants rather than returning without settling them.
+        let unsettled: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_tickets
+             WHERE orchestration_id=?1 AND state IN
+             ('queued','running','waiting_approval','waiting_review','blocked'))",
+            [orchestration_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !unsettled { return Ok(current); }
+    }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
     let updated = tx.execute(
@@ -2300,6 +2312,37 @@ mod tests {
         assert_eq!(ticket.state, "running");
         assert!(read_only_policy(&store, &session_id).unwrap().is_some());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeated_off_repairs_stale_active_mandates_without_reopening_work() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Inspect safely", "stale-disabled-mandate", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // Simulate an old interrupted policy write that persisted Off but
+        // failed before settling active work. This must never be treated as
+        // an idempotent no-op with a still-live provider grant.
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+            [&cfg.id],
+        ).unwrap();
+        let repaired = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert!(!repaired.enabled);
+        assert!(repaired.policy_revision > cfg.policy_revision);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(assignment_session(&store, &ticket.id).unwrap().is_none());
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "stale callback").unwrap());
+
+        // Once repaired, repeated Off is genuinely idempotent.
+        let same = change_enabled(&store, &cfg.id, repaired.policy_revision, false).unwrap();
+        assert_eq!(same.policy_revision, repaired.policy_revision);
     }
 
     #[test]

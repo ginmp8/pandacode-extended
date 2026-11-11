@@ -169,6 +169,11 @@ UPDATE sa_assignments SET state='interrupted',updated_at=CAST(strftime('%s','now
 UPDATE sa_tickets SET state='interrupted',revision=revision+1,active_assignment_id=NULL,
  updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
  WHERE state='running';
+-- Interrupted tickets must not keep live mandates after a crash, including
+-- legacy rows already interrupted without the required revocation.
+UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
+ SELECT id FROM sa_tickets WHERE state='interrupted'
+);
 ";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3425,6 +3430,7 @@ mod tests {
         let cfg = enabled(&store);
         let (ticket, _) = admit(&mut store, &cfg.id, "Interrupted restart", "restart-ledger", false).unwrap();
         let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original_auth = mandate(&store,&ticket.id).unwrap().authorization_id;
         let path = store.path.clone();
         drop(store);
 
@@ -3432,6 +3438,10 @@ mod tests {
         let interrupted = get_ticket(&reopened, &ticket.id).unwrap();
         assert_eq!(interrupted.state, "interrupted");
         assert!(interrupted.active_assignment_id.is_none());
+        let recovered_mandate = mandate(&reopened,&ticket.id).unwrap();
+        assert!(recovered_mandate.revoked);
+        assert_eq!(recovered_mandate.authorization_id,original_auth);
+        assert!(read_only_policy(&reopened,&original_session).is_err());
         assert!(!on_run_finished(&reopened, &original_session, true, "delayed success").unwrap());
         let events = history(&reopened, &ticket.id, 200).unwrap();
         assert_eq!(events.iter().filter(|event| event.kind == "restart_interrupted").count(), 1);
@@ -3442,6 +3452,39 @@ mod tests {
         let replayed = history(&again, &ticket.id, 200).unwrap();
         assert_eq!(replayed.iter().filter(|event| event.kind == "restart_interrupted").count(), 1);
         assert_eq!(get_ticket(&again, &ticket.id).unwrap().state, "interrupted");
+    }
+
+    #[test]
+    fn legacy_interrupted_ticket_with_unrevoked_mandate_is_repaired_once_on_restart() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,launched)=admit(
+            &mut store,&cfg.id,"Old interrupted work","legacy-restart-mandate",false,
+        ).unwrap();
+        assert!(launched);
+        let path=store.path.clone();
+        // Emulate a historical interruption that settled the worker but
+        // retained its original native execution mandate.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='interrupted' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
+        assert!(mandate(&reopened,&ticket.id).unwrap().revoked);
+        let revision=get_ticket(&reopened,&ticket.id).unwrap().revision;
+        let audit_count=history(&reopened,&ticket.id,100).unwrap().len();
+        drop(reopened);
+        let again=Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&again,&ticket.id).unwrap().revision,revision);
+        assert_eq!(history(&again,&ticket.id,100).unwrap().len(),audit_count);
+        assert!(mandate(&again,&ticket.id).unwrap().revoked);
     }
 
     #[test]

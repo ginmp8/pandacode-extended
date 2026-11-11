@@ -487,7 +487,10 @@ pub(crate) fn read_only_policy(
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
         }
         let active_bot = bots::get(store, &scope.bot_id)?;
-        if active_bot.paused || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id) {
+        let assigned_session = store.session(session_id)?;
+        if active_bot.paused || active_bot.project_id != assigned_session.project_id
+            || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
+        {
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
         }
         return Ok(Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly));
@@ -590,8 +593,11 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
          AND EXISTS (
-           SELECT 1 FROM sa_assignments active JOIN bots current_bot ON current_bot.id=active.bot_id
+           SELECT 1 FROM sa_assignments active
+           JOIN bots current_bot ON current_bot.id=active.bot_id
+           JOIN sessions active_session ON active_session.id=active.session_id
            WHERE active.id=t.active_assignment_id AND current_bot.paused=0
+             AND current_bot.project_id=active_session.project_id
              AND (active.bot_id=o.coordinator_bot_id OR
                (active.bot_id=t.worker_bot_id AND current_bot.project_id=t.project_id))
          )
@@ -1824,6 +1830,28 @@ mod tests {
             [&task.id], |r| r.get(0),
         ).unwrap();
         assert_eq!(settled_events, 1);
+    }
+
+    #[test]
+    fn coordinator_project_move_cannot_read_or_finalize_its_previous_context() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (task, _) = admit_role(
+            &mut store, &cfg.id, "Coordinator observes a fixed project", "coordinator-project-move", false, true,
+        ).unwrap();
+        let session = assignment_session(&store, &task.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('different','Different','/tmp/coordinator-different')",
+            [],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET project_id='different' WHERE id='router'", []).unwrap();
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(guard_run_admission(&store, &session, &[]).is_err());
+        assert!(on_run_finished(&store, &session, true, "Prior-project advice").unwrap());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "blocked");
+        assert!(prepare_coordinated_worker(&mut store, &task.id, false).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Late coordinator").unwrap());
     }
 
     #[test]

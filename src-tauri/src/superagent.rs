@@ -412,21 +412,28 @@ fn assignment_session(store: &Store, task_id: &str) -> Result<Option<String>> {
 pub(crate) fn read_only_policy(
     store: &Store, session_id: &str,
 ) -> Result<Option<crate::architect::reviewer_security::ReviewerToolPolicy>> {
-    let scope: Option<(String, String, i64, i64, i64, i64, i64)> = store.db.query_row(
-        "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled
+    let scope: Option<(String, String, i64, i64, i64, i64, i64, String, String, String)> = store.db.query_row(
+        "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
+                a.bot_id,t.worker_bot_id,t.project_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE a.session_id=?1 AND t.active_assignment_id=a.id",
         [session_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,
+                r.get(7)?,r.get(8)?,r.get(9)?)),
     ).optional().map_err(|e| e.to_string())?;
-    if let Some((task_state,assignment_state,expiry,revoked,mandate_version,config_version,enabled)) = scope {
+    if let Some((task_state,assignment_state,expiry,revoked,mandate_version,config_version,enabled,
+                 bot_id,worker_id,project_id)) = scope {
         if task_state != "running" || assignment_state != "running" || revoked != 0
             || expiry <= storage::now() || mandate_version != config_version || enabled == 0
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
+        }
+        let active_bot = bots::get(store, &bot_id)?;
+        if active_bot.paused || (bot_id == worker_id && active_bot.project_id != project_id) {
+            return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
         }
         return Ok(Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly));
     }
@@ -527,6 +534,12 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let Some((task_id, assignment_id, coordinator)) = assignment else { return Ok(false) };
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
+         AND EXISTS (
+           SELECT 1 FROM sa_assignments active JOIN bots current_bot ON current_bot.id=active.bot_id
+           WHERE active.id=t.active_assignment_id AND current_bot.paused=0
+             AND (active.bot_id=o.coordinator_bot_id OR
+               (active.bot_id=t.worker_bot_id AND current_bot.project_id=t.project_id))
+         )
          FROM sa_mandates m JOIN sa_tickets t ON t.id=m.ticket_id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id WHERE t.id=?1",
         params![task_id,storage::now()], |r| r.get(0),
@@ -579,7 +592,14 @@ fn accept(store: &Store, ticket_id: &str, expected_revision: i64) -> Result<Tick
             ON o.id=sa_tickets.orchestration_id
             WHERE m.ticket_id=sa_tickets.id AND m.revoked=0 AND m.expires_at>?3
               AND m.policy_revision=o.policy_revision AND o.enabled=1
-         )",
+              AND EXISTS (
+                SELECT 1 FROM bots worker JOIN bots coordinator
+                  ON coordinator.id=o.coordinator_bot_id
+                WHERE worker.id=sa_tickets.worker_bot_id
+                  AND worker.paused=0 AND coordinator.paused=0
+                  AND worker.project_id=sa_tickets.project_id
+              )
+         )
         params![ticket_id,expected_revision,now],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {
@@ -1710,6 +1730,34 @@ mod tests {
             [&task.id], |r| r.get(0),
         ).unwrap();
         assert_eq!(settled_events, 1);
+    }
+
+    #[test]
+    fn paused_or_moved_native_bots_cannot_supply_or_accept_stale_evidence() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (first, _) = admit(&mut store, &config.id, "Safe result", "bot-drift-first", false).unwrap();
+        let first_session = assignment_session(&store, &first.id).unwrap().unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(read_only_policy(&store, &first_session).is_err());
+        assert!(on_run_finished(&store, &first_session, true, "Untrusted late result").unwrap());
+        assert_eq!(get_ticket(&store, &first.id).unwrap().state, "blocked");
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'", []).unwrap();
+
+        let (second, _) = admit(&mut store, &config.id, "Another result", "bot-drift-second", false).unwrap();
+        let second_session = assignment_session(&store, &second.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &second_session, true, "Current worker evidence").unwrap());
+        let awaiting = get_ticket(&store, &second.id).unwrap();
+        assert_eq!(awaiting.state, "waiting_approval");
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='router'", []).unwrap();
+        assert!(accept(&store, &second.id, awaiting.revision).is_err());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='router'", []).unwrap();
+        store.db.execute("INSERT INTO projects(id,name,path) VALUES('other','Other','/tmp/sa-other')", []).unwrap();
+        store.db.execute("UPDATE bots SET project_id='other' WHERE id='worker'", []).unwrap();
+        assert!(accept(&store, &second.id, awaiting.revision).is_err());
+        assert_eq!(get_ticket(&store, &second.id).unwrap().state, "waiting_approval");
+        assert!(!history(&store, &second.id, 100).unwrap()
+            .iter().any(|entry| entry.kind == "human_accepted"));
     }
 
     #[test]

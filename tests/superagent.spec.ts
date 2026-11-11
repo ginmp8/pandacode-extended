@@ -272,3 +272,34 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await expect(host.getByText('No event sources configured.')).toBeVisible();
   await expect(host.getByRole('region',{name:'Source decisions'})).toHaveCount(0);
 });
+
+
+test('SuperAgent preset draft survives an asynchronous native list reload', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-preset-draft-test'; document.body.appendChild(host);
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    window.addEventListener('sa-release-native-list', release, {once:true});
+    mountSuperagent(host, async command => {
+      if (command === 'bots_list') {
+        await pending;
+        return [{id:'router',name:'Router',paused:false},
+          {id:'worker',name:'Worker',paused:false}] as never;
+      }
+      if (command === 'superagent_list') return [] as never;
+      throw new Error('Unexpected command: ' + command);
+    });
+  });
+  const host = page.locator('#sa-preset-draft-test');
+  await host.getByRole('combobox',{name:'Example preset'}).selectOption('Software Development');
+  const name = host.getByRole('textbox',{name:'Name',exact:true});
+  await expect(name).toHaveValue('Software Development');
+  await name.fill('Custom original name');
+  await page.evaluate(() => window.dispatchEvent(new Event('sa-release-native-list')));
+  await expect(host.getByText('No orchestrations created.')).toBeVisible();
+  await expect(name).toHaveValue('Custom original name');
+  await expect(host.getByRole('combobox',{name:'Example preset'})).toHaveValue('Software Development');
+});

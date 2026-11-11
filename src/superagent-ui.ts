@@ -42,6 +42,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
+  // Persist the user's editable preset draft across asynchronous list refreshes.
+  let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
@@ -181,9 +183,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
       '<label>Example preset<select data-sa-template aria-label="Example preset">' +
       '<option value="">Custom</option>' +
-      '<option value="Software Development">Software Development</option>' +
-      '<option value="Issue Resolution">Issue Resolution</option></select></label>' +
-      '<label>Name<input name="name" maxlength="120" placeholder="Software Development" required></label>' +
+      '<option value="Software Development"' +
+      (draftPresetTemplate === 'Software Development' ? ' selected' : '') +
+      '>Software Development</option>' +
+      '<option value="Issue Resolution"' +
+      (draftPresetTemplate === 'Issue Resolution' ? ' selected' : '') +
+      '>Issue Resolution</option></select></label>' +
+      '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
+      safe(draftPresetName) + '" required></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
       '<option value="">Choose bot</option>' + choices + '</select></label>' +
       '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
@@ -267,11 +274,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   host.addEventListener('change', event => {
     const target = event.target;
     if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
+    draftPresetTemplate = target.value;
+    draftPresetName = target.value;
     const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
-    if (field) field.value = target.value;
+    if (field) field.value = draftPresetName;
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.name === 'name' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
+      draftPresetName = target.value;
+    }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
     }
@@ -442,6 +455,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         if (!input.name || !input.coordinatorBotId || !input.workerBotId ||
           input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
         const created = await call<Config>('superagent_create',{ input });
+        draftPresetName = ''; draftPresetTemplate = '';
         selected = created.id; await reload();
       });
     }

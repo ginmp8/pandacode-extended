@@ -701,7 +701,10 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let moved = tx.execute(
         "UPDATE sa_assignments SET state=?2,result=?3,updated_at=?4
          WHERE id=?1 AND state='running'",
-        params![assignment_id,if successful { "finished" } else { "failed" },trimmed,now],
+        // Rejected callbacks are not successful coordinator plans, even if
+        // the provider returned text. Otherwise a later manual retry after
+        // pause/revocation could promote that unauthorized plan to authority.
+        params![assignment_id,if authorized && successful { "finished" } else { "failed" },trimmed,now],
     ).map_err(|e| e.to_string())?;
     if moved != 1 { return Err("SuperAgent assignment changed before settlement.".into()); }
     let updated = tx.execute(
@@ -714,7 +717,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,?2,?3,?4)",
-        params![task_id,if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
+        params![task_id,if !authorized { "callback_rejected" }
+            else if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(true)
@@ -2178,6 +2182,37 @@ mod tests {
         assert!(retry_blocked(&mut store, &ticket.id, false).is_err());
         assert_eq!(history(&store, &ticket.id, 200).unwrap()
             .iter().filter(|entry| entry.kind == "human_accepted").count(), 0);
+    }
+
+    #[test]
+    fn rejected_coordinator_callback_cannot_be_replayed_as_authorized_worker_plan() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &cfg.id, "Bounded coordination", "rejected-plan-replay", false, true,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='router'", []).unwrap();
+
+        // A provider may still return success after native authority was
+        // revoked. The ticket is blocked; its coordinator assignment is not
+        // a valid plan for future dispatch or manual retry.
+        assert!(on_run_finished(&store, &session, true, "Untrusted late plan").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+        let attempts = assignments(&store, &ticket.id, 20).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].state, "failed");
+        assert!(history(&store, &ticket.id, 20).unwrap().iter()
+            .any(|event| event.kind == "callback_rejected"));
+
+        // Restoring the bot's availability is not authorization to relabel
+        // an earlier rejected plan as successful coordination.
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='router'", []).unwrap();
+        assert!(retry_blocked(&mut store, &ticket.id, false).is_err());
+        assert!(prepare_coordinated_worker(&mut store, &ticket.id, false).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+        assert_eq!(assignments(&store, &ticket.id, 20).unwrap().len(), 1);
     }
 
     #[test]

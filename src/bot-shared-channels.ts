@@ -183,14 +183,18 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
   const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
   const options = members.map(bot => `<label><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}"><span>${escape(bot.name)}</span></label>`).join('');
   return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
-    <div class="bc-council-controls"><label class="bc-council-toggle"><span class="bc-council-toggle-text"><strong>Council</strong><small>Review this message</small></span><input type="checkbox" name="councilEnabled" aria-label="Council review this message"></label>
-      <fieldset class="bc-council-options"><legend>Council settings (this message only)</legend>
-        <div class="bc-council-numbers"><label>Target score <input type="number" name="councilTarget" min="1" max="10" step="0.5" value="9"></label>
-        <label>Max rounds <input type="number" name="councilMaxRounds" min="1" max="100" step="1" value="10"></label></div>
+    <div class="composer-toolbar"><button type="button" class="bc-council-trigger composer-council-button" data-action="channel-council" aria-label="Council: off" aria-haspopup="dialog" aria-expanded="false" aria-controls="bc-council-panel" title="Council settings"><span class="council-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg></span></button><span class="bc-composer-spacer"></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div>
+    <section id="bc-council-panel" class="floating-menu council-panel bc-council-panel" role="dialog" aria-labelledby="bc-council-title" popover="auto">
+      <div class="bc-council-controls">
+        <div class="council-panel-head"><label id="bc-council-title" for="bc-council-enabled">Council</label><input id="bc-council-enabled" class="ds-toggle council-switch" type="checkbox" role="switch" name="councilEnabled" aria-describedby="bc-council-about"></div>
+        <p id="bc-council-about">Reviewers score this message until they reach your target. These settings apply only to this message.</p>
+        <fieldset class="bc-council-options"><legend class="sr-only">Council settings for this message</legend>
+        <div class="council-field"><span id="bc-council-target-label">Target score</span><div class="bc-council-value-row"><div class="ds-seg" role="group" aria-labelledby="bc-council-target-label"><button type="button" data-council-preset="target" data-value="7" aria-pressed="false">7.0</button><button type="button" data-council-preset="target" data-value="8" aria-pressed="false">8.0</button><button type="button" data-council-preset="target" data-value="8.5" aria-pressed="false">8.5</button><button type="button" data-council-preset="target" data-value="9" aria-pressed="true">9.0</button><button type="button" data-council-preset="target" data-value="9.5" aria-pressed="false">9.5</button><button type="button" data-council-preset="target" data-value="10" aria-pressed="false">10.0</button></div><input type="number" name="councilTarget" aria-label="Custom target score" title="Target score (1–10)" min="1" max="10" step="0.5" value="9"></div></div>
+        <div class="council-field"><span id="bc-council-rounds-label">Max rounds</span><div class="bc-council-value-row"><div class="ds-seg" role="group" aria-labelledby="bc-council-rounds-label"><button type="button" data-council-preset="rounds" data-value="3" aria-pressed="false">3</button><button type="button" data-council-preset="rounds" data-value="5" aria-pressed="false">5</button><button type="button" data-council-preset="rounds" data-value="10" aria-pressed="true">10</button><button type="button" data-council-preset="rounds" data-value="25" aria-pressed="false">25</button></div><input type="number" name="councilMaxRounds" aria-label="Custom max rounds" title="Max rounds (1–100)" min="1" max="100" step="1" value="10"></div></div>
         <div class="bc-council-mode-group"><span class="bc-council-section-label">Reviewers</span>
-          <div class="bc-council-modes" role="group" aria-label="Reviewer mode">
-            <label><input type="radio" name="councilMode" value="auto" checked><span>Automatic</span></label>
-            <label><input type="radio" name="councilMode" value="selected"><span>Channel bots</span></label>
+          <div class="bc-council-modes ds-seg" role="group" aria-label="Reviewer mode">
+            <label><input type="radio" name="councilMode" value="auto" checked><span>Auto</span></label>
+            <label><input type="radio" name="councilMode" value="selected"><span>Bots</span></label>
           </div>
         </div>
         <div class="bc-council-reviewer-options"><p>Choose 2–8 members other than any bot assigned this message.</p>${options}</div>
@@ -198,9 +202,70 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
           <label>Authorized repository (owner/name) <input type="text" name="councilGithubRepo" maxlength="201" placeholder="owner/repository" autocomplete="off"></label>
           <small>Uses the existing signed-in GitHub CLI. A failed or uncertain external write is reported separately; it never changes the Council verdict.</small></div>
         <div class="bc-council-selected-permissions"><label><input type="checkbox" name="councilScopedFile"> Allow one exact native file-inspection action</label><label>Authorized relative file path <input type="text" name="councilFilePath" maxlength="240" placeholder="src/example.ts" autocomplete="off"></label><small>Read-only by default. This does not authorize shell commands or checkout writes.</small></div>
-      </fieldset>
-    </div>
-    <div class="composer-toolbar"><span></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div></form>`;
+        </fieldset>
+      </div>
+    </section></form>`;
+}
+
+/** Bind the per-message Council panel without changing the channel's native submission contract. */
+export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
+  if (!form) return;
+  const panel = form.querySelector<HTMLElement>('.bc-council-panel');
+  const trigger = form.querySelector<HTMLButtonElement>('.bc-council-trigger');
+  if (!panel || !trigger) return;
+  const sync = () => {
+    const enabled = form.querySelector<HTMLInputElement>('input[name="councilEnabled"]')?.checked ?? false;
+    trigger.dataset.on = enabled ? 'true' : 'false';
+    trigger.setAttribute('aria-label', enabled ? 'Council: on' : 'Council: off');
+    for (const choice of panel.querySelectorAll<HTMLButtonElement>('button[data-council-preset]')) {
+      const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';
+      const input = form.elements.namedItem(name) as HTMLInputElement | null;
+      choice.setAttribute('aria-pressed', String(Number(input?.value) === Number(choice.dataset.value)));
+    }
+  };
+  panel.addEventListener('click', event => {
+    const choice = (event.target as Element).closest<HTMLButtonElement>('button[data-council-preset]');
+    if (!choice) return;
+    const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';
+    const input = form.elements.namedItem(name) as HTMLInputElement | null;
+    if (!input) return;
+    input.value = choice.dataset.value ?? input.value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  panel.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.hidePopover();
+    trigger.focus({ preventScroll: true });
+  });
+  panel.addEventListener('toggle', event => {
+    trigger.setAttribute('aria-expanded', String(event.newState === 'open'));
+  });
+  form.addEventListener('change', sync);
+  form.addEventListener('input', sync);
+  sync();
+}
+
+/** Show Council above the channel tray as a non-modal popover, like the direct-chat Council. */
+export function toggleSharedChannelCouncil(trigger: HTMLElement): void {
+  const panel = trigger.closest<HTMLFormElement>('#shared-channel-composer')?.querySelector<HTMLElement>('.bc-council-panel');
+  if (!panel) return;
+  if (panel.matches(':popover-open')) { panel.hidePopover(); trigger.focus({ preventScroll: true }); return; }
+  panel.showPopover();
+  const rect = trigger.getBoundingClientRect();
+  const width = Math.max(0, Math.min(380, window.innerWidth - 24));
+  const natural = Math.min(560, panel.scrollHeight);
+  const above = rect.top - 12, below = window.innerHeight - rect.bottom - 12;
+  const placeAbove = above >= natural || above > below;
+  const room = Math.max(0, placeAbove ? above : below);
+  const height = Math.min(560, room);
+  panel.style.width = width + 'px';
+  panel.style.maxHeight = height + 'px';
+  panel.style.left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2)) + 'px';
+  panel.style.top = (placeAbove ? Math.max(12, rect.top - 10 - Math.min(natural, height)) : rect.bottom + 10) + 'px';
+  trigger.setAttribute('aria-expanded', 'true');
+  panel.querySelector<HTMLElement>('.council-switch')?.focus({ preventScroll: true });
 }
 
 async function editChannel(options: SharedChannelUiOptions, channel: SharedChannelDetail): Promise<void> {

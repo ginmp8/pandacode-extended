@@ -2701,6 +2701,9 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // A turn's approval requests expire even if Council is still reviewing
+        // or the user stopped the run. This must precede deferred final callbacks.
+        bots::gateway::turn_ended(&session_id);
         // The Architect must persist its final Council verdict before bot callbacks
         // inspect it; otherwise an asynchronous bot finish may race the Team save
         // and strand a genuinely completed Channel Council delivery.

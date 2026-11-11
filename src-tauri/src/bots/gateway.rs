@@ -293,6 +293,15 @@ fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
     Ok(parts.join("\n\n").trim().to_owned())
 }
 
+/// Clear approval prompts that belonged to the harness turn that just ended.
+/// Council may still be reviewing; turn completion must not forward a final
+/// result, but it must revoke authorization requests from that ended turn.
+pub(crate) fn turn_ended(session_id: &str) {
+    if let Ok(mut map) = pending().lock() {
+        map.remove(session_id);
+    }
+}
+
 /// Returns false while the turn's work is still underway on a backup model or on hold, so
 /// channel and bot-to-bot deliveries stay linked until that work really ends.
 pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) -> bool {
@@ -531,6 +540,21 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ending_an_intermediate_council_turn_revokes_its_approval_requests() {
+        let session_id = format!("ended-council-turn-{}", crate::storage::id());
+        pending().lock().unwrap().insert(
+            session_id.clone(),
+            vec![("old-request".into(), "Use a privileged tool".into())],
+        );
+        assert!(pending().lock().unwrap().contains_key(&session_id));
+        turn_ended(&session_id);
+        assert!(!pending().lock().unwrap().contains_key(&session_id),
+            "approval from an ended turn must not authorize a later Council turn");
+        turn_ended(&session_id);
+    }
+
 
     #[test]
     fn queued_attachments_reach_the_prompt() {

@@ -57,6 +57,8 @@ pub struct ChannelCouncilView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub followup_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub followup_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub acceptance_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_by: Option<String>,
@@ -376,16 +378,17 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         "failed" if state != "Limit reached" => "Failed".into(),
         _ => state,
     };
-    let followup: Option<(String, Option<String>)> = store.db.query_row(
-        "SELECT state,issue_url FROM extended_channel_council_followups WHERE delivery_id=?1",
-        [delivery_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    let followup: Option<(String, Option<String>, Option<String>)> = store.db.query_row(
+        "SELECT state,issue_url,error FROM extended_channel_council_followups WHERE delivery_id=?1",
+        [delivery_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let (followup_status, followup_url) = followup.map_or((None,None), |(s,u)| (Some(s),u));
+    let (followup_status, followup_url, followup_error) =
+        followup.map_or((None,None,None), |(s,u,e)| (Some(s),u,e));
     let notice = if delivery_status == "failed" && notice.is_none() {
         Some("Council delivery ended without approval. Review the report before retrying.".into())
     } else { notice };
     let accepted_by = acceptance_reason.as_ref().map(|_| "local_user".to_string());
-    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, acceptance_reason, accepted_by }))
+    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, followup_error, acceptance_reason, accepted_by }))
 }
 
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.

@@ -460,6 +460,26 @@ fn admit_role(
     Ok((get_ticket(store, &ticket_id)?, !blocked))
 }
 
+/// A recorded coordinator plan is not a transferable authorization. Its
+/// original native session must still exist in the coordinator's current
+/// project. For a direct manual ticket with no coordinator attempt, this
+/// check is intentionally vacuous; worker admission remains independently
+/// gated by its own native mandate.
+fn coordinator_plan_current(
+    store: &Store, ticket_id: &str, coordinator_id: &str, project_id: &str,
+) -> Result<bool> {
+    let invalid: bool = store.db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_assignments a
+           LEFT JOIN sessions original ON original.id=a.session_id
+           WHERE a.ticket_id=?1 AND a.bot_id=?2
+             AND (a.state<>'finished' OR original.id IS NULL OR original.project_id<>?3)
+         )",
+        params![ticket_id,coordinator_id,project_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(!invalid)
+}
+
 fn assignment_session(store: &Store, task_id: &str) -> Result<Option<String>> {
     store.db.query_row(
         "SELECT a.session_id FROM sa_assignments a JOIN sa_tickets t ON t.active_assignment_id=a.id
@@ -486,10 +506,11 @@ pub(crate) fn read_only_policy(
         coordinator_id: String,
         worker_id: String,
         project_id: String,
+        ticket_id: String,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
-                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id
+                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -502,6 +523,7 @@ pub(crate) fn read_only_policy(
             mandate_version: r.get(4)?, config_version: r.get(5)?,
             enabled: r.get::<_, i64>(6)? != 0, bot_id: r.get(7)?,
             coordinator_id: r.get(8)?, worker_id: r.get(9)?, project_id: r.get(10)?,
+            ticket_id: r.get(11)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
@@ -517,6 +539,9 @@ pub(crate) fn read_only_policy(
         let assigned_session = store.session(session_id)?;
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
             || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
+            || (scope.bot_id == scope.worker_id && !coordinator_plan_current(
+                store, &scope.ticket_id, &scope.coordinator_id, &coordinator.project_id,
+            )?)
         {
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
         }
@@ -638,10 +663,18 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
          JOIN sa_orchestrations o ON o.id=t.orchestration_id WHERE t.id=?1",
         params![task_id,storage::now()], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
+    let provenance_ok = if coordinator { true } else {
+        let cfg = configuration(store, &get_ticket(store, &task_id)?.orchestration_id)?;
+        bots::get(store, &cfg.coordinator_bot_id)
+            .and_then(|bot| coordinator_plan_current(store, &task_id, &bot.id, &bot.project_id))
+            .unwrap_or(false)
+    };
     let trimmed = text.trim().chars().take(4096).collect::<String>();
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
-    let authorized = execution_permitted(authorized, crate::feature_controls::get().bots_paused);
+    let authorized = execution_permitted(
+        authorized && provenance_ok, crate::feature_controls::get().bots_paused,
+    );
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
@@ -691,6 +724,11 @@ fn accept_with_pause(
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
     {
         return Err("Task has no current verified worker result to accept.".into());
+    }
+    let coordinator = configuration(store, &ticket.orchestration_id)?;
+    let coordinator = bots::get(store, &coordinator.coordinator_bot_id)?;
+    if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
+        return Err("Coordinator plan is stale or its original session is unavailable.".into());
     }
     let now = storage::now();
     let changed = tx.execute(
@@ -972,13 +1010,8 @@ fn retry_blocked(
     if !mandate_ok {
         return Err("Original mandate expired, was revoked or differs from current policy.".into());
     }
-    let coordinator_failed: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_assignments a
-         WHERE a.ticket_id=?1 AND a.bot_id=?2 AND a.state<>'finished')",
-        params![ticket_id,config.coordinator_bot_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
-    if coordinator_failed {
-        return Err("Coordinator evidence is unavailable; a worker retry cannot bypass coordination.".into());
+    if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
+        return Err("Coordinator evidence is stale; a worker retry cannot bypass coordination.".into());
     }
     let (attempts, worker_attempts): (i64,i64) = store.db.query_row(
         "SELECT COALESCE(MAX(attempt),0),COUNT(*) FILTER (WHERE bot_id=?2)
@@ -1056,6 +1089,9 @@ fn prepare_coordinated_worker(
     // Coordinator advice is tied to the original native session workspace.
     // A later bot project change or deleted source session cannot make that
     // older result an authorized plan for another checkout.
+    if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
+        return Err("Coordinator plan or original workspace is no longer current.".into());
+    }
     let plan: Option<String> = store.db.query_row(
         "SELECT a.result FROM sa_assignments a
          JOIN sessions coordinator_session ON coordinator_session.id=a.session_id
@@ -2059,6 +2095,31 @@ mod tests {
         fail_launch(&store, &ticket.id, "original coordinator session disappeared").unwrap();
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_ok());
+    }
+
+    #[test]
+    fn coordinator_workspace_drift_revokes_worker_execution_result_and_approval() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, _) = admit_role(
+            &mut store, &cfg.id, "Original project work", "plan-drift-running-worker", false, true,
+        ).unwrap();
+        let plan_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &plan_session, true, "Plan in original workspace").unwrap());
+        let (running, _, _, _) = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+        let worker_session = assignment_session(&store, &running.id).unwrap().unwrap();
+
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('moved','Moved','/tmp/sa-worker-plan-drift')", [],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET project_id='moved' WHERE id='router'", []).unwrap();
+        assert!(read_only_policy(&store, &worker_session).is_err());
+        assert!(on_run_finished(&store, &worker_session, true, "Stale work").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+        assert!(accept(&store, &ticket.id, get_ticket(&store, &ticket.id).unwrap().revision).is_err());
+        assert!(retry_blocked(&mut store, &ticket.id, false).is_err());
+        assert_eq!(history(&store, &ticket.id, 200).unwrap()
+            .iter().filter(|entry| entry.kind == "human_accepted").count(), 0);
     }
 
     #[test]

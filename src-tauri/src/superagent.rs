@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 pub(crate) const CHANNEL: &str = "superagent";
+/// The existing bot gateway accepts at most 32 KiB of inbound text. Reserve
+/// headroom for native task metadata, read-only instructions and coordinator
+/// evidence; never persist an objective that is silently truncated at dispatch.
+const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_orchestrations (
@@ -276,7 +280,7 @@ fn admit_role(
     request_key: &str, busy: bool, coordinate: bool,
 ) -> Result<(Ticket, bool)> {
     let objective = objective.trim();
-    if objective.is_empty() || objective.len() > 32_768 || objective.chars().any(|c| c == '\0') {
+    if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
     }
     if request_key.is_empty() || request_key.len() > 128
@@ -1403,6 +1407,20 @@ mod tests {
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
         assert!(retry_blocked(&mut store,&ticket.id,false).is_err());
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn oversized_manual_objective_is_rejected_before_durable_or_gateway_dispatch() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let long_objective="x".repeat(MAX_OBJECTIVE_BYTES+1);
+        assert!(admit(&mut store,&config.id,&long_objective,"oversize-direct",false).is_err());
+        assert!(admit_role(&mut store,&config.id,&long_objective,"oversize-coordinator",false,true).is_err());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count,0);
+        assert!(admit(&mut store,&config.id,&"x".repeat(MAX_OBJECTIVE_BYTES),"max-accepted",false).is_ok());
     }
 
     #[test]

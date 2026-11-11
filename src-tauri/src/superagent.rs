@@ -3,7 +3,7 @@
 //! not execute untrusted model proposals as authority or create another runner.
 
 use crate::{bots, storage::{self, Store}, AppState, Result};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
@@ -227,12 +227,16 @@ fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str,
     let blocked = busy || occupied;
     let ticket_id = storage::id();
     let assignment_id = (!blocked).then(storage::id);
+    // Reserve the internal conversation in the SAME SQLite transaction as the
+    // ticket, mandate and worker lease. If any insert or CHECK fails, the
+    // ephemeral session and bot-thread mapping must roll back as well.
+    // Store methods share this connection, so use unchecked_transaction here
+    // instead of borrowing it mutably while provisioning the bot thread.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id = if blocked { None } else {
         Some(bots::thread_session(store, &worker, CHANNEL, &ticket_id, "SuperAgent · Manual task")?.0)
     };
     let now = storage::now();
-    let tx = store.db.transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,active_assignment_id,created_at,updated_at)
          VALUES(?1,?2,?3,?4,'local-user','manual',?5,?6,?7,?8,?9,?10,?10)",
@@ -577,6 +581,31 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn failed_assignment_insert_cannot_leave_an_orphan_native_session() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_sa_assignment BEFORE INSERT ON sa_assignments
+             BEGIN SELECT RAISE(ABORT,'injected assignment failure'); END;"
+        ).unwrap();
+        assert!(admit(&mut store, &config.id, "Must roll back", "fault-1", false).is_err());
+        for sql in [
+            "SELECT COUNT(*) FROM sa_tickets",
+            "SELECT COUNT(*) FROM sa_mandates",
+            "SELECT COUNT(*) FROM sa_assignments",
+            "SELECT COUNT(*) FROM bot_threads WHERE channel_id='superagent'",
+            "SELECT COUNT(*) FROM sessions",
+        ] {
+            let count: i64 = store.db.query_row(sql, [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 0, "partial admission remained after rollback: {sql}");
+        }
+        store.db.execute_batch("DROP TRIGGER reject_sa_assignment").unwrap();
+        let (ticket, launch) = admit(&mut store, &config.id, "Must roll back", "fault-1", false).unwrap();
+        assert!(launch);
+        assert_eq!(ticket.state, "running");
     }
 
     #[test]

@@ -864,6 +864,18 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         [&delivery_id],|r|r.get(0),
     ).unwrap();
     assert_eq!(state,"sending");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_followups
+         SET state='unknown',error='GitHub result is uncertain; check the repository.'
+         WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    let detail = shared_channels::detail(&f.store,&channel.id,100).unwrap();
+    let view = detail.messages.iter().find(|entry| entry.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(view.followup_status.as_deref(),Some("unknown"));
+    assert!(view.followup_error.as_deref().unwrap().contains("uncertain"),
+        "the delivery card exposes a trustworthy follow-up error independently of Council verdict");
 }
 
 #[test]

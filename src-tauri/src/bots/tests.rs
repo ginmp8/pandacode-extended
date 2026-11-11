@@ -597,6 +597,40 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
         params![delivery_id,cycle,crate::storage::now()],
     ).unwrap();
     assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Approved);
+    // A new native file-change record can arrive after the team's saved
+    // acceptance snapshot. It must revoke both live and replay admission.
+    let change_id = crate::storage::id();
+    let changed_at = crate::storage::now();
+    let change_message: i64 = f.store.db.query_row(
+        "INSERT INTO messages(session_id,role,content,created_at)
+         VALUES(?1,'changes','',?2) RETURNING id",
+        params![sid, changed_at], |row| row.get(0),
+    ).unwrap();
+    let change_summary = json!({
+        "files":[{"path":"src/after-review.rs","status":"modified","additions":1,"deletions":0,
+                  "binary":false,"truncated":false}],
+        "ownFiles":1,"attributed":true
+    });
+    f.store.db.execute(
+        "INSERT INTO turn_changes(id,session_id,message_id,summary,created_at,diff_bytes)
+         VALUES(?1,?2,?3,?4,?5,0)",
+        params![change_id,sid,change_message,change_summary.to_string(),changed_at],
+    ).unwrap();
+    assert!(matches!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Denied(_)),
+        "a newly persisted change must revoke a saved user exception");
+    f.store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='completed' WHERE id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(!shared_channels::council_callback_allowed(&f.store,&delivery_id).unwrap(),
+        "restart callbacks cannot reuse approval after new native file changes");
+    f.store.db.execute(
+        "UPDATE bot_shared_channel_deliveries SET status='in_progress' WHERE id=?1",
+        [&delivery_id],
+    ).unwrap();
+    f.store.db.execute("DELETE FROM turn_changes WHERE id=?1", [&change_id]).unwrap();
+    f.store.db.execute("DELETE FROM messages WHERE id=?1", [change_message]).unwrap();
+    assert_eq!(channel_council_outcome(&f.store,&sid).unwrap(),ChannelCouncilOutcome::Approved);
     team.config.council.as_mut().unwrap().target = 2.0;
     f.store.db.execute(
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",

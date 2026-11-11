@@ -574,10 +574,17 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     }
     team.council_status = council::status(team);
 }
+/// A stored verdict cannot approve writes recorded after the last native
+/// snapshot. Compare the persisted change index at the final admission boundary.
+pub(crate) fn council_evidence_is_current(store: &Store, team: &TeamSnapshot) -> bool {
+    council::changed_at(store, team).is_ok_and(|latest| latest <= team.changed_at)
+}
+
 /// Do not use a cached "passed" label as an authorization token. Recompute
 /// the native Council gate from frozen workers, scores, required skill receipts
-/// and the reviewed revision before publishing a successful channel result.
-pub(crate) fn verified_council_pass(team: &TeamSnapshot) -> bool {
+/// and current stored change evidence before publishing a successful result.
+pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool {
+    if !council_evidence_is_current(store, team) { return false; }
     let Some(stored) = team.council_status.as_ref() else { return false };
     if stored.state != "passed" || stored.stale { return false; }
     let Some(verified) = council::status(team) else { return false };

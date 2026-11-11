@@ -76,6 +76,32 @@ CREATE TABLE IF NOT EXISTS sa_audit (
 CREATE INDEX IF NOT EXISTS sa_audit_ticket ON sa_audit(ticket_id,id);
 "#;
 
+/// Cross-bot resource admission is a database invariant, not only an
+/// optimistic application check. Every active assignment with the same ticket
+/// project shares an exclusive lease; ordinary bots keep their existing behavior.
+/// These triggers also protect future retry/update callers from bypassing admission.
+pub(crate) const PROJECT_LEASE: &str = r#"
+CREATE TRIGGER IF NOT EXISTS sa_project_lease_insert
+ BEFORE INSERT ON sa_assignments
+ WHEN NEW.state='running' AND EXISTS(
+   SELECT 1 FROM sa_assignments a
+   JOIN sa_tickets previous ON previous.id=a.ticket_id
+   JOIN sa_tickets incoming ON incoming.id=NEW.ticket_id
+   WHERE a.state='running' AND previous.project_id=incoming.project_id
+ )
+ BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
+CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
+ BEFORE UPDATE OF state ON sa_assignments
+ WHEN NEW.state='running' AND EXISTS(
+   SELECT 1 FROM sa_assignments a
+   JOIN sa_tickets previous ON previous.id=a.ticket_id
+   JOIN sa_tickets incoming ON incoming.id=NEW.ticket_id
+   WHERE a.id<>NEW.id AND a.state='running'
+     AND previous.project_id=incoming.project_id
+ )
+ BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
+"#;
+
 /// An active harness is not resumed automatically after process restart.
 pub(crate) const RECOVER: &str = "
 INSERT INTO sa_audit(ticket_id,kind,detail,at)
@@ -279,8 +305,13 @@ fn admit_role(
     }
     let candidate = if coordinate { &coordinator } else { &worker };
     let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE bot_id=?1 AND state='running')",
-        [&candidate.id], |row| row.get(0),
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_assignments a
+           JOIN sa_tickets previous ON previous.id=a.ticket_id
+           WHERE a.state='running'
+             AND (a.bot_id=?1 OR previous.project_id=?2)
+         )",
+        params![candidate.id,config.project_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
@@ -739,8 +770,13 @@ fn retry_blocked(
         return Err("Manual worker retry limit reached; create a new authorized ticket.".into());
     }
     let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE bot_id=?1 AND state='running')",
-        [&worker.id], |r| r.get(0),
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_assignments a
+           JOIN sa_tickets previous ON previous.id=a.ticket_id
+           WHERE a.state='running' AND
+                 (a.bot_id=?1 OR previous.project_id=?2)
+         )",
+        params![worker.id,config.project_id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     if busy || occupied {
         return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
@@ -818,8 +854,13 @@ fn prepare_coordinated_worker(
         return Err("Coordinator plan cannot extend an expired or revised mandate.".into());
     }
     let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE bot_id=?1 AND state='running')",
-        [&worker.id], |r| r.get(0),
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_assignments a
+           JOIN sa_tickets previous ON previous.id=a.ticket_id
+           WHERE a.state='running' AND
+                 (a.bot_id=?1 OR previous.project_id=?2)
+         )",
+        params![worker.id,config.project_id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     if busy || occupied {
         return Err("Worker is occupied; coordinated ticket stays queued.".into());
@@ -1362,6 +1403,42 @@ mod tests {
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
         assert!(retry_blocked(&mut store,&ticket.id,false).is_err());
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn project_resource_lease_serializes_distinct_native_workers_and_retry() {
+        let mut store=fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Second Builder','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let first_cfg=enabled(&store);
+        let second_cfg=create_configuration(&store,NewOrchestration {
+            name:"Same project other worker".into(),
+            coordinator_bot_id:"router".into(),
+            worker_bot_id:"other-worker".into(),
+        }).unwrap();
+        let second_cfg=change_enabled(&store,&second_cfg.id,1,true).unwrap();
+        let (first,started)=admit(&mut store,&first_cfg.id,"First","resource-a",false).unwrap();
+        assert!(started);
+        let (second,other_started)=admit(&mut store,&second_cfg.id,"Second","resource-b",false).unwrap();
+        assert!(!other_started);
+        assert_eq!(second.state,"blocked");
+        // A bypassing SQL caller must hit the same native lease, including
+        // on the distinct worker ID and on a separate session.
+        let blocked=store.db.execute(
+            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES('illegal-lease',?1,'other-worker','illegal-session','running',1,?2,?2)",
+            params![second.id,storage::now()],
+        );
+        assert!(blocked.is_err());
+        let sid=assignment_session(&store,&first.id).unwrap().unwrap();
+        assert!(on_run_finished(&store,&sid,true,"Evidence").unwrap());
+        let (resumed,_,worker)=retry_blocked(&mut store,&second.id,false).unwrap();
+        assert_eq!(resumed.state,"running");
+        assert_eq!(worker,"other-worker");
+        assert_ne!(assignment_session(&store,&second.id).unwrap(),Some(sid));
     }
 
     #[test]

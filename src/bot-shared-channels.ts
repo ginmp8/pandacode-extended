@@ -30,7 +30,14 @@ export interface ChannelCouncilView {
   lowest: number | null;
   artifactRevision: string;
   notice?: string | null;
-  reviewers: { botId: string | null; name: string; lens: string; round: number; score: number | null }[];
+  reviewers: {
+    botId: string | null; name: string; lens: string; round: number; score: number | null;
+    skills?: {
+      id: string; status: string; sha256?: string | null; sourceKind?: string | null;
+      sourceRef?: string | null; sourceCommit?: string | null; required: boolean;
+      nativeRetrieval: boolean; nativeCheckVerified: boolean; correctiveAction?: string | null;
+    }[];
+  }[];
   followupStatus?: string | null;
   followupUrl?: string | null;
   followupError?: string | null;
@@ -94,7 +101,24 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
     const description = message.kind === "direct_delegation"
       ? `${bot?.name ?? "Bot"}: ${message.text}` : `Assigned to ${bot?.name ?? "bot"}`;
     const council = message.council;
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${council.reviewers.map(reviewer => `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}`).join(' · ')}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    // Show only provenance safe for a channel: no local materialization paths,
+    // private reviewer instructions or credentials. Details remain accessible
+    // by keyboard/assistive technology without a second Customize registry.
+    const reviewerSummary = council?.reviewers.map(reviewer => {
+      const skills = reviewer.skills ?? [];
+      const receipts = skills.map(skill => [
+        skill.id, skill.status, skill.sha256 ? `SHA-256 ${skill.sha256}` : '',
+        skill.sourceKind ?? '', skill.sourceRef ?? '', skill.sourceCommit ?? '',
+        skill.nativeRetrieval ? 'retrieval recorded' : 'retrieval not verified',
+        skill.nativeCheckVerified ? 'native check verified' : 'native check not verified',
+        skill.correctiveAction ?? '',
+      ].filter(Boolean).join(' · '));
+      const skillNote = receipts.length
+        ? ` <span class="bc-council-skill-receipts" role="note" tabindex="0" aria-label="${escape(receipts.join('; '))}" title="${escape(receipts.join('; '))}">Skills: ${skills.length}</span>`
+        : '';
+      return `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}${skillNote}`;
+    }).join(' · ') ?? '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;

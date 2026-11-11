@@ -71,6 +71,25 @@ pub struct ChannelCouncilReviewer {
     pub lens: String,
     pub round: usize,
     pub score: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<ChannelCouncilSkill>,
+}
+
+/// Safe, task-scoped provenance only. Never expose local staging paths,
+/// native tool grants, credentials, or the reviewer's private transcript.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCouncilSkill {
+    pub id: String,
+    pub status: String,
+    pub sha256: Option<String>,
+    pub source_kind: Option<String>,
+    pub source_ref: Option<String>,
+    pub source_commit: Option<String>,
+    pub required: bool,
+    pub native_retrieval: bool,
+    pub native_check_verified: bool,
+    pub corrective_action: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -352,10 +371,50 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             },
         };
         let reviewers = team.workers.iter().filter_map(|worker| {
-            worker.council.as_ref().map(|seat| ChannelCouncilReviewer {
-                bot_id: worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.clone()),
-                name: worker.name.clone(), lens: seat.lens.clone(),
-                round: seat.round, score: seat.score,
+            worker.council.as_ref().map(|seat| {
+                let mut skills_out = Vec::new();
+                if let Some(binding) = worker.reviewer_binding.as_ref() {
+                    if let Some(skills) = binding.snapshot.skills.as_ref() {
+                        let intact = skills.verify().is_ok();
+                        for pin in &skills.pins {
+                            let observed = binding.skill_evidence.get(&pin.id);
+                            let retrieved = observed.is_some_and(|e| e.invoked && e.content_sha256 == pin.content_sha256
+                                && e.artifact_revision == binding.artifact_revision);
+                            let checked = observed.is_some_and(|e| e.valid_for(pin, &binding.artifact_revision));
+                            let status = if !pin.eligible || !pin.supplied {
+                                "unavailable"
+                            } else if !intact {
+                                "outdated"
+                            } else if pin.check_required && !checked {
+                                "not_verified"
+                            } else { "available" };
+                            let corrective_action = (status != "available").then(|| {
+                                "Recheck the assigned skill in Customize and dispatch a new authorized Council round.".to_owned()
+                            });
+                            skills_out.push(ChannelCouncilSkill {
+                                id: pin.id.clone(), status: status.into(),
+                                sha256: Some(pin.content_sha256.clone()),
+                                source_kind: Some(pin.source_kind.clone()),
+                                source_ref: pin.source_ref.clone(), source_commit: pin.source_commit.clone(),
+                                required: pin.required_for_acceptance, native_retrieval: retrieved,
+                                native_check_verified: checked, corrective_action,
+                            });
+                        }
+                        for skipped in &skills.skipped {
+                            skills_out.push(ChannelCouncilSkill {
+                                id: skipped.id.clone(), status: "skipped".into(),
+                                sha256: None, source_kind: None, source_ref: None, source_commit: None,
+                                required: false, native_retrieval: false, native_check_verified: false,
+                                corrective_action: Some("Review this missing or unsafe skill in Customize and start a new Council round.".into()),
+                            });
+                        }
+                    }
+                }
+                ChannelCouncilReviewer {
+                    bot_id: worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.clone()),
+                    name: worker.name.clone(), lens: seat.lens.clone(),
+                    round: seat.round, score: seat.score, skills: skills_out,
+                }
             })
         }).collect();
         let note = (!original_matches)

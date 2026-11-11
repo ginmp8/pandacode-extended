@@ -1280,7 +1280,10 @@ fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
                     params![session_id,crate::storage::now()],
                 ).unwrap();
             } else {
-                team.status = "waiting".into();
+                // The second pending delivery awaits corrective action ("ready"),
+                // not a running provider turn ("waiting"). Store::open must only
+                // interrupt the latter when its session has a corresponding run.
+                team.status = if index == 2 { "ready" } else { "waiting" }.into();
                 if index == 2 {
                     // A distinct correction round must survive restart without
                     // borrowing the approved neighboring delivery's verdict.

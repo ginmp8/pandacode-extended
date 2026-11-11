@@ -325,7 +325,7 @@ fn council_approval_proof_and_github_followup_have_exactly_one_durable_claim() {
     let message_id = crate::storage::id();
     let delivery_id = crate::storage::id();
     let council = crate::architect::CouncilConfig {
-        post_acceptance_issue: Some(crate::architect::council::PostAcceptanceIssue {
+        post_acceptance_issue: Some(crate::architect::PostAcceptanceIssue {
             authorization_id: "explicit-user-action".into(), repository: "owner/repo".into(),
         }),
         ..Default::default()

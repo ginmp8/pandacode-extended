@@ -331,6 +331,18 @@ pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selec
     Ok(())
 }
 
+/// Preserve the native failure type rather than showing every optional
+/// skill provisioning error as an indistinguishable skipped receipt.
+pub(super) fn skipped_skill_status(reason: &str) -> &'static str {
+    if reason.starts_with("reviewer_skill_truncated:") { "truncated" }
+    else if reason.starts_with("reviewer_skill_untrusted:") { "untrusted" }
+    else if reason.starts_with("reviewer_skill_drift:") { "outdated" }
+    else if reason.starts_with("reviewer_skill_cycle:")
+        || reason.starts_with("reviewer_skill_incompatible:") { "incompatible" }
+    else if reason.starts_with("reviewer_skill_unavailable:") { "unavailable" }
+    else { "skipped" }
+}
+
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String, String)> = store.db.query_row(
         "SELECT cycle_id,artifact_revision,source_message_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
@@ -402,7 +414,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                         }
                         for skipped in &skills.skipped {
                             skills_out.push(ChannelCouncilSkill {
-                                id: skipped.id.clone(), status: "skipped".into(),
+                                id: skipped.id.clone(), status: skipped_skill_status(&skipped.reason).into(),
                                 sha256: None, source_kind: None, source_ref: None, source_commit: None,
                                 required: false, native_retrieval: false, native_check_verified: false,
                                 corrective_action: Some("Review this missing or unsafe skill in Customize and start a new Council round.".into()),

@@ -33,6 +33,21 @@ fn bot(f: &Fixture) -> Bot {
 }
 
 #[test]
+fn optional_skill_failures_preserve_distinct_provisioning_statuses() {
+    for (reason, expected) in [
+        ("reviewer_skill_unavailable: missing skill", "unavailable"),
+        ("reviewer_skill_untrusted: safety issue", "untrusted"),
+        ("reviewer_skill_truncated: prompt limit", "truncated"),
+        ("reviewer_skill_drift: replaced skill", "outdated"),
+        ("reviewer_skill_cycle: dependency loop", "incompatible"),
+        ("reviewer_skill_incompatible: unsupported harness", "incompatible"),
+        ("invalid source", "skipped"),
+    ] {
+        assert_eq!(shared_channels::skipped_skill_status(reason), expected);
+    }
+}
+
+#[test]
 fn shared_channel_council_is_opt_in_and_never_selects_outsiders_or_executors() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();

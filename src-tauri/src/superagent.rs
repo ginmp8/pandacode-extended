@@ -492,8 +492,9 @@ pub async fn superagent_list(state: State<'_,AppState>) -> Result<Vec<Orchestrat
     let store=state.store.lock().map_err(|e|e.to_string())?;
     let mut stmt=store.db.prepare("SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision FROM sa_orchestrations ORDER BY created_at")
         .map_err(|e|e.to_string())?;
-    stmt.query_map([],orchestration_row).map_err(|e|e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+    let rows = stmt.query_map([],orchestration_row).map_err(|e|e.to_string())?;
+    let configs = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    Ok(configs)
 }
 
 #[tauri::command]
@@ -539,7 +540,8 @@ fn change_enabled(
 
 #[tauri::command]
 pub async fn superagent_ticket(state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
-    get_ticket(&state.store.lock().map_err(|e|e.to_string())?,&ticket_id)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    get_ticket(&store, &ticket_id)
 }
 
 #[tauri::command]
@@ -579,12 +581,14 @@ pub async fn superagent_submit(
         if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket.id,&error); }
         return Err(format!("Dispatch failed; ticket {} retained for inspection: {error}",ticket.id));
     }
-    get_ticket(&state.store.lock().map_err(|e|e.to_string())?,&ticket.id)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    get_ticket(&store, &ticket.id)
 }
 
 #[tauri::command]
 pub async fn superagent_accept(state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
-    accept(&state.store.lock().map_err(|e|e.to_string())?,&ticket_id,expected_revision)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    accept(&store, &ticket_id, expected_revision)
 }
 
 #[tauri::command]

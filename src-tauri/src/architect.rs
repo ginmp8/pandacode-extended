@@ -10,7 +10,9 @@ pub(crate) mod profiles;
 mod routing;
 pub(crate) mod watchdog;
 
-pub use council::{CouncilConfig, CouncilSeat, CouncilStatus, PostAcceptanceIssue};
+pub use council::{CouncilConfig, CouncilSeat, CouncilStatus};
+#[cfg(test)]
+pub(crate) use council::PostAcceptanceIssue;
 
 use crate::{
     providers::ToolHost,

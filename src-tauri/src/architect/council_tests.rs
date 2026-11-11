@@ -9,11 +9,13 @@ const SINCE: i64 = 1000;
 
 #[test]
 fn post_acceptance_github_action_requires_one_exact_repository_and_user_grant() {
-    let mut config = CouncilConfig::default();
-    config.post_acceptance_issue = Some(council::PostAcceptanceIssue {
-        authorization_id: "local-user-approval".into(),
-        repository: "owner/repo-name".into(),
-    });
+    let mut config = CouncilConfig {
+        post_acceptance_issue: Some(council::PostAcceptanceIssue {
+            authorization_id: "local-user-approval".into(),
+            repository: "owner/repo-name".into(),
+        }),
+        ..Default::default()
+    };
     assert!(config.validate().is_ok());
     config.post_acceptance_issue.as_mut().unwrap().repository = "owner/../other".into();
     assert!(config.validate().unwrap_err().contains("owner/name"));

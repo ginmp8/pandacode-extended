@@ -749,9 +749,11 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
 /// The returned bool permits an ordinary collaboration callback; None means no
 /// terminal transition was made.
 pub(super) fn settle_channel_delivery(
-    store: &Store, session_id: &str, delivery_id: &str, channel_id: &str,
-    message_id: &str, bot_id: &str, successful: bool, reply: &str,
+    store: &Store, session_id: &str,
+    delivery: (&str, &str, &str, &str),
+    successful: bool, reply: &str,
 ) -> Result<Option<bool>> {
+    let (delivery_id, channel_id, message_id, bot_id) = delivery;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     // Re-read under the same SQLite transaction as the terminal claim:
     // a changed review/revision must not pass on a stale pre-gateway decision.
@@ -912,7 +914,7 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     if let Some((delivery_id,channel_id,message_id,bot_id)) = channel {
         let callback = {
             let store = match state.store.lock() { Ok(store)=>store, Err(_)=>return };
-            match settle_channel_delivery(&store, session_id, &delivery_id, &channel_id, &message_id, &bot_id, successful, reply) {
+            match settle_channel_delivery(&store, session_id, (&delivery_id, &channel_id, &message_id, &bot_id), successful, reply) {
                 Ok(Some(callback)) => callback,
                 Ok(None) => return,
                 Err(error) => {

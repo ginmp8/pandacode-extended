@@ -560,6 +560,28 @@ fn assignment_session(store: &Store, task_id: &str) -> Result<Option<String>> {
     ).optional().map_err(|e| e.to_string())
 }
 
+/// Verify that a provider session still belongs to the exact native
+/// ticket/attempt thread it was admitted under. Recheck this at execution
+/// admission AND result settlement, not just at the gateway ingress.
+fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM bot_threads thread
+            JOIN sa_assignments assignment ON assignment.session_id=thread.session_id
+            WHERE assignment.session_id=?1 AND assignment.bot_id=thread.bot_id
+              AND assignment.ticket_id=?3 AND thread.channel_id=?2
+              AND (
+                (assignment.attempt=1 AND thread.external_id=?3)
+                OR (assignment.attempt>1 AND
+                    thread.external_id=?3 || ':attempt:' || assignment.attempt)
+                OR (assignment.attempt>1 AND
+                    thread.external_id=?3 || ':worker:' || assignment.attempt)
+              )
+        )",
+        params![session_id, CHANNEL, ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 /// Only the active, user-admitted read-only assignment is allowed to run.
 /// Leverages the existing provider-level Council isolation (native plan,
 /// tool-host removal, external MCP checks and permission denial), not a prompt.
@@ -626,23 +648,7 @@ pub(crate) fn read_only_policy(
         // A native assignment never inherits ambient bot permissions if its
         // internal thread has been unlinked or remapped after admission.
         // This guards direct session launch as well as the inbound gateway.
-        let native_thread: bool = store.db.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM bot_threads thread
-                JOIN sa_assignments assignment ON assignment.session_id=thread.session_id
-                WHERE assignment.session_id=?1 AND assignment.bot_id=thread.bot_id
-                  AND assignment.ticket_id=?3 AND thread.channel_id=?2
-                  AND (
-                    (assignment.attempt=1 AND thread.external_id=?3)
-                    OR (assignment.attempt>1 AND
-                        thread.external_id=?3 || ':attempt:' || assignment.attempt)
-                    OR (assignment.attempt>1 AND
-                        thread.external_id=?3 || ':worker:' || assignment.attempt)
-                  )
-            )",
-            params![session_id, CHANNEL, scope.ticket_id],
-            |r| r.get(0),
-        ).map_err(|e| e.to_string())?;
+        let native_thread = assignment_thread_current(store, session_id, &scope.ticket_id)?;
         if !native_thread {
             return Err("policy_unsupported: SuperAgent session no longer matches its native thread.".into());
         }
@@ -834,8 +840,10 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
     let within_budget = assignment_within_budget(started_at, storage::now());
+    let thread_current = assignment_thread_current(store, session_id, &task_id)?;
     let authorized = execution_permitted(
-        authorized && provenance_ok && within_budget, crate::feature_controls::get().bots_paused,
+        authorized && provenance_ok && within_budget && thread_current,
+        crate::feature_controls::get().bots_paused,
     );
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
@@ -1845,9 +1853,15 @@ mod tests {
         assert!(read_only_policy(&store, &sid).is_err());
         assert!(guard_run_admission(&store, &sid, &[]).is_err());
 
-        // The same must hold after a successful native result or Stop,
-        // including a stale provider callback racing a future session.
-        assert!(on_run_finished(&store, &sid, true, "Read-only evidence").unwrap());
+        // A late provider success after the thread was detached is also
+        // rejected as evidence; neither a new launch nor human acceptance
+        // may inherit that orphaned native task result.
+        assert!(on_run_finished(&store, &sid, true, "Detached provider result").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(history(&store, &ticket.id, 20).unwrap()
+            .iter().any(|event| event.kind == "callback_rejected"));
         assert!(read_only_policy(&store, &sid).is_err());
 
         let ordinary = bots::get(&store, "worker").unwrap();

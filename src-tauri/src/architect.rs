@@ -660,6 +660,7 @@ pub(crate) fn reviewer_policy(
     let policy = if let Some(binding) = &worker.reviewer_binding {
         binding.validate(&team, worker)?;
         reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+        bot_reviewers::validate_frozen_seat(store, binding, true)?;
         if binding.snapshot.bot_context.as_ref().is_some_and(|ctx| !ctx.skill_ids.is_empty())
             && binding.snapshot.skills.is_none()
         {
@@ -3163,6 +3164,20 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
     };
     if routing::failed_chain(store, team, &worker.id)?.map_or(0, |c| c.attempts) >= routing::MAX_ATTEMPTS {
         return Ok(false);
+    }
+    // Reassigning a selected-bot Council seat to another provider/model would
+    // change its frozen reviewer identity, skill delivery and task-scoped tool
+    // permissions. Do not mutate the worker/session before a fresh authorized
+    // review round has been dispatched. Ordinary/native workers keep failover.
+    if let Some(binding) = worker.reviewer_binding.as_ref().filter(|b| b.reviewer_bot_id.is_some()) {
+        let same = binding.snapshot.provider == next.provider && binding.snapshot.model == next.model;
+        let pins_valid = binding.snapshot.skills.as_ref().is_none_or(|skills| skills.verify().is_ok());
+        if !same || !pins_valid || binding.snapshot.tool_policy.validate().is_err() {
+            let worker = &mut team.workers[index];
+            let prior = worker.error.clone().unwrap_or_default();
+            worker.error = Some(bounded(&format!("{prior} policy_unsupported: selected Council reviewer failover would change frozen harness, skills or permission policy; dispatch a new authorized round."), 1024));
+            return Ok(false);
+        }
     }
     let roster = team.config.workers.iter().find(|p| p.provider == next.provider && p.model == next.model);
     let reasoning_effort = routing::effort(&next.provider, worker.reasoning_effort.as_ref()).or_else(|| roster.and_then(|p| p.reasoning_effort.clone()));

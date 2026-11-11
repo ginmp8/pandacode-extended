@@ -314,6 +314,81 @@ fn recovering_an_automatic_round_with_a_smaller_selected_quorum_needs_fresh_scor
 }
 
 #[test]
+fn resumed_selected_seat_fails_closed_if_bot_was_paused_or_removed() {
+    let (store, mut team) = fixture();
+    let project = store.session(&team.session_id).unwrap().project_id;
+    store.db.execute(
+        "INSERT INTO bots(id,name,role,project_id,provider,model,mode,created_at,updated_at)
+         VALUES('bot-a','Reviewer','QA',?1,'codex','frozen-model','full',1,1)",
+        [&project],
+    ).unwrap();
+    let mut worker = seat("resume-reviewer", 1, None, SINCE + 1);
+    worker.status = "running".into();
+    team.council_since = SINCE;
+    team.config.council = Some(on(9.0, 10, 2));
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider,
+        &worker.model, worker.council.as_ref().unwrap(),
+    );
+    binding.snapshot.provider = "codex".into();
+    binding.snapshot.model = "frozen-model".into();
+    binding.reviewer_bot_id = Some("bot-a".into());
+    binding.snapshot.bot_context = Some(
+        reviewer_security::ReviewerBotContext::from_bot(&crate::bots::get(&store, "bot-a").unwrap()),
+    );
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false).is_ok());
+    store.db.execute(
+        "UPDATE bots SET name='Changed',instructions='New instructions',model='new-model'
+         WHERE id='bot-a'",
+        [],
+    ).unwrap();
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false).is_ok(),
+        "profile edits must not rewrite or invalidate an already frozen seat");
+    assert_eq!(binding.snapshot.model, "frozen-model");
+    assert_eq!(binding.snapshot.bot_context.as_ref().unwrap().name, "Reviewer");
+    store.db.execute("UPDATE bots SET paused=1 WHERE id='bot-a'", []).unwrap();
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false)
+        .unwrap_err().contains("paused"));
+    store.db.execute("DELETE FROM bots WHERE id='bot-a'", []).unwrap();
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false)
+        .unwrap_err().contains("removed"));
+}
+
+#[test]
+fn selected_council_failover_never_changes_its_frozen_provider_or_permissions() {
+    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline"]);
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.workers[0].status = "failed".into();
+    team.workers[0].council = Some(CouncilSeat {
+        round: 1, lens: "security".into(), score: None, started_at: 1, closed_by_selection: false,
+    });
+    let worker = &team.workers[0];
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider,
+        &worker.model, worker.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some("selected-bot".into());
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Selected".into(), role: "QA".into(), instructions: "Review".into(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+        skill_ids: Vec::new(),
+    });
+    team.workers[0].reviewer_binding = Some(binding.clone());
+    let before = (team.workers[0].provider.clone(), team.workers[0].model.clone(),
+        team.workers[0].session_id.clone());
+    assert!(!fail_over(&store, &mut team, 0, "provider failure").unwrap(),
+        "a cross-harness fallback cannot inherit a selected seat's tool authority");
+    assert_eq!((team.workers[0].provider.clone(),team.workers[0].model.clone(),
+        team.workers[0].session_id.clone()), before);
+    assert_eq!(team.workers[0].reviewer_binding.as_ref(),Some(&binding));
+    assert_eq!(team.workers[0].status, "failed");
+    assert!(team.workers[0].error.as_deref().unwrap().contains("policy_unsupported"));
+    assert_eq!(store.session(&before.2).unwrap().provider, before.0,
+        "the native session must not be silently changed on an unsupported fallback");
+}
+
+#[test]
 fn selected_round_freezes_all_profiles_before_split_dispatch_and_replacement() {
     let (store, mut team) = fixture();
     let project = store.session(&team.session_id).unwrap().project_id;

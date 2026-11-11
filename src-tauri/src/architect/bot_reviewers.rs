@@ -39,6 +39,31 @@ fn valid_bot(bot: &bots::Bot, executor: Option<&str>, check_executable: bool) ->
     Ok(())
 }
 
+/// Revalidate a persisted reviewer after restart/resume without reading mutable
+/// persona or skill assignments into the in-flight seat. Deleting or pausing the
+/// selected bot revokes further work; editing the bot leaves frozen inputs intact.
+pub(super) fn validate_frozen_seat(
+    store: &Store, binding: &super::reviewer_security::ReviewerBinding, check_executable: bool,
+) -> Result<()> {
+    let Some(bot_id) = binding.reviewer_bot_id.as_deref() else { return Ok(()) };
+    let current = bots::get(store, bot_id)
+        .map_err(|_| format!("reviewer_unavailable: selected bot {bot_id} was removed."))?;
+    if current.paused {
+        return Err("reviewer_unavailable: selected reviewer bot is paused.".into());
+    }
+    let provider = &binding.snapshot.provider;
+    let model = &binding.snapshot.model;
+    if !HARNESSES.contains(&provider.as_str())
+        || model.is_empty()
+        || (check_executable && (!model_routing::allowed(provider, model)
+            || !model_health::is_healthy(provider, model)
+            || providers::executable(provider).is_none()))
+    {
+        return Err("reviewer_unavailable: frozen reviewer harness/model is no longer available.".into());
+    }
+    Ok(())
+}
+
 /// Return the same server-side eligibility rules used for actual dispatch, including
 /// executable installation and model health. A UI can never authorize a bot itself.
 pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json::Value>> {

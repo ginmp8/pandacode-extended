@@ -180,7 +180,7 @@ jobs:
           # Linux arm64 pinned to plain ARMv8-A, never the runner's CPU.
           - { os: ubuntu-24.04-arm, target: linux-aarch64, transcribe_cmake: '-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a' }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       TRANSCRIBE_CMAKE_ARGS: ${{ matrix.transcribe_cmake }}
     steps:
@@ -206,5 +206,6 @@ jobs:
       # crashed optimised builds, so debug tests passed while the released app segfaulted.
       - name: Real audio smoke (release profile)
         if: runner.os == 'macOS'
-        timeout-minutes: 40
+        # A cold optimized Intel macOS build can exceed 40 minutes after the clippy pass.
+        timeout-minutes: 70
         run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib real_audio -- --ignored --nocapture

@@ -256,6 +256,11 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
     let (bot, session_id, created, kind) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let bot = super::get(&store, &inbound.bot_id)?;
+        if inbound.channel_id == crate::superagent::CHANNEL {
+            crate::superagent::guard_gateway_inbound(
+                &store, &bot.id, &inbound.thread, &inbound.sender_id, inbound.trusted,
+            )?;
+        }
         if !inbound.trusted && !channels::is_approved(&store, &inbound.channel_id, &inbound.sender_id)? {
             return Err("This sender is not paired with the bot.".into());
         }

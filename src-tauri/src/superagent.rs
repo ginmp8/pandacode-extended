@@ -619,6 +619,36 @@ pub(crate) fn read_only_policy(
     Ok(None)
 }
 
+/// Require a pre-existing, active native assignment before a message may enter
+/// the internal SuperAgent gateway channel. This check runs before the gateway
+/// creates a bot thread or parses commands, so an external sender or a stale
+/// callback cannot create an orphan conversation or trigger bot-wide commands.
+/// Normal paired channels remain on their existing authentication path.
+pub(crate) fn guard_gateway_inbound(
+    store: &Store, bot_id: &str, external_id: &str, sender_id: &str, trusted: bool,
+) -> Result<()> {
+    if !trusted || sender_id != "local-user" {
+        return Err("policy_unsupported: internal SuperAgent delivery requires local authority.".into());
+    }
+    let session_id: Option<String> = store.db.query_row(
+        "SELECT thread.session_id
+         FROM bot_threads thread
+         JOIN sa_assignments assignment ON assignment.session_id=thread.session_id
+         JOIN sa_tickets ticket ON ticket.id=assignment.ticket_id
+         WHERE thread.bot_id=?1 AND thread.channel_id=?2 AND thread.external_id=?3
+           AND assignment.bot_id=?1 AND assignment.state='running'
+           AND ticket.state='running' AND ticket.active_assignment_id=assignment.id",
+        params![bot_id, CHANNEL, external_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let session_id = session_id.ok_or(
+        "policy_unsupported: no active native assignment owns this SuperAgent thread.",
+    )?;
+    if read_only_policy(store, &session_id)?.is_none() {
+        return Err("policy_unsupported: internal SuperAgent assignment has no native policy.".into());
+    }
+    Ok(())
+}
+
 /// Called while the shared running-agent mutex and then the Store mutex
 /// are held, immediately before native run registration. This is the second
 /// admission fence after a durable SuperAgent lease was reserved: a normal bot
@@ -1497,6 +1527,44 @@ mod tests {
         assert_eq!(after.activity[0].kind, "stopped");
         assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
+
+    #[test]
+    fn gateway_denies_untrusted_unassigned_and_revoked_internal_messages_before_thread_creation() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Read-only assigned task", "internal-gateway-1", false,
+        ).unwrap();
+        assert!(started);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let thread: String = store.db.query_row(
+            "SELECT external_id FROM bot_threads WHERE session_id=?1",
+            [&session_id], |row| row.get(0),
+        ).unwrap();
+        assert!(guard_gateway_inbound(&store, "worker", &thread, "local-user", true).is_ok());
+        for (bot, external, sender, trusted) in [
+            ("worker", thread.as_str(), "untrusted-external", false),
+            ("worker", thread.as_str(), "bot:router", true),
+            ("router", thread.as_str(), "local-user", true),
+            ("worker", "unassigned-thread", "local-user", true),
+        ] {
+            assert!(guard_gateway_inbound(&store, bot, external, sender, trusted).is_err());
+        }
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_threads WHERE channel_id=?1",
+            [CHANNEL], |row| row.get(0),
+        ).unwrap();
+        assert!(guard_gateway_inbound(
+            &store, "worker", "unassigned-thread", "local-user", true,
+        ).is_err());
+        let after: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_threads WHERE channel_id=?1",
+            [CHANNEL], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(before, after, "rejected deliveries must not create bot conversations");
+        stop(&store, &ticket.id).unwrap();
+        assert!(guard_gateway_inbound(&store, "worker", &thread, "local-user", true).is_err());
     }
 
     #[test]

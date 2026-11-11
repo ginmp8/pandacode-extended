@@ -10,6 +10,46 @@ async function showBots(page: Page): Promise<void> {
 }
 
 test.describe('shared bot channels', () => {
+  test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
+    await page.goto('/?bots=sample');
+    const html = await page.evaluate(async () => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      return sharedChannelThreadHtml({
+        id: 'channel-one', name: 'isolated', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'delivery-one', kind: 'assigned', authorBotId: null,
+          text: '', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId: 'cycle-one', sessionId: 'private-session-one',
+            state: 'Passed', round: 1, target: 9, lowest: 9.5,
+            artifactRevision: 'frozen-revision',
+            reviewers: [{
+              botId: 'selected-bot', name: 'Selected bot', lens: 'security',
+              round: 1, score: 9.5,
+              skills: [{
+                id: 'skill-a', status: 'not_verified',
+                sha256: 'a'.repeat(64), sourceKind: 'github',
+                sourceRef: 'main', sourceCommit: 'c'.repeat(40),
+                required: true, nativeRetrieval: true,
+                nativeCheckVerified: false,
+                correctiveAction: 'Dispatch a new authorized Council round.',
+              }],
+            }],
+          },
+        }],
+      }, []);
+    });
+    await page.setContent(html);
+    const receipt = page.getByRole('note', { name: /skill-a.*not_verified/i });
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toHaveAttribute('tabindex', '0');
+    await expect(receipt).toHaveAttribute('title', /SHA-256 a{64}/);
+    await expect(receipt).toContainText('Skills: 1');
+    await expect(page.getByRole('note', { name: 'Delivery Council status' })).toContainText('Selected bot');
+    expect(html).not.toContain('sensitive/path');
+  });
+
   test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
     // Sample bot bootstrapping may leave no initial conversation selected.
     // Open a real bot conversation before asserting its composer and switching

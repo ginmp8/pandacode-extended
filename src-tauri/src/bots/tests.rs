@@ -246,6 +246,83 @@ fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
     let second = detail.messages.iter().find(|m| m.id==contexts[1].0).unwrap().council.as_ref().unwrap();
     assert_ne!(first.cycle_id,second.cycle_id);
     assert_ne!(first.session_id,second.session_id);
+    // One delivery may contain frozen skill evidence without leaking that
+    // reviewer's skill receipts to the other Council for the same bot.
+    let mut team = crate::architect::load(&f.store,&contexts[0].1).unwrap().unwrap();
+    team.council_since = 1234;
+    let created = 1235;
+    let mut worker: crate::architect::Worker = serde_json::from_value(json!({
+        "id":"frozen-reviewer","sessionId":"private-reviewer-session",
+        "name":"Quality reviewer","profileId":"auto","provider":"codex","model":"gpt-5",
+        "reasoningEffort":null,"status":"completed","assignment":"Verify source",
+        "summary":"Reviewed the source","error":null,"dependsOn":[],"files":[],
+        "attempt":1,"createdAt":created,"updatedAt":created,
+        "council":{"round":1,"lens":"security","score":9.5,"startedAt":created,"closedBySelection":false}
+    })).unwrap();
+    let mut binding = crate::architect::reviewer_security::ReviewerBinding::native(
+        &team,&worker.id,created,&worker.provider,&worker.model,
+        worker.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some("selected-reviewer".into());
+    binding.snapshot.bot_context = Some(crate::architect::reviewer_security::ReviewerBotContext {
+        name: "Selected reviewer".into(),role: "QA".into(),
+        instructions: String::new(),goals: String::new(),soul: String::new(),
+        reasoning_effort: String::new(),skill_ids: vec!["required-provenance".into()],
+    });
+    binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+        pins: vec![crate::skills::reviewer::SkillPin {
+            id: "required-provenance".into(),source_kind:"github".into(),
+            source_location:"/sensitive/path/must-not-leak".into(),
+            source_ref:Some("main".into()),source_commit:Some("c".repeat(40)),
+            content_sha256:"a".repeat(64),file_sha256:Default::default(),
+            dependencies:vec![],required_for_acceptance:true,check_required:true,
+            delivery_mode:"bounded_prompt".into(),staged_path:None,
+            imported:true,bot_assigned:true,eligible:true,supplied:true,
+            invoked:false,check_executed:false,evidence_verified:false,
+        }],
+        prompt: "Frozen methodology only".into(),
+        skipped: vec![crate::skills::reviewer::SkippedSkill {
+            id:"unsafe-optional".into(),reason:"invalid source".into(),
+            bot_assigned:true,eligible:false,supplied:false,
+        }],
+    });
+    let revision = binding.artifact_revision.clone();
+    worker.reviewer_binding = Some(binding);
+    team.workers.push(worker);
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![contexts[0].1,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    let details = shared_channels::detail(&f.store,&channel.id,100).unwrap();
+    let first_skills = &details.messages.iter().find(|m| m.id==contexts[0].0)
+        .unwrap().council.as_ref().unwrap().reviewers[0].skills;
+    assert_eq!(first_skills.len(),2);
+    assert_eq!(first_skills[0].status,"not_verified",
+        "native retrieval or a reviewer claim is not proof of executed verification");
+    assert!(first_skills[0].required);
+    assert_eq!(first_skills[0].source_commit.as_deref(),Some("cccccccccccccccccccccccccccccccccccccccc"));
+    assert_eq!(first_skills[1].status,"skipped");
+    assert!(details.messages.iter().find(|m| m.id==contexts[1].0)
+        .unwrap().council.as_ref().unwrap().reviewers.is_empty());
+    let serialized = serde_json::to_string(&details).unwrap();
+    assert!(!serialized.contains("/sensitive/path") && !serialized.contains("Frozen methodology"),
+        "channel details must expose provenance, not private instructions or local paths");
+    let observed = serde_json::from_value(json!({
+        "contentSha256":"a".repeat(64),"artifactRevision":revision,
+        "invoked":true,"checkExecuted":true,"evidenceVerified":true,
+        "checkKind":"pinned_input_integrity"
+    })).unwrap();
+    team.workers[0].reviewer_binding.as_mut().unwrap()
+        .skill_evidence.insert("required-provenance".into(),observed);
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![contexts[0].1,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    let verified = shared_channels::detail(&f.store,&channel.id,100).unwrap();
+    let skill = &verified.messages.iter().find(|m| m.id==contexts[0].0)
+        .unwrap().council.as_ref().unwrap().reviewers[0].skills[0];
+    assert!(skill.native_retrieval && skill.native_check_verified);
+    assert_eq!(skill.status,"available");
 }
 
 

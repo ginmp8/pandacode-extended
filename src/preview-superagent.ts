@@ -9,7 +9,11 @@ const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
 ):Promise<T> {
-  const bots=await listBots();
+  // Pure listing must not race the preview's first bots_list seed. Only
+  // commands that actually resolve portable bot identities may load bots.
+  const needsBots=['superagent_create','superagent_update',
+    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
+  const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
   let value:unknown;

@@ -732,7 +732,7 @@ pub(super) fn settle_channel_delivery(
 
 /// Claim one post-acceptance GitHub issue attempt. A crash after 'sending'
 /// leaves an explicitly uncertain result; it must never silently create twice.
-fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> Result<Option<(String,String,String)>> {
+pub(super) fn claim_post_acceptance_issue(store: &Store, delivery_id: &str) -> Result<Option<(String,String,String)>> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let item: Option<(String,String,String)> = store.db.query_row(
         "SELECT repository,title,body FROM extended_channel_council_followups

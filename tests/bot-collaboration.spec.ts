@@ -38,12 +38,16 @@ test.describe('bot collaboration', () => {
     await fixture.locator('input[name="councilMode"][value="selected"]').check();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toHaveCount(1);
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveCount(1);
+    await expect(fixture.locator('input[name="councilGithubIssue"]')).toHaveCount(1);
+    await expect(fixture.locator('input[name="councilGithubRepo"]')).toHaveCount(1);
 
     await fixture.locator('input[name="councilTarget"]').fill('8.5');
     await fixture.locator('input[name="councilMaxRounds"]').fill('4');
     await fixture.locator('input[name="councilReviewer"][value="reviewer"]').check();
     await fixture.locator('input[name="councilScopedFile"]').check();
     await fixture.locator('input[name="councilFilePath"]').fill('src/entry.ts');
+    await fixture.locator('input[name="councilGithubIssue"]').check();
+    await fixture.locator('input[name="councilGithubRepo"]').fill('owner/repo');
     await page.evaluate(async () => {
       const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs } = await import('/src/bot-shared-channels.ts');
       const parent = document.getElementById('channel-council-fixture')!;
@@ -66,6 +70,8 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilReviewer"][value="reviewer"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveValue('src/entry.ts');
+    await expect(fixture.locator('input[name="councilGithubIssue"]')).toBeChecked();
+    await expect(fixture.locator('input[name="councilGithubRepo"]')).toHaveValue('owner/repo');
     await page.evaluate(async () => {
       const { sharedChannelComposerHtml, restoreSharedChannelCouncilInputs } = await import('/src/bot-shared-channels.ts');
       const old = document.querySelector<HTMLFormElement>('#channel-council-fixture form')!;
@@ -78,6 +84,8 @@ test.describe('bot collaboration', () => {
       old.replaceWith(next);
     });
     await expect(fixture.locator('input[name="councilEnabled"]')).not.toBeChecked();
+    await expect(fixture.locator('input[name="councilGithubIssue"]')).not.toBeChecked();
+    await expect(fixture.locator('input[name="councilGithubRepo"]')).toHaveValue('');
   });
 
   test('renders attributed bot posts, explicit recipients, and direct delegation status in one channel', async ({ page }) => {

@@ -5,6 +5,7 @@
 use crate::{bots, storage::{self, Store}, AppState, Result};
 
 pub(crate) mod manifest;
+pub(crate) mod events;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};

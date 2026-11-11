@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -668,6 +668,14 @@ impl Store {
                 ).map_err(|e| e.to_string())?;
                 migration.execute_batch(crate::superagent::PROJECT_LEASE).map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=40;").map_err(|e| e.to_string())?;
+            }
+            if version < 41 {
+                // S4 source-observation decisions are durable, separate from task
+                // admission and never enable autonomy or external effects.
+                migration.execute_batch(crate::superagent::events::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=41;")
+                    .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

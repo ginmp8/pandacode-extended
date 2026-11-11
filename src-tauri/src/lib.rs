@@ -4438,6 +4438,8 @@ pub fn run() {
                 superagent::superagent_tickets,
                 superagent::superagent_activity,
                 superagent::superagent_submit,
+                superagent::superagent_submit_coordinated,
+                superagent::superagent_dispatch_worker,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_stop,

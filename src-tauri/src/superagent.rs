@@ -875,23 +875,60 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
 /// process; callers must stop the returned sessions after the transaction.
 /// No attempt is replayed and unresolved effect receipts stay unresolved.
 pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
-    let expired = {
+    // Only the owning serve process calls this. Select a bounded page of
+    // running assignments; unsupported/revoked work is never automatically
+    // retried. The same native ticket revision guard is used at settlement.
+    let stopped = {
         let mut stmt = store.db.prepare(
-            "SELECT a.id,a.ticket_id,a.session_id,t.revision
-             FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
+            "SELECT a.id,a.ticket_id,a.session_id,t.revision,
+                    CASE
+                      WHEN a.created_at<=0 OR a.created_at>?1
+                        THEN 'Invalid assignment clock; no replay'
+                      WHEN (?1-a.created_at)>=?2
+                        THEN 'Assignment exceeded its bounded run time; no replay'
+                      WHEN ?3=1
+                        THEN 'Bots paused; native execution authority revoked'
+                      WHEN o.enabled=0
+                        THEN 'Team disabled; no replay'
+                      WHEN m.ticket_id IS NULL OR m.revoked!=0 OR m.expires_at<=?1
+                           OR m.policy_revision!=o.policy_revision
+                           OR t.policy_revision!=o.policy_revision
+                           OR m.project_id!=t.project_id OR o.project_id!=t.project_id
+                        THEN 'Mandate expired, revoked or stale; no replay'
+                      WHEN coordinator.id IS NULL OR coordinator.paused!=0
+                        THEN 'Coordinator unavailable; no replay'
+                      WHEN worker.id IS NULL OR worker.paused!=0
+                           OR worker.project_id!=t.project_id
+                        THEN 'Worker unavailable or out of scope; no replay'
+                      WHEN active_session.id IS NULL
+                           OR active_session.project_id!=t.project_id
+                        THEN 'Assignment session missing or out of scope; no replay'
+                      ELSE NULL
+                    END
+             FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id
+             JOIN sa_orchestrations o ON o.id=t.orchestration_id
+             LEFT JOIN sa_mandates m ON m.ticket_id=t.id
+             LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
+             LEFT JOIN bots worker ON worker.id=a.bot_id
+             LEFT JOIN sessions active_session ON active_session.id=a.session_id
              WHERE a.state='running' AND t.state='running'
-               AND t.active_assignment_id=a.id AND a.created_at>0 AND ?1>=a.created_at
-               AND (?1-a.created_at)>=?2
-             ORDER BY a.created_at,a.id",
+               AND t.active_assignment_id=a.id
+             ORDER BY a.created_at,a.id LIMIT 200",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![now,MAX_ASSIGNMENT_RUN_MS], |r| Ok((
-            r.get::<_, String>(0)?, r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
-        ))).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(
+            params![now,MAX_ASSIGNMENT_RUN_MS,i64::from(crate::feature_controls::get().bots_paused)],
+            |r| Ok((
+                r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            )),
+        ).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let mut sessions = Vec::new();
-    for (assignment_id,ticket_id,session_id,revision) in expired {
+    for (assignment_id,ticket_id,session_id,revision,reason) in stopped {
+        let Some(reason) = reason else { continue };
         let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
         let changed = tx.execute(
             "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
@@ -912,8 +949,8 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         ).map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'watchdog_interrupted','Assignment exceeded its bounded run time; no replay',?2)",
-            params![ticket_id,now],
+             VALUES(?1,'watchdog_interrupted',?2,?3)",
+            params![ticket_id,reason,now],
         ).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         sessions.push(session_id);
@@ -2741,6 +2778,96 @@ mod tests {
         assert!(mandate(&store, &ticket.id).unwrap().revoked);
         assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
         assert_eq!(history(&store, &ticket.id, 10).unwrap()
+            .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+    }
+
+    #[test]
+    fn watchdog_keeps_healthy_assignments_and_revokes_stale_runtime_paths() {
+        for fault in ["clock", "paused-worker", "disabled-team", "expired-mandate", "revoked-mandate"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Private unfinished work", "watchdog-stale", false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let now = storage::now();
+            assert!(watchdog_expired_assignments(&store, now).unwrap().is_empty());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            match fault {
+                "clock" => {
+                    store.db.execute(
+                        "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+                        params![ticket.id, now + 60_000],
+                    ).unwrap();
+                }
+                "paused-worker" => {
+                    store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+                }
+                "disabled-team" => {
+                    store.db.execute(
+                        "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                        [&config.id],
+                    ).unwrap();
+                }
+                "expired-mandate" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+                        params![ticket.id, now - 1],
+                    ).unwrap();
+                }
+                "revoked-mandate" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(watchdog_expired_assignments(&store, now).unwrap(), vec![session.clone()], "{fault}");
+            assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty());
+            let interrupted = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(interrupted.state, "interrupted");
+            assert!(interrupted.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            assert_eq!(history(&store, &ticket.id, 20).unwrap()
+                .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+            assert!(!on_run_finished(&store, &session, true, "Late success").unwrap());
+            assert_ne!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        }
+    }
+
+    #[test]
+    fn watchdog_interruption_and_uncertain_effect_survive_reopen_without_replay() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Private provider payload",
+            "watchdog-restart", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        // A transport timeout might already have issued an external effect.
+        // Never infer a missing remote outcome is safe to retry after restart.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:issue:42',?2,'pending',?3,?3)",
+            params![ticket.id, "a".repeat(64), storage::now()],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(), vec![session.clone()]);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 10).unwrap()[0].state, "uncertain");
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        assert!(watchdog_expired_assignments(&reopened, storage::now()).unwrap().is_empty());
+        assert!(!on_run_finished(&reopened, &session, true, "Replay success").unwrap());
+        assert_eq!(history(&reopened, &ticket.id, 20).unwrap()
             .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
     }
 

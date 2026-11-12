@@ -384,6 +384,7 @@ fn observe_authenticated_in_tx(
 
 /// One operator-event write uses the same receipt+cursor transaction as a
 /// bounded poll, so the direct native decision contract stays identical.
+#[cfg(test)]
 fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
     -> Result<EventDecision>
 {

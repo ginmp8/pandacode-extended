@@ -42,6 +42,25 @@ to answer noninteractive reads). macOS always uses the same 0600 file.
 When adding something new that the frontend does after a run or on a timer with real
 effects, give serve mode a native twin in `headless.rs` — see the checklist at the bottom.
 
+### SuperAgent watchdog recovery boundaries
+
+The owning `serve` process checks a bounded batch of active native assignments
+every 30 seconds. Besides the absolute attempt budget, it interrupts and revokes
+assignments whose recorded start clock is invalid or whose Team, mandate,
+coordinator, worker, or session is no longer authorized or available. The
+interruption is revision-guarded and audited with a sanitized reason. A
+late provider callback cannot approve the task, and the previous session is
+stopped. This is a **stop-and-investigate** safety mechanism, not automatic
+retry or recovery of unverified external work.
+
+An interrupted Ticket remains durable and cannot be restarted by an inferred
+source event. On restart, existing `pending` external-effect receipts become
+`uncertain`; they require independent provider reconciliation before any
+future retry. A paused or revoked Team is not re-enabled by a watchdog tick.
+The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
+redacted state without touching live sessions. Per-effect dispatch and full
+headless admission/retry still require explicit user-authorized native grants.
+
 ## First run
 
 ```sh

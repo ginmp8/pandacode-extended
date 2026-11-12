@@ -970,6 +970,11 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
             params![assignment_id,now],
         ).map_err(|e| e.to_string())?;
         tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
              VALUES(?1,'watchdog_interrupted',?2,?3)",
             params![ticket_id,reason,now],
@@ -1772,6 +1777,13 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
          WHERE id=?1 AND state='running'",
         params![ticket.active_assignment_id,now],
     ).map_err(|e| e.to_string())?;
+    // Revoking a Ticket cannot prove an in-flight provider effect failed.
+    // Preserve its identity and require explicit remote reconciliation.
+    tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'stopped','local-user revoked mandate',?2)",
@@ -1813,6 +1825,11 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
         store.db.execute(
             "UPDATE sa_assignments SET state='interrupted',updated_at=?2
              WHERE ticket_id=?1 AND state='running'",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
             params![ticket_id,now],
         ).map_err(|e| e.to_string())?;
         record(store,&ticket_id, if removed { "bot_removed" } else { "bot_reset" },
@@ -1948,6 +1965,15 @@ fn change_enabled(
              FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING}"
         );
         tx.execute(&audit, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+        // Team Off revokes all outstanding attempts; uncertain external work
+        // is preserved in the same transaction, never retried by this path.
+        tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE state='pending' AND ticket_id IN (
+                SELECT id FROM sa_tickets WHERE orchestration_id=?1
+                AND state IN ('queued','running','waiting_approval','waiting_review','blocked'))",
+            params![orchestration_id,now],
+        ).map_err(|e| e.to_string())?;
         let grants = format!(
             "UPDATE sa_mandates SET revoked=1 WHERE ticket_id IN (
                SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING})"
@@ -3946,6 +3972,55 @@ mod tests {
              WHERE ticket_id=?1 AND effect_key='comment'", [&task.id],
         ).unwrap();
         assert_eq!(accept(&store, &task.id, waiting.revision).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn revocation_preserves_external_effect_identity_as_uncertain_atomically() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let receipt_state = |db: &Store, ticket: &str| -> String {
+            db.db.query_row("SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+                [ticket], |r| r.get(0)).unwrap()
+        };
+        let (first, launched) = admit(&mut store, &cfg.id, "Inspect external receipt",
+            "stop-effect-recovery", false).unwrap();
+        assert!(launched);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'effect-1','digest','pending',?2,?2)",
+            params![first.id,now],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER deny_stop_receipt BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='stopped'
+             BEGIN SELECT RAISE(ABORT,'injected stop audit failure'); END;",
+        ).unwrap();
+        assert!(stop(&store, &first.id).is_err());
+        assert_eq!(receipt_state(&store, &first.id), "pending");
+        assert!(!mandate(&store, &first.id).unwrap().revoked);
+        store.db.execute_batch("DROP TRIGGER deny_stop_receipt").unwrap();
+        assert_eq!(stop(&store, &first.id).unwrap().0.state, "stopped");
+        assert_eq!(receipt_state(&store, &first.id), "uncertain");
+        assert!(stop(&store, &first.id).is_err());
+        let (second, launched) = admit(&mut store, &cfg.id, "Inspect another effect",
+            "disable-effect-recovery", false).unwrap();
+        assert!(launched);
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'effect-2','digest','pending',?2,?2)",
+            params![second.id,now],
+        ).unwrap();
+        change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert_eq!(receipt_state(&store, &second.id), "uncertain");
+        assert_eq!(get_ticket(&store, &second.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &second.id).unwrap().revoked);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='applied'",
+            [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

@@ -359,3 +359,13 @@ text-only model evidence and a timeout do not establish that a remote action
 happened. A receipt marked `applied` by verified reconciliation no longer
 blocks this particular guard. This does not enable a production external
 dispatcher or bypass native Council-required completion checks.
+
+### Revocation leaves external work explicitly uncertain
+
+When native Stop, Team Off, watchdog interruption or bot reset/removal revokes
+an active Ticket, any `pending` external-effect receipt is marked `uncertain`
+in the same SQLite transaction. No provider call, retry, acknowledgment or
+terminal approval is inferred. A failure during revocation rolls back the
+receipt change as well as the mandate transition. Only independent
+authoritative remote reconciliation can move an uncertain receipt to
+`applied` after verification.

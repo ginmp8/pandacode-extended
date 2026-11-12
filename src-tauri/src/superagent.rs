@@ -1647,6 +1647,18 @@ fn accept_with_pause(
     {
         return Err("Task has no current verified worker result to accept.".into());
     }
+    // A provider timeout or restart can leave a remote change uncertain
+    // even after the worker produced text evidence. Human acceptance must
+    // never turn that uncertainty into a completed Ticket or final reply.
+    // Check inside the same SQLite transaction as the terminal transition.
+    let unresolved: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND state IN ('pending','uncertain'))",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved {
+        return Err("SuperAgent has unresolved external effects; reconcile authoritative provider state before accepting.".into());
+    }
     let coordinator = configuration(store, &ticket.orchestration_id)?;
     let coordinator = bots::get(store, &coordinator.coordinator_bot_id)?;
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
@@ -3885,6 +3897,55 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn unresolved_effects_block_manual_and_headless_acceptance_without_losing_evidence() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (task, started) = admit(
+            &mut store, &config.id, "Verify external state",
+            "unresolved-effect-finalization", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &task.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Worker evidence").unwrap());
+        let waiting = get_ticket(&store, &task.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        let now = storage::now();
+        // Simulate durable effect receipts retained from an interrupted
+        // remote request, not a fabricated provider success.
+        for (key, state) in [("write", "pending"), ("comment", "uncertain")] {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                  (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,'sha256-fixture',?3,?4,?4)",
+                params![task.id,key,state,now],
+            ).unwrap();
+        }
+        let refusal = accept(&store, &task.id, waiting.revision).unwrap_err();
+        assert!(refusal.contains("unresolved external effects"));
+        assert!(headless_accept_ticket(&store.path, &task.id, waiting.revision)
+            .unwrap_err().contains("unresolved external effects"));
+        assert_eq!(get_ticket(&store, &task.id).unwrap().revision, waiting.revision);
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='human_accepted'",
+            [&task.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        // Settling only one receipt does not clear the other uncertainty.
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id=?1 AND effect_key='write'", [&task.id],
+        ).unwrap();
+        assert!(accept(&store, &task.id, waiting.revision).is_err());
+        // Test-only remote reconciliation fixture: production must verify
+        // provider state before changing a receipt to applied.
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id=?1 AND effect_key='comment'", [&task.id],
+        ).unwrap();
+        assert_eq!(accept(&store, &task.id, waiting.revision).unwrap().state, "completed");
     }
 
     #[test]

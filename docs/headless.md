@@ -345,3 +345,17 @@ Never retry pending/uncertain receipts or mark them applied based on this
 inspection alone. Independent authoritative remote reconciliation and a
 separate explicitly authorized dispatcher are still required; this command
 is not headless admission, resume or effect-dispatch parity.
+
+
+### Unresolved external effects block final acceptance
+
+Native manual and headless Ticket acceptance now share an atomic guard: if a
+Ticket has any `pending` or `uncertain` external-effect receipt, it cannot
+transition to `completed`, even when the worker has recorded evidence and a
+human explicitly accepts it. No `human_accepted` audit or final reply is
+written on denial. An operator must first reconcile the **authoritative
+remote provider state**, including exact effect key and payload identity;
+text-only model evidence and a timeout do not establish that a remote action
+happened. A receipt marked `applied` by verified reconciliation no longer
+blocks this particular guard. This does not enable a production external
+dispatcher or bypass native Council-required completion checks.

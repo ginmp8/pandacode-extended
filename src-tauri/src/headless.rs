@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(parsed("--accept-ticket ticket_123 4"), Ok(Command::AcceptTicket {
             ticket_id: "ticket_123".into(), expected_revision: 4,
         }));
-        assert_eq!(parse(&vec!["--reject-ticket".into(), "ticket_123".into(), "7".into(), "Needs changes".into()]),
+        assert_eq!(parse(&["--reject-ticket".into(), "ticket_123".into(), "7".into(), "Needs changes".into()]),
             Ok((Command::RejectTicket {
                 ticket_id: "ticket_123".into(), expected_revision: 7, reason: "Needs changes".into(),
             }, None)));

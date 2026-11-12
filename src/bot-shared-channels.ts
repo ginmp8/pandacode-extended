@@ -250,6 +250,7 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
       if (activeCouncilPlacement) window.removeEventListener('resize', activeCouncilPlacement);
       activeCouncilPlacement = place;
       window.addEventListener('resize', place);
+      place();
     } else if (activeCouncilPlacement === place) {
       window.removeEventListener('resize', place);
       activeCouncilPlacement = null;

@@ -59,6 +59,7 @@ CREATE INDEX IF NOT EXISTS sa_thread_links_ticket
 
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
+#[cfg(test)]
 const MAX_RECEIPTS: i64 = 10_000;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issue_comment.created",
@@ -81,6 +82,7 @@ pub struct EventSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(test), expect(dead_code, reason = "Authenticated event intake is not implemented yet"))]
 pub struct EventEnvelope {
     pub source_id: String,
     pub delivery_id: String,
@@ -297,6 +299,7 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
     source(store,id)
 }
 
+#[cfg(test)]
 fn valid_event(event: &EventEnvelope) -> bool {
     token_ok(&event.delivery_id, 128) && repo_ok(&event.repository)
         && token_ok(&event.actor, 80) && EVENT_KINDS.contains(&event.event_kind.as_str())
@@ -309,6 +312,7 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// Ticket, launch a provider, publish a reply or claim GitHub authenticity.
 /// A delivery ID is immutable: replay with changed fields is rejected even
 /// after mode changes, restart, or later cursor advancement.
+#[cfg(test)]
 fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
     if !valid_event(event) {
         return Err("Invalid, unsupported or unbounded source event envelope.".into());

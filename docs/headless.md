@@ -242,16 +242,31 @@ pandacode serve --inspect-ticket <ticket-id>
 ```
 
 These one-shot local commands return bounded JSON operational metadata from the
-existing native orchestration and Ticket queries. Ticket inspection includes the
-state/revision, mandate revocation and policy version, assignment IDs/statuses,
-and audit event kinds/timestamps. It deliberately excludes objectives, message
-transcripts, worker results, rejection reasons, approval identifiers and secrets.
-Unknown Ticket IDs and incompatible database schemas fail with a nonzero exit
-code. Output is local stdout, not an unauthenticated remote API.
+existing native orchestration and Ticket queries. Ticket listing and inspection
+include the state/revision, mandate revocation and policy version, assignment
+IDs/statuses, and audit event kinds/timestamps. They deliberately exclude
+objectives, message transcripts, worker results, rejection reasons, approval
+identifiers and secrets. Unknown Ticket IDs and incompatible database schemas
+fail with a nonzero exit code. Output is local stdout, not an unauthenticated
+remote API.
 
 Unlike import/export or ordinary serve startup, inspection opens
 `kingcode.sqlite3` **read-only before `setup_common`**. It neither starts bots
 nor runs the Store's migration/restart recovery; inspecting a live host must
-not mark a healthy worker as interrupted. These commands do not authorize
-headless task creation, approval, cancellation, or event automation; those
-remain pending native integration work.
+not mark a healthy worker as interrupted.
+
+### Ticket review and stop commands
+
+```sh
+pandacode serve --list-tickets
+pandacode serve --accept-ticket <ticket-id> <expected-revision>
+pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
+pandacode serve --stop-ticket <ticket-id>
+```
+
+Accept and reject use the current Ticket revision; reject also requires a
+nonempty reason. Stop revokes the Ticket mandate in the shared database. A
+provider call already held in memory by a running serve process is not forcibly
+terminated; its late completion is denied by the native state and mandate
+checks. These commands do not create, retry, or resume tasks, and authenticated
+event intake remains unavailable.

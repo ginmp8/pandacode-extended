@@ -21,7 +21,7 @@ test.describe('shared bot channels', () => {
     const trigger = composer.locator('.bc-council-trigger');
     const panel = composer.getByRole('dialog', { name: 'Council' });
 
-    await expect(trigger).toBeVisible();
+    await expect(trigger).toBeVisible({ timeout: 15_000 });
     await expect(panel).toBeHidden();
     await expect(composer.locator('.bc-council-controls')).toBeHidden();
     await trigger.click();

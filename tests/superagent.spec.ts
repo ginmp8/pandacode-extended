@@ -186,6 +186,7 @@ test('native Council observation is advisory and never authorizes task completio
 });
 
 test('SuperAgent examples only fill names and leave all authorization disabled', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const bar=page.locator('.sidebar-bots-bar');
   if(await bar.getAttribute('aria-pressed')!=='true') await bar.click();

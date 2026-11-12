@@ -48,6 +48,18 @@ close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance; full native Council,
 source Auto, safely scoped worker writes, headless parity and recovery remain.
 
 
+### GitHub Issue lifecycle observation
+
+Sources can explicitly observe `issues.closed` and `issues.reopened` from
+GitHub's REST Events `IssuesEvent`, alongside existing issue-open, comment
+and PR/review/Check Run classes. The configured repository and exact actor,
+signed-in operator identity and native Observe revision are verified before a
+decision receipt is stored. Closing or reopening an issue changes no Ticket
+state, starts no Demand and grants no Worker privilege. Event body content is
+not persisted or interpreted as a task instruction. Replays are idempotent
+across application restart. This extends observation only; Auto remains
+unavailable.
+
 ### Authenticated Observe: self-event loops and bounded pagination
 
 The operator-issued **Poll authenticated GitHub** command resolves the current

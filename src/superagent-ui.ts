@@ -323,7 +323,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
           '<label>Exact actor<input name="actorFilter" maxlength="80" required></label></div>' +
           '<label>Event class<select name="eventKind">' +
-          ['issues.opened','issues.edited','issue_comment.created','pull_request.opened',
+          ['issues.opened','issues.edited','issues.closed','issues.reopened',
+            'issue_comment.created','pull_request.opened',
             'pull_request.closed','pull_request.reopened','pull_request_review.submitted',
             'pull_request_review.updated','pull_request_review.dismissed',
             'pull_request_review_comment.created','check_run.completed']

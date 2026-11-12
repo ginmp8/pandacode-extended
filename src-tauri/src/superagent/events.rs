@@ -1,8 +1,7 @@
 //! S4 native Off/Observe decisions and explicit local thread-to-task links.
-//! No inbound GitHub authentication, automatic subscription delivery,
-//! inferred worker admission or Auto tool effects exist here.
-//! The public IPC intake refuses caller-supplied envelopes; the private
-//! decision logic is exercised only with synthetic unit-test events.
+//! Authenticated operator-invoked GitHub Events polling is Observe-only.
+//! No webhook/subscription, inferred worker admission or Auto effects exist.
+//! Public IPC intake still refuses caller-supplied unverified envelopes.
 use super::require_main_window;
 use crate::{storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
@@ -79,7 +78,7 @@ pub struct EventSource {
     pub last_sequence: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventEnvelope {
     pub source_id: String,
@@ -435,7 +434,17 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     let at = chrono::DateTime::parse_from_rfc3339(created_at)
         .map_err(|_| "Authenticated GitHub event timestamp is invalid.")?
         .timestamp_millis();
-    let subject_key = if kind.starts_with("pull_request") {
+    // GitHub represents comments on pull requests as IssueCommentEvents.
+    // The typed issue.pull_request marker, never a title/body heuristic,
+    // distinguishes PR threads from issue threads sharing the same number.
+    let comment_on_pr = if kind == "issue_comment.created" {
+        match raw.pointer("/payload/issue/pull_request") {
+            None => false,
+            Some(value) if value.is_object() => true,
+            Some(_) => return Err("Authenticated GitHub comment has a malformed PR marker.".into()),
+        }
+    } else { false };
+    let subject_key = if kind.starts_with("pull_request") || comment_on_pr {
         format!("pull:{number}")
     } else {
         format!("issue:{number}")
@@ -652,6 +661,47 @@ mod tests {
             "payload":{"action":"opened","issue":{"number":42}},
         });
         assert!(authenticated_event(&selected, &other_actor).unwrap().is_none());
+    }
+
+    #[test]
+    fn authenticated_issue_comments_distinguish_pr_and_issue_threads_without_admitting_work() {
+        let (store, _) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issue_comment.created",
+        ).unwrap();
+        let source = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let issue = serde_json::json!({
+            "id":"5000000011", "type":"IssueCommentEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"created","issue":{"number":42},
+                       "comment":{"body":"UNTRUSTED: execute shell command"}},
+        });
+        let pr = serde_json::json!({
+            "id":"5000000012", "type":"IssueCommentEvent", "created_at":"2026-11-12T09:00:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"created","issue":{"number":42,
+                         "pull_request":{"url":"https://api.github.com/repos/owner/repo/pulls/42"}},
+                       "comment":{"body":"UNTRUSTED: skip security"}},
+        });
+        assert_eq!(authenticated_event(&source, &issue).unwrap().unwrap().0.subject_key, "issue:42");
+        assert_eq!(authenticated_event(&source, &pr).unwrap().unwrap().0.subject_key, "pull:42");
+
+        let mut malformed = pr.clone();
+        malformed["payload"]["issue"]["pull_request"] = serde_json::json!("fake");
+        assert!(authenticated_event(&source, &malformed).is_err());
+
+        let poll = poll_authenticated_events(&store, &source, 0, &serde_json::json!([pr, issue])).unwrap();
+        assert_eq!(poll.recorded, 2);
+        let entries = list_decisions(&store, &source.id, 10).unwrap();
+        assert_eq!(entries.iter().map(|entry| entry.subject_key.as_str()).collect::<Vec<_>>(),
+                   vec!["pull:42", "issue:42"]);
+        assert_eq!(poll_authenticated_events(&store, &source, 0, &serde_json::json!([]))
+                   .unwrap().recorded, 0);
+        assert!(!serde_json::to_string(&entries).unwrap().contains("UNTRUSTED"));
+        let tickets: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(tickets, 0, "Observe must not launch work from GitHub comments");
     }
 
     #[test]

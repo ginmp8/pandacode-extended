@@ -535,7 +535,8 @@ test('multi-member Team Builder stores native role revisions without launching u
   await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();
-  await expect(host.getByText('Policy revision 2',{exact:false})).toBeVisible();
+  await expect(host.getByRole('region',{name:'Configured Team roles'}))
+    .toContainText('Policy revision 2');
   const calls=await page.evaluate(()=>(window as unknown as {saRosterCalls:string[]}).saRosterCalls);
   expect(calls.filter(value=>value==='superagent_roster_update')).toHaveLength(1);
   expect(calls.filter(value=>value==='superagent_submit' || value==='superagent_set_enabled')).toHaveLength(0);

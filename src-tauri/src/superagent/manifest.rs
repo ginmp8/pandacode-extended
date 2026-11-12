@@ -528,13 +528,13 @@ mod tests {
             "SELECT id FROM sa_orchestrations WHERE name='Economy Team'",[],
             |row|row.get(0),
         ).unwrap();
-        let roles=super::roster::read(&store,&id).unwrap();
+        let roles=super::super::roster::read(&store,&id).unwrap();
         assert_eq!(roles.worker_bot_ids,vec!["worker","extra-one","extra-two"]);
         assert_eq!(roles.reviewer_bot_ids,vec!["reviewer-one","reviewer-two"]);
         assert!(!roles.execution_ready);
-        let config=super::configuration(&store,&id).unwrap();
+        let config=super::super::configuration(&store,&id).unwrap();
         assert!(!config.enabled);
-        assert!(super::change_enabled(&store,&id,config.policy_revision,true).is_err());
+        assert!(super::super::change_enabled(&store,&id,config.policy_revision,true).is_err());
         let exported=export(&store).unwrap();
         assert_eq!(exported["schemaVersion"],2);
         assert_eq!(exported["orchestrations"][0]["extraWorkerBots"],json!(["Worker B","Worker C"]));
@@ -548,7 +548,7 @@ mod tests {
         let mut missing=exported;
         missing["orchestrations"][0]["extraWorkerBots"]=json!(["Missing Bot"]);
         assert!(apply(&store,&missing,true).is_err());
-        assert_eq!(super::roster::read(&store,&id).unwrap().worker_bot_ids,roles.worker_bot_ids);
+        assert_eq!(super::super::roster::read(&store,&id).unwrap().worker_bot_ids,roles.worker_bot_ids);
         let mut invalid_schema=doc;
         invalid_schema["schemaVersion"]=json!(1);
         assert!(preview(&store,&invalid_schema).is_err());

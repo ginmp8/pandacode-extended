@@ -45,6 +45,8 @@ interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   attemptInsights?: AssignmentInsight[];
   activity: Activity[]; council?: CouncilObservation | null;
+  finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
+  unresolvedExternalEffects?: number;
 }
 interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
@@ -177,7 +179,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dt>Mandate</dt><dd>' + (ticketDetails.mandate.revoked ? 'Revoked' : 'Issued') +
         ' · ' + (ticketDetails.mandate.allowedSideEffects ? 'Scoped side effects' : 'No side effects allowed') +
         ' · Tools: ' + safe(ticketDetails.mandate.allowedTools.join(', ') || 'none') + '</dd>' +
-        '<dt>Expires</dt><dd>' + safe(new Date(ticketDetails.mandate.expiresAt).toLocaleString()) + '</dd></dl>' +
+        '<dt>Expires</dt><dd>' + safe(new Date(ticketDetails.mandate.expiresAt).toLocaleString()) + '</dd>' +
+        '<dt>Finalization</dt><dd id="sa-finalization-blocked">' +
+        (ticketDetails.finalizationGate === 'council_required'
+          ? 'Blocked: native Council task review required; no verified task-bound approval.'
+          : ticketDetails.finalizationGate === 'effects_unresolved'
+            ? 'Blocked: ' + (ticketDetails.unresolvedExternalEffects ?? 0) +
+              ' unresolved external effects require authoritative reconciliation.'
+            : ticketDetails.finalizationGate === 'native_recheck_required'
+              ? 'Manual decision possible only after native authorization recheck.'
+              : 'No finalization decision pending.') + '</dd></dl>' +
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
@@ -391,7 +402,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
         '" aria-expanded="' + (ticket.id === inspectedTicket) + '">View evidence</button>' +
         (ticket.state === 'waiting_approval'
-          ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
+          ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '"' +
+            (ticketDetails?.ticket.id === ticket.id &&
+            (ticketDetails.finalizationGate === 'council_required' ||
+             ticketDetails.finalizationGate === 'effects_unresolved')
+              ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
+            '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
         (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' : '') +
         (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
@@ -463,7 +479,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<li><div><strong>' + safe(ticket.objective) + '</strong><small>Ticket ' +
           safe(ticket.id) + ' · Revision ' + ticket.revision + '</small></div>' +
           '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) + '">View evidence</button>' +
-          '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
+          '<button type="button" data-sa-accept="' + safe(ticket.id) + '"' +
+            (ticketDetails?.ticket.id === ticket.id &&
+            (ticketDetails.finalizationGate === 'council_required' ||
+             ticketDetails.finalizationGate === 'effects_unresolved')
+              ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
+            '>Accept evidence</button>' +
           '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button></li>'
         ).join('') || '<li class="sa-empty">No Tickets awaiting human approval for this Team.</li>') +
         '</ul>' +

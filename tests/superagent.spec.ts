@@ -151,6 +151,51 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
 });
 
+test('native finalization snapshot blocks unsafe accept controls without executing them', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-finalization-native'; document.body.appendChild(host);
+    (window as unknown as {finalizationActions:string[]}).finalizationActions = [];
+    mountSuperagent(host, async command => {
+      if(command==='bots_list') return [{id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Test Team',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:2,
+      }] as never;
+      if(command==='superagent_tickets') return [{
+        id:'ticket',orchestrationId:'team',objective:'Review real evidence',
+        state:'waiting_approval',revision:3,evidence:'worker evidence',
+      }] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket:{id:'ticket',orchestrationId:'team',objective:'Review real evidence',
+          state:'waiting_approval',revision:3,evidence:'worker evidence'},
+        mandate:{actor:'operator',authorizationId:'manual',policyRevision:2,
+          projectId:'project',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],finalizationGate:'council_required',
+        unresolvedExternalEffects:0,
+      } as never;
+      (window as unknown as {finalizationActions:string[]}).finalizationActions.push(command);
+      throw new Error('Unapproved action: '+command);
+    });
+  });
+  const host = page.locator('#sa-finalization-native');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await expect(host.getByRole('region',{name:'Ticket evidence'}))
+    .toContainText('Blocked: native Council task review required');
+  await expect(host.getByRole('button',{name:'Accept evidence'})).toBeDisabled();
+  await expect(host.getByRole('button',{name:'Accept evidence'}))
+    .toHaveAttribute('aria-describedby','sa-finalization-blocked');
+  const actions=await page.evaluate(() =>
+    (window as unknown as {finalizationActions:string[]}).finalizationActions);
+  expect(actions).not.toContain('superagent_accept');
+});
+
 test('native Council observation is advisory and never authorizes task completion', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

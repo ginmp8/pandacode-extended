@@ -575,6 +575,10 @@ pub struct TaskSnapshot {
     pub assignments: Vec<Assignment>,
     pub attempt_insights: Vec<AssignmentInsight>,
     pub activity: Vec<AuditEntry>,
+    /// Snapshot explanation only. Provider admission and native acceptance
+    /// always recheck their own authority, revision and effect state.
+    pub finalization_gate: String,
+    pub unresolved_external_effects: i64,
     /// Advisory native Council status, never a SuperAgent approval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub council: Option<council_adapter::CouncilObservation>,
@@ -601,7 +605,23 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
             remaining_run_budget_ms: remaining,
         }
     }).collect();
+    let unresolved_external_effects = effects::unresolved_count(store, ticket_id)?;
+    let candidate_session = native_assignments.iter()
+        .find(|attempt| attempt.state == "finished"
+            && attempt.result == ticket.evidence)
+        .map(|attempt| attempt.session_id.as_str()).unwrap_or_default();
+    let finalization_gate = if ticket.state != "waiting_approval" {
+        "not_pending"
+    } else if council_adapter::requires_task_review(store, ticket_id, candidate_session)? {
+        "council_required"
+    } else if unresolved_external_effects > 0 {
+        "effects_unresolved"
+    } else {
+        "native_recheck_required"
+    };
     let result = TaskSnapshot {
+        finalization_gate: finalization_gate.to_owned(),
+        unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
         ticket,
         mandate: native_mandate,
@@ -3934,6 +3954,34 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn native_snapshot_reports_true_finalization_gate_without_granting_acceptance() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (task, launched) = admit(&mut store, &cfg.id, "Inspect finalization",
+            "snapshot-approval-gate", false).unwrap();
+        assert!(launched);
+        let active = ticket_snapshot(&store, &task.id, 20).unwrap();
+        assert_eq!(active.finalization_gate, "not_pending");
+        let sid = assignment_session(&store, &task.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &sid, true, "Recorded result").unwrap());
+        let waiting = ticket_snapshot(&store, &task.id, 20).unwrap();
+        assert_eq!(waiting.finalization_gate, "native_recheck_required");
+        assert_eq!(waiting.unresolved_external_effects, 0);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'effect','digest','uncertain',?2,?2)",
+            params![task.id,now],
+        ).unwrap();
+        let blocked = ticket_snapshot(&store, &task.id, 20).unwrap();
+        assert_eq!(blocked.finalization_gate, "effects_unresolved");
+        assert_eq!(blocked.unresolved_external_effects, 1);
+        assert!(accept(&store, &task.id, blocked.ticket.revision).is_err());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
     }
 
     #[test]

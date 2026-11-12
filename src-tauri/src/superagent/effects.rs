@@ -21,6 +21,7 @@ pub(crate) const RECOVER: &str =
     "UPDATE sa_effect_receipts SET state='uncertain',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';";
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
 pub enum Reservation {
     Reserved,
     AlreadyPending,
@@ -28,6 +29,7 @@ pub enum Reservation {
     AlreadyApplied,
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
 pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Result<Reservation> {
     if key.is_empty() || key.len()>128 || !key.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'|b'.'|b':'))
         || payload.is_empty() || payload.len()>1_048_576 {
@@ -74,6 +76,7 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
     Ok(result)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
 pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?3
@@ -86,6 +89,7 @@ pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
 
 /// Caller must verify the external provider result independently: this
 /// primitive neither executes an action nor infers success from a timeout.
+#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
 pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->Result<()>{
     let digest=format!("{:x}",Sha256::digest(payload));
     let n=store.db.execute(

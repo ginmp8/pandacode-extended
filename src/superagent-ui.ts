@@ -31,6 +31,9 @@ interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
 }
+interface ThreadLink {
+  sourceId: string; ticketId: string; repository: string; subjectKey: string; createdAt: number;
+}
 interface SourceDecision {
   sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
   decision: string; sequence: number; policyRevision: number; at: number;
@@ -47,7 +50,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
-  let decisions: SourceDecision[] = [];
+  let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
@@ -94,7 +97,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
           safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
           '<li>No activity recorded.</li>') +
-        '</ol>' +
+        '</ol><h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
+        (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
+          safe(link.subjectKey) + '</li>').join('') ||
+          '<li>No threads linked.</li>') + '</ul>' +
+        (sourcesLoaded && sources.length
+          ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
+            sources.map(src => '<option value="' + safe(src.id) + '">' +
+              safe(src.repository) + ' · ' + safe(src.eventKind) + '</option>').join('') +
+            '</select></label><label>Exact thread key<input name="subjectKey" required ' +
+            'maxlength="24" placeholder="issue:42 or pull:123"></label>' +
+            '<button type="submit">Link thread (context only)</button></form>'
+          : '<p>Load event sources below before linking a thread.</p>') +
         (ticketDetails.council
           ? '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
             '<h5>Native Council (advisory)</h5><p>Native team status: ' +
@@ -212,13 +226,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
-      inspectedTicket = ''; ticketDetails = null; return;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = []; return;
     }
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
-    const snapshot = await call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 });
+    const [snapshot, links] = await Promise.all([
+      call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
+      call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
+    ]);
     if (inspectedTicket === id) {
       ticketDetails = snapshot;
+      threadLinks = links;
       // Keep the ticket row and its grant/history pinned to one native revision.
       const index = tickets.findIndex(ticket => ticket.id === id);
       if (index >= 0) tickets[index] = snapshot.ticket;
@@ -234,7 +252,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
-        inspectedTicket = '';
+        inspectedTicket = ''; threadLinks = [];
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
@@ -302,7 +320,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       const next = target.dataset.saSelect;
       selected = next;
       tickets = [];
-      inspectedTicket = ''; ticketDetails = null;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
@@ -422,6 +440,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'thread-link') {
+      const ticketId = inspectedTicket;
+      const sourceId = String(data.get('sourceId') ?? '');
+      const subjectKey = String(data.get('subjectKey') ?? '').trim();
+      if (!ticketId || !ticketDetails || !sources.some(src => src.id === sourceId) ||
+          !/^(issue|pull):[1-9][0-9]{0,11}$/.test(subjectKey)) return;
+      void work(async () => {
+        await call('superagent_source_link_thread', {sourceId,ticketId,subjectKey});
+        await refreshTicketDetails();
+        feedback = 'Thread linked as context only; no task or authorization created.';
+      });
+      return;
+    }
     if (form.dataset.saForm === 'source') {
       const orchestrationId = selected;
       const repository = String(data.get('repository') ?? '').trim();

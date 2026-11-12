@@ -102,3 +102,7 @@ The creation form provides **Software Development** and **Issue Resolution** nam
 These are configuration-only suggestions: they neither choose existing bots nor
 create profiles, enable a policy, grant tools or start a task. Both bot IDs
 must be chosen explicitly, and the created preset is disabled.
+
+### Explicit GitHub thread references (partial S4)
+
+The trusted local Bots → Orchestrations Ticket detail can now link an exact `issue:NUMBER` or `pull:NUMBER` to a configured Off/Observe GitHub source from the same orchestration. Native SQLite v42 stores at most 16 source-thread references per Ticket, rejects foreign tasks and conflicting owners, preserves links across restart, and does not modify task authorization or launch a provider. This is **manual context metadata only**, not authenticated GitHub event delivery, subscription notifications, Auto policy, or authorization for write tools. Those integration steps remain pending.

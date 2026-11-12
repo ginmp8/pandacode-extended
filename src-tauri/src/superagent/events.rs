@@ -1,5 +1,6 @@
-//! S4 native Off/Observe event decisions. No inbound GitHub authentication,
-//! subscription, inferred worker admission or Auto tool effects exist here.
+//! S4 native Off/Observe decisions and explicit local thread-to-task links.
+//! No inbound GitHub authentication, automatic subscription delivery,
+//! inferred worker admission or Auto tool effects exist here.
 //! Only the trusted local main-window preview can submit an envelope; external
 //! transports must authenticate independently before using these decisions.
 use super::require_main_window;
@@ -41,6 +42,22 @@ CREATE INDEX IF NOT EXISTS sa_event_decisions_source_cursor
   ON sa_event_decisions(source_id,sequence);
 "#;
 
+
+/// A separate additive v42 migration, leaving v41 receipt histories untouched.
+/// Links are local-user references to source threads, never event authority.
+pub(crate) const THREAD_LINK_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_source_thread_links (
+  source_id TEXT NOT NULL REFERENCES sa_event_sources(id) ON DELETE RESTRICT,
+  subject_key TEXT NOT NULL,
+  ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(source_id,subject_key)
+);
+CREATE INDEX IF NOT EXISTS sa_thread_links_ticket
+  ON sa_source_thread_links(ticket_id,created_at);
+"#;
+
+const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
 const EVENT_KINDS: &[&str] = &[
@@ -102,6 +119,87 @@ pub struct EventDecisionRecord {
     pub decision: String,
     pub policy_revision: i64,
     pub at: i64,
+}
+
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceThreadLink {
+    pub source_id: String,
+    pub ticket_id: String,
+    pub repository: String,
+    pub subject_key: String,
+    pub created_at: i64,
+}
+
+/// Links may refer only to an exact issue or PR number, not URLs, arbitrary
+/// text or any user-supplied action. Local approval of a link never authorizes
+/// an incoming webhook, a task transition or a tool call.
+fn valid_thread_key(value: &str) -> bool {
+    let Some((kind, number)) = value.split_once(':') else { return false };
+    matches!(kind, "issue" | "pull") && (1..=12).contains(&number.len())
+        && !number.starts_with('0') && number.bytes().all(|c| c.is_ascii_digit())
+}
+
+fn list_thread_links(store: &Store, ticket_id: &str) -> Result<Vec<SourceThreadLink>> {
+    super::get_ticket(store, ticket_id)?;
+    let mut statement = store.db.prepare(
+        "SELECT l.source_id,l.ticket_id,s.repository,l.subject_key,l.created_at
+         FROM sa_source_thread_links l
+         JOIN sa_event_sources s ON s.id=l.source_id
+         WHERE l.ticket_id=?1 ORDER BY l.created_at,l.source_id,l.subject_key
+         LIMIT 16"
+    ).map_err(|e| e.to_string())?;
+    let rows = statement.query_map([ticket_id], |row| Ok(SourceThreadLink {
+        source_id: row.get(0)?, ticket_id: row.get(1)?,
+        repository: row.get(2)?, subject_key: row.get(3)?,
+        created_at: row.get(4)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &str)
+    -> Result<SourceThreadLink>
+{
+    if !valid_thread_key(subject_key) {
+        return Err("A source link requires an exact issue:123 or pull:123 thread key.".into());
+    }
+    let ticket = super::get_ticket(store, ticket_id)?;
+    let src = source(store, source_id)?;
+    if src.orchestration_id != ticket.orchestration_id {
+        return Err("Event source and Ticket must belong to the same orchestration.".into());
+    }
+    if matches!(ticket.state.as_str(), "completed" | "stopped" | "failed"
+        | "interrupted" | "inconclusive")
+    {
+        return Err("Terminal Tickets cannot gain new source thread links.".into());
+    }
+    let current: Option<String> = store.db.query_row(
+        "SELECT ticket_id FROM sa_source_thread_links
+         WHERE source_id=?1 AND subject_key=?2",
+        params![source_id,subject_key], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(existing) = current {
+        if existing != ticket_id {
+            return Err("Source thread is already linked to a different Ticket.".into());
+        }
+    } else {
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id=?1",
+            [ticket_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if count >= MAX_LINKS_PER_TICKET {
+            return Err("Ticket source thread link limit reached.".into());
+        }
+        store.db.execute(
+            "INSERT INTO sa_source_thread_links
+             (source_id,subject_key,ticket_id,created_at) VALUES(?1,?2,?3,?4)",
+            params![source_id,subject_key,ticket_id,storage::now()],
+        ).map_err(|e| e.to_string())?;
+    }
+    list_thread_links(store, ticket_id)?.into_iter()
+        .find(|link| link.source_id == source_id && link.subject_key == subject_key)
+        .ok_or_else(|| "Source thread link unavailable after update.".into())
 }
 
 fn token_ok(value: &str, max: usize) -> bool {
@@ -340,6 +438,26 @@ pub async fn superagent_source_observe(
     observe(&store,&event)
 }
 
+
+#[tauri::command]
+pub async fn superagent_source_link_thread(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, ticket_id: String, subject_key: String,
+) -> Result<SourceThreadLink> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    link_thread(&store, &source_id, &ticket_id, &subject_key)
+}
+
+#[tauri::command]
+pub async fn superagent_source_thread_links(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
+) -> Result<Vec<SourceThreadLink>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_thread_links(&store, &ticket_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,4 +572,80 @@ mod tests {
         assert_eq!(timeline[0].delivery_id,"two");
         assert_eq!(timeline[1].policy_revision,a.policy_revision);
     }
+
+    fn insert_manual_ticket(store: &Store, id: &str, orchestration_id: &str) {
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES(?1,?2,?1,'Private objective','local-user','manual','fixture',
+                    'worker',1,'queued',?3,?3)",
+            params![id,orchestration_id,storage::now()],
+        ).unwrap();
+    }
+
+    #[test]
+    fn explicit_source_thread_links_are_idempotent_durable_and_not_task_authority() {
+        let (store,path)=fixture();
+        insert_manual_ticket(&store,"ticket-one","orch");
+        let src=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        let link=link_thread(&store,&src.id,"ticket-one","issue:42").unwrap();
+        assert_eq!(link.repository,"test/fixture");
+        assert_eq!(link_thread(&store,&src.id,"ticket-one","issue:42").unwrap().created_at,link.created_at);
+        assert_eq!(list_thread_links(&store,"ticket-one").unwrap().len(),1);
+        let state: String = store.db.query_row(
+            "SELECT state FROM sa_tickets WHERE id='ticket-one'",[],|row|row.get(0)
+        ).unwrap();
+        assert_eq!(state,"queued");
+        let mandates: i64=store.db.query_row("SELECT COUNT(*) FROM sa_mandates",[],|row|row.get(0)).unwrap();
+        assert_eq!(mandates,0,"Linking a source must not issue a mandate");
+        assert_eq!(source(&store,&src.id).unwrap().mode,"off");
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened,"ticket-one").unwrap()[0].subject_key,"issue:42");
+        assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,0);
+    }
+
+    #[test]
+    fn source_links_reject_foreign_tickets_conflicts_and_unbounded_subjects() {
+        let (store,_)=fixture();
+        insert_manual_ticket(&store,"one","orch");
+        insert_manual_ticket(&store,"two","orch");
+        store.db.execute(
+            "INSERT INTO sa_orchestrations
+             (id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
+             VALUES('other','Other','router','worker','fixture',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        insert_manual_ticket(&store,"foreign","other");
+        let src=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        assert!(link_thread(&store,&src.id,"foreign","issue:42").is_err());
+        for invalid in ["issue:0","issue:01","issue:-1","issue:1/../../x","pull:abc",
+                        "issue:1234567890123","issue:2\nsecret","https://github.com/test/fixture/issues/2"] {
+            assert!(link_thread(&store,&src.id,"one",invalid).is_err(),"{invalid}");
+        }
+        link_thread(&store,&src.id,"one","issue:42").unwrap();
+        assert!(link_thread(&store,&src.id,"two","issue:42").is_err());
+        assert!(list_thread_links(&store,"two").unwrap().is_empty());
+        store.db.execute("UPDATE sa_tickets SET state='stopped' WHERE id='two'",[]).unwrap();
+        assert!(link_thread(&store,&src.id,"two","pull:52").is_err());
+        let count:i64=store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links",[],|row|row.get(0)).unwrap();
+        assert_eq!(count,1);
+    }
+
+    #[test]
+    fn source_thread_schema_upgrades_from_v41_without_dropping_event_receipts() {
+        let (store,path)=fixture();
+        let src=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        observe(&store,&event("delivery-kept",&src,1)).unwrap();
+        store.db.execute_batch("DROP TABLE sa_source_thread_links; PRAGMA user_version=41;").unwrap();
+        drop(store);
+        let upgraded=Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&upgraded,&src.id,10).unwrap()[0].delivery_id,"delivery-kept");
+        insert_manual_ticket(&upgraded,"upgraded-ticket","orch");
+        assert!(link_thread(&upgraded,&src.id,"upgraded-ticket","pull:123").is_ok());
+        assert_eq!(upgraded.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),
+            storage::SCHEMA_VERSION);
+    }
+
 }

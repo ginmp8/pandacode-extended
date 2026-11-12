@@ -162,6 +162,7 @@ test('native Council observation is advisory and never authorizes task completio
         id:'ticket-one',objective:'Review artifact',state:'waiting_approval',
         revision:2,evidence:'worker evidence'
       }] as never;
+      if (command === 'superagent_source_thread_links') return [] as never;
       if (command === 'superagent_snapshot') return {
         ticket:{id:'ticket-one',objective:'Review artifact',
           state:'waiting_approval',revision:2,evidence:'worker evidence'},
@@ -302,4 +303,56 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
   await expect(host.getByText('No orchestrations created.')).toBeVisible();
   await expect(name).toHaveValue('Custom original name');
   await expect(host.getByRole('combobox',{name:'Example preset'})).toHaveValue('Software Development');
+});
+
+
+test('SuperAgent links explicit GitHub source threads to the selected Ticket without dispatch', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-thread-link-test';document.body.appendChild(host);
+    const links:Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>=[];
+    const configs=[{id:'one',name:'One',coordinatorBotId:'router',
+      workerBotId:'worker',enabled:true,policyRevision:1}];
+    const ticket={id:'ticket-one',objective:'Private fixture',state:'queued',revision:1,evidence:null};
+    let dispatches=0;
+    mountSuperagent(host,async (command,args)=>{
+      if(command==='bots_list')return [{id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return configs as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {ticket,
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[]} as never;
+      if(command==='superagent_source_list')return [{
+        id:'source-one',orchestrationId:'one',repository:'test/fixture',actorFilter:'trusted',
+        eventKind:'issues.opened',mode:'off',policyRevision:1,lastSequence:0
+      }] as never;
+      if(command==='superagent_source_thread_links')return links.filter(
+        link=>link.ticketId===args?.ticketId) as never;
+      if(command==='superagent_source_link_thread'){
+        if(args?.sourceId!=='source-one'||args.ticketId!=='ticket-one')throw Error('Wrong scope');
+        if(links.some(link=>link.sourceId===args.sourceId&&link.subjectKey===args.subjectKey))
+          throw Error('Duplicate reference');
+        const link={sourceId:'source-one',ticketId:'ticket-one',repository:'test/fixture',
+          subjectKey:String(args.subjectKey),createdAt:Date.now()};
+        links.push(link);return link as never;
+      }
+      dispatches++;
+      throw Error('Unexpected side-effect command: '+command);
+    });
+    (window as unknown as {saDispatchCount:()=>number}).saDispatchCount=()=>dispatches;
+  });
+  const host=page.locator('#sa-thread-link-test');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await expect(host.getByText('No threads linked.')).toBeVisible();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await host.getByRole('textbox',{name:'Exact thread key'}).fill('issue:42');
+  await host.getByRole('button',{name:'Link thread (context only)'}).click();
+  await expect(host.locator('.sa-linked-threads')).toContainText('test/fixture / issue:42');
+  await expect(host.getByRole('status')).toContainText('no task or authorization created');
+  await expect(host.getByText('Private fixture')).toBeVisible();
+  await expect.poll(()=>page.evaluate(
+    ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);
 });

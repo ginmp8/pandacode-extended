@@ -7,6 +7,7 @@ type Ticket = { id:string; orchestrationId:string; objective:string;
 type Activity = { id:number; kind:string; detail:string; at:number };
 type Assignment = { id:string; botId:string; sessionId:string; attempt:number; state:string };
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
+const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
@@ -46,6 +47,12 @@ export async function invokeSuperagent<T>(
       else value={ticket:t,mandate,assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
       break;
     }
+    case 'superagent_source_thread_links':
+      value=threadLinks.get(args.ticketId)||[];break;
+    // These are preview-only references. Real native code verifies source and
+    // Ticket orchestration ownership and rejects conflicting thread reuse.
+    case 'superagent_source_link_thread':
+      throw Error('Source linking requires a native trusted event source.');
     case 'superagent_create':{
       const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
       if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');

@@ -435,20 +435,39 @@ pub struct DemandIndex {
     pub updated_at: i64,
 }
 
-fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+/// Stable keyset pagination by native updated_at+Ticket ID, not an arbitrary
+/// SQL offset. Each page is a live read; refreshing the first page is required
+/// to see Tickets modified after a paging cursor was issued.
+fn list_all_demands_page(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
     if !(1..=200).contains(&limit) {
         return Err("Demand index page size must be between 1 and 200.".into());
+    }
+    if before_updated_at.is_some() != before_id.is_some()
+        || before_updated_at.is_some_and(|time| time <= 0)
+        || before_id.is_some_and(|id| id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')))
+    {
+        return Err("Demand cursor requires a bounded Ticket ID and positive timestamp.".into());
     }
     let mut stmt = store.db.prepare(
         "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         WHERE (?2 IS NULL OR t.updated_at < ?2
+                OR (t.updated_at=?2 AND t.id < ?3))
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([limit], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page(store, limit, None, None)
 }
 
 /// Cross-Team native decision queue, independent of the general 200-row
@@ -2029,10 +2048,11 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 #[tauri::command]
 pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<String>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands(&store, limit.unwrap_or(200))
+    list_all_demands_page(&store, limit.unwrap_or(200), before_updated_at, before_id.as_deref())
 }
 
 #[tauri::command]
@@ -2738,6 +2758,52 @@ mod tests {
         assert!(!serialized.contains("first-demand"));
         assert!(!serialized.contains("authorizationId"));
         assert!(!serialized.contains("sessionId"));
+    }
+
+    #[test]
+    fn cross_team_demand_pages_preserve_order_ties_and_durable_history() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let id = format!("page-{index:03}");
+            let key = format!("request-{index:03}");
+            let objective = format!("Work item {index}");
+            // Several Tickets share the same clock tick; the ID breaks ties.
+            let at = 1_000 + index / 3;
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',?5,'worker',?6,'queued',?7,?7)",
+                params![id,team.id,key,objective,team.project_id,team.policy_revision,at],
+            ).unwrap();
+        }
+        let first = list_all_demands_page(&store, 200, None, None).unwrap();
+        assert_eq!(first.len(), 200);
+        assert_eq!(first[0].id, "page-204");
+        let boundary = first.last().unwrap();
+        let second = list_all_demands_page(
+            &store, 200, Some(boundary.updated_at), Some(&boundary.id)
+        ).unwrap();
+        assert_eq!(second.len(), 5);
+        assert_eq!(second.last().unwrap().id, "page-000");
+        let all_ids: std::collections::HashSet<_> = first.iter().chain(second.iter())
+            .map(|item| item.id.clone()).collect();
+        assert_eq!(all_ids.len(), 205, "No skipped or repeated Ticket at timestamp ties");
+        assert!(list_all_demands_page(&store, 10, Some(1), None).is_err());
+        assert!(list_all_demands_page(&store, 10, None, Some("page-000")).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(-1), Some("page-000")).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(1000), Some("../leak")).is_err());
+        assert!(list_all_demands_page(&store, 201, None, None).is_err());
+        // A newer update cannot enter a page requested with an older cursor.
+        store.db.execute(
+            "UPDATE sa_tickets SET updated_at=9999 WHERE id='page-000'", []
+        ).unwrap();
+        assert!(!list_all_demands_page(
+            &store, 200, Some(boundary.updated_at), Some(&boundary.id)
+        ).unwrap().iter().any(|item| item.id == "page-000"));
+        assert_eq!(list_all_demands_page(&store, 1, None, None).unwrap()[0].id, "page-000");
+        assert!(first.iter().all(|item| item.revision == 0));
     }
 
     #[test]

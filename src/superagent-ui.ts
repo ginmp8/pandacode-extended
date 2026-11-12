@@ -69,7 +69,7 @@ interface SourceDecision {
 
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
-  let allDemands: DemandIndex[] = [], allDemandsLoaded = false;
+  let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
@@ -331,8 +331,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
       '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
       'Refresh all Teams</button></header>' +
-      '<p>Up to 200 most recently updated native Tickets across Teams. Board counts cover only this loaded page; ' +
-      'they do not represent totals or launch work. Open a Demand to act within its Team.</p>' +
+      '<p>Native Tickets across Teams, loaded 200 at a time in newest-first order. Board counts cover ' +
+      'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
       (!allDemandsLoaded ? '<p role="status">Load all Teams to see cross-Team demands.</p>' :
         '<div class="sa-demand-layout-toggle" role="group" aria-label="Demand presentation">' +
         (['board','list'] as const).map(layout =>
@@ -342,7 +342,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (globalDemandLayout === 'board' ? demandBoard :
           '<ul class="sa-tickets sa-global-demand-list">' +
           (allDemands.map(demandCard).join('') ||
-          '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>')) +
+          '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>') +
+        '<p role="status">' + allDemands.length + ' native Demands loaded.</p>' +
+        (allDemandsHasMore ? '<button type="button" data-sa-load-older-demands>Load older Demands</button>' : '')) +
       '</section>';
     const nativePreflight = demandPreflight && demandPreflight.orchestrationId === selected &&
       preflightObjective === demandObjective.trim() && preflightMode === demandMode
@@ -559,7 +561,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     loading = true;
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
-    allDemands = []; allDemandsLoaded = false;
+    allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
     reviewQueue = []; reviewQueueLoaded = false;
     demandPreflight = null;
     // Keep updated controls hidden until the mutating operation has settled.
@@ -734,10 +736,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-load-all-demands')) {
       void work(async () => {
         allDemands = [];
-        allDemandsLoaded = false;
+        allDemandsLoaded = false; allDemandsHasMore = false;
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{limit:200});
         allDemands = loaded;
+        allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-older-demands')) {
+      const last = allDemands[allDemands.length - 1];
+      if (!allDemandsLoaded || !allDemandsHasMore || !last) return;
+      void work(async () => {
+        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+          limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
+        });
+        const seen = new Set(allDemands.map(item => item.id));
+        allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];
+        allDemandsHasMore = loaded.length === 200;
       });
       return;
     }

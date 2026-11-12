@@ -623,6 +623,52 @@ test('cross-Team Demands index is native-backed and opens only the original Team
   expect(calls.filter(value=>value==='superagent_accept'||value==='superagent_submit')).toHaveLength(0);
 });
 
+test('cross-Team native Demand pages load older Tickets without inferring new work', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-paged-demands'; document.body.appendChild(host);
+    const pages: Record<string,unknown>[]=[];
+    (window as unknown as {saDemandPages:Record<string,unknown>[]}).saDemandPages=pages;
+    const makeDemand=(index:number)=>({
+      id:'demand-'+index,orchestrationId:'team',objective:'Ticket '+index,
+      state:'blocked',revision:1,updatedAt:2000-index,
+    });
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [{id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [{id:'team',name:'Delivery Team',
+        coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        pages.push({...args});
+        if(args?.beforeId==='demand-199'&&args?.beforeUpdatedAt===1801)
+          return [makeDemand(200),makeDemand(201)] as never;
+        if(!args?.beforeId)return Array.from({length:200},(_,index)=>makeDemand(index)) as never;
+        throw Error('Native pagination cursor mismatch');
+      }
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-paged-demands');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await global.getByRole('button',{name:'Refresh all Teams'}).click();
+  await expect(global).toContainText('200 native Demands loaded.');
+  await global.getByRole('button',{name:'Load older Demands'}).click();
+  await expect(global).toContainText('202 native Demands loaded.');
+  await expect(global.getByRole('button',{name:'Load older Demands'})).toHaveCount(0);
+  await global.getByRole('button',{name:'List',exact:true}).click();
+  await expect(global.locator('.sa-global-demand-list li')).toHaveCount(202);
+  await expect(global).toContainText('Ticket 201');
+  const cursors=await page.evaluate(()=>
+    (window as unknown as {saDemandPages:Record<string,unknown>[]}).saDemandPages);
+  expect(cursors).toHaveLength(2);
+  expect(cursors[1]).toMatchObject({limit:200,beforeUpdatedAt:1801,beforeId:'demand-199'});
+});
+
 test('manual demand preflight shows native read-only scope and never admits work', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

@@ -268,6 +268,13 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await expect(host.getByText('Explicit authenticated gh Events polling',{exact:false})).toBeVisible();
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
+  // These actions are surfaced by the native GitHub Events adapter, not
+  // inferred from issue/review text or mistaken for Council acceptance.
+  const kinds = host.getByRole('combobox',{name:'Event class'});
+  await expect(kinds.locator('option[value="pull_request.closed"]')).toHaveCount(1);
+  await expect(kinds.locator('option[value="pull_request_review.submitted"]')).toHaveCount(1);
+  await expect(kinds.locator('option[value="pull_request_review_comment.created"]')).toHaveCount(1);
+  await expect(kinds.locator('option[value="pull_request_review.dismissed"]')).toHaveCount(1);
   await host.getByRole('textbox',{name:'Repository (owner/name)'}).fill('test/fixture');
   await host.getByRole('textbox',{name:'Exact actor'}).fill('trusted-bot');
   await host.getByRole('button',{name:'Add source (Off)'}).click();

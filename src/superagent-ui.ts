@@ -286,7 +286,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<label>Exact actor<input name="actorFilter" maxlength="80" required></label></div>' +
           '<label>Event class<select name="eventKind">' +
           ['issues.opened','issues.edited','issue_comment.created','pull_request.opened',
-            'pull_request_review.submitted','check_run.completed']
+            'pull_request.closed','pull_request.reopened','pull_request_review.submitted',
+            'pull_request_review.updated','pull_request_review.dismissed',
+            'pull_request_review_comment.created','check_run.completed']
             .map(kind => '<option value="' + kind + '">' + kind + '</option>').join('') +
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +

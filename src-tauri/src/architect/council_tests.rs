@@ -89,9 +89,34 @@ fn council_inspector_reports_native_queue_wait_and_settled_span_without_provider
     assert_eq!(result.attempts[1].observed_span_ms, None);
     assert_eq!(result.attempts[2].queue_wait_ms, None);
     assert_eq!(result.attempts[2].observed_span_ms, Some(11));
+    assert_eq!(result.usage.unique_attempts, 3);
+    assert_eq!(result.usage.queue_measured_attempts, 1);
+    assert_eq!(result.usage.span_measured_attempts, 2);
+    assert_eq!(result.usage.cumulative_queue_wait_ms, Some(4));
+    assert_eq!(result.usage.cumulative_observed_span_ms, Some(31));
+    assert!(result.usage.token_count.is_none());
+    assert!(result.usage.cost_amount.is_none());
+    assert_eq!(result.usage.usage_provenance, "unknown");
     assert!(!result.verified_pass);
 }
 
+
+#[test]
+fn native_usage_totals_dedupe_attempt_ids_and_never_treat_absent_receipts_as_zero() {
+    let mut first = seat("same-id", 1, Some(9.0), SINCE + 1);
+    first.council.as_mut().unwrap().started_at = SINCE + 3;
+    first.updated_at = SINCE + 9;
+    let mut duplicate = first.clone();
+    duplicate.council.as_mut().unwrap().round = 2;
+    let inspected = council::inspection(&team_with(on(9.0, 3, 2), vec![first, duplicate]), false).unwrap();
+    assert_eq!(inspected.attempts.len(), 2);
+    assert_eq!(inspected.usage.unique_attempts, 1);
+    assert_eq!(inspected.usage.queue_measured_attempts, 1);
+    assert_eq!(inspected.usage.cumulative_queue_wait_ms, Some(2));
+    assert_eq!(inspected.usage.cumulative_observed_span_ms, Some(6));
+    assert!(inspected.usage.token_count.is_none());
+    assert!(inspected.usage.cost_amount.is_none());
+}
 
 #[test]
 fn native_completed_council_projection_requires_a_verified_terminal_pass() {

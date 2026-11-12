@@ -41,6 +41,17 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       findings + '</ul></section>'
     : '';
   const hidden = inspection.attempts.length - shown.length;
+  const usage = inspection.usage;
+  const usageHtml = usage
+    ? '<p class="council-usage-totals">Native attempts: ' + escape(String(usage.uniqueAttempts)) +
+      ' · Cumulative queue ' + escape(observedDuration('', usage.cumulativeQueueWaitMs).trim()) +
+      ' (' + escape(String(usage.queueMeasuredAttempts)) + '/' + escape(String(usage.uniqueAttempts)) + ' measured)' +
+      ' · Cumulative observed span ' + escape(observedDuration('', usage.cumulativeObservedSpanMs).trim()) +
+      ' (' + escape(String(usage.spanMeasuredAttempts)) + '/' + escape(String(usage.uniqueAttempts)) + ' measured)' +
+      ' · Provider tokens ' + (usage.tokenCount === null ? 'unknown' : escape(String(usage.tokenCount))) +
+      ' · Cost ' + (usage.costAmount === null || !usage.costCurrency ? 'unknown' : escape(String(usage.costAmount) + ' ' + usage.costCurrency)) +
+      '</p>'
+    : '';
   const completion = inspection.verifiedPass && inspection.status.state === 'passed' &&
     !inspection.status.stale && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
@@ -51,7 +62,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p><p>' + (criteria.length ? 'Required criteria: ' +
       escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
-    completion + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    completion + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + findingsHtml + '</div>';
 }
 

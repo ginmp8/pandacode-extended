@@ -68,12 +68,21 @@ export interface CouncilReportedFinding {
   artifactRevision: string | null;
   verifiedEvidenceRefs: string[]; evidenceVerified: boolean; locationVerified: boolean;
 }
+/** Observed native queue and settled spans, cumulative across unique attempt IDs (not wall-clock or billing). */
+export interface CouncilUsageTotals {
+  uniqueAttempts: number; queueMeasuredAttempts: number; spanMeasuredAttempts: number;
+  cumulativeQueueWaitMs: number | null; cumulativeObservedSpanMs: number | null;
+  tokenCount: number | null; costAmount: number | null; costCurrency: string | null;
+  usageProvenance: 'unknown';
+}
 export interface CouncilInspection {
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';
   cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
   verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
   criteria: CouncilCriterion[];
   attempts: CouncilInspectionAttempt[];
+  /** Optional for older native builds / existing preview fixtures. */
+  usage?: CouncilUsageTotals;
   reportedFindings?: CouncilReportedFinding[];
 }
 export interface TeamConfig {

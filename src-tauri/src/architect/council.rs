@@ -351,8 +351,45 @@ pub struct CouncilInspection {
     pub verified_completion: Option<CouncilVerifiedCompletion>,
     pub criteria: Vec<CouncilCriterion>,
     pub attempts: Vec<CouncilInspectionAttempt>,
+    /// Summed native observations, not wall-clock elapsed time or a provider billing receipt.
+    pub usage: CouncilUsageTotals,
     /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
     pub reported_findings: Vec<CouncilReportedFinding>,
+}
+/// Observed lifecycle only. Missing provider billing receipts remain unknown, not zero.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilUsageTotals {
+    pub unique_attempts: usize,
+    pub queue_measured_attempts: usize,
+    pub span_measured_attempts: usize,
+    pub cumulative_queue_wait_ms: Option<i64>,
+    pub cumulative_observed_span_ms: Option<i64>,
+    pub token_count: Option<u64>,
+    pub cost_amount: Option<f64>,
+    pub cost_currency: Option<String>,
+    pub usage_provenance: &'static str,
+}
+fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
+    let mut ids = std::collections::HashSet::new();
+    let unique: Vec<_> = attempts.iter().filter(|attempt| ids.insert(attempt.worker_id.as_str())).collect();
+    let queue: Vec<i64> = unique.iter().filter_map(|attempt| attempt.queue_wait_ms).collect();
+    let spans: Vec<i64> = unique.iter().filter_map(|attempt| attempt.observed_span_ms).collect();
+    let add = |values: &[i64]| (!values.is_empty())
+        .then(|| values.iter().try_fold(0_i64, |sum, value| sum.checked_add(*value)))
+        .flatten();
+    CouncilUsageTotals {
+        unique_attempts: unique.len(),
+        queue_measured_attempts: queue.len(),
+        span_measured_attempts: spans.len(),
+        cumulative_queue_wait_ms: add(&queue),
+        cumulative_observed_span_ms: add(&spans),
+        // No native provider receipt is available: unknown even for completed reviews.
+        token_count: None,
+        cost_amount: None,
+        cost_currency: None,
+        usage_provenance: "unknown",
+    }
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -491,7 +528,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
     } else {
         None
     };
-    let attempts = seats(team).map(|(worker, seat)| CouncilInspectionAttempt {
+    let attempts: Vec<CouncilInspectionAttempt> = seats(team).map(|(worker, seat)| CouncilInspectionAttempt {
         worker_id: worker.id.clone(),
         round: seat.round,
         lens: seat.lens.clone(),
@@ -525,7 +562,8 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
     Some(CouncilInspection {
         mode: config.mode(),
         cycle_started_at: team.council_since, team_revision: team.revision,
-        status, verified_pass, verified_completion, criteria: config.criteria.clone(), attempts,
+        status, verified_pass, verified_completion, criteria: config.criteria.clone(),
+        usage: usage_totals(&attempts), attempts,
         reported_findings: Vec::new(),
     })
 }

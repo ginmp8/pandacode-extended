@@ -447,3 +447,44 @@ test('Ticket activity offers native All, Compact and JSON views without invented
   await expect(details.locator('.sa-audit-list li')).toHaveCount(1);
   await expect(details.getByText('Manual native grant',{exact:false})).toBeVisible();
 });
+
+test('Off source never polls GitHub and Observe only records authenticated native decisions',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-poll-source';document.body.appendChild(host);
+    const src={id:'source-1',orchestrationId:'preset',repository:'owner/repo',actorFilter:'trusted-bot',
+      eventKind:'issues.opened',mode:'off',policyRevision:1,lastSequence:0};
+    const calls:string[]=[];
+    (window as unknown as {saPollCalls:string[]}).saPollCalls=calls;
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [{id:'a',name:'A',paused:false},{id:'b',name:'B',paused:false}] as never;
+      if(command==='superagent_list')return [{id:'preset',name:'Observed Team',coordinatorBotId:'a',
+        workerBotId:'b',enabled:false,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_source_list')return [src] as never;
+      if(command==='superagent_source_set_mode'){
+        src.mode=String(args?.mode);src.policyRevision+=1;return {...src} as never;
+      }
+      if(command==='superagent_source_poll_authenticated'){
+        if(src.mode!=='observe')throw new Error('Poll attempted outside Observe');
+        return {scanned:3,recorded:1,duplicates:2} as never;
+      }
+      throw new Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-poll-source');
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await expect(host.getByRole('button',{name:'Poll authenticated GitHub'})).toHaveCount(0);
+  await host.getByRole('button',{name:'Enable Observe'}).click();
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('button',{name:'Poll authenticated GitHub'})).toBeVisible();
+  await host.getByRole('button',{name:'Poll authenticated GitHub'}).click();
+  await expect(host.getByRole('status').filter({hasText:'3 scanned, 1 recorded, 2 duplicate'})).toBeVisible();
+  const calls=await page.evaluate(()=>(window as unknown as {saPollCalls:string[]}).saPollCalls);
+  expect(calls.filter(c=>c==='superagent_source_poll_authenticated')).toHaveLength(1);
+  expect(calls.filter(c=>c==='superagent_submit'||c==='superagent_dispatch_worker')).toHaveLength(0);
+});

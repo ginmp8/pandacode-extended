@@ -162,10 +162,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<button type="button" data-sa-source-mode="' + safe(src.id) +
       '" data-sa-next-mode="' + (src.mode === 'off' ? 'observe' : 'off') + '">' +
       (src.mode === 'off' ? 'Enable Observe' : 'Turn Off') + '</button>' +
+      (src.mode === 'observe'
+        ? '<button type="button" data-sa-source-poll="' + safe(src.id) +
+          '">Poll authenticated GitHub</button>' : '') +
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
       '">View decisions</button></li>').join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. No authenticated GitHub intake, Auto tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>Off/Observe only. Explicit authenticated gh Events polling is a bounded read-only snapshot; no webhooks, guaranteed gap-free subscription, Auto tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
@@ -469,6 +472,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             {sourceId:src.id,expectedRevision:src.policyRevision,mode});
           await reload();
         });
+      return;
+    }
+    if (target.dataset.saSourcePoll) {
+      const currentSource = sources.find(item => item.id === target.dataset.saSourcePoll);
+      if (currentSource?.mode === 'observe') void work(async () => {
+        const summary = await call<{scanned:number;recorded:number;duplicates:number}>(
+          'superagent_source_poll_authenticated', {sourceId:currentSource.id});
+        feedback = 'Authenticated bounded poll: ' + summary.scanned + ' scanned, ' +
+          summary.recorded + ' recorded, ' + summary.duplicates +
+          ' duplicate. No tasks or effects started.';
+        await reload();
+      });
       return;
     }
     if (target.dataset.saSourceDecisions) {

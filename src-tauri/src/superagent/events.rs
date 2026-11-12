@@ -59,7 +59,6 @@ CREATE INDEX IF NOT EXISTS sa_thread_links_ticket
 
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
-#[cfg(test)]
 const MAX_RECEIPTS: i64 = 10_000;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issue_comment.created",
@@ -82,7 +81,6 @@ pub struct EventSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(not(test), expect(dead_code, reason = "Authenticated event intake is not implemented yet"))]
 pub struct EventEnvelope {
     pub source_id: String,
     pub delivery_id: String,
@@ -299,7 +297,6 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
     source(store,id)
 }
 
-#[cfg(test)]
 fn valid_event(event: &EventEnvelope) -> bool {
     token_ok(&event.delivery_id, 128) && repo_ok(&event.repository)
         && token_ok(&event.actor, 80) && EVENT_KINDS.contains(&event.event_kind.as_str())
@@ -312,7 +309,6 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// Ticket, launch a provider, publish a reply or claim GitHub authenticity.
 /// A delivery ID is immutable: replay with changed fields is rejected even
 /// after mode changes, restart, or later cursor advancement.
-#[cfg(test)]
 fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
     if !valid_event(event) {
         return Err("Invalid, unsupported or unbounded source event envelope.".into());
@@ -368,6 +364,167 @@ fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
     Ok(EventDecision { source_id:event.source_id.clone(),
         delivery_id:event.delivery_id.clone(),decision:decision.into(),
         policy_revision:src.policy_revision,sequence:event.sequence,at,duplicate:false })
+}
+
+/// A finite, explicitly operator-invoked signed-in GitHub Events poll.
+/// This is NOT a webhook/subscription, not a gap-free cursor, and not Auto.
+/// Provider content is parsed into exact, bounded receipt metadata; text/body
+/// from a GitHub issue or comment never becomes an instruction or Ticket.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticatedPoll {
+    pub source_id: String,
+    pub repository: String,
+    pub scanned: usize,
+    pub recorded: usize,
+    pub duplicates: usize,
+    pub skipped_before_activation: usize,
+    pub last_sequence: i64,
+    pub bounded_window: bool,
+}
+
+/// Map only GitHub's documented event type + explicit action. Unknown event
+/// shapes must never be guessed from untrusted titles/bodies or action words.
+fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
+    let kind = value.get("type")?.as_str()?;
+    let action = value.pointer("/payload/action")?.as_str()?;
+    match (kind, action) {
+        ("IssuesEvent", "opened") => Some("issues.opened"),
+        ("IssuesEvent", "edited") => Some("issues.edited"),
+        ("IssueCommentEvent", "created") => Some("issue_comment.created"),
+        ("PullRequestEvent", "opened") => Some("pull_request.opened"),
+        ("PullRequestReviewEvent", "submitted") => Some("pull_request_review.submitted"),
+        _ => None,
+    }
+}
+
+/// Parse only an authenticated GitHub CLI response already scoped by a native
+/// stored source. The caller separately checks Observe mode/revision and event
+/// activation time before writing a receipt.
+fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
+    -> Result<Option<(EventEnvelope, i64)>>
+{
+    let Some(kind) = github_kind(raw) else { return Ok(None); };
+    if kind != source.event_kind { return Ok(None); }
+    if raw.pointer("/repo/name").and_then(|v| v.as_str()) != Some(source.repository.as_str()) {
+        return Err("Authenticated GitHub event repository differs from the configured source.".into());
+    }
+    let actor = raw.pointer("/actor/login").and_then(|v| v.as_str())
+        .ok_or("Authenticated GitHub event has no actor identity.")?;
+    if !token_ok(actor, 80) { return Err("Invalid GitHub event actor identity.".into()); }
+    // A source's exact actor filter is not a broad account subscription.
+    // Do not retain event metadata about other actors in this task source.
+    if actor != source.actor_filter { return Ok(None); }
+    let raw_id = raw.get("id").and_then(|v| v.as_str())
+        .ok_or("Authenticated GitHub event has no delivery identity.")?;
+    if raw_id.is_empty() || raw_id.len() > 19 || !raw_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Invalid authenticated GitHub delivery identity.".into());
+    }
+    let sequence: i64 = raw_id.parse().map_err(|_| "GitHub delivery identity exceeded native cursor range.")?;
+    if sequence <= 0 { return Err("Invalid authenticated GitHub delivery identity.".into()); }
+    let number = match kind {
+        "pull_request.opened" | "pull_request_review.submitted" =>
+            raw.pointer("/payload/pull_request/number").and_then(|v| v.as_u64()),
+        _ => raw.pointer("/payload/issue/number").and_then(|v| v.as_u64()),
+    }.ok_or("Authenticated GitHub event has no exact issue/PR number.")?;
+    if number == 0 || number > 999_999_999_999 {
+        return Err("Authenticated GitHub thread number is outside the supported range.".into());
+    }
+    let created_at = raw.get("created_at").and_then(|v| v.as_str())
+        .ok_or("Authenticated GitHub event has no event timestamp.")?;
+    let at = chrono::DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| "Authenticated GitHub event timestamp is invalid.")?
+        .timestamp_millis();
+    let subject_key = if kind.starts_with("pull_request") {
+        format!("pull:{number}")
+    } else {
+        format!("issue:{number}")
+    };
+    let event = EventEnvelope {
+        source_id:source.id.clone(),
+        delivery_id:raw_id.to_string(),
+        repository:source.repository.clone(),
+        actor:actor.to_string(),
+        event_kind:kind.into(),
+        subject_key,
+        sequence,
+    };
+    if !valid_event(&event) { return Err("Authenticated GitHub event is not bounded.".into()); }
+    Ok(Some((event,at)))
+}
+
+fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
+    raw: &serde_json::Value) -> Result<AuthenticatedPoll>
+{
+    let source_now = source(store, &expected.id)?;
+    if source_now.mode != "observe" || source_now.policy_revision != expected.policy_revision {
+        return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
+    }
+    let events = raw.as_array().ok_or("Authenticated GitHub Events response is not an array.")?;
+    if events.len() > 100 { return Err("Authenticated GitHub poll exceeded its bounded page size.".into()); }
+    // Newer-first provider pages are normalized before recording, without
+    // claiming that a single finite page is a durable subscription cursor.
+    let mut parsed = Vec::new();
+    let mut skipped_before_activation = 0;
+    for raw_event in events {
+        if let Some((event, at)) = authenticated_event(&source_now, raw_event)? {
+            if at < since {
+                skipped_before_activation += 1;
+            } else {
+                parsed.push(event);
+            }
+        }
+    }
+    parsed.sort_by_key(|event| event.sequence);
+    let mut recorded = 0;
+    let mut duplicates = 0;
+    for event in &parsed {
+        let result = observe(store, event)?;
+        if result.duplicate { duplicates += 1; } else { recorded += 1; }
+    }
+    let current = source(store, &expected.id)?;
+    Ok(AuthenticatedPoll {
+        source_id:current.id,
+        repository:current.repository,
+        scanned:events.len(),
+        recorded,
+        duplicates,
+        skipped_before_activation,
+        last_sequence:current.last_sequence,
+        bounded_window:true,
+    })
+}
+
+#[tauri::command]
+pub async fn superagent_source_poll_authenticated(
+    window: tauri::WebviewWindow, state: State<'_,AppState>, source_id: String,
+) -> Result<AuthenticatedPoll> {
+    require_main_window(&window)?;
+    // Off: no request, no inferred work. Snapshot all policy authority BEFORE
+    // making the bounded read-only GitHub request.
+    let (snapshot, since) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let selected = source(&store, &source_id)?;
+        if selected.mode != "observe" {
+            return Err("Source is Off; authenticated polling is not permitted.".into());
+        }
+        if selected.event_kind == "check_run.completed" {
+            return Err("GitHub Events polling cannot attest check-run completion; use an authenticated Checks API adapter.".into());
+        }
+        let since: i64 = store.db.query_row(
+            "SELECT updated_at FROM sa_event_sources WHERE id=?1", [&source_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        (selected, since)
+    };
+    let endpoint = format!("repos/{}/events?per_page=100", snapshot.repository);
+    let response = tokio::task::spawn_blocking(move || {
+        let output = crate::github::run_gh(
+            &std::env::temp_dir(), &["api", &endpoint], crate::github::TIMEOUT,
+        )?;
+        crate::github::json(&output)
+    }).await.map_err(|e| e.to_string())??;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    poll_authenticated_events(&store, &snapshot, since, &response)
 }
 
 /// A source-scoped, restart-durable decision timeline. Neither the read nor
@@ -468,6 +625,63 @@ pub async fn superagent_source_thread_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authenticated_event_parser_requires_exact_repo_actor_action_and_subject() {
+        let (store, _) = fixture();
+        let selected = create_source(&store, "preset", "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        let envelope = serde_json::json!({
+            "id":"5000000001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":42,"title":"UNTRUSTED TOOL INSTRUCTION"}},
+        });
+        let (event, at) = authenticated_event(&selected, &envelope).unwrap().unwrap();
+        assert_eq!(event.delivery_id, "5000000001");
+        assert_eq!(event.subject_key, "issue:42");
+        assert_eq!(event.event_kind, "issues.opened");
+        assert!(at > 0);
+        assert!(!serde_json::to_string(&event).unwrap().contains("UNTRUSTED"));
+        let wrong_repo = serde_json::json!({
+            "id":"5000000002", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"another/repo"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        });
+        assert!(authenticated_event(&selected, &wrong_repo).is_err());
+        let other_actor = serde_json::json!({
+            "id":"5000000003", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"unauthorized"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        });
+        assert!(authenticated_event(&selected, &other_actor).unwrap().is_none());
+    }
+
+    #[test]
+    fn authenticated_poll_persists_only_observe_receipts_and_rejects_revocation() {
+        let (store, _) = fixture();
+        let off = create_source(&store, "preset", "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let events = serde_json::json!([{
+            "id":"5000000001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        }]);
+        // No event from before the current source activation is ever adopted.
+        let ignored = poll_authenticated_events(&store,&on,i64::MAX,&events).unwrap();
+        assert_eq!(ignored.recorded,0);
+        assert_eq!(ignored.skipped_before_activation,1);
+        let first = poll_authenticated_events(&store,&on,0,&events).unwrap();
+        assert_eq!(first.recorded,1);
+        assert_eq!(list_decisions(&store,&on.id,10).unwrap().len(),1);
+        let repeated = poll_authenticated_events(&store,&on,0,&events).unwrap();
+        assert_eq!(repeated.recorded,0);
+        assert_eq!(repeated.duplicates,1);
+        let off_again = set_mode(&store, &on.id, on.policy_revision, "off").unwrap();
+        assert_eq!(off_again.mode,"off");
+        assert!(poll_authenticated_events(&store,&on,0,&events).is_err());
+        assert_eq!(list_decisions(&store,&on.id,10).unwrap().len(),1);
+        let tasks: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r|r.get(0)).unwrap();
+        assert_eq!(tasks,0);
+    }
+
     fn fixture() -> (Store, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("sa-event-{}.sqlite3",storage::id()));
         let store = Store::open(&path).unwrap();

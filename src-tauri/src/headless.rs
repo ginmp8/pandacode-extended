@@ -359,19 +359,35 @@ fn start_services(app: tauri::AppHandle) {
             if state.shutdown.load(Ordering::SeqCst) != 0 {
                 break;
             }
-            let expired = match state.store.lock() {
+            // Lock ordering matches admission: running agents first, then Store.
+            // A separate one-shot CLI can revoke a Ticket in the same SQLite
+            // database but cannot reach this process's provider handle directly.
+            // Stop those still-running native sessions on the next bounded tick.
+            let running_sessions = match state.agents.lock() {
+                Ok(agents) => agents.keys().cloned().collect::<Vec<_>>(),
+                Err(error) => {
+                    eprintln!("serve: SuperAgent running session inspection failed: {error}");
+                    continue;
+                }
+            };
+            let cancellations = match state.store.lock() {
                 Ok(store) => crate::superagent::watchdog_expired_assignments(
                     &store, crate::storage::now(),
-                ),
+                ).and_then(|expired| {
+                    let revoked = crate::superagent::headless_cancelled_assignments(
+                        &store, &running_sessions,
+                    )?;
+                    Ok(expired.into_iter().chain(revoked).collect::<BTreeSet<_>>())
+                }),
                 Err(error) => Err(error.to_string()),
             };
-            match expired {
+            match cancellations {
                 Ok(sessions) => for session_id in sessions {
-                    println!("serve: stopping expired SuperAgent assignment {session_id}");
+                    println!("serve: stopping revoked or expired SuperAgent assignment {session_id}");
                     if let Err(error) = crate::stop_session(
                         watchdog.clone(), watchdog.state::<AppState>(), session_id,
                     ).await {
-                        eprintln!("serve: expired SuperAgent session stop failed: {error}");
+                        eprintln!("serve: SuperAgent session stop failed: {error}");
                     }
                 },
                 Err(error) => eprintln!("serve: SuperAgent watchdog failed: {error}"),

@@ -381,3 +381,18 @@ fail-closed guard, not a new reviewer invocation or exception workflow. The
 native task-bound reviewer request/verdict and attributed, reason-bound human
 exception remain unimplemented; Council-Off Tickets retain normal manual
 acceptance.
+
+
+### Cross-process Stop propagation to the serve-owned provider
+
+`pandacode serve --stop-ticket <ticket-id>` is a separate one-shot CLI
+process. It atomically revokes the native mandate and marks the Ticket stopped
+in the shared SQLite database; the CLI cannot directly access a running
+`serve` process's in-memory provider handle. The serve-owned native watchdog
+now also reads **already stopped/interrupted** task assignments at each
+30-second tick and calls the existing `stop_session` for any still-active
+provider session belonging to that exact native assignment. Ordinary bot
+sessions are never selected. A failed stop is logged and retried on a later
+tick while the provider remains active; no Ticket or external-effect receipt is
+replayed or reauthorized. The SQLite-side effect and callback gates apply
+immediately, even before the asynchronous provider handle is terminated.

@@ -915,6 +915,37 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
 /// budget used by tool admission. This is called only by the owning serve
 /// process; callers must stop the returned sessions after the transaction.
 /// No attempt is replayed and unresolved effect receipts stay unresolved.
+/// Return task-owned provider sessions that a separate local headless
+/// control command has already stopped or interrupted in SQLite. A live serve
+/// process can observe those revocations without taking a second writer lease,
+/// attempting a restart recovery, or stopping an unrelated ordinary bot session.
+/// This read never treats a stopped Ticket as a new dispatch/retry permission.
+pub(crate) fn headless_cancelled_assignments(
+    store: &Store, active_sessions: &[String],
+) -> Result<Vec<String>> {
+    if active_sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_assignments a
+            JOIN sa_tickets t ON t.id=a.ticket_id
+            WHERE a.session_id=?1
+              AND (a.state IN ('stopped','interrupted')
+                   OR t.state IN ('stopped','interrupted'))
+        )",
+    ).map_err(|e| e.to_string())?;
+    let mut cancelled = Vec::new();
+    for session_id in active_sessions {
+        let cancelled_native: bool = stmt.query_row([session_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if cancelled_native && !cancelled.contains(session_id) {
+            cancelled.push(session_id.clone());
+        }
+    }
+    Ok(cancelled)
+}
+
 pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
     // Only the owning serve process calls this. Inspect every live assignment:
     // limiting the SQL page before filtering healthy entries could starve a
@@ -2719,6 +2750,37 @@ mod tests {
         assert!(capped.truncated_attempts);
         assert_eq!(capped.nodes[1].attempt, Some(2));
         assert_eq!(capped.nodes[50].attempt, Some(51));
+    }
+
+    #[test]
+    fn headless_stopped_ticket_cancels_only_its_live_native_provider_session() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(&mut store, &cfg.id,
+            "Stop test in disposable workspace", "headless-stop-live", false).unwrap();
+        assert!(admitted);
+        let assigned = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, "desktop", "unrelated-normal-chat",
+            "Unrelated ordinary chat",
+        ).unwrap().0;
+        let active = vec![ordinary.clone(), assigned.clone(), assigned.clone()];
+        assert!(headless_cancelled_assignments(&store, &active).unwrap().is_empty());
+        // Simulates a one-shot headless control process writing revocation to
+        // the same SQLite database while the owner retains its provider handle.
+        let stopped = headless_stop_ticket(&store.path, &ticket.id).unwrap();
+        assert!(stopped.contains("stopped"));
+        let to_cancel = headless_cancelled_assignments(&store, &active).unwrap();
+        assert_eq!(to_cancel, vec![assigned.clone()]);
+        assert!(!to_cancel.contains(&ordinary));
+        assert!(headless_cancelled_assignments(&store, &[]).unwrap().is_empty());
+        assert_eq!(headless_cancelled_assignments(&store, &active).unwrap(), to_cancel);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+        assert!(read_only_policy(&store, &assigned).is_err());
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "normal bot paths cannot inherit task revocation");
     }
 
     #[test]

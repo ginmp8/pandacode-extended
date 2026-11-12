@@ -680,12 +680,14 @@ pub(crate) fn inspect_headless_effect_receipts(
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let receipts = effects::receipt_history(&store, ticket_id, 100)?;
+    let requires_reconciliation = receipts.iter()
+        .any(|receipt| receipt.state == "pending" || receipt.state == "uncertain");
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId": ticket_id,
         "receipts": receipts,
         "totalUnresolved": effects::unresolved_count(&store, ticket_id)?,
         "observationalOnly": true,
-        "requiresIndependentRemoteReconciliation": true,
+        "requiresIndependentRemoteReconciliation": requires_reconciliation,
         "replayed": false
     })).map_err(|e| e.to_string())
 }

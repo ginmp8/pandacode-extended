@@ -196,6 +196,33 @@ mod tests{
     }
 
     #[test]
+    fn headless_receipt_inspection_reports_only_actual_unresolved_effects() {
+        let (store,id) = fixture();
+        let empty: serde_json::Value = serde_json::from_str(
+            &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
+        ).unwrap();
+        assert_eq!(empty["requiresIndependentRemoteReconciliation"], false);
+        assert_eq!(empty["observationalOnly"], true);
+        assert_eq!(empty["replayed"], false);
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:42",b"payload").unwrap(),Reservation::Reserved);
+        let pending: serde_json::Value = serde_json::from_str(
+            &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
+        ).unwrap();
+        assert_eq!(pending["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(pending["receipts"][0]["state"], "pending");
+        acknowledge_applied(&store,&id,"github:issue:42",b"payload").unwrap();
+        let applied: serde_json::Value = serde_json::from_str(
+            &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
+        ).unwrap();
+        assert_eq!(applied["totalUnresolved"], 0);
+        assert_eq!(applied["requiresIndependentRemoteReconciliation"], false);
+    }
+
+    #[test]
     fn receipt_history_is_bounded_task_owned_and_survives_restart() {
         let (store, id) = fixture();
         assert!(receipt_history(&store, &id, 0).is_err());

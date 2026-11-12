@@ -5,6 +5,7 @@
 use crate::{bots, storage::{self, Store}, AppState, Result};
 
 pub(crate) mod manifest;
+pub(crate) mod roster;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
 pub mod effects;
@@ -1517,6 +1518,9 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
+        if roster::has_additional_members(store,orchestration_id)? {
+            return Err("Configured multi-member Teams cannot run without native scoped admission.".into());
+        }
         let coordinator=bots::get(store,&current.coordinator_bot_id)?;
         let worker=bots::get(store,&current.worker_bot_id)?;
         if coordinator.paused || worker.paused
@@ -1603,6 +1607,9 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
         [id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     if used { return Err("A preset with ticket history cannot be reconfigured; create a new preset.".into()); }
+    if roster::has_additional_members(store,id)? {
+        return Err("Clear additional Team roles before editing primary bot identities.".into());
+    }
     let name = input.name.trim();
     if name.is_empty() || name.len()>120 || name.chars().any(char::is_control)
         || input.coordinator_bot_id == input.worker_bot_id

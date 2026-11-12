@@ -116,6 +116,9 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             [&preset.name], super::orchestration_row,
         ).optional().map_err(|e| e.to_string())?;
         if let Some(old) = &existing {
+            if super::roster::has_additional_members(store,&old.id)? {
+                return Err("Legacy import cannot overwrite or disregard configured Team members.".into());
+            }
             // Reimports must never change an existing preset's authorizations,
             // bot bindings or enabled state. Require an explicit edit workflow.
             if old.coordinator_bot_id != coordinator.id
@@ -211,6 +214,11 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         .map_err(|e| e.to_string())?;
     let mut presets = Vec::with_capacity(configs.len());
     for config in configs {
+        // Until v2 portable roles are supported, never silently discard
+        // configured Workers or Reviewers from a claimed complete export.
+        if super::roster::has_additional_members(store,&config.id)? {
+            return Err("Portable multi-member Team export requires manifest v2; no data was discarded.".into());
+        }
         // Export the real names, not unstable local IDs or task state.
         let coordinator = bots::get(store, &config.coordinator_bot_id)?;
         let worker = bots::get(store, &config.worker_bot_id)?;

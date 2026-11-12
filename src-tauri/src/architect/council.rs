@@ -296,6 +296,8 @@ pub struct CouncilInspection {
     pub verified_completion: Option<CouncilVerifiedCompletion>,
     pub criteria: Vec<CouncilCriterion>,
     pub attempts: Vec<CouncilInspectionAttempt>,
+    /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
+    pub reported_findings: Vec<CouncilReportedFinding>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -324,6 +326,101 @@ pub struct CouncilInspectionAttempt {
     pub cost_currency: Option<String>,
     pub usage_provenance: &'static str,
 }
+
+/// Versioned read-only projection of a real reviewer message, not a verified defect,
+/// artifact-SHA attestation, permission grant or Council approval.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilReportedFinding {
+    pub schema_version: u8,
+    pub id: String,
+    pub cycle_id: String,
+    pub round: usize,
+    pub worker_id: String,
+    pub report_message_id: i64,
+    pub lens: String,
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub explanation: String,
+    /// Internal frozen reviewer revision is not a content digest.
+    pub artifact_revision: Option<String>,
+    /// No independent native check receipt is currently attached to a report claim.
+    pub verified_evidence_refs: Vec<String>,
+    pub evidence_verified: bool,
+    pub location_verified: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReportedFindingDraft {
+    severity: String,
+    category: String,
+    title: String,
+    explanation: String,
+}
+
+/// Parse only bounded structured claims. Never parse instructions, locations, IDs,
+/// evidence authorization, scores or external effects out of model-authored JSON.
+fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft> {
+    const PREFIX: &str = "Council findings JSON:";
+    let Some(raw) = report.lines().rev().find_map(|line| line.trim().strip_prefix(PREFIX)) else {
+        return Vec::new();
+    };
+    if raw.len() > 8192 { return Vec::new(); }
+    let Ok(items) = serde_json::from_str::<Vec<ReportedFindingDraft>>(raw.trim()) else {
+        return Vec::new();
+    };
+    if items.len() > 16 { return Vec::new(); }
+    let valid = |value: &str, cap: usize| !value.trim().is_empty()
+        && value.chars().count() <= cap && !value.chars().any(char::is_control);
+    if items.iter().any(|f| !matches!(f.severity.as_str(), "critical" | "high" | "medium" | "low" | "info")
+        || !valid(&f.category, 80) || !valid(&f.title, 160) || !valid(&f.explanation, 2000))
+    {
+        return Vec::new();
+    }
+    items
+}
+
+/// Extract from the SAME native assistant turn whose score was admitted. A later
+/// user/coordination turn invalidates the projection. Durable message IDs make
+/// read-only finding IDs stable across restart without a second state store.
+pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> Vec<CouncilReportedFinding> {
+    let mut findings = Vec::new();
+    for (worker, seat) in seats(team) {
+        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
+            continue;
+        }
+        let latest = store.db.query_row(
+            "SELECT id, substr(content,-8192) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
+            params![worker.session_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        ).optional().ok().flatten();
+        let Some((message_id, report)) = latest else { continue };
+        if parse_score(&report) != seat.score { continue; }
+        for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
+            findings.push(CouncilReportedFinding {
+                schema_version: 1,
+                id: format!("{}:{}:{}:{message_id}:{index}", team.session_id, team.council_since, worker.id),
+                cycle_id: format!("{}:{}", team.session_id, team.council_since),
+                round: seat.round,
+                worker_id: worker.id.clone(),
+                report_message_id: message_id,
+                lens: seat.lens.clone(),
+                severity: draft.severity,
+                category: draft.category,
+                title: draft.title,
+                explanation: draft.explanation,
+                artifact_revision: worker.reviewer_binding.as_ref().map(|binding| binding.artifact_revision.clone()),
+                verified_evidence_refs: Vec::new(),
+                evidence_verified: false,
+                location_verified: false,
+            });
+        }
+    }
+    findings
+}
+
 pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<CouncilInspection> {
     let config = team.config.council.as_ref()?;
     let status = status(team)?;
@@ -373,6 +470,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
     Some(CouncilInspection {
         cycle_started_at: team.council_since, team_revision: team.revision,
         status, verified_pass, verified_completion, criteria: config.criteria.clone(), attempts,
+        reported_findings: Vec::new(),
     })
 }
 
@@ -1110,7 +1208,7 @@ pub(super) fn reviewer_rules(worker: &Worker) -> String {
     let Some(seat) = &worker.council else {
         return String::new();
     };
-    format!(" You are an independent Council reviewer; your lens is {}. Hunt real defects and verify each by inspecting the work itself (code, output, frames, renders) or running checks; skip nitpicks that do not affect the result. Say what would raise the score. Score strictly: 10 means you found nothing worth improving; deduct for each real defect, in proportion to its impact. End your final report with the exact line `Council score: N/10`.", seat.lens)
+    format!(" You are an independent Council reviewer; your lens is {}. Hunt real defects and verify each by inspecting the work itself (code, output, frames, renders) or running checks; skip nitpicks that do not affect the result. Say what would raise the score. Score strictly: 10 means you found nothing worth improving; deduct for each real defect, in proportion to its impact. For actionable defects, optionally include one line starting Council findings JSON: followed by a compact JSON array of objects with severity (critical/high/medium/low/info), category, title and explanation. Do not claim independent evidence verification through that line. End your final report with the exact line `Council score: N/10`.", seat.lens)
 }
 
 /// The read-only rule for a reviewer: it reviews the work its assignment names, and its findings go

@@ -6,6 +6,44 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 
 const SINCE: i64 = 1000;
 
+
+#[test]
+fn council_reported_findings_are_bounded_untrusted_claims_not_native_evidence() {
+    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"authorization\",\"title\":\"Missing check\",\"explanation\":\"A route lacks an authorization guard\"},{\"severity\":\"low\",\"category\":\"tests\",\"title\":\"Missing negative test\",\"explanation\":\"Add a denied-path regression\"}]\nCouncil score: 6/10";
+    assert_eq!(council::parse_reported_findings(report).len(), 2);
+    assert!(council::parse_reported_findings("Council findings JSON: [{\"severity\":\"unknown\",\"category\":\"x\",\"title\":\"bad\",\"explanation\":\"bad\"}]\nCouncil score: 5/10").is_empty());
+    assert!(council::parse_reported_findings("Council findings JSON: [{\"severity\":\"high\",\"category\":\"x\",\"title\":\"bad\",\"explanation\":\"bad\",\"permission\":\"write\"}]\nCouncil score: 5/10").is_empty());
+    assert!(council::parse_reported_findings("Council score: 10/10").is_empty());
+}
+
+#[test]
+fn native_council_finding_projection_reuses_persisted_report_and_invalidates_after_new_turn() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let root = store.session(&sid).unwrap();
+    let review_session = store.create_session(&root.project_id, "codex", "", "full").unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let mut reviewer = seat("finding-reviewer", 1, Some(6.0), team.council_since + 1);
+    reviewer.session_id = review_session.id.clone();
+    team.workers.push(reviewer);
+    save(&store, &mut team).unwrap();
+    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Route lacks auth\",\"explanation\":\"Unprotected read endpoint\"},{\"severity\":\"medium\",\"category\":\"tests\",\"title\":\"Missing denial test\",\"explanation\":\"No negative request case\"}]\nCouncil score: 6/10";
+    store.message(&review_session.id, "assistant", report).unwrap();
+    let first = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(first.reported_findings.len(), 2);
+    assert!(!first.verified_pass);
+    assert!(!first.reported_findings[0].evidence_verified);
+    assert!(first.reported_findings[0].verified_evidence_refs.is_empty());
+    assert!(first.reported_findings[0].artifact_revision.is_none());
+    assert_eq!(first.reported_findings[0].worker_id, "finding-reviewer");
+    assert_eq!(first.reported_findings[0].round, 1);
+    assert_eq!(first.reported_findings[0].schema_version, 1);
+    assert_eq!(first.reported_findings[0].id,
+        council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings[0].id);
+    store.message(&review_session.id, "coordination", "A new review turn started").unwrap();
+    assert!(council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings.is_empty());
+}
+
 #[test]
 fn council_inspection_is_cycle_scoped_and_never_invents_usage_or_pass() {
     let old = seat("old", 1, Some(10.0), SINCE - 1);

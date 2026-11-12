@@ -1005,7 +1005,13 @@ pub(crate) fn council_inspection_state(
         });
     let verified_pass = issued_seats_are_valid && verified_council_pass(store, &team);
     refresh_council(store, &mut team);
-    Ok(council::inspection(&team, verified_pass))
+    let mut inspection = council::inspection(&team, verified_pass);
+    if issued_seats_are_valid {
+        if let Some(result) = inspection.as_mut() {
+            result.reported_findings = council::reported_findings(store, &team);
+        }
+    }
+    Ok(inspection)
 }
 
 /// Native read-only inspection for a task or opt-in channel delivery.

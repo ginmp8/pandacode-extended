@@ -70,6 +70,29 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
+
+test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'fixing', round: 1, lowest: 6, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    reportedFindings: [
+      { schemaVersion: 1, id: 'cycle:worker:22:0', cycleId: 'cycle', round: 1,
+        workerId: 'worker-1', reportMessageId: 22, lens: 'Security', severity: 'high',
+        category: 'authorization', title: '<img src=x onerror=alert(1)>',
+        explanation: 'The route is missing a guard', artifactRevision: null,
+        verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const findings = panel(page).getByRole('region', { name: 'Reviewer-reported findings' });
+  await expect(findings.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(findings.getByText('independent evidence unverified', { exact: false })).toBeVisible();
+  await expect(findings.locator('img')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
 test('Council inspector only discloses a verified terminal cycle and escapes its identity', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 17,

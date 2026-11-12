@@ -31,6 +31,15 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     return '<section aria-label="Review round ' + round + '"><h4>Round ' + round +
       '</h4><ul>' + entries + '</ul></section>';
   }).join('');
+  const reported = (inspection.reportedFindings ?? []).slice(-32);
+  const findings = reported.map(f => '<li><strong>' + escape(f.severity.toUpperCase() + ' · ' + f.title) +
+    '</strong><p>' + escape(f.category + ' · ' + f.lens + ' · ' + f.explanation) +
+    '</p><small>Reviewer report only; independent evidence unverified · Round ' +
+    escape(String(f.round)) + ' · ' + escape(f.workerId) + '</small></li>').join('');
+  const findingsHtml = reported.length
+    ? '<section aria-label="Reviewer-reported findings"><h4>Reviewer-reported findings (unverified)</h4><ul>' +
+      findings + '</ul></section>'
+    : '';
   const hidden = inspection.attempts.length - shown.length;
   const completion = inspection.verifiedPass && inspection.status.state === 'passed' &&
     !inspection.status.stale && inspection.verifiedCompletion
@@ -43,7 +52,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</p><p>' + (criteria.length ? 'Required criteria: ' +
       escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
     completion + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No reviewer attempts have been admitted.</p>') + '</div>';
+    (attempts || '<p>No reviewer attempts have been admitted.</p>') + findingsHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */

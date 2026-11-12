@@ -53,11 +53,21 @@ export interface CouncilInspectionAttempt {
   tokenCount: number | null; costAmount: number | null;
   costCurrency: string | null; usageProvenance: 'unknown';
 }
+/** Native-attributed reviewer report claim, not independently verified evidence or a pass. */
+export interface CouncilReportedFinding {
+  schemaVersion: number; id: string; cycleId: string; round: number;
+  workerId: string; reportMessageId: number; lens: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  category: string; title: string; explanation: string;
+  artifactRevision: string | null;
+  verifiedEvidenceRefs: string[]; evidenceVerified: boolean; locationVerified: boolean;
+}
 export interface CouncilInspection {
   cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
   verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
   criteria: CouncilCriterion[];
   attempts: CouncilInspectionAttempt[];
+  reportedFindings?: CouncilReportedFinding[];
 }
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of

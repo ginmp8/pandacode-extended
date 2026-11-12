@@ -101,6 +101,8 @@ export function councilStateText({ council, status, rounds: cycle }: CouncilProg
     // Accepted while the latest round has no score: the last complete round's lowest, else just "Accepted".
     case 'accepted': { const last = status.lowest ?? [...cycle].reverse().find(round => round.lowest !== null)?.lowest; return last === undefined || last === null ? 'Accepted' : `Accepted at ${formatScore(last)}`; }
     case 'limit': return `${changedAfterPass ? `Stopped at round limit: changed after passing at ${lowest}` : 'Stopped at round limit'} (${status.round}${rounds})`;
+    // An unavailable native child Council is never an inferred pass or a finished review.
+    case 'blocked': return 'Council blocked · ' + (status.notice ?? 'Required native review is unavailable');
   }
 }
 

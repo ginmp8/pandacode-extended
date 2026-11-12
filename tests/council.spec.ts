@@ -71,6 +71,21 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
 
+test('Council blocked child state remains non-passing in shared native inspector', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', cycleStartedAt: 1000, teamRevision: 5,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true,
+      notice: 'Nested Council requires a task-isolated native child review before any root approval.' },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('blocked', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

@@ -364,3 +364,11 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [x] Align all six app-version fields and Extended source provenance, leaving independent planned release `0.12.0` unchanged.
 - [ ] Confirm CI of the **new exact destination SHA**; the [prior push](https://github.com/ginmp8/pandacode-extended/actions/runs/43173312668) and [prior PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43173319356) passed 11/11 jobs each but do not certify a new commit.
 - [ ] Exercise native quit dialog (Quit/Cancel, repeated requests, local/cloud-only, serve and restart), all Extended Settings On/Off, native platform builds, dependency audits and integration paths; audit remaining customized source hunks before any parity/release approval.
+
+## 2026-11-12 — CI cancellation guard regression test correction
+
+- [x] Pin source `9aa88776f07c2274134e4a952ffcd7da71e70e50`, destination `dd15a184c6184df330896299ba50443dc559e6b2` and both complete recursive trees; confirm zero upstream paths missing and all application-version fields remain at `0.3.112`.
+- [x] Diagnose the exact failed step in [push CI #43188294463](https://github.com/ginmp8/pandacode-extended/actions/runs/43188294463) and [PR CI #43188308169](https://github.com/ginmp8/pandacode-extended/actions/runs/43188308169): the release-test suite has one stale CI cancellation assertion, not a failed runtime feature test.
+- [x] Update only the Extended release-gate regression assertion to match the upstream/Extended enforced `github.event_name == 'pull_request'` predicate, preserving active push and manual CI; leave production workflow behavior unchanged.
+- [ ] Verify the published fix by complete, exact-SHA push and PR CI runs; a queued, in-progress or failed job is not successful validation.
+- [ ] Continue contextual review of 81 shared divergent paths and native Settings On/Off, real audio, quit guard, Connect/MCP, bots, cloud/VM, credentials, migrations and installers before release approval.

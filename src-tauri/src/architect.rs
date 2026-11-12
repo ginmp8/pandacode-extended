@@ -1419,7 +1419,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     json!({"type":"function","name":format!("pandacode_{name}"),"description":description,"inputSchema":schema})
 }
 fn files_schema() -> Value {
-    json!({"type":"array","description":"Repo-relative paths; '/' only, no absolute, '.'/'..' or globs; [] reserves all.","items":{"type":"string"}})
+    json!({"type":"array","description":"Relative '/' paths; no absolute, '.'/'..' or globs; [] reserves all.","items":{"type":"string"}})
 }
 /// The dispatch tool. A direct worker's copy is scoped to its own sub-workers and has no
 /// escalation fields.
@@ -1428,12 +1428,12 @@ fn dispatch_tool(child: bool) -> Value {
     let s = json!({"type":"string"});
     let mut item = json!({"key":id,"profileId":id,"provider":s,"model":s,"reasoningEffort":s,"name":s,"prompt":s,"dependsOn":{"type":"array","items":id},"files":files_schema(),"readOnly":{"type":"boolean"}});
     let description = if child {
-        "Start sub-workers only for parallel work or another model; otherwise do it yourself. Files inside your scope (read-only if you are); dependsOn only these. Their results resume you.".to_string()
+        "Sub-workers only for parallel work/model; scoped files (inherit readOnly); dependsOn child IDs; results resume you.".to_string()
     } else {
         item["replaces"] = json!({"type":"string","description":"Failed worker (or one that failed your check) to replace and abandon. \"auto\" escalates harness or model; max 2 retries, then report. Starts from its changes."});
         item["replaceReason"] = json!({"type":"string","description":"The failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
-        "Start assignments as one parallel batch; returns IDs. profileId \"auto\" (or none while routing is on): Panda Router picks; name a profile, or provider and model in auto teams, only if the user names models. files: disjoint write scopes run in parallel, [] reserves the checkout; readOnly may overlap. dependsOn: returned IDs.".into()
+        "Dispatch a parallel batch; returns IDs. profileId names a profile or auto/omitted lets Panda Router pick; provider/model only if user named them. Disjoint files run in parallel; [] reserves checkout; readOnly overlaps; dependsOn returned IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }
@@ -1441,7 +1441,7 @@ fn catalog() -> Vec<Value> {
     let id = json!({"type":"string"});
     vec![
         dispatch_tool(false),
-        tool("route_models","Preview Panda Router: pick, alternatives (P success, cost), ladder, difficulty. failed: models that failed it, oldest first; never stepped down to.",json!({"tasks":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"files":{"type":"integer"},"failed":{"type":"array","items":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"}}}}},"required":["text"]}},"mode":{"type":"string","enum":["balanced","cheapest","quality"]}}),&["tasks"]),
+        tool("route_models","Preview Router pick, alternatives (P success, cost), ladder, difficulty; failed lists excluded models oldest first.",json!({"tasks":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"files":{"type":"integer"},"failed":{"type":"array","items":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"}}}}},"required":["text"]}},"mode":{"type":"string","enum":["balanced","cheapest","quality"]}}),&["tasks"]),
         tool("list_workers","Statuses and summaries.",json!({"offset":{"type":"integer"}}),&[]),
         tool("read_worker","A worker's response, or with checkpoint: true its checkpoint, paged: offset = nextOffset.",json!({"workerId":id,"offset":{"type":"integer"},"checkpoint":{"type":"boolean"}}),&["workerId"]),
         tool("followup_worker","Resume an idle worker; omitted fields inherit.",json!({"workerId":id,"key":id,"prompt":{"type":"string"},"files":files_schema(),"readOnly":{"type":"boolean"},"reasoningEffort":{"type":"string"}}),&["workerId","key","prompt"]),
@@ -1454,7 +1454,7 @@ fn sub_worker_catalog() -> Vec<Value> {
     let id = json!({"type":"string"});
     vec![
         dispatch_tool(true),
-        tool("sub_workers","Sub-workers: list; read (offset = nextOffset; checkpoint: true pages it), followup (key, prompt; rest inherit) or cancel (reason) a workerId.",json!({"action":{"type":"string","enum":["list","read","followup","cancel"]},"offset":{"type":"integer"},"checkpoint":{"type":"boolean"},"workerId":id,"key":id,"prompt":{"type":"string"},"files":files_schema(),"readOnly":{"type":"boolean"},"reasoningEffort":{"type":"string"},"reason":{"type":"string"}}),&["action"]),
+        tool("sub_workers","Sub-workers: list; read offset/checkpoint; followup key/prompt (rest inherit); cancel reason; workerId.",json!({"action":{"type":"string","enum":["list","read","followup","cancel"]},"offset":{"type":"integer"},"checkpoint":{"type":"boolean"},"workerId":id,"key":id,"prompt":{"type":"string"},"files":files_schema(),"readOnly":{"type":"boolean"},"reasoningEffort":{"type":"string"},"reason":{"type":"string"}}),&["action"]),
     ]
 }
 /// The architect tool a `sub_workers` action stands for, and its arguments without `action`.

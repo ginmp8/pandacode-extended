@@ -3763,7 +3763,7 @@ mod tests {
             ).unwrap();
             assert!(shared, "new upstream bot tables must be created");
             let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-            assert_eq!(version, 37);
+            assert_eq!(version, 38);
         }
         // The schema reconciliation must not need to run again on next start.
         let reopened = Store::open(&path).unwrap();

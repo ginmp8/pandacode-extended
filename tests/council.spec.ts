@@ -12,7 +12,7 @@ type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: 
 test.setTimeout(60_000);
 
 /** Records every architect_set_council; `refuse` makes the mock refuse a command, like a native error. */
-async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture): Promise<void> {
+async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
     const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
@@ -29,6 +29,7 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
         return team;
       }
       if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
+      if (command === 'architect_council_inspect' && ${inspection !== undefined}) return ${JSON.stringify(inspection ?? null)};
       switch (command) {
     `);
     await route.fulfill({ response, body });
@@ -45,6 +46,43 @@ const settle = async (page: Page) => { await expect(button(page)).toBeVisible();
 
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
+test('native Council inspector displays unknown usage and never trusts a display-only pass', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 5,
+    status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
+    verifiedPass: false,
+    criteria: [{ id: 'security', lens: 'Security', target: 9, required: true }],
+    attempts: [{ workerId: 'a', name: '<img src=x onerror=alert(1)>', lens: 'Security',
+      round: 1, reviewerSource: 'direct_bot', status: 'completed', score: 9.8,
+      abandoned: false, provider: 'codex', model: 'gpt-model', attempt: 1,
+      createdAt: 1001, startedAt: 1002, lastUpdatedAt: 1010,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Tokens unknown', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Cost unknown', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
+});
+test('Council inspector denial remains accessible on narrow screens', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', { architect_council_inspect: 'task scope denied' });
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(inspector.getByRole('alert')).toHaveText('Could not inspect this Council: task scope denied');
+  const bounds = await panel(page).boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+});
+
 
 test('Council criteria editor saves task-scoped user criteria without altering legacy defaults', async ({ page }) => {
   await open(page, '/?council');

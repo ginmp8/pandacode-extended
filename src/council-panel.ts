@@ -4,6 +4,7 @@ import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type CouncilConfig, type TeamSnapshot } from './architect-types';
 import type { ProviderId } from './types';
 import { createCouncilCriteriaEditor } from './council-criteria-editor';
+import { createCouncilInspector } from './council-inspector';
 import { COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilDefaults, councilForNewThreads, setCouncilForNewThreads, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
@@ -423,6 +424,11 @@ export function createCouncil(host: CouncilHost) {
         reason => selectedError(sessionId, reason),
       );
       panel.querySelector<HTMLElement>('.council-foot')!.before(editor);
+      if (shownConfig(sessionId)) {
+        const inspection = createCouncilInspector(() => host.call('architect_council_inspect', { sessionId }));
+        panel!.querySelector<HTMLElement>('.council-foot')!.before(inspection);
+        inspection.addEventListener('toggle', () => requestAnimationFrame(() => placeNow?.()));
+      }
       // Opening or changing the disclosure alters the popover's natural height.
       // Reposition after the staged editor has updated its visibility.
       const positionEditor = () => requestAnimationFrame(() => placeNow?.());

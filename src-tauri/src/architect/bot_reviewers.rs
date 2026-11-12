@@ -125,19 +125,25 @@ pub(super) fn review_policy(
 /// Called on a user setting change and again before dispatch, not by model output.
 pub(super) fn validate_roster(store: &Store, session_id: &str, council: &CouncilConfig) -> Result<()> {
     council.validate()?;
-    if council.reviewer_bot_ids.is_empty() { return Ok(()); }
+    if council.reviewer_bot_ids.is_empty() && council.nested_bot_reviewers.is_empty() { return Ok(()); }
     let executor = executor(store, session_id)?;
     let mut used = HashSet::new();
     let mut available_skills = HashSet::new();
-    for id in &council.reviewer_bot_ids {
+    for id in council.reviewer_bot_ids.iter().chain(council.nested_bot_reviewers.iter().map(|child| &child.bot_id)) {
         if !used.insert(id) {
             return Err("reviewer_unavailable: repeated reviewer bot ID.".into());
         }
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
         valid_bot(&bot, executor.as_deref(), true)?;
-        available_skills.extend(bot.skills.iter().cloned());
-        if let Some(permissions) = &council.review_permissions {
-            review_policy(&bot, permissions)?;
+        if council.nested_bot_reviewers.iter().any(|child| &child.bot_id == id) {
+            if bot.provider == "zcode" {
+                return Err("child_council_unavailable: the selected bot harness cannot host a native child Architect.".into());
+            }
+        } else {
+            available_skills.extend(bot.skills.iter().cloned());
+            if let Some(permissions) = &council.review_permissions {
+                review_policy(&bot, permissions)?;
+            }
         }
     }
     if council.optional_skill_ids.iter().any(|id| !available_skills.contains(id)) {
@@ -301,6 +307,9 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     let old = team.config.council.as_ref();
     let next = next.as_ref();
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
+        || old.map(|c| &c.nested_bot_reviewers) != next.map(|c| &c.nested_bot_reviewers)
+        || old.map(|c| c.strategy) != next.map(|c| c.strategy)
+        || old.map(|c| c.force_escalation) != next.map(|c| c.force_escalation)
         || old.map(|c| c.automatic_reviewers) != next.map(|c| c.automatic_reviewers)
         || ((old.is_some_and(|c| c.automatic_reviewers > 0)
             || next.is_some_and(|c| c.automatic_reviewers > 0))
@@ -325,7 +334,7 @@ pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConf
     }) {
         return Err("Council criteria are frozen after a reviewer seat is issued; start a new Council cycle to revise them.".into());
     }
-    if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()) {
+    if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty() || !c.nested_bot_reviewers.is_empty()) {
         let lenses = super::council::fixed_lens_count(team);
         if config.needed() < lenses {
             return Err(format!("This Council cycle fixed {lenses} lenses. Reserve at least {lenses} top-level reviewer seats, or finish this cycle before reducing the roster."));

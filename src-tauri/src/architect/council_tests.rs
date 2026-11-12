@@ -605,7 +605,7 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
         let inspected = council::inspection(&team_with(config.clone(), vec![]), false).unwrap();
         assert_eq!(inspected.mode, mode);
         if children > 0 {
-            assert!(config.validate().unwrap_err().contains("child_council_unavailable"));
+            assert!(config.validate().is_ok(), "isolated child reservations are valid but are not passing reviews");
             assert_eq!(council::status(&team_with(config.clone(), vec![])).unwrap().state, "blocked");
             assert!(council::reviewer_source_for(
                 &team_with(config.clone(), vec![]),
@@ -1990,4 +1990,71 @@ fn the_leads_own_edits_count_even_on_a_file_a_worker_changed() {
     persist_turn(&state, &sid, &["src/a.rs"]);
     store_team(&state, &mut saved(&state, &sid));
     assert!(finish_refusal(&saved(&state, &sid)).unwrap().contains("out of date"));
+}
+
+#[test]
+fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
+    let (state, sid) = state_fixture();
+    let mut children = Vec::new();
+    {
+        let store = state.store.lock().unwrap();
+        let root = store.session(&sid).unwrap();
+        for id in ["child-security", "child-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![id,root.project_id,storage::now()],
+            ).unwrap();
+            children.push(id.to_string());
+        }
+        let mut root_team = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = children.iter().map(|id| council::CouncilNestedReviewer {
+            bot_id: id.clone(), child_reviewers: 2, child_target: 9.5,
+            child_max_rounds: 2,
+        }).collect();
+        assert!(config.validate().is_ok());
+        root_team.config.council = Some(config);
+        save(&store, &mut root_team).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review the source artifact", None, None).unwrap();
+    assert_eq!(council::status(&started).unwrap().state, "blocked");
+    assert!(council::finish_refusal(&started).unwrap().contains("child_council_unavailable"));
+    let child_ids = {
+        let store = state.store.lock().unwrap();
+        let first = child_council::inspect(&store, &started).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].child_session_id, first[1].child_session_id);
+        child_council::reserve(&store, &started).unwrap();
+        assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+        for child in &first {
+            let session = store.session(&child.child_session_id).unwrap();
+            assert_eq!(session.mode, "plan", "parent Full permission never carries into children");
+            assert_eq!(session.project_id, store.session(&sid).unwrap().project_id);
+            assert_eq!(parent_of(&store, &session.id).unwrap().as_deref(), Some(sid.as_str()));
+            let team = load(&store, &session.id).unwrap().unwrap();
+            assert_eq!(team.status, "blocked");
+            assert!(team.workers.is_empty());
+            let cfg = team.config.council.as_ref().unwrap();
+            assert_eq!(cfg.reviewers, 2);
+            assert_eq!(cfg.target, 9.5);
+            assert!(cfg.nested_bot_reviewers.is_empty());
+            assert!(cfg.review_permissions.is_none());
+            assert!(cfg.post_acceptance_issue.is_none());
+        }
+        first.into_iter().map(|c| c.child_session_id).collect::<Vec<_>>()
+    };
+    for child_id in child_ids {
+        let error = start_state(&state, &child_id, "Try to hijack child", None, None).unwrap_err();
+        assert!(error.contains("child_council_denied"), "{error}");
+    }
+    let store = state.store.lock().unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    store.db.execute(
+        "UPDATE architect_requests SET content='{}'
+         WHERE parent_session_id=?1 AND kind='council_child'
+           AND key=?2",
+        rusqlite::params![sid, format!("native-council-child:{}:child-security",started.council_since)],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
 }

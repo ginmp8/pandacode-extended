@@ -280,9 +280,13 @@ impl CouncilConfig {
                     return Err("Nested Council requires 2 to 8 child reviewers, target 1 to 10 and 1 to 100 rounds.".into());
                 }
             }
-            // Do not admit a configuration whose child can be mistaken for a direct seat.
-            // The root-child native session/receipt/authority lifecycle is not yet available.
-            return Err("child_council_unavailable: isolated child Architect admission is required before enabling nested reviewers.".into());
+            // The native root can reserve isolated, task-owned child Architect
+            // sessions. Root completion remains blocked until verified leaf
+            // execution and one authenticated composite seat are implemented.
+            let required = self.criteria.iter().filter(|criterion| criterion.required).count();
+            if self.nested_bot_reviewers.iter().any(|child| child.child_reviewers < required) {
+                return Err("Each child Council must have enough reviewers to cover every required user criterion.".into());
+            }
         }
         Ok(())
     }
@@ -381,6 +385,9 @@ pub struct CouncilInspection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_completion: Option<CouncilVerifiedCompletion>,
     pub criteria: Vec<CouncilCriterion>,
+    /// Authenticated native reservations only; no child scores or pass claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved_children: Vec<super::child_council::ChildReservationView>,
     pub attempts: Vec<CouncilInspectionAttempt>,
     /// Summed native observations, not wall-clock elapsed time or a provider billing receipt.
     pub usage: CouncilUsageTotals,
@@ -596,7 +603,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         cycle_started_at: team.council_since, team_revision: team.revision,
         status, verified_pass, verified_completion, criteria: config.criteria.clone(),
         usage: usage_totals(&attempts), attempts,
-        reported_findings: Vec::new(),
+        reserved_children: Vec::new(), reported_findings: Vec::new(),
     })
 }
 

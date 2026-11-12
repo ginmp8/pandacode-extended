@@ -1,6 +1,7 @@
 //! Persistent, event-driven cross-harness delegation. Worker text stays in its own task.
 mod briefing;
 mod bot_reviewers;
+mod child_council;
 pub(crate) mod coordination;
 mod council;
 pub(crate) mod council_requests;
@@ -957,7 +958,7 @@ pub(crate) fn validate_channel_reviewers(
     store: &Store, council: &CouncilConfig, members: &[String], executors: &[String],
 ) -> Result<()> {
     council.validate()?;
-    for id in &council.reviewer_bot_ids {
+    for id in council.reviewer_bot_ids.iter().chain(council.nested_bot_reviewers.iter().map(|child| &child.bot_id)) {
         if !members.contains(id) {
             return Err("reviewer_unavailable: selected reviewer is not a Shared Channel member.".into());
         }
@@ -1007,6 +1008,9 @@ pub(crate) fn council_inspection_state(
     let verified_pass = issued_seats_are_valid && verified_council_pass(store, &team);
     refresh_council(store, &mut team);
     let mut inspection = council::inspection(&team, verified_pass);
+    if let Some(result) = inspection.as_mut() {
+        result.reserved_children = child_council::inspect(&store, &team)?;
+    }
     if issued_seats_are_valid {
         if let Some(result) = inspection.as_mut() {
             result.reported_findings = council::reported_findings(store, &team);
@@ -1387,6 +1391,9 @@ pub(crate) fn start_state(
         }
     }
     let mut team = load(&store, session_id)?.ok_or("Configure a team first.")?;
+    if parent_of(&store, session_id)?.is_some() {
+        return Err("child_council_denied: a task-owned Council child cannot be started as an ordinary Architect or bot conversation.".into());
+    }
     if active(&team.status)
         || agents.contains_key(session_id)
         || team
@@ -1444,6 +1451,9 @@ pub(crate) fn start_state(
     // Failure cannot leave an unbound or re-bound cycle after a launch.
     let transaction = store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     crate::bots::shared_channels::bind_delivery_cycle(&store, session_id, team.council_since)?;
+    // Reserve child Architects atomically with the parent cycle. Reservations do
+    // not dispatch reviewers and cannot satisfy the root's blocked Council gate.
+    child_council::reserve(&store, &team)?;
     save(&store, &mut team)?;
     transaction.commit().map_err(|e|e.to_string())?;
     let admission = Admission {

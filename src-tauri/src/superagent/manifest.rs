@@ -26,6 +26,10 @@ struct Preset {
     name: String,
     coordinator_bot: String,
     worker_bot: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_worker_bots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reviewer_bots: Vec<String>,
     enabled: bool,
     autonomy: String,
     max_concurrent_tasks: u8,
@@ -62,6 +66,8 @@ struct Resolved {
     name: String,
     coordinator_id: String,
     worker_id: String,
+    extra_worker_ids: Vec<String>,
+    reviewer_ids: Vec<String>,
     project_id: String,
     existing: bool,
 }
@@ -78,7 +84,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
     }
     let manifest: Manifest = serde_json::from_value(document.clone())
         .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-    if manifest.schema_version != 1 || manifest.orchestrations.len() > MAX_PRESETS {
+    if !matches!(manifest.schema_version,1|2) || manifest.orchestrations.len() > MAX_PRESETS {
         return Err("Unsupported SuperAgent manifest schema or too many presets.".into());
     }
     let bots = bots::list(store)?;
@@ -110,19 +116,46 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
         if coordinator.id == worker.id {
             return Err("Coordinator and worker must be different existing bots.".into());
         }
+        if manifest.schema_version==1
+            && (!preset.extra_worker_bots.is_empty() || !preset.reviewer_bots.is_empty()) {
+            return Err("Version 1 manifests cannot declare multi-member Teams.".into());
+        }
+        if preset.extra_worker_bots.len()>7 || preset.reviewer_bots.len()>4 {
+            return Err("Portable Team exceeds member limits.".into());
+        }
+        let mut unique=HashSet::new();
+        unique.insert(coordinator.id.as_str());
+        unique.insert(worker.id.as_str());
+        let mut extra_ids=Vec::new();
+        let mut reviewer_ids=Vec::new();
+        for name in &preset.extra_worker_bots {
+            let bot=lookup(name)?;
+            if !unique.insert(bot.id.as_str()) || bot.paused
+                || bot.project_id != worker.project_id {
+                return Err("Duplicate, paused or cross-project additional Team Worker.".into());
+            }
+            extra_ids.push(bot.id.clone());
+        }
+        for name in &preset.reviewer_bots {
+            let bot=lookup(name)?;
+            if !unique.insert(bot.id.as_str()) || bot.paused {
+                return Err("Duplicate or paused Team Reviewer.".into());
+            }
+            reviewer_ids.push(bot.id.clone());
+        }
         let existing: Option<Orchestration> = store.db.query_row(
             "SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision
              FROM sa_orchestrations WHERE name=?1 COLLATE NOCASE",
             [&preset.name], super::orchestration_row,
         ).optional().map_err(|e| e.to_string())?;
         if let Some(old) = &existing {
-            if super::roster::has_additional_members(store,&old.id)? {
-                return Err("Legacy import cannot overwrite or disregard configured Team members.".into());
-            }
-            // Reimports must never change an existing preset's authorizations,
-            // bot bindings or enabled state. Require an explicit edit workflow.
+            let roles=super::roster::read(store,&old.id)?;
+            // Reimports never downgrade, overwrite or enable existing Team
+            // configurations even when their local bot IDs differ.
             if old.coordinator_bot_id != coordinator.id
                 || old.worker_bot_id != worker.id || old.project_id != worker.project_id
+                || roles.worker_bot_ids.iter().skip(1).cloned().collect::<Vec<_>>() != extra_ids
+                || roles.reviewer_bot_ids != reviewer_ids
             {
                 return Err(format!("Existing orchestration conflicts with imported preset: {}",preset.name));
             }
@@ -131,6 +164,8 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             name: preset.name.clone(),
             coordinator_id: coordinator.id.clone(),
             worker_id: worker.id.clone(),
+            extra_worker_ids: extra_ids,
+            reviewer_ids,
             project_id: worker.project_id.clone(),
             existing: existing.is_some(),
         });
@@ -161,13 +196,28 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
             continue;
         }
         let now = storage::now();
+        let id=storage::id();
         tx.execute(
             "INSERT INTO sa_orchestrations
                 (id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,created_at,updated_at)
              VALUES(?1,?2,?3,?4,?5,0,?6,?6)",
-            params![storage::id(),candidate.name,candidate.coordinator_id,
+            params![&id,candidate.name,candidate.coordinator_id,
                 candidate.worker_id,candidate.project_id,now],
         ).map_err(|e| format!("Atomic SuperAgent import aborted: {e}"))?;
+        for (index,bot_id) in candidate.extra_worker_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+                 VALUES(?1,'worker',?2,?3)",
+                params![&id,(index+1) as i64,bot_id],
+            ).map_err(|e| format!("Atomic Team Worker import aborted: {e}"))?;
+        }
+        for (index,bot_id) in candidate.reviewer_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+                 VALUES(?1,'reviewer',?2,?3)",
+                params![&id,index as i64,bot_id],
+            ).map_err(|e| format!("Atomic Team Reviewer import aborted: {e}"))?;
+        }
         result.created.push(candidate.name);
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -213,19 +263,27 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         .collect::<rusqlite::Result<Vec<Orchestration>>>()
         .map_err(|e| e.to_string())?;
     let mut presets = Vec::with_capacity(configs.len());
+    let mut any_extra_roles=false;
     for config in configs {
-        // Until v2 portable roles are supported, never silently discard
-        // configured Workers or Reviewers from a claimed complete export.
-        if super::roster::has_additional_members(store,&config.id)? {
-            return Err("Portable multi-member Team export requires manifest v2; no data was discarded.".into());
+        let roles=super::roster::read(store,&config.id)?;
+        let extra_worker_bots=roles.worker_bot_ids.iter().skip(1)
+            .map(|id|bots::get(store,id).map(|bot|bot.name))
+            .collect::<Result<Vec<_>>>()?;
+        let reviewer_bots=roles.reviewer_bot_ids.iter()
+            .map(|id|bots::get(store,id).map(|bot|bot.name))
+            .collect::<Result<Vec<_>>>()?;
+        if !extra_worker_bots.is_empty() || !reviewer_bots.is_empty() {
+            any_extra_roles=true;
         }
-        // Export the real names, not unstable local IDs or task state.
+        // Export display names, never local IDs, private tasks or authority.
         let coordinator = bots::get(store, &config.coordinator_bot_id)?;
         let worker = bots::get(store, &config.worker_bot_id)?;
         presets.push(Preset {
             name: config.name,
             coordinator_bot: coordinator.name,
             worker_bot: worker.name,
+            extra_worker_bots,
+            reviewer_bots,
             enabled: config.enabled,
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
@@ -233,7 +291,9 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             council: Council { enabled: false },
         });
     }
-    serde_json::to_value(Manifest { schema_version: 1, orchestrations: presets })
+    serde_json::to_value(Manifest {
+        schema_version:if any_extra_roles {2} else {1},orchestrations:presets,
+    })
         .map_err(|e| e.to_string())
 }
 
@@ -444,6 +504,54 @@ mod tests {
         assert!(apply(&store,&document("Ambiguous"),true).is_err());
         let count: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_orchestrations",[],|r|r.get(0)).unwrap();
         assert_eq!(count,0);
+    }
+
+
+    #[test]
+    fn portable_v2_preflight_roundtrips_ordered_roles_without_secrets_or_authority() {
+        let store=fixture();
+        for (id,name) in [("extra-one","Worker B"),("extra-two","Worker C"),
+            ("reviewer-one","Reviewer A"),("reviewer-two","Reviewer B")] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?2,'worker-project','codex','default','plan',?3,?3)",
+                params![id,name,storage::now()],
+            ).unwrap();
+        }
+        let mut doc=document("Economy Team");
+        doc["schemaVersion"]=json!(2);
+        doc["orchestrations"][0]["extraWorkerBots"]=json!(["Worker B","Worker C"]);
+        doc["orchestrations"][0]["reviewerBots"]=json!(["Reviewer A","Reviewer B"]);
+        assert_eq!(preview(&store,&doc).unwrap().would_create,vec!["Economy Team"]);
+        assert_eq!(apply(&store,&doc,true).unwrap().created,vec!["Economy Team"]);
+        let id:String=store.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Economy Team'",[],
+            |row|row.get(0),
+        ).unwrap();
+        let roles=super::roster::read(&store,&id).unwrap();
+        assert_eq!(roles.worker_bot_ids,vec!["worker","extra-one","extra-two"]);
+        assert_eq!(roles.reviewer_bot_ids,vec!["reviewer-one","reviewer-two"]);
+        assert!(!roles.execution_ready);
+        let config=super::configuration(&store,&id).unwrap();
+        assert!(!config.enabled);
+        assert!(super::change_enabled(&store,&id,config.policy_revision,true).is_err());
+        let exported=export(&store).unwrap();
+        assert_eq!(exported["schemaVersion"],2);
+        assert_eq!(exported["orchestrations"][0]["extraWorkerBots"],json!(["Worker B","Worker C"]));
+        assert_eq!(exported["orchestrations"][0]["reviewerBots"],json!(["Reviewer A","Reviewer B"]));
+        assert!(!exported.to_string().contains("worker-project"));
+        assert!(!exported.to_string().contains("extra-one"));
+        assert_eq!(apply(&store,&exported,true).unwrap().unchanged,vec!["Economy Team"]);
+        let mut conflict=exported.clone();
+        conflict["orchestrations"][0]["reviewerBots"]=json!(["Worker B"]);
+        assert!(preview(&store,&conflict).is_err());
+        let mut missing=exported;
+        missing["orchestrations"][0]["extraWorkerBots"]=json!(["Missing Bot"]);
+        assert!(apply(&store,&missing,true).is_err());
+        assert_eq!(super::roster::read(&store,&id).unwrap().worker_bot_ids,roles.worker_bot_ids);
+        let mut invalid_schema=doc;
+        invalid_schema["schemaVersion"]=json!(1);
+        assert!(preview(&store,&invalid_schema).is_err());
     }
 
     #[test]

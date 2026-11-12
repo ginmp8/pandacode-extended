@@ -44,7 +44,7 @@ pub(super) fn has_additional_members(store:&Store,id:&str)->Result<bool> {
     ).map_err(|e|e.to_string())?;
     Ok(count>0)
 }
-fn read(store:&Store,id:&str)->Result<TeamRoster> {
+pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
     let config=configuration(store,id)?;
     let mut workers=vec![config.worker_bot_id.clone()];
     let mut reviewers=Vec::new();

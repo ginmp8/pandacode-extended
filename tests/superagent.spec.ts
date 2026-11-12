@@ -403,3 +403,47 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
 });
+
+test('Ticket activity offers native All, Compact and JSON views without invented evidence', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-audit-native-fixture';document.body.appendChild(host);
+    const ticket={id:'audit-ticket',objective:'Review bounded evidence',state:'waiting_approval',revision:3,evidence:'evidence'};
+    mountSuperagent(host,async command => {
+      if (command==='bots_list')return [{id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}] as never;
+      if (command==='superagent_list')return [{id:'audit-team',name:'Audit Team',coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if (command==='superagent_tickets')return [ticket] as never;
+      if (command==='superagent_source_thread_links')return [] as never;
+      if (command==='superagent_snapshot')return {
+        ticket,mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[
+          {id:3,at:1794444000000,kind:'turn_settled',detail:'Evidence recorded'},
+          {id:2,at:1794443999000,kind:'turn_settled',detail:'Evidence recorded'},
+          {id:1,at:1794443998000,kind:'admitted',detail:'Manual native grant'},
+        ]
+      } as never;
+      throw new Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-audit-native-fixture');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const details=host.getByRole('region',{name:'Ticket evidence'});
+  const modes=details.getByRole('navigation',{name:'Activity display'});
+  await expect(modes.getByRole('button',{name:'All'})).toHaveAttribute('aria-pressed','true');
+  await expect(details.locator('.sa-audit-list li')).toHaveCount(3);
+  await modes.getByRole('button',{name:'Compact'}).click();
+  await expect(details.locator('.sa-audit-list li')).toHaveCount(2);
+  await expect(details.getByText('2 consecutive native events',{exact:false})).toBeVisible();
+  await modes.getByRole('button',{name:'JSON'}).click();
+  await expect(details.locator('.sa-audit-json')).toContainText('"id": 3');
+  await expect(details.locator('.sa-audit-json')).not.toContainText('another-ticket');
+  await details.getByRole('searchbox',{name:'Filter native activity'}).fill('admitted');
+  await expect(details.locator('.sa-audit-json')).toContainText('"kind": "admitted"');
+  await expect(details.locator('.sa-audit-json')).not.toContainText('turn_settled');
+  await modes.getByRole('button',{name:'All'}).click();
+  await expect(details.locator('.sa-audit-list li')).toHaveCount(1);
+  await expect(details.getByText('Manual native grant',{exact:false})).toBeVisible();
+});

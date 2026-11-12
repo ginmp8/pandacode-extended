@@ -49,6 +49,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
+  let activityMode: 'all' | 'compact' | 'json' = 'all';
+  let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -77,6 +79,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const choices = optionsFor('');
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
+    const activity = (ticketDetails?.activity ?? []).filter(entry => {
+      const needle = activityFilter.trim().toLowerCase();
+      return !needle || (entry.kind + ' ' + entry.detail + ' ' + entry.id).toLowerCase().includes(needle);
+    });
+    const compactGroups = activity.reduce<Array<{first:Activity; count:number; last:Activity}>>((groups, event) => {
+      const tail = groups[groups.length - 1];
+      if (tail && tail.first.kind === event.kind && tail.first.detail === event.detail) {
+        tail.count += 1; tail.last = event;
+      } else {
+        groups.push({first:event,count:1,last:event});
+      }
+      return groups;
+    }, []);
+    const auditContent = activityMode === 'json'
+      ? '<pre class="sa-audit-json"><code>' + safe(JSON.stringify(activity, null, 2)) + '</code></pre>'
+      : '<ol class="sa-audit-list">' +
+        (activityMode === 'compact'
+          ? compactGroups.map(group => '<li>' + safe(activityTime(group.first.at)) + ' · ' +
+              safe(group.first.kind) + ' · ' + safe(group.first.detail) +
+              (group.count > 1 ? ' · ' + group.count + ' consecutive native events' : '') +
+              '</li>').join('')
+          : activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
+              safe(entry.kind) + ' · ' + safe(entry.detail) + ' · Event ' + entry.id +
+              '</li>').join('')) +
+        (!activity.length ? '<li>No matching native events.</li>' : '') + '</ol>';
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
@@ -94,11 +121,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
           safe(item.sessionId) + '</code></li>').join('') || '<li>No worker assigned.</li>') +
-        '</ul><h5>Native activity</h5><ol>' +
-        (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
-          safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
-          '<li>No activity recorded.</li>') +
-        '</ol><h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
+        '</ul><h5>Native activity</h5>' +
+        '<nav class="sa-activity-tabs" aria-label="Activity display">' +
+        (['all','compact','json'] as const).map(mode =>
+          '<button type="button" data-sa-activity-mode="' + mode + '" aria-pressed="' +
+          (mode === activityMode) + '">' + mode[0].toUpperCase() + mode.slice(1) +
+          '</button>').join('') + '</nav>' +
+        '<label class="sa-activity-filter">Filter native activity<input type="search" data-sa-activity-filter value="' +
+        safe(activityFilter) + '" placeholder="Event type, detail or ID"></label>' +
+        '<p class="sa-activity-source">' + activity.length + ' native events in view · ' +
+        'bounded latest-50 Ticket snapshot, native audit order. No inferred status.</p>' +
+        auditContent +
+        '<h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
         (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
           safe(link.subjectKey) + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
@@ -351,6 +385,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
     }
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-activity-filter')) {
+      activityFilter = target.value;
+      const selection = target.selectionStart;
+      render();
+      const replacement = host.querySelector<HTMLInputElement>('[data-sa-activity-filter]');
+      replacement?.focus({preventScroll:true});
+      if (replacement && selection !== null) replacement.setSelectionRange(selection, selection);
+    }
   });
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
@@ -358,6 +400,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
+      return;
+    }
+    if (target.dataset.saActivityMode) {
+      const mode = target.dataset.saActivityMode;
+      if (!['all','compact','json'].includes(mode)) return;
+      activityMode = mode as typeof activityMode;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-activity-mode="' + mode + '"]')?.focus({preventScroll:true});
       return;
     }
     if (target.dataset.saView) {

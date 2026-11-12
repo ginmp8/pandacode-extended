@@ -7,6 +7,7 @@ use crate::{bots, storage::{self, Store}, AppState, Result};
 pub(crate) mod manifest;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
+pub(crate) mod effects;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -527,6 +528,7 @@ pub(crate) fn inspect_headless_status(
             "revision": snapshot.ticket.revision,
             "activeAssignmentId": &snapshot.ticket.active_assignment_id,
             "hasEvidence": snapshot.ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
+            "unresolvedExternalEffects": effects::unresolved_count(&store, ticket_id)?,
             "mandate": {
                 "revoked": snapshot.mandate.revoked,
                 "policyRevision": snapshot.mandate.policy_revision,

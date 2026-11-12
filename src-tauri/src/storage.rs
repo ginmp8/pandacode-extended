@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 42;
+pub const SCHEMA_VERSION: i64 = 43;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -685,6 +685,12 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=42;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 43 {
+                migration.execute_batch(crate::superagent::effects::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=43;")
+                    .map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
@@ -729,6 +735,7 @@ impl Store {
             WHERE CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END IN ('running','waiting');").map_err(|e|e.to_string())?;
         // Reconcile SuperAgent-owned running assignments without replaying effects.
         recovery.execute_batch(crate::superagent::RECOVER).map_err(|e| e.to_string())?;
+        recovery.execute_batch(crate::superagent::effects::RECOVER).map_err(|e| e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
         let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if ranked { rank_published_drafts(&db)?; }

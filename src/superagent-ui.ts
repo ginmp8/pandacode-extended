@@ -10,6 +10,8 @@ interface Config {
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
+interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
+  workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
@@ -52,6 +54,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let activityMode: 'all' | 'compact' | 'json' = 'all';
   let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
+  let roleRoster: TeamRoster | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   const safe = (value: unknown) => escape(String(value ?? ''));
@@ -222,6 +225,33 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + '</section>' : '';
+    const roleOptions = (selectedRoles:string[]) => bots
+      .filter(bot => chosen && bot.id !== chosen.coordinatorBotId && bot.id !== chosen.workerBotId)
+      .map(bot => '<option value="' + safe(bot.id) + '"' +
+        (selectedRoles.includes(bot.id) ? ' selected' : '') +
+        (bot.paused ? ' disabled' : '') + '>' + safe(bot.name) +
+        (bot.paused ? ' (paused)' : '') + '</option>').join('');
+    const teamRoles = chosen
+      ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
+        '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers and optional Reviewers are configuration only until native role admission is implemented.</p>' +
+        (!roleRoster || roleRoster.orchestrationId !== chosen.id
+          ? '<button type="button" data-sa-role-load>Load native members</button>'
+          : '<p>Coordinator: ' + safe(botName(roleRoster.coordinatorBotId)) +
+            ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
+            ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
+            '<form data-sa-form="roster">' +
+              '<label>Additional Workers (up to 7)<select name="additionalWorkers" multiple size="5">' +
+              roleOptions(roleRoster.workerBotIds.slice(1)) + '</select></label>' +
+              '<label>Optional Council Reviewers (up to 4)<select name="reviewers" multiple size="5">' +
+              roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
+              '<p>A bot may have one role only. Workers must share the primary Worker project. Existing Teams with Tickets cannot be reconfigured.</p>' +
+              '<button class="primary-button" type="submit"' +
+                (chosen.enabled || (chosen.ticketCount??0)>0 ? ' disabled' : '') +
+                '>Save configured roles</button></form>' +
+              '<p role="status">' + (roleRoster.executionReady ?
+                'Single-worker manual execution available after explicit enable.' :
+                'Multi-member execution is disabled until native scoped admission is available.') + '</p>') +
+        '</section>' : '';
     const overview = chosen
       ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
         '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Manual read-only' : 'Disabled / Off') +
@@ -285,7 +315,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<option value="">Choose bot</option>' + choices + '</select></label>' +
           '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
           choices + '</select></label></div><button class="primary-button" type="submit"' +
-          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview
+          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
         : '') +
       (workspaceView === 'runs' ? (active || '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
       (workspaceView === 'review' ? reviewPanel : '') +
@@ -334,7 +364,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
-        inspectedTicket = ''; threadLinks = [];
+        inspectedTicket = ''; threadLinks = []; roleRoster = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
@@ -343,6 +373,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ticketDetails = null;
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
+      if (roleRoster && selected) {
+        roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
+      }
       if (sourcesLoaded && selected) {
         sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
         if (!sources.some(item => item.id === decisionSourceId)) {
@@ -421,6 +454,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
       return;
     }
+    if (target.hasAttribute('data-sa-role-load')) {
+      if (selected) void work(async () => {
+        roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-open-runs')) {
       workspaceView = 'runs'; render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="runs"]')?.focus({preventScroll:true});
@@ -433,7 +472,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const next = target.dataset.saSelect;
       selected = next;
       tickets = [];
-      inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      inspectedTicket = ''; ticketDetails = null; threadLinks = []; roleRoster = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
@@ -565,6 +604,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'roster') {
+      const cfg=current();
+      if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
+      const workerBotIds=[cfg.workerBotId,...data.getAll('additionalWorkers').map(String)];
+      const reviewerBotIds=data.getAll('reviewers').map(String);
+      void work(async () => {
+        roleRoster=await call<TeamRoster>('superagent_roster_update',{
+          orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,
+          input:{workerBotIds,reviewerBotIds},
+        });
+        await reload();
+        workspaceView='teams';
+      });
+      return;
+    }
     if (form.dataset.saForm === 'thread-link') {
       const ticketId = inspectedTicket;
       const sourceId = String(data.get('sourceId') ?? '');

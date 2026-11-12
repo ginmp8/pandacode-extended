@@ -491,3 +491,52 @@ test('Off source never polls GitHub and Observe only records authenticated nativ
   expect(calls.filter(c=>c==='superagent_source_poll_authenticated')).toHaveLength(1);
   expect(calls.filter(c=>c==='superagent_submit'||c==='superagent_dispatch_worker')).toHaveLength(0);
 });
+
+test('multi-member Team Builder stores native role revisions without launching unapproved work',async({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-configured-roster';document.body.appendChild(host);
+    const calls:string[]=[];(window as unknown as {saRosterCalls:string[]}).saRosterCalls=calls;
+    const config={id:'team',name:'Security-critical Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker',policyRevision:1,enabled:false,ticketCount:0};
+    let roster={orchestrationId:'team',policyRevision:1,coordinatorBotId:'coordinator',
+      workerBotIds:['worker'],reviewerBotIds:[],executionReady:true};
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker A',paused:false},
+        {id:'worker-b',name:'Worker B',paused:false},
+        {id:'worker-c',name:'Worker C',paused:false},
+        {id:'review-a',name:'Reviewer A',paused:false},
+        {id:'review-b',name:'Reviewer B',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{...config}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_roster')return {...roster} as never;
+      if(command==='superagent_roster_update') {
+        if(args?.expectedRevision!==config.policyRevision)throw Error('Native policy revision mismatch');
+        const input=args?.input as {workerBotIds:string[];reviewerBotIds:string[]};
+        if(input.workerBotIds.length!==3||input.reviewerBotIds.length!==2)throw Error('Role validation failed');
+        config.policyRevision++;
+        roster={...roster,workerBotIds:input.workerBotIds,reviewerBotIds:input.reviewerBotIds,
+          policyRevision:config.policyRevision,executionReady:false};
+        return {...roster} as never;
+      }
+      throw Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-configured-roster');
+  await host.getByRole('button',{name:'Load native members'}).click();
+  const form=host.locator('form[data-sa-form="roster"]');
+  await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
+  await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
+  await form.getByRole('button',{name:'Save configured roles'}).click();
+  await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();
+  await expect(host.getByText('Policy revision 2',{exact:false})).toBeVisible();
+  const calls=await page.evaluate(()=>(window as unknown as {saRosterCalls:string[]}).saRosterCalls);
+  expect(calls.filter(value=>value==='superagent_roster_update')).toHaveLength(1);
+  expect(calls.filter(value=>value==='superagent_submit' || value==='superagent_set_enabled')).toHaveLength(0);
+});

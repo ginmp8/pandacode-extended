@@ -172,6 +172,44 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
 
+test('M3 mixed Council preserves a direct bot plus one explicitly added automatic seat', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await expect(panel(page).getByText('Root Council: 2 of 2–8 combined seats; every source is required.')).toBeVisible();
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    reviewers: 0, automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'],
+  });
+  await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1].automaticReviewers).toBeUndefined();
+  expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
+});
+
+test('M3 never saves a bot-only zero-quorum configuration as the user changes sources', async ({ page }) => {
+  const bots = [{ id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false }];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await eligibleReviewers(page).first().check();
+  await toggle(page).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Select 2 to 8 distinct reviewer bots');
+  expect(await calls(page)).toHaveLength(0);
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].automaticReviewers).toBe(1);
+});
+
 test('optional selected-bot skill remains optional after Council configuration is reloaded', async ({ page }) => {
   const bots = [
     { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },

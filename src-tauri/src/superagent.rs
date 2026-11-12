@@ -2173,15 +2173,12 @@ fn retry_blocked(
     if worker_attempts >= 2 {
         return Err("Manual worker retry limit reached; create a new authorized ticket.".into());
     }
-    let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           JOIN sa_tickets previous ON previous.id=a.ticket_id
-           WHERE a.state='running' AND
-                 (a.bot_id=?1 OR previous.project_id=?2)
-         )",
-        params![worker.id,config.project_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
+    // Reuse the same native lease probe as initial admission: a concurrent
+    // coordinator can hold a *different* project than its Ticket's worker,
+    // and a missing session must retain its reservation until recovery.
+    let occupied = manual_candidate_occupied(
+        store, &worker.id, &config.project_id, &worker.project_id,
+    )?;
     if busy || occupied {
         return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
     }
@@ -4771,6 +4768,12 @@ mod tests {
         ).unwrap();
         assert!(!launched, "native admission must reserve the coordinator's actual workspace");
         assert_eq!(blocked.state, "blocked");
+        // Retry must detect the coordinator's actual session checkout before
+        // any session/assignment is created, not depend only on the SQL
+        // trigger rejecting the conflicting insert.
+        assert!(retry_blocked(&mut store, &blocked.id, false)
+            .unwrap_err().contains("occupied"));
+        assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
 
         // The SQLite trigger is a second line of defense against callers
         // that attempt to bypass the normal occupied-workspace preflight.

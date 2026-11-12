@@ -990,20 +990,40 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
       (window as any).__councilFocusTrail.push(location);
     }, true);
   });
-  for (const start of order) {
-    for (const key of ['Tab', 'Shift+Tab']) {
-      // Start on that control, then traverse two full rounds using real key events.
-      for (let step = 0; step < order.length && await where() !== start; step++) await page.keyboard.press('Tab');
-      expect(await where()).toBe(start);
+  // Prove both directed keyboard edges from every control, including both
+  // wraps. Two uninterrupted cycles in each direction additionally guard focus
+  // retention without repeating equivalent WebKit keyboard walks 16 times.
+  const focusAt = async (at: number) => {
+    await page.evaluate(index => {
+      const root = document.querySelector<HTMLElement>('.council-panel');
+      if (!root) throw new Error('Council panel is missing');
+      const controls = [...root.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled), details > summary')]
+        .filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      if (!controls[index]) throw new Error('Missing Council focus target');
+      controls[index].focus();
+    }, at);
+    expect(await where()).toBe(order[at]);
+  };
+  for (const at of order.keys()) {
+    for (const [key, direction] of [['Tab', 1], ['Shift+Tab', -1]] as const) {
+      await focusAt(at);
       await page.evaluate(() => { (window as any).__councilFocusTrail = []; });
-      for (let step = 0; step < order.length * 2; step++) await page.keyboard.press(key);
+      await page.keyboard.press(key);
+      const expected = order[(at + direction + order.length) % order.length];
       const visited: string[] = await page.evaluate(() => (window as any).__councilFocusTrail);
-      const direction = key === 'Tab' ? 1 : -1;
-      const expected = Array.from({ length: order.length * 2 }, (_, step) =>
-        order[(order.indexOf(start) + direction * (step + 1) + order.length * 2) % order.length]);
-      expect(visited).toEqual(expected);
-      expect(await where()).toBe(start);
+      expect(visited).toEqual([expected]);
+      expect(await where()).toBe(expected);
     }
+  }
+  for (const [key, direction] of [['Tab', 1], ['Shift+Tab', -1]] as const) {
+    await focusAt(0);
+    await page.evaluate(() => { (window as any).__councilFocusTrail = []; });
+    for (let step = 0; step < order.length * 2; step++) await page.keyboard.press(key);
+    const visited: string[] = await page.evaluate(() => (window as any).__councilFocusTrail);
+    const expected = Array.from({ length: order.length * 2 }, (_, step) =>
+      order[(direction * (step + 1) + order.length * 2) % order.length]);
+    expect(visited).toEqual(expected);
+    expect(await where()).toBe('switch');
   }
   expect(await panel(page).locator('.council-new-threads').getAttribute('tabindex')).toBe('0');
   expect(await toggle(page).getAttribute('tabindex')).toBe('0');

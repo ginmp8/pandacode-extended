@@ -49,6 +49,17 @@ See [model routing](model-routing.md).
 
 ## Council
 
+Issue #147 adds a source-composition contract: the native read-only Council inspector
+reports derived modes M1 (automatic), M2 (direct bots), and M3 (direct bots plus
+additional automatic reviewers). The same serialized contract now recognizes
+task-owned nested-bot plans for M4–M7, with distinct bot IDs, two to eight leaf
+reviewers and a bounded target/round budget per child. **Nested plans remain
+fail-closed** with `child_council_unavailable` at native configuration and dispatch
+until isolated child Architect sessions, correlated receipts and policy inheritance
+exist. A persisted invalid plan cannot pass from ordinary root reviewer scores;
+the native Council reports `blocked`. This is a compatibility/safety foundation,
+**not** implementation or acceptance of M4–M7 or the 21 execution scenarios.
+
 With Council on, the lead convenes independent read-only reviewers who each score the work out of
 10. It fixes what they find and convenes a fresh round until every reviewer reaches the target, the
 lowest score rather than the average. `finish_team` enforces this; the rules only explain it. Set it

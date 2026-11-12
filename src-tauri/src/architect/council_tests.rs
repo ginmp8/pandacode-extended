@@ -492,6 +492,64 @@ fn selected_bot_config_requires_distinct_bounded_identity_roster() {
 }
 
 #[test]
+fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dispatch() {
+    let nested = |id: &str| council::CouncilNestedReviewer {
+        bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,
+    };
+    for (mode, direct, children, automatic) in [
+        ("m1", 0, 0, 0), ("m2", 2, 0, 0), ("m3", 1, 0, 1),
+        ("m4", 0, 2, 0), ("m5", 0, 1, 1), ("m6", 1, 1, 0), ("m7", 1, 1, 1),
+    ] {
+        let mut config = on(9.0, 3, 0);
+        config.reviewer_bot_ids = (0..direct).map(|i| format!("direct-{i}")).collect();
+        config.nested_bot_reviewers = (0..children).map(|i| nested(&format!("child-{i}"))).collect();
+        config.automatic_reviewers = automatic;
+        assert_eq!(config.mode(), mode);
+        assert!(config.needed() >= 2 && config.needed() <= 8);
+        let inspected = council::inspection(&team_with(config.clone(), vec![]), false).unwrap();
+        assert_eq!(inspected.mode, mode);
+        if children > 0 {
+            assert!(config.validate().unwrap_err().contains("child_council_unavailable"));
+            assert_eq!(council::status(&team_with(config.clone(), vec![])).unwrap().state, "blocked");
+            assert!(council::reviewer_source_for(
+                &team_with(config.clone(), vec![]),
+                &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false },
+                None, None,
+            ).unwrap_err().contains("child_council_unavailable"));
+        } else {
+            assert!(config.validate().is_ok(), "legacy and additive M3 sources remain admissible");
+        }
+    }
+}
+
+#[test]
+fn nested_source_preflight_rejects_identity_aliasing_quorum_and_unsafe_child_limits() {
+    let nested = |id: &str| council::CouncilNestedReviewer {
+        bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,
+    };
+    let mut config = on(9.0, 3, 0);
+    config.nested_bot_reviewers = vec![nested("child-a")];
+    assert!(config.validate().unwrap_err().contains("2 to 8 total"));
+    config.nested_bot_reviewers.push(nested("child-a"));
+    assert!(config.validate().unwrap_err().contains("unique"));
+    config.nested_bot_reviewers[1].bot_id = "child-b".into();
+    config.reviewer_bot_ids = vec!["child-b".into()];
+    assert!(config.validate().unwrap_err().contains("distinct from direct"));
+    config.reviewer_bot_ids = Vec::new();
+    config.nested_bot_reviewers[1].child_reviewers = 1;
+    assert!(config.validate().unwrap_err().contains("2 to 8 child"));
+    config.nested_bot_reviewers[1].child_reviewers = 2;
+    config.nested_bot_reviewers[1].child_target = f64::NAN;
+    assert!(config.validate().unwrap_err().contains("target 1 to 10"));
+    config.nested_bot_reviewers[1].child_target = 9.0;
+    config.nested_bot_reviewers.extend((2..9).map(|i| nested(&format!("child-{i}"))));
+    assert!(config.validate().unwrap_err().contains("2 to 8 total"));
+    assert!(serde_json::from_value::<council::CouncilNestedReviewer>(
+        json!({"botId":"child-a","childReviewers":2,"childTarget":9.0,"childMaxRounds":3,"grant":"all"})
+    ).is_err(), "untrusted nested fields cannot introduce tool grants");
+}
+
+#[test]
 fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
     let original = on(9.0, 10, 0);
     assert_eq!(serde_json::to_value(&original).unwrap(),

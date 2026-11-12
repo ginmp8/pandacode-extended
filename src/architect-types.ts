@@ -11,6 +11,10 @@ export interface WorkerProfile {
 export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
 export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
 export type CouncilCriteriaSource = 'architect' | 'user' | 'hybrid';
+/** Frozen child plan only; native admission rejects it until task-owned child sessions exist. */
+export interface CouncilNestedReviewer {
+  botId: string; childReviewers: number; childTarget: number; childMaxRounds: number;
+}
 export interface CouncilCriterion { id: string; lens: string; required: boolean; target: number; evidenceRequired?: boolean }
 export interface CouncilConfig {
   target: number;
@@ -18,6 +22,8 @@ export interface CouncilConfig {
   reviewers: number;
   /** Task-scoped persistent reviewer identities; absent means automatic native workers. */
   reviewerBotIds?: string[];
+  /** Independent coordinating bots (one child native Council per root seat). Not executable yet. */
+  nestedBotReviewers?: CouncilNestedReviewer[];
   /** Extra automatic root seats, opt-in only when direct bot seats are selected. */
   automaticReviewers?: number;
   /** Missing source/criteria preserves the original Council semantics. */
@@ -31,7 +37,7 @@ export interface CouncilConfig {
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */
-export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted';
+export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted' | 'blocked';
 /** Native's own reading of the council, which also sees edits the webview cannot (the lead's own). `stale`: the latest round passed, then the work changed. */
 /** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: a plain sentence for the user whenever `team.error`
  *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
@@ -63,6 +69,7 @@ export interface CouncilReportedFinding {
   verifiedEvidenceRefs: string[]; evidenceVerified: boolean; locationVerified: boolean;
 }
 export interface CouncilInspection {
+  mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';
   cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
   verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
   criteria: CouncilCriterion[];

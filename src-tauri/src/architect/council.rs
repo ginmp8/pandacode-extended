@@ -75,6 +75,16 @@ pub(super) enum CouncilReviewerSource {
     Automatic,
     DirectBot,
 }
+/// Task-owned child Council configuration, not a grant to launch a bot chat.
+/// Admission stays fail-closed until the native child lifecycle is wired up.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilNestedReviewer {
+    pub bot_id: String,
+    pub child_reviewers: usize,
+    pub child_target: f64,
+    pub child_max_rounds: usize,
+}
 fn no_extra_reviewers(count: &usize) -> bool {
     *count == 0
 }
@@ -102,6 +112,10 @@ pub struct CouncilConfig {
     /// Persistent bot IDs for task-scoped selected reviewers; empty keeps native Council behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_bot_ids: Vec<String>,
+    /// Selected coordinating bots; each will own exactly one isolated child Council.
+    /// A child is one root seat, never a list of extra root votes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_bot_reviewers: Vec<CouncilNestedReviewer>,
     /// Additive automatic top-level seats alongside explicit selected direct bots (M3).
     #[serde(default, skip_serializing_if = "no_extra_reviewers")]
     pub automatic_reviewers: usize,
@@ -126,7 +140,7 @@ pub struct CouncilConfig {
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), automatic_reviewers: 0, criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), nested_bot_reviewers: Vec::new(), automatic_reviewers: 0, criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
     }
 }
 impl CouncilConfig {
@@ -141,10 +155,10 @@ impl CouncilConfig {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
         }
         if self.automatic_reviewers > 0 {
-            if self.reviewer_bot_ids.is_empty() || self.reviewers != 0 {
-                return Err("Additional automatic Council seats require selected direct bots and reviewers=0.".into());
+            if (self.reviewer_bot_ids.is_empty() && self.nested_bot_reviewers.is_empty()) || self.reviewers != 0 {
+                return Err("Additional automatic Council seats require selected bots and reviewers=0.".into());
             }
-            if self.reviewer_bot_ids.len() + self.automatic_reviewers > MAX_REVIEWERS {
+            if self.reviewer_bot_ids.len() + self.nested_bot_reviewers.len() + self.automatic_reviewers > MAX_REVIEWERS {
                 return Err("The combined Council reviewer sources exceed eight top-level seats.".into());
             }
         }
@@ -211,7 +225,7 @@ impl CouncilConfig {
         }
         if let Some(followup) = &self.post_acceptance_issue { followup.validate()?; }
         if !self.reviewer_bot_ids.is_empty() {
-            let minimum = if self.automatic_reviewers > 0 { 1 } else { MIN_REVIEWERS };
+            let minimum = if self.automatic_reviewers > 0 || !self.nested_bot_reviewers.is_empty() { 1 } else { MIN_REVIEWERS };
             if !(minimum..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {
                 return Err(format!("Select {minimum} to {MAX_REVIEWERS} distinct Council reviewer bots."));
             }
@@ -220,11 +234,50 @@ impl CouncilConfig {
                 return Err("Council reviewer bot IDs must be valid and unique.".into());
             }
         }
+        if !self.nested_bot_reviewers.is_empty() {
+            if self.reviewers != 0 {
+                return Err("Nested Council bot seats require reviewers=0; reserve automatic seats explicitly.".into());
+            }
+            if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&self.needed()) {
+                return Err("Nested Council requires 2 to 8 total top-level seats.".into());
+            }
+            let mut ids: std::collections::HashSet<&str> = self.reviewer_bot_ids.iter().map(String::as_str).collect();
+            for child in &self.nested_bot_reviewers {
+                if !super::valid_id(&child.bot_id) || !ids.insert(&child.bot_id) {
+                    return Err("Nested Council bot IDs must be valid, unique and distinct from direct reviewers.".into());
+                }
+                if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&child.child_reviewers)
+                    || !child.child_target.is_finite() || !(1.0..=10.0).contains(&child.child_target)
+                    || !(1..=MAX_ROUNDS).contains(&child.child_max_rounds)
+                {
+                    return Err("Nested Council requires 2 to 8 child reviewers, target 1 to 10 and 1 to 100 rounds.".into());
+                }
+            }
+            // Do not admit a configuration whose child can be mistaken for a direct seat.
+            // The root-child native session/receipt/authority lifecycle is not yet available.
+            return Err("child_council_unavailable: isolated child Architect admission is required before enabling nested reviewers.".into());
+        }
         Ok(())
     }
+    pub(super) fn mode(&self) -> &'static str {
+        let direct = !self.reviewer_bot_ids.is_empty();
+        let nested = !self.nested_bot_reviewers.is_empty();
+        // No explicit reviewer IDs preserves original M1 automatic Council.
+        let automatic = self.automatic_reviewers > 0 || (!direct && !nested);
+        match (automatic, direct, nested) {
+            (true, false, false) => "m1",
+            (false, true, false) => "m2",
+            (true, true, false) => "m3",
+            (false, false, true) => "m4",
+            (true, false, true) => "m5",
+            (false, true, true) => "m6",
+            (true, true, true) => "m7",
+            (false, false, false) => unreachable!("a Council without explicit sources is automatic"),
+        }
+    }
     pub(super) fn needed(&self) -> usize {
-        if !self.reviewer_bot_ids.is_empty() {
-            self.reviewer_bot_ids.len() + self.automatic_reviewers
+        if !self.reviewer_bot_ids.is_empty() || !self.nested_bot_reviewers.is_empty() {
+            self.reviewer_bot_ids.len() + self.nested_bot_reviewers.len() + self.automatic_reviewers
         } else if self.reviewers == 0 {
             // Only Auto may expand its native seats for required user criteria.
             self.criteria.iter().filter(|criterion| criterion.required).count().max(MIN_REVIEWERS)
@@ -288,6 +341,8 @@ pub struct CouncilVerifiedCompletion {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CouncilInspection {
+    /// Derived root reviewer sources. A non-running nested configuration is never a pass.
+    pub mode: &'static str,
     pub cycle_started_at: i64,
     pub team_revision: u64,
     pub status: CouncilStatus,
@@ -468,6 +523,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         usage_provenance: "unknown",
     }).collect();
     Some(CouncilInspection {
+        mode: config.mode(),
         cycle_started_at: team.council_since, team_revision: team.revision,
         status, verified_pass, verified_completion, criteria: config.criteria.clone(), attempts,
         reported_findings: Vec::new(),
@@ -768,6 +824,9 @@ pub(super) fn reviewer_source_for(
     requested: Option<CouncilReviewerSource>,
 ) -> Result<CouncilReviewerSource> {
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
+    if !config.nested_bot_reviewers.is_empty() {
+        return Err("child_council_unavailable: nested seats require isolated native child admission.".into());
+    }
     let selected = !config.reviewer_bot_ids.is_empty();
     let mixed = config.automatic_reviewers > 0;
     let source = match requested {
@@ -992,6 +1051,9 @@ fn verdict(team: &TeamSnapshot) -> Option<(String, bool)> {
 }
 /// The verdict from a view the caller already computed.
 fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Option<(String, bool)> {
+    if !config.nested_bot_reviewers.is_empty() {
+        return Some(("child_council_unavailable: nested native Council evidence has not been admitted.".into(), false));
+    }
     if accepted(team) {
         return None;
     }
@@ -1067,6 +1129,12 @@ pub(super) fn status(team: &TeamSnapshot) -> Option<CouncilStatus> {
     Some(status_in(team, config, &Rounds::of(team, config)))
 }
 fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> CouncilStatus {
+    if !config.nested_bot_reviewers.is_empty() {
+        return CouncilStatus {
+            state: "blocked".into(), round: view.latest, lowest: None, target: config.target,
+            stale: true, notice: Some("Nested Council requires a task-isolated native child review before any root approval.".into()),
+        };
+    }
     let round = view.latest;
     let low = lowest(team, round);
     let stale = stale(team, round);

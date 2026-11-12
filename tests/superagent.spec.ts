@@ -311,7 +311,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
   });
   const host=page.locator('#sa-source-test');
   await host.getByRole('button',{name:'Sources',exact:true}).click();
-  await expect(host.getByText('Explicit authenticated gh Events polling',{exact:false})).toBeVisible();
+  await expect(host.getByText('Authenticated GitHub Events polling is bounded',{exact:false})).toBeVisible();
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
   // These actions are surfaced by the native GitHub Events adapter, not
@@ -586,6 +586,14 @@ test('Check Run observation stays Off until enabled and never launches a Demand'
         return {sourceId:src.id,deliveryId:'checkrun_240',decision:'observed_permitted',
           policyRevision:src.policyRevision,sequence:1,at:Date.now(),duplicate:false} as never;
       }
+      if(command==='superagent_source_decisions')return [{
+        sourceId:src.id,deliveryId:'checkrun_240',actor:'trusted-bot',
+        eventKind:'check_run.completed',subjectKey:'pull:42',
+        decision:'observed_permitted',sequence:1,policyRevision:src.policyRevision,
+        at:Date.now(),checkConclusion:'failure',
+        checkHeadSha:'0123456789012345678901234567890123456789',
+        checkCompletedAt:Date.now()
+      }] as never;
       throw new Error('Unexpected native command: '+command);
     });
   });
@@ -603,6 +611,10 @@ test('Check Run observation stays Off until enabled and never launches a Demand'
   await host.getByRole('textbox',{name:'Check Run ID'}).fill('240');
   await host.getByRole('button',{name:'Observe authenticated Check Run'}).click();
   await expect(host.getByRole('status')).toContainText('observed_permitted');
+  await host.getByRole('button',{name:'View decisions'}).click();
+  const timeline=host.getByRole('region',{name:'Source decisions'});
+  await expect(timeline).toContainText('Observed Check: failure');
+  await expect(timeline).toContainText('Head 012345678901');
   const calls=await page.evaluate(()=>(window as unknown as {
     saCheckCalls:{command:string;runId?:number}[]
   }).saCheckCalls);

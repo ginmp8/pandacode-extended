@@ -67,6 +67,7 @@ interface RunGraph {
 interface SourceDecision {
   sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
   decision: string; sequence: number; policyRevision: number; at: number;
+  checkConclusion?: string; checkHeadSha?: string; checkCompletedAt?: number;
 }
 
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
@@ -101,6 +102,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
     Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toLocaleString() : 'Unavailable';
+  const observedCheck = (entry: SourceDecision): string =>
+    entry.eventKind !== 'check_run.completed' ? '' :
+    entry.checkConclusion && entry.checkHeadSha && entry.checkCompletedAt
+      ? ' · Observed Check: ' + safe(entry.checkConclusion) +
+        ' · Head ' + safe(entry.checkHeadSha.slice(0, 12)) +
+        ' · Completed ' + safe(activityTime(entry.checkCompletedAt))
+      : ' · Check outcome unavailable (legacy receipt)';
   function render(): void {
     if (!host.isConnected) return;
     const list = presets.map(item =>
@@ -255,8 +263,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (linkedDecisionsLoaded ? '<ol>' +
           (linkedDecisions.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
             safe(entry.eventKind) + ' · ' + safe(entry.subjectKey) + ' · ' +
-            safe(entry.decision) + ' · Delivery ' + safe(entry.deliveryId) +
-            '</li>').join('') || '<li>No authenticated Observe decisions match linked threads.</li>') +
+            safe(entry.decision) + observedCheck(entry) +
+            ' · Delivery ' + safe(entry.deliveryId) + '</li>').join('') || '<li>No authenticated Observe decisions match linked threads.</li>') +
           '</ol>' : '') + '</section>' +
         (sourcesLoaded && sources.length
           ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
@@ -313,7 +321,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<h5>Recorded decisions</h5><ol>' +
             (decisions.map(d => '<li>' + safe(activityTime(d.at)) + ' · ' +
               safe(d.decision) + ' · ' + safe(d.eventKind) + ' · ' +
-              safe(d.subjectKey) + ' · Delivery ' + safe(d.deliveryId) +
+              safe(d.subjectKey) + observedCheck(d) +
+              ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
     // One native read of the bounded cross-Team Demand index powers both

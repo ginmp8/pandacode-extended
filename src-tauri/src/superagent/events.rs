@@ -56,6 +56,23 @@ CREATE INDEX IF NOT EXISTS sa_thread_links_ticket
   ON sa_source_thread_links(ticket_id,created_at);
 "#;
 
+/// Additive v45 sidecar. Check Run results are observation metadata,
+/// never a passing CI gate or an authorization. Legacy receipts remain unknown.
+pub(crate) const CHECK_RESULT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_check_run_results (
+  source_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL,
+  conclusion TEXT NOT NULL CHECK(conclusion IN (
+    'success','failure','neutral','cancelled','skipped','timed_out','action_required'
+  )),
+  head_sha TEXT NOT NULL CHECK(length(head_sha)=40),
+  completed_at INTEGER NOT NULL CHECK(completed_at>0),
+  PRIMARY KEY(source_id,delivery_id),
+  FOREIGN KEY(source_id,delivery_id)
+    REFERENCES sa_event_decisions(source_id,delivery_id) ON DELETE RESTRICT
+);
+"#;
+
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
@@ -122,6 +139,12 @@ pub struct EventDecisionRecord {
     pub decision: String,
     pub policy_revision: i64,
     pub at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_conclusion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_completed_at: Option<i64>,
 }
 
 
@@ -717,9 +740,12 @@ fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<Even
     }
     source(store, source_id)?;
     let mut stmt = store.db.prepare(
-        "SELECT source_id,delivery_id,actor,event_kind,subject_key,sequence,
-                decision,policy_revision,at FROM sa_event_decisions
-         WHERE source_id=?1 ORDER BY sequence DESC,delivery_id DESC LIMIT ?2",
+        "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,d.sequence,
+                d.decision,d.policy_revision,d.at,
+                checks.conclusion,checks.head_sha,checks.completed_at
+         FROM sa_event_decisions d LEFT JOIN sa_check_run_results checks
+           ON checks.source_id=d.source_id AND checks.delivery_id=d.delivery_id
+         WHERE d.source_id=?1 ORDER BY d.sequence DESC,d.delivery_id DESC LIMIT ?2",
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![source_id,limit], |row| {
         Ok(EventDecisionRecord {
@@ -728,6 +754,8 @@ fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<Even
             subject_key:row.get(4)?, sequence:row.get(5)?,
             decision:row.get(6)?, policy_revision:row.get(7)?,
             at:row.get(8)?,
+            check_conclusion:row.get(9)?, check_head_sha:row.get(10)?,
+            check_completed_at:row.get(11)?,
         })
     }).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
@@ -834,6 +862,34 @@ fn observe_authenticated_check_run(
     };
     let envelope = authenticated_check_run(&current, raw, requested_id, sequence)?;
     let receipt = observe_authenticated_in_tx(&tx, &current, &envelope, signed_in)?;
+    // Replays must preserve their original result. A v41-v44 receipt with no
+    // original verified result stays unknown; never backfill it on replay.
+    let conclusion = raw.get("conclusion").and_then(serde_json::Value::as_str)
+        .ok_or("Completed Check Run has no conclusion.")?;
+    let head_sha = raw.get("head_sha").and_then(serde_json::Value::as_str)
+        .ok_or("Completed Check Run has no head SHA.")?;
+    let previous: Option<(String, String, i64)> = tx.query_row(
+        "SELECT conclusion,head_sha,completed_at FROM sa_check_run_results
+         WHERE source_id=?1 AND delivery_id=?2",
+        params![&current.id, &envelope.delivery_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    match previous {
+        Some((old_conclusion, old_sha, old_completed_at)) => {
+            if old_conclusion != conclusion || old_sha != head_sha || old_completed_at != at {
+                return Err("Authenticated Check Run replay conflicts with its immutable recorded result.".into());
+            }
+        }
+        None if !receipt.duplicate && receipt.decision == "observed_permitted" => {
+            tx.execute(
+                "INSERT INTO sa_check_run_results
+                 (source_id,delivery_id,conclusion,head_sha,completed_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![&current.id,&envelope.delivery_id,conclusion,head_sha,at],
+            ).map_err(|e| e.to_string())?;
+        }
+        None => {} // Ignored/legacy receipt: no implied CI outcome.
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(receipt)
 }
@@ -943,10 +999,13 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
     let ticket = super::get_ticket(store, ticket_id)?;
     let mut stmt = store.db.prepare(
         "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,
-                d.sequence,d.decision,d.policy_revision,d.at
+                d.sequence,d.decision,d.policy_revision,d.at,
+                checks.conclusion,checks.head_sha,checks.completed_at
          FROM sa_source_thread_links l
          JOIN sa_event_sources s ON s.id=l.source_id
          JOIN sa_event_decisions d ON d.source_id=l.source_id AND d.subject_key=l.subject_key
+         LEFT JOIN sa_check_run_results checks
+           ON checks.source_id=d.source_id AND checks.delivery_id=d.delivery_id
          WHERE l.ticket_id=?1 AND s.orchestration_id=?2
            AND d.decision='observed_permitted'
          ORDER BY d.sequence DESC,d.delivery_id DESC LIMIT ?3",
@@ -956,6 +1015,8 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
             source_id:row.get(0)?, delivery_id:row.get(1)?, actor:row.get(2)?,
             event_kind:row.get(3)?, subject_key:row.get(4)?, sequence:row.get(5)?,
             decision:row.get(6)?, policy_revision:row.get(7)?, at:row.get(8)?,
+            check_conclusion:row.get(9)?, check_head_sha:row.get(10)?,
+            check_completed_at:row.get(11)?,
         })
     }).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
@@ -1307,6 +1368,90 @@ mod tests {
         assert_eq!(revoked.mode, "off");
         assert!(observe_authenticated_check_run(&store, &on, 240, &run, "operator").is_err());
         assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn check_run_outcome_is_immutable_restart_durable_and_never_authorizes_work() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 701, "status": "completed", "conclusion": "failure",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot"},
+            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+        });
+        let first = observe_authenticated_check_run(&store, &on, 701, &run, "operator").unwrap();
+        assert_eq!(first.decision, "observed_permitted");
+        let records = list_decisions(&store, &on.id, 10).unwrap();
+        assert_eq!(records[0].check_conclusion.as_deref(), Some("failure"));
+        assert_eq!(records[0].check_head_sha.as_deref(), Some(sha));
+        assert!(records[0].check_completed_at.unwrap() > 0);
+        assert!(observe_authenticated_check_run(&store, &on, 701, &run, "operator")
+            .unwrap().duplicate);
+        for altered in 0..3 {
+            let mut conflicting = run.clone();
+            match altered {
+                0 => conflicting["conclusion"] = serde_json::json!("success"),
+                1 => {
+                    let changed = "abcdef0123456789abcdef0123456789abcdef01";
+                    conflicting["head_sha"] = serde_json::json!(changed);
+                    conflicting["pull_requests"][0]["head"]["sha"] = serde_json::json!(changed);
+                }
+                _ => conflicting["completed_at"] =
+                    serde_json::json!((chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339()),
+            }
+            assert!(observe_authenticated_check_run(
+                &store, &on, 701, &conflicting, "operator").is_err(),
+                "a conflicting Check Run outcome cannot rewrite the original");
+        }
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 1);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap()[0].check_conclusion.as_deref(),
+            Some("failure"));
+        let tickets: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0)).unwrap();
+        assert_eq!(tickets, 0, "Observe must not authorize or create work");
+        drop(store);
+        let restarted = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&restarted, &on.id, 10).unwrap()[0]
+            .check_conclusion.as_deref(), Some("failure"));
+    }
+
+    #[test]
+    fn check_run_sidecar_failure_rolls_back_receipt_cursor_and_legacy_stays_unknown() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 702, "status": "completed", "conclusion": "success",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot"},
+            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+        });
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_check_outcome BEFORE INSERT ON sa_check_run_results
+             BEGIN SELECT RAISE(ABORT,'simulated outcome write error'); END;"
+        ).unwrap();
+        assert!(observe_authenticated_check_run(&store, &on, 702, &run, "operator").is_err());
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
+        store.db.execute_batch("DROP TRIGGER reject_check_outcome").unwrap();
+        // Simulate a pre-v45 receipt with no checked outcome attached.
+        let envelope = authenticated_check_run(&on, &run, 702, 1).unwrap();
+        let transaction = store.db.unchecked_transaction().unwrap();
+        observe_authenticated_in_tx(&transaction, &on, &envelope, "operator").unwrap();
+        transaction.commit().unwrap();
+        assert!(observe_authenticated_check_run(&store, &on, 702, &run, "operator")
+            .unwrap().duplicate);
+        assert!(list_decisions(&store, &on.id, 10).unwrap()[0].check_conclusion.is_none(),
+            "legacy observed Check Runs must never acquire a later unverified outcome");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(list_decisions(&reopened, &on.id, 10).unwrap()[0].check_head_sha.is_none());
     }
 
     #[test]

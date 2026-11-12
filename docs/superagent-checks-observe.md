@@ -39,3 +39,21 @@ Verification: native tests
 and `superagent::events::tests::check_run_correlation_denies_ambiguous_missing_stale_or_changed_payloads`.
 The unit tests use API-shaped fixtures; a real signed-in GitHub CLI and
 private repository permissions remain separate operational verification.
+
+
+## Durable, non-authorizing Check Run outcome (v45)
+
+For newly observed completed Check Runs, an additive SQLite sidecar persists
+the authenticated `conclusion`, exact `head_sha`, and `completed_at`
+with the original decision in the **same transaction**. Source decisions and
+explicitly linked Run activity display **Observed Check**, not a passing task
+gate or Council verdict. Native queries exclude full output, annotations,
+workflow payloads and private text.
+
+Replays changing conclusion, SHA or completion time are rejected without
+advancing the cursor or changing the receipt. Existing v41-v44 decisions
+remain intact after v45 migration; outcomes absent at their original
+observation remain explicitly unknown, never inferred or backfilled from a
+later API response. A sidecar write failure rolls back the complete receipt
+and cursor. This schema change is additive; operators should retain a
+pre-upgrade backup, as older builds cannot open a v45 database.

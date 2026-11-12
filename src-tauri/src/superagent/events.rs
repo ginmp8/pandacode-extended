@@ -315,17 +315,19 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// Ticket, launch a provider, publish a reply or claim GitHub authenticity.
 /// A delivery ID is immutable: replay with changed fields is rejected even
 /// after mode changes, restart, or later cursor advancement.
-fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
-    -> Result<EventDecision>
-{
+fn observe_authenticated_in_tx(
+    tx: &rusqlite::Transaction<'_>, src: &EventSource,
+    event: &EventEnvelope, signed_in: &str,
+) -> Result<EventDecision> {
     if !token_ok(signed_in, 80) {
         return Err("Signed-in GitHub identity is unavailable; source observation denied.".into());
     }
     if !valid_event(event) {
         return Err("Invalid, unsupported or unbounded source event envelope.".into());
     }
-    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let src = source(store, &event.source_id)?;
+    if event.source_id != src.id {
+        return Err("Authenticated delivery does not belong to this source.".into());
+    }
     type Existing = (String,String,String,String,i64,String,i64,i64);
     let existing: Option<Existing> = tx.query_row(
         "SELECT repository,actor,event_kind,subject_key,sequence,decision,policy_revision,at
@@ -375,10 +377,21 @@ fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
             params![&event.source_id,event.sequence],
         ).map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
     Ok(EventDecision { source_id:event.source_id.clone(),
         delivery_id:event.delivery_id.clone(),decision:decision.into(),
         policy_revision:src.policy_revision,sequence:event.sequence,at,duplicate:false })
+}
+
+/// One operator-event write uses the same receipt+cursor transaction as a
+/// bounded poll, so the direct native decision contract stays identical.
+fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
+    -> Result<EventDecision>
+{
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let src = source(store, &event.source_id)?;
+    let receipt = observe_authenticated_in_tx(&tx, &src, event, signed_in)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(receipt)
 }
 
 #[cfg(test)]
@@ -590,17 +603,26 @@ fn poll_authenticated_events_with_identity(
         }
     }
     parsed.sort_by_key(|event| event.sequence);
+    // A multi-page poll is one authoritative observation batch: either every
+    // eligible receipt and the cursor survive, or none do. A later conflicting
+    // delivery or storage failure must not strand earlier partial decisions.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let current_policy = source(store, &expected.id)?;
+    if current_policy.mode != "observe" || current_policy.policy_revision != expected.policy_revision {
+        return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
+    }
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
     for event in &parsed {
-        let result = observe_authenticated(store, event, signed_in)?;
+        let result = observe_authenticated_in_tx(&tx, &current_policy, event, signed_in)?;
         if result.duplicate { duplicates += 1; }
         else {
             recorded += 1;
             if event.actor.eq_ignore_ascii_case(signed_in) { self_ignored += 1; }
         }
     }
+    tx.commit().map_err(|e| e.to_string())?;
     let current = source(store, &expected.id)?;
     Ok(AuthenticatedPoll {
         source_id:current.id,
@@ -856,6 +878,49 @@ mod tests {
             "id": (start - index as i64).to_string(), "created_at": "2026-11-12T08:59:00Z",
             "type": "WatchEvent", "repo": {"name": "owner/repo"},
         })).collect())
+    }
+
+    #[test]
+    fn authenticated_observe_poll_rolls_back_every_receipt_and_cursor_on_late_failure() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let raw_event = |id: &str, issue: i64| serde_json::json!({
+            "id":id, "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":issue}}
+        });
+        let batch = serde_json::json!([
+            raw_event("5000000002", 2), raw_event("5000000001", 1),
+        ]);
+        // Failure on the second ascending delivery must roll back the first
+        // insert and its cursor; a restart must observe the unchanged state.
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER fail_second_observation
+             BEFORE INSERT ON sa_event_decisions
+             WHEN NEW.delivery_id='5000000002'
+             BEGIN SELECT RAISE(ABORT,'simulated later receipt failure'); END;",
+        ).unwrap();
+        assert!(poll_authenticated_events(&store, &observed, 0, &batch).is_err());
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &observed.id, 10).unwrap().is_empty());
+        store.db.execute_batch("DROP TRIGGER fail_second_observation").unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&reopened, &observed.id, 10).unwrap().is_empty());
+        let result = poll_authenticated_events(&reopened, &observed, 0, &batch).unwrap();
+        assert_eq!(result.recorded, 2);
+        assert_eq!(result.duplicates, 0);
+        assert_eq!(result.last_sequence, 5_000_000_002);
+        let replay = poll_authenticated_events(&reopened, &observed, 0, &batch).unwrap();
+        assert_eq!(replay.duplicates, 2);
+        assert_eq!(replay.recorded, 0);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

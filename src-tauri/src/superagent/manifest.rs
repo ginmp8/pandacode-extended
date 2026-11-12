@@ -234,21 +234,35 @@ fn export(store: &Store) -> Result<serde_json::Value> {
  * the exact same native preview, backup, import, and export contracts.
  * Unlike desktop IPC, these entrypoints require no synthetic Webview.
  */
-pub(crate) fn run_headless_import(
-    app: &tauri::AppHandle, path: &Path,
-) -> Result<ImportResult> {
+fn read_headless_document(path: &Path) -> Result<serde_json::Value> {
     let metadata = fs::metadata(path)
-        .map_err(|e| format!("Cannot inspect orchestration import: {e}"))?;
+        .map_err(|e| format!("Cannot inspect orchestration manifest: {e}"))?;
     if metadata.len() > MAX_BYTES as u64 {
         return Err("SuperAgent manifest exceeds the 1 MB limit.".into());
     }
     let bytes = fs::read(path)
-        .map_err(|e| format!("Cannot read orchestration import: {e}"))?;
+        .map_err(|e| format!("Cannot read orchestration manifest: {e}"))?;
     if bytes.len() > MAX_BYTES {
         return Err("SuperAgent manifest exceeds the 1 MB limit.".into());
     }
-    let document: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("Invalid orchestration manifest JSON: {e}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Invalid orchestration manifest JSON: {e}"))
+}
+
+/// Validates dependencies without importing presets or writing a backup.
+pub(crate) fn run_headless_preview(
+    app: &tauri::AppHandle, path: &Path,
+) -> Result<ImportPreview> {
+    let document = read_headless_document(path)?;
+    let state = app.state::<AppState>();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    preview(&store, &document)
+}
+
+pub(crate) fn run_headless_import(
+    app: &tauri::AppHandle, path: &Path,
+) -> Result<ImportResult> {
+    let document = read_headless_document(path)?;
     let state = app.state::<AppState>();
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;

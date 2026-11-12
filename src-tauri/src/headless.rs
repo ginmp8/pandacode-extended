@@ -26,6 +26,7 @@ enum Command {
     FullAccess { enabled: bool },
     ExportBots { path: PathBuf },
     SyncBots { path: PathBuf },
+    PreviewOrchestrations { path: PathBuf },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
@@ -106,6 +107,19 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         Command::InspectOrchestrations | Command::InspectTicket { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
+        }
+        Command::PreviewOrchestrations { path } => {
+            match crate::superagent::manifest::run_headless_preview(app, &path) {
+                Ok(plan) => {
+                    println!("Would create disabled presets: {}", plan.would_create.join(", "));
+                    println!("Unchanged presets: {}", plan.unchanged.join(", "));
+                    std::process::exit(0)
+                }
+                Err(error) => {
+                    eprintln!("Orchestration preview failed: {error}");
+                    std::process::exit(1)
+                }
+            }
         }
         Command::ImportOrchestrations { path } => {
             match crate::superagent::manifest::run_headless_import(app, &path) {
@@ -419,6 +433,13 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--preview-orchestrations" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--preview-orchestrations needs a file path.\n\n{}", help()))?;
+                command = Command::PreviewOrchestrations { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
             "--import-orchestrations" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--import-orchestrations needs a file path.\n\n{}", help()))?;
@@ -514,6 +535,8 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit.
   --sync-bots <file>     Fetch pinned GitHub manifests from a source registry, back up,
                          import once, report results and exit (does not start serving).
+  --preview-orchestrations <file>
+                         Validate and preview disabled presets without importing or backing up.
   --import-orchestrations <file>
                          Explicitly import disabled SuperAgent presets after native validation
                          and a verified config-only backup; exit without starting tasks.
@@ -557,6 +580,10 @@ mod tests {
             parsed("--export-bots bots.json"),
             Ok(Command::ExportBots { path: PathBuf::from("bots.json") })
         );
+        assert_eq!(parsed("--preview-orchestrations presets.json"),
+            Ok(Command::PreviewOrchestrations { path: PathBuf::from("presets.json") }));
+        assert!(parsed("--preview-orchestrations").is_err());
+        assert!(parsed("--preview-orchestrations p.json --import-orchestrations p.json").is_err());
         assert_eq!(parsed("--import-orchestrations presets.json"),
             Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--export-orchestrations presets.json"),
@@ -602,6 +629,7 @@ mod tests {
             "--device-name",
             "--import-bots",
             "--export-bots",
+            "--preview-orchestrations",
             "--import-orchestrations",
             "--export-orchestrations",
             "--inspect-orchestrations",

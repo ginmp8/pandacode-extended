@@ -221,6 +221,7 @@ configuration-only companion manifest used by the desktop UI:
 
 ```sh
 pandacode serve --export-orchestrations orchestrations.json
+pandacode serve --preview-orchestrations orchestrations.json
 pandacode serve --import-orchestrations orchestrations.json
 ```
 

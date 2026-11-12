@@ -733,7 +733,7 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     if view.at_limit(config) && !live(team, round) && (reconfigured(team, round) || view.complete(round) || stale(team, round) || in_round(team, round).count() >= MAX_REVIEWERS) {
         if !config.criteria.is_empty()
             && (!view.complete(round) || stale(team, round)
-                || lowest(team, round).map_or(true, |score| score < config.target)
+                || lowest(team, round).is_none_or(|score| score < config.target)
                 || !criterion_blockers(team, config, round).is_empty())
         {
             return Some(("Council required criteria did not pass at the round limit; only explicit attributed user acceptance can close this exception.".into(), false));

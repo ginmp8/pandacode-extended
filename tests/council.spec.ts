@@ -722,8 +722,8 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
   await open(page, '/?council');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();
-  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.closest<HTMLElement>('[data-field]')!.dataset.field!) : `outside:${active.tagName}`; });
-  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'new'];
+  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.classList.contains('council-criteria-toggle') ? 'criteria' : active.closest<HTMLElement>('[data-field]')!.dataset.field!) : `outside:${active.tagName}`; });
+  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'criteria', 'new'];
   const seen: string[] = [];
   for (let step = 0; step < order.length; step++) { seen.push(await where()); await page.keyboard.press('Tab'); }
   expect(seen).toEqual(order);
@@ -738,6 +738,7 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
       const location = !active.closest('.council-panel') ? `outside:${active.tagName}`
         : active.classList.contains('council-switch') ? 'switch'
         : active.classList.contains('council-new-threads') ? 'new'
+        : active.classList.contains('council-criteria-toggle') ? 'criteria'
         : field?.dataset.field ?? 'unmapped';
       (window as any).__councilFocusTrail.push(location);
     }, true);
@@ -768,6 +769,26 @@ test('at 900×420 the composer panel fits above its button without scrolling', a
   await button(page).click();
   await expect(panel(page)).toBeVisible();
   expect(await panel(page).evaluate(node => node.scrollHeight <= node.clientHeight)).toBe(true);
+});
+
+test('expanded review criteria retain focus and a bounded panel on short screens', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 420 });
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await page.keyboard.press('Tab');
+  await expect(criteria.getByLabel('Criterion ID')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await panel(page).locator('.council-new-threads').focus();
+  await page.keyboard.press('Tab');
+  await expect(toggle(page)).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(panel(page).locator('.council-new-threads')).toBeFocused();
+  expect(await panel(page).evaluate(node => node.getBoundingClientRect().height <= window.innerHeight - 20)).toBe(true);
 });
 
 test('with Council on and nothing reviewed yet, the panel says so quietly', async ({ page }) => {

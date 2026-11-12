@@ -423,6 +423,11 @@ export function createCouncil(host: CouncilHost) {
         reason => selectedError(sessionId, reason),
       );
       panel.querySelector<HTMLElement>('.council-foot')!.before(editor);
+      // Opening or changing the disclosure alters the popover's natural height.
+      // Reposition after the staged editor has updated its visibility.
+      const positionEditor = () => requestAnimationFrame(() => placeNow?.());
+      editor.addEventListener('click', positionEditor);
+      editor.addEventListener('change', positionEditor);
     }
     // Compact (from the strip): only the row it opened on, titled by what it does (a heading, no longer the switch's label).
     if (panel.dataset.compact) {

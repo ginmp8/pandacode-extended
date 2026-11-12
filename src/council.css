@@ -122,6 +122,15 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 
 /* #147: a collapsible task-criteria editor in the existing Council modal. */
 .council-criteria{border-top:1px solid var(--border);padding-top:7px}
+/* A closed disclosure shares the title row instead of adding an extra row.
+   The original 420px-height Council popover must still fit without scrolling. */
+.council-criteria:has(.council-criteria-editor[hidden]){
+  position:absolute;inset-block-start:7px;inset-inline-end:57px;
+  padding:0;border:0;
+}
+.council-criteria:has(.council-criteria-editor[hidden]) .council-criteria-toggle{
+  min-height:24px;padding:2px 6px;font-size:var(--ds-text-meta);
+}
 .council-criteria [hidden]{display:none}
 .council-criteria-toggle{width:100%;min-height:28px;text-align:left;color:var(--text)}
 .council-criteria-editor,.council-criteria-fields,.council-criteria-rows{display:grid;gap:8px;padding-top:7px}

@@ -524,6 +524,13 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
     <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
     <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
+    <section id="superagent-workspace" aria-label="Orchestrations" hidden>
+      <header class="sa-workspace-header">
+        <div class="sa-workspace-trail"><button type="button" data-action="superagent-back">Back to Bots</button><span aria-hidden="true">/</span><h1>Orchestrations</h1></div>
+        <p>Reusable Teams and their native Demands. Manual read-only execution only until scoped authorization is available.</p>
+      </header>
+      <div id="superagent-host"><p role="status">Loading orchestrations…</p></div>
+    </section>
     <section id="customize-hub" aria-label="Customize skills" hidden></section>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
@@ -3112,6 +3119,7 @@ async function showViewMenu(anchor: HTMLElement): Promise<void> {
   } });
 }
 function setWorkspaceView(view: WorkspaceView): void {
+  if (superagentShown) closeSuperagent(false);
   if (state.view === view) return;
   closeMenus();
   state.view = view; localStorage.setItem('pandacode.view', view);
@@ -6274,18 +6282,51 @@ function botsOptions(providers: Provider[]): import('./bots').BotsOptions {
     openChat: id => run((async () => { closeModal(); await openBot(id); })()),
   };
 }
+let superagentShown = false;
+let superagentReturnFocus: HTMLElement | null = null;
+let superagentMount: { refresh(): Promise<void> } | undefined;
+function closeSuperagent(restoreFocus = true): void {
+  if (!superagentShown) return;
+  superagentShown = false;
+  $('#superagent-workspace').hidden = true;
+  $('.workspace').classList.remove('superagent-open');
+  const previous = superagentReturnFocus;
+  superagentReturnFocus = null;
+  if (restoreFocus) {
+    const fallback = document.querySelector<HTMLElement>('.sidebar-bots-bar');
+    const target = previous?.isConnected && previous.getClientRects().length ? previous : fallback;
+    target?.focus({ preventScroll: true });
+  }
+}
 async function showSuperagent(): Promise<void> {
-  const dialog = modal('Orchestrations', '<div id="superagent-host"><p role="status">Loading…</p></div>', 'superagent-dialog');
-  const host = dialog.querySelector<HTMLElement>('#superagent-host')!;
+  if (superagentShown) {
+    document.querySelector<HTMLButtonElement>('#superagent-workspace [data-action="superagent-back"]')?.focus({ preventScroll: true });
+    return;
+  }
+  closeMenus();
+  if (document.querySelector<HTMLDialogElement>('#dialog')?.open) closeModal();
+  if (customizeShown) closeCustomize(false);
+  if (!$('#settings-page').hidden) closeSettings();
+  superagentReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const workspace = $('#superagent-workspace');
+  superagentShown = true;
+  workspace.hidden = false;
+  $('.workspace').classList.add('superagent-open');
+  const host = workspace.querySelector<HTMLElement>('#superagent-host')!;
   try {
-    const { mountSuperagent } = await import('./superagent-ui');
-    if (dialog.open && host.isConnected) mountSuperagent(host, call);
+    if (superagentMount) await superagentMount.refresh();
+    else {
+      const { mountSuperagent } = await import('./superagent-ui');
+      if (!superagentShown) return;
+      superagentMount = mountSuperagent(host, call);
+    }
   } catch (cause) {
-    if (dialog.open && host.isConnected) {
+    if (superagentShown) {
       host.textContent = cause instanceof Error ? cause.message : String(cause);
       host.setAttribute('role','alert');
     }
   }
+  if (superagentShown) workspace.querySelector<HTMLButtonElement>('[data-action="superagent-back"]')?.focus({ preventScroll: true });
 }
 async function showBots(open: { botId?: string; startNew?: boolean } = {}): Promise<void> {
   const dialog = modal(open.startNew ? 'New bot' : 'Bots', '<div id="bots-host"><p role="status">Loading bots…</p></div>', 'bots-dialog');
@@ -7084,7 +7125,13 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     'board-open', 'select-task', 'select-project', 'open-bot',
     'open-shared-channel', 'bots', 'new-bot', 'settings-page',
   ].includes(name)) closeCustomize(false);
+  if (superagentShown && [
+    'new-task','new-chat','board-view','conversation-view','github-view',
+    'board-open','select-task','select-project','open-bot','open-shared-channel',
+    'bots','new-bot','settings','settings-page','toggle-customize',
+  ].includes(name)) closeSuperagent(false);
   switch (name) {
+    case 'superagent-back': closeSuperagent(); break;
     case 'support': await openSupport(); break;
     case 'new-task': if (state.view === 'board') showBoardTaskForm(); else await createTask(); break;
     case 'new-chat': if (state.view !== 'conversation') setWorkspaceView('conversation'); await createChat(); break;

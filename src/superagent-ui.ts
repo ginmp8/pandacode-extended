@@ -39,9 +39,10 @@ interface SourceDecision {
   decision: string; sequence: number; policyRevision: number; at: number;
 }
 
-export function mountSuperagent(host: HTMLElement, call: Call): void {
+export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
+  let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
@@ -183,44 +184,88 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
-        details + sourcePanel + '</section>' : '';
+        details + '</section>' : '';
+    const overview = chosen
+      ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
+        '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Manual read-only' : 'Disabled / Off') +
+        ' · Policy revision ' + chosen.policyRevision + '</p>' +
+        '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
+        '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
+        '<dt>Current native support</dt><dd>One worker, manual dispatch; scoped writes and automatic GitHub intake unsupported.</dd></dl>' +
+        '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
+      : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
+    const reviewPanel = chosen
+      ? '<section class="sa-pane" aria-label="Review inbox"><h3>Review inbox · ' + safe(chosen.name) +
+        '</h3><p>Only native Tickets awaiting explicit human evidence acceptance; advisory Council is not a verified pass.</p>' +
+        '<ul class="sa-tickets">' +
+        (tickets.filter(ticket => ticket.state === 'waiting_approval').map(ticket =>
+          '<li><div><strong>' + safe(ticket.objective) + '</strong><small>Ticket ' +
+          safe(ticket.id) + ' · Revision ' + ticket.revision + '</small></div>' +
+          '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) + '">View evidence</button>' +
+          '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
+          '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button></li>'
+        ).join('') || '<li class="sa-empty">No Tickets awaiting human approval for this Team.</li>') +
+        '</ul>' +
+        (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
+          '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
+          '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
+        details + '</section>'
+      : '<section class="sa-pane"><p>Select a Team to inspect its native human review queue.</p></section>';
+    const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
+      ([
+        ['teams','Teams'],['runs','Demands / Runs'],['review','Review inbox'],
+        ['sources','Sources'],['portable','Portable configuration'],
+      ] as const).map(([id,label]) =>
+        '<button type="button" data-sa-view="' + id + '" aria-current="' +
+        (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+      '</nav>';
     host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
+      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; writes, automatic GitHub dispatch and Council verdicts are not yet supported.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
       (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
       (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
         safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
-      '<section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
+      navigation +
+      '<div class="sa-layout"><aside class="sa-directory" aria-label="Teams directory">' +
+      '<section class="sa-pane"><h3>Teams</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
-      '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
-      '<label>Example preset<select data-sa-template aria-label="Example preset">' +
-      '<option value="">Custom</option>' +
-      '<option value="Software Development"' +
-      (draftPresetTemplate === 'Software Development' ? ' selected' : '') +
-      '>Software Development</option>' +
-      '<option value="Issue Resolution"' +
-      (draftPresetTemplate === 'Issue Resolution' ? ' selected' : '') +
-      '>Issue Resolution</option></select></label>' +
-      '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
-      safe(draftPresetName) + '" required></label>' +
-      '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
-      '<option value="">Choose bot</option>' + choices + '</select></label>' +
-      '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-      choices + '</select></label></div><button class="primary-button" type="submit"' +
-      (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
-      active +
-      '<section class="sa-pane"><h3>Portable configuration</h3>' +
-      '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
-      '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
-      safe(importText) + '</textarea></label>' +
-      '<div class="sa-actions"><button type="button" data-sa-export>Export</button>' +
-      '<button type="button" data-sa-preview>Preview import</button></div>' +
-      (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
-        preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
-        '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
-      '</section></div>';
+      '</aside><div class="sa-stage">' +
+      (workspaceView === 'teams'
+        ? '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
+          '<label>Example preset<select data-sa-template aria-label="Example preset">' +
+          '<option value="">Custom</option>' +
+          '<option value="Software Development"' +
+          (draftPresetTemplate === 'Software Development' ? ' selected' : '') +
+          '>Software Development</option>' +
+          '<option value="Issue Resolution"' +
+          (draftPresetTemplate === 'Issue Resolution' ? ' selected' : '') +
+          '>Issue Resolution</option></select></label>' +
+          '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
+          safe(draftPresetName) + '" required></label>' +
+          '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
+          '<option value="">Choose bot</option>' + choices + '</select></label>' +
+          '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
+          choices + '</select></label></div><button class="primary-button" type="submit"' +
+          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview
+        : '') +
+      (workspaceView === 'runs' ? (active || '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
+      (workspaceView === 'review' ? reviewPanel : '') +
+      (workspaceView === 'sources' ? (chosen ? '<section class="sa-pane">' + sourcePanel + '</section>'
+        : '<section class="sa-pane"><p>Select a Team to configure its Off/Observe GitHub sources.</p></section>') : '') +
+      (workspaceView === 'portable'
+        ? '<section class="sa-pane"><h3>Portable configuration</h3>' +
+          '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
+          '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
+          safe(importText) + '</textarea></label>' +
+          '<div class="sa-actions"><button type="button" data-sa-export>Export</button>' +
+          '<button type="button" data-sa-preview>Preview import</button></div>' +
+          (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
+            preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
+            '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
+          '</section>' : '') +
+      '</div></div></div>';
     host.setAttribute('aria-busy', String(busy));
   }
   async function refreshTicketDetails(): Promise<void> {
@@ -315,8 +360,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       const action = confirm?.action; confirm = null; if (action) void work(action);
       return;
     }
+    if (target.dataset.saView) {
+      const next = target.dataset.saView;
+      if (!['teams','runs','review','sources','portable'].includes(next)) return;
+      workspaceView = next as typeof workspaceView;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.hasAttribute('data-sa-open-runs')) {
+      workspaceView = 'runs'; render();
+      host.querySelector<HTMLButtonElement>('[data-sa-view="runs"]')?.focus({preventScroll:true});
+      return;
+    }
     if (target.dataset.saSelect) {
-      if (busy || loading || selected === target.dataset.saSelect) return;
+      if (busy || loading) return;
+      workspaceView = 'runs';
+      if (selected === target.dataset.saSelect) { render(); return; }
       const next = target.dataset.saSelect;
       selected = next;
       tickets = [];
@@ -487,7 +547,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
         const created = await call<Config>('superagent_create',{ input });
         draftPresetName = ''; draftPresetTemplate = '';
-        selected = created.id; await reload();
+        selected = created.id; workspaceView = 'runs'; await reload();
       });
     }
     if (form.dataset.saForm === 'reject') {
@@ -512,4 +572,5 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   });
   render();
   void reload();
+  return { refresh: reload };
 }

@@ -8,7 +8,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(sidebar).toBeVisible();
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
-  const dialog=page.getByRole('dialog',{name:'Orchestrations'});
+  const dialog=page.getByRole('region',{name:'Orchestrations'});
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Software Development');
@@ -23,6 +23,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.locator('.sa-list .sa-last-activity')).not.toContainText('Unavailable');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await dialog.getByRole('button',{name:'Portable configuration'}).click();
   await dialog.getByRole('button',{name:'Export'}).click();
   const text=dialog.getByRole('textbox',{name:'Companion manifest JSON'});
   await expect(text).toContainText('"schemaVersion": 1');
@@ -32,6 +33,8 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('status').filter({hasText:'0 presets imported; 1 unchanged.'})).toBeVisible();
+  await dialog.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
 
 
@@ -44,7 +47,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(sidebar).toBeVisible();
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
-  const dialog=page.getByRole('dialog',{name:'Orchestrations'});
+  const dialog=page.getByRole('region',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
@@ -87,7 +90,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await expect(sidebar).toBeVisible();
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
-  const dialog=page.getByRole('dialog',{name:'Orchestrations'});
+  const dialog=page.getByRole('region',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
@@ -133,6 +136,7 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
     });
   });
   const host = page.locator('#sa-isolation-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByText('First preset ticket')).toBeVisible();
   await expect(host.locator('[data-sa-accept="ticket-from-first-preset"]')).toHaveCount(1);
   await host.locator('[data-sa-select="preset-two"]').click();
@@ -177,6 +181,7 @@ test('native Council observation is advisory and never authorizes task completio
     });
   });
   const host = page.locator('#sa-council-readonly-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByRole('button',{name:'View evidence'})).toBeVisible();
   await host.getByRole('button',{name:'View evidence'}).click();
   const note = host.getByRole('note',{name:'Native Council observation'});
@@ -193,7 +198,7 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   const sidebar=page.getByRole('region',{name:'Bots',exact:true});
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
-  const dialog=page.getByRole('dialog',{name:'Orchestrations'});
+  const dialog=page.getByRole('region',{name:'Orchestrations'});
   const example=dialog.getByRole('combobox',{name:'Example preset'});
   const name=dialog.getByRole('textbox',{name:'Name',exact:true});
   await example.selectOption('Software Development');
@@ -255,6 +260,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
     });
   });
   const host=page.locator('#sa-source-test');
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
   await expect(host.getByText('No authenticated GitHub intake',{exact:false})).toBeVisible();
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
@@ -271,6 +277,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('issue:42');
   await expect(host.locator('[data-sa-next-mode="auto"]')).toHaveCount(0);
   await host.locator('[data-sa-select="two"]').click();
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
   await expect(host.locator('.sa-source-list')).toHaveCount(0);
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
@@ -348,9 +355,12 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
     (window as unknown as {saDispatchCount:()=>number}).saDispatchCount=()=>dispatches;
   });
   const host=page.locator('#sa-thread-link-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'View evidence'}).click();
   await expect(host.getByText('No threads linked.')).toBeVisible();
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
   await host.getByRole('button',{name:'Load sources'}).click();
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('textbox',{name:'Exact thread key'}).fill('issue:42');
   await host.getByRole('button',{name:'Link thread (context only)'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('test/fixture / issue:42');
@@ -358,4 +368,34 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await expect(host.getByText('Private fixture')).toBeVisible();
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);
+});
+
+test('Bots Orchestrations is a persistent main workspace with native-backed Teams and Runs', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const bar=page.locator('.sidebar-bots-bar');
+  if (await bar.getAttribute('aria-pressed') !== 'true') await bar.click();
+  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const workspace=page.getByRole('region',{name:'Orchestrations'});
+  await expect(workspace).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Orchestrations'})).toHaveCount(0);
+  await expect(workspace.getByRole('navigation',{name:'Orchestration views'})).toBeVisible();
+  await expect(workspace.getByRole('complementary',{name:'Teams directory'})).toContainText('No orchestrations created.');
+  await workspace.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(workspace.getByText('Select a Team from the directory')).toBeVisible();
+  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Persistent Team');
+  await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await workspace.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
+  await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await workspace.getByRole('button',{name:'Back to Bots'}).click();
+  await expect(workspace).toBeHidden();
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  await expect(workspace).toBeVisible();
+  await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
+  await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
 });

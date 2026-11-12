@@ -72,7 +72,7 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('Cumulative queue 1.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cumulative observed span 8.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Provider tokens unknown', { exact: false })).toBeVisible();
-  await expect(panel(page).getByText('Queue 1.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-inspection section[aria-label="Review round 1"] small').getByText('Queue 1.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Observed span (last update) 8.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);

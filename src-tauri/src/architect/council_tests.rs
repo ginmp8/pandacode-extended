@@ -517,6 +517,60 @@ fn selected_bot_config_requires_distinct_bounded_identity_roster() {
 }
 
 #[test]
+fn native_user_forced_s2_requires_two_fresh_independent_rounds_before_pass() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.force_escalation = true;
+    assert!(config.validate().is_ok());
+    assert_eq!(serde_json::to_value(&config).unwrap()["strategy"], "escalated");
+    let mut team = team_with(config.clone(), vec![
+        seat("initial-a", 1, Some(9.5), SINCE + 1),
+        seat("initial-b", 1, Some(9.7), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "dispatch");
+    assert!(finish_refusal(&team).unwrap().contains("S2 forced escalation"));
+    assert_eq!(council::round_for(&team, &config, None).unwrap(), 2);
+    team.workers.extend([
+        seat("fresh-a", 2, Some(9.6), SINCE + 3),
+        seat("fresh-b", 2, Some(9.8), SINCE + 4),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+    // A later artifact change invalidates both phases, not only the last score.
+    team.changed_at = SINCE + 5;
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_some());
+}
+
+#[test]
+fn escalated_native_source_policy_preserves_legacy_modes_and_denies_unimplemented_phase_two() {
+    let original = on(9.0, 4, 2);
+    assert_eq!(serde_json::to_value(&original).unwrap(),
+        json!({"target":9.0,"maxRounds":4,"reviewers":2}));
+    let mut direct = on(9.0, 4, 0);
+    direct.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    direct.strategy = council::CouncilExecutionStrategy::Escalated;
+    direct.force_escalation = true;
+    assert_eq!(direct.mode(), "m2");
+    assert_eq!(direct.automatic_reviewers, 0);
+    assert!(direct.validate().is_ok());
+    let team = team_with(direct.clone(), vec![
+        seat("direct-a", 1, Some(9.3), SINCE + 1),
+        seat("direct-b", 1, Some(9.4), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "dispatch");
+    assert_eq!(council::round_for(&team, &direct, None).unwrap(), 2);
+    direct.max_rounds = 1;
+    assert!(direct.validate().unwrap_err().contains("at least two"));
+    direct.max_rounds = 4;
+    direct.strategy = council::CouncilExecutionStrategy::Parallel;
+    assert!(direct.validate().unwrap_err().contains("requires the escalated"));
+    direct.force_escalation = false;
+    direct.strategy = council::CouncilExecutionStrategy::TwoPhase;
+    assert!(direct.validate().unwrap_err().contains("strategy_unavailable"));
+}
+
+#[test]
 fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dispatch() {
     let nested = |id: &str| council::CouncilNestedReviewer {
         bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,

@@ -68,6 +68,18 @@ fn architect_criteria(source: &CouncilCriteriaSource) -> bool {
 fn required_criterion() -> bool {
     true
 }
+/// Execution strategy is orthogonal to reviewer source and required criteria.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilExecutionStrategy {
+    #[default]
+    Parallel,
+    Escalated,
+    TwoPhase,
+}
+fn parallel_strategy(strategy: &CouncilExecutionStrategy) -> bool {
+    *strategy == CouncilExecutionStrategy::Parallel
+}
 /// Explicit source identity for an admitted top-level native Council reviewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +131,12 @@ pub struct CouncilConfig {
     /// Additive automatic top-level seats alongside explicit selected direct bots (M3).
     #[serde(default, skip_serializing_if = "no_extra_reviewers")]
     pub automatic_reviewers: usize,
+    /// Per-task execution strategy; parallel preserves existing Council defaults.
+    #[serde(default, skip_serializing_if = "parallel_strategy")]
+    pub strategy: CouncilExecutionStrategy,
+    /// Native, user-requested escalation trigger. Never model-authored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_escalation: bool,
     /// Absent preserves original Architect-selected or selected-bot Council behavior.
     #[serde(default, skip_serializing_if = "architect_criteria")]
     pub criteria_source: CouncilCriteriaSource,
@@ -140,7 +158,7 @@ pub struct CouncilConfig {
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), nested_bot_reviewers: Vec::new(), automatic_reviewers: 0, criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), nested_bot_reviewers: Vec::new(), automatic_reviewers: 0, strategy: CouncilExecutionStrategy::Parallel, force_escalation: false, criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
     }
 }
 impl CouncilConfig {
@@ -150,6 +168,15 @@ impl CouncilConfig {
         }
         if !(1..=MAX_ROUNDS).contains(&self.max_rounds) {
             return Err(format!("Council takes 1 to {MAX_ROUNDS} rounds."));
+        }
+        if self.strategy == CouncilExecutionStrategy::TwoPhase {
+            return Err("strategy_unavailable: independent native two-phase challengers have not been admitted.".into());
+        }
+        if self.force_escalation && self.strategy != CouncilExecutionStrategy::Escalated {
+            return Err("Forced escalation requires the escalated Council strategy.".into());
+        }
+        if self.force_escalation && self.max_rounds < 2 {
+            return Err("Forced Council escalation requires at least two bounded review rounds.".into());
         }
         if self.reviewers > MAX_REVIEWERS || self.automatic_reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
@@ -814,7 +841,7 @@ fn mixed_source_quorum(team: &TeamSnapshot, config: &CouncilConfig, round: usize
     }
     let mut selected = std::collections::HashSet::new();
     let mut automatic = 0;
-    for (worker, seat) in in_round(team, round)
+    for (worker, _) in in_round(team, round)
         .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
     {
         if !worker.read_only {
@@ -1113,6 +1140,22 @@ fn verdict(team: &TeamSnapshot) -> Option<(String, bool)> {
     let config = team.config.council.as_ref()?;
     verdict_in(team, config, &Rounds::of(team, config))
 }
+/// A user-forced S2 escalation needs two fresh, independent native Council rounds
+/// passing on the same artifact. Each round retains the existing source, score,
+/// required-criterion and independently verified skill-evidence gates.
+fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
+    if config.strategy != CouncilExecutionStrategy::Escalated || !config.force_escalation {
+        return true;
+    }
+    (1..=view.latest).filter(|&round| {
+        view.complete(round)
+            && !stale(team, round)
+            && lowest(team, round).is_some_and(|score| score >= config.target)
+            && criterion_blockers(team, config, round).is_empty()
+            && unverified_required_skill_checks(team, round).is_empty()
+    }).take(2).count() == 2
+}
+
 /// The verdict from a view the caller already computed.
 fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Option<(String, bool)> {
     if !config.nested_bot_reviewers.is_empty() {
@@ -1128,6 +1171,13 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     }
     if reconfigured(team, round) && !view.at_limit(config) {
         return Some((format!("Council round {round} was closed by the user's reviewer selection change. Dispatch a new round with councilLens."), false));
+    }
+    // Do not let a limit or a first-round pass bypass the explicit two-round S2 gate.
+    if config.force_escalation && config.strategy == CouncilExecutionStrategy::Escalated
+        && view.at_limit(config) && !live(team, round) && view.complete(round)
+        && !forced_escalation_satisfied(team, config, view)
+    {
+        return Some(("S2 forced escalation reached the round limit without two fresh passing rounds on the same artifact; only an attributed user exception may close it.".into(), false));
     }
     // The limit is the user's brake: no further round can open. The lead finishes once nothing is live
     // and the last round is complete, out of date, or full; a current round it can still fill comes first.
@@ -1170,6 +1220,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     }
     let low = lowest(team, round)?;
     if low >= config.target {
+        if !forced_escalation_satisfied(team, config, view) {
+            return Some(("S2 forced escalation requires a fresh second native Council round from the same enabled reviewer sources; earlier or stale scores are not approval.".into(), false));
+        }
         return None;
     }
     Some((format!("Council round {round}: lowest {low}, target {}. Fix the blockers with workers, then dispatch a new round with councilLens. {ESCAPE}", config.target), true))
@@ -1214,11 +1267,15 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
-    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && low.is_some_and(|low| low >= config.target) {
+    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && low.is_some_and(|low| low >= config.target)
+        && forced_escalation_satisfied(team, config, view) {
         "passed"
     } else if view.at_limit(config) {
         "limit"
-    } else if !view.complete(round) {
+    } else if !view.complete(round) || (config.force_escalation
+        && config.strategy == CouncilExecutionStrategy::Escalated
+        && !forced_escalation_satisfied(team, config, view)
+        && low.is_some_and(|score| score >= config.target) && !stale) {
         "dispatch"
     } else {
         "fixing"

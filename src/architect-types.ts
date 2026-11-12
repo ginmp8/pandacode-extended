@@ -11,6 +11,7 @@ export interface WorkerProfile {
 export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
 export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
 export type CouncilCriteriaSource = 'architect' | 'user' | 'hybrid';
+export type CouncilExecutionStrategy = 'parallel' | 'escalated' | 'two_phase';
 /** Frozen child plan only; native admission rejects it until task-owned child sessions exist. */
 export interface CouncilNestedReviewer {
   botId: string; childReviewers: number; childTarget: number; childMaxRounds: number;
@@ -26,6 +27,10 @@ export interface CouncilConfig {
   nestedBotReviewers?: CouncilNestedReviewer[];
   /** Extra automatic root seats, opt-in only when direct bot seats are selected. */
   automaticReviewers?: number;
+  /** Native task strategy; default parallel keeps M1/M2 behavior unchanged. */
+  strategy?: CouncilExecutionStrategy;
+  /** An explicit S2 escalation trigger requires a second fresh native review round. */
+  forceEscalation?: boolean;
   /** Missing source/criteria preserves the original Council semantics. */
   criteriaSource?: CouncilCriteriaSource;
   criteria?: CouncilCriterion[];

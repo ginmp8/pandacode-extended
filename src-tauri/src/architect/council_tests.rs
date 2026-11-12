@@ -6,6 +6,49 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 
 const SINCE: i64 = 1000;
 
+#[test]
+fn council_inspection_is_cycle_scoped_and_never_invents_usage_or_pass() {
+    let old = seat("old", 1, Some(10.0), SINCE - 1);
+    let mut fresh = seat("fresh-a", 1, Some(10.0), SINCE + 1);
+    fresh.updated_at = SINCE + 8;
+    let other = seat("fresh-b", 1, Some(9.5), SINCE + 2);
+    let team = team_with(on(9.0, 3, 2), vec![old, fresh, other]);
+    let inspected = council::inspection(&team, false).unwrap();
+    assert_eq!(inspected.status.state, "passed");
+    assert!(!inspected.verified_pass);
+    assert_eq!(inspected.attempts.len(), 2);
+    let first = &inspected.attempts[0];
+    assert_eq!(first.worker_id, "fresh-a");
+    assert_eq!(first.reviewer_source, "automatic");
+    let value = serde_json::to_value(inspected).unwrap();
+    assert_eq!(value["attempts"][0]["lastUpdatedAt"], SINCE + 8);
+    assert_eq!(value["attempts"][0]["usageProvenance"], "unknown");
+    assert!(value["attempts"][0]["tokenCount"].is_null());
+    assert!(value["attempts"][0]["costAmount"].is_null());
+}
+#[test]
+fn council_inspection_never_converts_missing_scores_or_human_acceptance_to_pass() {
+    let mut team = team_with(on(9.0, 3, 2), vec![
+        seat("first", 1, Some(10.0), SINCE + 1),
+        seat("unfinished", 1, None, SINCE + 2),
+    ]);
+    assert!(!council::inspection(&team, true).unwrap().verified_pass);
+    team.council_accepted = Some(team.council_since);
+    let accepted = council::inspection(&team, true).unwrap();
+    assert_eq!(accepted.status.state, "accepted");
+    assert!(!accepted.verified_pass);
+}
+#[test]
+fn native_council_inspection_reuses_the_existing_task_state() {
+    let (state, sid) = council_state(on(9.0, 3, 0));
+    let store = state.store.lock().unwrap();
+    let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(inspected.status.state, "waiting");
+    assert!(!inspected.verified_pass);
+    assert!(inspected.attempts.is_empty());
+}
+
+
 
 #[test]
 fn post_acceptance_github_action_requires_one_exact_repository_and_user_grant() {

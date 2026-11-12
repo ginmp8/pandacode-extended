@@ -985,6 +985,38 @@ pub async fn architect_get(
         Ok(team)
     }
 }
+
+/** Read-only task Council inspection. Never treat freshly refreshed status as stored proof. */
+pub(crate) fn council_inspection_state(
+    store: &Store, session_id: &str,
+) -> Result<Option<council::CouncilInspection>> {
+    if parent_of(store, session_id)?.is_some() {
+        return Err("council_inspection_denied: worker sessions cannot inspect the parent Council.".into());
+    }
+    let Some(mut team) = load(store, session_id)? else { return Ok(None) };
+    let issued_seats_are_valid = team.workers.iter()
+        .filter(|w| w.created_at >= team.council_since && w.council.is_some())
+        .filter_map(|w| w.reviewer_binding.as_ref()
+            .filter(|b| b.reviewer_bot_id.is_some()).map(|b| (w, b)))
+        .all(|(w, b)| {
+            b.validate(&team, w).is_ok()
+                && reviewer_security::validate_issued_authority(store, session_id, b).is_ok()
+                && bot_reviewers::validate_frozen_seat(store, b, true).is_ok()
+        });
+    let verified_pass = issued_seats_are_valid && verified_council_pass(store, &team);
+    refresh_council(store, &mut team);
+    Ok(council::inspection(&team, verified_pass))
+}
+
+/// Native read-only inspection for a task or opt-in channel delivery.
+#[tauri::command]
+pub async fn architect_council_inspect(
+    state: State<'_, AppState>, session_id: String,
+) -> Result<Option<council::CouncilInspection>> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    council_inspection_state(&store, &session_id)
+}
+
 #[tauri::command]
 pub async fn architect_configure(
     app: tauri::AppHandle,

@@ -250,6 +250,74 @@ pub struct CouncilStatus {
     pub notice: Option<String>,
 }
 
+/** A native read-only projection; never an approval token. */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilInspection {
+    pub cycle_started_at: i64,
+    pub team_revision: u64,
+    pub status: CouncilStatus,
+    pub verified_pass: bool,
+    pub criteria: Vec<CouncilCriterion>,
+    pub attempts: Vec<CouncilInspectionAttempt>,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilInspectionAttempt {
+    pub worker_id: String,
+    pub round: usize,
+    pub lens: String,
+    pub reviewer_source: &'static str,
+    pub name: String,
+    pub status: String,
+    pub score: Option<f64>,
+    pub abandoned: bool,
+    pub provider: String,
+    pub model: String,
+    pub attempt: usize,
+    pub created_at: i64,
+    pub started_at: i64,
+    /// Last update may include checkpoints; it is not measured provider duration.
+    pub last_updated_at: i64,
+    pub token_count: Option<u64>,
+    pub cost_amount: Option<f64>,
+    pub cost_currency: Option<String>,
+    pub usage_provenance: &'static str,
+}
+pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<CouncilInspection> {
+    let config = team.config.council.as_ref()?;
+    let status = status(team)?;
+    let verified_pass = verified_pass && status.state == "passed" && !status.stale;
+    let attempts = seats(team).map(|(worker, seat)| CouncilInspectionAttempt {
+        worker_id: worker.id.clone(),
+        round: seat.round,
+        lens: seat.lens.clone(),
+        reviewer_source: if worker.reviewer_binding.as_ref()
+            .and_then(|binding| binding.reviewer_bot_id.as_ref()).is_some() {
+            "direct_bot"
+        } else { "automatic" },
+        name: worker.name.clone(),
+        status: worker.status.clone(),
+        score: seat.score,
+        abandoned: worker.abandoned,
+        provider: worker.provider.clone(),
+        model: worker.model.clone(),
+        attempt: worker.attempt,
+        created_at: worker.created_at,
+        started_at: seat.started_at,
+        last_updated_at: worker.updated_at,
+        // No provider receipt is available yet: unknown, not zero.
+        token_count: None,
+        cost_amount: None,
+        cost_currency: None,
+        usage_provenance: "unknown",
+    }).collect();
+    Some(CouncilInspection {
+        cycle_started_at: team.council_since, team_revision: team.revision,
+        status, verified_pass, criteria: config.criteria.clone(), attempts,
+    })
+}
+
 /// The lead's setting on a task's team; takes effect at once. It starts a lead turn only when it ends
 /// the lead's question to the user (the team was asking and no longer is).
 pub(super) fn set(state: &AppState, session_id: &str, council: Option<CouncilConfig>) -> Result<TeamSnapshot> {

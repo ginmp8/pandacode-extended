@@ -34,6 +34,22 @@ export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'pa
 /** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: a plain sentence for the user whenever `team.error`
  *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
 export interface CouncilStatus { state: CouncilState; round: number; lowest: number | null; target: number; stale: boolean; notice?: string | null }
+
+/** Read-only native Council projection, never an approval token. */
+export interface CouncilInspectionAttempt {
+  workerId: string; round: number; lens: string;
+  reviewerSource: 'automatic' | 'direct_bot';
+  name: string; status: string; score: number | null; abandoned: boolean;
+  provider: string; model: string; attempt: number;
+  createdAt: number; startedAt: number; lastUpdatedAt: number;
+  tokenCount: number | null; costAmount: number | null;
+  costCurrency: string | null; usageProvenance: 'unknown';
+}
+export interface CouncilInspection {
+  cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
+  verifiedPass: boolean; criteria: CouncilCriterion[];
+  attempts: CouncilInspectionAttempt[];
+}
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of
    * installed models, or as the prompt asks). Configured teams name fixed worker profiles. */

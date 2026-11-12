@@ -21,7 +21,12 @@ interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
 }
-interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
+interface Assignment { id: string; botId: string; sessionId: string; state: string;
+  attempt: number; createdAt?: number; updatedAt?: number }
+interface AssignmentInsight {
+  assignmentId: string; currentAssignment: boolean; hasResult: boolean;
+  mandateRevoked: boolean; runBudgetExpired: boolean; remainingRunBudgetMs: number | null;
+}
 interface ManualPreflight {
   orchestrationId: string; policyRevision: number; projectId: string;
   selectedBotId: string; selectedRole: string; eligible: boolean; reason: string | null;
@@ -34,6 +39,7 @@ interface CouncilObservation {
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
+  attemptInsights?: AssignmentInsight[];
   activity: Activity[]; council?: CouncilObservation | null;
 }
 interface EventSource {
@@ -62,6 +68,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
+  let inspectedAssignmentId = '';
   let activityMode: 'all' | 'compact' | 'json' = 'all';
   let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
@@ -119,6 +126,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               safe(entry.kind) + ' · ' + safe(entry.detail) + ' · Event ' + entry.id +
               '</li>').join('')) +
         (!activity.length ? '<li>No matching native events.</li>' : '') + '</ol>';
+    const attempt = ticketDetails?.assignments.find(item => item.id === inspectedAssignmentId);
+    const insight = ticketDetails?.attemptInsights?.find(item => item.assignmentId === inspectedAssignmentId);
+    const attemptDetails = attempt
+      ? '<section class="sa-assignment-inspector" role="region" aria-label="Native assignment inspector">' +
+        '<h5>Attempt ' + attempt.attempt + ' · ' + safe(attempt.state) + '</h5>' +
+        '<p>Native Ticket/Assignment snapshot; not provider liveness, a review verdict or a grant.</p>' +
+        '<dl><dt>Bot</dt><dd>' + safe(botName(attempt.botId)) + '</dd>' +
+        '<dt>Session</dt><dd><code>' + safe(attempt.sessionId) + '</code></dd>' +
+        '<dt>Current Ticket assignment</dt><dd>' +
+        (insight ? (insight.currentAssignment ? 'Yes' : 'No') : 'Unavailable') + '</dd>' +
+        '<dt>Native mandate</dt><dd>' +
+        (insight ? (insight.mandateRevoked ? 'Revoked' : 'Recorded (not a tool grant)') : 'Unavailable') + '</dd>' +
+        '<dt>Provider result</dt><dd>' +
+        (insight ? (insight.hasResult ? 'Recorded (content hidden)' : 'Not recorded') : 'Unknown') + '</dd>' +
+        '<dt>Started / updated</dt><dd>' + safe(activityTime(attempt.createdAt)) +
+        ' / ' + safe(activityTime(attempt.updatedAt)) + '</dd>' +
+        '<dt>Attempt run budget</dt><dd>' +
+        (!insight ? 'Unavailable' : insight.runBudgetExpired ? 'Expired' :
+          insight.remainingRunBudgetMs === null ? 'Not running' :
+          Math.max(0, Math.floor(insight.remainingRunBudgetMs / 1000)) + ' seconds remain') +
+        '</dd></dl><button type="button" data-sa-close-assignment>Close attempt</button></section>'
+      : '';
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
@@ -135,8 +164,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
-          safe(item.sessionId) + '</code></li>').join('') || '<li>No worker assigned.</li>') +
-        '</ul><h5>Native activity</h5>' +
+          safe(item.sessionId) + '</code> <button type="button" data-sa-inspect-assignment="' +
+          safe(item.id) + '" aria-expanded="' + (item.id === inspectedAssignmentId) +
+          '">Inspect attempt ' + item.attempt + '</button></li>').join('') ||
+          '<li>No worker assigned.</li>') +
+        '</ul>' + attemptDetails + '<h5>Native activity</h5>' +
         '<nav class="sa-activity-tabs" aria-label="Activity display">' +
         (['all','compact','json'] as const).map(mode =>
           '<button type="button" data-sa-activity-mode="' + mode + '" aria-pressed="' +
@@ -256,7 +288,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</select></label></div><button class="primary-button" type="submit"' +
       (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
-      ''<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
+      '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
       safe(demandObjective) + '</textarea></label>' +
       '<label>Dispatch<select name="mode"><option value="coordinated"' +
       (demandMode === 'coordinated' ? ' selected' : '') + '>Coordinator, then worker</option>' +
@@ -397,7 +429,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
-      inspectedTicket = ''; ticketDetails = null; threadLinks = []; return;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      inspectedAssignmentId = ''; return;
     }
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
@@ -407,6 +440,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     ]);
     if (inspectedTicket === id) {
       ticketDetails = snapshot;
+      if (!snapshot.assignments.some(item => item.id === inspectedAssignmentId)) {
+        inspectedAssignmentId = '';
+      }
       threadLinks = links;
       linkedDecisions = []; linkedDecisionsLoaded = false;
       // Keep the ticket row and its grant/history pinned to one native revision.
@@ -435,7 +471,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
       tickets = [];
-      ticketDetails = null;
+      ticketDetails = null; inspectedAssignmentId = '';
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
       if (roleRoster && selected) {
@@ -574,7 +610,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand);
       if (!demand || !presets.some(item => item.id === demand.orchestrationId)) return;
       selected = demand.orchestrationId;
-      tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = []; roleRoster = null;
+      tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      inspectedAssignmentId = ''; roleRoster = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{
@@ -615,7 +652,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const next = target.dataset.saSelect;
       selected = next;
       tickets = [];
-      inspectedTicket = ''; ticketDetails = null; threadLinks = []; roleRoster = null;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      inspectedAssignmentId = ''; roleRoster = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
@@ -679,14 +717,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
     if (target.hasAttribute('data-sa-close-details')) {
-      inspectedTicket = ''; ticketDetails = null; render(); return;
+      inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
+      render(); return;
+    }
+    if (target.hasAttribute('data-sa-close-assignment')) {
+      inspectedAssignmentId = ''; render(); return;
+    }
+    if (target.dataset.saInspectAssignment) {
+      if (ticketDetails?.ticket.id !== inspectedTicket ||
+          !ticketDetails.assignments.some(item => item.id === target.dataset.saInspectAssignment)) return;
+      inspectedAssignmentId = inspectedAssignmentId === target.dataset.saInspectAssignment
+        ? '' : target.dataset.saInspectAssignment;
+      render();
+      return;
     }
     if (target.dataset.saInspectTicket) {
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
-        inspectedTicket = ''; ticketDetails = null; render();
+        inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
+        render();
       } else {
-        inspectedTicket = id; ticketDetails = null;
+        inspectedTicket = id; ticketDetails = null; inspectedAssignmentId = '';
         void work(refreshTicketDetails);
       }
       return;

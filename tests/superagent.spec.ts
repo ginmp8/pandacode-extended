@@ -653,3 +653,52 @@ test('manual demand preflight shows native read-only scope and never admits work
   await host.getByRole('textbox',{name:'Task objective'}).fill('Changed objective');
   await expect(panel).toHaveCount(0);
 });
+
+test('native-backed attempt inspector shows recorded sessions and run budgets without granting effects', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-native-attempt-test'; document.body.appendChild(host);
+    mountSuperagent(host, async command => {
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Team fixture',coordinatorBotId:'router',workerBotId:'worker',
+        enabled:true,policyRevision:2
+      }] as never;
+      if(command==='superagent_tickets') return [{
+        id:'ticket',orchestrationId:'team',objective:'Inspect native attempt',
+        state:'running',revision:3,evidence:null
+      }] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket:{id:'ticket',orchestrationId:'team',objective:'Inspect native attempt',
+          state:'running',revision:3,evidence:null},
+        mandate:{actor:'operator',authorizationId:'manual',policyRevision:2,
+          projectId:'project',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[{id:'attempt-one',botId:'worker',sessionId:'session-one',
+          state:'running',attempt:1,createdAt:1794400000000,updatedAt:1794400000200}],
+        attemptInsights:[{assignmentId:'attempt-one',currentAssignment:true,
+          hasResult:false,mandateRevoked:false,runBudgetExpired:false,
+          remainingRunBudgetMs:240000}],
+        activity:[]
+      } as never;
+      throw new Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-native-attempt-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await host.getByRole('button',{name:'Inspect attempt 1'}).click();
+  const inspector=host.getByRole('region',{name:'Native assignment inspector'});
+  await expect(inspector).toContainText('session-one');
+  await expect(inspector).toContainText('240 seconds remain');
+  await expect(inspector).toContainText('Recorded (not a tool grant)');
+  await expect(inspector).toContainText('Not recorded');
+  await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
+  await inspector.getByRole('button',{name:'Close attempt'}).click();
+  await expect(inspector).toHaveCount(0);
+});

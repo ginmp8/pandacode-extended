@@ -512,12 +512,27 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
 /// Consistent native read of a Ticket, its mandate, attempt history and audit.
 /// A single SQLite read transaction prevents a pre-Stop assignment being
 /// displayed alongside a post-Stop authority record.
+/// Native per-attempt insights are observed in the same transaction as
+/// Ticket, Mandate and Assignment. These are neither a tool grant nor
+/// proof of a live provider or an approved Council verdict.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentInsight {
+    pub assignment_id: String,
+    pub current_assignment: bool,
+    pub has_result: bool,
+    pub mandate_revoked: bool,
+    pub run_budget_expired: bool,
+    pub remaining_run_budget_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
     pub ticket: Ticket,
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
+    pub attempt_insights: Vec<AssignmentInsight>,
     pub activity: Vec<AuditEntry>,
     /// Advisory native Council status, never a SuperAgent approval.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -530,11 +545,27 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store, ticket_id)?;
+    let native_mandate = mandate(store, ticket_id)?;
+    let native_assignments = assignments(store, ticket_id, limit)?;
+    let observed_at = storage::now();
+    let attempt_insights = native_assignments.iter().map(|a| {
+        let (expired, remaining) = headless_assignment_budget(a, observed_at);
+        AssignmentInsight {
+            assignment_id: a.id.clone(),
+            current_assignment: ticket.state == "running" && a.state == "running"
+                && ticket.active_assignment_id.as_deref() == Some(a.id.as_str()),
+            has_result: a.result.as_ref().is_some_and(|text| !text.is_empty()),
+            mandate_revoked: native_mandate.revoked,
+            run_budget_expired: expired,
+            remaining_run_budget_ms: remaining,
+        }
+    }).collect();
     let result = TaskSnapshot {
         council: council_adapter::inspect(store, &ticket)?,
         ticket,
-        mandate: mandate(store, ticket_id)?,
-        assignments: assignments(store, ticket_id, limit)?,
+        mandate: native_mandate,
+        assignments: native_assignments,
+        attempt_insights,
         activity: history(store, ticket_id, limit)?,
     };
     tx.commit().map_err(|e| e.to_string())?;
@@ -2288,6 +2319,46 @@ mod tests {
         ).unwrap();
         assert_eq!(paused["worker"]["eligibleAtSnapshot"], false);
         assert_eq!(paused["coordinator"]["eligibleAtSnapshot"], false);
+    }
+
+    #[test]
+    fn native_ticket_snapshot_inspects_attempt_budget_and_revocation_without_grants() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Private fixture objective", "insight-1", false,
+        ).unwrap();
+        assert!(started);
+        let first = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert_eq!(first.attempt_insights.len(), 1);
+        let insight = &first.attempt_insights[0];
+        assert_eq!(insight.assignment_id, first.assignments[0].id);
+        assert!(insight.current_assignment);
+        assert!(!insight.mandate_revoked);
+        assert!(!insight.has_result);
+        assert!(!insight.run_budget_expired);
+        assert!(insight.remaining_run_budget_ms.unwrap() > 0);
+        let count_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |r| r.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2, result='private provider result'
+             WHERE id=?1",
+            params![insight.assignment_id, storage::now() - MAX_ASSIGNMENT_RUN_MS - 1000],
+        ).unwrap();
+        let overdue = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(overdue.attempt_insights[0].run_budget_expired);
+        assert!(overdue.attempt_insights[0].has_result);
+        assert_eq!(overdue.attempt_insights[0].remaining_run_budget_ms, Some(0));
+        assert!(!serde_json::to_string(&overdue.attempt_insights).unwrap()
+            .contains("private provider result"));
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |r| r.get::<_, i64>(0)).unwrap(), count_before);
+        stop(&store, &ticket.id).unwrap();
+        let stopped = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(!stopped.attempt_insights[0].current_assignment);
+        assert!(stopped.attempt_insights[0].mandate_revoked);
+        assert_eq!(stopped.attempt_insights[0].remaining_run_budget_ms, None);
     }
 
     #[test]

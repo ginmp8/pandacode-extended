@@ -122,8 +122,10 @@ test('Council blocked child state remains non-passing in shared native inspector
   await button(page).click();
   await panel(page).getByText('Review evidence and usage').click();
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
-  await expect(panel(page).getByText('blocked', { exact: false })).toBeVisible();
   const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  // Assert the actual child reservation status rather than matching unrelated
+  // root status prose; Playwright strict locators must remain unambiguous.
+  await expect(child.locator('summary')).toContainText('blocked');
   await expect(child).toContainText('Reservations are not executed reviews');
   await child.locator('summary').focus();
   await page.keyboard.press('Enter');

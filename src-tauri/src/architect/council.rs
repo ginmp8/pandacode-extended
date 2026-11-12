@@ -1271,7 +1271,10 @@ pub(super) fn unreviewed(team: &TeamSnapshot) -> Option<String> {
 /// Whether a new user message starts a new cycle: only once the old one has nothing outstanding.
 /// Otherwise "keep going" after a stop continues its rounds.
 pub(super) fn new_cycle(team: &TeamSnapshot) -> bool {
-    finish_refusal(team).is_none()
+    // A newly configured nested Council is blocked by design, but its first
+    // objective still needs a fresh native cycle identity before child admission.
+    // A stopped, previously started child cycle must keep its existing identity.
+    team.council_since <= 0 || finish_refusal(team).is_none()
 }
 
 /// The snapshot's `councilStatus`, from the same checks as the gate.

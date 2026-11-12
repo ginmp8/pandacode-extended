@@ -2014,6 +2014,20 @@ fn nested_council_roster_is_editable_before_cycle_and_frozen_after_start() {
 }
 
 #[test]
+fn initial_nested_council_has_a_cycle_identity_without_restarting_blocked_reviews() {
+    let mut config = on(9.0, 3, 0);
+    config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+        bot_id: "child-security".into(), child_reviewers: 2,
+        child_target: 9.5, child_max_rounds: 2,
+    }];
+    let mut team = team_with(config, vec![]);
+    team.council_since = 0;
+    assert!(council::new_cycle(&team), "the first native child cycle must be admitted");
+    team.council_since = SINCE;
+    assert!(!council::new_cycle(&team), "a blocked cycle must keep its frozen identity");
+}
+
+#[test]
 fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let (state, sid) = state_fixture();
     let mut children = Vec::new();

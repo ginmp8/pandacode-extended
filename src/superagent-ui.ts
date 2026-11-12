@@ -146,7 +146,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const attempt = ticketDetails?.assignments.find(item => item.id === inspectedAssignmentId);
     const insight = ticketDetails?.attemptInsights?.find(item => item.assignmentId === inspectedAssignmentId);
     const attemptDetails = attempt
-      ? '<section class="sa-assignment-inspector" role="region" aria-label="Native assignment inspector">' +
+      ? '<section class="sa-assignment-inspector" role="region" aria-label="Native assignment inspector" tabindex="-1">' +
         '<h5>Attempt ' + attempt.attempt + ' · ' + safe(attempt.state) + '</h5>' +
         '<p>Native Ticket/Assignment snapshot; not provider liveness, a review verdict or a grant.</p>' +
         '<dl><dt>Bot</dt><dd>' + safe(botName(attempt.botId)) + '</dd>' +
@@ -200,7 +200,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               '<small>' + (node.kind === 'ticket' ? 'Root Ticket' :
                 runGraph!.edges.find(edge => edge.to === node.id)?.relation === 'owns_attempt'
                   ? 'Ticket owns attempt' : 'Ticket awaits decision') +
-              '</small></li>').join('') || '<li>No durable nodes.</li>') +
+              '</small>' +
+              (node.kind === 'assignment' && ticketDetails.assignments.some(item =>
+                node.id === 'assignment:' + item.id &&
+                node.botId === item.botId && node.attempt === item.attempt)
+                ? ' <button type="button" data-sa-graph-inspect-assignment="' +
+                  safe(node.id.slice('assignment:'.length)) + '">' +
+                  'Inspect graph attempt ' + node.attempt + '</button>' : '') +
+              '</li>').join('') || '<li>No durable nodes.</li>') +
             '</ol>' + (runGraph.truncatedAttempts
               ? '<p>Only the latest 50 attempts are shown.</p>' : '') :
             '<p>Graph not loaded.</p>') + '</section>' +
@@ -863,6 +870,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-close-assignment')) {
       inspectedAssignmentId = ''; render(); return;
+    }
+    if (target.dataset.saGraphInspectAssignment) {
+      const assignmentId = target.dataset.saGraphInspectAssignment;
+      // Graph data is a projection, never permission. Only navigate to an
+      // attempt confirmed by this Ticket's same-revision native snapshot.
+      const snapshot = ticketDetails;
+      const node = runGraph?.nodes.find(item =>
+        item.kind === 'assignment' && item.id === 'assignment:' + assignmentId);
+      const assignment = snapshot?.assignments.find(item => item.id === assignmentId);
+      if (!runGraphLoaded || !snapshot || !assignment || !node ||
+          runGraph?.ticketId !== inspectedTicket ||
+          runGraph.ticketRevision !== snapshot.ticket.revision ||
+          snapshot.ticket.id !== inspectedTicket ||
+          node.botId !== assignment.botId || node.attempt !== assignment.attempt) return;
+      inspectedAssignmentId = assignmentId;
+      render();
+      host.querySelector<HTMLElement>('.sa-assignment-inspector')?.focus({preventScroll:true});
+      return;
     }
     if (target.dataset.saInspectAssignment) {
       if (ticketDetails?.ticket.id !== inspectedTicket ||

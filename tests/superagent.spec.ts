@@ -878,6 +878,13 @@ test('native Run graph is lazy, revision-bound and read-only', async ({page}) =>
   await expect(graph).toContainText('Ticket owns attempt');
   await expect(graph).toContainText('Active native assignment');
   await expect(graph.getByRole('listitem')).toHaveCount(2);
+  await graph.getByRole('button',{name:'Inspect graph attempt 1'}).click();
+  const inspector=host.getByRole('region',{name:'Native assignment inspector'});
+  await expect(inspector).toContainText('session');
+  await expect(inspector).toContainText('Attempt 1');
+  await expect(inspector).toBeFocused();
+  await inspector.getByRole('button',{name:'Close attempt'}).click();
+  await expect(inspector).toHaveCount(0);
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
   const calls=await page.evaluate(()=>
     (window as unknown as {saGraphCalls:()=>string[]}).saGraphCalls());

@@ -62,6 +62,37 @@ The panel uses a non-modal popover. Keyboard focus moves to its switch when open
 
 *Figure 4 — Narrow-window layout, with the Council panel constrained to the available viewport (component preview).*
 
+## Read-only evidence inspection for a delivery
+
+For a message with an attached Council delivery, **Inspect Council evidence** opens a
+read-only dialog *in the current Shared Channel*. This calls the same native
+`architect_council_inspect` task-scoped inspection command used in a direct
+conversation, rather than constructing review scores or approval state from
+channel messages. The existing **View Council report** button still opens the
+underlying task conversation; its behavior has not changed.
+
+The inspector lists the native cycle's reviewer attempts, rounds, lenses,
+scores, per-attempt queue wait and observed lifecycle spans. Tokens and monetary
+cost remain **unknown** unless native provider evidence exists; a duration
+observed by the app is not provider billable time. Names and review content are
+escaped before rendering. The dialog is keyboard accessible, works at narrow
+widths, and never grants reviewer tools, reads a different channel's transcript
+or dispatches work.
+
+**Native pass not verified** means exactly that, even if a channel's summary
+shows a high score or `passed` text. A completed native review-cycle record is
+shown only when the native gate independently verifies a passing Council and
+the originating task has reached its completed state. A user's **accepted**
+exception is not a native pass. This optional completion projection is
+informational: it is **not** an artifact digest, portable approval receipt,
+task-consumer authorization or substitute for the #147 request/receipt contract.
+
+If native inspection is denied, unavailable or the originating task cannot be
+read, the dialog displays the error without inventing a verdict. Older Council
+records without a completion projection continue to render the attempts and
+unknown usage as before. Rollback may hide the new Channel entry point without
+changing the native Council gate or the existing report navigation.
+
 ## Troubleshooting
 
 | Situation | What to check |

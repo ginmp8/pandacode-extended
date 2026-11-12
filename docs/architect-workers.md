@@ -139,6 +139,34 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   note. The lead's review carries `council`: `round`, `target`, `lowest`, `complete`, `passed`, `roundsLeft`,
   `scores` (the latest round), `firstScores` (each lens's first score this cycle) and `next`.
 
+### Read-only native Council inspection
+
+`architect_council_inspect` returns the existing task's Council status,
+reviewer attempts and configured criteria. The native implementation in
+`src-tauri/src/architect/council.rs` does not expose a second scoring engine.
+Worker-owned sessions cannot inspect the parent's Council. The native caller
+validates issued reviewer authority, selected-bot frozen inputs and the
+persisted current-evidence gate before setting `verifiedPass`.
+
+The optional `verifiedCompletion` projection describes a **completed**
+native Council cycle only when the gate is independently verified as passing,
+the round is not stale, and the team itself has finished. It includes the
+native task/cycle identity, team revision, round and minimum score. A displayed
+high score, queued/running team, unverified gate, stale round or a human
+`accepted` exception cannot create this projection. It is **not** an
+artifact-bound task review request/receipt or authority to notify or approve
+an external consumer. Those contracts remain separate work in issue #147.
+
+The direct-chat and opt-in Shared Channel UI use the same read-only inspector.
+The Channel dialog preserves the previous **View Council report** navigation.
+The inspector escapes untrusted review strings. Measured native queue wait and
+settled observation span are distinguished from provider tokens/billing:
+unknown provider usage or cost remains unknown. The added fields are optional;
+older saved Council configuration and review history require no migration.
+The gate and task session remain authoritative after UI rollback. Relevant
+regressions are in `src-tauri/src/architect/council_tests.rs`,
+`tests/council.spec.ts` and `tests/bots-channels.spec.ts`.
+
 ## Saved setups and profiles
 
 **Save setup** remembers the complete team for this task and future tasks, across

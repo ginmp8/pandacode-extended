@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — application metadata 0.3.117 and storage compatibility
+
+The [pinned source](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4) advances six app-version fields in root npm manifest/lockfile, Cargo manifest/application lock entry and Tauri config to **0.3.117**. Only source version hunks were applied to the four Extended-customized npm/Cargo files; Extended dependency overrides, remediations and security audit workflows were retained. The original Tauri version update is byte-exact. No new vulnerability remediation is claimed.
+
+Upstream introduces restricted dismissal of stored error rows: only matching session error IDs, a 500-ID batch cap, and no deletion for mirrored remote tasks. Integration preserves Extended's existing SQLite schema version **37** instead of restoring source version 36. Security/regression tests for the published SHA and native Connect, remote mirrors and data persistence remain unverified; Extended **0.12.0 DRAFT** is not a released build.
+
 ## 2026-11-12 — source 0.3.116 version and security continuity
 
 The [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) update (tree 1fc1d5aec803b0c6242d6293eceebcfff0982229) advances the six npm/Cargo/Tauri application version fields to **0.3.116** without changing Extended **0.12.0 DRAFT** distribution planning. Root package.json, package-lock.json root and workspace, src-tauri/Cargo.toml, the application entry in src-tauri/Cargo.lock, and src-tauri/tauri.conf.json are aligned. Existing Extended package constraints, overrides and Cargo dependency remediations are retained by applying only upstream version hunks to customized manifests. No vulnerability remediation is claimed from this import.

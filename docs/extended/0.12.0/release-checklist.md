@@ -1,5 +1,14 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — upstream 0.3.117 candidate checkpoint
+
+- [x] Freeze fork `9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4` / tree `597285f6e291294cd230c4f09befa578fa87bd54`; complete recursive Git inventory is not truncated (1,971 upstream paths; 2,029 candidate Extended paths).
+- [x] Stage all 90 source-changed paths (79 exact, 11 source-hunk/Extended-aware adaptations), including 11 newly added source files and byte-exact original release notes; no missing source paths, type differences or mode changes.
+- [x] Carry forward Extended schema v37 (source v36), Connect master gate, configuration, dependency remediations and original upstream app-version alignment to **0.3.117**, independently of Extended **0.12.0 DRAFT**.
+- [ ] Obtain all CI/build/audit results for the exact published integration SHA. Prior Extended `84f9f754` CI passed but cannot establish new-SHA success.
+- [ ] Run full Node/TypeScript/browser/Rust/Clippy/Expo checks, error dismissal/undo and storage/remote mirror scenarios, screen-reader and native Settings On/Off/external integrations.
+- [ ] Independently review the 83 customized shared paths at the hunk and behavioral level; complete release approval separately, without tag, installer, npm publish or deployment.
+
 ## 2026-11-12 — upstream 0.3.116 synchronization checkpoint
 
 - [x] Pin complete fork source SHA 12a0468948c2ff1c9bc6be0bebf3f85411d73819, Git tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, application version **0.3.116**; recursive Git trees were not truncated.

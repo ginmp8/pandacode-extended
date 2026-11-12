@@ -1,5 +1,9 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — 0.3.117 error reporting and existing controls
+
+The [0.3.117 source](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4) changes error presentation and dismissal, not the intended scope of Extended feature switches. Upstream changes were applied to the Extended bot UI, main thread, app update feedback and Connect settings. The Connect master switch is still required before remote functions can be reached; the source's error-row UI was reconciled around that Extended gate and failed master-switch operations now focus the related banner. No new restrictive default or global MCP/bot/cloud/VM/credential block was introduced. The underlying On/Off behavior and external integrations still require native regression evidence.
+
 ## 2026-11-12 — no new Extended control introduced for upstream 0.3.116
 
 The [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) tool-activity changes were integrated without changing existing optional Extended controls. The new tool_image command is authorized by existing task/session records and its own local image safeguards; it is not a new global switch that disables MCP, bots, Connect, cloud/VM, credentials or automation. The eight source-overlap adaptations apply exact upstream hunks onto pre-existing Extended files and preserve unrelated Extended modifications, including Settings defaults. Enabled/disabled native flows, resumed bots and external integrations were **not** exercised; code presence is not proof of runtime parity. Planned release remains **0.12.0 DRAFT**.

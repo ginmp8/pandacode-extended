@@ -1,5 +1,11 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — inherited error handling and dismissible notifications (upstream 0.3.117)
+
+[Source `9648d1c4c9e6`](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4), Git tree `597285f6e291294cd230c4f09befa578fa87bd54`, adds per-turn repeated-error counts, expandable long errors, dismiss/undo for saved local error rows, and more visible and dismissible failures across thread, launcher, toast, menu-bar, remote access and settings. The complete 90-file upstream delta is incorporated (79 exact, 11 reconciled) with no upstream path absent from the candidate. This is inherited functionality, not a new Extended-only feature. [Original upstream note](../../../releases/0.3.117.md) remains unchanged.
+
+The 11 overlap integrations retain Extended configuration, repaired npm/Cargo locks, database schema v37, and the Connect master switch; the latter now also places an upstream error banner at the switch when its update fails. Native checks and complete hunk-level review of 83 historically divergent shared files remain outstanding. Application metadata is 0.3.117; the distribution remains **0.12.0 DRAFT**, not approved or published.
+
 ## 2026-11-12 — inherited tool activity, thumbnail and image-viewer features
 
 Source [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) (tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, app **0.3.116**) adds readable tool-call summaries for command/file/search/MCP activity, failure and destructive-action indicators, grouped cards, and thumbnails for previously viewed or generated images. The new local tool_image Rust command restricts access to images named by the same task's tool records, rejects network paths and symlinks, checks task/workspace ownership and caps image size. These are inherited upstream capabilities.

@@ -1,5 +1,11 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — inherited 0.3.117 error-dismissal limits and acceptance
+
+The [upstream 0.3.117 release note](../../../releases/0.3.117.md) states that dismissing a local saved error becomes permanent after the five-second Undo window, while dismissal for a remote-computer thread remains local and lasts only until restart. These are inherited documented behaviors, not independently reproduced Extended bugs. The upstream report also notes that browser coverage was targeted rather than a verified final full-suite pass and that a final automated review could not run.
+
+Pinned source `9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4` (tree `597285f6e291294cd230c4f09befa578fa87bd54`) and all 90 source-changed paths are staged; zero upstream paths are missing. Static inventory still shows 83 custom shared paths (including Extended-preserved schema v37 and Connect master gating). Verify actual SQLite persistence, error ID scope, Undo/dismissibility, remote mirror behavior, accessible banners, bot/Connect/Settings On/Off and external integrations. No local Node, browser, Rust, Clippy, Expo or security audits were executed; published-SHA CI and native acceptance require separate confirmation. Extended **0.12.0 DRAFT** is unapproved.
+
 ## 2026-11-12 — upstream tool-row limitations and outstanding acceptance
 
 The [upstream 0.3.116](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) image thumbnail feature depends on image paths recorded by a task's own tools and literal script output paths. Images created through piped script input may not be recognized; compound-command descriptions can be heuristic. Source-side authorization rules reject network paths and symlinks and impose size limits; those safeguards were imported but not independently security-tested on a packaged application. No new vulnerability or feature regression is claimed without reproduction.

@@ -1,5 +1,11 @@
 # PandaCode Extended documentation
 
+## 2026-11-12 — PandaCode 0.3.117 error visibility parity
+
+Pinned fork [`9648d1c4c9e6`](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4), tree `597285f6e291294cd230c4f09befa578fa87bd54`, declares app **0.3.117**. All 90 source-changed paths since 0.3.116 were integrated: 79 byte/mode-exact files and 11 Extended-aware patch reconciliations. Full recursive inventory: 1,971 upstream files, 2,029 Extended files, 1,888 shared identical, 83 shared customized, 58 Extended-only, **zero missing or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**.
+
+Inherited upstream behavior groups repeated errors, permits dismiss/undo, collapses long errors, and surfaces errors in dialogs, notifications, the launcher, and remote settings. Source release notes remain byte-exact. The two semantic overlap resolutions preserve Extended's schema version 37 and Connect master switch while integrating upstream error handling. Previous Extended `84f9f754` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43225357816) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43225377880) succeeded; the newly published SHA must be checked separately. Native On/Off and external integration parity are not established.
+
 ## 2026-11-12 — upstream 0.3.116 tool activity parity
 
 Fork [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819), tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, declares application **0.3.116**. Against upstream 0.3.115, 86 source paths changed (55 added, 31 modified): 78 source-exact copies and eight non-overlapping three-way adaptations to existing Extended code and dependency manifests. The staged inventory contains 1,960 upstream blobs, 1,879 identical shared files, 81 customized shared files, 58 Extended-only files, **zero upstream files missing**, and no mode differences. Original [0.3.116 notes](../../releases/0.3.116.md) remain byte-exact. The planned Extended distribution remains **0.12.0 DRAFT**, independent of upstream. CI for the eventual published SHA and native integration acceptance are not yet verified.

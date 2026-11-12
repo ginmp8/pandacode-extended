@@ -270,3 +270,23 @@ provider call already held in memory by a running serve process is not forcibly
 terminated; its late completion is denied by the native state and mandate
 checks. These commands do not create, retry, or resume tasks, and authenticated
 event intake remains unavailable.
+
+### Emergency Team disable (local operator)
+
+```sh
+pandacode serve --disable-orchestration <orchestration-id> <expected-policy-revision>
+```
+
+This one-shot local command uses the desktop's native revision-guarded policy
+transition against the existing SQLite database. It atomically turns the Team
+Off, revokes nonterminal Ticket mandates, interrupts active assignments,
+releases native leases and preserves audit/history. It does **not** open
+`Store::open`, run startup recovery, start a provider, re-enable a Team, or
+create an external network management endpoint. A stale revision, missing Team
+or incompatible schema produces an error without changing that Team.
+
+A running provider may still have an in-memory call; the CLI cannot forcibly
+terminate it, but subsequent SuperAgent-authorized tool admissions and late
+callbacks are denied by native mandate/state checks. This is not process
+termination or completed external-effect reconciliation. Use the inspection
+commands above to verify the final native state.

@@ -35,6 +35,7 @@ enum Command {
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
+    DisableOrchestration { orchestration_id: String, expected_revision: i64 },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -101,9 +102,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            let ticket_action = matches!(&command,
-                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. });
-            if ticket_action {
+            let native_action = matches!(&command,
+                Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+                | Command::StopTicket { .. } | Command::DisableOrchestration { .. });
+            if native_action {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
                     .and_then(|dir| {
@@ -115,13 +117,17 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
                             Command::StopTicket { ticket_id } =>
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            Command::DisableOrchestration { orchestration_id, expected_revision } =>
+                                crate::superagent::headless_disable_orchestration(
+                                    &database, orchestration_id, *expected_revision,
+                                ),
                             _ => unreachable!(),
                         }
                     });
                 match result {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
-                        eprintln!("SuperAgent Ticket command failed: {error}");
+                        eprintln!("SuperAgent native command failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -148,7 +154,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
-        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. } => {
+        | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+        | Command::StopTicket { .. } | Command::DisableOrchestration { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }
@@ -570,6 +577,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--disable-orchestration" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--disable-orchestration needs an orchestration ID.\n\n{}", help()))?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--disable-orchestration needs an expected revision.\n\n{}", help()))?;
+                command = Command::DisableOrchestration {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--stop-ticket" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
@@ -636,6 +656,15 @@ fn validate_ticket_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_orchestration_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Provide a bounded alphanumeric orchestration ID.".into());
+    }
+    Ok(())
+}
+
 fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     let revision = value.parse::<i64>()
         .map_err(|_| "Provide a nonnegative expected Ticket revision.".to_string())?;
@@ -648,7 +677,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -679,7 +708,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
-  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit."
+  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
+  --disable-orchestration <id> <revision>
+                         Turn a Team Off and atomically revoke its mandates;
+                         live provider calls may finish but native authority stays revoked."
         .into()
 }
 
@@ -744,6 +776,13 @@ mod tests {
         assert!(parsed("--reject-ticket ticket_123 1 --sign-out").is_err());
         assert!(parsed("--stop-ticket").is_err());
         assert!(parsed("--stop-ticket ticket_123 --list-tickets").is_err());
+        assert_eq!(parsed("--disable-orchestration team_123 3"), Ok(Command::DisableOrchestration {
+            orchestration_id: "team_123".into(), expected_revision: 3,
+        }));
+        assert!(parsed("--disable-orchestration team_123").is_err());
+        assert!(parsed("--disable-orchestration team_123 nope").is_err());
+        assert!(parsed("--disable-orchestration ../team 3").is_err());
+        assert!(parsed("--disable-orchestration team_123 3 --stop-ticket ticket_123").is_err());
         assert!(parsed("--accept-ticket ticket_123 1 --import-bots bots.json").is_err());
         assert!(parsed("--inspect-ticket").is_err());
         assert!(parsed("--inspect-ticket ../outside").is_err());
@@ -793,6 +832,7 @@ mod tests {
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",
+            "--disable-orchestration",
             "--sync-bots",
             "xvfb-run",
         ] {

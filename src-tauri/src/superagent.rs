@@ -631,6 +631,21 @@ pub(crate) fn headless_reject_ticket(
     headless_ticket_status(&reject(&store, ticket_id, expected_revision, reason)?)
 }
 
+/// Local operator emergency disable. Reuse the desktop's native CAS,
+/// audit, lease settlement and revocation without invoking restart recovery
+/// against a live host. Never dispatch work or implicitly re-enable a Team.
+pub(crate) fn headless_disable_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = change_enabled(&store, orchestration_id, expected_revision, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.id,
+        "enabled": updated.enabled,
+        "policyRevision": updated.policy_revision,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local CLI Stop revokes the mandate in the shared database. A
 /// running serve process may still have a provider call in memory; its late
 /// callback is denied by the existing state/mandate checks in on_run_finished.
@@ -2982,6 +2997,54 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn headless_disable_revokes_only_its_team_without_live_store_recovery() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let unrelated = create_configuration(&store, NewOrchestration {
+            name: "Other Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Active, private work", "headless-disable", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(headless_disable_orchestration(
+            &store.path, &cfg.id, cfg.policy_revision + 1,
+        ).is_err(), "stale revision must reject the entire policy mutation");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+
+        let outcome: serde_json::Value = serde_json::from_str(
+            &headless_disable_orchestration(&store.path, &cfg.id, cfg.policy_revision).unwrap(),
+        ).unwrap();
+        assert_eq!(outcome["orchestrationId"], cfg.id);
+        assert_eq!(outcome["enabled"], false);
+        assert_eq!(outcome["policyRevision"], cfg.policy_revision + 1);
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert!(!configuration(&store, &unrelated.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &unrelated.id).unwrap().policy_revision,
+            unrelated.policy_revision, "unrelated Team must be untouched");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Late provider success").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(headless_disable_orchestration(
+            &store.path, &cfg.id, cfg.policy_revision,
+        ).is_err(), "replayed old revision cannot change policy");
+        let repeated: serde_json::Value = serde_json::from_str(
+            &headless_disable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 1).unwrap(),
+        ).unwrap();
+        assert_eq!(repeated["policyRevision"], cfg.policy_revision + 1,
+            "idempotent Off does not create a spurious revision");
+        assert_eq!(history(&store, &ticket.id, 10).unwrap().iter()
+            .filter(|entry| entry.kind == "orchestration_disabled").count(), 1);
     }
 
     #[test]

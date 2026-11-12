@@ -13,6 +13,8 @@ interface Config {
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
+interface DemandIndex { id: string; orchestrationId: string; objective: string;
+  state: string; revision: number; updatedAt: number }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface Mandate {
@@ -43,6 +45,7 @@ interface SourceDecision {
 
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
+  let allDemands: DemandIndex[] = [], allDemandsLoaded = false;
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
   let preview: Preview | null = null, inspected: unknown = null;
@@ -190,6 +193,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               safe(d.subjectKey) + ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
+    const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
+      '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
+      'Refresh all Teams</button></header>' +
+      '<p>Read-only index of up to 200 most recently updated native Tickets. ' +
+      'Open a demand to inspect and act through its original Team.</p>' +
+      (!allDemandsLoaded ? '<p role="status">Load all Teams to see cross-Team demands.</p>' :
+        '<ul class="sa-tickets">' +
+        (allDemands.map(demand => '<li><div><strong>' + safe(demand.objective) +
+          '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
+            'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
+          demand.revision + ' · Updated ' + safe(activityTime(demand.updatedAt)) +
+          '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
+          '">Open demand</button></li>').join('') ||
+          '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>') +
+      '</section>';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
@@ -317,7 +335,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           choices + '</select></label></div><button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
         : '') +
-      (workspaceView === 'runs' ? (active || '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
+      (workspaceView === 'runs' ? globalDemands + (active ||
+        '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
       (workspaceView === 'review' ? reviewPanel : '') +
       (workspaceView === 'sources' ? (chosen ? '<section class="sa-pane">' + sourcePanel + '</section>'
         : '<section class="sa-pane"><p>Select a Team to configure its Off/Observe GitHub sources.</p></section>') : '') +
@@ -356,6 +375,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   }
   async function reload(): Promise<void> {
     loading = true;
+    // Mutations invalidate the cross-Team index. Never show stale global
+    // status as if the native Tickets had already been re-read.
+    allDemands = []; allDemandsLoaded = false;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
     if (!busy) render();
@@ -452,6 +474,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-all-demands')) {
+      void work(async () => {
+        allDemands = [];
+        allDemandsLoaded = false;
+        const loaded = await call<DemandIndex[]>('superagent_all_demands',{limit:200});
+        allDemands = loaded;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (target.dataset.saOpenDemand) {
+      const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand);
+      if (!demand || !presets.some(item => item.id === demand.orchestrationId)) return;
+      selected = demand.orchestrationId;
+      tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = []; roleRoster = null;
+      sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+      void work(async () => {
+        tickets = await call<Ticket[]>('superagent_tickets',{
+          orchestrationId:demand.orchestrationId,limit:50,
+        });
+        // The global index can include an older Ticket outside the Team's
+        // latest-50 page. Resolve it through the native immutable Ticket
+        // identity and verify its Team before exposing any approval controls.
+        if (!tickets.some(item => item.id === demand.id)) {
+          const detail = await call<TicketDetails>('superagent_snapshot',{
+            ticketId:demand.id,limit:50,
+          });
+          if (detail.ticket.orchestrationId !== demand.orchestrationId) {
+            throw new Error('Native demand ownership changed; reload the index.');
+          }
+          tickets = [detail.ticket,...tickets];
+        }
+        inspectedTicket = demand.id;
+        await refreshTicketDetails();
+      });
       return;
     }
     if (target.hasAttribute('data-sa-role-load')) {

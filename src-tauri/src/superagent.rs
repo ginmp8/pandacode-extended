@@ -421,6 +421,36 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Bounded cross-Team demand index for the trusted local workspace. The
+/// projection intentionally excludes worker evidence, actor, request keys,
+/// mandates and session IDs; detailed access stays within native Ticket reads.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemandIndex {
+    pub id: String,
+    pub orchestration_id: String,
+    pub objective: String,
+    pub state: String,
+    pub revision: i64,
+    pub updated_at: i64,
+}
+
+fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+    if !(1..=200).contains(&limit) {
+        return Err("Demand index page size must be between 1 and 200.".into());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
+         FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([limit], |row| Ok(DemandIndex {
+        id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
+        state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 /// Immutable native assignment history, including completed and failed attempts.
 /// Never infer task success or authorization from an assignment's terminal state.
 #[derive(Debug, Clone, Serialize)]
@@ -1710,6 +1740,15 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 }
 
 #[tauri::command]
+pub async fn superagent_all_demands(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
+) -> Result<Vec<DemandIndex>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_all_demands(&store, limit.unwrap_or(200))
+}
+
+#[tauri::command]
 pub async fn superagent_assignments(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
 ) -> Result<Vec<Assignment>> {
@@ -2139,6 +2178,48 @@ mod tests {
         assert!(read_only_policy(&store, &sid).is_err());
         assert!(!on_run_finished(&store, &sid, true, "late worker success").unwrap_or(false)
             || get_ticket(&store, &ticket.id).unwrap().state != "waiting_approval");
+    }
+
+    #[test]
+    fn native_cross_team_demand_index_is_bounded_and_excludes_private_evidence() {
+        let mut store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Second reusable Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&second.id],
+        ).unwrap();
+        let (one, started) = admit(
+            &mut store, &first.id, "First demand", "first-demand", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &one.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "PRIVATE WORKER EVIDENCE").unwrap());
+        let pending = get_ticket(&store, &one.id).unwrap();
+        accept(&store, &one.id, pending.revision).unwrap();
+        let (two, started) = admit(
+            &mut store, &second.id, "Second demand", "second-demand", false,
+        ).unwrap();
+        assert!(started);
+        let all = list_all_demands(&store, 200).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|row| row.id == one.id && row.orchestration_id == first.id
+            && row.state == "completed"));
+        assert!(all.iter().any(|row| row.id == two.id && row.orchestration_id == second.id
+            && row.state == "running"));
+        assert_eq!(list_all_demands(&store, 1).unwrap().len(), 1);
+        assert!(list_all_demands(&store, 0).is_err());
+        assert!(list_all_demands(&store, 201).is_err());
+        assert_eq!(list_tickets(&store, &first.id, 50).unwrap().len(), 1);
+        let serialized = serde_json::to_string(&all).unwrap();
+        assert!(!serialized.contains("PRIVATE WORKER EVIDENCE"));
+        assert!(!serialized.contains("first-demand"));
+        assert!(!serialized.contains("authorizationId"));
+        assert!(!serialized.contains("sessionId"));
     }
 
     #[test]

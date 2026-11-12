@@ -541,3 +541,58 @@ test('multi-member Team Builder stores native role revisions without launching u
   expect(calls.filter(value=>value==='superagent_roster_update')).toHaveLength(1);
   expect(calls.filter(value=>value==='superagent_submit' || value==='superagent_set_enabled')).toHaveLength(0);
 });
+
+
+test('cross-Team Demands index is native-backed and opens only the original Team Ticket',async({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-cross-team-runs';document.body.appendChild(host);
+    const calls:string[]=[];(window as unknown as {saCrossCalls:string[]}).saCrossCalls=calls;
+    const configs=[
+      {id:'team-a',name:'Economy',coordinatorBotId:'router',workerBotId:'worker',
+        enabled:true,policyRevision:2},
+      {id:'team-b',name:'Performance',coordinatorBotId:'router',workerBotId:'worker',
+        enabled:true,policyRevision:3},
+    ];
+    const run={id:'demand-b',orchestrationId:'team-b',objective:'Inspect build logs',
+      state:'waiting_approval',revision:4,updatedAt:1794470400000,evidence:'private'};
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'router',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return configs as never;
+      if(command==='superagent_tickets')return [] as never; // older than local Team page
+      if(command==='superagent_all_demands')return [{
+        id:run.id,orchestrationId:run.orchestrationId,objective:run.objective,
+        state:run.state,revision:run.revision,updatedAt:run.updatedAt,
+      }] as never;
+      if(command==='superagent_snapshot') {
+        if(args?.ticketId!==run.id)throw Error('Cross-Team Ticket leak');
+        return {ticket:run,mandate:{actor:'local-user',authorizationId:'native',
+          projectId:'project-b',policyRevision:3,expiresAt:1800000000000,
+          revoked:false,allowedTools:[],allowedSideEffects:false},
+          assignments:[],activity:[],council:null} as never;
+      }
+      if(command==='superagent_source_thread_links')return [] as never;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-cross-team-runs');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await global.getByRole('button',{name:'Refresh all Teams'}).click();
+  await expect(global).toContainText('Performance');
+  await expect(global).toContainText('Inspect build logs');
+  await global.getByRole('button',{name:'Open demand'}).click();
+  await expect(host.getByRole('region',{name:'Selected orchestration'}))
+    .toContainText('Performance');
+  await expect(host.getByRole('region',{name:'Ticket evidence'}))
+    .toContainText('Ticket ID');
+  const calls=await page.evaluate(()=>(window as unknown as {saCrossCalls:string[]}).saCrossCalls);
+  expect(calls.filter(value=>value==='superagent_all_demands')).toHaveLength(1);
+  expect(calls.filter(value=>value==='superagent_accept'||value==='superagent_submit')).toHaveLength(0);
+});

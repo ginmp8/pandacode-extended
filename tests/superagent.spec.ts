@@ -711,3 +711,57 @@ test('native-backed attempt inspector shows recorded sessions and run budgets wi
   await inspector.getByRole('button',{name:'Close attempt'}).click();
   await expect(inspector).toHaveCount(0);
 });
+
+
+test('native effect receipt inspection is lazy, task-scoped and cannot dispatch', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-effect-inspector-test'; document.body.appendChild(host);
+    const seen:string[] = [];
+    mountSuperagent(host, async command => {
+      seen.push(command);
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Recovery Team',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:2
+      }] as never;
+      if(command==='superagent_tickets') return [{
+        id:'ticket',orchestrationId:'team',objective:'Inspect reconciliation',
+        state:'interrupted',revision:7,evidence:null
+      }] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket:{id:'ticket',orchestrationId:'team',objective:'Inspect reconciliation',
+          state:'interrupted',revision:7,evidence:null},
+        mandate:{actor:'operator',authorizationId:'manual',policyRevision:2,
+          projectId:'project',expiresAt:1800000000000,revoked:true,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[]
+      } as never;
+      if(command==='superagent_effect_receipts') return [
+        {effectKey:'github:issue:42',payloadSha256:'f'.repeat(64),
+          state:'uncertain',createdAt:1794400000000,updatedAt:1794400000100}
+      ] as never;
+      throw Error('Unexpected native command: '+command);
+    });
+    (window as unknown as {saEffectCalls:()=>string[]}).saEffectCalls=()=>seen;
+  });
+  const host=page.locator('#sa-effect-inspector-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const region=host.getByRole('region',{name:'Native effect receipts'});
+  await expect(region).toContainText('Receipts not loaded.');
+  await region.getByRole('button',{name:'Inspect receipts'}).click();
+  await expect(region).toContainText('github:issue:42');
+  await expect(region).toContainText('uncertain');
+  await expect(region).toContainText('independent provider reconciliation');
+  await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
+  const seen=await page.evaluate(() =>
+    (window as unknown as {saEffectCalls:()=>string[]}).saEffectCalls());
+  expect(seen.filter(value=>value==='superagent_effect_receipts')).toHaveLength(1);
+  expect(seen.some(value=>/submit|dispatch|accept|reserve|acknowledge/.test(value))).toBe(false);
+});

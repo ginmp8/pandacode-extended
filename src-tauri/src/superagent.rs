@@ -652,6 +652,24 @@ pub(crate) fn inspect_headless_team_readiness(
     })).map_err(|e| e.to_string())
 }
 
+/// Redacted to native receipt metadata; no external provider call, replay,
+/// model text or recovery mutation. Inspecting a live serve database cannot
+/// open Store::open because startup recovery interrupts active assignments.
+pub(crate) fn inspect_headless_effect_receipts(
+    database_path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let receipts = effects::receipt_history(&store, ticket_id, 100)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "receipts": receipts,
+        "totalUnresolved": effects::unresolved_count(&store, ticket_id)?,
+        "observationalOnly": true,
+        "requiresIndependentRemoteReconciliation": true,
+        "replayed": false
+    })).map_err(|e| e.to_string())
+}
+
 /// Bounded local task index for a one-shot CLI. Keep this read-only so it can
 /// run beside a healthy serve process without invoking Store::open recovery.
 /// Ticket objectives, evidence, assignment results and mandate identities are
@@ -1886,6 +1904,16 @@ pub async fn superagent_activity(window: tauri::WebviewWindow,
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     history(&store, &ticket_id, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+pub async fn superagent_effect_receipts(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, limit: Option<i64>,
+) -> Result<Vec<effects::EffectReceiptView>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    effects::receipt_history(&store, &ticket_id, limit.unwrap_or(50))
 }
 
 #[tauri::command]

@@ -23,6 +23,10 @@ interface Mandate {
 }
 interface Assignment { id: string; botId: string; sessionId: string; state: string;
   attempt: number; createdAt?: number; updatedAt?: number }
+interface EffectReceipt {
+  effectKey: string; payloadSha256: string; state: 'pending' | 'uncertain' | 'applied';
+  createdAt: number; updatedAt: number;
+}
 interface AssignmentInsight {
   assignmentId: string; currentAssignment: boolean; hasResult: boolean;
   mandateRevoked: boolean; runBudgetExpired: boolean; remainingRunBudgetMs: number | null;
@@ -73,6 +77,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let activityMode: 'all' | 'compact' | 'json' = 'all';
   let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
+  let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let roleRoster: TeamRoster | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -169,7 +174,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           safe(item.id) + '" aria-expanded="' + (item.id === inspectedAssignmentId) +
           '">Inspect attempt ' + item.attempt + '</button></li>').join('') ||
           '<li>No worker assigned.</li>') +
-        '</ul>' + attemptDetails + '<h5>Native activity</h5>' +
+        '</ul>' + attemptDetails +
+        '<section class="sa-effect-receipts" role="region" aria-label="Native effect receipts">' +
+        '<h5>External effect receipts</h5><p>Read-only native identity and state. ' +
+        'Pending may still be running; uncertain requires independent provider reconciliation. ' +
+        'Neither state permits replay, approval or assumed success.</p>' +
+        '<button type="button" data-sa-load-effect-receipts>Inspect receipts</button>' +
+        (effectReceiptsLoaded ? '<ol>' +
+          (effectReceipts.map(item => '<li><code>' + safe(item.effectKey) + '</code> · ' +
+            safe(item.state) + ' · SHA-256 <code>' + safe(item.payloadSha256) +
+            '</code> · Updated ' + safe(activityTime(item.updatedAt)) + '</li>').join('') ||
+            '<li>No native external effect receipts for this Ticket.</li>') + '</ol>' :
+            '<p>Receipts not loaded.</p>') + '</section>' +
+        '<h5>Native activity</h5>' +
         '<nav class="sa-activity-tabs" aria-label="Activity display">' +
         (['all','compact','json'] as const).map(mode =>
           '<button type="button" data-sa-activity-mode="' + mode + '" aria-pressed="' +
@@ -464,6 +481,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
+    effectReceipts = []; effectReceiptsLoaded = false;
     const [snapshot, links] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
@@ -755,6 +773,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
+    if (target.hasAttribute('data-sa-load-effect-receipts')) {
+      const ticketId = inspectedTicket;
+      if (!ticketId || !ticketDetails || ticketDetails.ticket.id !== ticketId) return;
+      void work(async () => {
+        const nativeReceipts = await call<EffectReceipt[]>('superagent_effect_receipts',
+          {ticketId, limit:50});
+        if (inspectedTicket !== ticketId) return;
+        effectReceipts = nativeReceipts; effectReceiptsLoaded = true;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-close-details')) {
       inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
       render(); return;

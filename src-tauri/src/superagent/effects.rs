@@ -3,6 +3,7 @@
 use crate::{storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
+use serde::Serialize;
 
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_effect_receipts (
@@ -111,6 +112,48 @@ pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->
     Ok(())
 }
 
+/// A bounded, task-owned operational projection of immutable effect identities.
+/// This never performs a provider lookup, retries an effect, or authorizes a
+/// pending receipt. Only the native task owner or local headless operator reads
+/// it; external payload bytes and any provider responses are never returned.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectReceiptView {
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub(crate) fn receipt_history(
+    store: &Store, ticket_id: &str, limit: i64,
+) -> Result<Vec<EffectReceiptView>> {
+    if !(1..=100).contains(&limit) {
+        return Err("Effect receipt page size must be between 1 and 100.".into());
+    }
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("SuperAgent Ticket not found.".into());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT effect_key,payload_sha256,state,created_at,updated_at
+         FROM sa_effect_receipts WHERE ticket_id=?1
+         ORDER BY created_at DESC,effect_key DESC LIMIT ?2",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, limit], |row| Ok(EffectReceiptView {
+        effect_key: row.get(0)?,
+        payload_sha256: row.get(1)?,
+        state: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string().into())
+}
+
 pub(crate) fn unresolved_count(store:&Store,ticket_id:&str)->Result<i64>{
     store.db.query_row(
         "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state!='applied'",
@@ -141,6 +184,39 @@ mod tests{
         let (ticket,started)=superagent::admit(&mut store,&cfg.id,"Safe work","receipt-fixture",false).unwrap();
         assert!(started);
         (store,ticket.id)
+    }
+
+    #[test]
+    fn receipt_history_is_bounded_task_owned_and_survives_restart() {
+        let (store, id) = fixture();
+        assert!(receipt_history(&store, &id, 0).is_err());
+        assert!(receipt_history(&store, &id, 101).is_err());
+        assert!(receipt_history(&store, "missing", 10).is_err());
+        assert!(receipt_history(&store, &id, 10).unwrap().is_empty());
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store, &id, "github:issue:8", b"secret body").unwrap(), Reservation::Reserved);
+        let first = receipt_history(&store, &id, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].effect_key, "github:issue:8");
+        assert_eq!(first[0].state, "pending");
+        let json = serde_json::to_string(&first).unwrap();
+        assert!(!json.contains("secret body"));
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 1);
+        let path = store.path.clone();
+        drop(store);
+        // Read-only headless inspection must not change an in-flight receipt.
+        let read = Store::open_read_only(&path).unwrap();
+        assert_eq!(receipt_history(&read, &id, 10).unwrap()[0].state, "pending");
+        drop(read);
+        let recovered = Store::open(&path).unwrap();
+        assert_eq!(receipt_history(&recovered, &id, 10).unwrap()[0].state, "uncertain");
+        assert_eq!(unresolved_count(&recovered, &id).unwrap(), 1);
+        // A second task must not be able to inspect the original receipt under
+        // its own ID; unknown task IDs cannot return an empty pseudo-history.
+        assert!(receipt_history(&recovered, "not-a-task", 10).is_err());
     }
 
     #[test]

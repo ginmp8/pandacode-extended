@@ -306,3 +306,23 @@ one-shot CLI cannot observe every live in-memory provider session and cannot
 reserve a checkout. `requiresLiveAdmissionRecheck` is always true. The real
 native admission path must repeat its checks and may still reject the request.
 No objective text, private evidence or authentication credential is printed.
+
+
+### Inspecting durable external-effect receipts (read-only)
+
+`pandacode serve --inspect-ticket-effects <ticket-id>` inspects up to 100
+existing native receipt identities on the same local SQLite database without
+running restart recovery against a healthy serve process. An unknown Ticket
+or malformed ID exits nonzero. The native UI also offers **Inspect receipts**
+under a Ticket's read-only inspector; neither surface can dispatch an effect.
+
+Each entry includes an exact effect key, canonical payload SHA-256, persistent
+`pending` / `uncertain` / `applied` state, and creation/update timestamps.
+These are **local operator diagnostics**, so protect CLI output as operational
+metadata. No payload, provider response or private conversation is returned.
+`pending` may represent a live in-flight attempt; on a genuine process restart
+native recovery changes it to `uncertain` (read-only inspection does not).
+Never retry pending/uncertain receipts or mark them applied based on this
+inspection alone. Independent authoritative remote reconciliation and a
+separate explicitly authorized dispatcher are still required; this command
+is not headless admission, resume or effect-dispatch parity.

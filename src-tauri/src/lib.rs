@@ -4459,6 +4459,7 @@ pub fn run() {
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,

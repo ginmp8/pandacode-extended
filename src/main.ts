@@ -7176,6 +7176,22 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       }
       break;
     }
+    case 'channel-council-inspect': {
+      const taskId = element.dataset.sessionId;
+      if (!taskId || !state.sharedChannelId) break;
+      // Read the same task-owned native Council projection without switching channels.
+      const { createCouncilInspector } = await import('./council-inspector');
+      const dialog = modal('Council inspection',
+        '<div class="bc-council-inspector-host" role="region" aria-label="Native Council evidence"></div>',
+        'bc-council-inspector-dialog');
+      const inspector = createCouncilInspector(() =>
+        call<import('./architect-types').CouncilInspection | null>('architect_council_inspect', { sessionId: taskId }));
+      dialog.querySelector('.bc-council-inspector-host')?.append(inspector);
+      const summary = inspector.querySelector<HTMLElement>('summary');
+      summary?.focus();
+      summary?.click();
+      break;
+    }
     case 'channel-council-report': {
       const taskId = element.dataset.sessionId;
       if (!taskId) break;

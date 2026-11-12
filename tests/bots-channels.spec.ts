@@ -83,6 +83,67 @@ test.describe('shared bot channels', () => {
     await expect(restoredPanel.locator('input[name="councilReviewer"]').first()).toBeChecked();
   });
 
+
+  test('channel Council opens the shared native inspector without navigating or granting a pass', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.setViewportSize({ width: 360, height: 640 });
+    const inspection = {
+      cycleStartedAt: 1000, teamRevision: 9,
+      status: { state: 'passed', round: 1, lowest: 9.7, target: 9, stale: false },
+      verifiedPass: false, criteria: [],
+      attempts: [{
+        workerId: 'a', round: 1, lens: '<script>alert(1)</script>',
+        reviewerSource: 'direct_bot', name: 'Review', status: 'completed',
+        score: 9.7, abandoned: false, provider: 'codex', model: 'native',
+        attempt: 1, createdAt: 1000, startedAt: 1001, lastUpdatedAt: 1020,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+      }],
+    };
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
+        'if (command === "architect_council_inspect" && args.sessionId === "channel-cycle-task") return ' +
+        JSON.stringify(inspection) + '; switch (command) {');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.evaluate(async () => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = sharedChannelThreadHtml({
+        id: 'channel-one', name: 'launch', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'delivery-one', kind: 'assigned', authorBotId: null,
+          text: '', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId: 'cycle-one', sessionId: 'channel-cycle-task', state: 'Passed',
+            round: 1, target: 9, lowest: 9.7, artifactRevision: 'artifact',
+            reviewers: [],
+          },
+        }],
+      }, []);
+      const assignment = wrapper.querySelector('.bc-assigned');
+      const history = document.querySelector('.bc-history');
+      if (!assignment || !history) throw new Error('Channel fixture is missing');
+      history.append(assignment);
+    });
+    await expect(page.getByRole('button', { name: 'View Council report' })).toBeVisible();
+    await page.getByRole('button', { name: 'Inspect Council evidence' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Council inspection' });
+    await expect(dialog).toBeVisible();
+    const details = dialog.locator('.council-inspection');
+    await expect(details).toHaveAttribute('open', '');
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('Tokens unknown', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('<script>alert(1)</script>', { exact: false })).toBeVisible();
+    await expect(dialog.locator('script')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('textbox', { name: 'Message channel' })).toBeVisible();
+  });
+
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
     await page.goto('/?bots=sample');
     const html = await page.evaluate(async () => {

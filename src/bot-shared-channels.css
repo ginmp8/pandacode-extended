@@ -129,3 +129,12 @@
 .bots-group-channels .channel-row .bc-face-count { width: 21px; height: 21px; font-size: 8px; }
 .bots-group-channels .bots-group-label { margin-top: 13px; }
 .bc-earlier { flex: none; align-self: center; }
+
+/* Channel delivery evidence uses the same native inspector as direct chat. */
+.bc-council-inspector-host{width:min(640px,calc(100dvw - 44px));min-width:0;max-height:calc(100dvh - 160px);overflow:auto;overflow-wrap:anywhere}
+.bc-council-inspector-host .council-inspection{display:block;max-width:100%;font-size:var(--ds-text-ui)}
+.bc-council-inspector-host .council-inspection summary{cursor:pointer;font-weight:var(--weight-medium)}
+.bc-council-inspector-host .council-inspection-body{min-width:0;overflow-wrap:anywhere;line-height:1.5}
+.bc-council-inspector-host .council-inspection-body li{margin:8px 0}
+.bc-council-inspector-host .council-inspection-body small{display:block;color:var(--muted)}
+.bc-council-inspector-host .council-inspection :focus-visible{outline:2px solid var(--focus);outline-offset:2px}

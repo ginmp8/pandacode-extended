@@ -1588,6 +1588,7 @@ fn dispatch_tool(child: bool) -> Value {
         item["replaces"] = json!({"type":"string","description":"Replace failed worker or failed check; \"auto\" tries other/stronger models at most twice; retains changes."});
         item["replaceReason"] = json!({"type":"string","description":"Failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
+        item["councilReviewerSource"] = json!({"type":"string","enum":["automatic","direct_bot"],"description":"Source for mixed A+D Council seats: automatic native reviewer or a selected direct bot; does not authorize extra sources."});
         "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" or omitted with routing on, Router picks models; select explicit models only when asked. files are repo-relative; [] reserves checkout. Disjoint writers/readOnly can overlap; dependsOn uses returned IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
@@ -1769,6 +1770,9 @@ struct Assignment {
     /// Makes this a read-only Council reviewer (the lead's dispatch only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     council_lens: Option<String>,
+    /// Required for mixed root Councils; not an authority grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    council_reviewer_source: Option<council::CouncilReviewerSource>,
 }
 /// Canonicalize only equivalent relative spellings before scope validation and reservation.
 fn normalize_file_scopes(files: &mut [String]) {
@@ -2145,7 +2149,10 @@ fn dispatch_as(
                 if !has_files {
                     return Err("Supply an explicit files array for every new assignment.".into());
                 }
-                if me.is_some() && assignment.council_lens.is_some() {
+                if assignment.council_reviewer_source.is_some() && assignment.council_lens.is_none() {
+                    return Err("councilReviewerSource requires a Council review lens.".into());
+                }
+                if me.is_some() && (assignment.council_lens.is_some() || assignment.council_reviewer_source.is_some()) {
                     return Err("Only the lead convenes a Council.".into());
                 }
                 text(&assignment.name, "Name")?;
@@ -2182,15 +2189,25 @@ fn dispatch_as(
                     }
                 }
                 let seat = council::seat_for(&team, assignment.council_lens.as_deref(), assignment.replaces.as_deref())?;
+                let reviewer_source = seat.as_ref().map(|seat| council::reviewer_source_for(
+                    &team, seat, assignment.replaces.as_deref(), assignment.council_reviewer_source,
+                )).transpose()?;
                 if let Some(seat) = &seat {
                     overtaken.extend(council::overtake(&mut team, seat.round));
                 }
                 // While routing is on, an assignment that names no model is routed too (`routes` has its key).
                 // The request above keeps the name as sent, so a retry still matches it.
                 let shown: String = assignment.name.chars().take(NAME_CHARS).collect();
-                let selected_bot = if let Some(seat) = &seat {
-                    bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
-                } else { None };
+                let selected_bot = match (seat.as_ref(), reviewer_source) {
+                    (Some(seat), Some(council::CouncilReviewerSource::DirectBot)) =>
+                        bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?,
+                    (Some(seat), Some(council::CouncilReviewerSource::Automatic)) => {
+                        // Freeze selected bot identities even if the automatic seat starts first.
+                        bot_reviewers::freeze_mixed_roster(&store, &team, seat.round, library)?;
+                        None
+                    },
+                    _ => None,
+                };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
                 let profile = if let Some(bot) = &selected_bot {
                     bot.profile.clone()
@@ -2238,7 +2255,7 @@ fn dispatch_as(
                     if let Some(bot) = &selected_bot {
                         binding.reviewer_bot_id = Some(bot.id.clone());
                         binding.roster_bot_ids = bot.roster_bot_ids.clone();
-                        binding.required_reviewers = Some(bot.roster_bot_ids.len());
+                        binding.required_reviewers = team.config.council.as_ref().map(|config| config.needed());
                         binding.snapshot.bot_context = Some(bot.context.clone());
                         binding.snapshot.tool_policy = bot.tool_policy.clone();
                         binding.snapshot.skills = bot.skills.clone();

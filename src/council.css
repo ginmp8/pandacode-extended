@@ -22,6 +22,12 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-panel-head label{font-size:var(--ds-text-ui);font-weight:var(--weight-medium);color:var(--text);cursor:pointer}
 .council-panel p{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4}
 .council-panel #council-about{margin-top:-6px}
+/* Keep the unchanged 420px composer preset compact with optional collapsed sections. */
+@media (max-height:480px){
+  .council-panel:not([data-compact]){gap:5px;padding-block:6px}
+  .council-panel:not([data-compact]) .council-field{gap:2px}
+  .council-panel:not([data-compact]) #council-about{line-height:1.2}
+}
 .council-field{display:grid;gap:5px}
 .council-field>span{color:var(--text);font-weight:var(--weight-medium);font-size:var(--ds-text-meta)}
 .council-lowest{font-size:inherit;color:var(--muted)}

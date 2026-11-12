@@ -467,7 +467,10 @@ impl ReviewerBinding {
             || self.reviewer_bot_id.is_some() != self.snapshot.bot_context.is_some()
             || self.reviewer_bot_id.as_deref().is_some_and(|id| !super::valid_id(id))
             || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))
-            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(self.roster_bot_ids.len())
+            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(
+                team.config.council.as_ref()
+                    .filter(|config| config.automatic_reviewers > 0)
+                    .map_or(self.roster_bot_ids.len(), |config| config.needed()))
                 || self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id))))
         {
             return Err("reviewer_session_mismatch: immutable reviewer binding differs from scheduled worker.".into());

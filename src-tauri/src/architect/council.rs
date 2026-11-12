@@ -68,6 +68,16 @@ fn architect_criteria(source: &CouncilCriteriaSource) -> bool {
 fn required_criterion() -> bool {
     true
 }
+/// Explicit source identity for an admitted top-level native Council reviewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CouncilReviewerSource {
+    Automatic,
+    DirectBot,
+}
+fn no_extra_reviewers(count: &usize) -> bool {
+    *count == 0
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CouncilCriterion {
@@ -92,6 +102,9 @@ pub struct CouncilConfig {
     /// Persistent bot IDs for task-scoped selected reviewers; empty keeps native Council behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_bot_ids: Vec<String>,
+    /// Additive automatic top-level seats alongside explicit selected direct bots (M3).
+    #[serde(default, skip_serializing_if = "no_extra_reviewers")]
+    pub automatic_reviewers: usize,
     /// Absent preserves original Architect-selected or selected-bot Council behavior.
     #[serde(default, skip_serializing_if = "architect_criteria")]
     pub criteria_source: CouncilCriteriaSource,
@@ -113,7 +126,7 @@ pub struct CouncilConfig {
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), automatic_reviewers: 0, criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
     }
 }
 impl CouncilConfig {
@@ -124,8 +137,16 @@ impl CouncilConfig {
         if !(1..=MAX_ROUNDS).contains(&self.max_rounds) {
             return Err(format!("Council takes 1 to {MAX_ROUNDS} rounds."));
         }
-        if self.reviewers > MAX_REVIEWERS {
+        if self.reviewers > MAX_REVIEWERS || self.automatic_reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
+        }
+        if self.automatic_reviewers > 0 {
+            if self.reviewer_bot_ids.is_empty() || self.reviewers != 0 {
+                return Err("Additional automatic Council seats require selected direct bots and reviewers=0.".into());
+            }
+            if self.reviewer_bot_ids.len() + self.automatic_reviewers > MAX_REVIEWERS {
+                return Err("The combined Council reviewer sources exceed eight top-level seats.".into());
+            }
         }
         if self.criteria.len() > MAX_REVIEWERS {
             return Err("Council criteria exceed the eight-seat limit.".into());
@@ -190,8 +211,9 @@ impl CouncilConfig {
         }
         if let Some(followup) = &self.post_acceptance_issue { followup.validate()?; }
         if !self.reviewer_bot_ids.is_empty() {
-            if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {
-                return Err(format!("Select {MIN_REVIEWERS} to {MAX_REVIEWERS} distinct Council reviewer bots."));
+            let minimum = if self.automatic_reviewers > 0 { 1 } else { MIN_REVIEWERS };
+            if !(minimum..=MAX_REVIEWERS).contains(&self.reviewer_bot_ids.len()) {
+                return Err(format!("Select {minimum} to {MAX_REVIEWERS} distinct Council reviewer bots."));
             }
             let mut ids = std::collections::HashSet::new();
             if self.reviewer_bot_ids.iter().any(|id| !super::valid_id(id) || !ids.insert(id)) {
@@ -202,7 +224,7 @@ impl CouncilConfig {
     }
     pub(super) fn needed(&self) -> usize {
         if !self.reviewer_bot_ids.is_empty() {
-            self.reviewer_bot_ids.len()
+            self.reviewer_bot_ids.len() + self.automatic_reviewers
         } else if self.reviewers == 0 {
             // Only Auto may expand its native seats for required user criteria.
             self.criteria.iter().filter(|criterion| criterion.required).count().max(MIN_REVIEWERS)
@@ -606,6 +628,50 @@ fn required_reviewers(team: &TeamSnapshot, config: &CouncilConfig, round: usize)
         .find(|binding| !binding.roster_bot_ids.is_empty())
         .and_then(|binding| binding.required_reviewers).unwrap_or_else(|| config.needed())
 }
+/// Source admission is native, before assigning a worker or opening a reviewer session.
+pub(super) fn reviewer_source_for(
+    team: &TeamSnapshot, seat: &CouncilSeat, replaces: Option<&str>,
+    requested: Option<CouncilReviewerSource>,
+) -> Result<CouncilReviewerSource> {
+    let config = team.config.council.as_ref().ok_or("Council is off.")?;
+    let selected = !config.reviewer_bot_ids.is_empty();
+    let mixed = config.automatic_reviewers > 0;
+    let source = match requested {
+        Some(source) => source,
+        None if mixed => return Err("Mixed Council requires councilReviewerSource on every reviewer assignment.".into()),
+        None if selected => CouncilReviewerSource::DirectBot,
+        None => CouncilReviewerSource::Automatic,
+    };
+    if (source == CouncilReviewerSource::DirectBot && !selected)
+        || (source == CouncilReviewerSource::Automatic && selected && !mixed)
+    {
+        return Err("Council reviewer source is not enabled for this task.".into());
+    }
+    if let Some(old) = replaces.and_then(|id| team.workers.iter().find(|worker| worker.id == id && worker.council.is_some())) {
+        let previous = if old.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.as_ref()).is_some() {
+            CouncilReviewerSource::DirectBot
+        } else {
+            CouncilReviewerSource::Automatic
+        };
+        if source != previous {
+            return Err("reviewer_session_mismatch: a replacement cannot change its reviewer source.".into());
+        }
+    }
+    if mixed {
+        let occupied = team.workers.iter()
+            .filter(|worker| worker.created_at >= team.council_since && worker.council.as_ref().is_some_and(|s| s.round == seat.round))
+            .filter(|worker| !worker.abandoned || worker.council.as_ref().is_some_and(|s| s.score.is_some()))
+            .filter(|worker| Some(worker.id.as_str()) != replaces)
+            .filter(|worker| (worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.as_ref()).is_some())
+                == (source == CouncilReviewerSource::DirectBot))
+            .count();
+        let limit = if source == CouncilReviewerSource::DirectBot { config.reviewer_bot_ids.len() } else { config.automatic_reviewers };
+        if occupied >= limit {
+            return Err("The selected Council reviewer source has no remaining seats in this round.".into());
+        }
+    }
+    Ok(source)
+}
 pub(super) fn fixed_lens_count(team: &TeamSnapshot) -> usize {
     team.config.council.as_ref().map_or(0, |config| Rounds::of(team, config).lenses.len())
 }
@@ -708,7 +774,7 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     }
     let round = round_for(team, config, replaces)?;
     let fixed = Rounds::of(team, config).lenses;
-    if round == 1 && !config.reviewer_bot_ids.is_empty() && fixed.len() >= config.reviewer_bot_ids.len()
+    if round == 1 && !config.reviewer_bot_ids.is_empty() && fixed.len() >= config.needed()
         && !fixed.iter().any(|known| same_lens(known, lens))
     {
         return Err("The selected reviewer roster cannot cover another fixed Council lens.".into());
@@ -965,7 +1031,11 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         return String::new();
     };
     let selected = !config.reviewer_bot_ids.is_empty();
-    let count = if selected {
+    let mixed = config.automatic_reviewers > 0;
+    let count = if mixed {
+        format!("exactly {} seats: {} selected configured bots and {} additional automatic reviewers",
+            config.needed(), config.reviewer_bot_ids.len(), config.automatic_reviewers)
+    } else if selected {
         format!("exactly {} selected configured bots", config.reviewer_bot_ids.len())
     } else {
         match config.reviewers {
@@ -974,10 +1044,13 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         }
     };
     let models: std::collections::HashSet<_> = team.config.workers.iter().map(|p| (&p.provider, &p.model)).collect();
-    let models = if selected { "native selected-bot seats" } else if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
+    let models = if mixed { "native selected-bot seats and independent automatic model profiles" } else if selected { "native selected-bot seats" } else if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
     let limit = format!("Never finish below the target unless the limit of {} rounds is reached; after the last round make no more changes, and say so plainly.", config.max_rounds);
     let selected_note = if selected {
-        format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each fresh reviewer seat to one of those bots, using that bot's frozen model and review persona. Dispatch one unique Council lens per bot; never substitute a worker or claim unavailable bots reviewed. Disclose reduced diversity if distinct bots use the same provider/model. Provider/model/profileId fields in reviewer assignments cannot override the selected bot.", config.reviewer_bot_ids.join(", "))
+        let source_rule = if mixed {
+            format!(" Each reviewer assignment MUST specify councilReviewerSource: direct_bot or automatic. Dispatch exactly {} selected-bot seats and {} automatic seats per round; never replace one source with the other.", config.reviewer_bot_ids.len(), config.automatic_reviewers)
+        } else { String::new() };
+        format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each selected-bot seat to one of those bots with a frozen model and persona. Dispatch one unique Council lens per seat; never substitute a worker or claim unavailable bots reviewed. Disclose reduced diversity when reviewers use the same provider/model. Provider/model/profileId fields cannot override a selected bot.{source_rule}", config.reviewer_bot_ids.join(", "))
     } else { String::new() };
     let criteria_note = match config.criteria_source {
         CouncilCriteriaSource::Architect => String::new(),

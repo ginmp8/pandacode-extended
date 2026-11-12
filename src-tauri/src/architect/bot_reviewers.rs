@@ -227,6 +227,16 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     Ok(reviewers)
 }
 
+/// Freeze all selected bot inputs before the first mixed-source reviewer starts.
+pub(super) fn freeze_mixed_roster(
+    store: &Store, team: &TeamSnapshot, round: usize, library: Option<&crate::skills::Library>,
+) -> Result<()> {
+    if team.config.council.as_ref().is_some_and(|config| config.automatic_reviewers > 0) {
+        round_reviewers(store, team, round, true, library)?;
+    }
+    Ok(())
+}
+
 /// Resolve a frozen selected reviewer. Live deletion, pause, executor identity and frozen-model
 /// availability are still checked, without substituting a newly edited profile or another bot.
 pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
@@ -291,6 +301,10 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     let old = team.config.council.as_ref();
     let next = next.as_ref();
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
+        || old.map(|c| c.automatic_reviewers) != next.map(|c| c.automatic_reviewers)
+        || ((old.is_some_and(|c| c.automatic_reviewers > 0)
+            || next.is_some_and(|c| c.automatic_reviewers > 0))
+            && old.map(|c| c.reviewers) != next.map(|c| c.reviewers))
         || old.map(|c| &c.criteria_source) != next.map(|c| &c.criteria_source)
         || old.map(|c| &c.criteria) != next.map(|c| &c.criteria)
         || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
@@ -313,8 +327,8 @@ pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConf
     }
     if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()) {
         let lenses = super::council::fixed_lens_count(team);
-        if config.reviewer_bot_ids.len() < lenses {
-            return Err(format!("This Council cycle fixed {lenses} lenses. Select at least {lenses} reviewer bots, or finish this cycle before reducing the roster."));
+        if config.needed() < lenses {
+            return Err(format!("This Council cycle fixed {lenses} lenses. Reserve at least {lenses} top-level reviewer seats, or finish this cycle before reducing the roster."));
         }
     }
     if team.workers.iter().any(|w| w.created_at >= team.council_since && w.council.is_some() && super::unsettled(&w.status)) {

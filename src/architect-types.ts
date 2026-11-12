@@ -18,6 +18,8 @@ export interface CouncilConfig {
   reviewers: number;
   /** Task-scoped persistent reviewer identities; absent means automatic native workers. */
   reviewerBotIds?: string[];
+  /** Extra automatic root seats, opt-in only when direct bot seats are selected. */
+  automaticReviewers?: number;
   /** Missing source/criteria preserves the original Council semantics. */
   criteriaSource?: CouncilCriteriaSource;
   criteria?: CouncilCriterion[];

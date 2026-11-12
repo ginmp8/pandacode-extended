@@ -365,6 +365,75 @@ fn selected_bot_config_requires_distinct_bounded_identity_roster() {
 }
 
 #[test]
+fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
+    let original = on(9.0, 10, 0);
+    assert_eq!(serde_json::to_value(&original).unwrap(),
+        json!({"target":9.0,"maxRounds":10,"reviewers":0}));
+    let mut mixed = original.clone();
+    mixed.reviewer_bot_ids = vec!["security-bot".into()];
+    mixed.automatic_reviewers = 1;
+    assert!(mixed.validate().is_ok());
+    assert_eq!(mixed.needed(), 2);
+    assert_eq!(serde_json::to_value(&mixed).unwrap()["automaticReviewers"], 1);
+    assert!(council::reviewer_source_for(&team_with(mixed.clone(), vec![]),
+        &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false },
+        None, None).unwrap_err().contains("councilReviewerSource"));
+    mixed.automatic_reviewers = 8;
+    assert!(mixed.validate().unwrap_err().contains("eight top-level"));
+    mixed.automatic_reviewers = 1;
+    mixed.reviewers = 2;
+    assert!(mixed.validate().unwrap_err().contains("reviewers=0"));
+    let mut direct_only = original;
+    direct_only.reviewer_bot_ids = vec!["security-bot".into()];
+    assert!(direct_only.validate().unwrap_err().contains("2 to 8"));
+    assert_eq!(council::reviewer_source_for(&team_with(on(9.0, 10, 0), vec![]),
+        &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false },
+        None, Some(council::CouncilReviewerSource::DirectBot)).unwrap_err(),
+        "Council reviewer source is not enabled for this task.");
+}
+
+#[test]
+fn mixed_council_admission_gates_each_real_source_and_preserves_its_score() {
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["security-bot".into()];
+    config.automatic_reviewers = 1;
+    let mut team = team_with(config.clone(), vec![]);
+    let direct = council::seat_for(&team, Some("Security"), None).unwrap().unwrap();
+    assert_eq!(council::reviewer_source_for(&team, &direct, None, Some(council::CouncilReviewerSource::DirectBot)).unwrap(),
+        council::CouncilReviewerSource::DirectBot);
+    let mut worker = seat("bot-review", 1, Some(9.9), SINCE + 1);
+    worker.council.as_mut().unwrap().lens = "Security".into();
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider, &worker.model, worker.council.as_ref().unwrap());
+    binding.reviewer_bot_id = Some("security-bot".into());
+    binding.roster_bot_ids = config.reviewer_bot_ids.clone();
+    binding.required_reviewers = Some(2);
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Security".into(), role: "QA".into(), instructions: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(), skill_ids: vec![],
+    });
+    worker.reviewer_binding = Some(binding);
+    team.workers.push(worker);
+    let automatic = council::seat_for(&team, Some("Compatibility"), None).unwrap().unwrap();
+    assert_eq!(council::reviewer_source_for(&team, &automatic, None, Some(council::CouncilReviewerSource::Automatic)).unwrap(),
+        council::CouncilReviewerSource::Automatic);
+    let mut other = seat("automatic-review", 1, Some(7.0), SINCE + 2);
+    other.council.as_mut().unwrap().lens = "Compatibility".into();
+    other.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
+        &team, &other.id, other.created_at, &other.provider, &other.model, other.council.as_ref().unwrap()));
+    team.workers.push(other);
+    assert!(team.workers.iter().all(|w| w.reviewer_binding.as_ref().unwrap().validate(&team, w).is_ok()));
+    assert!(council::complete(&team, &config, 1), "both real top-level sources must report");
+    assert_eq!(council::status(&team).unwrap().lowest, Some(7.0));
+    assert_eq!(council::reviewer_source_for(&team, &automatic, None, Some(council::CouncilReviewerSource::Automatic)).unwrap_err(),
+        "The selected Council reviewer source has no remaining seats in this round.");
+    assert_eq!(council::reviewer_source_for(&team, &direct, None, Some(council::CouncilReviewerSource::DirectBot)).unwrap_err(),
+        "The selected Council reviewer source has no remaining seats in this round.");
+    assert!(council::reviewer_source_for(&team, &automatic, Some("bot-review"),
+        Some(council::CouncilReviewerSource::Automatic)).unwrap_err().contains("replacement cannot change"));
+}
+
+#[test]
 fn selected_bot_quorum_is_frozen_when_later_round_chooses_more_bots() {
     let mut original = on(9.0, 10, 0);
     original.reviewer_bot_ids = vec!["bot-1".into(), "bot-2".into()];

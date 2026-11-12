@@ -1030,13 +1030,29 @@ pub(crate) fn council_inspection_scoped_state(
     Ok(inspected)
 }
 
+/// Optional consistency selector over the same native Council inspector. Legacy
+/// callers omit both values; task consumers may pin an exact cycle AND revision.
+/// This does not authorize a new task or grant access to foreign evidence.
+pub(crate) fn council_inspection_select_state(
+    store: &Store, session_id: &str, cycle_id: Option<&str>, team_revision: Option<u64>,
+) -> Result<Option<council::CouncilInspection>> {
+    match (cycle_id, team_revision) {
+        (None, None) => council_inspection_state(store, session_id),
+        (Some(cycle), Some(revision)) =>
+            council_inspection_scoped_state(store, session_id, cycle, revision).map(Some),
+        _ => Err("council_inspection_denied: cycleId and teamRevision must be supplied together.".into()),
+    }
+}
+
 /// Native read-only inspection for a task or opt-in channel delivery.
+/// Optional cycle/revision selectors reject stale evidence without changing legacy reads.
 #[tauri::command]
 pub async fn architect_council_inspect(
     state: State<'_, AppState>, session_id: String,
+    cycle_id: Option<String>, team_revision: Option<u64>,
 ) -> Result<Option<council::CouncilInspection>> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    council_inspection_state(&store, &session_id)
+    council_inspection_select_state(&store, &session_id, cycle_id.as_deref(), team_revision)
 }
 
 #[tauri::command]

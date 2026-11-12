@@ -153,6 +153,10 @@ fn trusted_native_cycle_inspection_fails_closed_for_stale_or_wrong_scope() {
     let cycle = format!("{}:{}", sid, current.cycle_started_at);
     let matched = council_inspection_scoped_state(&store, &sid, &cycle, current.team_revision).unwrap();
     assert_eq!(matched.cycle_started_at, current.cycle_started_at);
+    assert!(council_inspection_select_state(&store, &sid, None, None).unwrap().is_some());
+    assert!(council_inspection_select_state(&store, &sid, Some(&cycle), Some(current.team_revision)).unwrap().is_some());
+    assert!(council_inspection_select_state(&store, &sid, Some(&cycle), None).unwrap_err().contains("must be supplied together"));
+    assert!(council_inspection_select_state(&store, &sid, None, Some(current.team_revision)).unwrap_err().contains("must be supplied together"));
     assert!(!matched.verified_pass);
     assert!(council_inspection_scoped_state(&store, &sid, "foreign:cycle", current.team_revision)
         .unwrap_err().contains("council_inspection_stale"));

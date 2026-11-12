@@ -160,7 +160,7 @@ pub(crate) fn receipt_history(
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
     })).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string().into())
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
 pub(crate) fn unresolved_count(store:&Store,ticket_id:&str)->Result<i64>{
@@ -279,7 +279,7 @@ mod tests{
     #[test]
     fn effect_reservation_denies_expired_or_future_assignment_attempts() {
         for started_at in [
-            storage::now() - super::MAX_ASSIGNMENT_RUN_MS - 1000,
+            storage::now() - crate::superagent::MAX_ASSIGNMENT_RUN_MS - 1000,
             storage::now() + 60_000,
         ] {
             let (store,id)=fixture();

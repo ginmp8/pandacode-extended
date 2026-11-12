@@ -3,7 +3,7 @@
 //! eligibility, snapshots, verdicts and tool restrictions; never reimplement
 //! scores or treat its team result as authority for an unbound ticket artifact.
 use super::Ticket;
-use crate::{architect, storage::Store, Result};
+use crate::{architect, storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -106,7 +106,7 @@ pub(super) fn inspect(store: &Store, ticket: &Ticket) -> Result<Option<CouncilOb
            AND a.state='finished' AND a.result=t.evidence
            AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments
                           WHERE ticket_id=?1)",
-        [&ticket.id], |r| r.get(0),
+        [&ticket.id], |r| Ok((r.get(0)?, r.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((assignment_id, session)) = assignment else { return Ok(None) };
     if !super::assignment_thread_current(store, &session, &ticket.id)? {

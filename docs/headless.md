@@ -290,3 +290,19 @@ terminate it, but subsequent SuperAgent-authorized tool admissions and late
 callbacks are denied by native mandate/state checks. This is not process
 termination or completed external-effect reconciliation. Use the inspection
 commands above to verify the final native state.
+
+
+### Read-only Team readiness inspection
+
+`pandacode serve --inspect-team-readiness <team-id>` opens the existing database
+read-only without running startup recovery or interrupting the serving process.
+It reuses the native manual coordinator/worker availability, policy revision,
+Team project and checkout-occupancy checks. The JSON returns redacted role IDs,
+current reasons for denial and the existing read-only tool/effect ceiling; it
+never creates a Ticket, mandate, assignment, lease or provider call.
+
+`eligibleAtSnapshot` is **not an authorization or admission guarantee**: the
+one-shot CLI cannot observe every live in-memory provider session and cannot
+reserve a checkout. `requiresLiveAdmissionRecheck` is always true. The real
+native admission path must repeat its checks and may still reject the request.
+No objective text, private evidence or authentication credential is printed.

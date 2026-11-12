@@ -589,6 +589,38 @@ pub(crate) fn inspect_headless_status(
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
+/// Observe native Team readiness beside a live headless process without
+/// running migration or startup recovery. This shares the desktop's native
+/// manual role/checkout checks, but a detached CLI cannot attest live in-memory
+/// provider occupancy. Actual admission MUST independently revalidate.
+pub(crate) fn inspect_headless_team_readiness(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let worker = manual_preflight(&store, orchestration_id, "Headless readiness probe", false, false)?;
+    let coordinator = manual_preflight(&store, orchestration_id, "Headless readiness probe", true, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": orchestration_id,
+        "policyRevision": worker.policy_revision,
+        "projectId": worker.project_id,
+        "worker": {
+            "botId": worker.selected_bot_id,
+            "eligibleAtSnapshot": worker.eligible,
+            "reason": worker.reason
+        },
+        "coordinator": {
+            "botId": coordinator.selected_bot_id,
+            "eligibleAtSnapshot": coordinator.eligible,
+            "reason": coordinator.reason
+        },
+        "allowedTools": [],
+        "allowedSideEffects": false,
+        "requiresLiveAdmissionRecheck": true,
+        "admitted": false,
+        "attemptBudgetMs": worker.attempt_budget_ms
+    })).map_err(|e| e.to_string())
+}
+
 /// Bounded local task index for a one-shot CLI. Keep this read-only so it can
 /// run beside a healthy serve process without invoking Store::open recovery.
 /// Ticket objectives, evidence, assignment results and mandate identities are
@@ -2221,6 +2253,42 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_team_readiness_is_redacted_nonmutating_and_never_admits() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Headless readiness".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let disabled: serde_json::Value = serde_json::from_str(
+            &inspect_headless_team_readiness(&store.path, &cfg.id).unwrap()
+        ).unwrap();
+        assert_eq!(disabled["worker"]["eligibleAtSnapshot"], false);
+        assert_eq!(disabled["admitted"], false);
+        assert_eq!(disabled["requiresLiveAdmissionRecheck"], true);
+        assert_eq!(disabled["allowedSideEffects"], false);
+        assert_eq!(disabled["policyRevision"], cfg.policy_revision);
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let ready: serde_json::Value = serde_json::from_str(
+            &inspect_headless_team_readiness(&store.path, &cfg.id).unwrap()
+        ).unwrap();
+        assert_eq!(ready["policyRevision"], enabled.policy_revision);
+        assert_eq!(ready["worker"]["botId"], "worker");
+        assert_eq!(ready["coordinator"]["botId"], "router");
+        assert_eq!(ready["worker"]["eligibleAtSnapshot"], true);
+        assert_eq!(ready["admitted"], false);
+        assert_eq!(ready["allowedTools"], serde_json::json!([]));
+        let tickets: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0)).unwrap();
+        let mandates: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [], |r| r.get(0)).unwrap();
+        assert_eq!((tickets, mandates), (0, 0));
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused: serde_json::Value = serde_json::from_str(
+            &inspect_headless_team_readiness(&store.path, &cfg.id).unwrap()
+        ).unwrap();
+        assert_eq!(paused["worker"]["eligibleAtSnapshot"], false);
+        assert_eq!(paused["coordinator"]["eligibleAtSnapshot"], false);
+    }
 
     #[test]
     fn headless_run_budget_diagnostic_is_native_redacted_and_nonmutating() {

@@ -32,6 +32,7 @@ enum Command {
     InspectOrchestrations,
     ListTickets,
     InspectTicket { ticket_id: String },
+    InspectTeamReadiness { orchestration_id: String },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
@@ -84,6 +85,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTeamReadiness { orchestration_id } = &command {
+                // Read-only on an existing database; do not run startup recovery
+                // against another live headless process. This is not admission.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_team_readiness(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                    ));
+                match result {
+                    Ok(readiness) => { println!("{readiness}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team readiness inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -154,6 +171,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
+        | Command::InspectTeamReadiness { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::DisableOrchestration { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
@@ -540,6 +558,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--inspect-team-readiness" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-team-readiness needs a Team ID.\n\n{}", help()))?;
+                validate_orchestration_id(value)?;
+                command = Command::InspectTeamReadiness { orchestration_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--inspect-ticket" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket needs a ticket ID.\n\n{}", help()))?;
@@ -677,7 +703,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-team-readiness <id> | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -703,6 +729,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --inspect-team-readiness <id>
+                         Inspect a Team's read-only native manual admission preflight;
+                         live sessions and policy must be rechecked on actual admission.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
   --accept-ticket <id> <revision>
                          Accept current worker evidence at the expected Ticket revision; exit.
@@ -757,6 +786,11 @@ mod tests {
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--inspect-team-readiness team_123"),
+            Ok(Command::InspectTeamReadiness { orchestration_id: "team_123".into() }));
+        assert!(parsed("--inspect-team-readiness").is_err());
+        assert!(parsed("--inspect-team-readiness ../other").is_err());
+        assert!(parsed("--inspect-team-readiness team_123 --stop-ticket ticket_123").is_err());
         assert_eq!(parsed("--inspect-ticket ticket_123"),
             Ok(Command::InspectTicket { ticket_id: "ticket_123".into() }));
         assert_eq!(parsed("--accept-ticket ticket_123 4"), Ok(Command::AcceptTicket {
@@ -828,6 +862,7 @@ mod tests {
             "--export-orchestrations",
             "--inspect-orchestrations",
             "--list-tickets",
+            "--inspect-team-readiness",
             "--inspect-ticket",
             "--accept-ticket",
             "--reject-ticket",

@@ -22,6 +22,11 @@ interface Mandate {
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
 }
 interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
+interface ManualPreflight {
+  orchestrationId: string; policyRevision: number; projectId: string;
+  selectedBotId: string; selectedRole: string; eligible: boolean; reason: string | null;
+  allowedTools: string[]; allowedSideEffects: boolean; attemptBudgetMs: number;
+}
 interface Activity { id: number; kind: string; detail: string; at: number }
 interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
@@ -51,6 +56,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
+  let demandObjective = '', demandMode: 'coordinated' | 'direct' = 'coordinated';
+  let demandPreflight: ManualPreflight | null = null;
+  let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
@@ -208,6 +216,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '">Open demand</button></li>').join('') ||
           '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>') +
       '</section>';
+    const nativePreflight = demandPreflight && demandPreflight.orchestrationId === selected &&
+      preflightObjective === demandObjective.trim() && preflightMode === demandMode
+      ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
+        '<h4>Native demand preflight</h4><p role="status">' +
+        (demandPreflight.eligible ? 'Eligible for manual read-only admission now.' :
+          'Not eligible for immediate admission: ' + safe(demandPreflight.reason)) + '</p>' +
+        '<dl><dt>Selected role and bot</dt><dd>' + safe(demandPreflight.selectedRole) +
+        ' · ' + safe(botName(demandPreflight.selectedBotId)) + '</dd>' +
+        '<dt>Team project / policy revision</dt><dd>' + safe(demandPreflight.projectId) +
+        ' / ' + demandPreflight.policyRevision + '</dd>' +
+        '<dt>Authorized tools / effects</dt><dd>' +
+        safe(demandPreflight.allowedTools.join(', ') || 'none') + ' / ' +
+        (demandPreflight.allowedSideEffects ? 'scoped' : 'no side effects') + '</dd>' +
+        '<dt>Attempt time budget</dt><dd>' +
+        safe(String(Math.floor(demandPreflight.attemptBudgetMs / 60000))) + ' minutes</dd></dl>' +
+        '<p>This is a read-only snapshot, not a grant, Ticket or guaranteed reservation. ' +
+        'Native admission rechecks all policy, availability and checkout limits.</p></section>' : '';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
@@ -220,11 +245,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</select></label></div><button class="primary-button" type="submit"' +
       (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
-      '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
-      '<label>Dispatch<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
-      '<option value="direct">Worker directly</option></select></label>' +
+      ''<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
+      safe(demandObjective) + '</textarea></label>' +
+      '<label>Dispatch<select name="mode"><option value="coordinated"' +
+      (demandMode === 'coordinated' ? ' selected' : '') + '>Coordinator, then worker</option>' +
+      '<option value="direct"' + (demandMode === 'direct' ? ' selected' : '') +
+      '>Worker directly</option></select></label>' +
+      '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (chosen.enabled ? '' : ' disabled') +
-      '>Dispatch manually</button></form>' +
+      '>Dispatch manually</button></form>' + nativePreflight +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
@@ -378,6 +407,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
     allDemands = []; allDemandsLoaded = false;
+    demandPreflight = null;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
     if (!busy) render();
@@ -428,6 +458,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.name === 'mode' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
+      demandMode = target.value === 'direct' ? 'direct' : 'coordinated';
+      demandPreflight = null;
+      host.querySelector('[aria-label="Native demand preflight"]')?.remove();
+      return;
+    }
     if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
     draftPresetTemplate = target.value;
     draftPresetName = target.value;
@@ -436,6 +473,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLTextAreaElement && target.name === 'objective' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
+      demandObjective = target.value;
+      demandPreflight = null;
+      host.querySelector('[aria-label="Native demand preflight"]')?.remove();
+    }
     if (target instanceof HTMLInputElement && target.name === 'name' &&
         target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
       draftPresetName = target.value;
@@ -474,6 +517,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.hasAttribute('data-sa-preflight')) {
+      const form = host.querySelector<HTMLFormElement>('form[data-sa-form="run"]');
+      const chosen = current();
+      const objective = form?.querySelector<HTMLTextAreaElement>('textarea[name="objective"]')?.value.trim() ?? '';
+      const coordinated = form?.querySelector<HTMLSelectElement>('select[name="mode"]')?.value !== 'direct';
+      if (!chosen || !objective) return;
+      demandPreflight = null;
+      void work(async () => {
+        demandPreflight = await call<ManualPreflight>('superagent_preflight', {
+          orchestrationId: chosen.id, objective, coordinated,
+        });
+        demandObjective = objective;
+        preflightObjective = objective;
+        preflightMode = coordinated ? 'coordinated' : 'direct';
+      });
       return;
     }
     if (target.hasAttribute('data-sa-load-all-demands')) {
@@ -744,7 +804,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const key = taskKey;
       void work(async () => {
         await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });
-        taskKey = crypto.randomUUID(); await reload();
+        taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
+        await reload();
       });
     }
   });

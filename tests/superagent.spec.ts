@@ -596,3 +596,51 @@ test('cross-Team Demands index is native-backed and opens only the original Team
   expect(calls.filter(value=>value==='superagent_all_demands')).toHaveLength(1);
   expect(calls.filter(value=>value==='superagent_accept'||value==='superagent_submit')).toHaveLength(0);
 });
+
+test('manual demand preflight shows native read-only scope and never admits work', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-native-preflight-test'; document.body.appendChild(host);
+    const calls: string[] = [];
+    mountSuperagent(host, async (command, args) => {
+      calls.push(command);
+      if (command === 'bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [{id:'team',name:'Manual Team',
+        coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:2}] as never;
+      if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_preflight') {
+        if (args?.orchestrationId !== 'team' || args?.objective !== 'Inspect changes')
+          throw Error('Wrong preflight request');
+        return {orchestrationId:'team',policyRevision:2,projectId:'isolated-project',
+          selectedBotId:args.coordinated ? 'router' : 'worker',
+          selectedRole:args.coordinated ? 'coordinator' : 'worker',
+          eligible:true,reason:null,allowedTools:[],allowedSideEffects:false,
+          attemptBudgetMs:1800000} as never;
+      }
+      throw Error('Unexpected command '+command);
+    });
+    (window as unknown as {saPreflightCalls:()=>string[]}).saPreflightCalls = () => calls;
+  });
+  const host = page.locator('#sa-native-preflight-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect changes');
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  const panel = host.getByRole('region',{name:'Native demand preflight'});
+  await expect(panel).toContainText('Eligible for manual read-only admission now.');
+  await expect(panel).toContainText('Router');
+  await expect(panel).toContainText('isolated-project / 2');
+  await expect(panel).toContainText('none / no side effects');
+  await expect(panel).toContainText('not a grant, Ticket or guaranteed reservation');
+  await expect(host.getByRole('textbox',{name:'Task objective'})).toHaveValue('Inspect changes');
+  const calls = await page.evaluate(() =>
+    (window as unknown as {saPreflightCalls:()=>string[]}).saPreflightCalls());
+  expect(calls.filter(name=>name==='superagent_preflight')).toHaveLength(1);
+  expect(calls.filter(name=>name.includes('submit')||name.includes('dispatch'))).toHaveLength(0);
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Changed objective');
+  await expect(panel).toHaveCount(0);
+});

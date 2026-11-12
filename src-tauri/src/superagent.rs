@@ -744,6 +744,75 @@ fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
     Ok(())
 }
 
+/// One native read of checkout/bot contention used both by the real admit
+/// transition and the non-authoritative preview. Admission always repeats it.
+fn manual_candidate_occupied(
+    store: &Store, candidate_id: &str, team_project: &str, candidate_project: &str,
+) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_assignments a
+           JOIN sa_tickets previous ON previous.id=a.ticket_id
+           LEFT JOIN sessions active_session ON active_session.id=a.session_id
+           WHERE a.state='running'
+             AND (a.bot_id=?1 OR previous.project_id IN (?2,?3)
+                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL)
+         )",
+        params![candidate_id,team_project,candidate_project], |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
+/// Read-only, time-sensitive advisory from the same native source data as
+/// admission. It issues no Ticket, grant, session, lease or provider request.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualPreflight {
+    pub orchestration_id: String,
+    pub policy_revision: i64,
+    pub project_id: String,
+    pub selected_bot_id: String,
+    pub selected_role: String,
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub allowed_side_effects: bool,
+    pub attempt_budget_ms: i64,
+}
+
+fn manual_preflight(
+    store: &Store, config_id: &str, objective: &str, coordinate: bool, busy: bool,
+) -> Result<ManualPreflight> {
+    let trimmed = objective.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_OBJECTIVE_BYTES || trimmed.contains('\0') {
+        return Err("A nonempty, bounded objective is required.".into());
+    }
+    let cfg = configuration(store, config_id)?;
+    let coordinator = bots::get(store, &cfg.coordinator_bot_id)?;
+    let worker = bots::get(store, &cfg.worker_bot_id)?;
+    let candidate = if coordinate { &coordinator } else { &worker };
+    let reason = if !execution_permitted(cfg.enabled, crate::feature_controls::get().bots_paused) {
+        Some("Team is disabled or bots are globally paused.".to_owned())
+    } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
+        Some("Selected bot is paused or outside the Team project.".to_owned())
+    } else if roster::has_additional_members(store, config_id)? {
+        Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned())
+    } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
+        Some(if coordinate {
+            "Coordinator is occupied; this request cannot be admitted yet.".to_owned()
+        } else {
+            "Worker or checkout is occupied; manual admission may create a blocked Ticket.".to_owned()
+        })
+    } else { None };
+    Ok(ManualPreflight {
+        orchestration_id: cfg.id, policy_revision: cfg.policy_revision,
+        project_id: cfg.project_id, selected_bot_id: candidate.id.clone(),
+        selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
+        eligible: reason.is_none(), reason,
+        allowed_tools: Vec::new(), allowed_side_effects: false,
+        attempt_budget_ms: MAX_ASSIGNMENT_RUN_MS,
+    })
+}
+
 /// Native manual request with a stable dedup key. A blocked request remains
 /// auditable and must be explicitly retried; no background inference or launch.
 fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str, busy: bool) -> Result<(Ticket, bool)> {
@@ -803,17 +872,7 @@ fn admit_role(
         return Err("A selected bot is paused, missing or outside the worker project scope.".into());
     }
     let candidate = if coordinate { &coordinator } else { &worker };
-    let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           JOIN sa_tickets previous ON previous.id=a.ticket_id
-           LEFT JOIN sessions active_session ON active_session.id=a.session_id
-           WHERE a.state='running'
-             AND (a.bot_id=?1 OR previous.project_id IN (?2,?3)
-                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL)
-         )",
-        params![candidate.id,config.project_id,candidate.project_id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
+    let occupied = manual_candidate_occupied(store, &candidate.id, &config.project_id, &candidate.project_id)?;
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
     if coordinate && (busy || occupied) {
@@ -1774,6 +1833,25 @@ pub async fn superagent_snapshot(
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     ticket_snapshot(&store, &ticket_id, limit.unwrap_or(50))
+}
+
+/// The UI can preview the current native manual admission boundary without
+/// acquiring a Ticket or issuing a permission. This is NOT authorization:
+/// superagent_submit/submit_coordinated must recheck on their own path.
+#[tauri::command]
+pub async fn superagent_preflight(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    orchestration_id: String, objective: String, coordinated: bool,
+) -> Result<ManualPreflight> {
+    require_main_window(&window)?;
+    let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
+        .keys().cloned().collect();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let config = configuration(&store, &orchestration_id)?;
+    let bot_id = if coordinated { &config.coordinator_bot_id } else { &config.worker_bot_id };
+    let busy = active.iter().any(|sid| bots::owner_of(&store, sid).ok().flatten()
+        .is_some_and(|(bot, _)| bot.id == *bot_id));
+    manual_preflight(&store, &orchestration_id, &objective, coordinated, busy)
 }
 
 /// Deliver the exact objective admitted and persisted by native authorization.
@@ -3054,6 +3132,50 @@ mod tests {
         assert!(coordinator_packet.contains("\n\nInspect fixture\n\n"));
         assert!(coordinator_packet.contains("Read-only coordinator"));
         assert!(coordinator_packet.len() < 32 * 1024);
+    }
+
+    #[test]
+    fn native_manual_preflight_is_read_only_and_reports_current_role_and_limits() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Preflight fixture".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let disabled = manual_preflight(&store, &cfg.id, "Inspect safely", false, false).unwrap();
+        assert!(!disabled.eligible);
+        assert!(disabled.reason.unwrap().contains("disabled"));
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let direct = manual_preflight(&store, &cfg.id, "Inspect safely", false, false).unwrap();
+        assert!(direct.eligible);
+        assert_eq!(direct.policy_revision, enabled.policy_revision);
+        assert_eq!(direct.selected_role, "worker");
+        assert_eq!(direct.selected_bot_id, "worker");
+        assert_eq!(direct.project_id, "project");
+        assert!(direct.allowed_tools.is_empty());
+        assert!(!direct.allowed_side_effects);
+        assert_eq!(direct.attempt_budget_ms, MAX_ASSIGNMENT_RUN_MS);
+        let coordinator = manual_preflight(&store, &cfg.id, "Inspect safely", true, false).unwrap();
+        assert_eq!(coordinator.selected_role, "coordinator");
+        assert_eq!(coordinator.selected_bot_id, "router");
+        assert!(manual_preflight(&store, &cfg.id, " ", false, false).is_err());
+        let count: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "Preflight must not create a Ticket or any grant");
+    }
+
+    #[test]
+    fn native_manual_preflight_detects_checkout_contention_and_revoked_bot() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        assert!(!manual_preflight(&store, &cfg.id, "Inspect", false, true).unwrap().eligible);
+        let (ticket, started) = admit(&mut store, &cfg.id, "Active task", "preflight-lease", false).unwrap();
+        assert!(started);
+        let busy = manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap();
+        assert!(!busy.eligible);
+        assert!(busy.reason.unwrap().contains("occupied"));
+        stop(&store, &ticket.id).unwrap();
+        assert!(manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap().eligible);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(!manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap().eligible);
     }
 
     #[test]

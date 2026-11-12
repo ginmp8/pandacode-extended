@@ -37,6 +37,13 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
         return Err("Invalid or oversized effect identity.".into());
     }
     let digest=format!("{:x}",Sha256::digest(payload));
+    // Global pause is a native revocation, not a UI-only switch. This
+    // reservation guard is defense-in-depth; an eventual dispatcher must
+    // revalidate the same authority immediately before the remote call.
+    if crate::feature_controls::get().bots_paused {
+        return Err("SuperAgent effects are disabled while bots are paused.".into());
+    }
+    let now = storage::now();
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     // A receipt is not a grant. Require the live worker assignment and every
     // immutable scope field to still agree before allowing a caller to attempt
@@ -56,8 +63,10 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
            AND t.project_id=m.project_id AND m.project_id=o.project_id
            AND t.actor=m.actor AND m.authorization_id<>''
            AND b.project_id=t.project_id AND b.paused=0
+           AND a.created_at>0 AND a.created_at<=?2
+           AND (?2-a.created_at)<?3
            AND m.allowed_side_effects=1 AND o.enabled=1)",
-        params![ticket_id,storage::now()],|r|r.get(0)
+        params![ticket_id,now,super::MAX_ASSIGNMENT_RUN_MS],|r|r.get(0)
     ).map_err(|e|e.to_string())?;
     if !authorized {return Err("Native effect authorization unavailable.".into());}
     let existing: Option<(String,String)>=tx.query_row(
@@ -238,6 +247,35 @@ mod tests{
         assert_eq!(unresolved_count(&store,&id).unwrap(),0);
         store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&id]).unwrap();
         assert!(reserve(&store,&id,"github:comment:8",b"payload").is_err());
+    }
+
+    #[test]
+    fn effect_reservation_denies_expired_or_future_assignment_attempts() {
+        for started_at in [
+            storage::now() - super::MAX_ASSIGNMENT_RUN_MS - 1000,
+            storage::now() + 60_000,
+        ] {
+            let (store,id)=fixture();
+            // The fixture simulates a native grant only for the receipt
+            // primitive. No production API may issue this write authority.
+            store.db.execute(
+                "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+                [&id],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1 AND state='running'",
+                params![&id,started_at],
+            ).unwrap();
+            assert!(reserve(&store,&id,"github:issue:late",b"body").is_err());
+            assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        }
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:valid",b"body").unwrap(),
+            Reservation::Reserved);
     }
 
     #[test]

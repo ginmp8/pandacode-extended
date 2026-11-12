@@ -644,6 +644,37 @@ fn mixed_council_admission_gates_each_real_source_and_preserves_its_score() {
 }
 
 #[test]
+fn mixed_council_never_substitutes_duplicate_bot_or_automatic_scores_for_required_sources() {
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["security-bot".into()];
+    config.automatic_reviewers = 1;
+    let mut team = team_with(config.clone(), vec![
+        seat("first-auto", 1, Some(9.9), SINCE + 1),
+        seat("second-auto", 1, Some(9.7), SINCE + 2),
+    ]);
+    assert!(!council::complete(&team, &config, 1));
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+
+    let mut direct_binding = reviewer_security::ReviewerBinding::native(
+        &team, &team.workers[0].id, team.workers[0].created_at,
+        &team.workers[0].provider, &team.workers[0].model,
+        team.workers[0].council.as_ref().unwrap(),
+    );
+    direct_binding.reviewer_bot_id = Some("security-bot".into());
+    team.workers[0].reviewer_binding = Some(direct_binding.clone());
+    assert!(council::complete(&team, &config, 1));
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+
+    team.workers[1].reviewer_binding = Some(direct_binding);
+    assert!(!council::complete(&team, &config, 1), "one bot cannot take both top-level seats");
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+
+    team.workers[1].reviewer_binding = None;
+    team.workers[1].read_only = false;
+    assert!(!council::complete(&team, &config, 1), "writable workers cannot review");
+}
+
+#[test]
 fn selected_bot_quorum_is_frozen_when_later_round_chooses_more_bots() {
     let mut original = on(9.0, 10, 0);
     original.reviewer_bot_ids = vec!["bot-1".into(), "bot-2".into()];

@@ -805,6 +805,30 @@ fn unverified_required_skill_checks(team: &TeamSnapshot, round: usize) -> Vec<St
 fn live(team: &TeamSnapshot, round: usize) -> bool {
     in_round(team, round).any(|(w, _)| unsettled(&w.status))
 }
+/// A mixed M3 round cannot replace a selected bot with an extra automatic
+/// reviewer, or count one selected bot twice. Each required source must settle
+/// its own read-only native seat before the existing Council gate may pass.
+fn mixed_source_quorum(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
+    if config.automatic_reviewers == 0 || !config.nested_bot_reviewers.is_empty() {
+        return true;
+    }
+    let mut selected = std::collections::HashSet::new();
+    let mut automatic = 0;
+    for (worker, seat) in in_round(team, round)
+        .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
+    {
+        if !worker.read_only {
+            return false;
+        }
+        match worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.as_deref()) {
+            Some(id) if config.reviewer_bot_ids.iter().any(|expected| expected == id) && selected.insert(id) => {}
+            Some(_) => return false,
+            None => automatic += 1,
+        }
+    }
+    selected.len() == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers
+}
+
 /// One check's view of the cycle's rounds, computed once: the latest round, whether each is complete
 /// (oldest first), how many started, and the lenses the first round fixed.
 struct Rounds {
@@ -829,7 +853,9 @@ impl Rounds {
             let seated = in_round(team, round).filter(|(w, seat)| counts(w, seat)).count();
             let count = scored(team, round).count();
             let required = required_reviewers(team, config, round);
-            let complete = !reconfigured(team, round) && count == seated && count >= required && view.missing(team, round).is_empty() && missing_required_criteria(team, config, round).is_empty();
+            let complete = !reconfigured(team, round) && count == seated && count >= required
+                && mixed_source_quorum(team, config, round)
+                && view.missing(team, round).is_empty() && missing_required_criteria(team, config, round).is_empty();
             view.done.push(complete);
             view.started += usize::from(in_round(team, round).any(|(_, seat)| seat.started_at > 0));
         }

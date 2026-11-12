@@ -66,8 +66,8 @@ test('native Council inspector displays unknown usage and never trusts a display
   await button(page).click();
   await panel(page).getByText('Review evidence and usage').click();
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
-  await expect(panel(page).getByText('Tokens unknown', { exact: false })).toBeVisible();
-  await expect(panel(page).getByText('Cost unknown', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Tokens unknown');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Cost unknown');
   await expect(panel(page).getByText('Native attempts: 1', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cumulative queue 1.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cumulative observed span 8.0 s', { exact: false })).toBeVisible();

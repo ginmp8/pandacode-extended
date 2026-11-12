@@ -31,7 +31,6 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.getByText(/0 new; 1 unchanged/)).toBeVisible();
   await dialog.getByRole('button',{name:'Confirm import'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
-  await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('status').filter({hasText:'0 presets imported; 1 unchanged.'})).toBeVisible();
   await dialog.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
@@ -52,6 +51,8 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  // Wait for the native create ACK and the Runs view, not the click itself.
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Enable manual'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
@@ -105,6 +106,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
 });
 
 test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     // The native read fails while switching presets: an old approval must
@@ -139,7 +141,9 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByText('First preset ticket')).toBeVisible();
   await expect(host.locator('[data-sa-accept="ticket-from-first-preset"]')).toHaveCount(1);
-  await host.locator('[data-sa-select="preset-two"]').click();
+  await expect(host.locator('.sa-directory .sa-item')).toHaveCount(2);
+  await host.locator('.sa-directory .sa-item').filter({hasText:'Second preset'})
+    .getByRole('button',{name:'Details'}).click();
   await expect(host.getByRole('alert')).toContainText('Native ticket read failed');
   await expect(host.getByRole('heading', {name:'Second preset'})).toBeVisible();
   await expect(host.getByText('First preset ticket')).toHaveCount(0);

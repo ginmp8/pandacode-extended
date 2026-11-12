@@ -1,5 +1,11 @@
 # PandaCode Extended documentation
 
+## 2026-11-12 — source 0.3.115 Skills-library parity
+
+Source [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) (Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`) advances two commits from `650537ae` and declares native app **0.3.115**. All 15 upstream-changed paths (14 modified, one new) are mirrored: 11 exact blobs/modes and four version-only manifest adaptations retaining Extended dependency remediation. The upstream `releases/0.3.115.md` is unchanged. The planned Extended distribution remains **0.12.0 DRAFT**, without release or publication. Prior Extended `64cd597d` passed 11/11 push CI jobs and 11/11 PR CI jobs; final integration SHA CI and native acceptance need separate evidence.
+
+Inherited changes protect project Skills activations against unsafe links, hardlinks, special files, bad activation records, failed writes and shared Git exclude entries; phone disabled-skill slash commands and clone/worktree Skills-root refresh follow upstream. These are inherited behavior, not new Extended-only features. Runtime Skills enable/disable, native Settings On/Off, Connect, bots, MCP and cloud/VM integrations remain unverified in this run.
+
 ## 2026-11-12 — upstream 0.3.114 HEAD integration
 
 The fork [`main` at `650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80) (tree `e6a217fa48157f11f9bc03739d7995b0c8c4cd74`, application **0.3.114**) is the full source snapshot. The four new commits since `9aa88776` change 41 source files (12 added, 29 modified): 33 exact upstream blobs and eight Extended-preserving adaptations. They include Linux JACK/OSS fallback diagnostics and nonempty CI assertions, plus transcript windowing, cached thread rows, scrolling, send responsiveness, and loaded-turn search with 0.3.113/0.3.114 original notes. The 0.12.0 Extended distribution remains **DRAFT**, not tagged or approved. This source-copy result does not prove installed/native parity or all historical customized-file behavior.

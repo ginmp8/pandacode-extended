@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — upstream 0.3.115 metadata and Skills safeguards
+
+Fork [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369), full tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`, app 0.3.115, 15 source-changed paths (11 exact, four version-only Extended dependency-preserving adaptations). Planned Extended 0.12.0 remains DRAFT. Prior `64cd597d` push and PR CI each passed 11/11 jobs; the new integration commit needs independent exact-SHA CI.
+
+Root npm, lockfile root and workspace, Cargo package/lock and Tauri versions advance to **0.3.115**. There are no upstream dependency changes in the two source commits; existing Extended versions, overrides and vendor patches are preserved rather than overwritten by the upstream manifests. Upstream Skills project-path checks and rollback improvements are inherited product behavior, not evidence of a new Extended-specific vulnerability fix. RustSec/npm scans for the final integration SHA remain to be verified.
+
 ## 2026-11-12 — source app 0.3.114
 
 Source [`650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80) advances the application-version fields to **0.3.114** in npm, Cargo and Tauri. This does not advance the planned Extended **0.12.0 DRAFT** release. Existing Extended package overrides, vendor patches and remediated Cargo dependencies are intentionally preserved; no new remediation is claimed. Dependency audits for the resulting commit require exact-SHA CI verification.

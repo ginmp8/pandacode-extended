@@ -1,5 +1,11 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — Skills control compatibility with upstream 0.3.115
+
+Source [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) (Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`) advances two commits from `650537ae` and declares native app **0.3.115**. All 15 upstream-changed paths (14 modified, one new) are mirrored: 11 exact blobs/modes and four version-only manifest adaptations retaining Extended dependency remediation. The upstream `releases/0.3.115.md` is unchanged. The planned Extended distribution remains **0.12.0 DRAFT**, without release or publication. Prior Extended `64cd597d` passed 11/11 push CI jobs and 11/11 PR CI jobs; final integration SHA CI and native acceptance need separate evidence.
+
+No new Extended Settings switch or restrictive default is introduced. Upstream project-scope Skills activation/deactivation guards, disabled mobile slash-command handling and clone/worktree invalidation are incorporated alongside existing optional Extended update, bot pause, Connect/direct, external MCP, cloud/VM and credential-transfer controls. Their enabled/disabled native flows remain pending independent validation; project safeguards must not be generalized into disabling these other features.
+
 ## 2026-11-12 — inherited transcript and audio changes
 
 Upstream transcript windowing, loaded-turn search, cached rows and Linux JACK/OSS fallback are imported from [`650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80). No new Extended control or more restrictive default is introduced. Existing automatic/manual update, Connect, bot pause/resume, MCP, cloud/VM and credential-transfer controls retain their prior configurable On/Off semantics; those native behavioral paths were not exercised in this integration. The 0.12.0 distribution remains unapproved.

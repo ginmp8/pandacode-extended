@@ -1,5 +1,11 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — upstream 0.3.115 known limitations and acceptance
+
+Fork [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369), full tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`, app 0.3.115, 15 source-changed paths (11 exact, four version-only Extended dependency-preserving adaptations). Planned Extended 0.12.0 remains DRAFT. Prior `64cd597d` push and PR CI each passed 11/11 jobs; the new integration commit needs independent exact-SHA CI.
+
+The upstream release notes explicitly retain a parent-directory symlink race between validation and write, in-place user-scope rule-file updates, and absent Windows hardlink verification. These are inherited documented limitations; no additional Extended exploit or regression was independently reproduced. Project-scope safety now refuses links outside the checkout or into `.git`, hardlinks and special files, while retaining valid skill/rule link layouts. Manual installed-app Skills toggles, phone disabled-skill commands, remote clone/worktree root refresh, Settings On/Off, bots, MCP, Connect, cloud/VM and credential flows were not exercised in this run. Full semantic review of the 81 historical customized shared paths remains outstanding.
+
 ## 2026-11-12 — verification gaps after source 0.3.114 integration
 
 No regression is claimed solely from the imported upstream changes. GitHub CI for the eventual publication commit is not yet complete; local Node/Rust builds and tests, installed-platform transcript performance, Linux fallback when both microphones fail, native Settings On/Off, Connect/MCP/bots/cloud/VM/credentials and historical divergent-file semantic acceptance remain unverified. The inherited transcript Find function searches only loaded pages, not unfetched history (upstream `releases/0.3.114.md`). Keep these limits separate from proven failures and release approval.

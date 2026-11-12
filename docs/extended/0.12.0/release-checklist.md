@@ -1,5 +1,14 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — upstream 0.3.115 Skills-library checkpoint
+
+- [x] Freeze [fork `main` source](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) and complete recursive Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9` (not truncated).
+- [x] Integrate all 15 upstream-changed paths: 11 byte/mode-exact imports (including original `releases/0.3.115.md`); four version-only manifest adaptations retaining Extended dependency remediation.
+- [x] Align all six npm/Cargo/Tauri app-version fields to `0.3.115`, without advancing Extended `0.12.0` DRAFT.
+- [ ] Check CI for the final destination SHA (Node, Rust, RustSec/npm, mobile/Expo and platform Clippy). Prior `64cd597d` passed 11/11 jobs in each push and PR run, not yet evidence for this new commit.
+- [ ] Validate installed-app Skills project activation/deactivation, phone disabled-skill commands and remote clone/worktree refresh, plus the existing Extended On/Off controls.
+- [ ] Review all 81 historical customized shared paths semantically, and obtain separate release approval.
+
 ## 2026-11-12 — upstream 0.3.114 checkpoint
 
 - [x] Pin full upstream source SHA `650537ae449d805656f531fc6fdb5dec09eceb80` and Git tree `e6a217fa48157f11f9bc03739d7995b0c8c4cd74`; include all 41 changed source paths, including original release files and new transcript modules/tests.

@@ -1,5 +1,11 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — inherited Skills switching improvements (upstream 0.3.115)
+
+Source [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) (Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`) advances two commits from `650537ae` and declares native app **0.3.115**. All 15 upstream-changed paths (14 modified, one new) are mirrored: 11 exact blobs/modes and four version-only manifest adaptations retaining Extended dependency remediation. The upstream `releases/0.3.115.md` is unchanged. Planned Extended **0.12.0 DRAFT** remains separate. Prior Extended `64cd597d` passed 11/11 push CI jobs and 11/11 PR CI jobs; exact new-SHA CI and native acceptance are still required.
+
+Project-scoped Skills validate links and file types, use safer replacement/rollback and Git exclude bookkeeping; tampered activation records cannot direct cleanup outside their expected surface. Mobile slash commands respect a disabled skill, and remote clone/worktree changes refresh Skills-root applicability. Existing Extended configuration does not change. Pending: native Skills switches and historical Extended On/Off and external integration parity. [Original upstream release notes](../../../releases/0.3.115.md).
+
 ## 2026-11-12 — fork 0.3.114 imported
 
 The current source is [`650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80) (tree `e6a217fa48157f11f9bc03739d7995b0c8c4cd74`). The 41-path source delta since `9aa88776` imports upstream transcript windowing and Linux audio fallback repairs, plus original 0.3.113/0.3.114 release notes. 33 changed files are byte-exact, eight are reconciled with Extended controls, dependency fixes and CI. The Extended release remains **0.12.0 DRAFT**. This static import is not native Settings On/Off or external-integration acceptance; consult the [checklist](release-checklist.md) and [known issues](known-issues.md).

@@ -46,3 +46,24 @@ and the same theme tokens for desktop, narrow, light and dark views.
 These tests must pass at the exact current SHA. This partial feature does not
 close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance; full native Council,
 source Auto, safely scoped worker writes, headless parity and recovery remain.
+
+
+### Authenticated Observe: self-event loops and bounded pagination
+
+The operator-issued **Poll authenticated GitHub** command resolves the current
+account with native `gh api user`, then reads up to three chronological
+`repos/{owner}/{repo}/events` pages (100 events each). It validates ordered
+numeric event IDs and a persisted-cursor or source-activation boundary before
+committing any decision. An incomplete or changing feed, failed request or
+invalid identity is an error: the previous cursor is not silently advanced.
+A source can still miss events that GitHub no longer retains, so this is **not**
+a guaranteed subscription or permission to enable Auto.
+
+An event authored by the authenticated operator is durably recorded as
+`ignored_filter` even when its configured actor matches the source; such
+self-authored events are never `observed_permitted`. The UI reports new
+self-authored denials separately. Only bounded metadata is stored; issue and
+comment bodies are not included in decision receipts. Off performs no network
+polling, and linked source events remain context only, not task grants or tool
+instructions. This intentionally reuses the existing policy-denial receipt
+schema without a destructive migration.

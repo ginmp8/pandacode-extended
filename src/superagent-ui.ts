@@ -784,11 +784,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.dataset.saSourcePoll) {
       const currentSource = sources.find(item => item.id === target.dataset.saSourcePoll);
       if (currentSource?.mode === 'observe') void work(async () => {
-        const summary = await call<{scanned:number;recorded:number;duplicates:number}>(
-          'superagent_source_poll_authenticated', {sourceId:currentSource.id});
-        feedback = 'Authenticated bounded poll: ' + summary.scanned + ' scanned, ' +
-          summary.recorded + ' recorded, ' + summary.duplicates +
-          ' duplicate. No tasks or effects started.';
+        const summary = await call<{
+          scanned:number;recorded:number;duplicates:number;selfIgnored:number;pagesFetched:number
+        }>('superagent_source_poll_authenticated', {sourceId:currentSource.id});
+        feedback = 'Authenticated bounded poll: ' + summary.scanned + ' scanned across ' +
+          summary.pagesFetched + ' page(s), ' + summary.recorded + ' recorded, ' +
+          summary.selfIgnored + ' self-authored ignored, ' + summary.duplicates +
+          ' duplicate. No tasks or effects started. This is not a gap-free subscription.';
         await reload();
       });
       return;

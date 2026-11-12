@@ -59,6 +59,8 @@ CREATE INDEX IF NOT EXISTS sa_thread_links_ticket
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
+const GITHUB_PAGE_SIZE: usize = 100;
+const GITHUB_MAX_PAGES: usize = 3;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issue_comment.created",
     "pull_request.opened", "pull_request_review.submitted",
@@ -313,7 +315,12 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// Ticket, launch a provider, publish a reply or claim GitHub authenticity.
 /// A delivery ID is immutable: replay with changed fields is rejected even
 /// after mode changes, restart, or later cursor advancement.
-fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
+fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
+    -> Result<EventDecision>
+{
+    if !token_ok(signed_in, 80) {
+        return Err("Signed-in GitHub identity is unavailable; source observation denied.".into());
+    }
     if !valid_event(event) {
         return Err("Invalid, unsupported or unbounded source event envelope.".into());
     }
@@ -345,8 +352,13 @@ fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
 
     let decision = if event.sequence <= src.last_sequence { "ignored_stale" }
         else if src.mode == "off" { "ignored_off" }
-        else if src.repository != event.repository || src.actor_filter != event.actor
+        else if src.repository != event.repository
+            || !src.actor_filter.eq_ignore_ascii_case(&event.actor)
             || src.event_kind != event.event_kind { "ignored_filter" }
+        // Durable denial using the existing policy-denial receipt state: the
+        // current operator's own actions never become inferred work, even
+        // when a source explicitly names that actor. No schema migration.
+        else if event.actor.eq_ignore_ascii_case(signed_in) { "ignored_filter" }
         else { "observed_permitted" };
     let at = storage::now();
     tx.execute(
@@ -370,6 +382,11 @@ fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
         policy_revision:src.policy_revision,sequence:event.sequence,at,duplicate:false })
 }
 
+#[cfg(test)]
+fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
+    observe_authenticated(store, event, "local-operator")
+}
+
 /// A finite, explicitly operator-invoked signed-in GitHub Events poll.
 /// This is NOT a webhook/subscription, not a gap-free cursor, and not Auto.
 /// Provider content is parsed into exact, bounded receipt metadata; text/body
@@ -383,8 +400,85 @@ pub struct AuthenticatedPoll {
     pub recorded: usize,
     pub duplicates: usize,
     pub skipped_before_activation: usize,
+    pub self_ignored: usize,
+    pub pages_fetched: usize,
     pub last_sequence: i64,
     pub bounded_window: bool,
+}
+
+
+/// The signed-in identity is acquired by native `gh api user` before reading
+/// Events. An arbitrary Webview event or a GitHub payload cannot assert it.
+fn authenticated_login(raw: &serde_json::Value) -> Result<String> {
+    let login = raw.get("login").and_then(|v| v.as_str())
+        .ok_or("Authenticated GitHub account has no login.")?;
+    if !token_ok(login, 80) {
+        return Err("Authenticated GitHub account login is invalid.".into());
+    }
+    Ok(login.to_owned())
+}
+
+/// Verify the feed's descending GitHub event identities while collecting a
+/// finite pagination window. A short page, an older persisted identity, or
+/// a pre-activation timestamp anchors the historical boundary. Without an
+/// anchor, fail *before* recording newer events: no silent cursor leap over
+/// an unvisited page. This does not assert that GitHub retained every event.
+fn github_page_complete(
+    raw: &serde_json::Value, since: i64, cursor: i64, previous_id: &mut Option<i64>,
+) -> Result<bool> {
+    let events = raw.as_array()
+        .ok_or("Authenticated GitHub Events page is not an array.")?;
+    if events.len() > GITHUB_PAGE_SIZE {
+        return Err("Authenticated GitHub Events page exceeds the fixed limit.".into());
+    }
+    let mut anchored = false;
+    for item in events {
+        let id = item.get("id").and_then(|v| v.as_str())
+            .ok_or("Authenticated GitHub Event has no numeric identity.")?;
+        if id.is_empty() || id.len() > 19 || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("Authenticated GitHub Event identity is invalid.".into());
+        }
+        let sequence: i64 = id.parse().map_err(|_| "GitHub Event identity is out of range.")?;
+        if sequence <= 0 || previous_id.is_some_and(|previous| sequence >= previous) {
+            return Err("GitHub Events ordering changed during pagination; retry without advancing cursor.".into());
+        }
+        *previous_id = Some(sequence);
+        let stamp = item.get("created_at").and_then(|v| v.as_str())
+            .ok_or("Authenticated GitHub Event has no timestamp.")?;
+        let at = chrono::DateTime::parse_from_rfc3339(stamp)
+            .map_err(|_| "Authenticated GitHub Event timestamp is invalid.")?
+            .timestamp_millis();
+        if sequence <= cursor || at < since {
+            anchored = true;
+        }
+    }
+    Ok(events.len() < GITHUB_PAGE_SIZE || anchored)
+}
+
+/// Validate the entire bounded set before any database receipt/cursor write.
+/// A page failure or a rolling feed with unstable ordering is not a partial
+/// success: retain the prior durable source cursor and request a retry.
+fn combine_github_pages(pages: &[serde_json::Value], since: i64, cursor: i64)
+    -> Result<serde_json::Value>
+{
+    if pages.is_empty() || pages.len() > GITHUB_MAX_PAGES {
+        return Err("Invalid bounded GitHub Events page count.".into());
+    }
+    let mut previous = None;
+    let mut combined = Vec::new();
+    let mut complete = false;
+    for page in pages {
+        if complete {
+            return Err("GitHub Events pages continued beyond the verified boundary.".into());
+        }
+        complete = github_page_complete(page, since, cursor, &mut previous)?;
+        let entries = page.as_array().ok_or("Invalid GitHub Events page.")?;
+        combined.extend(entries.iter().cloned());
+    }
+    if !complete {
+        return Err("GitHub Events window exceeds three pages; no source cursor advanced.".into());
+    }
+    Ok(serde_json::Value::Array(combined))
 }
 
 /// Map only GitHub's documented event type + explicit action. Unknown event
@@ -467,15 +561,22 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     Ok(Some((event,at)))
 }
 
-fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
-    raw: &serde_json::Value) -> Result<AuthenticatedPoll>
+fn poll_authenticated_events_with_identity(
+    store: &Store, expected: &EventSource, since: i64,
+    raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
+) -> Result<AuthenticatedPoll>
 {
+    if !token_ok(signed_in, 80) || !(1..=GITHUB_MAX_PAGES).contains(&pages_fetched) {
+        return Err("Authenticated source polling requires a verified operator and bounded pages.".into());
+    }
     let source_now = source(store, &expected.id)?;
     if source_now.mode != "observe" || source_now.policy_revision != expected.policy_revision {
         return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
     }
     let events = raw.as_array().ok_or("Authenticated GitHub Events response is not an array.")?;
-    if events.len() > 100 { return Err("Authenticated GitHub poll exceeded its bounded page size.".into()); }
+    if events.len() > pages_fetched * GITHUB_PAGE_SIZE {
+        return Err("Authenticated GitHub poll exceeded its bounded page size.".into());
+    }
     // Newer-first provider pages are normalized before recording, without
     // claiming that a single finite page is a durable subscription cursor.
     let mut parsed = Vec::new();
@@ -492,9 +593,14 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
     parsed.sort_by_key(|event| event.sequence);
     let mut recorded = 0;
     let mut duplicates = 0;
+    let mut self_ignored = 0;
     for event in &parsed {
-        let result = observe(store, event)?;
-        if result.duplicate { duplicates += 1; } else { recorded += 1; }
+        let result = observe_authenticated(store, event, signed_in)?;
+        if result.duplicate { duplicates += 1; }
+        else {
+            recorded += 1;
+            if event.actor.eq_ignore_ascii_case(signed_in) { self_ignored += 1; }
+        }
     }
     let current = source(store, &expected.id)?;
     Ok(AuthenticatedPoll {
@@ -504,9 +610,18 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
         recorded,
         duplicates,
         skipped_before_activation,
+        self_ignored,
+        pages_fetched,
         last_sequence:current.last_sequence,
         bounded_window:true,
     })
+}
+
+#[cfg(test)]
+fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
+    raw: &serde_json::Value) -> Result<AuthenticatedPoll>
+{
+    poll_authenticated_events_with_identity(store, expected, since, raw, "local-operator", 1)
 }
 
 #[tauri::command]
@@ -530,15 +645,36 @@ pub async fn superagent_source_poll_authenticated(
         ).map_err(|e| e.to_string())?;
         (selected, since)
     };
-    let endpoint = format!("repos/{}/events?per_page=100", snapshot.repository);
-    let response = tokio::task::spawn_blocking(move || {
-        let output = crate::github::run_gh(
-            &std::env::temp_dir(), &["api", &endpoint], crate::github::TIMEOUT,
+    let repo = snapshot.repository.clone();
+    let prior_cursor = snapshot.last_sequence;
+    // Authenticate the operator independently of untrusted Event payloads.
+    // Fetch the complete bounded window before storing even one decision.
+    // Any failed page, authentication change or unstable order denies the poll.
+    let (signed_in, response, pages_fetched) = tokio::task::spawn_blocking(move || {
+        let root = std::env::temp_dir();
+        let user = crate::github::run_gh(
+            &root, &["api", "user"], crate::github::TIMEOUT,
         )?;
-        crate::github::json(&output)
+        let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+        let mut pages = Vec::new();
+        let mut previous_id = None;
+        for page in 1..=GITHUB_MAX_PAGES {
+            let endpoint = format!("repos/{repo}/events?per_page={GITHUB_PAGE_SIZE}&page={page}");
+            let output = crate::github::run_gh(
+                &root, &["api", &endpoint], crate::github::TIMEOUT,
+            )?;
+            let value = crate::github::json(&output)?;
+            let complete = github_page_complete(&value, since, prior_cursor, &mut previous_id)?;
+            pages.push(value);
+            if complete { break; }
+        }
+        let response = combine_github_pages(&pages, since, prior_cursor)?;
+        Ok::<_, String>((signed_in, response, pages.len()))
     }).await.map_err(|e| e.to_string())??;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    poll_authenticated_events(&store, &snapshot, since, &response)
+    poll_authenticated_events_with_identity(
+        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+    )
 }
 
 /// A source-scoped, restart-durable decision timeline. Neither the read nor
@@ -677,6 +813,74 @@ pub async fn superagent_source_thread_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_login_and_self_event_filter_are_native_and_restart_durable() {
+        assert_eq!(authenticated_login(&serde_json::json!({"login":"Operator"})).unwrap(), "Operator");
+        for invalid in [serde_json::json!({}), serde_json::json!({"login":"bad login"}),
+                        serde_json::json!({"login":""})] {
+            assert!(authenticated_login(&invalid).is_err());
+        }
+        let (store,path) = fixture();
+        let off = create_source(&store,"orch","owner/repo","operator","issues.opened").unwrap();
+        let src = set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        let own = serde_json::json!([{
+            "id":"5000001001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"operator"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":42,
+                       "body":"UNTRUSTED instructions must never dispatch"}},
+        }]);
+        assert!(poll_authenticated_events_with_identity(
+            &store,&src,0,&own,"",1).is_err());
+        assert_eq!(source(&store,&src.id).unwrap().last_sequence,0);
+        let result = poll_authenticated_events_with_identity(
+            &store,&src,0,&own,"Operator",1).unwrap();
+        assert_eq!(result.self_ignored,1);
+        assert_eq!(result.recorded,1);
+        assert_eq!(list_decisions(&store,&src.id,10).unwrap()[0].decision,"ignored_filter");
+        assert_eq!(source(&store,&src.id).unwrap().last_sequence,5_000_001_001);
+        assert_eq!(poll_authenticated_events_with_identity(
+            &store,&src,0,&own,"Operator",1).unwrap().duplicates,1);
+        assert_eq!(poll_authenticated_events_with_identity(
+            &store,&src,0,&own,"Operator",1).unwrap().self_ignored,0);
+        assert!(!serde_json::to_string(&list_decisions(&store,&src.id,10).unwrap())
+            .unwrap().contains("UNTRUSTED"));
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened,&src.id,10).unwrap()[0].decision,"ignored_filter");
+        assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,5_000_001_001);
+    }
+
+    fn github_page(start: i64, size: usize) -> serde_json::Value {
+        serde_json::Value::Array((0..size).map(|index| serde_json::json!({
+            "id": (start - index as i64).to_string(), "created_at": "2026-11-12T08:59:00Z",
+            "type": "WatchEvent", "repo": {"name": "owner/repo"},
+        })).collect())
+    }
+
+    #[test]
+    fn github_paginated_window_does_not_silently_advance_past_missing_history() {
+        let first = github_page(1000,100);
+        let second = github_page(900,100);
+        let third = github_page(800,100);
+        assert!(combine_github_pages(&[first.clone(),second.clone(),third.clone()],0,0).is_err());
+        let with_anchor = combine_github_pages(&[first.clone(),second.clone()],0,850).unwrap();
+        assert_eq!(with_anchor.as_array().unwrap().len(),200);
+        let short = combine_github_pages(&[github_page(20,2)],0,0).unwrap();
+        assert_eq!(short.as_array().unwrap().len(),2);
+        let mut replayed = github_page(900,100);
+        replayed[0]["id"] = serde_json::json!("1000");
+        assert!(combine_github_pages(&[first.clone(),replayed],0,850).is_err());
+        let invalid = serde_json::json!([{"id":"unsafe","created_at":"2026-11-12T08:59:00Z"}]);
+        assert!(combine_github_pages(&[invalid],0,0).is_err());
+        let (store,_) = fixture();
+        let off = create_source(&store,"orch","owner/repo","trusted-bot","issues.opened").unwrap();
+        let on = set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        assert_eq!(source(&store,&on.id).unwrap().last_sequence,0);
+        assert!(list_decisions(&store,&on.id,10).unwrap().is_empty());
+    }
+
     #[test]
     fn authenticated_event_parser_requires_exact_repo_actor_action_and_subject() {
         let (store, _) = fixture();

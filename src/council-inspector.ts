@@ -10,9 +10,23 @@ function observedDuration(label: string, ms: number | null | undefined): string 
 /** Safe read-only native projection, reusable without the task orchestrator. */
 export function councilInspectionHtml(inspection: CouncilInspection | null): string {
   if (!inspection) return '<p>No task-owned Council is available.</p>';
+  // An informational hint never overrides a stale or non-passing native state.
+  const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale;
   const verdict = inspection.status.state === 'accepted'
     ? 'Accepted by user (not a native pass)'
-    : inspection.verifiedPass ? 'Verified native pass' : 'Native pass not verified';
+    : verified ? 'Verified native pass' : 'Native pass not verified';
+  const modeLabels: Record<CouncilInspection['mode'], string> = {
+    m1: 'Architect', m2: 'Bots', m3: 'Bots + Architect',
+    m4: 'Bots with own Architect', m5: 'Bots with own Architect + Architect',
+    m6: 'Mixed bots', m7: 'Mixed bots + Architect',
+  };
+  const nativeMode = inspection.mode && modeLabels[inspection.mode];
+  const sourceBreakdown = nativeMode
+    ? '<p class="council-native-mode">Native mode: ' + escape(nativeMode) +
+      ' · Observed attempts (not a passing quorum): ' +
+      escape(String(inspection.attempts.filter(a => a.reviewerSource === 'direct_bot').length)) + ' direct bot, ' +
+      escape(String(inspection.attempts.filter(a => a.reviewerSource === 'automatic').length)) + ' automatic</p>'
+    : '';
   const shown = inspection.attempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
   const criteria = inspection.criteria.filter(c => c.required);
@@ -52,8 +66,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' · Cost ' + (usage.costAmount === null || !usage.costCurrency ? 'unknown' : escape(String(usage.costAmount) + ' ' + usage.costCurrency)) +
       '</p>'
     : '';
-  const completion = inspection.verifiedPass && inspection.status.state === 'passed' &&
-    !inspection.status.stale && inspection.verifiedCompletion
+  const completion = verified && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
       escape(String(inspection.verifiedCompletion.round)) + '</p>' : '';
@@ -62,7 +75,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p><p>' + (criteria.length ? 'Required criteria: ' +
       escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
-    completion + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    completion + sourceBreakdown + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + findingsHtml + '</div>';
 }
 

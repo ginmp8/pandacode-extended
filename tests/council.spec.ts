@@ -66,7 +66,7 @@ test('native Council inspector displays unknown usage and never trusts a display
   await button(page).click();
   await panel(page).getByText('Review evidence and usage').click();
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
-  await expect(panel(page).locator('.council-usage-totals')).toContainText('Tokens unknown');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Provider tokens unknown');
   await expect(panel(page).locator('.council-usage-totals')).toContainText('Cost unknown');
   await expect(panel(page).getByText('Native attempts: 1', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cumulative queue 1.0 s', { exact: false })).toBeVisible();
@@ -76,6 +76,33 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('Observed span (last update) 8.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
+});
+
+test('M3 native read-only inspector discloses both reviewer sources without treating stale status as approval', async ({ page }) => {
+  const inspection = {
+    mode: 'm3', cycleStartedAt: 1000, teamRevision: 18,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: true },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 18, round: 1, lowest: 9.5 },
+    criteria: [], attempts: [
+      { workerId: 'direct', round: 1, name: 'Security', lens: 'Security',
+        reviewerSource: 'direct_bot', status: 'completed', score: 10,
+        provider: 'codex', model: 'model-one', attempt: 1,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      { workerId: 'auto', round: 1, name: 'Compatibility', lens: 'Compatibility',
+        reviewerSource: 'automatic', status: 'completed', score: 9.5,
+        provider: 'claude', model: 'model-two', attempt: 1,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).locator('.council-native-mode')).toContainText('Native mode: Bots + Architect');
+  await expect(panel(page).locator('.council-native-mode')).toContainText('1 direct bot, 1 automatic');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+  await expect(panel(page).getByText('Stale revision', { exact: false })).toBeVisible();
 });
 
 test('Council blocked child state remains non-passing in shared native inspector', async ({ page }) => {

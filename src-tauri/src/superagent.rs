@@ -629,7 +629,9 @@ pub struct RunGraph {
 fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
     // Same native snapshot transaction as the Inspector, not a client-side
     // graph built from unrelated Ticket and Assignment revisions.
-    let snapshot = ticket_snapshot(store, ticket_id, 50)?;
+    // Read one extra row to distinguish exactly fifty attempts from
+    // truncated history without exposing any older attempt in the graph.
+    let snapshot = ticket_snapshot(store, ticket_id, 51)?;
     let ticket = snapshot.ticket;
     let root_id = format!("ticket:{}", ticket.id);
     let mut nodes = vec![RunGraphNode {
@@ -638,7 +640,7 @@ fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
         bot_id: None, attempt: None, active: false,
     }];
     let mut edges = Vec::new();
-    for assignment in snapshot.assignments.iter().rev() {
+    for assignment in snapshot.assignments.iter().take(50).rev() {
         let id = format!("assignment:{}", assignment.id);
         nodes.push(RunGraphNode {
             id: id.clone(), kind: "assignment".into(),
@@ -667,7 +669,7 @@ fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
     }
     Ok(RunGraph {
         ticket_id: ticket.id, ticket_revision: ticket.revision,
-        truncated_attempts: snapshot.assignments.len() == 50,
+        truncated_attempts: snapshot.assignments.len() > 50,
         nodes, edges,
     })
 }
@@ -2540,6 +2542,34 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0)
         ).unwrap();
         assert_eq!(total,1,"Graph inspection must not launch another demand");
+        // The native graph is bounded but must not claim truncation at
+        // exactly 50 attempts. Once a 51st exists, preserve the latest 50.
+        for attempt in 2..=50 {
+            store.db.execute(
+                "INSERT INTO sa_assignments
+                 (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+                 VALUES(?1,?2,'worker',?3,'finished',?4,?5,?5)",
+                params![
+                    format!("graph-assignment-{attempt}"), &ticket.id,
+                    format!("graph-session-{attempt}"),attempt,storage::now(),
+                ],
+            ).unwrap();
+        }
+        let exactly_fifty = run_graph(&store, &ticket.id).unwrap();
+        assert_eq!(exactly_fifty.nodes.len(), 51);
+        assert!(!exactly_fifty.truncated_attempts);
+        store.db.execute(
+            "INSERT INTO sa_assignments
+             (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES('graph-assignment-51',?1,'worker','graph-session-51',
+                    'finished',51,?2,?2)",
+            params![&ticket.id, storage::now()],
+        ).unwrap();
+        let capped = run_graph(&store, &ticket.id).unwrap();
+        assert_eq!(capped.nodes.len(),51);
+        assert!(capped.truncated_attempts);
+        assert_eq!(capped.nodes[1].attempt, Some(2));
+        assert_eq!(capped.nodes[50].attempt, Some(51));
     }
 
     #[test]

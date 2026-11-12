@@ -4,6 +4,10 @@
 
 Preserve the existing security remediations and compatible overrides, including the previously documented Rust `zip` 9.0.5 update (first applied in the 0.10.0 cycle). Do not describe inherited patches as new security fixes. The fork's native application version is 0.3.101 at opening; this is independent of Extended 0.12.0 documentation.
 
+## 2026-11-12 dependency and CI status
+
+The unreleased fork [`8e5ab59c`](https://github.com/ginmp8/pandacode/commit/8e5ab59cdd22344a08e199dd94e6674af71ac7bd), tree `4fccf8f62aad4a59e3a03005db469819394713f4`, keeps application **0.3.111** unchanged and modifies two source paths. `releases/0.3.111.md` is mirrored exactly; CI is reconciled for the fully qualified ignored release-profile audio test with `--exact` and APT fetch retries `Acquire::Retries=3`, retaining Extended's audits, mobile checks, ARM64 recovery and macOS timeout. The Extended regression test now checks the real Linux/macOS capture requirement and both exact test commands. No upstream product capability or dependency version changed. Six npm/Cargo/Tauri application-version fields match upstream **0.3.111**; no dependency manifest changed. Previous Extended `e059e9a08623` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43159765950) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43159773384) each reported a failing Node web-test job (526/527 passed): its stale assertion required macOS-only capture despite Linux/macOS now being required. Corrected without weakening coverage. Other jobs were running at inspection; new-SHA CI and real Settings On/Off, microphone and integration acceptance remain pending.
+
 ## Required checks for every imported upstream change
 
 - [ ] Compare npm, Cargo, mobile/Expo and other lockfiles and manifests with the exact upstream commit, preserving remediations unless replaced by a verified safe alternative.

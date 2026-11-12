@@ -22,6 +22,13 @@
 
 - [x] **2026-11-08 source checkpoint:** imported fork [`7134edf5`](https://github.com/ginmp8/pandacode/commit/7134edf501d31acc8bec28ff74be9d1dba171669) (app 0.3.102) as Extended [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): 12 upstream paths applied, including original `releases/0.3.102.md`; 0 upstream paths missing, all file modes preserved. Existing 80 modified shared paths still require full hunk-by-hunk acceptance. This checkbox verifies this source integration, **not** full functional parity.
 
+## 2026-11-12 synchronization checkpoint
+
+- [x] Pin source [`8e5ab59c`](https://github.com/ginmp8/pandacode/commit/8e5ab59cdd22344a08e199dd94e6674af71ac7bd) and previous destination `e059e9a08623eb9ccf3fbafabde5bdf679136de4`; verify full trees and application **0.3.111**.
+- [x] Mirror the one changed upstream release file; reconcile the source CI exact audio selection and APT retries, preserving Extended gates; fix the stale Extended audio test assertion.
+- [ ] Verify the new destination SHA's CI; Previous Extended `e059e9a08623` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43159765950) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43159773384) each reported a failing Node web-test job (526/527 passed): its stale assertion required macOS-only capture despite Linux/macOS now being required. Corrected without weakening coverage. Other jobs were running at inspection; new-SHA CI and real Settings On/Off, microphone and integration acceptance remain pending.
+- [ ] Complete native microphone, Settings On/Off, bots, MCP, Connect, cloud/VM and credentials, plus semantic review of the 81 customized shared files.
+
 ## Final exact-SHA validation
 
 - [ ] Run CI at the exact final 0.12.0 candidate, including Node/TypeScript, release-identity tests, Rust/Cargo/Clippy, RustSec, npm audits, website, mobile/Expo, ONNX and platform-specific checks.

@@ -8,9 +8,16 @@ const platforms = ci.split('\n  rust-platforms:')[1];
 test('release-profile audio smoke reaches all upstream platforms with required macOS capture', () => {
   assert.ok(platforms, 'Rust platform matrix must be present');
   assert.match(platforms, /if: runner\.os == 'macOS' \|\| matrix\.target == 'windows-x86_64' \|\| matrix\.target == 'linux-aarch64'/);
-  assert.match(platforms, /PANDACODE_REQUIRE_REAL_MIC: \$\{\{ runner\.os == 'macOS' && '1' \|\| '' \}\}/);
+  assert.match(platforms, /PANDACODE_REQUIRE_REAL_MIC: \$\{\{ runner\.os != 'Windows' && '1' \|\| '' \}\}/);
   assert.match(platforms, /timeout-minutes: 70/, 'Extended cold macOS build allowance must remain');
   assert.match(platforms, /name: Release startup smoke tests \(Windows arm64\)/);
+});
+
+test('release-profile audio smoke runs the named ignored Rust test exactly', () => {
+  const exactAudioCommand = 'cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture';
+  assert.equal(ci.split(exactAudioCommand).length - 1, 2, 'both Linux and matrix release jobs select the exact audio test');
+  assert.doesNotMatch(ci, /--lib real_audio -- --ignored/, 'broad filters could pass after a test rename');
+  assert.match(ci, /Acquire::Retries=3/, 'keep upstream apt fetch retry count');
 });
 
 test('Extended CI keeps security jobs, native dependency recovery and protected push runs', () => {

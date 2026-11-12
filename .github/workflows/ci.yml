@@ -117,8 +117,8 @@ jobs:
         run: |
           # Avoid the runner's stalled Azure package mirror; keep all Tauri dependencies and tests.
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils
       # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
       - run: npm ci
       - run: npm run build
@@ -134,7 +134,7 @@ jobs:
         timeout-minutes: 55
         env:
           PANDACODE_REQUIRE_REAL_MIC: '1'
-        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib real_audio -- --ignored --nocapture
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture
 
   router:
     # x86_64 Linux builds without ONNX Runtime (see `panda_onnx` in src-tauri/build.rs), so Panda Router's
@@ -216,8 +216,8 @@ jobs:
           # ARM64 ports DNS failures can leave partial APT indexes that cause stale-package 404s.
           # Retry update and install together, requiring every index refresh to succeed.
           for attempt in 1 2 3; do
-            if sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update &&
-               sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils; then
+            if sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update &&
+               sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -250,4 +250,4 @@ jobs:
         # has the null default above, so a runner with no input must fail instead of passing.
         env:
           PANDACODE_REQUIRE_REAL_MIC: ${{ runner.os != 'Windows' && '1' || '' }}
-        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib real_audio -- --ignored --nocapture
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture

@@ -44,6 +44,8 @@ export interface CouncilInspectionAttempt {
   name: string; status: string; score: number | null; abandoned: boolean;
   provider: string; model: string; attempt: number;
   createdAt: number; startedAt: number; lastUpdatedAt: number;
+  /** Native event timestamps in ms. Never infer provider-billed duration from these values. */
+  queueWaitMs?: number | null; observedSpanMs?: number | null;
   tokenCount: number | null; costAmount: number | null;
   costCurrency: string | null; usageProvenance: 'unknown';
 }

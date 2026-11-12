@@ -56,6 +56,7 @@ test('native Council inspector displays unknown usage and never trusts a display
       round: 1, reviewerSource: 'direct_bot', status: 'completed', score: 9.8,
       abandoned: false, provider: 'codex', model: 'gpt-model', attempt: 1,
       createdAt: 1001, startedAt: 1002, lastUpdatedAt: 1010,
+      queueWaitMs: 1000, observedSpanMs: 8000,
       tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' }],
   };
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
@@ -64,6 +65,8 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Tokens unknown', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cost unknown', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Queue 1.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Observed span (last update) 8.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });

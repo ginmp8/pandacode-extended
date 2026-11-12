@@ -1,6 +1,12 @@
 import { escape } from './dom';
 import type { CouncilInspection } from './architect-types';
 
+/** Native durations describe app-observed lifecycle only, not token or provider billing time. */
+function observedDuration(label: string, ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return label + ' unknown';
+  return label + ' ' + (ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : Math.round(ms) + ' ms');
+}
+
 /** Safe read-only native projection, reusable without the task orchestrator. */
 export function councilInspectionHtml(inspection: CouncilInspection | null): string {
   if (!inspection) return '<p>No task-owned Council is available.</p>';
@@ -15,10 +21,12 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       const score = a.score === null ? 'No native score' : a.score.toFixed(1) + '/10';
       const usage = a.tokenCount === null ? 'Tokens unknown' : a.tokenCount + ' tokens';
       const cost = a.costAmount === null || !a.costCurrency ? 'Cost unknown' : a.costAmount + ' ' + a.costCurrency;
+      const observed = observedDuration('Queue', a.queueWaitMs) + ' · ' +
+        observedDuration('Observed span (last update)', a.observedSpanMs);
       return '<li><strong>' + escape(a.name + ' — ' + a.lens) + '</strong> ' +
         escape(a.reviewerSource.replace('_', ' ') + ' · ' + a.status + ' · ' + score) +
-        '<small>Provider: ' + escape(a.provider + ' / ' + a.model + ' · ' + usage + ' · ' + cost +
-        ' (' + a.usageProvenance + ')') + '</small></li>';
+        '<small>Provider: ' + escape(a.provider + ' / ' + a.model + ' · ' + observed +
+        ' · ' + usage + ' · ' + cost + ' (' + a.usageProvenance + ')') + '</small></li>';
     }).join('');
     return '<section aria-label="Review round ' + round + '"><h4>Round ' + round +
       '</h4><ul>' + entries + '</ul></section>';

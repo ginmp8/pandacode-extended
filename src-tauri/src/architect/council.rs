@@ -299,6 +299,10 @@ pub struct CouncilInspectionAttempt {
     pub attempt: usize,
     pub created_at: i64,
     pub started_at: i64,
+    /// Measured native enqueue-to-first-start wait, not a provider estimate.
+    pub queue_wait_ms: Option<i64>,
+    /// Start-to-last-state-update span for settled attempts. Not provider billing time.
+    pub observed_span_ms: Option<i64>,
     /// Last update may include checkpoints; it is not measured provider duration.
     pub last_updated_at: i64,
     pub token_count: Option<u64>,
@@ -327,6 +331,13 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         attempt: worker.attempt,
         created_at: worker.created_at,
         started_at: seat.started_at,
+        queue_wait_ms: (seat.started_at > 0 && worker.created_at > 0)
+            .then(|| seat.started_at.checked_sub(worker.created_at))
+            .flatten().filter(|ms| *ms >= 0),
+        observed_span_ms: (seat.started_at > 0
+            && matches!(worker.status.as_str(), "completed" | "failed" | "stopped"))
+            .then(|| worker.updated_at.checked_sub(seat.started_at))
+            .flatten().filter(|ms| *ms >= 0),
         last_updated_at: worker.updated_at,
         // No provider receipt is available yet: unknown, not zero.
         token_count: None,

@@ -26,6 +26,46 @@ fn council_inspection_is_cycle_scoped_and_never_invents_usage_or_pass() {
     assert!(value["attempts"][0]["tokenCount"].is_null());
     assert!(value["attempts"][0]["costAmount"].is_null());
 }
+
+#[test]
+fn council_inspector_reports_native_queue_wait_and_settled_span_without_provider_claims() {
+    let mut settled = seat("settled", 1, Some(9.8), SINCE + 1);
+    settled.council.as_mut().unwrap().started_at = SINCE + 5;
+    settled.updated_at = SINCE + 25;
+    let mut queued = seat("queued", 1, None, SINCE + 2);
+    queued.council.as_mut().unwrap().started_at = 0;
+    queued.status = "queued".into();
+    let mut invalid = seat("invalid", 1, Some(9.0), SINCE + 30);
+    invalid.council.as_mut().unwrap().started_at = SINCE + 20;
+    invalid.updated_at = SINCE + 31;
+    let team = team_with(on(9.0, 3, 3), vec![settled, queued, invalid]);
+    let result = council::inspection(&team, false).unwrap();
+    assert_eq!(result.attempts.len(), 3);
+    let measured = &result.attempts[0];
+    assert_eq!(measured.queue_wait_ms, Some(4));
+    assert_eq!(measured.observed_span_ms, Some(20));
+    assert!(measured.token_count.is_none());
+    assert!(measured.cost_amount.is_none());
+    assert_eq!(measured.usage_provenance, "unknown");
+    assert_eq!(result.attempts[1].queue_wait_ms, None);
+    assert_eq!(result.attempts[1].observed_span_ms, None);
+    assert_eq!(result.attempts[2].queue_wait_ms, None);
+    assert_eq!(result.attempts[2].observed_span_ms, Some(11));
+    assert!(!result.verified_pass);
+}
+
+#[test]
+fn council_inspector_never_uses_live_checkpoint_time_as_completed_latency() {
+    let mut running = seat("live", 1, None, SINCE + 1);
+    running.status = "running".into();
+    running.council.as_mut().unwrap().started_at = SINCE + 2;
+    running.updated_at = SINCE + 20; // A heartbeat, not terminal completion.
+    let team = team_with(on(9.0, 3, 2), vec![running]);
+    let result = council::inspection(&team, false).unwrap();
+    assert_eq!(result.attempts[0].queue_wait_ms, Some(1));
+    assert_eq!(result.attempts[0].observed_span_ms, None);
+    assert!(result.attempts[0].token_count.is_none());
+}
 #[test]
 fn council_inspection_never_converts_missing_scores_or_human_acceptance_to_pass() {
     let mut team = team_with(on(9.0, 3, 2), vec![

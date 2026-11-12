@@ -1,5 +1,9 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — inherited transcript and audio changes
+
+Upstream transcript windowing, loaded-turn search, cached rows and Linux JACK/OSS fallback are imported from [`650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80). No new Extended control or more restrictive default is introduced. Existing automatic/manual update, Connect, bot pause/resume, MCP, cloud/VM and credential-transfer controls retain their prior configurable On/Off semantics; those native behavioral paths were not exercised in this integration. The 0.12.0 distribution remains unapproved.
+
 ## 2026-11-12 — inherited audio and CI update
 
 [fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50) changes only voice-test helpers/tests, voice documentation, upstream notes and CI. No Extended Settings behavior is modified, suppressed or made more restrictive. The inherited JACK/OSS **dictation** path falls back to the default input when a saved JACK/OSS backend fails; **Test microphone** reports the error. Native hardware acceptance remains outstanding. Existing Extended On/Off controls for bots, updates, Connect, MCP, cloud/VM and credential transfer remain untouched and are not verified by this import.

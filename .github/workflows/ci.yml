@@ -140,6 +140,7 @@ jobs:
         run: |
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/real-audio.log"
           grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/real-audio.log"
+          grep -q 'fell back to the default input' "$RUNNER_TEMP/real-audio.log"
 
   router:
     # x86_64 Linux builds without ONNX Runtime (see `panda_onnx` in src-tauri/build.rs), so Panda Router's
@@ -250,8 +251,8 @@ jobs:
       # the smoke lists devices, opens the default if one exists, and passes without one.
       - name: Real audio smoke (release profile)
         if: runner.os == 'macOS' || matrix.target == 'windows-x86_64' || matrix.target == 'linux-aarch64'
-        # Extended cold Intel builds can exceed the 55-minute upstream smoke allowance.
-        timeout-minutes: 70
+        # Upstream release smoke now allows 75 minutes for cold Intel builds.
+        timeout-minutes: 75
         # macOS runners have virtual inputs (Null Audio Device, Apple Virtual Sound Device) and Linux
         # has the null default above, so a runner with no input must fail instead of passing.
         env:
@@ -262,3 +263,4 @@ jobs:
         run: |
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/real-audio.log"
           grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/real-audio.log"
+          if [ "$RUNNER_OS" = Linux ]; then grep -q 'fell back to the default input' "$RUNNER_TEMP/real-audio.log"; fi

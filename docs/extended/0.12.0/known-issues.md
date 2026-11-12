@@ -1,5 +1,9 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — verification gaps after source 0.3.114 integration
+
+No regression is claimed solely from the imported upstream changes. GitHub CI for the eventual publication commit is not yet complete; local Node/Rust builds and tests, installed-platform transcript performance, Linux fallback when both microphones fail, native Settings On/Off, Connect/MCP/bots/cloud/VM/credentials and historical divergent-file semantic acceptance remain unverified. The inherited transcript Find function searches only loaded pages, not unfetched history (upstream `releases/0.3.114.md`). Keep these limits separate from proven failures and release approval.
+
 ## 2026-11-12 — release-smoke false-positive prevention
 
 [fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50) fixes the possibility that an overly narrow Rust `--exact` filter silently passes with zero tests; the smoke now verifies exactly one passing test, and an Extended regression assertion covers both jobs. The JACK/OSS fallback test distinguishes dictation from microphone-probe errors. This is inherited behavior and stronger test coverage, not proof of native acceptance or a verified Extended product defect. Final CI for the newly integrated Extended SHA, real Linux microphone/JACK/OSS and Settings On/Off/external integration flows remain outstanding.

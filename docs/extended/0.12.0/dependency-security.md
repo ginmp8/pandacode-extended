@@ -1,5 +1,9 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — source app 0.3.114
+
+Source [`650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80) advances the application-version fields to **0.3.114** in npm, Cargo and Tauri. This does not advance the planned Extended **0.12.0 DRAFT** release. Existing Extended package overrides, vendor patches and remediated Cargo dependencies are intentionally preserved; no new remediation is claimed. Dependency audits for the resulting commit require exact-SHA CI verification.
+
 ## 2026-11-12 — unchanged dependency manifests
 
 [fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50), tree `bd360c6d9d3d6f8bd209a8408914c4e1b80f85ef`, retains native app **0.3.112** across npm, Cargo and Tauri metadata. No package manifests or lockfiles changed in these two source commits. CI installs Linux `libasound2-plugins` for JACK smoke coverage, retains Extended npm/RustSec audits and requires a genuinely executed audio test. This does not establish a newly fixed vulnerability or new-SHA CI success. Previous Extended `c2c3789c` push CI passed 11/11 jobs.

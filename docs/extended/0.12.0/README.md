@@ -1,5 +1,9 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — fork 0.3.114 imported
+
+The current source is [`650537ae449d805656f531fc6fdb5dec09eceb80`](https://github.com/ginmp8/pandacode/commit/650537ae449d805656f531fc6fdb5dec09eceb80) (tree `e6a217fa48157f11f9bc03739d7995b0c8c4cd74`). The 41-path source delta since `9aa88776` imports upstream transcript windowing and Linux audio fallback repairs, plus original 0.3.113/0.3.114 release notes. 33 changed files are byte-exact, eight are reconciled with Extended controls, dependency fixes and CI. The Extended release remains **0.12.0 DRAFT**. This static import is not native Settings On/Off or external-integration acceptance; consult the [checklist](release-checklist.md) and [known issues](known-issues.md).
+
 ## 2026-11-12 — JACK/OSS fallback and no-empty-smoke CI import
 
 The current unreleased [fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50) (Git tree `bd360c6d9d3d6f8bd209a8408914c4e1b80f85ef`, application **0.3.112**) advances two source commits since `eb78ef90`. Five upstream paths changed: Linux JACK/OSS dictation-versus-microphone-probe documentation, the original `releases/0.3.112.md`, a test-only recording helper in `voice/capture.rs`, real-audio fallback and latency assertions, and release-profile CI. Four paths are imported byte/mode-exact; `.github/workflows/ci.yml` is reconciled to require one passing ignored release-audio smoke test, install ALSA plugins for JACK fallback, and cancel only superseded PR runs. Existing Extended security checks, Expo, Windows ARM64, APT recovery and macOS timeouts remain. The Extended CI test now validates the new smoke contract. Source application manifests remain 0.3.112.

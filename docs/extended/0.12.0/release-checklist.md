@@ -1,5 +1,14 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — upstream 0.3.114 checkpoint
+
+- [x] Pin full upstream source SHA `650537ae449d805656f531fc6fdb5dec09eceb80` and Git tree `e6a217fa48157f11f9bc03739d7995b0c8c4cd74`; include all 41 changed source paths, including original release files and new transcript modules/tests.
+- [x] Preserve the Extended-only controls and dependency differences in eight modified shared paths; align npm/Cargo/Tauri native version to 0.3.114 without changing the planned Extended 0.12.0 version.
+- [ ] Verify exact published commit CI across Node, Rust, RustSec/npm, macOS/Windows/Linux, Expo and audio fallback.
+- [ ] Verify runtime transcript windowing, loaded-turn Find, send/scroll and installed-platform performance.
+- [ ] Verify native Settings On/Off, Connect, MCP, bots, cloud/VM, credentials, and all remaining historical shared-file differences.
+- [ ] Approve an Extended release separately. No tag, GitHub Release, npm publication, installers or deploy in this sync.
+
 ## 2026-11-12 — source 9aa88776 reconciliation
 
 - [x] Pin fork `main` source SHA `9aa88776f07c2274134e4a952ffcd7da71e70e50`, tree `bd360c6d9d3d6f8bd209a8408914c4e1b80f85ef`, and native version `0.3.112`.

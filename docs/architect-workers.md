@@ -474,3 +474,9 @@ team and cleared atomically when applied. `config` and the parent `Session` alwa
 describe the effective setup. No schema migration is needed for this optional field.
 An architect can explicitly resolve cancelled work with a reason; unresolved
 failures prevent successful completion.
+
+### Reviewer-reported structured findings (issue #147, partial native projection)
+
+The Council inspector can derive bounded, versioned, stable finding IDs from the latest persisted native reviewer assistant message whose score matches the admitted seat. A reviewer may include a single `Council findings JSON:` line with a compact JSON array of at most 16 objects containing `severity`, `category`, `title` and `explanation`, followed by its normal final `Council score: N/10` line. The native projection adds cycle, reviewer, round and message attribution; a newer user/coordination turn invalidates the old reported-finding projection. Malformed, unbounded or unrecognized fields are ignored, not executed.
+
+**Safety boundary:** these are explicitly **reviewer-reported, unverified claims**, not independently established defects, verified file locations, artifact SHA digests, proof of skill checks, authorized fixes or approval tokens. No claimed evidence reference is promoted to native evidence; required evidence continues to fail closed, and only the existing Council score and terminal approval gate can determine pass. The scope-bound native inspection helper rejects stale cycle/revision reads, but its trusted caller still must independently verify task ownership. Durable structured finding dispositions, independent evidence receipts, task-bound request admission, and authenticated artifact-digest receipts remain unimplemented under #147; do not consume these projections as final #148 task approval.

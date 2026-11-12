@@ -1014,6 +1014,22 @@ pub(crate) fn council_inspection_state(
     Ok(inspection)
 }
 
+/// Strict current-cycle selector for trusted native consumers. The caller must
+/// separately authorize task ownership; this is not a public approval API.
+/// A stale cycle or revision is denied rather than returning a newer verdict.
+pub(crate) fn council_inspection_scoped_state(
+    store: &Store, session_id: &str, cycle_id: &str, team_revision: u64,
+) -> Result<council::CouncilInspection> {
+    let inspected = council_inspection_state(store, session_id)?
+        .ok_or("council_inspection_denied: task Council is unavailable.")?;
+    if cycle_id != format!("{}:{}", session_id, inspected.cycle_started_at)
+        || team_revision != inspected.team_revision
+    {
+        return Err("council_inspection_stale: cycle or team revision does not match native state.".into());
+    }
+    Ok(inspected)
+}
+
 /// Native read-only inspection for a task or opt-in channel delivery.
 #[tauri::command]
 pub async fn architect_council_inspect(

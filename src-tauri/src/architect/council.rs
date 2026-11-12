@@ -353,7 +353,7 @@ pub struct CouncilReportedFinding {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReportedFindingDraft {
+pub(super) struct ReportedFindingDraft {
     severity: String,
     category: String,
     title: String,
@@ -362,7 +362,7 @@ struct ReportedFindingDraft {
 
 /// Parse only bounded structured claims. Never parse instructions, locations, IDs,
 /// evidence authorization, scores or external effects out of model-authored JSON.
-fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft> {
+pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft> {
     const PREFIX: &str = "Council findings JSON:";
     let Some(raw) = report.lines().rev().find_map(|line| line.trim().strip_prefix(PREFIX)) else {
         return Vec::new();

@@ -146,6 +146,22 @@ fn council_inspection_never_converts_missing_scores_or_human_acceptance_to_pass(
     assert!(!accepted.verified_pass);
 }
 #[test]
+fn trusted_native_cycle_inspection_fails_closed_for_stale_or_wrong_scope() {
+    let (state, sid) = council_state(on(9.0, 3, 0));
+    let store = state.store.lock().unwrap();
+    let current = council_inspection_state(&store, &sid).unwrap().unwrap();
+    let cycle = format!("{}:{}", sid, current.cycle_started_at);
+    let matched = council_inspection_scoped_state(&store, &sid, &cycle, current.team_revision).unwrap();
+    assert_eq!(matched.cycle_started_at, current.cycle_started_at);
+    assert!(!matched.verified_pass);
+    assert!(council_inspection_scoped_state(&store, &sid, "foreign:cycle", current.team_revision)
+        .unwrap_err().contains("council_inspection_stale"));
+    assert!(council_inspection_scoped_state(&store, &sid, &cycle, current.team_revision + 1)
+        .unwrap_err().contains("council_inspection_stale"));
+    assert!(council_inspection_scoped_state(&store, "missing-task", &cycle, current.team_revision)
+        .unwrap_err().contains("council_inspection_denied"));
+}
+#[test]
 fn native_council_inspection_reuses_the_existing_task_state() {
     let (state, sid) = council_state(on(9.0, 3, 0));
     let store = state.store.lock().unwrap();

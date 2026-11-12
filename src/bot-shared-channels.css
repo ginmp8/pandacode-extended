@@ -2,9 +2,9 @@
 .bots-panel-head { position: relative; }
 .bot-create-menu { position: absolute; z-index: 80; top: calc(100% + 6px); right: 0; display: flex; width: 186px; flex-direction: column; gap: 2px; padding: 6px; border-radius: var(--radius-md); background: var(--glass-warm); backdrop-filter: blur(26px) saturate(1.45); -webkit-backdrop-filter: blur(26px) saturate(1.45); box-shadow: 0 14px 36px -10px var(--glass-shadow-deep); }
 .bot-create-menu[hidden] { display: none; }
-.bot-create-menu button { display: flex; align-items: center; gap: 9px; min-height: 32px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.bot-create-menu button { display: flex; align-items: center; justify-content: flex-start; gap: 9px; width: 100%; min-height: 32px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .bot-create-menu button:hover, .bot-create-menu button:focus-visible { background: rgb(var(--accent-rgb) / .14); outline: none; }
-.bot-create-menu .icon { width: 16px; height: 16px; color: var(--muted); }
+.bot-create-menu .icon { flex: none; width: 16px; height: 16px; color: var(--muted); }
 .bot-shared-dialog:has(.bc-channel) { width: min(760px, calc(100vw - 32px)); }
 .conversation-pane.channel-thread #transcript { display: flex; flex-direction: column; padding: 0; }
 .conversation-pane.channel-thread .transcript { overflow: hidden; }
@@ -61,6 +61,54 @@
 .bc-reassign-menu button:hover { background: var(--ds-fill); }
 .bc-composer textarea { min-height: 58px; overflow-y: auto; resize: none; }
 .bc-composer textarea:focus-visible { outline: none; }
+/* Keep the channel Council in the tray, not inside the message field. */
+.bc-composer .bc-composer-spacer{flex:1}
+.bc-composer .bc-council-trigger{display:inline-grid;place-items:center;flex:none;width:36px;height:36px;padding:0;border:0;border-radius:var(--ds-radius-control);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--ds-ease-out) ease-out,color var(--ds-ease-out) ease-out}
+.bc-composer .bc-council-trigger:hover,.bc-composer .bc-council-trigger[aria-expanded=true]{background:var(--ds-row-hover);color:var(--text)}
+.bc-composer .bc-council-trigger[data-on=true]{background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
+.bc-composer .bc-council-trigger:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.bc-composer .bc-council-trigger .icon{--icon-size:var(--ds-icon-tray,18px);width:18px;height:18px}
+/* Native popover keeps form-owned inputs in the submission while placing the panel above the composer. */
+.bc-council-panel[popover]{position:fixed;inset:auto;margin:0;z-index:90;box-sizing:border-box;width:380px;max-width:calc(100dvw - 24px);max-height:calc(100dvh - 24px);overflow-y:auto;overscroll-behavior:contain;padding:10px 12px;border:1px solid var(--ds-border,var(--border));border-radius:var(--radius-md);background:var(--panel-surface,var(--bg));color:var(--text);box-shadow:0 18px 48px -12px var(--glass-shadow-deep),0 4px 12px -5px var(--glass-shadow-near)}
+.bc-council-panel[popover]:not(:popover-open){display:none}
+.bc-council-panel[popover]:popover-open{display:flex;flex-direction:column;gap:10px}
+.bc-council-controls{display:grid;gap:10px;min-width:0;font-size:var(--ds-text-ui)}
+.bc-council-panel .council-panel-head{min-height:28px}
+.bc-council-panel #bc-council-about{margin:0;color:var(--muted);line-height:1.45;font-size:var(--ds-text-meta)}
+.bc-council-options{display:grid;gap:12px;min-inline-size:0;margin:0;padding:0;border:0}
+.bc-council-options .council-field{gap:6px}
+.bc-council-value-row{display:flex;align-items:center;gap:7px;min-width:0}
+.bc-council-value-row>.ds-seg{flex:1;min-width:0}
+.bc-council-panel .ds-seg>button{height:28px;padding:0 4px;font-size:var(--ds-text-ui)}
+.bc-council-value-row>input[type=number]{box-sizing:border-box;flex:0 0 51px;width:51px;min-width:0;height:34px;padding:4px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill,var(--raised));color:var(--text);font:inherit;font-variant-numeric:tabular-nums;text-align:center}
+.bc-council-value-row>input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+.bc-council-section-label{color:var(--text);font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
+.bc-council-mode-group{display:grid;gap:6px}
+.bc-council-modes{display:flex;gap:2px}
+.bc-council-modes label{display:flex;position:relative;flex:1;justify-content:center;align-items:center;min-height:28px;padding:0 8px;border-radius:var(--ds-radius-inner);color:var(--muted);font-size:var(--ds-text-ui);cursor:pointer}
+.bc-council-modes label:has(input:checked){background:var(--ds-thumb);box-shadow:var(--ds-thumb-shadow);color:var(--text)}
+.bc-council-modes label:focus-within{outline:2px solid var(--focus);outline-offset:1px}
+.bc-council-modes input[type=radio]{position:absolute;width:1px;height:1px;opacity:0}
+.bc-council-reviewer-options{display:none;flex-wrap:wrap;gap:7px;padding:2px 0}
+.bc-council-reviewer-options p{flex-basis:100%;margin:0;color:var(--muted);font-size:var(--ds-text-meta)}
+.bc-council-reviewer-options label{display:inline-flex;align-items:center;gap:7px;padding:5px 8px;border-radius:var(--ds-radius-inner);background:var(--ds-fill);cursor:pointer}
+.bc-council-reviewer-options input[type=checkbox],.bc-council-followup input[type=checkbox],.bc-council-selected-permissions input[type=checkbox]{flex:none;width:15px;min-width:15px;height:15px;min-height:15px;margin:0;accent-color:var(--ds-primary-bg)}
+.bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-reviewer-options{display:flex}
+.bc-council-followup,.bc-council-selected-permissions{display:grid;gap:8px;padding-top:10px;border-top:1px solid var(--ds-border)}
+.bc-council-followup label,.bc-council-selected-permissions label{display:flex;align-items:center;gap:8px;line-height:1.45;cursor:pointer}
+.bc-council-followup label:has(input[type=text]),.bc-council-selected-permissions label:has(input[type=text]){display:grid;justify-items:start;gap:6px;cursor:default}
+.bc-council-followup input[type=text],.bc-council-selected-permissions input[type=text]{box-sizing:border-box;width:100%;min-width:0;height:32px;padding:6px 9px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill);color:var(--text);font:inherit}
+.bc-council-followup small,.bc-council-selected-permissions small{color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4;overflow-wrap:anywhere}
+.bc-council-selected-permissions{display:none}
+.bc-council-options:has(input[name=councilMode][value=selected]:checked) .bc-council-selected-permissions{display:grid}
+.bc-council-panel :is(input,button):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media(max-width:420px){.bc-council-panel .bc-council-value-row{flex-wrap:wrap}.bc-council-panel .bc-council-value-row>.ds-seg{flex-basis:100%}.bc-council-panel .bc-council-value-row>input[type=number]{margin-left:auto}}
+@media(prefers-reduced-transparency:reduce){.bc-council-panel[popover]{background:var(--bg)}}
+.bc-council-report { padding: 2px 8px; font-size: 12px; }
+.bc-council-summary { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; color: var(--text); }
+.bc-council-summary strong { font-weight: 600; }
+.bc-council-reviewers { color: var(--muted); }
+.bc-assigned:has(.bc-council-summary) { flex-wrap: wrap; }
 .bc-create-form, .bc-settings-form { display: grid; gap: 11px; padding: 0 20px 18px; }
 .bc-create-form .dialog-description { margin: 0; }
 .bc-create-form input[name=name], .bc-settings-form input[name=name], .bc-settings-form select { min-height: 36px; padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: var(--fill-hover); color: var(--text); font: inherit; }

@@ -7,6 +7,8 @@ fn protocol() -> Protocol {
         model: "default".into(),
         reasoning_effort: None,
         mode: "ask".into(),
+        reviewer_boundary: false,
+            reviewer_policy: None,
         cwd: PathBuf::from("/tmp"),
         resume_id: None,
         prompt: "Explain this project".into(),

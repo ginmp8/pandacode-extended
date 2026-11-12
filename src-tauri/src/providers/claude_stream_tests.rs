@@ -713,6 +713,8 @@ fn a_start_after_the_list_does_not_count_the_agent_twice() {
 }
 
 /// A turn for a prompt the CLI is slow to take: the whole long wait must stay stoppable.
+/// This fixture invokes POSIX sh, matching the Unix-only run_process test helper.
+#[cfg(unix)]
 #[tokio::test]
 async fn stop_ends_the_long_wait_for_an_owed_prompt_at_once() {
     use std::sync::Arc;

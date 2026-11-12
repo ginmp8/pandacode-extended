@@ -1,0 +1,113 @@
+# Extended 0.12.0 — known issues and acceptance gaps
+
+**Status:** The initial register was inherited from [0.11.0](../0.11.0/known-issues.md); 0.12.0 Extended-only acceptance gaps are now recorded below. Unverified scenarios are **not** confirmed defects.
+
+| Area | Opening classification | Evidence needed before 0.12.0 release |
+| --- | --- | --- |
+| Full upstream functional parity | Static/source checks were recorded in 0.11.0; remaining shared divergence and live behavior are unverified | Fresh complete tree, file modes/binaries, hunk-level explanations and Settings On/Off tests |
+| Bot and channel context | Fresh-context and shared-channel preferences inherited from 0.11.0 | Real delegation, fresh-context, channel history, restart, queue and permissions regression |
+| Account pools and sign-in | Imported upstream features, native multi-account validation not documented as complete | Live authorized Claude/Codex accounts, usage/limit transitions, restart, queue preservation and provider UI |
+| Mobile redesign | Source inherited in 0.11.0; real device behavior not verified | iOS/Android navigation, authentication, notifications, badge and TestFlight usage |
+| Connect, MCP, cloud/VM, credentials | No full native acceptance recorded | Test both settings states, approvals, remote authorization and recovery |
+| Existing installations / data migrations | Acceptance pending | Representative SQLite upgrades, backup/recovery, rollback and native platform installation |
+| Independent Extended packaging | Tag/version workflow patched in 0.11.0, but runtime auto-update behavior has limitations | Real installers, updater manifest, signing and differing Extended tag vs upstream app-version behavior |
+| Confirmed 0.12.0-specific defects | None at cycle opening | Reproduction, impacted SHA, fix and regression evidence |
+| ZCode participation in agent teams (inherited upstream 0.3.102 limitation) | ZCode supports single-agent tasks; automatic teams exclude it, and a team with completed worker activity cannot be switched to ZCode in the same task | Verify the imported model-picker and team-catalog regression tests and test single-agent/team transitions in native app; do not treat the upstream harness limitation as an Extended regression |
+
+## 0.12.0 Extended feature gaps and known limits
+
+| Feature | Current source evidence | Pending native evidence / limitation |
+| --- | --- | --- |
+| [#121 — History preferences](../../extended-bot-context.md) | Per-bot defaults, member-scoped per-channel overrides and focused tests are present on `extended/development`. | Validate migration, retained preferences, restart, UI precedence, membership removal, archived channels, queued work and native context. **History exclusion is not complete context or memory isolation.** |
+| [#122 — Cross-channel collaboration](../../extended-bot-collaboration.md) | Bot post/request tools, attributed timelines, tracking and recovery logic exist in source. | Validate actual multi-channel interactions, no accidental work or broadcast, idempotency, stop/restart, loop limits and private direct requests. **Recovery uses native admission checks:** interrupted callback claims are retried only when no matching queued/recorded callback exists. The recipient's completed task is not rerun to recover its callback; exactly-once delivery across uncertain native launches remains unverified. |
+| [#123 — Portable manifests](../../extended-bot-manifests.md) | Desktop/headless adapters, pre-import backup gate and SHA-pinned GitHub reads exist in source. | Verify cross-machine round-trips, partial import, backup failure, safe external-channel settings, source integrity and access. Pre-update validation rejects invalid Extended settings; source-content and local-state checks avoid redundant Git applies. Playwright-focused UI testing is added to CI, but native end-to-end restoration remains unverified. **No automatic Git polling**; configuration backups cannot restore credentials, messages, workspaces, memories, pairing or live work. |
+
+Code-level fixes were added for audit findings affecting callback recovery and manifest prevalidation/sync; unresolved native acceptance scenarios are not silently marked complete. See the [0.12.0 checklist](release-checklist.md) for the required evidence.
+
+## Baseline provenance
+
+- [0.11.0 known issues](../0.11.0/known-issues.md)
+- [0.11.0 release readiness](../0.11.0/release-checklist.md)
+- [0.11.0 native/application release identity](../releasing.md)
+
+As new evidence arrives, distinguish **observed failures**, **known inherited limitations**, **planned tests** and **validated fixes**. Do not disable upstream functionality in lieu of a justified correction.
+
+## PandaCode 0.3.103 integration
+
+Council's scored review/fix rounds, composer panel, controls and stale-score tracking were copied from the fork's current HEAD, with original tests. **Known upstream limitations:** paid-model review/fix sessions have not been validated; external file edits and shell/script changes not reported through file tracking may not invalidate a score. Native Settings On/Off interactions, cancellation/restart, resume, Connect/MCP/cloud permissions and real platform behavior are **unverified**, not confirmed regressions. The 80 previously customized shared source files have not been exhaustively accepted hunk by hunk.
+
+## PandaCode 0.3.104 acceptance gaps
+
+- **Unverified, not confirmed defects:** desktop panda startup/replay, star-button external link behavior, keyboard access, reduced motion, sidebar sizing and mobile shared-source build behavior have only imported source tests and code review, not independent native-app validation.
+- **Static parity:** at the [integrated source SHA](https://github.com/ginmp8/pandacode/commit/d5d51769ccac15145e67c071ea06a5502c4cadcb) all 1,561 tracked upstream blobs have corresponding paths; the 80 existing Extended customized shared files still lack exhaustive hunk-by-hunk and real Settings On/Off acceptance. This is not a confirmed loss of functionality.
+- **CI:** code-commit [push run #42503275362](https://github.com/ginmp8/pandacode-extended/actions/runs/42503275362) and [PR run #42503280072](https://github.com/ginmp8/pandacode-extended/actions/runs/42503280072) were still running when initially checked. Validate final documentation SHA independently before calling the candidate build green.
+
+## PandaCode 0.3.105 inherited-account acceptance (2026-11-08)
+
+- **Observed code incorporation, not a confirmed bug:** all 38 changed paths from [source `f28c4df0`](https://github.com/ginmp8/pandacode/commit/f28c4df06c1f2d4ca3575eb9db186a2fe7cf8665) were reconciled in [Extended `36228b94`](https://github.com/ginmp8/pandacode-extended/commit/36228b949aaf8648109e2f8f8da441a8735cee41). No upstream files were omitted from the complete static tree. Eight files required local reconciliation, retaining prior Extended behavior.
+- **Unverified runtime scenarios:** actual Claude/Codex credentials across distinct config folders and subscriptions, token precedence, identity refresh while requests are in flight, opt-in account pooling, handoff/resume, compact expandable account-switch notices and /btw isolation across task changes; repeat with existing Extended Settings On/Off and real authorized provider/native builds.
+- **Evidence boundary:** static tree parity and imported tests cannot prove runtime behavior. No local tests executed; CI was pending on the exact code commit at first observation. The 80 shared-file differences still require complete code-level justification and functional acceptance.
+
+
+## Upstream 0.3.106 acceptance status — 2026-11-09
+
+**No new confirmed Extended defect is asserted by this integration.** The source introduces transcript/final answer following, accessibility-aware themed headers, RTL prose, non-English keyboard shortcuts, recovery from inspector task-load failures, and task tools for every supported harness. Their source code and regression tests have been staged, but native/Playwright behavior has not been independently exercised with Extended controls. The 80 source-divergent Extended shared paths still need full hunk-level semantic classification. Missing scanner coverage is now explicitly a failed assurance step rather than an apparent success; this does not substitute for an SBOM or actual security scan.
+
+## Exact-SHA CI security finding — 2026-11-09
+
+At [Extended integration `34d8fb4c`](https://github.com/ginmp8/pandacode-extended/commit/34d8fb4caa985f2ceb4815945dc58ed3042c8353) (upstream [`0bfd5738`](https://github.com/ginmp8/pandacode/commit/0bfd57383621d5aa001d3871018920855cabec39), app **0.3.106**), [push CI #42644925066](https://github.com/ginmp8/pandacode-extended/actions/runs/42644925066) and [PR CI #42644937837](https://github.com/ginmp8/pandacode-extended/actions/runs/42644937837) both **failed**: five of six jobs succeeded in each, but **RustSec audit failed**. The lockfile contains `rusqlite 0.38.0` and `libsqlite3-sys 0.36.0`, whose bundled SQLite is affected by [RUSTSEC-2026-0459 / CVE-2026-119375](https://github.com/RustSec/advisory-db/blob/main/crates/libsqlite3-sys/RUSTSEC-2026-0459.md) (CVSS 6.8). The advisory identifies patched `libsqlite3-sys >=0.39.0`, released with `rusqlite 0.41`; the application explicitly enables `rusqlite`'s `bundled` feature. Its exposure involves opening a crafted local database plus WAL file; the failed audit does not independently establish exploitability in a deployed installation.
+
+**Unresolved, release-blocking dependency remediation:** upgrade the compatible `rusqlite`/SQLite dependency graph, regenerate and commit `src-tauri/Cargo.lock` using Cargo (not hand-edited), verify the Rust toolchain floor (`rusqlite 0.41` requires Rust 1.89), check any affected SQLite API/storage and migration paths, and rerun `cargo check --locked`, relevant Rust/SQLite regression tests, and `cargo audit --file src-tauri/Cargo.lock` before treating the finding as fixed. The local sandbox has no Cargo and cannot resolve GitHub DNS, so no validated lockfile regeneration or Rust test was possible. No vulnerability suppression, CI bypass, or dependency-version-only edit was applied. The source and destination Git trees still have **zero missing upstream paths**, but this does not prove functional equivalence of the 80 customized shared files or validate Settings/Connect/MCP/cloud/VM native behavior. Planned Extended distribution **0.12.0** remains unapproved; checks on any documentation-only follow-up SHA are separate.
+
+## Status update: SQLite dependency remediation candidate — 2026-11-09
+
+The historical `libsqlite3-sys 0.36.0` RustSec failure remains a valid observation on earlier commits. The new candidate uses `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`, reusing the full compatible dependency graph from a read-only branch where RustSec and locked Rust checks passed. **Resolution is pending exact-SHA base/development CI and native SQLite/data-migration validation.** Settings On/Off, Connect, MCP, bots, cloud/VM and credential integrations remain separately unverified; no functionality was disabled.
+
+## SQLite audit failure follow-up — 2026-11-09
+
+The former RustSec failure on `libsqlite3-sys 0.36.0` is **historical**, affecting previous commits rather than the current `base/development` dependency graph. Both [push #42680289120](https://github.com/ginmp8/pandacode-extended/actions/runs/42680289120) and [PR #42680300162](https://github.com/ginmp8/pandacode-extended/actions/runs/42680300162) passed RustSec and Linux locked Rust tests/Clippy on [code SHA `06cb9b0c0141`](https://github.com/ginmp8/pandacode-extended/commit/06cb9b0c0141e964d43d0c462cbd30e9fc44ec1c). **Remaining unverified release gates:** native SQLite data migration/upgrade/rollback, installed-app behavior across platforms, the 80 shared-file hunk reconciliations, and independent Settings On/Off, Connect/MCP, bots, cloud/VM, and credential workflows. Do not reopen the old audit result as a current CI failure, or interpret passing CI as installed-app release approval.
+
+
+## New Skills manager acceptance gaps — upstream 0.3.107
+
+The upstream introduces a Skills manager with global/project switches, quarantine, local/link installation and uninstall/Undo. Upstream release notes explicitly report incomplete native Windows/Linux cross-volume and live CLI validation; these limitations are inherited, not confirmed Extended regressions. On this Extended candidate, interactions between skill switches and existing Feature controls, bots, shared channels, MCP/Connect and restart are unverified. The 80 previously divergent shared source files still require full semantic acceptance. CI on the new exact destination SHA, native installers and data migration are pending; do not interpret a complete file inventory as functional parity certification.
+
+## Upstream 0.3.107 exact-SHA CI follow-up — 2026-11-10
+
+Both [push CI #42805588366](https://github.com/ginmp8/pandacode-extended/actions/runs/42805588366) and [PR CI #42805595388](https://github.com/ginmp8/pandacode-extended/actions/runs/42805595388) completed **successfully (6/6 jobs each)** on the reconciled code commit [`e4e5c0c51daa8a0149015bb26a00c8fb09bb2050`](https://github.com/ginmp8/pandacode-extended/commit/e4e5c0c51daa8a0149015bb26a00c8fb09bb2050). All reported jobs passed: Linux Rust check/tests, RustSec, Node/TypeScript/unit tests and website, npm dependency audit, Expo/mobile compatibility and macOS ONNX parity.
+
+The pending-CI statement above is an earlier observation, now resolved for the referenced code SHA. Remaining acceptance gaps include native Skills CLI install/quarantine/restore/uninstall/Undo, cross-volume behavior, SQLite migration/rollback, Extended controls On/Off and a hunk-by-hunk reconciliation of all 80 customized shared files. A docs-only follow-up SHA requires its own CI verification.
+
+## Upstream 0.3.108 voice-dictation integration — 2026-11-10
+
+- Source: [`ginmp8/pandacode:main` `952d0acbe02547af036ef6d7635ec415a472eb3b`](https://github.com/ginmp8/pandacode/commit/952d0acbe02547af036ef6d7635ec415a472eb3b), tree `202f77088372d261b263b806354d84ce094f25b8`, native app version **0.3.108**; includes commits after the source's release commit. The planned Extended distribution documentation remains **0.12.0 DRAFT**.
+- Reconciled the 109-path source delta relative to `5998a8fc085efbd9d0d53b65f8fb3a3f80a7b9a1`: 78 additions (including Rust/frontend audio input, model catalog, tests and notices), 17 exact source updates and 14 changes reconciled with Extended behavior. The inherited voice feature supports optional on-device speech models and configured transcription services, transcription into the composer, explicit recording/stop and tests. This is not an Extended-only invention.
+- Preserved Extended Feature controls, release identity and dependency remediation, including `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`. Native microphone permissions, service credentials, model downloads, user-cancelled recording, offline transcription and Settings states need separate behavior checks.
+- This section describes a source integration **candidate**, not evidence of a successful new-SHA CI run. Check the eventual exact commit SHA for Rust/Linux/Windows/macOS, RustSec, Node, npm, Expo, installer/platform and native feature-control acceptance. Historic successful CI applies only to the earlier SHAs.
+
+Native microphone permission, on-device model integrity, restart/cancellation, cloud speech-service configuration and differing CPU/OS build baselines have not received independent installed-app acceptance; no regression or vulnerability is asserted without evidence.
+
+
+## Post-0.3.108 source regression and assurance status — 2026-11-10
+
+Fork [`57f0aaf7cfc3`](https://github.com/ginmp8/pandacode/commit/57f0aaf7cfc35419d4a21b9823bbdf35dc73cfd1) hardens its voice-model tamper test for coarse timestamp filesystems and introduces a green-CI release gate. These are inherited changes, **not a confirmed new Extended defect**. Manual-only publishing is preserved. Native voice download checks, all relevant Feature controls On/Off paths, and the 80 historically divergent source files still require independent semantic/runtime acceptance.
+
+## Post-0.3.108 source follow-up — 2026-11-10
+
+No new source-code defect or vulnerability identified. Manual publication intentionally fails when only PR/non-main CI exists for the SHA or when main push CI is pending, failed or cancelled. This gate has not been independently exercised in a live manual run. Native controls, Voice, installers and 80 shared-file semantic differences remain open; no release approval.
+
+## Fork HEAD 979b7d4e integration — 2026-11-10
+
+The upstream update adds clearer documentation of x64 on-device voice CPU requirements, Windows on Arm limitations, transcription cancellation/retention behavior and a diagnostic for an unavailable/malformed GitHub Actions CI response. These are source clarifications, **not** confirmed Extended product defects. The preceding destination SHA `4ef18f0fe5fda72190c6754711ae8d7fbc4ab200` had a [failed push workflow](https://github.com/ginmp8/pandacode-extended/actions/runs/42862512017) due to a cancelled ONNX/macOS job, while its [PR workflow succeeded](https://github.com/ginmp8/pandacode-extended/actions/runs/42862529729). Check the new exact SHA; do not mislabel prior PR success as push-CI success. The 80 historical divergent shared paths and installed-app feature acceptance remain open.
+
+## Fork HEAD bc323966 integration — 2026-11-10
+
+The upstream fixes correct automatic recording-stop instructions (the visible button says **Transcribe recording**, not Retry), improve unexpected speech-engine termination messaging, prevent later main pushes cancelling a release commit's CI, and treat a nonzero `gh run list` exit as a failure. These are **inherited fixes**, not proof of previously failing Extended behavior. [previous Extended `858253745655`](https://github.com/ginmp8/pandacode-extended/commit/858253745655e2c7ebf4b0115679aaceeef69140) passed [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/42872820878) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/42872835520); new CI and native voice acceptance must be checked independently. Eighty historic modified shared paths and the intentional Extended release-guide deviation still need complete hunk-level confirmation. No release approval.
+
+## Fork HEAD 9437b3a9 follow-up — 2026-11-10
+
+The fork documents inherited Voice constraints: a custom local transcription URL requires a literal loopback IP (not `localhost`), a path and no query/fragment/embedded credentials; speech-service uploads and local speech-model downloads do not use system/HTTP proxy settings, so proxy-only networks cannot reach them. It also clarifies when a recording stopping sends audio to the chosen service. These disclosures are **not** newly reproduced Extended defects. The release gate now reports CI run IDs and permits rerunning cancelled or infrastructure/flaky jobs; manual publishing remains opt-in only. Native platform and service integration has not been independently exercised. The 80+ shared-file divergences still need hunk-level and runtime acceptance.
+
+## Mobile node-forge advisory remediation — 2026-11-10
+
+**Confirmed:** the Extended `c7c14606` push CI's mobile npm audit failed for pinned `node-forge@1.4.2`; [job evidence](https://github.com/ginmp8/pandacode-extended/actions/runs/42920988289). GitHub-reviewed advisories identify **1.4.3** as patched. The narrow Extended mobile override/lockfile remediation is in the next candidate; new-SHA npm audit, Expo compatibility and full CI remain **pending**, not passed. No application exploitability has been demonstrated.

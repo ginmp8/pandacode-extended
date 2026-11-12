@@ -168,3 +168,15 @@ dialog.bot-settings-dialog{width:min(880px,calc(100vw - 32px));max-height:88dvh}
 .bots-soul-error{margin:0}
 /* A native select wears the .settings-select look: same fill, border and radius, with the chevron drawn from --muted instead of the system arrow. */
 .bots-detail select,.bots-detail .bs-row>select{appearance:none;-webkit-appearance:none;border-radius:var(--radius-sm);background-color:color-mix(in srgb,var(--text) 6%,transparent);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5'/%3E%3C/svg%3E");background-position:calc(100% - 10px) 50%;background-repeat:no-repeat;padding-right:var(--space-3)}
+
+/* Extended: local channel history settings stay separate from external Connections. */
+.bs-history-explanation{margin:8px 2px 12px;font-size:var(--text-sm);line-height:1.5;color:var(--muted)}
+.bs-channel-history-empty{padding:16px;margin:0;font-size:var(--text-sm);color:var(--muted)}
+
+/* Extended: optional channel communication guidance under Instructions. */
+.bs-communication-examples{margin:12px 0 0;padding:10px 12px;border:1px solid var(--ds-border, var(--border));border-radius:var(--radius-md)}
+.bs-communication-examples summary{cursor:pointer;font-weight:600;color:var(--text)}
+.bs-communication-examples[open] summary{margin-bottom:8px}
+.bs-communication-examples p{margin:10px 0 4px;font-size:var(--text-sm);color:var(--muted)}
+.bs-communication-examples code{display:block;overflow-wrap:anywhere;white-space:pre-wrap;font-size:12px;color:var(--text);padding:8px;background:var(--ds-fill);border-radius:var(--radius-sm)}
+.bs-communication-examples small{display:block;margin-top:12px;line-height:1.5;color:var(--muted)}

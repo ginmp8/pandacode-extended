@@ -33,8 +33,8 @@ async function showTasksView(page: Page): Promise<void> {
 async function openBots(page: Page): Promise<void> {
   await page.goto('/');
   await showBotsView(page);
-  await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
-  await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+  await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+  await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
   await expect(bots(page)).toBeVisible();
 }
 
@@ -57,6 +57,56 @@ async function openSettings(page: Page, section?: string, name = 'Scout'): Promi
 }
 
 test.describe('bots', () => {
+  test('bot actions menu aligns icons and labels to the left', async ({ page }) => {
+    await page.goto('/');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    const items = sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem');
+    await expect(items).toHaveCount(5);
+    await expect(items).toHaveText(['New bot', 'New channel', 'Orchestrations', 'Import / Sync bots…', 'Export bots…']);
+    const positions = await items.evaluateAll(elements => elements.map(element => {
+      const icon = element.querySelector('.icon');
+      if (!icon) throw new Error('Bot action is missing its icon.');
+      return {
+        justification: getComputedStyle(element).justifyContent,
+        iconLeft: icon.getBoundingClientRect().left,
+      };
+    }));
+    expect(positions.every(position => position.justification === 'flex-start')).toBe(true);
+    expect(Math.max(...positions.map(position => position.iconLeft)) -
+      Math.min(...positions.map(position => position.iconLeft))).toBeLessThan(1);
+  });
+
+  test('resized bot settings textareas retain their size across a background refresh', async ({ page }) => {
+    // Creating the preview bot settings, resizing two controls and waiting for
+    // the asynchronous refresh can exceed the default 20s on shared CI runners.
+    // Preserve all measured-height and background-refresh assertions.
+    test.setTimeout(60_000);
+    await page.goto('/?bots=sample');
+    await showBotsView(page);
+    await sidebar(page).getByRole('button', { name: 'Scout settings', exact: true }).click();
+    const settings = panel(page);
+    await expect(settings).toBeVisible();
+    const instructions = settings.getByRole('textbox', { name: 'Instructions' });
+    const goals = settings.getByRole('textbox', { name: 'Standing goals' });
+    await expect(instructions).toBeVisible();
+    await instructions.evaluate(field => { (field as HTMLTextAreaElement).style.height = '280px'; });
+    await goals.evaluate(field => { (field as HTMLTextAreaElement).style.height = '175px'; });
+    // Unfocus the textareas: restoring only the active input does not preserve all resizes.
+    await settings.getByRole('button', { name: 'More', exact: true }).click();
+    const heights = await settings.evaluate(root =>
+      Object.fromEntries(['instructions', 'goals'].map(name => {
+        const field = root.querySelector<HTMLTextAreaElement>(`textarea[name="${name}"]`)!;
+        return [name, field.getBoundingClientRect().height];
+      })));
+    expect(heights.instructions).toBeGreaterThan(270);
+    expect(heights.goals).toBeGreaterThan(165);
+
+    await page.evaluate(() => (window as any).__previewEmit('bots-changed', {}));
+    await expect.poll(async () => instructions.evaluate(field => field.getBoundingClientRect().height)).toBeGreaterThan(270);
+    await expect.poll(async () => goals.evaluate(field => field.getBoundingClientRect().height)).toBeGreaterThan(165);
+  });
+
   test('a new bot keeps its draft and caret through background refreshes', async ({ page }) => {
     await openBots(page);
     const form = bots(page).getByRole('form', { name: 'New bot' });
@@ -189,8 +239,8 @@ test.describe('bots', () => {
     await expect(panel(page)).toBeHidden();
     // A second bot on the same harness keeps its own, empty selection (same page: preview bots live in memory).
     await showBotsView(page);
-    await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
     await bots(page).getByRole('region', { name: 'Suggestions' }).getByRole('button', { name: /Researcher/ }).click();
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
@@ -235,21 +285,21 @@ test.describe('bots', () => {
     expect(await page.evaluate(() => (window as any).__botTaskBriefs.filter((item: any) => item.brief).length)).toBe(1);
   });
 
-  test('per-bot fresh context setting is opt-in, explained and independent', async ({ page }) => {
+  test('fresh context stays in Profile; shared history has its own settings', async ({ page }) => {
     await newBot(page, 'Scout');
     await openSettings(page);
-    const toggle = panel(page).getByRole('checkbox', { name: 'Fresh context each message' });
-    const channelHistory = panel(page).getByRole('checkbox', { name: 'Include shared channel history' });
-    await expect(toggle).not.toBeChecked();
-    await expect(channelHistory).toBeChecked();
-    const help = panel(page).getByRole('img', { name: 'About fresh context each message' });
+    const profile = panel(page);
+    const fresh = profile.getByRole('checkbox', { name: 'Fresh context each message' });
+    await expect(fresh).not.toBeChecked();
+    await expect(profile.getByRole('checkbox', { name: 'Include channel history by default' })).toHaveCount(0);
+    // Preserve the existing fresh-context tooltip and alignment regression checks.
+    const help = profile.getByRole('img', { name: 'About fresh context each message' });
     await expect(help).toHaveAttribute('data-tip', /visible transcript, schedules, active work and queued messages remain intact/i);
-    // The title, tooltip and switch belong to the first row; the hint is a separate line.
-    const helpRow = panel(page).locator('.bs-row.has-help', { has: toggle });
+    const helpRow = profile.locator('.bs-row.has-help', { has: fresh });
     const titleBox = await helpRow.locator('.bs-row-help-title strong').boundingBox();
     const tipBox = await help.boundingBox();
     const hintBox = await helpRow.locator('.bs-row-text > small').boundingBox();
-    const switchBox = await toggle.boundingBox();
+    const switchBox = await fresh.boundingBox();
     expect(titleBox && tipBox && hintBox && switchBox).toBeTruthy();
     if (titleBox && tipBox && hintBox && switchBox) {
       const titleCenter = titleBox.y + titleBox.height / 2;
@@ -258,41 +308,101 @@ test.describe('bots', () => {
       expect(Math.abs(switchBox.y + switchBox.height / 2 - titleCenter)).toBeLessThan(12);
     }
     await help.click();
-    await expect(toggle).not.toBeChecked();
-    const historyHelp = panel(page).getByRole('img', { name: 'About include shared channel history' });
-    await expect(historyHelp).toHaveAttribute('data-tip', /up to eight earlier posts and bot replies/i);
+    await expect(fresh).not.toBeChecked();
+    await fresh.check();
+    await expect(profile.locator('.bs-saved')).toContainText('Saved');
+    await tab(page, 'Shared Channels').click();
+    const history = profile.getByRole('checkbox', { name: 'Include channel history by default' });
+    await expect(history).toBeChecked();
+    const historyHelp = profile.getByRole('img', { name: 'About include channel history by default' });
+    await expect(historyHelp).toHaveAttribute('data-tip', /eight recent posts and replies/);
     await historyHelp.click();
-    await expect(channelHistory).toBeChecked();
-    await channelHistory.uncheck();
-    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
-    await toggle.check();
-    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
+    await expect(history).toBeChecked();
+    await expect(profile.getByText('This bot is not a member of an active shared channel.')).toBeVisible();
+    await history.uncheck();
+    await expect(profile.locator('.bs-saved')).toContainText('Saved');
     await page.keyboard.press('Escape');
     await openSettings(page);
-    await expect(toggle).toBeChecked();
-    await expect(channelHistory).not.toBeChecked();
+    await expect(fresh).toBeChecked();
+    await tab(page, 'Shared Channels').click();
+    await expect(history).not.toBeChecked();
     await page.keyboard.press('Escape');
 
     await showBotsView(page);
-    await sidebar(page).getByRole('button', { name: 'Add bot or channel' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await sidebar(page).getByRole('button', { name: 'Bot actions' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
     await bots(page).getByRole('textbox', { name: 'Name' }).fill('Writer');
     await bots(page).getByRole('button', { name: 'Create bot' }).click();
     await expect(bots(page)).toBeHidden();
     await openSettings(page, undefined, 'Writer');
     await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Fresh context each message' })).not.toBeChecked();
-    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Include shared channel history' })).toBeChecked();
+    await panel(page, 'Writer').getByRole('tab', { name: 'Shared Channels' }).click();
+    await expect(panel(page, 'Writer').getByRole('checkbox', { name: 'Include channel history by default' })).toBeChecked();
     await page.keyboard.press('Escape');
     await showBotsView(page);
     await sidebar(page).getByRole('button', { name: 'Chat with Scout' }).click();
-    await openSettings(page);
-    await expect(toggle).toBeChecked();
-    await expect(channelHistory).not.toBeChecked();
-    await channelHistory.check();
-    await expect(panel(page).locator('.bs-saved')).toContainText('Saved');
+    await openSettings(page, 'Shared Channels');
+    await expect(history).not.toBeChecked();
+    await history.check();
+    await expect(profile.locator('.bs-saved')).toContainText('Saved');
     await page.keyboard.press('Escape');
-    await openSettings(page);
-    await expect(channelHistory).toBeChecked();
+    await openSettings(page, 'Shared Channels');
+    await expect(history).toBeChecked();
+  });
+
+  test('joined channels can override the default independently and clear stale choices', async ({ page }) => {
+    await newBot(page, 'Scout');
+    const call = (command: string, args: Record<string, unknown> = {}) => page.evaluate(async ([command, args]) =>
+      (await import('/src/bridge.ts')).call(command, args), [command, args] as const);
+    const botsList = await call('bots_list') as { id: string; name: string }[];
+    const scoutId = botsList.find(bot => bot.name === 'Scout')!.id;
+    const writer = await call('bot_create', { input: {
+      name: 'Writer', role: '', instructions: '', goals: '', avatar: 'panda:0',
+      provider: 'claude', model: 'default', mode: 'ask', heartbeatMinutes: 0,
+    } }) as { id: string };
+    const launch = await call('bot_shared_channel_create', { name: 'launch', memberIds: [scoutId, writer.id] }) as { id: string };
+    await call('bot_shared_channel_create', { name: 'review', memberIds: [scoutId] });
+    const outsider = await call('bot_shared_channel_create', { name: 'outsider', memberIds: [writer.id] }) as { id: string };
+    await openSettings(page, 'Shared Channels');
+    const settings = panel(page);
+    const global = settings.getByRole('checkbox', { name: 'Include channel history by default' });
+    const choice = (name: string) => settings.getByRole('combobox', { name: `History for #${name}` });
+    await expect(settings.locator('select[name=sharedChannelHistoryMode]')).toHaveCount(2);
+    await expect(choice('launch')).toHaveValue('default');
+    await global.uncheck();
+    await expect(settings.getByText('Excluded via bot default')).toHaveCount(2);
+    await choice('launch').selectOption('include');
+    await expect(settings.getByText('Included via channel override')).toBeVisible();
+    await expect(choice('review')).toHaveValue('default');
+    await global.check();
+    await choice('review').selectOption('exclude');
+    await expect(settings.getByText('Excluded via channel override')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await openSettings(page, 'Shared Channels');
+    await expect(choice('launch')).toHaveValue('include');
+    await expect(choice('review')).toHaveValue('exclude');
+    await expect(call('bot_set_shared_channel_history_override', {
+      botId: scoutId, channelId: outsider.id, mode: 'include',
+    })).rejects.toThrow(/belongs to this channel/);
+    await expect(call('bot_set_shared_channel_history_override', {
+      botId: scoutId, channelId: launch.id, mode: 'invalid',
+    })).rejects.toThrow(/Choose Use default/);
+    await page.keyboard.press('Escape');
+    await call('bot_shared_channel_update', {
+      channelId: launch.id, name: 'launch', memberIds: [writer.id], leadBotId: writer.id,
+    });
+    await call('bot_shared_channel_update', {
+      channelId: launch.id, name: 'launch', memberIds: [scoutId, writer.id], leadBotId: scoutId,
+    });
+    await openSettings(page, 'Shared Channels');
+    await expect(choice('launch')).toHaveValue('default');
+    await choice('launch').selectOption('exclude');
+    await page.keyboard.press('Escape');
+    await call('bot_shared_channel_archive', { channelId: launch.id, archived: true });
+    await call('bot_shared_channel_archive', { channelId: launch.id, archived: false });
+    await openSettings(page, 'Shared Channels');
+    await expect(choice('launch')).toHaveValue('default');
+    await expect(choice('review')).toHaveValue('exclude');
   });
 
   test('chatting with a bot streams like any task and keeps its brief out of the transcript', async ({ page }) => {
@@ -406,6 +516,25 @@ test.describe('bots', () => {
     const choice = picker.locator('.model-menu-option[data-provider="github-copilot"][data-model="default"]');
     await expect(choice).toContainText('Default');
     await expect(choice).toHaveAttribute('aria-current', 'true');
+  });
+
+  test('Instructions explain explicit channel communication without changing the saved instructions', async ({ page }) => {
+    await newBot(page);
+    await openSettings(page, 'Profile');
+    const settings = panel(page);
+    const instructions = settings.getByRole('textbox', { name: 'Instructions' });
+    const original = await instructions.inputValue();
+    const help = settings.getByRole('img', { name: 'About communication tools' });
+    await expect(help).toBeVisible();
+    const examples = settings.locator('.bs-communication-examples');
+    await expect(examples).toHaveCount(1);
+    await expect(examples).not.toHaveAttribute('open', '');
+    await examples.locator('summary').click();
+    await expect(examples).toContainText('pandacode_bot_post_channel');
+    await expect(examples).toContainText('pandacode_bot_request_channel');
+    await expect(examples).toContainText('pandacode_bot_message_bot');
+    await expect(examples).toContainText('explicit recipients');
+    await expect(instructions).toHaveValue(original);
   });
 
   test('the header pauses the bot and opens the right settings', async ({ page }) => {
@@ -620,7 +749,7 @@ test.describe('bots', () => {
     await expect(tab(page, 'Profile')).toHaveAttribute('aria-selected', 'true');
     // Sections are a vertical list, like Settings, and arrow keys move through it.
     await expect(panel(page).getByRole('tablist', { name: 'Bot settings' })).toHaveAttribute('aria-orientation', 'vertical');
-    await expect(panel(page).getByRole('tab')).toHaveText([/^Profile/, /^Connections/, /^Schedules/, /^Memory/, /^Skills/, /^Activity/]);
+    await expect(panel(page).getByRole('tab')).toHaveText([/^Profile/, /^Connections/, /^Shared Channels/, /^Schedules/, /^Memory/, /^Skills/, /^Activity/]);
     await tab(page, 'Profile').focus();
     await page.keyboard.press('ArrowDown');
     await expect(tab(page, 'Connections')).toHaveAttribute('aria-selected', 'true');
@@ -792,7 +921,7 @@ test.describe('bots', () => {
     await expect(sidebar(page).getByText('No bots yet')).toBeVisible({ timeout: 10_000 });
     await expect(sidebar(page).locator('.bot-row-skeleton')).toHaveCount(0);
     await sidebar(page).getByRole('button', { name: 'New bot or channel' }).click();
-    await sidebar(page).getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New bot' }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New bot' }).click();
     await expect(bots(page)).toBeVisible();
   });
 });

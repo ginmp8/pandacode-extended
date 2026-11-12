@@ -118,6 +118,11 @@ No xvfb, no `PANDACODE_SECRETS_FILE` (macOS already uses the 0600 file). Try pla
 
 ## Bots
 
+For the Extended desktop import/export workflow, source registry, SHA-pinned Git sync,
+optional settings, external channels and verified pre-import backups, see
+[Portable bot manifests and Git synchronization](extended-bot-manifests.md).
+
+
 Bots (channels, schedules, approval rules, their whole profile) are configured with one
 JSON file applied inside the serve process — no UI, and channels come up live:
 
@@ -162,6 +167,18 @@ pandacode serve --import-bots bots.json
   already-fired once-schedules are omitted, since their run time is gone). Use it to
   snapshot or move a server's setup; put the tokens back before re-importing.
 
+Each `--import-bots` run now creates and verifies a secret-free configuration backup
+before changing any bots. The backup path is printed, and a backup failure prevents
+all imports. The new one-shot `--sync-bots bot-sources.json` command reads GitHub source
+registries and exits after one sync attempt, without starting a Connect host.
+It prefers an installed, authenticated GitHub CLI (`gh api`; configure with
+`gh auth login`) and falls back to the existing HTTPS transport if `gh` is
+missing or not signed in. Public sources need no authentication, and existing
+headless environment tokens remain optional for private repositories. It
+persists per-registry sync receipts in private application data rather than modifying
+the source JSON, so a second unchanged run can skip backup and import. It does not
+automatically poll; the original serve and sign-in flows are unchanged.
+
 Schedules, rules, profiles and secrets are read fresh by a running serve; channels added
 by hand (not through the import) need a restart to connect.
 
@@ -195,3 +212,61 @@ native twin in serve mode (`headless.rs`), or server behavior silently diverges:
 - [ ] timers with side effects (limit resumes live in `headless.rs`; turn checks are
       deliberately desktop-only)
 - [ ] queue events (`queue-changed` emitters call `headless::queue_changed`)
+
+
+## Headless SuperAgent preset administration (Extended)
+
+The local operator can explicitly export or import the same portable
+configuration-only companion manifest used by the desktop UI:
+
+```sh
+pandacode serve --export-orchestrations orchestrations.json
+pandacode serve --preview-orchestrations orchestrations.json
+pandacode serve --import-orchestrations orchestrations.json
+```
+
+Each command exits after the local operation. Import parses and preflights the
+1 MB-bounded document, writes a verified private recovery snapshot before a
+new preset is inserted, commits native SQLite changes transactionally, and
+leaves every imported preset **Off**. No task starts, no credential or live
+Ticket is imported, and no remote unauthenticated management endpoint is
+opened. Repeating the same import is idempotent; headless errors produce a
+non-zero exit code. This is configuration administration, **not** headless
+task dispatch/approval parity; that remains a separate implementation gate.
+
+### Read-only task inspection (local CLI)
+
+```sh
+pandacode serve --inspect-orchestrations
+pandacode serve --inspect-ticket <ticket-id>
+```
+
+These one-shot local commands return bounded JSON operational metadata from the
+existing native orchestration and Ticket queries. Ticket listing and inspection
+include the state/revision, mandate revocation and policy version, assignment
+IDs/statuses, and audit event kinds/timestamps. They deliberately exclude
+objectives, message transcripts, worker results, rejection reasons, approval
+identifiers and secrets. Unknown Ticket IDs and incompatible database schemas
+fail with a nonzero exit code. Output is local stdout, not an unauthenticated
+remote API.
+
+Unlike import/export or ordinary serve startup, inspection opens
+`kingcode.sqlite3` **read-only before `setup_common`**. It neither starts bots
+nor runs the Store's migration/restart recovery; inspecting a live host must
+not mark a healthy worker as interrupted.
+
+### Ticket review and stop commands
+
+```sh
+pandacode serve --list-tickets
+pandacode serve --accept-ticket <ticket-id> <expected-revision>
+pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
+pandacode serve --stop-ticket <ticket-id>
+```
+
+Accept and reject use the current Ticket revision; reject also requires a
+nonempty reason. Stop revokes the Ticket mandate in the shared database. A
+provider call already held in memory by a running serve process is not forcibly
+terminated; its late completion is denied by the native state and mandate
+checks. These commands do not create, retry, or resume tasks, and authenticated
+event intake remains unavailable.

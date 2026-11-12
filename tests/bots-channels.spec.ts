@@ -10,6 +10,158 @@ async function showBots(page: Page): Promise<void> {
 }
 
 test.describe('shared bot channels', () => {
+
+  test('bot collaboration: Council opens from the channel footer, keeps settings in the form and closes with Escape', async ({ page }) => {
+    // The full preview initializes channel state before exercising the Council controls.
+    test.setTimeout(60_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    const trigger = composer.locator('.bc-council-trigger');
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+
+    await expect(trigger).toBeVisible({ timeout: 15_000 });
+    await expect(panel).toBeHidden();
+    await expect(composer.locator('.bc-council-controls')).toBeHidden();
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    const enabled = panel.getByRole('switch', { name: 'Council' });
+    await expect(enabled).toBeFocused();
+    await enabled.check();
+    await panel.getByRole('button', { name: '8.5', exact: true }).click();
+    await panel.getByRole('button', { name: '5', exact: true }).click();
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: on');
+    await expect(panel.getByRole('button', { name: '8.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    const values = await composer.evaluate(form => {
+      const data = new FormData(form as HTMLFormElement);
+      return { enabled: data.get('councilEnabled'), target: data.get('councilTarget'), rounds: data.get('councilMaxRounds') };
+    });
+    expect(values).toEqual({ enabled: 'on', target: '8.5', rounds: '5' });
+
+    // The number fields still permit values outside the presets.
+    await panel.getByRole('spinbutton', { name: 'Custom target score' }).fill('6.5');
+    await expect(panel.getByRole('button', { name: '8.5', exact: true })).toHaveAttribute('aria-pressed', 'false');
+    await page.keyboard.press('Escape');
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: on');
+    await prompt.fill('Keep the message composer independent');
+    await expect(prompt).toHaveValue('Keep the message composer independent');
+    await expect(composer.locator('.bc-council-controls')).toBeHidden();
+  });
+
+  test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
+    // The full preview initializes channel state before exercising the Council controls.
+    test.setTimeout(60_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('button', { name: '9.5', exact: true }).click();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const reviewers = panel.locator('input[name="councilReviewer"]');
+    await expect(reviewers.first()).toBeVisible();
+    await reviewers.first().check();
+    await page.keyboard.press('Escape');
+
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    const restored = page.locator('#shared-channel-composer');
+    await expect(restored.getByRole('button', { name: 'Council: on' })).toBeVisible();
+    await expect(restored.locator('.bc-council-panel')).toBeHidden();
+    await restored.getByRole('button', { name: 'Council: on' }).click();
+    const restoredPanel = restored.getByRole('dialog', { name: 'Council' });
+    await expect(restoredPanel.getByRole('switch', { name: 'Council' })).toBeChecked();
+    await expect(restoredPanel.getByRole('button', { name: '9.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(restoredPanel.getByRole('radio', { name: 'Bots' })).toBeChecked();
+    await expect(restoredPanel.locator('input[name="councilReviewer"]').first()).toBeChecked();
+  });
+
+  test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
+    await page.goto('/?bots=sample');
+    const html = await page.evaluate(async () => {
+      const module = '/src/bot-shared-channels.ts';
+      const { sharedChannelThreadHtml } = await import(module);
+      return sharedChannelThreadHtml({
+        id: 'channel-one', name: 'isolated', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'delivery-one', kind: 'assigned', authorBotId: null,
+          text: '', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId: 'cycle-one', sessionId: 'private-session-one',
+            state: 'Passed', round: 1, target: 9, lowest: 9.5,
+            artifactRevision: 'frozen-revision',
+            reviewers: [{
+              botId: 'selected-bot', name: 'Selected bot', lens: 'security',
+              round: 1, score: 9.5,
+              skills: [{
+                id: 'skill-a', status: 'not_verified',
+                sha256: 'a'.repeat(64), sourceKind: 'github',
+                sourceRef: 'main', sourceCommit: 'c'.repeat(40),
+                required: true, nativeRetrieval: true,
+                nativeCheckVerified: false,
+                correctiveAction: 'Dispatch a new authorized Council round.',
+              }],
+            }],
+          },
+        }],
+      }, []);
+    });
+    await page.setContent(html);
+    const receipt = page.getByRole('note', { name: /skill-a.*not_verified/i });
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toHaveAttribute('tabindex', '0');
+    await expect(receipt).toHaveAttribute('title', /SHA-256 a{64}/);
+    await expect(receipt).toContainText('Skills: 1');
+    await expect(page.locator('.bc-council-summary')).toContainText('Selected bot');
+    expect(html).not.toContain('sensitive/path');
+  });
+
+  test('switches directly from a shared channel to a bot conversation', async ({ page }) => {
+    // Sample bot bootstrapping may leave no initial conversation selected.
+    // Open a real bot conversation before asserting its composer and switching
+    // to the channel; keep the complete navigation and draft-retention checks.
+    test.setTimeout(60_000);
+    await showBots(page);
+    const initialBot = sidebar(page).getByRole('button', { name: /^Chat with Scout/ });
+    await expect(initialBot).toBeVisible();
+    await initialBot.click();
+    await expect(page.locator('#composer-area #composer')).toBeVisible();
+    const pageErrors: string[] = [];
+    page.on('pageerror', error => pageErrors.push(error.message));
+    const channel = sidebar(page).getByRole('button', { name: '#launch' });
+    await expect(channel).toBeVisible();
+    await channel.click();
+    await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
+
+    // The new bot conversation must replace the channel without clicking Back.
+    await page.getByRole('textbox', { name: 'Message channel' }).fill('Unsent channel draft');
+    const bot = sidebar(page).getByRole('button', { name: /^Chat with Scout/ });
+    await expect(bot).toBeVisible();
+    await bot.click();
+    // A positive destination assertion must pass before checking that the channel
+    // class went away; otherwise a blank intermediate view could pass that check.
+    await expect(page.locator('#breadcrumb .bot-crumb')).toContainText('Scout');
+    await expect(page.locator('.conversation-pane')).not.toHaveClass(/channel-thread/);
+    await expect(page.locator('#transcript .bc-channel')).toHaveCount(0);
+    await expect(page.locator('#composer #prompt')).toBeVisible();
+    await expect(sidebar(page).locator('.channel-row[aria-current="page"]')).toHaveCount(0);
+
+    // The channel keeps a draft that was not sent before the switch.
+    // Re-resolve the current channel row after the bot switch; the sidebar can
+    // replace its nodes asynchronously, so clicking a detached old element is inert.
+    await channel.click();
+    await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveValue('Unsent channel draft');
+    expect(pageErrors).toEqual([]);
+  });
+
   test('creates a channel from the sidebar and opens its settings', async ({ page }) => {
     await showBots(page);
     await page.getByRole('button', { name: 'Add bot or channel' }).click();

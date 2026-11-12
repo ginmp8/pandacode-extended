@@ -5,6 +5,7 @@
 
 mod brief;
 pub(crate) mod channels;
+pub(crate) mod collaboration;
 pub(crate) mod failover;
 pub(crate) mod extended;
 pub(crate) mod gateway;
@@ -196,6 +197,45 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
         }
     }
     extended::upgrade(db)?;
+    collaboration::upgrade(db)?;
+    // Council is an immutable opt-in on an individual message. Separate
+    // sidecars preserve older channel/bot schemas, threads and import payloads.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS extended_channel_council_requests(
+            message_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_messages(id) ON DELETE CASCADE,
+            council_json TEXT NOT NULL CHECK(json_valid(council_json)),
+            executor_ids TEXT NOT NULL CHECK(json_valid(executor_ids)),
+            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_deliveries(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            channel_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            executor_bot_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL UNIQUE,
+            objective TEXT NOT NULL,
+            artifact_revision TEXT NOT NULL,
+            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_acceptances(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            cycle_id TEXT NOT NULL,
+            council_since INTEGER NOT NULL,
+            dispatch_revision INTEGER NOT NULL,
+            changed_at INTEGER NOT NULL,
+            actor TEXT NOT NULL CHECK(actor='local_user'),
+            reason TEXT NOT NULL CHECK(length(reason) BETWEEN 8 AND 1024),
+            accepted_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS extended_channel_council_followups(
+            delivery_id TEXT PRIMARY KEY REFERENCES bot_shared_channel_deliveries(id) ON DELETE CASCADE,
+            authorization_id TEXT NOT NULL,
+            repository TEXT NOT NULL,
+            revision TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending','sending','succeeded','failed','unknown')),
+            issue_url TEXT,
+            error TEXT,
+            updated_at INTEGER NOT NULL);",
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -568,10 +608,18 @@ pub(crate) fn create(store: &Store, input: &BotInput, root: &std::path::Path) ->
     let input = validate(input)?;
     let id = crate::storage::id();
     let folder = root.join(slug(&input.name, &id));
-    std::fs::create_dir_all(&folder).map_err(|e| format!("Could not create the bot's workspace: {e}"))?;
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| format!("Could not create the bot's workspace: {e}"))?;
     let project = store.add_project(&folder)?;
+    crate::skill_manager::projects_changed();
     // The sidebar shows the bot's name, not its folder's.
-    store.db.execute("UPDATE projects SET name=?2 WHERE id=?1", params![project.id, input.name]).map_err(|e| e.to_string())?;
+    store
+        .db
+        .execute(
+            "UPDATE projects SET name=?2 WHERE id=?1",
+            params![project.id, input.name],
+        )
+        .map_err(|e| e.to_string())?;
     let now = crate::storage::now();
     store
         .db
@@ -659,6 +707,7 @@ pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
 pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
     let bot = get(store, id)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    crate::superagent::invalidate_bot(store, id, false)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     shared_channels::settle_posts(store, &open)?;
@@ -673,6 +722,7 @@ pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
 
 /// Deletes the bot and its records. Its workspace folder stays on disk.
 pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
+    crate::superagent::invalidate_bot(store, id, true)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     let channels: Vec<String> = {
@@ -844,6 +894,8 @@ pub struct BotDetail {
     fresh_context_each_message: bool,
     /// Extended-only; upstream local channels include their recent messages by default.
     include_shared_channel_history: bool,
+    /// Joined local channels and their Extended-only history preferences.
+    shared_channel_history: Vec<extended::SharedChannelHistoryPreference>,
     /// The local server's port, for web chat links and the WhatsApp webhook URL.
     server_port: u16,
 }
@@ -949,6 +1001,7 @@ pub async fn bot_detail(state: State<'_, AppState>, bot_id: String) -> Result<Bo
         rules: guard::rules(&store, &bot_id)?,
         fresh_context_each_message: extended::enabled(&store, &bot_id)?,
         include_shared_channel_history: extended::include_shared_channel_history(&store, &bot_id)?,
+        shared_channel_history: extended::channel_history_preferences(&store, &bot_id)?,
         server_port: channels::http::port(),
     })
 }
@@ -1038,64 +1091,224 @@ pub async fn bot_project_ids(state: State<'_, AppState>) -> Result<Vec<String>> 
 
 /// Sends a message to the bot from the desktop app, in its desktop conversation.
 #[tauri::command]
-pub async fn bot_message(app: tauri::AppHandle, bot_id: String, text: String, image_ids: Option<Vec<String>>, moodboard_ids: Option<Vec<String>>, force_queue: Option<bool>) -> Result<String> {
-    gateway::deliver_with_queue(&app, gateway::Inbound { bot_id, channel_id: DESKTOP.into(), thread: DESKTOP.into(), sender_id: DESKTOP.into(), sender_name: "You".into(), text, trusted: true, image_ids, moodboard_ids }, force_queue.unwrap_or(false)).await
+pub async fn bot_message(
+    app: tauri::AppHandle,
+    bot_id: String,
+    text: String,
+    image_ids: Option<Vec<String>>,
+    moodboard_ids: Option<Vec<String>>,
+    force_queue: Option<bool>,
+) -> Result<String> {
+    gateway::deliver_with_queue(
+        &app,
+        gateway::Inbound {
+            bot_id,
+            channel_id: DESKTOP.into(),
+            thread: DESKTOP.into(),
+            sender_id: DESKTOP.into(),
+            sender_name: "You".into(),
+            text,
+            trusted: true,
+            image_ids,
+            moodboard_ids,
+        },
+        force_queue.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]
-pub async fn bot_set_capabilities(app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, bot_id: String, skills: Vec<String>, mcp: Vec<String>) -> Result<Bot> {
+pub async fn bot_set_capabilities(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    bot_id: String,
+    skills: Vec<String>,
+    mcp: Vec<String>,
+) -> Result<Bot> {
     guard_main(&window)?;
-    let bot = set_capabilities(&*state.store.lock().map_err(|e| e.to_string())?, &bot_id, &skills, &mcp)?;
+    let bot = set_capabilities(
+        &*state.store.lock().map_err(|e| e.to_string())?,
+        &bot_id,
+        &skills,
+        &mcp,
+    )?;
     let _ = app.emit("bots-changed", ());
     Ok(bot)
 }
 
 /// Starts an ordinary task with a bot (or none). The window then applies the bot's harness and model.
 #[tauri::command]
-pub async fn bot_assign_task(window: tauri::WebviewWindow, state: State<'_, AppState>, session_id: String, bot_id: Option<String>) -> Result<Option<Bot>> {
+pub async fn bot_assign_task(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    session_id: String,
+    bot_id: Option<String>,
+) -> Result<Option<Bot>> {
     guard_main(&window)?;
-    assign_task(&*state.store.lock().map_err(|e| e.to_string())?, &session_id, bot_id.as_deref())
+    assign_task(
+        &*state.store.lock().map_err(|e| e.to_string())?,
+        &session_id,
+        bot_id.as_deref(),
+    )
 }
 
 #[tauri::command]
-pub async fn bot_task_links(state: State<'_, AppState>) -> Result<std::collections::HashMap<String, String>> {
+pub async fn bot_task_links(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>> {
     task_links(&*state.store.lock().map_err(|e| e.to_string())?)
 }
 
 /// The brief a bot task's next message carries, or nothing when the task has no bot or has
 /// seen this version. Skills are the bot's plus the project's, deduplicated by id; the bot's
 /// ride in the prompt, so nothing is written into a checkout other tasks may share.
-pub(crate) fn task_brief(store: &Store, library: Option<&crate::skills::Library>, session_id: &str) -> Result<Option<String>> {
-    let Some((bot, seen)) = task_bot(store, session_id)? else { return Ok(None) };
+/// The app goes through `task_brief_shared`; this form serves tests on a bare store.
+#[cfg(test)]
+/// The app goes through `task_brief_shared`; this form serves tests on a bare store.
+#[cfg(test)]
+pub(crate) fn task_brief(
+    store: &Store,
+    library: Option<&crate::skills::Library>,
+    session_id: &str,
+) -> Result<Option<String>> {
+    task_brief_with(store, library, session_id, || {
+        crate::skill_manager::disabled_for(session_id)
+    })
+}
+
+/// `task_brief` for the app's shared store: the session's switched-off skills are read (a
+/// settings file and the database) with the store unlocked, so other commands are never kept
+/// waiting on that I/O. Nothing is read when the task has no brief due.
+fn task_brief_shared(
+    store: &std::sync::Mutex<Store>,
+    library: Option<&crate::skills::Library>,
+    session_id: &str,
+    disabled: impl FnOnce() -> std::collections::BTreeSet<String>,
+) -> Result<Option<String>> {
+    let due = {
+        let store = store.lock().map_err(|e| e.to_string())?;
+        task_bot(&store, session_id)?.is_some_and(|(bot, seen)| seen != bot.memory_version)
+    };
+    if !due {
+        return Ok(None);
+    }
+    let disabled = disabled();
+    let store = store.lock().map_err(|e| e.to_string())?;
+    task_brief_with(&store, library, session_id, || disabled)
+}
+
+/// `disabled` gives the session's switched-off skills (All projects and its project): they are
+/// neither inlined nor announced as installed.
+fn task_brief_with(
+    store: &Store,
+    library: Option<&crate::skills::Library>,
+    session_id: &str,
+    disabled: impl FnOnce() -> std::collections::BTreeSet<String>,
+) -> Result<Option<String>> {
+    let Some((bot, seen)) = task_bot(store, session_id)? else {
+        return Ok(None);
+    };
     if seen == bot.memory_version {
         return Ok(None);
     }
     let task = store.session(session_id)?;
     let root = store.workspace_root(&task.project_id, Some(session_id))?;
-    let project = library.map(|l| l.project_active(&task.provider, &root)).unwrap_or_default();
-    let resolved = crate::skills::scoped::resolve(&bot.skills, &project);
+    let project = library
+        .map(|l| l.project_active(&task.provider, &root))
+        .unwrap_or_default();
+    let mut resolved = crate::skills::scoped::resolve(&bot.skills, &project);
+    let disabled = disabled();
+    let mut skipped = Vec::new();
+    if let Some(library) = library {
+        let ids: Vec<String> = resolved.iter().map(|r| r.id.clone()).collect();
+        let (kept, off) = library.without_switched_off(&ids, &disabled);
+        resolved.retain(|r| kept.contains(&r.id));
+        skipped = off;
+    }
     let files = crate::skills::scoped::has_skill_folder(&task.provider);
     // Harnesses with skill folders already read the project's; the rest get every skill as text.
-    let inline: Vec<String> = resolved.iter().filter(|r| !files || r.provenance == "bot").map(|r| r.id.clone()).collect();
-    let installed: Vec<String> = resolved.iter().filter(|r| files && r.provenance != "bot").map(|r| format!("{} ({})", r.id, if r.provenance == "both" { "bot and project" } else { "project" })).collect();
-    let (text, skipped) = library.map(|l| l.prompt_text(&inline)).unwrap_or_default();
+    let inline: Vec<String> = resolved
+        .iter()
+        .filter(|r| !files || r.provenance == "bot")
+        .map(|r| r.id.clone())
+        .collect();
+    let installed: Vec<String> = resolved
+        .iter()
+        .filter(|r| files && r.provenance != "bot")
+        .map(|r| {
+            format!(
+                "{} ({})",
+                r.id,
+                if r.provenance == "both" {
+                    "bot and project"
+                } else {
+                    "project"
+                }
+            )
+        })
+        .collect();
+    let (text, more) = library
+        .map(|l| l.prompt_text_filtered(&inline, &disabled))
+        .unwrap_or_default();
+    skipped.extend(more);
     let memories = memories(store, &bot.id)?;
-    store.db.execute("UPDATE bot_tasks SET brief_version=?2 WHERE session_id=?1", params![session_id, bot.memory_version]).map_err(|e| e.to_string())?;
-    Ok(Some(format!("{}{}", brief::compose(&bot, &memories, brief::TASK, ""), brief::skills(&text, &installed, &skipped))))
+    store
+        .db
+        .execute(
+            "UPDATE bot_tasks SET brief_version=?2 WHERE session_id=?1",
+            params![session_id, bot.memory_version],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(Some(format!(
+        "{}{}",
+        brief::compose(&bot, &memories, brief::TASK, ""),
+        brief::skills(&text, &installed, &skipped)
+    )))
 }
 
 #[tauri::command]
-pub async fn bot_task_brief(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String) -> Result<Option<String>> {
+pub async fn bot_task_brief(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<String>> {
     let library = crate::skills::library(&app).ok();
-    task_brief(&*state.store.lock().map_err(|e| e.to_string())?, library.as_ref(), &session_id)
+    let store = state.store.clone();
+    crate::blocking(move || {
+        task_brief_shared(&store, library.as_ref(), &session_id, || {
+            crate::skill_manager::disabled_for(&session_id)
+        })
+    })
+    .await
 }
 
 /// Starts the scheduler and channel connections once the app is ready.
 pub(crate) fn start(app: &tauri::AppHandle) {
     // Before the scheduler or any window reads a bot, so older databases have the profile columns.
-    let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| { upgrade(&store.db)?; shared_channels::reconcile_in_progress(&store) });
+    let upgraded = app.state::<AppState>().store.lock().map_err(|e| e.to_string()).and_then(|store| {
+        upgrade(&store.db)?;
+        shared_channels::reconcile_in_progress(&store)?;
+        collaboration::reconcile_unsent_requests(&store)?;
+        // Only remove immutable Council skill files after references in durable
+        // native round records are recovered. Never touch the assessed checkout.
+        if let Ok(library) = crate::skills::library(app) {
+            if let Err(error) = crate::skills::reviewer::cleanup_orphaned(&library, &store) {
+                eprintln!("Could not reclaim orphaned Council reviewer snapshots: {error}");
+            }
+        }
+        Ok(())
+    });
+    let is_upgraded = upgraded.is_ok();
     if let Err(error) = upgraded {
         eprintln!("Could not upgrade the bots table: {error}");
+    }
+    if is_upgraded {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            collaboration::resume_callbacks(&app).await;
+            shared_channels::resume_post_acceptance_issues(&app).await;
+        });
     }
     schedule::start(app.clone());
     channels::start_all(app.clone());
@@ -1113,16 +1326,138 @@ pub(crate) async fn pause_all(app: &tauri::AppHandle) {
     }
 }
 
+/// A Shared Channel Council delivery is not finished merely because the latest
+/// harness turn ended. Only the matching native Council terminal verdict can
+/// authorize a final reply. Ordinary bot conversations retain per-turn delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelCouncilOutcome {
+    Ordinary,
+    Waiting,
+    Approved,
+    Denied(&'static str),
+}
+
+pub(crate) fn team_state(store: &Store, session_id: &str) -> Result<Option<String>> {
+    Ok(crate::architect::load(store, session_id)?.map(|team| team.status))
+}
+
+pub(crate) fn channel_council_outcome(store: &Store, session_id: &str) -> Result<ChannelCouncilOutcome> {
+    let active: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if active == 0 {
+        // A Council-enabled assignment with a lost cycle link must never
+        // silently fall back to ordinary completion or callback behavior.
+        let requested: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_deliveries d
+             JOIN extended_channel_council_requests r ON r.message_id=d.message_id
+             WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+            [session_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if requested != 0 {
+            return Ok(ChannelCouncilOutcome::Denied("Council delivery is missing its native cycle."));
+        }
+        return Ok(ChannelCouncilOutcome::Ordinary);
+    }
+    if active != 1 { return Ok(ChannelCouncilOutcome::Waiting); }
+    let delivery_id: String = store.db.query_row(
+        "SELECT c.delivery_id FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !shared_channels::council_scope_active(store, &delivery_id)? {
+        return Ok(ChannelCouncilOutcome::Denied("Council delivery channel or executor is no longer available."));
+    }
+    let Some(team) = crate::architect::load(store, session_id)? else {
+        return Ok(ChannelCouncilOutcome::Denied("Council delivery has no native team."));
+    };
+    let Some(config) = team.config.council.as_ref() else {
+        return Ok(ChannelCouncilOutcome::Denied("Council was removed from the delivery."));
+    };
+    let original: String = store.db.query_row(
+        "SELECT c.source_message_id FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    let requested = super::bots::shared_channels::council_request(store,&original)?;
+    if requested.is_none_or(|request| request.council != *config) {
+        return Ok(ChannelCouncilOutcome::Denied("Council settings changed after the channel message was authorized."));
+    }
+    let frozen: String = store.db.query_row(
+        "SELECT c.artifact_revision FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1 AND d.status IN ('queued','in_progress')",
+        [session_id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    if frozen != format!("cycle:{}",team.council_since) {
+        return Ok(ChannelCouncilOutcome::Waiting);
+    }
+    match team.status.as_str() {
+        "completed" if !crate::architect::council_evidence_is_current(store, &team) =>
+            Ok(ChannelCouncilOutcome::Denied("Council evidence changed after the last native review.")),
+        "completed" => match team.council_status.as_ref() {
+            Some(status) if status.state == "passed" && !status.stale
+                && crate::architect::verified_council_pass(store, &team) => Ok(ChannelCouncilOutcome::Approved),
+            Some(status) if status.state == "limit" => Ok(ChannelCouncilOutcome::Waiting),
+            Some(status) if status.state == "accepted" && !status.stale => {
+                let proof: Option<(String, i64, i64, i64)> = store.db.query_row(
+                    "SELECT a.cycle_id,a.council_since,a.dispatch_revision,a.changed_at
+                     FROM extended_channel_council_acceptances a
+                     JOIN extended_channel_council_deliveries c ON c.delivery_id=a.delivery_id
+                     JOIN bot_shared_channel_deliveries d ON d.id=a.delivery_id
+                     WHERE d.session_id=?1 AND d.status='in_progress' AND a.cycle_id=c.cycle_id",
+                    [session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                ).optional().map_err(|error| error.to_string())?;
+                if proof.is_some_and(|(_, since, revision, changed)| {
+                    team.council_accepted == Some(since) && team.council_since == since
+                        && team.dispatch_revision as i64 == revision && team.changed_at == changed
+                }) { Ok(ChannelCouncilOutcome::Approved) }
+                else { Ok(ChannelCouncilOutcome::Waiting) }
+            },
+            Some(status) if status.state == "accepted" => Ok(ChannelCouncilOutcome::Waiting),
+            _ => Ok(ChannelCouncilOutcome::Denied("Council has no verified, current passing review.")),
+        },
+        // Store::open intentionally interrupts native running/waiting teams.
+        // This is a recoverable pause, NOT a failed Council verdict, but only
+        // when the task was interrupted by restart and not stopped by the user.
+        "interrupted" => {
+            let recoverable: bool = store.db.query_row(
+                "SELECT restart_interrupted=1 AND stop_requested=0
+                 FROM sessions WHERE id=?1 AND status='interrupted'",
+                [session_id], |row| row.get(0),
+            ).optional().map_err(|error| error.to_string())?.unwrap_or(false);
+            Ok(if recoverable { ChannelCouncilOutcome::Waiting }
+                else { ChannelCouncilOutcome::Denied("Council team ended without approval.") })
+        },
+        "failed" | "stopped" => Ok(ChannelCouncilOutcome::Denied("Council team ended without approval.")),
+        _ => Ok(ChannelCouncilOutcome::Waiting),
+    }
+}
+
 /// Called when any task's run ends; replies for bot conversations go back to their channel.
 pub(crate) fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) {
     let app = app.clone();
     let session_id = session_id.to_owned();
     tauri::async_runtime::spawn(async move {
+        let gate = app.state::<AppState>().store.lock().ok()
+            .and_then(|store| channel_council_outcome(&store, &session_id).ok())
+            .unwrap_or(ChannelCouncilOutcome::Waiting);
+        if gate == ChannelCouncilOutcome::Waiting {
+            // An intermediate lead turn cannot drain the queue or emit a callback.
+            return;
+        }
         let reply = app.state::<AppState>().store.lock().ok()
             .and_then(|store| shared_channels::latest_reply(&store, &session_id).ok())
             .unwrap_or_default();
-        if gateway::run_finished(&app, &session_id, successful).await {
-            shared_channels::run_finished(&app, &session_id, successful, &reply).await;
+        let denied = matches!(gate, ChannelCouncilOutcome::Denied(_));
+        // Terminal Council denial is not a provider failure requiring failover.
+        if gateway::run_finished(&app, &session_id, successful || denied).await {
+            shared_channels::run_finished(&app, &session_id, successful && !denied, &reply).await;
         }
     });
 }
@@ -1139,5 +1474,141 @@ pub(crate) fn note(app: &tauri::AppHandle, bot_id: &str, kind: &str, summary: &s
     let result = state.store.lock().map_err(|e| e.to_string()).and_then(|store| log(&store, bot_id, kind, summary, detail));
     if let Err(error) = result {
         eprintln!("Could not record bot activity: {error}");
+    }
+}
+
+#[cfg(test)]
+mod skill_switch_tests {
+    use super::*;
+
+    fn library(root: &std::path::Path, names: &[&str]) -> crate::skills::Library {
+        let library = crate::skills::Library::new(root.join("library"), root.join("home"));
+        let source = || crate::skills::Source {
+            kind: "folder".into(),
+            location: "x".into(),
+            git_ref: None,
+            commit: None,
+        };
+        for name in names {
+            library
+                .import(
+                    crate::skills::Kind::Skill,
+                    vec![(
+                        "SKILL.md".into(),
+                        format!("---\nname: {name}\ndescription: {name} things\n---\nDo {name}.\n")
+                            .into_bytes(),
+                    )],
+                    name,
+                    source(),
+                )
+                .unwrap();
+        }
+        library
+    }
+
+    #[test]
+    fn bots_task_brief_leaves_out_skills_switched_off_for_the_session() {
+        let root =
+            std::env::temp_dir().join(format!("pandacode-bot-switch-{}", crate::storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let library = library(&root, &["review", "lint", "keep"]);
+        let checkout = root.join("project");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let project = store.add_project(&checkout).unwrap();
+        let main = store.workspace_root(&project.id, None).unwrap();
+        for (id, harness) in [("lint", "claude"), ("keep", "claude")] {
+            library
+                .activate(
+                    id,
+                    harness,
+                    crate::skills::Scope::Project,
+                    Some(&main),
+                    false,
+                )
+                .unwrap();
+        }
+        let input = BotInput {
+            name: "Scout".into(),
+            role: "r".into(),
+            instructions: "i".into(),
+            provider: "claude".into(),
+            model: "default".into(),
+            mode: "ask".into(),
+            ..Default::default()
+        };
+        let bot = create(&store, &input, &root).unwrap();
+        let bot = set_capabilities(&store, &bot.id, &["review".into()], &[]).unwrap();
+        let task = store
+            .create_session(&project.id, "claude", "default", "ask")
+            .unwrap();
+        assign_task(&store, &task.id, Some(&bot.id)).unwrap();
+        let off = std::collections::BTreeSet::from(["review".to_string(), "lint".to_string()]);
+        let brief = task_brief_with(&store, Some(&library), &task.id, || off)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        // Neither inlined (bot skill) nor announced as installed (project skill)…
+        assert!(!brief.contains("Do review."), "{brief}");
+        assert!(!brief.contains("lint (project)"), "{brief}");
+        // …while skills that are on still are, and the brief says why the others are missing.
+        assert!(brief.contains("keep (project)"), "{brief}");
+        assert!(
+            brief.contains("review is off in Skills.") && brief.contains("lint is off in Skills."),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn bots_task_brief_reads_switched_off_skills_with_the_store_unlocked() {
+        let root =
+            std::env::temp_dir().join(format!("pandacode-bot-unlocked-{}", crate::storage::id()));
+        let checkout = root.join("project");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&checkout).unwrap();
+        let input = BotInput {
+            name: "Scout".into(),
+            role: "r".into(),
+            instructions: "i".into(),
+            provider: "claude".into(),
+            model: "default".into(),
+            mode: "ask".into(),
+            ..Default::default()
+        };
+        let bot = create(&store, &input, &root).unwrap();
+        let plain = store
+            .create_session(&project.id, "claude", "default", "ask")
+            .unwrap();
+        let task = store
+            .create_session(&project.id, "claude", "default", "ask")
+            .unwrap();
+        assign_task(&store, &task.id, Some(&bot.id)).unwrap();
+        let store = std::sync::Mutex::new(store);
+        let never = || -> std::collections::BTreeSet<String> {
+            panic!("switches are read only when a brief is due")
+        };
+        // No bot, no brief, no switch I/O.
+        assert_eq!(
+            task_brief_shared(&store, None, &plain.id, never).unwrap(),
+            None
+        );
+        let mut read = false;
+        let brief = task_brief_shared(&store, None, &task.id, || {
+            read = true;
+            assert!(
+                store.try_lock().is_ok(),
+                "the store is locked during switch I/O"
+            );
+            Default::default()
+        })
+        .unwrap();
+        assert!(read && brief.is_some());
+        // The brief goes once; the next message reads nothing.
+        assert_eq!(
+            task_brief_shared(&store, None, &task.id, never).unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

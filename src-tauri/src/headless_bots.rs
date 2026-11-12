@@ -4,7 +4,7 @@
 //! back. Applying is pure (Store in, report out) — only starting the added channels needs
 //! the AppHandle, which is the caller's job in the serve process.
 
-use crate::bots::{self, channels, guard, schedule};
+use crate::bots::{self, channels, guard, schedule, shared_channels};
 use crate::storage::Store;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -42,19 +42,113 @@ pub(crate) fn apply(store: &Store, root: &Path, doc: &Value, now: i64) -> Report
             }
         }
     }
+    if let Some(entries) = doc.get("sharedChannels").filter(|value| !value.is_null()) {
+        if let Some(entries) = entries.as_array() {
+            for entry in entries {
+                match apply_shared_channel(store, entry) {
+                    Ok(line) => report.lines.push(line),
+                    Err(error) => {
+                        report.failed += 1;
+                        report.lines.push(format!("shared channel: {error}"));
+                    }
+                }
+            }
+        } else {
+            report.failed += 1;
+            report.lines.push("sharedChannels must be an array or null.".into());
+        }
+    }
+    // Restore channel-specific Extended settings after their channels have been imported.
+    for entry in entries {
+        if let Some(overrides) = entry.get("extended")
+            .and_then(|value| value.get("sharedChannelHistoryOverrides"))
+            .filter(|value| !value.is_null()) {
+            let name = entry.get("name").and_then(Value::as_str).unwrap_or("");
+            if let Err(error) = apply_history_overrides(store, name, overrides) {
+                report.failed += 1;
+                report.lines.push(format!("bot \"{name}\" shared-channel preferences: {error}"));
+            }
+        }
+    }
     report
 }
 
+/// Reject unsupported Extended fields before the native update can write the profile.
+/// Bot-level partial success must never turn a malformed preference into a saved mode change.
+fn validate_extended_preferences(entry: &Value) -> crate::Result<()> {
+    let Some(extended) = entry.get("extended").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let settings = extended.as_object().ok_or("extended must be an object or null")?;
+    for (key, value) in settings {
+        if value.is_null() { continue; }
+        match key.as_str() {
+            "freshContextEachMessage" | "includeSharedChannelHistory" => {
+                if !value.is_boolean() {
+                    return Err(format!("extended.{key} must be boolean or null"));
+                }
+            }
+            "sharedChannelHistoryOverrides" => {
+                let overrides = value.as_array()
+                    .ok_or("extended.sharedChannelHistoryOverrides must be an array or null.")?;
+                for override_entry in overrides {
+                    let channel = override_entry.get("channel").and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or("Every shared channel history override needs a channel name.")?;
+                    let mode = override_entry.get("mode").and_then(Value::as_str)
+                        .ok_or("Every shared channel history override needs a mode.")?;
+                    if !matches!(mode, "default" | "include" | "exclude") {
+                        return Err(format!("Invalid history preference for {channel}."));
+                    }
+                }
+            }
+            _ => return Err(format!("Unsupported extended preference: {key}")),
+        }
+    }
+    Ok(())
+}
+
 fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedChannel>, now: i64) -> crate::Result<Vec<String>> {
-    let input: bots::BotInput =
-        serde_json::from_value(entry.clone()).map_err(|error| format!("unreadable bot entry: {error}"))?;
-    if input.name.trim().is_empty() {
+    let raw_name = match entry.get("name") {
+        Some(Value::String(name)) => name.as_str(),
+        Some(_) => return Err("unreadable bot entry: name must be a string.".into()),
+        None => "",
+    };
+    if raw_name.trim().is_empty() {
         return Err("Every bot needs a name.".into());
     }
-    // Constructors store the canonical name (control characters stripped, capped at 60);
-    // match on that form or a non-canonical file name duplicates its bot on every apply.
-    let canonical = bots::clean(&input.name, 60);
+    // Keep native BotInput defaults for original manifests. Only the newly exported optional
+    // preferences preserve their previous value when omitted or explicitly null.
+    let canonical = bots::clean(raw_name, 60);
     let existing = bots::list(store)?.into_iter().find(|bot| bot.name == canonical);
+    let mut prepared = entry.clone();
+    let fields = ["reasoningEffort", "backupModels", "fallbackMode", "color", "notify", "whileWorking", "showPlan"];
+    let object = prepared.as_object_mut().ok_or("unreadable bot entry: expected an object")?;
+    if let Some(saved) = &existing {
+        let saved = serde_json::to_value(saved).map_err(|error| error.to_string())?;
+        for key in fields {
+            if object.get(key).is_none_or(Value::is_null) {
+                if let Some(value) = saved.get(key) {
+                    object.insert(key.to_owned(), value.clone());
+                }
+            }
+        }
+    } else {
+        for key in fields {
+            if object.get(key).is_some_and(Value::is_null) {
+                object.remove(key);
+            }
+        }
+    }
+    validate_extended_preferences(entry)?;
+    let input: bots::BotInput =
+        serde_json::from_value(prepared).map_err(|error| format!("unreadable bot entry: {error}"))?;
+    // The provider's stable effort contract is a necessary precondition. Dynamic
+    // per-model catalogs are checked by the harness when a model is available.
+    crate::providers::validate_reasoning_effort(
+        &input.provider,
+        (!input.reasoning_effort.is_empty()).then_some(input.reasoning_effort.as_str()),
+    ).map_err(|error| format!("reasoningEffort: {error}"))?;
     let (name, mut lines) = match &existing {
         Some(bot) => {
             bots::update(store, &bot.id, &input)?;
@@ -65,6 +159,22 @@ fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedCha
             (bot.id.clone(), vec![format!("\"{}\" imported", bot.name)])
         }
     };
+    if let Some(extended) = entry.get("extended").filter(|value| !value.is_null()) {
+        let values = extended.as_object().ok_or("extended must be an object or null")?;
+        for (key, value) in values {
+            if value.is_null() { continue; }
+            if key == "sharedChannelHistoryOverrides" {
+                if !value.is_array() { return Err("extended.sharedChannelHistoryOverrides must be an array or null.".into()); }
+                continue;
+            }
+            let enabled = value.as_bool().ok_or_else(|| format!("extended.{key} must be boolean or null"))?;
+            match key.as_str() {
+                "freshContextEachMessage" => { bots::extended::set(store, &name, enabled)?; }
+                "includeSharedChannelHistory" => { bots::extended::set_channel_history(store, &name, enabled)?; }
+                _ => return Err(format!("Unsupported extended preference: {key}")),
+            }
+        }
+    }
     if entry.get("skills").is_some() || entry.get("mcp").is_some() {
         let skills = canonical_capabilities(entry.get("skills"))?;
         let mcp = canonical_capabilities(entry.get("mcp"))?;
@@ -83,23 +193,73 @@ fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedCha
             let mut input: channels::ChannelInput = serde_json::from_value(channel_entry.clone())
                 .map_err(|error| format!("unreadable channel entry: {error}"))?;
             let label = input.label.trim().chars().take(60).collect::<String>();
-            // A matched channel needs nothing from the file: skip before resolving
-            // secrets, so a removed environment variable cannot block a converged
-            // server from booting.
-            if channels::list(store, &name)?.iter().any(|channel| channel.kind == input.kind && channel.label == label) {
-                lines.push(format!("  channel {} \"{label}\" already configured", input.kind));
+            let enabled = channel_entry.get("enabled").filter(|value| !value.is_null())
+                .map(|value| value.as_bool().ok_or("Channel enabled must be boolean or null."))
+                .transpose()?;
+            let reconcile = channel_entry.get("reconcile").filter(|value| !value.is_null())
+                .map(|value| value.as_bool().ok_or("Channel reconcile must be boolean or null."))
+                .transpose()?.unwrap_or(false);
+            let matches: Vec<_> = channels::list(store, &name)?.into_iter()
+                .filter(|channel| channel.kind == input.kind && channel.label == label).collect();
+            if matches.len() > 1 {
+                return Err(format!("Ambiguous {} channel \"{label}\".", input.kind));
+            }
+            if let Some(saved) = matches.first() {
+                if !reconcile {
+                    lines.push(format!("  channel {} \"{label}\" already configured", input.kind));
+                    continue;
+                }
+                if !input.secrets.is_empty() {
+                    // A portable manifest may include env references for fresh machines.
+                    // Matched channels keep their existing OS-stored secrets; a manifest
+                    // must never rotate or erase them, even when an env var is unavailable.
+                    lines.push(format!("  channel {} \"{label}\": preserved existing credentials (secret bindings apply only to new channels)", input.kind));
+                }
+                let mut patch = serde_json::Map::new();
+                if let Some(config) = channel_entry.get("config").filter(|value| !value.is_null()) {
+                    for (key, value) in config.as_object().ok_or("Channel config must be an object.")? {
+                        if !matches!((input.kind.as_str(), key.as_str()), ("web", "remote" | "publicUrl") | ("whatsapp", "publicUrl")) {
+                            if key == "phoneNumberId" && input.kind == "whatsapp" && saved.config.get(key) == Some(value) {
+                                continue;
+                            }
+                            return Err(format!("  channel {} \"{label}\": {key} cannot be reconciled", input.kind));
+                        }
+                        if saved.config.get(key) != Some(value) {
+                            patch.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                // Validate and persist channel settings before toggling availability.
+                // An invalid endpoint must not unintentionally disable a working channel.
+                if !patch.is_empty() {
+                    channels::configure(store, &saved.id, &Value::Object(patch))?;
+                }
+                if let Some(value) = enabled {
+                    if value != saved.enabled {
+                        store.db.execute("UPDATE bot_channels SET enabled=?2 WHERE id=?1",
+                            rusqlite::params![saved.id, value]).map_err(|error| error.to_string())?;
+                    }
+                }
+                if enabled.is_some_and(|value| value != saved.enabled) || channels::get(store, &saved.id)?.config != saved.config {
+                    added.push(AddedChannel { id: saved.id.clone() });
+                    lines.push(format!("  channel {} \"{label}\" updated", input.kind));
+                } else {
+                    lines.push(format!("  channel {} \"{label}\" already configured", input.kind));
+                }
                 continue;
             }
             for (secret_name, value) in input.secrets.iter_mut() {
                 *value = resolve_secret(&input.kind, secret_name, value, &|variable| std::env::var(variable).ok())?;
             }
-            // The desktop catches bad token shapes before saving (bot_channel_add →
-            // verify → check_format); import must fail the same way, or a truncated or
-            // swapped token imports as success and the channel dies unreported.
             channels::check_format(&input)?;
             let channel = channels::add(store, &name, &input)?;
+            if enabled == Some(false) {
+                store.db.execute("UPDATE bot_channels SET enabled=0 WHERE id=?1", [&channel.id])
+                    .map_err(|error| error.to_string())?;
+            }
             added.push(AddedChannel { id: channel.id.clone() });
-            lines.push(format!("  channel {} \"{label}\" added", channel.kind));
+            lines.push(format!("  channel {} \"{label}\" added{}", channel.kind,
+                if enabled == Some(false) { " (disabled)" } else { "" }));
         }
     }
     if let Some(entries) = entry.get("schedules").and_then(Value::as_array) {
@@ -154,6 +314,146 @@ fn apply_bot(store: &Store, root: &Path, entry: &Value, added: &mut Vec<AddedCha
     Ok(lines)
 }
 
+/// Restore local group-channel configuration only. Membership references are portable names;
+/// assignments, messages and channel history never enter the document.
+fn apply_shared_channel(store: &Store, entry: &Value) -> crate::Result<String> {
+    let object = entry.as_object().ok_or("Expected a shared channel object.")?;
+    let name = object.get("name").and_then(Value::as_str).ok_or("A shared channel needs a name.")?;
+    let normalized = name.trim().trim_start_matches('#').trim();
+    if normalized.is_empty() { return Err("A shared channel needs a name.".into()); }
+    let matches: Vec<_> = shared_channels::list(store)?.into_iter()
+        .filter(|channel| channel.name.eq_ignore_ascii_case(normalized)).collect();
+    if matches.len() > 1 { return Err(format!("Ambiguous shared channel: {name}")); }
+    let existing = matches.first();
+    let all_bots = bots::list(store)?;
+    let resolve = |raw: &str| -> crate::Result<String> {
+        let canonical = bots::clean(raw, 60);
+        let found: Vec<_> = all_bots.iter().filter(|bot| bot.name == canonical).collect();
+        if found.len() != 1 { return Err(format!("Shared channel {name}: bot {raw:?} is missing or ambiguous.")); }
+        Ok(found[0].id.clone())
+    };
+    let members = match object.get("members").filter(|value| !value.is_null()) {
+        Some(value) => Some(value.as_array().ok_or("Shared channel members must be an array.")?
+            .iter().map(|value| resolve(value.as_str().ok_or("Member names must be strings.")?))
+            .collect::<crate::Result<Vec<_>>>()?),
+        None => None,
+    };
+    let lead = object.get("lead").filter(|value| !value.is_null())
+        .map(|value| resolve(value.as_str().ok_or("Shared channel lead must be a name.")?))
+        .transpose()?;
+    let archived = object.get("archived").filter(|value| !value.is_null())
+        .map(|value| value.as_bool().ok_or("Shared channel archived must be boolean."))
+        .transpose()?;
+    let channel = match existing {
+        Some(channel) => {
+            let desired = members.as_deref().unwrap_or(&channel.member_ids);
+            let lead = lead.as_deref().or(channel.lead_bot_id.as_deref());
+            if lead.is_some_and(|id| !desired.iter().any(|member| member == id)) {
+                return Err(format!("Shared channel {name}: lead must be a member."));
+            }
+            if channel.archived && (desired != channel.member_ids.as_slice() || lead != channel.lead_bot_id.as_deref()) {
+                return Err(format!("Shared channel {name}: restore the archived channel before changing its members."));
+            }
+            if desired != channel.member_ids.as_slice() || lead != channel.lead_bot_id.as_deref() {
+                shared_channels::update(store, &channel.id, name, desired, lead)?;
+            }
+            channel.clone()
+        }
+        None => {
+            let desired = members.ok_or("A new shared channel requires members.")?;
+            if desired.is_empty() { return Err("A new shared channel requires at least one member.".into()); }
+            if lead.as_ref().is_some_and(|id| !desired.contains(id)) {
+                return Err(format!("Shared channel {name}: lead must be a member."));
+            }
+            let created = shared_channels::create(store, name, &desired)?;
+            if let Some(lead) = lead.as_deref() {
+                if created.lead_bot_id.as_deref() != Some(lead) {
+                    shared_channels::update(store, &created.id, name, &desired, Some(lead))?;
+                }
+            }
+            created
+        }
+    };
+    if let Some(archived) = archived {
+        if channel.archived != archived {
+            let active: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM bot_shared_channel_deliveries WHERE channel_id=?1 AND status IN ('queued','in_progress')",
+                [&channel.id], |row| row.get(0)).map_err(|error| error.to_string())?;
+            if active > 0 { return Err(format!("Shared channel {name}: active work prevents archive changes.")); }
+            shared_channels::set_archived(store, &channel.id, archived)?;
+        }
+    }
+    Ok(format!("shared channel \"{name}\" configured"))
+}
+
+fn exported_history_overrides(store: &Store, bot_id: &str) -> crate::Result<Value> {
+    let mut statement = store.db.prepare(
+        "SELECT c.name,o.mode FROM extended_bot_channel_history_overrides o
+         JOIN bot_shared_channels c ON c.id=o.channel_id
+         WHERE o.bot_id=?1 ORDER BY c.name COLLATE NOCASE,c.id",
+    ).map_err(|error| error.to_string())?;
+    let rows = statement.query_map([bot_id], |row| {
+        Ok(json!({"channel": row.get::<_, String>(0)?, "mode": row.get::<_, String>(1)?}))
+    }).map_err(|error| error.to_string())?;
+    let values = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?;
+    Ok(Value::Array(values))
+}
+
+fn apply_history_overrides(store: &Store, name: &str, overrides: &Value) -> crate::Result<()> {
+    let bot_name = bots::clean(name, 60);
+    let bot = bots::list(store)?.into_iter().find(|bot| bot.name == bot_name)
+        .ok_or_else(|| format!("Bot {bot_name:?} is missing."))?;
+    let entries = overrides.as_array().ok_or("Shared channel history overrides must be an array.")?;
+    let channels = shared_channels::list(store)?;
+    for entry in entries {
+        let channel_name = entry.get("channel").and_then(Value::as_str)
+            .ok_or("Every shared channel history override needs a channel name.")?;
+        let mode = entry.get("mode").and_then(Value::as_str)
+            .ok_or("Every shared channel history override needs a mode.")?;
+        if !matches!(mode, "default" | "include" | "exclude") {
+            return Err(format!("Invalid history preference for {channel_name}."));
+        }
+        let found: Vec<_> = channels.iter().filter(|channel| channel.name.eq_ignore_ascii_case(channel_name)).collect();
+        if found.len() != 1 { return Err(format!("Missing or ambiguous shared channel {channel_name:?}.")); }
+        bots::extended::set_channel_history_override(store, &bot.id, &found[0].id, mode)?;
+    }
+    Ok(())
+}
+
+/// Portable channel configuration is allowlisted: the native record also contains
+/// machine identity, connection state and WhatsApp verification tokens.
+pub(crate) fn validate_public_url(text: &str) -> crate::Result<()> {
+    if text.trim().is_empty() { return Ok(()); }
+    let url = tauri::Url::parse(text)
+        .map_err(|_| "Public channel URLs must be valid HTTPS addresses.".to_owned())?;
+    if url.scheme() != "https" || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+        || url.path() != "/" {
+        return Err("Public channel URLs must be plain HTTPS origins without credentials, paths, queries or fragments.".into());
+    }
+    Ok(())
+}
+
+fn portable_channel_config(kind: &str, source: &Value) -> crate::Result<Value> {
+    let object = source.as_object().ok_or("Saved channel config must be an object.")?;
+    let mut config = serde_json::Map::new();
+    for (key, value) in object {
+        if matches!(key.as_str(), "identity" | "verifyToken") { continue; }
+        match (kind, key.as_str()) {
+            ("web", "remote") if value.is_boolean() => {},
+            ("web" | "whatsapp", "publicUrl") if value.is_string() => {
+                validate_public_url(value.as_str().unwrap_or_default())?;
+            },
+            ("whatsapp", "phoneNumberId") if value.as_str().is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())) => {},
+            _ => return Err(format!("Unsupported or sensitive {kind} channel config property: {key}")),
+        }
+        config.insert(key.clone(), value.clone());
+    }
+    Ok(Value::Object(config))
+}
+
 /// Capabilities as `references()` stores them: strings, trimmed, empties dropped — the
 /// same canonical form the unchanged-skip compares against.
 fn canonical_capabilities(value: Option<&Value>) -> crate::Result<Vec<String>> {
@@ -201,12 +501,10 @@ pub(crate) fn export(store: &Store) -> crate::Result<Value> {
     for bot in bots::list(store)? {
         let mut channels_json = Vec::new();
         for channel in channels::list(store, &bot.id)? {
-            let mut config = channel.config.clone();
-            if let Some(object) = config.as_object_mut() {
-                object.remove("verifyToken");
-            }
+            let config = portable_channel_config(&channel.kind, &channel.config)?;
             channels_json.push(json!({
                 "kind": channel.kind, "label": channel.label, "config": config,
+                "enabled": channel.enabled, "reconcile": true,
                 "secretsNeeded": channel.secrets,
             }));
         }
@@ -232,11 +530,33 @@ pub(crate) fn export(store: &Store) -> crate::Result<Value> {
             "goals": bot.goals, "soul": bot.soul, "avatar": bot.avatar,
             "provider": bot.provider, "model": bot.model,
             "mode": bot.mode, "heartbeatMinutes": bot.heartbeat_minutes,
+            "color": bot.color, "reasoningEffort": bot.reasoning_effort,
+            "backupModels": bot.backup_models, "fallbackMode": bot.fallback_mode,
+            "notify": bot.notify, "whileWorking": bot.while_working, "showPlan": bot.show_plan,
+            "extended": {
+                "freshContextEachMessage": bots::extended::enabled(store, &bot.id)?,
+                "includeSharedChannelHistory": bots::extended::include_shared_channel_history(store, &bot.id)?,
+                "sharedChannelHistoryOverrides": exported_history_overrides(store, &bot.id)?,
+            },
             "skills": bot.skills, "mcp": bot.mcp,
             "channels": channels_json, "schedules": schedules_json, "rules": rules_json,
         }));
     }
-    Ok(json!({ "bots": bots_json }))
+    let all_bots = bots::list(store)?;
+    let mut local_channels = Vec::new();
+    for channel in shared_channels::list(store)? {
+        let names = channel.member_ids.iter()
+            .map(|id| all_bots.iter().find(|bot| bot.id == *id)
+                .map(|bot| bot.name.clone()).ok_or_else(|| format!("Missing member in shared channel {}", channel.name)))
+            .collect::<crate::Result<Vec<_>>>()?;
+        let lead = channel.lead_bot_id.as_ref()
+            .map(|id| all_bots.iter().find(|bot| bot.id == *id)
+                .map(|bot| bot.name.clone()).ok_or_else(|| format!("Missing lead in shared channel {}", channel.name)))
+            .transpose()?;
+        local_channels.push(json!({ "name": channel.name, "members": names,
+            "lead": lead, "archived": channel.archived }));
+    }
+    Ok(json!({ "bots": bots_json, "sharedChannels": local_channels }))
 }
 
 /// Reads and applies the import file inside the serve process, starts the added channels
@@ -260,13 +580,22 @@ pub(crate) fn run_import(app: &tauri::AppHandle, path: &Path) {
         }
     };
     let state = app.state::<crate::AppState>();
-    let report = {
+    let data_dir = app.path().app_data_dir().unwrap_or_else(|error| {
+        eprintln!("Could not find the bot backup directory: {error}");
+        std::process::exit(1)
+    });
+    let (report, backup_path) = {
         let Ok(store) = state.store.lock() else {
             eprintln!("Could not open the task store for the bot import.");
             std::process::exit(1)
         };
-        apply(&store, &bots::workspace_root(), &doc, crate::storage::now())
+        crate::extended_bot_manifest::apply_with_backup(&store, &data_dir, &doc, crate::storage::now())
+            .unwrap_or_else(|error| {
+                eprintln!("Bot import blocked before mutation: {error}");
+                std::process::exit(1)
+            })
     };
+    println!("Bot configuration backup: {}", backup_path.display());
     for line in &report.lines {
         println!("{line}");
     }
@@ -310,6 +639,44 @@ pub(crate) fn run_import(app: &tauri::AppHandle, path: &Path) {
     }
 }
 
+/// Stage a complete export beside its destination, then replace it atomically.
+/// Keep the headless CLI's original overwrite behavior, including bare filenames.
+pub(crate) fn write_export_atomically(path: &Path, bytes: &[u8]) -> crate::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        return Err(format!("The export directory does not exist: {}", parent.display()));
+    }
+    let temp = parent.join(format!(".pandacode-bots-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> crate::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)
+            .map_err(|error| format!("Could not stage bot export: {error}"))?;
+        file.write_all(bytes).map_err(|error| format!("Could not write bot export: {error}"))?;
+        file.sync_all().map_err(|error| format!("Could not flush bot export: {error}"))?;
+        drop(file);
+        std::fs::rename(&temp, path)
+            .map_err(|error| format!("Could not replace {}: {error}", path.display()))?;
+        let written = std::fs::read(path)
+            .map_err(|error| format!("Could not verify bot export: {error}"))?;
+        if written != bytes {
+            return Err("The exported file failed verification.".into());
+        }
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    result
+}
+
 /// Writes the export document to `path` (pretty-printed, newline-terminated).
 pub(crate) fn run_export(app: &tauri::AppHandle, path: &Path) -> crate::Result<()> {
     use tauri::Manager;
@@ -319,7 +686,7 @@ pub(crate) fn run_export(app: &tauri::AppHandle, path: &Path) -> crate::Result<(
         export(&store)?
     };
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    std::fs::write(path, text + "\n").map_err(|e| format!("Could not write {}: {e}", path.display()))
+    write_export_atomically(path, format!("{text}\n").as_bytes())
 }
 
 #[cfg(test)]
@@ -335,6 +702,33 @@ mod tests {
         let root = std::env::temp_dir().join(format!("pandacode-bot-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn headless_export_replaces_existing_file_with_verified_bytes() {
+        let root = root();
+        let destination = root.join("bots.json");
+        std::fs::write(&destination, b"previous manifest").unwrap();
+        write_export_atomically(&destination, b"{\"bots\":[]}\n").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"{\"bots\":[]}\n");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn headless_export_failed_replace_preserves_destination_and_cleans_temp() {
+        let root = root();
+        let destination = root.join("occupied");
+        std::fs::create_dir(&destination).unwrap();
+        assert!(write_export_atomically(&destination, b"{\"bots\":[]}\n").is_err());
+        assert!(destination.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A per-test variable name that is never set: reading a missing variable is safe
@@ -428,6 +822,17 @@ mod tests {
     }
 
     #[test]
+    fn public_urls_cannot_export_auth_tokens() {
+        assert!(validate_public_url("https://example.com").is_ok());
+        assert!(validate_public_url("").is_ok());
+        for url in ["http://example.com", "https://user:secret@example.com",
+            "https://example.com/sensitive", "https://example.com/?token=abc",
+            "https://example.com/#private"] {
+            assert!(validate_public_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
     fn export_is_config_only_and_secret_free() {
         let store = store();
         let root = root();
@@ -450,6 +855,179 @@ mod tests {
         assert_eq!(bots::list(&store).unwrap().len(), 1);
         assert_eq!(bots::list(&store).unwrap()[0].avatar, "panda:3", "the avatar survives the round trip");
         assert_eq!(channels::list(&store, &bots::list(&store).unwrap()[0].id).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+
+    #[test]
+    fn portable_manifest_restores_nonsecret_configuration_into_a_fresh_store() {
+        let source = store();
+        let destination = store();
+        let source_root = root();
+        let destination_root = root();
+        let manifest = json!({
+            "bots": [
+                {
+                    "name": "Author", "provider": "claude", "model": "sonnet", "mode": "ask",
+                    "notify": false, "showPlan": true,
+                    "extended": {
+                        "freshContextEachMessage": true,
+                        "includeSharedChannelHistory": false
+                    },
+                    "channels": [{
+                        "kind": "web", "label": "local", "config": {"remote": false},
+                        "enabled": false
+                    }]
+                },
+                {"name": "Reviewer", "provider": "claude", "model": "sonnet", "mode": "ask"}
+            ],
+            "sharedChannels": [{
+                "name": "quality", "members": ["Author", "Reviewer"],
+                "lead": "Reviewer", "archived": false
+            }]
+        });
+        let created = apply(&source, &source_root, &manifest, 1_000_000);
+        assert_eq!(created.failed, 0, "{:?}", created.lines);
+        let exported = export(&source).unwrap();
+        let restored = apply(&destination, &destination_root, &exported, 2_000_000);
+        assert_eq!(restored.failed, 0, "{:?}", restored.lines);
+        let imported = export(&destination).unwrap();
+        assert_eq!(imported["sharedChannels"], exported["sharedChannels"]);
+        for original in exported["bots"].as_array().unwrap() {
+            let name = original["name"].as_str().unwrap();
+            let copy = imported["bots"].as_array().unwrap().iter()
+                .find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(copy, original, "Configuration differs for {name}");
+        }
+        let author = bots::list(&destination).unwrap().into_iter()
+            .find(|bot| bot.name == "Author").unwrap();
+        assert!(!channels::list(&destination, &author.id).unwrap()[0].enabled,
+            "Disabled integrations must remain disabled on a fresh installation");
+        let _ = std::fs::remove_dir_all(source_root);
+        let _ = std::fs::remove_dir_all(destination_root);
+    }
+
+    #[test]
+    fn invalid_extended_settings_do_not_change_an_existing_bot() {
+        let store = store();
+        let root = root();
+        let original = json!({"bots":[{"name":"tester","provider":"claude","model":"sonnet","mode":"ask"}]});
+        assert_eq!(apply(&store, &root, &original, 1_000_000).failed, 0);
+        let before = bots::list(&store).unwrap().remove(0);
+        let invalid = json!({"bots":[{"name":"tester","provider":"claude","model":"sonnet",
+            "mode":"full","extended":{"unknownSetting":true}}]});
+        let report = apply(&store, &root, &invalid, 2_000_000);
+        assert_eq!(report.failed, 1);
+        assert!(report.lines.iter().any(|line| line.contains("Unsupported extended preference")));
+        let after = bots::list(&store).unwrap().remove(0);
+        assert_eq!(after, before, "the rejected entry must leave the profile untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_incompatible_reasoning_effort_is_rejected_before_creating_a_bot() {
+        let store = store();
+        let root = root();
+        let invalid = json!({"bots":[{"name":"copilot","provider":"github-copilot",
+            "model":"default","mode":"ask","reasoningEffort":"high"}]});
+        let report = apply(&store, &root, &invalid, 1_000_000);
+        assert_eq!(report.failed, 1);
+        assert!(report.lines.iter().any(|line| line.contains("reasoningEffort")));
+        assert!(bots::list(&store).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn optional_preferences_preserve_absent_null_and_explicit_false() {
+        let store = store();
+        let root = root();
+        let original = json!({"bots":[{"name":"tester","provider":"claude","model":"sonnet","mode":"auto",
+            "reasoningEffort":"high","fallbackMode":"auto","notify":false,
+            "whileWorking":"steer","showPlan":true,
+            "extended":{"freshContextEachMessage":true,"includeSharedChannelHistory":false}}]});
+        assert_eq!(apply(&store, &root, &original, 1_000_000).failed, 0);
+        let legacy = json!({"bots":[{"name":"tester","provider":"claude","model":"sonnet","mode":"auto",
+            "notify":null,"reasoningEffort":null,"extended":null}]});
+        assert_eq!(apply(&store, &root, &legacy, 1_000_000).failed, 0);
+        let saved = bots::list(&store).unwrap().remove(0);
+        assert_eq!(saved.reasoning_effort, "high");
+        assert_eq!(saved.fallback_mode, "auto");
+        assert!(!saved.notify);
+        assert_eq!(saved.while_working, "steer");
+        assert!(saved.show_plan);
+        assert!(bots::extended::enabled(&store, &saved.id).unwrap());
+        assert!(!bots::extended::include_shared_channel_history(&store, &saved.id).unwrap());
+        let exported = export(&store).unwrap();
+        assert_eq!(exported["bots"][0]["notify"], false);
+        assert_eq!(exported["bots"][0]["extended"]["freshContextEachMessage"], true);
+        assert_eq!(apply(&store, &root, &exported, 1_000_000).failed, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_shared_channels_use_portable_bot_names_and_remain_idempotent() {
+        let store = store();
+        let root = root();
+        let doc = json!({"bots":[
+            {"name":"dev","provider":"claude","model":"sonnet","mode":"auto"},
+            {"name":"review","provider":"claude","model":"sonnet","mode":"auto"}],
+            "sharedChannels":[{"name":"launch","members":["dev","review"],"lead":"review","archived":false}]});
+        assert_eq!(apply(&store, &root, &doc, 1_000_000).failed, 0);
+        assert_eq!(apply(&store, &root, &doc, 1_000_000).failed, 0);
+        assert_eq!(shared_channels::list(&store).unwrap().len(), 1);
+        let output = export(&store).unwrap();
+        assert_eq!(output["sharedChannels"][0]["members"], json!(["dev","review"]));
+        assert_eq!(output["sharedChannels"][0]["lead"], "review");
+        assert_eq!(apply(&store, &root, &json!({"bots":[],"sharedChannels":null}), 1_000_000).failed, 0);
+        assert_eq!(shared_channels::list(&store).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_channel_ignores_missing_secret_bindings_during_reconciliation() {
+        let store = store();
+        let root = root();
+        let doc = json!({"bots":[{"name":"messenger","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"telegram","label":"primary","config":{},
+                "secrets":{"token":"123456:AAtesttokenvalueaaaaaaaaaaaaaaaaa"}}]}]});
+        assert_eq!(apply(&store, &root, &doc, 1_000_000).failed, 0);
+        let bot = bots::list(&store).unwrap().remove(0);
+        let original = channels::list(&store, &bot.id).unwrap().remove(0);
+        let credential = secret_store::get("app.pandacode.bots", &format!("{}:token", original.id));
+        let updated = json!({"bots":[{"name":"messenger","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"telegram","label":"primary","config":{},"enabled":false,
+                "reconcile":true,"secrets":{"token":"env:NOT_DEFINED_FOR_RECONCILE"}}]}]});
+        let report = apply(&store, &root, &updated, 2_000_000);
+        assert_eq!(report.failed, 0, "{:?}", report.lines);
+        assert!(!channels::get(&store, &original.id).unwrap().enabled);
+        assert_eq!(secret_store::get("app.pandacode.bots", &format!("{}:token", original.id)), credential);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_channel_reconciliation_is_opt_in_and_preserves_identity() {
+        let store = store();
+        let root = root();
+        let doc = json!({"bots":[{"name":"web","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"web","label":"local","config":{"remote":false}}]}]});
+        assert_eq!(apply(&store, &root, &doc, 1_000_000).failed, 0);
+        let bot = bots::list(&store).unwrap().remove(0);
+        let before = channels::list(&store, &bot.id).unwrap().remove(0);
+        let token = channels::web_token(&store, &before.id).unwrap();
+        let legacy = json!({"bots":[{"name":"web","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"web","label":"local","config":{"remote":true},"enabled":false}]}]});
+        assert_eq!(apply(&store, &root, &legacy, 1_000_000).failed, 0);
+        assert!(channels::get(&store, &before.id).unwrap().enabled);
+        let modern = json!({"bots":[{"name":"web","provider":"claude","model":"sonnet","mode":"auto",
+            "channels":[{"kind":"web","label":"local","reconcile":true,
+                "config":{"remote":true},"enabled":false}]}]});
+        assert_eq!(apply(&store, &root, &modern, 1_000_000).failed, 0);
+        let after = channels::get(&store, &before.id).unwrap();
+        assert!(!after.enabled);
+        assert_eq!(after.config["remote"], true);
+        assert_eq!(channels::web_token(&store, &before.id).unwrap(), token);
+        let exported = export(&store).unwrap();
+        assert_eq!(exported["bots"][0]["channels"][0]["enabled"], false);
         let _ = std::fs::remove_dir_all(root);
     }
 

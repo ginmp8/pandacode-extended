@@ -187,6 +187,7 @@ const MAX_ACCOUNT_DIRS: u32 = 99;
 fn new_account_dir(home: &Path, provider: &str) -> Result<(PathBuf, u32)> {
     for n in 2..=MAX_ACCOUNT_DIRS {
         let dir = home.join(format!(".{provider}-pandacode-{n}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -723,6 +724,8 @@ mod tests {
             model: "default".into(),
             reasoning_effort: None,
             mode: "full".into(),
+            reviewer_boundary: false,
+            reviewer_policy: None,
             cwd: dir.clone(),
             resume_id: None,
             prompt: "hello".into(),

@@ -6,6 +6,7 @@ export function escape(value: unknown): string {
 const paths: Record<string, string> = {
   images: '<rect x="6" y="3" width="15" height="15" rx="2"/><path d="M3 7v12a2 2 0 0 0 2 2h12M6 14l4-4 5 5 3-3 3 3"/><circle cx="16" cy="7" r="1"/>',
   play: '<path d="m8 4 12 8-12 8Z"/>',
+  mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
   board: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/>',
   chat: '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -30,6 +31,8 @@ const paths: Record<string, string> = {
   activity: '<path d="M4 20h16M7 16V9m5 7V4m5 12v-5"/>',
   grip: '<circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>',
   spark: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
+  plug: '<path d="M8 3v7M16 3v7M5 10h14v2a7 7 0 0 1-14 0v-2ZM12 19v3"/>',
+  skill: '<path d="m12 2 9 5v10l-9 5-9-5V7l9-5Zm0 10 9-5m-9 5L3 7m9 5v10"/>',
   bot: '<rect x="4" y="8" width="16" height="12" rx="4"/><path d="M12 4v4M9 13v1m6-1v1M2 13v3m20-3v3"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
@@ -173,7 +176,14 @@ async function unsafeHtml(enriched: Modules['enriched'], value: string): Promise
     fallback ??= import('marked').then(m => {
       const links = new m.Renderer(); const renderLink = links.link;
       links.link = function (token) { return renderLink.call(this, { ...token, href: workspaceHref(token.href) }); };
-      return (text: string) => m.marked.parse(text, { renderer: links });
+      return async (text: string) => {
+        // Match the primary renderer; this inert template is sanitized by the caller.
+        const template = document.createElement('template');
+        template.innerHTML = await m.marked.parse(text, { renderer: links });
+        for (const node of template.content.querySelectorAll('p,h1,h2,h3,h4,h5,h6,li,th,td,summary')) node.setAttribute('dir', 'auto');
+        for (const node of template.content.querySelectorAll('pre,code')) node.setAttribute('dir', 'ltr');
+        return template.innerHTML;
+      };
     });
     return (await fallback)(value);
   }

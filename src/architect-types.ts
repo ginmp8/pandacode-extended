@@ -7,6 +7,18 @@ export interface WorkerProfile {
   model: string;
   reasoningEffort?: string | null;
 }
+/** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
+export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
+export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
+export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[]; optionalSkillIds?: string[]; requiredCheckSkillIds?: string[]; reviewPermissions?: CouncilPermissionSelection | null; postAcceptanceIssue?: { authorizationId: string; repository: string } | null }
+/** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
+export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
+/** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */
+export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted';
+/** Native's own reading of the council, which also sees edits the webview cannot (the lead's own). `stale`: the latest round passed, then the work changed. */
+/** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: a plain sentence for the user whenever `team.error`
+ *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
+export interface CouncilStatus { state: CouncilState; round: number; lowest: number | null; target: number; stale: boolean; notice?: string | null }
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of
    * installed models, or as the prompt asks). Configured teams name fixed worker profiles. */
@@ -29,6 +41,8 @@ export interface TeamConfig {
   /** Extra instructions for the lead, added to the built-in team rules. Empty means the
    * built-in rules alone. */
   leadGuidance?: string | null;
+  /** Independent reviewers score the work until they all reach the target. Off on each new thread. */
+  council?: CouncilConfig | null;
 }
 export type ModelSelection = Pick<WorkerProfile, 'provider' | 'model' | 'reasoningEffort'>;
 export interface TeamSetup { architect: ModelSelection; config: TeamConfig }
@@ -76,6 +90,21 @@ export interface TeamWorker extends WorkerProfile {
   attempt: number;
   abandoned?: boolean;
   checkpoint?: WorkerCheckpoint | null;
+  council?: CouncilSeat | null;
+  /** S1/S2 native authority, with a pinned persistent bot ID where selected. */
+  reviewerBinding?: {
+    reviewerBotId?: string | null;
+    artifactRevision?: string;
+    skillEvidence?: Record<string, { contentSha256: string; artifactRevision: string; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; checkKind?: string | null }>;
+    snapshot?: {
+      skills?: {
+        pins: { id: string; contentSha256: string; supplied: boolean; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; requiredForAcceptance?: boolean; checkRequired?: boolean }[];
+        skipped?: { id: string; reason: string }[];
+      } | null;
+    };
+  } | null;
+  /** When a writing run last started or ended; 0 or absent for one that never ran. */
+  wroteAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -94,6 +123,10 @@ export interface TeamSnapshot {
   summary?: string | null;
   /** The lead's failed turn, while its retry waits; `heldUntil` is the reset of a usage limit holding it. */
   leadFailure?: { error: string; heldUntil?: number | null } | null;
+  /** When the user's latest objective began: reviewers created before it belong to an earlier cycle. */
+  councilSince?: number;
+  /** Native's reading, the only source of the council's state: the webview never derives it (a host that sends none reads as waiting). */
+  councilStatus?: CouncilStatus | null;
   updatedAt: number;
 }
 /** The note on a team whose failed lead turn PandaCode is retrying. */

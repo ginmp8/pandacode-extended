@@ -1,0 +1,41 @@
+/* Extended bot manifest management. Scoped to the existing Bots dialog. */
+.bot-manifest-dialog { width: min(780px, calc(100vw - 32px)); max-height: min(88vh, 900px); }
+.bot-manifest-dialog .bm-panel { display: grid; gap: 14px; padding: 14px 22px 22px; overflow-y: auto; max-height: calc(88vh - 88px); }
+.bm-panel fieldset { border: 1px solid var(--border, #7775); border-radius: 10px; margin: 0; padding: 12px; }
+.bm-panel legend { padding: 0 6px; font-weight: 600; }
+.bm-panel .bm-note { margin: 0; color: var(--muted, #777); line-height: 1.5; font-size: 0.88rem; }
+.bm-panel .bm-bots { display: grid; gap: 7px; max-height: 280px; overflow: auto; }
+.bm-panel .bm-choice { display: flex; align-items: center; justify-content: flex-start; gap: 9px; text-align: left; }
+.bm-panel .bm-formats { display: grid; gap: 8px; }
+.bm-panel .bm-formats label { display: flex; align-items: flex-start; justify-content: flex-start; gap: 9px; text-align: left; }
+/* The app's generic input width and height must not stretch native choice controls. */
+.bm-panel .bm-choice > input[type="checkbox"],
+.bm-panel .bm-formats label > input[type="radio"] {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.bm-panel .bm-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.bm-panel .bm-tabs button { border: 1px solid var(--border, #7775); border-radius: 8px; padding: 9px 12px; background: transparent; cursor: pointer; }
+.bm-panel .bm-tabs button[aria-pressed="true"] { border-color: var(--accent, currentColor); font-weight: 650; }
+.bm-panel section { display: grid; gap: 12px; }
+.bm-panel .bm-source { display: grid; gap: 9px; }
+.bm-panel .bm-source label { display: grid; gap: 5px; }
+.bm-panel .bm-source input, .bm-panel .bm-source textarea { box-sizing: border-box; width: 100%; min-width: 0; background: var(--input-bg, transparent); border: 1px solid var(--border, #7775); border-radius: 7px; color: inherit; padding: 9px; font: inherit; }
+.bm-panel .bm-source-state { font-size: 0.84rem; opacity: 0.75; margin: 0; overflow-wrap: anywhere; }
+.bm-panel .bm-source-actions { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+.bm-panel .bm-source-actions button { width: auto; }
+.bm-panel .bm-file { display: grid; gap: 10px; }
+.bm-panel [data-manifest-status] { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 12px; border: 1px solid var(--border, #7775); border-radius: 8px; line-height: 1.5; font-size: 0.9rem; }
+.bm-panel [data-manifest-status][data-error="true"] { border-color: var(--danger, #b33); }
+.bm-panel .bm-actions { flex-wrap: wrap; gap: 8px; }
+.bm-panel button:disabled { cursor: not-allowed; opacity: 0.5; }
+@media (max-width: 600px) {
+  .bot-manifest-dialog .bm-panel { padding: 12px; }
+  .bm-panel .bm-actions { display: grid; grid-template-columns: 1fr; }
+}

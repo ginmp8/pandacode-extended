@@ -10,6 +10,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
+/// Internal task messages may carry only the assignment text; chat commands
+/// would mutate shared bot sessions or approvals outside the Ticket mandate.
+fn command_allowed_for_channel(channel_id: &str, command: &Command) -> bool {
+    channel_id != crate::superagent::CHANNEL || *command == Command::Message
+}
+
 /// A message for a bot from the desktop, the web UI or a chat channel.
 #[derive(Debug, Clone)]
 pub(crate) struct Inbound {
@@ -66,12 +72,32 @@ fn channel_kind(store: &Store, channel_id: &str) -> String {
     match channel_id {
         super::DESKTOP => "desktop".into(),
         "schedule" => "schedule".into(),
+        crate::superagent::CHANNEL => crate::superagent::CHANNEL.into(),
         _ => channels::kind_of(store, channel_id).unwrap_or_else(|| "web".into()),
     }
 }
 
 /// The text a turn receives: the message, plus the brief when the thread has not seen this version.
-fn compose(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str, kind: &str, sender: &str, text: &str) -> Result<String> {
+/// A native SuperAgent assignment has its own explicit context. It must not
+/// copy unrelated conversation memories, standing goals, MCP references or
+/// cause skill installation to mutate the assigned bot's checkout.
+fn scoped_turn_text(bot: &Bot, kind: &str, text: &str) -> Option<String> {
+    (kind == crate::superagent::CHANNEL)
+        .then(|| format!("{text}{}", brief::superagent(bot)))
+}
+
+fn compose(
+    app: &tauri::AppHandle,
+    store: &Store,
+    bot: &Bot,
+    session_id: &str,
+    kind: &str,
+    sender: &str,
+    text: &str,
+) -> Result<String> {
+    if let Some(scoped) = scoped_turn_text(bot, kind, text) {
+        return Ok(scoped);
+    }
     let (skills, skipped) = workspace_skills(app, store, bot, session_id);
     let seen = super::brief_version_of(store, session_id)?;
     if !super::extended::enabled_for_session(store, session_id)?
@@ -79,31 +105,80 @@ fn compose(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str, k
         return Ok(text.to_owned());
     }
     for error in &skipped {
-        super::log(store, &bot.id, "error", &format!("Skill left out: {error}"), json!({"sessionId": session_id}))?;
+        super::log(
+            store,
+            &bot.id,
+            "error",
+            &format!("Skill left out: {error}"),
+            json!({"sessionId": session_id}),
+        )?;
     }
     let memories = super::memories(store, &bot.id)?;
     super::mark_briefed(store, session_id, bot.memory_version)?;
-    Ok(format!("{text}{}{skills}", brief::compose(bot, &memories, kind, sender)))
+    Ok(format!(
+        "{text}{}{skills}",
+        brief::compose(bot, &memories, kind, sender)
+    ))
 }
 
 /// A harness switch starts a fresh native session fed by a 64 KiB history replay
 /// (`context_recovery`). The brief sits at the end of an old user message, the first text that
 /// replay drops or shortens, so a pending replay counts as a thread that needs the brief again.
 fn handoff_pending(store: &Store, session_id: &str) -> Result<bool> {
-    store.db.query_row("SELECT EXISTS(SELECT 1 FROM context_recovery WHERE session_id=?1)", [session_id], |row| row.get(0)).map_err(|e| e.to_string())
+    store
+        .db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM context_recovery WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
 }
 
 /// Puts the bot's skills in its own workspace for this conversation's harness (project scope,
 /// never harness-global), and returns the brief text for skills that harness reads from the prompt.
-fn workspace_skills(app: &tauri::AppHandle, store: &Store, bot: &Bot, session_id: &str) -> (String, Vec<String>) {
-    let (Ok(task), Ok(root), Ok(library)) = (store.session(session_id), store.workspace_root(&bot.project_id, None), crate::skills::library(app)) else { return Default::default() };
-    let harness = task.provider;
-    let mut skipped = library.sync_project(&harness, &root, &bot.skills);
-    if crate::skills::scoped::has_skill_folder(&harness) {
-        let installed = library.project_active(&harness, &root).into_iter().filter(|id| bot.skills.contains(id)).collect::<Vec<_>>();
+/// Skills switched off for this session (All projects or the bot's project) are neither synced
+/// nor announced.
+fn workspace_skills(
+    app: &tauri::AppHandle,
+    store: &Store,
+    bot: &Bot,
+    session_id: &str,
+) -> (String, Vec<String>) {
+    let (Ok(task), Ok(root), Ok(library)) = (
+        store.session(session_id),
+        store.workspace_root(&bot.project_id, None),
+        crate::skills::library(app),
+    ) else {
+        return Default::default();
+    };
+    workspace_skills_with(
+        &library,
+        &task.provider,
+        &root,
+        &bot.skills,
+        &crate::skill_manager::disabled_for(session_id),
+    )
+}
+
+fn workspace_skills_with(
+    library: &crate::skills::Library,
+    harness: &str,
+    root: &std::path::Path,
+    skills: &[String],
+    disabled: &std::collections::BTreeSet<String>,
+) -> (String, Vec<String>) {
+    let (wanted, mut skipped) = library.without_switched_off(skills, disabled);
+    skipped.extend(library.sync_project(harness, root, &wanted));
+    if crate::skills::scoped::has_skill_folder(harness) {
+        let installed = library
+            .project_active(harness, root)
+            .into_iter()
+            .filter(|id| wanted.contains(id))
+            .collect::<Vec<_>>();
         return (brief::skills("", &installed, &skipped), skipped);
     }
-    let (text, more) = library.prompt_text(&bot.skills);
+    let (text, more) = library.prompt_text_filtered(&wanted, disabled);
     skipped.extend(more);
     (brief::skills(&text, &[], &skipped), skipped)
 }
@@ -127,13 +202,18 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
     if image_ids.len() > 4 {
         return Err("Attach up to four images per message.".into());
     }
-    let busy = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
-    if busy {
+    let running = state.agents.lock().map_err(|e| e.to_string())?.contains_key(session_id);
+    let team_busy = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        super::team_state(&store, session_id)?
+            .is_some_and(|status| matches!(status.as_str(), "running" | "waiting" | "paused"))
+    };
+    if running || team_busy {
         let fresh = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
             super::extended::enabled_for_session(&store, session_id)?
         };
-        if !force_queue && steer_while_busy(bot, &image_ids, sender_id, fresh)
+        if !force_queue && !team_busy && steer_while_busy(bot, &image_ids, sender_id, fresh)
             && crate::message_queue::steer_task(app.clone(), app.state::<AppState>(), session_id.to_owned(), text.clone()).await.is_ok()
         {
             return Ok(());
@@ -194,6 +274,11 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
     let (bot, session_id, created, kind) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let bot = super::get(&store, &inbound.bot_id)?;
+        if inbound.channel_id == crate::superagent::CHANNEL {
+            crate::superagent::guard_gateway_inbound(
+                &store, &bot.id, &inbound.thread, &inbound.sender_id, inbound.trusted,
+            )?;
+        }
         if !inbound.trusted && !channels::is_approved(&store, &inbound.channel_id, &inbound.sender_id)? {
             return Err("This sender is not paired with the bot.".into());
         }
@@ -202,7 +287,14 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         (bot, session, created, kind)
     };
     let waiting = pending().lock().map_err(|e| e.to_string())?.get(&session_id).is_some_and(|list| !list.is_empty());
-    match parse_command(&text, waiting) {
+    let command = parse_command(&text, waiting);
+    // Internal assignments are controlled by the Ticket mandate and native
+    // Stop/approval commands. A bot-wide /stop, /new or persistent "always"
+    // approval from this channel would cross that task's authority boundary.
+    if !command_allowed_for_channel(&inbound.channel_id, &command) {
+        return Err("policy_unsupported: SuperAgent requires native task controls, not bot-wide chat commands.".into());
+    }
+    match command {
         Command::Stop => {
             stop_bot(app, &bot.id).await;
             reply(app, &bot, &inbound.channel_id, &inbound.thread, "Stopped. I'll wait for your next message.").await;
@@ -233,10 +325,14 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
     let (turn, briefed) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         // Proactive messages go to the thread the user last wrote from.
-        if inbound.channel_id != super::DESKTOP {
+        if inbound.channel_id != super::DESKTOP && inbound.channel_id != crate::superagent::CHANNEL {
             super::set_notify_target(&store, &bot.id, Some(&inbound.channel_id), Some(&inbound.thread))?;
         }
-        super::log(&store, &bot.id, "inbound", &format!("{} ({kind}): {}", inbound.sender_name, text.chars().take(160).collect::<String>()), json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}))?;
+        // Task objective/evidence belongs in the durable Ticket audit, never in
+        // the selected bot's unrelated global activity and private history.
+        if inbound.channel_id != crate::superagent::CHANNEL {
+            super::log(&store, &bot.id, "inbound", &format!("{} ({kind}): {}", inbound.sender_name, text.chars().take(160).collect::<String>()), json!({"channelId": inbound.channel_id, "sessionId": session_id, "new": created}))?;
+        }
         let moodboard = inbound.moodboard_ids.as_deref().filter(|ids| !ids.is_empty())
             .map(|ids| crate::moodboards::resolve_refs(&store, &bot.project_id, ids))
             .transpose()?.unwrap_or_default();
@@ -288,6 +384,15 @@ fn latest_reply(store: &Store, session_id: &str) -> Result<String> {
     Ok(parts.join("\n\n").trim().to_owned())
 }
 
+/// Clear approval prompts that belonged to the harness turn that just ended.
+/// Council may still be reviewing; turn completion must not forward a final
+/// result, but it must revoke authorization requests from that ended turn.
+pub(crate) fn turn_ended(session_id: &str) {
+    if let Ok(mut map) = pending().lock() {
+        map.remove(session_id);
+    }
+}
+
 /// Returns false while the turn's work is still underway on a backup model or on hold, so
 /// channel and bot-to-bot deliveries stay linked until that work really ends.
 pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, successful: bool) -> bool {
@@ -317,7 +422,17 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let settled = held.is_none();
     let text = held.unwrap_or(text);
     let text = if text.is_empty() && !successful { "I couldn't finish that. Check PandaCode for details.".to_owned() } else { text };
-    if thread.channel_id == "schedule" {
+    if thread.channel_id == crate::superagent::CHANNEL {
+        // Internal task results are retained by the native ticket gate, never sent
+        // as an external channel reply or an ambient bot notification.
+        if settled {
+            if let Ok(store) = state.store.lock() {
+                if let Err(error) = crate::superagent::on_run_finished(&store, session_id, successful, &text) {
+                    eprintln!("SuperAgent settlement failed: {error}");
+                }
+            }
+        }
+    } else if thread.channel_id == "schedule" {
         if text.trim() == NOTHING || text.trim().is_empty() {
             if let Ok(store) = state.store.lock() {
                 let _ = super::log(&store, &bot.id, "scheduled", "Nothing to report", json!({}));
@@ -334,7 +449,10 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let _ = app.emit("bots-changed", ());
     // Send the next queued message natively, so bot threads keep moving without the window.
     // A failed run holds the queue until the next turn ends cleanly.
-    let next = if !successful { None } else { state.store.lock().ok().and_then(|store| message_queue::list(&store, Some(session_id)).ok()).and_then(|queue| queue.into_iter().next()) };
+    let next = if should_drain_queue(&thread.channel_id, successful) {
+        state.store.lock().ok().and_then(|store| message_queue::list(&store, Some(session_id)).ok())
+            .and_then(|queue| queue.into_iter().next())
+    } else { None };
     let taken = next.and_then(|entry| state.store.lock().ok().and_then(|store| {
         let entry = message_queue::take(&store, &entry.id).ok()?;
         let delivery = super::shared_channels::promote_taken(&store, session_id, &entry.text);
@@ -344,7 +462,21 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         super::failover::before_turn(app, &bot, session_id);
         let (context, image_ids) = queued_prompt(&entry.attachments);
         super::failover::remember_images(session_id, &image_ids);
-        let launched = crate::launch_task_in_project(app.clone(), app.state::<AppState>(), session_id.to_owned(), Some(format!("{}{context}", entry.text)), Some(image_ids), Some(bot.project_id.clone())).await;
+        // Queued Team messages must use the native Architect admission path.
+        let team = state.store.lock().map_err(|e| e.to_string())
+            .and_then(|store| super::team_state(&store, session_id));
+        let prompt = format!("{}{context}", entry.text);
+        let launched = match team {
+            Ok(Some(_)) => crate::architect::architect_start_in_project(
+                app.clone(), app.state::<AppState>(), session_id.to_owned(),
+                prompt, Some(image_ids), Some(bot.project_id.clone()),
+            ).await,
+            Ok(None) => crate::launch_task_in_project(
+                app.clone(), app.state::<AppState>(), session_id.to_owned(),
+                Some(prompt), Some(image_ids), Some(bot.project_id.clone()),
+            ).await,
+            Err(error) => Err(error),
+        };
         // A channel Stop that landed between the take and the launch stops the turn it missed.
         let stopped = launched.is_ok() && delivery.as_ref().is_some_and(|request| state.store.lock().is_ok_and(|store| super::shared_channels::delivery_stopped(&store, request)));
         if stopped {
@@ -381,6 +513,13 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     settled
 }
 
+/// A SuperAgent session has exactly one native ticket assignment. Its turn
+/// must not drain an unrelated message into the same session after settlement,
+/// because ticket acceptance and any later retry require a fresh native lease.
+fn should_drain_queue(channel_id: &str, successful: bool) -> bool {
+    successful && channel_id != crate::superagent::CHANNEL
+}
+
 /// Prompt text and image ids for queued attachments, as the window's composer builds them.
 /// Serve's native queue drain (headless.rs) reuses it for non-bot tasks.
 pub(crate) fn queued_prompt(attachments: &Value) -> (String, Vec<String>) {
@@ -412,6 +551,13 @@ pub(crate) async fn approval_requested(app: &tauri::AppHandle, session_id: &str,
     let state = app.state::<AppState>();
     let found = state.store.lock().ok().and_then(|store| owner_of(&store, session_id).ok().flatten());
     let Some((bot, thread)) = found else { return };
+    // No ambient bot approval rule can expand a SuperAgent read-only mandate.
+    if thread.channel_id == crate::superagent::CHANNEL {
+        if let Err(error) = answer(app, session_id, request_id, false).await {
+            eprintln!("SuperAgent approval denial failed: {error}");
+        }
+        return;
+    }
     // Allow rules answer without asking; deny rules refuse.
     let decision = state.store.lock().ok().and_then(|store| guard::decide(&store, &bot.id, text).ok());
     match decision {
@@ -514,6 +660,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_superagent_gateway_rejects_bot_wide_commands_and_approval_escalation() {
+        let channel = crate::superagent::CHANNEL;
+        assert!(command_allowed_for_channel(channel, &Command::Message));
+        for text in ["/stop", "/new", "/reset", "/help", "always", "yes", "deny"] {
+            let command = parse_command(text, true);
+            assert_ne!(command, Command::Message);
+            assert!(!command_allowed_for_channel(channel, &command), "{text}");
+            assert!(command_allowed_for_channel(super::super::DESKTOP, &command));
+        }
+        assert!(command_allowed_for_channel("schedule", &Command::Stop));
+    }
+
+    #[test]
+    fn superagent_task_context_omits_private_bot_state_and_ambient_skill_sync() {
+        let mut profile = bot("queue");
+        profile.role = "Code reviewer".into();
+        profile.instructions = "Inspect the authorized fixture only.".into();
+        profile.goals = "Private standing goal: do not export".into();
+        profile.soul = "Private conversational preference".into();
+        profile.mcp = vec!["private-provider".into()];
+        let scoped = scoped_turn_text(&profile, crate::superagent::CHANNEL, "Task: inspect")
+            .expect("native SuperAgent channel must be scoped");
+        assert!(scoped.contains("Task: inspect"));
+        assert!(scoped.contains("Code reviewer"));
+        assert!(scoped.contains("Inspect the authorized fixture only."));
+        for excluded in ["Private standing goal", "Private conversational preference",
+                         "private-provider", "saved memories", "pandacode_bot_notify"] {
+            assert!(!scoped.contains(excluded), "ambient bot data leaked: {excluded}");
+        }
+        assert!(scoped_turn_text(&profile, "desktop", "Normal conversation").is_none());
+    }
+
+    #[test]
+    fn superagent_assignment_never_drains_an_ordinary_message_queue() {
+        assert!(!should_drain_queue(crate::superagent::CHANNEL, true));
+        assert!(!should_drain_queue(crate::superagent::CHANNEL, false));
+        assert!(!should_drain_queue("schedule", false));
+        assert!(should_drain_queue("schedule", true));
+        assert!(should_drain_queue(super::super::DESKTOP, true));
+        assert!(should_drain_queue("telegram", true));
+    }
+
+    #[test]
+    fn ending_an_intermediate_council_turn_revokes_its_approval_requests() {
+        let session_id = format!("ended-council-turn-{}", crate::storage::id());
+        pending().lock().unwrap().insert(
+            session_id.clone(),
+            vec![("old-request".into(), "Use a privileged tool".into())],
+        );
+        assert!(pending().lock().unwrap().contains_key(&session_id));
+        turn_ended(&session_id);
+        assert!(!pending().lock().unwrap().contains_key(&session_id),
+            "approval from an ended turn must not authorize a later Council turn");
+        turn_ended(&session_id);
+    }
+
+
+    #[test]
     fn queued_attachments_reach_the_prompt() {
         let (context, images) = queued_prompt(&json!([
             {"kind":"image","id":"img-1","name":"shot.png","width":10,"height":20},
@@ -574,5 +778,60 @@ mod tests {
         let ids = vec!["image-a".into(), "image-b".into()];
         let attachments = image_attachments(&ids);
         assert_eq!(queued_prompt(&attachments).1, ids);
+    }
+}
+
+#[cfg(test)]
+mod skill_switch_tests {
+    use super::*;
+
+    #[test]
+    fn bots_workspace_sync_skips_and_removes_skills_switched_off_for_the_session() {
+        let root =
+            std::env::temp_dir().join(format!("pandacode-bot-sync-{}", crate::storage::id()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let library = crate::skills::Library::new(root.join("library"), root.join("home"));
+        let source = || crate::skills::Source {
+            kind: "folder".into(),
+            location: "x".into(),
+            git_ref: None,
+            commit: None,
+        };
+        for name in ["review", "keep"] {
+            library
+                .import(
+                    crate::skills::Kind::Skill,
+                    vec![(
+                        "SKILL.md".into(),
+                        format!("---\nname: {name}\ndescription: d\n---\nDo {name}.\n")
+                            .into_bytes(),
+                    )],
+                    name,
+                    source(),
+                )
+                .unwrap();
+        }
+        let skills = ["review".to_string(), "keep".to_string()];
+        // Synced while on, then switched off: the next sync removes it from the bot workspace.
+        workspace_skills_with(&library, "claude", &workspace, &skills, &Default::default());
+        let mut active = library.project_active("claude", &workspace);
+        active.sort();
+        assert_eq!(active, ["keep", "review"]);
+        let off = std::collections::BTreeSet::from(["review".to_string()]);
+        let (brief, skipped) = workspace_skills_with(&library, "claude", &workspace, &skills, &off);
+        assert_eq!(library.project_active("claude", &workspace), ["keep"]);
+        assert_eq!(skipped, ["review is off in Skills."]);
+        assert!(
+            brief.contains("installed in this checkout for you: keep.\n"),
+            "{brief}"
+        );
+        // Prompt harnesses never inline it either.
+        let (brief, _) = workspace_skills_with(&library, "kimi", &workspace, &skills, &off);
+        assert!(
+            brief.contains("Do keep.") && !brief.contains("Do review."),
+            "{brief}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

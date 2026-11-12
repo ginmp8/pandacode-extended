@@ -25,10 +25,9 @@ fn once(store: &Store) -> TaskSchedule {
 }
 
 #[test]
-fn schema_version_is_37_with_schedule_tables() {
+fn latest_schema_migration_preserves_schedule_tables() {
     let store = store();
-    assert_eq!(crate::storage::SCHEMA_VERSION, 37);
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 37);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), crate::storage::SCHEMA_VERSION);
     assert!(list(&store, None).unwrap().is_empty());
     assert_eq!(settings(&store).unwrap(), SchedulerSettings::default());
 }

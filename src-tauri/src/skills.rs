@@ -7,6 +7,10 @@ mod catalog;
 mod github;
 mod safety;
 pub(crate) mod scoped;
+pub(crate) mod reviewer;
+mod sync;
+mod sources;
+mod customize;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,16 +19,18 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 use adapter::Surface;
+pub(crate) use safety::scan as scan_safety;
 pub use safety::Finding;
 
 /// Relative path and bytes of each file in a skill or rule.
 pub type Files = Vec<(String, Vec<u8>)>;
-pub const MAX_FILES: usize = 64;
-pub const MAX_BYTES: usize = 1 << 20;
+// Bounded to include the public RhapsodIA Archify package (206 files / ~18 MiB).
+pub const MAX_FILES: usize = 256;
+pub const MAX_BYTES: usize = 24 << 20;
 // ponytail: one lock for the whole library; per-item locks if imports ever get slow.
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -85,6 +91,18 @@ pub struct Meta {
     pub imported_at: u64,
     /// The content hash whose safety findings the user accepted.
     pub acknowledged: Option<String>,
+    /// None inherits the application startup sync setting; legacy installs default to None.
+    #[serde(default)]
+    pub auto_update: Option<bool>,
+    /// True only after a user-trusted scoped discovery installed an unflagged, complete skill.
+    #[serde(default)]
+    pub auto_available: bool,
+    /// Required library peers declared in skill-dependencies.json (when present).
+    #[serde(default)]
+    pub required_skills: Vec<String>,
+    /// Exact imported file digests; old metadata remains valid without this map.
+    #[serde(default)]
+    pub file_hashes: std::collections::BTreeMap<String, String>,
     pub activations: Vec<Activation>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +112,10 @@ pub struct Item {
     pub meta: Meta,
     pub files: Vec<String>,
     pub findings: Vec<Finding>,
+    /// The library copy's absolute folder, for skills only: Skills → Add skill installs it as a
+    /// local-folder source (Rules & library's **Install…**).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,6 +159,26 @@ pub struct Matrix {
     pub harnesses: Vec<HarnessRow>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PeerDependencies {
+    #[serde(default)]
+    required_skills: Vec<String>,
+}
+fn peer_dependencies(files: &Files) -> Result<Vec<String>, String> {
+    let Some((_, bytes)) = files.iter().find(|(path, _)| path == "skill-dependencies.json") else { return Ok(Vec::new()) };
+    let parsed: PeerDependencies = serde_json::from_slice(bytes)
+        .map_err(|e| format!("Invalid skill-dependencies.json: {e}"))?;
+    let mut peers = Vec::new();
+    for id in parsed.required_skills {
+        if !valid_id(&id) || id.len() > 80 {
+            return Err(format!("Invalid required skill ID in skill-dependencies.json: {id}"));
+        }
+        if !peers.contains(&id) { peers.push(id); }
+    }
+    Ok(peers)
+}
+
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -167,16 +209,29 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id == slug(id)
 }
 /// `name:` and `description:` from leading `---` frontmatter, and the text after it.
-fn frontmatter(text: &str) -> (Option<String>, Option<String>, &str) {
-    let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else { return (None, None, text) };
-    let Some(end) = rest.find("\n---") else { return (None, None, text) };
+pub(crate) fn frontmatter(text: &str) -> (Option<String>, Option<String>, &str) {
+    let Some(rest) = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+    else {
+        return (None, None, text);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (None, None, text);
+    };
     let lines: Vec<&str> = rest[..end].lines().collect();
     let field = |key: &str| {
         let at = lines.iter().position(|line| line.starts_with(key))?;
         let value = lines[at][key.len()..].trim();
         // A YAML block scalar (`description: >-`) continues on the indented lines below it.
         let value = if matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+") {
-            lines[at + 1..].iter().take_while(|l| l.starts_with([' ', '\t']) || l.trim().is_empty()).map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+            lines[at + 1..]
+                .iter()
+                .take_while(|l| l.starts_with([' ', '\t']) || l.trim().is_empty())
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
         } else {
             value.trim_matches(['"', '\'']).to_string()
         };
@@ -197,6 +252,23 @@ fn now_ms() -> u64 {
 
 /// A skill keeps its folder and needs a SKILL.md; a rule is one Markdown file, kept as RULE.md.
 fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
+    if files.len() > MAX_FILES {
+        return Err(format!("A package may contain at most {MAX_FILES} files."));
+    }
+    let mut bytes = 0usize;
+    let mut names = std::collections::HashSet::new();
+    for (name, content) in &files {
+        if name.is_empty() || name.starts_with('/') || name.contains('\\')
+            || name.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part == ".git")
+            || !names.insert(name.to_ascii_lowercase())
+        {
+            return Err(format!("Unsafe, duplicate, or case-conflicting package path: {name}."));
+        }
+        bytes = bytes.checked_add(content.len()).ok_or("Package size overflow.")?;
+        if bytes > MAX_BYTES {
+            return Err(format!("A package may contain at most {} MiB.", MAX_BYTES >> 20));
+        }
+    }
     let markdown: Vec<_> = files.iter().filter(|(p, _)| !p.contains('/') && p.to_ascii_lowercase().ends_with(".md")).collect();
     match kind {
         Kind::Skill if files.iter().any(|(p, _)| p == "SKILL.md") => Ok(files),
@@ -211,14 +283,18 @@ fn normalize(kind: Kind, files: Files) -> Result<Files, String> {
     }
 }
 
-/// Regular, non-hidden files under `path` (or `path` itself), bounded.
-fn read_local(path: &Path) -> Result<Files, String> {
+/// Managed packages retain hidden supporting files; legacy local-folder imports
+/// exclude hidden files so unrelated dotfiles are not enrolled unexpectedly.
+pub(crate) fn read_local(path: &Path, include_hidden: bool) -> Result<Files, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
     if meta.is_file() {
         if meta.len() as usize > MAX_BYTES {
-            return Err("That file is larger than 1 MB.".into());
+            return Err(format!("That file is larger than {} MiB.", MAX_BYTES >> 20));
         }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "SKILL.md".into());
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "SKILL.md".into());
         return Ok(vec![(name, fs::read(path).map_err(|e| e.to_string())?)]);
     }
     let mut files = Vec::new();
@@ -226,19 +302,28 @@ fn read_local(path: &Path) -> Result<Files, String> {
     let mut pending = vec![path.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(&dir).map_err(|e| format!("Could not read {}: {e}", dir.display()))?.flatten() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
+            let entry_name = entry.file_name();
+            let name = entry_name.to_string_lossy();
+            if name == ".git" || (!include_hidden && name.starts_with('.')) {
                 continue;
             }
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if kind.is_file() {
                 let bytes = fs::read(entry.path()).map_err(|e| e.to_string())?;
                 total += bytes.len();
                 if files.len() >= MAX_FILES || total > MAX_BYTES {
-                    return Err(format!("That folder holds more than {MAX_FILES} files or 1 MB."));
+                    return Err(format!("That folder holds more than {MAX_FILES} files or {} MiB.", MAX_BYTES >> 20));
                 }
-                let relative = entry.path().strip_prefix(path).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
+                let relative = entry
+                    .path()
+                    .strip_prefix(path)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 files.push((relative, bytes));
             }
         }
@@ -249,6 +334,13 @@ fn read_local(path: &Path) -> Result<Files, String> {
 pub struct Library {
     dir: PathBuf,
     home: PathBuf,
+}
+
+/// An explicitly activated central-library skill; never a global auto-install.
+pub(crate) struct SlashSkill {
+    pub id: String,
+    pub description: String,
+    pub path: PathBuf,
 }
 
 impl Library {
@@ -271,75 +363,260 @@ impl Library {
         fs::write(&temp, json).and_then(|_| fs::rename(&temp, self.meta_path(&meta.id))).map_err(|e| format!("Could not save the library: {e}"))
     }
     fn files(&self, id: &str) -> Result<Files, String> {
-        let mut files = read_local(&self.dir.join(id))?;
+        let mut files = read_local(&self.dir.join(id), true)?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
     }
     fn item(&self, meta: Meta) -> Result<Item, String> {
         let files = self.files(&meta.id)?;
-        let findings = files.iter().flat_map(|(path, bytes)| safety::scan(path, &String::from_utf8_lossy(bytes))).collect();
-        Ok(Item { files: files.into_iter().map(|(p, _)| p).collect(), findings, meta })
+        let findings = files
+            .iter()
+            .flat_map(|(path, bytes)| safety::scan(path, &String::from_utf8_lossy(bytes)))
+            .collect();
+        let folder = Some(self.dir.join(&meta.id))
+            .filter(|dir| meta.kind == Kind::Skill && dir.is_absolute() && dir.is_dir())
+            .map(|dir| dir.to_string_lossy().into_owned());
+        Ok(Item {
+            files: files.into_iter().map(|(p, _)| p).collect(),
+            findings,
+            folder,
+            meta,
+        })
+    }
+
+    /// Recover an import interrupted after the previous folder was renamed but before its
+    /// metadata was committed. A rollback folder is internal temporary state, not a user backup.
+    fn recover_interrupted(&self) -> Result<(), String> {
+        let Ok(entries) = fs::read_dir(&self.dir) else { return Ok(()) };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = file_name.strip_prefix('.').and_then(|s| s.strip_suffix(".rollback")) else { continue };
+            if !valid_id(id) || !entry.path().is_dir() { continue }
+            let target = self.dir.join(id);
+            let committed = self.load(id).ok().and_then(|meta| read_local(&target, true).ok().map(|files| meta.sha256 == content_hash(&files))).unwrap_or(false);
+            if !committed {
+                if target.exists() { fs::remove_dir_all(&target).map_err(|e| e.to_string())?; }
+                fs::rename(entry.path(), &target).map_err(|e| format!("Could not recover {id}: {e}"))?;
+            } else {
+                fs::remove_dir_all(entry.path()).map_err(|e| format!("Could not finish {id}: {e}"))?;
+            }
+        }
+        // Incomplete staging folders can never become active without the commit above.
+        for entry in fs::read_dir(&self.dir).map_err(|e| e.to_string())?.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if file_name.strip_prefix('.').and_then(|s| s.strip_suffix(".staging")).is_some_and(valid_id) && entry.path().is_dir() {
+                fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<Item>, String> {
+        let _guard = LOCK.lock().map_err(|e| e.to_string())?;
+        self.recover_interrupted()?;
         let Ok(entries) = fs::read_dir(&self.dir) else { return Ok(Vec::new()) };
         let mut ids: Vec<String> = entries
             .flatten()
-            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".json").map(str::to_string))
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()?
+                    .strip_suffix(".json")
+                    .map(str::to_string)
+            })
             .filter(|id| valid_id(id))
             .collect();
         ids.sort();
-        ids.into_iter().map(|id| self.load(&id).and_then(|meta| self.item(meta))).collect()
+        ids.into_iter()
+            .map(|id| self.load(&id).and_then(|meta| self.item(meta)))
+            .collect()
+    }
+
+    /// Optional package icons are bounded data. The webview checks SVG markup before display.
+    pub fn icons(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let entries = self.list()?;
+        let mut icons = std::collections::BTreeMap::new();
+        for item in entries {
+            if item.meta.kind != Kind::Skill || !item.files.iter().any(|file| file == "assets/icon.svg") {
+                continue;
+            }
+            let skill_dir = self.dir.join(&item.meta.id);
+            let assets_dir = skill_dir.join("assets");
+            let icon_path = assets_dir.join("icon.svg");
+            let safe_directory = [skill_dir.as_path(), assets_dir.as_path()].iter().all(|dir| {
+                fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+            });
+            if !safe_directory || !fs::symlink_metadata(&icon_path).is_ok_and(|meta| {
+                meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 65_536
+            }) {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(icon_path) {
+                icons.insert(item.meta.id, content);
+            }
+        }
+        Ok(icons)
+    }
+
+    /// Only current, acknowledged, explicitly activated revisions can be invoked.
+    pub fn slash_skills(&self, harness: &str, cwd: &Path) -> Result<Vec<SlashSkill>, String> {
+        let entries = self.list()?;
+        let known_ids: std::collections::HashSet<_> = entries.iter().map(|item| item.meta.id.as_str()).collect();
+        let mut skills = Vec::new();
+        for item in entries.iter().filter(|item| item.meta.kind == Kind::Skill) {
+            let meta = &item.meta;
+            if !item.findings.is_empty() && meta.acknowledged.as_deref() != Some(meta.sha256.as_str()) {
+                continue;
+            }
+            if meta.required_skills.iter().any(|id| !known_ids.contains(id.as_str())) {
+                continue;
+            }
+            let active = meta.activations.iter().any(|activation| {
+                activation.harness == harness
+                    && activation.sha256 == meta.sha256
+                    && (activation.scope == Scope::User
+                        || (activation.scope == Scope::Project && activation.project.as_deref() == cwd.to_str()))
+                    && matches!(Self::status(meta, Some(activation)), "active" | "prompt")
+            });
+            if !active { continue; }
+            // Reject out-of-band package edits until the user reviews and reimports them.
+            let Ok(files) = self.files(&meta.id) else { continue };
+            if content_hash(&files) != meta.sha256 { continue; }
+            let path = self.dir.join(&meta.id).join("SKILL.md");
+            if !fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file() && !entry.file_type().is_symlink()) {
+                continue;
+            }
+            skills.push(SlashSkill { id: meta.id.clone(), description: meta.description.clone(), path });
+        }
+        Ok(skills)
     }
 
     /// Add or update an item. Updating keeps activations; they show as outdated until the
     /// user activates again, so a new version never reaches a harness without them.
-    pub fn import(&self, kind: Kind, files: Files, fallback_name: &str, source: Source) -> Result<Item, String> {
+    pub fn import(
+        &self,
+        kind: Kind,
+        files: Files,
+        fallback_name: &str,
+        source: Source,
+    ) -> Result<Item, String> {
         self.import_as(kind, files, fallback_name, source, false)
     }
 
     /// `import`, refusing (under the library lock, so a concurrent import cannot slip in
     /// between a check and the write) to replace an item that came from another source.
     pub(crate) fn import_as(&self, kind: Kind, files: Files, fallback_name: &str, source: Source, same_source_only: bool) -> Result<Item, String> {
+        self.import_as_guarded(kind, files, fallback_name, source, same_source_only, false)
+    }
+
+    /// Reject an unexpected existing package while holding the library's write lock.
+    pub(crate) fn import_as_guarded(
+        &self, kind: Kind, files: Files, fallback_name: &str, source: Source,
+        same_source_only: bool, require_absent: bool,
+    ) -> Result<Item, String> {
         let files = normalize(kind, files)?;
-        let main = files.iter().find(|(p, _)| p == main_file(kind)).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+        let main = files
+            .iter()
+            .find(|(p, _)| p == main_file(kind))
+            .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
         let (name, description, body) = frontmatter(&main);
         let name = name.unwrap_or_else(|| fallback_name.trim_end_matches(".md").to_string());
-        let description = description.unwrap_or_else(|| body.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or_default().chars().take(200).collect());
+        let description = description.unwrap_or_else(|| {
+            body.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect()
+        });
         let id = slug(&name);
         if id.is_empty() {
             return Err("Give the skill a name in its frontmatter.".into());
         }
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        self.recover_interrupted()?;
         let previous = self.load(&id).ok();
+        if require_absent && previous.is_some() {
+            return Err("ZIP replacement requires confirmation: the skill ID already exists in the central library.".into());
+        }
         if previous.as_ref().is_some_and(|p| p.kind != kind) {
             return Err(format!("A {} named {id} is already in the library.", if kind == Kind::Skill { "rule" } else { "skill" }));
         }
-        if let Some(taken) = previous.as_ref().filter(|p| same_source_only && !p.source.location.eq_ignore_ascii_case(&source.location)) {
+        if let Some(taken) = previous.as_ref().filter(|p| same_source_only
+            && (p.source.kind != source.kind || !p.source.location.eq_ignore_ascii_case(&source.location)
+                || p.source.git_ref != source.git_ref)) {
             return Err(format!("{id} is already in the library from {}.", taken.source.location));
         }
         let folder = self.dir.join(&id);
-        let _ = fs::remove_dir_all(&folder);
-        for (relative, bytes) in &files {
-            let path = folder.join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        if previous.is_none() && folder.exists() {
+            return Err(format!("{id} already exists on disk and is not a managed library entry."));
+        }
+        // Validate peer metadata before creating any staging folder. A malformed
+        // dependency manifest must not leave temporary library content behind.
+        let required_skills = peer_dependencies(&files)?;
+        let staged = self.dir.join(format!(".{id}.staging"));
+        let rollback = self.dir.join(format!(".{id}.rollback"));
+        fs::create_dir(&staged).map_err(|e| format!("Could not stage {id}: {e}"))?;
+        let stage_result = (|| -> Result<(), String> {
+            for (relative, bytes) in &files {
+                let path = staged.join(relative);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Could not create {relative}: {e}"))?;
+                }
+                fs::write(&path, bytes).map_err(|e| format!("Could not stage {relative}: {e}"))?;
             }
-            fs::write(&path, bytes).map_err(|e| format!("Could not save {relative}: {e}"))?;
+            Ok(())
+        })();
+        if let Err(error) = stage_result {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(error);
         }
         let sha256 = content_hash(&files);
+        let accepted = previous.as_ref().filter(|p| p.source.kind == source.kind
+            && p.source.location.eq_ignore_ascii_case(&source.location))
+            .and_then(|p| p.acknowledged.clone())
+            .filter(|hash| hash == &sha256);
+        let file_hashes = files.iter().map(|(path, content)| (path.clone(), sha256_hex(content))).collect();
+        let auto_update = previous.as_ref().and_then(|p| p.auto_update);
+        let auto_available = previous.as_ref().filter(|p| p.source.location.eq_ignore_ascii_case(&source.location))
+            .is_some_and(|p| p.auto_available);
         let meta = Meta {
-            acknowledged: previous.as_ref().and_then(|p| p.acknowledged.clone()).filter(|a| *a == sha256),
+            acknowledged: accepted,
+            auto_update,
+            auto_available,
+            required_skills,
+            file_hashes,
             activations: previous.map(|p| p.activations).unwrap_or_default(),
-            id, name, kind, description, source, sha256, imported_at: now_ms(),
+            id: id.clone(), name, kind, description, source, sha256, imported_at: now_ms(),
         };
-        self.save(&meta)?;
+        if folder.exists() {
+            if let Err(error) = fs::rename(&folder, &rollback) {
+                let _ = fs::remove_dir_all(&staged);
+                return Err(format!("Could not prepare {id} for update: {error}"));
+            }
+        }
+        if let Err(error) = fs::rename(&staged, &folder) {
+            let _ = fs::rename(&rollback, &folder);
+            let _ = fs::remove_dir_all(&staged);
+            return Err(format!("Could not install {id}: {error}"));
+        }
+        if let Err(error) = self.save(&meta) {
+            let _ = fs::remove_dir_all(&folder);
+            if rollback.exists() { let _ = fs::rename(&rollback, &folder); }
+            return Err(error);
+        }
+        if rollback.exists() { let _ = fs::remove_dir_all(&rollback); }
         self.item(meta)
     }
 
     pub fn scan(&self, id: &str) -> Result<Vec<Finding>, String> {
         Ok(self.item(self.load(id)?)?.findings)
+    }
+
+    fn missing_required(&self, meta: &Meta) -> Vec<String> {
+        meta.required_skills.iter().filter(|id| self.load(id).is_err()).cloned().collect()
     }
 
     fn base<'a>(&'a self, scope: Scope, root: Option<&'a Path>) -> Result<&'a Path, String> {
@@ -350,6 +627,11 @@ impl Library {
     }
 
     pub fn activate(&self, id: &str, harness: &str, scope: Scope, root: Option<&Path>, acknowledge: bool) -> Result<Change, String> {
+        self.activate_with_replacement(id, harness, scope, root, acknowledge, false)
+    }
+
+    /// Only the explicit replacement command may take over an unmanaged skill directory.
+    pub fn activate_with_replacement(&self, id: &str, harness: &str, scope: Scope, root: Option<&Path>, acknowledge: bool, replace_existing: bool) -> Result<Change, String> {
         if !adapter::known(harness) {
             return Err("Unknown harness.".into());
         }
@@ -357,6 +639,10 @@ impl Library {
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         let item = self.item(self.load(id)?)?;
         let meta = item.meta;
+        let missing = self.missing_required(&meta);
+        if !missing.is_empty() {
+            return Err(format!("Install required peer skills before activating {}: {}.", meta.name, missing.join(", ")));
+        }
         let acknowledged = if item.findings.is_empty() || meta.acknowledged.as_deref() == Some(meta.sha256.as_str()) {
             meta.acknowledged.clone()
         } else if acknowledge {
@@ -376,10 +662,19 @@ impl Library {
             Surface::Folder(dir) => {
                 // After a surface move the new folder must be free, as for a first activation;
                 // the old copy goes only once the new one is written, and an edited file stays.
-                let written = adapter::write_folder(&dir, id, &files, if moved { &[] } else { &old_files })?;
+                let prior = if moved { &[][..] } else { old_files.as_slice() };
+                let written = if replace_existing && prior.is_empty() && dir.join(id).exists() {
+                    let (written, backup) = adapter::replace_unmanaged_folder(&dir, id, &files)?;
+                    kept.push(format!("Original skill backed up at {}", backup.display()));
+                    written
+                } else {
+                    adapter::write_folder(&dir, id, &files, prior)?
+                };
                 if moved {
-                    kept = adapter::remove_folder(&old_files);
-                    if kept.is_empty() {
+                    let removed = adapter::remove_folder(&old_files);
+                    let all_removed = removed.is_empty();
+                    kept.extend(removed);
+                    if all_removed {
                         excluded.drain(..).for_each(|entry| adapter::unexclude(base, &entry));
                     }
                 }
@@ -408,36 +703,91 @@ impl Library {
             }
             Surface::Prompt => ("prompt", Vec::new()),
         };
-        let activation = Activation { harness: harness.into(), scope, project: project.clone(), surface: surface.into(), sha256: meta.sha256.clone(), files: written, excluded };
-        let activations = meta.activations.iter().filter(|a| !matches(a)).cloned().chain([activation]).collect();
-        self.save(&Meta { acknowledged, activations, ..meta })?;
+        let activation = Activation {
+            harness: harness.into(),
+            scope,
+            project: project.clone(),
+            surface: surface.into(),
+            sha256: meta.sha256.clone(),
+            files: written,
+            excluded,
+        };
+        let activations = meta
+            .activations
+            .iter()
+            .filter(|a| !matches(a))
+            .cloned()
+            .chain([activation])
+            .collect();
+        self.save(&Meta {
+            acknowledged,
+            activations,
+            ..meta
+        })?;
         drop(_guard);
-        Ok(Change { items: self.list()?, kept })
+        Ok(Change {
+            items: self.list()?,
+            kept,
+        })
     }
 
-    pub fn deactivate(&self, id: &str, harness: &str, scope: Scope, root: Option<&Path>) -> Result<Change, String> {
+    pub fn deactivate(
+        &self,
+        id: &str,
+        harness: &str,
+        scope: Scope,
+        root: Option<&Path>,
+    ) -> Result<Change, String> {
         let base = self.base(scope, root)?;
         let project = (scope == Scope::Project).then(|| base.to_string_lossy().into_owned());
         let _guard = LOCK.lock().map_err(|e| e.to_string())?;
         let meta = self.load(id)?;
-        let matches = |a: &Activation| a.harness == harness && a.scope == scope && a.project == project;
+        let matches =
+            |a: &Activation| a.harness == harness && a.scope == scope && a.project == project;
         let Some(activation) = meta.activations.iter().find(|a| matches(a)).cloned() else {
             return Err(format!("{} is not active there.", meta.name));
         };
-        let kept = match activation.surface.as_str() {
-            "folder" => adapter::remove_folder(&activation.files),
-            "block" => activation.files.iter().filter(|w| !matches!(adapter::remove_block(w, id), Ok(true))).map(|w| w.path.clone()).collect(),
-            _ => Vec::new(),
-        };
-        if scope == Scope::Project && kept.is_empty() {
-            for entry in &activation.excluded {
-                adapter::unexclude(base, entry);
-            }
-        }
-        let activations = meta.activations.iter().filter(|a| !matches(a)).cloned().collect();
-        self.save(&Meta { activations, ..meta })?;
+        let kept = undo(id, &activation, Some(base));
+        let activations = meta
+            .activations
+            .iter()
+            .filter(|a| !matches(a))
+            .cloned()
+            .collect();
+        self.save(&Meta {
+            activations,
+            ..meta
+        })?;
         drop(_guard);
-        Ok(Change { items: self.list()?, kept })
+        Ok(Change {
+            items: self.list()?,
+            kept,
+        })
+    }
+
+    /// Turns an item off for every harness and scope it was activated in, including
+    /// activations an older build made that the page no longer offers a switch for. Each
+    /// project activation is undone in the checkout it recorded; edited files stay (`kept`).
+    pub fn deactivate_all(&self, id: &str) -> Result<Change, String> {
+        let _guard = LOCK.lock().map_err(|e| e.to_string())?;
+        let meta = self.load(id)?;
+        let mut kept = Vec::new();
+        for activation in &meta.activations {
+            let base = match activation.scope {
+                Scope::User => Some(self.home.as_path()),
+                Scope::Project => activation.project.as_deref().map(Path::new),
+            };
+            kept.extend(undo(id, activation, base));
+        }
+        self.save(&Meta {
+            activations: Vec::new(),
+            ..meta
+        })?;
+        drop(_guard);
+        Ok(Change {
+            items: self.list()?,
+            kept,
+        })
     }
 
     /// Refuses while anything is active, so no harness keeps files the library forgot.
@@ -489,7 +839,7 @@ impl Library {
         for harness in adapter::FILE_HARNESSES.iter().chain(adapter::PROMPT_HARNESSES) {
             let prompt = !adapter::FILE_HARNESSES.contains(harness);
             let in_use = metas.iter().any(|m| m.activations.iter().any(|a| a.harness == *harness));
-            let installed = !prompt && adapter::installed(harness, &self.home);
+            let installed = adapter::installed(harness, &self.home);
             if !installed && !in_use {
                 continue;
             }
@@ -524,44 +874,121 @@ impl Library {
                             unmanaged.push(Unmanaged { scope: *scope, kind: Kind::Rule, path: path.clone(), detail: format!("Has a PandaCode block for {id} that the library does not track.") });
                         }
                         if other {
-                            unmanaged.push(Unmanaged { scope: *scope, kind: Kind::Rule, path, detail: "Has instructions PandaCode does not manage.".into() });
+                            unmanaged.push(Unmanaged {
+                                scope: *scope,
+                                kind: Kind::Rule,
+                                path,
+                                detail: "Has instructions PandaCode does not manage.".into(),
+                            });
                         }
                     }
                 }
             }
-            harnesses.push(HarnessRow { harness: harness.to_string(), installed, prompt, cells, unmanaged });
+            harnesses.push(HarnessRow {
+                harness: harness.to_string(),
+                installed,
+                prompt,
+                cells,
+                unmanaged,
+            });
         }
         Ok(Matrix { project, harnesses })
     }
 }
 
-fn active_in<'m>(meta: &'m Meta, harness: &str, scope: Scope, project: &Option<String>) -> Option<&'m Activation> {
-    meta.activations.iter().find(|a| a.harness == harness && a.scope == scope && a.project == *project)
+/// Removes one activation's files (an edited file stays and is returned) and, when nothing
+/// was kept, the project exclude lines it added to `base`.
+fn undo(id: &str, activation: &Activation, base: Option<&Path>) -> Vec<String> {
+    let kept: Vec<String> = match activation.surface.as_str() {
+        "folder" => adapter::remove_folder(&activation.files),
+        "block" => activation
+            .files
+            .iter()
+            .filter(|w| !matches!(adapter::remove_block(w, id), Ok(true)))
+            .map(|w| w.path.clone())
+            .collect(),
+        _ => Vec::new(),
+    };
+    if let (Scope::Project, true, Some(base)) = (activation.scope, kept.is_empty(), base) {
+        for entry in &activation.excluded {
+            adapter::unexclude(base, entry);
+        }
+    }
+    kept
+}
+fn active_in<'m>(
+    meta: &'m Meta,
+    harness: &str,
+    scope: Scope,
+    project: &Option<String>,
+) -> Option<&'m Activation> {
+    meta.activations
+        .iter()
+        .find(|a| a.harness == harness && a.scope == scope && a.project == *project)
 }
 
 /// Whether a project activation's files sit outside the folder its harness reads now, as Codex
 /// skills recorded under `.codex/skills` do since it moved to `.agents/skills`.
 fn outside_surface(kind: Kind, activation: &Activation) -> bool {
-    let Some(project) = activation.project.as_deref().filter(|_| activation.surface == "folder") else { return false };
-    let Surface::Folder(dir) = adapter::surface(&activation.harness, kind, activation.scope, Path::new(project)) else { return false };
-    activation.files.iter().any(|file| !Path::new(&file.path).starts_with(&dir))
+    let Some(project) = activation
+        .project
+        .as_deref()
+        .filter(|_| activation.surface == "folder")
+    else {
+        return false;
+    };
+    let Surface::Folder(dir) = adapter::surface(
+        &activation.harness,
+        kind,
+        activation.scope,
+        Path::new(project),
+    ) else {
+        return false;
+    };
+    activation
+        .files
+        .iter()
+        .any(|file| !Path::new(&file.path).starts_with(&dir))
 }
 
 pub(crate) fn library(app: &AppHandle) -> Result<Library, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("skills");
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("skills");
     let home = crate::agent_usage_providers::home().ok_or("Could not find your home folder.")?;
     Ok(Library::new(dir, home))
 }
 fn repo_name(repo: &str) -> String {
-    repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').trim_end_matches(".git").to_string()
+    repo.trim()
+        .trim_start_matches("https://github.com/")
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string()
 }
-fn root(state: &AppState, project_id: Option<String>, session_id: Option<String>) -> Result<Option<PathBuf>, String> {
-    project_id.map(|id| state.root(&id, session_id.as_deref())).transpose()
+fn root(
+    state: &AppState,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<Option<PathBuf>, String> {
+    project_id
+        .map(|id| state.root(&id, session_id.as_deref()))
+        .transpose()
 }
 
 #[tauri::command]
 pub async fn skills_list(app: AppHandle) -> crate::Result<Vec<Item>> {
     crate::blocking(move || library(&app)?.list()).await
+}
+
+#[tauri::command]
+pub async fn skills_icons(app: AppHandle) -> crate::Result<std::collections::BTreeMap<String, String>> {
+    crate::blocking(move || library(&app)?.icons()).await
+}
+
+pub(crate) fn active_slash_skills(app: &AppHandle, harness: &str, cwd: &Path) -> Result<Vec<SlashSkill>, String> {
+    library(app)?.slash_skills(harness, cwd)
 }
 #[tauri::command]
 pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> crate::Result<Item> {
@@ -570,7 +997,7 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
         if !path.is_absolute() {
             return Err("Choose a folder or Markdown file.".into());
         }
-        let files = read_local(&path)?;
+        let files = read_local(&path, false)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let source = Source { kind: "folder".into(), location: path.to_string_lossy().into_owned(), git_ref: None, commit: None };
         library(&app)?.import(kind, files, &name, source)
@@ -578,11 +1005,16 @@ pub async fn skills_import_folder(app: AppHandle, path: String, kind: Kind) -> c
     .await
 }
 #[tauri::command]
-pub async fn skills_import_github(app: AppHandle, repo: String, path: String, git_ref: Option<String>, kind: Kind) -> crate::Result<Item> {
+pub async fn skills_import_github(
+    app: AppHandle,
+    repo: String,
+    path: String,
+    git_ref: Option<String>,
+    kind: Kind,
+) -> crate::Result<Item> {
     crate::blocking(move || {
-        let repo = repo_name(&repo);
+        let (repo, path, git_ref) = github::selection(&repo, &path, git_ref.as_deref())?;
         let (files, commit) = github::fetch(&repo, &path, git_ref.as_deref())?;
-        let path = path.trim_matches('/').to_string();
         let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(repo.rsplit('/').next().unwrap_or_default()).to_string();
         let location = if path.is_empty() { repo } else { format!("{repo}/{path}") };
         library(&app)?.import(kind, files, &name, Source { kind: "github".into(), location, git_ref, commit: Some(commit) })
@@ -591,17 +1023,36 @@ pub async fn skills_import_github(app: AppHandle, repo: String, path: String, gi
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn skills_activate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>, acknowledge: Option<bool>) -> crate::Result<Change> {
+pub async fn skills_activate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>, acknowledge: Option<bool>, replace_existing: Option<bool>) -> crate::Result<Change> {
     let root = root(&state, project_id, session_id)?;
-    crate::blocking(move || library(&app)?.activate(&id, &harness, scope, root.as_deref(), acknowledge.unwrap_or(false))).await
+    crate::blocking(move || library(&app)?.activate_with_replacement(&id, &harness, scope, root.as_deref(), acknowledge.unwrap_or(false), replace_existing.unwrap_or(false))).await
 }
 #[tauri::command]
-pub async fn skills_deactivate(app: AppHandle, state: State<'_, AppState>, id: String, harness: String, scope: Scope, project_id: Option<String>, session_id: Option<String>) -> crate::Result<Change> {
+pub async fn skills_deactivate(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    harness: String,
+    scope: Scope,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> crate::Result<Change> {
     let root = root(&state, project_id, session_id)?;
     crate::blocking(move || library(&app)?.deactivate(&id, &harness, scope, root.as_deref())).await
 }
+/// Turns a library item off everywhere it is active (Rules & library's way out of legacy
+/// activations before **Remove**).
 #[tauri::command]
-pub async fn skills_matrix(app: AppHandle, state: State<'_, AppState>, project_id: Option<String>, session_id: Option<String>) -> crate::Result<Matrix> {
+pub async fn skills_deactivate_all(app: AppHandle, id: String) -> crate::Result<Change> {
+    crate::blocking(move || library(&app)?.deactivate_all(&id)).await
+}
+#[tauri::command]
+pub async fn skills_matrix(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> crate::Result<Matrix> {
     let root = root(&state, project_id, session_id)?;
     crate::blocking(move || library(&app)?.matrix(root.as_deref())).await
 }
@@ -640,7 +1091,378 @@ pub async fn skills_discover(app: AppHandle) -> crate::Result<catalog::Catalogs>
     crate::blocking(move || library(&app)?.discover(&github::api)).await
 }
 
+#[tauri::command]
+pub async fn skills_source_preview(app: AppHandle, repo: String, path: String, git_ref: Option<String>) -> crate::Result<sources::SourcePreview> {
+    crate::blocking(move || library(&app)?.preview_skill_source(&github::api, &repo, &path, git_ref.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn skills_source_list(app: AppHandle) -> crate::Result<Vec<sources::SavedSource>> {
+    crate::blocking(move || library(&app)?.saved_skill_sources()).await
+}
+
+#[tauri::command]
+pub async fn skills_source_import(
+    app: AppHandle, repo: String, path: String, git_ref: Option<String>, commit: String, selected_paths: Vec<String>,
+) -> crate::Result<sources::SourceImport> {
+    crate::blocking(move || library(&app)?.import_skill_source(
+        &github::api, &repo, &path, git_ref.as_deref(), &commit, selected_paths,
+    )).await
+}
+
+/// A single checked import command payload (source identity, selection and progress ID).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedSourceImport {
+    pub repo: String,
+    pub path: String,
+    pub git_ref: Option<String>,
+    pub commit: String,
+    pub selected_paths: Vec<String>,
+    pub operation_id: String,
+    pub allow_replace: Option<bool>,
+}
+
+/// The same payload contract is used by ZIP, source import and manual sync.
+/// Kept separate from event transport so native tests can assert exact fields.
+fn operation_progress_payload(
+    operation_id: &str, path: &str, name: &str, phase: &str,
+    completed: usize, total: usize, detail: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operationId": operation_id, "path": path, "name": name,
+        "phase": phase, "completed": completed, "total": total,
+        "detail": detail,
+    })
+}
+
+/// Streams package phases through the regular Tauri event bus, scoped to a UI operation.
+#[tauri::command]
+pub async fn skills_source_import_tracked(
+    app: AppHandle, request: TrackedSourceImport,
+) -> crate::Result<sources::SourceImport> {
+    let TrackedSourceImport {repo, path, git_ref, commit, selected_paths, operation_id, allow_replace} = request;
+    if operation_id.is_empty() || operation_id.len() > 80
+        || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        return Err("Invalid skill operation identifier.".into());
+    }
+    crate::blocking(move || {
+        let event_app = app.clone();
+        library(&app)?.import_skill_source_progress(
+            &github::api,
+            sources::SourceImportRequest {
+                repo: &repo, path: &path, git_ref: git_ref.as_deref(), commit: &commit,
+                selected_paths, allow_replace: allow_replace.unwrap_or(false),
+            },
+            |progress| {
+                let payload = operation_progress_payload(
+                    &operation_id, &progress.path, &progress.name, &progress.phase,
+                    progress.completed, progress.total, progress.detail.as_deref(),
+                );
+                let _ = event_app.emit("skills-operation-progress", payload);
+            },
+        )
+    }).await
+}
+
+#[tauri::command]
+pub async fn skills_source_set_selection(app: AppHandle, id: String, selected_paths: Vec<String>) -> crate::Result<sources::SavedSource> {
+    crate::blocking(move || library(&app)?.set_saved_source_paths(&id, selected_paths)).await
+}
+
+#[tauri::command]
+pub async fn skills_source_remove(app: AppHandle, id: String) -> crate::Result<Vec<sources::SavedSource>> {
+    crate::blocking(move || library(&app)?.remove_skill_source(&id)).await
+}
+
+
+fn refresh_bot_briefs_if_changed(app: &AppHandle, report: &sync::SyncReport) {
+    if report.updated.is_empty() && report.installed.is_empty() { return; }
+    let app_state = app.state::<AppState>();
+    let result = app_state.store.lock();
+    if let Ok(store) = result {
+        // Next bot message sees the new library state, not a mid-run mutation.
+        let _ = store.db.execute("UPDATE bots SET memory_version=memory_version+1", []);
+    }
+}
+
+#[tauri::command]
+pub async fn skills_sync_item(app: AppHandle, id: String) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || {
+        let report = library(&app)?.synchronize(&github::api, sync::Selection::One(id), false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
+#[tauri::command]
+pub async fn skills_sync_all(app: AppHandle) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || {
+        let report = library(&app)?.synchronize(&github::api, sync::Selection::All, false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
+#[tauri::command]
+pub async fn skills_sync_source(app: AppHandle, repo: String, path: Option<String>) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || {
+        let (repo, path, _) = github::selection(&repo, path.as_deref().unwrap_or(""), None)?;
+        let report = library(&app)?.synchronize(&github::api, sync::Selection::Source(repo, path), false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
+#[tauri::command]
+pub async fn skills_sync_saved_source(app: AppHandle, id: String) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || {
+        let library = library(&app)?;
+        let ids = library.selected_skill_ids(&id)?;
+        if ids.is_empty() {
+            return Err("None of the skills in this saved source are still installed.".into());
+        }
+        let report = library.synchronize(&github::api, sync::Selection::Ids(ids), false)?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
+
+#[tauri::command]
+pub async fn skills_sync_policy(app: AppHandle) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_policy()).await
+}
+#[tauri::command]
+pub async fn skills_sync_set_global(app: AppHandle, enabled: bool) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_set_global(enabled)).await
+}
+#[tauri::command]
+pub async fn skills_sync_trust(app: AppHandle, repo: String, path: Option<String>, git_ref: Option<String>, trusted: bool) -> crate::Result<sync::SyncPolicy> {
+    crate::blocking(move || library(&app)?.sync_trust_scope_ref(&repo, path.as_deref().unwrap_or(""), git_ref.as_deref(), trusted)).await
+}
+#[tauri::command]
+pub async fn skills_sync_override(app: AppHandle, id: String, auto_update: Option<bool>) -> crate::Result<Item> {
+    crate::blocking(move || library(&app)?.sync_set_override(&id, auto_update)).await
+}
+#[tauri::command]
+pub async fn skills_sync_set_ref(app: AppHandle, id: String, git_ref: Option<String>) -> crate::Result<Item> {
+    crate::blocking(move || library(&app)?.sync_set_ref(&id, git_ref)).await
+}
+#[tauri::command]
+pub async fn skills_sync_report(app: AppHandle) -> crate::Result<sync::SyncReport> {
+    crate::blocking(move || library(&app)?.last_sync_report()).await
+}
+
+/// Automatic checks run off the UI and bot admission threads, after app setup.
+pub fn begin_startup_sync(app: AppHandle) {
+    std::thread::spawn(move || {
+        if let Ok(library) = library(&app) {
+            if let Ok(sources) = library.saved_skill_sources() {
+                let ids: Vec<String> = sources.iter()
+                    .flat_map(|source| library.selected_skill_ids(&source.id).unwrap_or_default())
+                    .collect();
+                if !ids.is_empty() {
+                    if let Ok(report) = library.synchronize(&github::api, sync::Selection::Ids(ids), true) {
+                        refresh_bot_briefs_if_changed(&app, &report);
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests;
+
 #[cfg(test)]
 mod catalog_tests;
+
+/// ZIP and manual sync share the same operation-scoped package progress event.
+#[tauri::command]
+pub async fn skills_import_zip_tracked(app: AppHandle, path: String, operation_id: String, allow_replace: Option<bool>) -> crate::Result<customize::ZipInstall> {
+    if operation_id.is_empty() || operation_id.len() > 80
+        || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        return Err("Invalid skill operation identifier.".into());
+    }
+    crate::blocking(move || {
+        let name = std::path::Path::new(&path).file_name()
+            .unwrap_or_default().to_string_lossy().into_owned();
+        let event_app = app.clone();
+        let result = customize::import_zip_progress(&app, &path, allow_replace.unwrap_or(false), |phase| {
+            let payload = operation_progress_payload(
+                &operation_id, &name, &name, phase,
+                usize::from(phase == "installed"), 1, None,
+            );
+            let _ = event_app.emit("skills-operation-progress", payload);
+        });
+        if let Err(error) = &result {
+            let payload = operation_progress_payload(
+                &operation_id, &name, &name, "failed", 1, 1, Some(error),
+            );
+            let _ = app.emit("skills-operation-progress", payload);
+        }
+        result
+    }).await
+}
+
+#[tauri::command]
+pub async fn skills_sync_tracked(app: AppHandle, scope: String, id: Option<String>, ids: Option<Vec<String>>, operation_id: String) -> crate::Result<sync::SyncReport> {
+    if operation_id.is_empty() || operation_id.len() > 80
+        || !operation_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        return Err("Invalid skill operation identifier.".into());
+    }
+    crate::blocking(move || {
+        let library = library(&app)?;
+        let selection = match scope.as_str() {
+            "all" => sync::Selection::All,
+            "skill" => sync::Selection::One(id.ok_or("Choose a skill ID to synchronize.")?),
+            "source" => sync::Selection::Ids(library.selected_skill_ids(&id.ok_or("Choose a saved source.")?)?),
+            "ids" => {
+                let ids = ids.ok_or("Choose which failed skills to retry.")?;
+                if ids.is_empty() || ids.len() > 300 {
+                    return Err("Retry requires between one and 300 installed skill IDs.".into());
+                }
+                sync::Selection::Ids(ids)
+            }
+            _ => return Err("Unknown skill synchronization scope.".into()),
+        };
+        let events_app = app.clone();
+        let report = library.synchronize_progress(&github::api, selection, false, |progress| {
+            let payload = operation_progress_payload(
+                &operation_id, &progress.id, &progress.name, &progress.phase,
+                progress.completed, progress.total, progress.detail.as_deref(),
+            );
+            let _ = events_app.emit("skills-operation-progress", payload);
+        })?;
+        refresh_bot_briefs_if_changed(&app, &report);
+        Ok(report)
+    }).await
+}
+
+#[tauri::command]
+pub async fn skills_import_zip(app: AppHandle, path: String) -> crate::Result<customize::ZipInstall> {
+    crate::blocking(move || customize::import_zip(&app, &path)).await
+}
+
+#[tauri::command]
+pub async fn skills_preview_file(app: AppHandle, id: String, file: String) -> crate::Result<customize::PreviewFile> {
+    crate::blocking(move || customize::installed_preview(&app, &id, &file)).await
+}
+
+#[tauri::command]
+pub async fn skills_github_preview_file(repo: String, path: String, commit: String, file: String) -> crate::Result<customize::PreviewFile> {
+    crate::blocking(move || customize::github_preview(&repo, &path, &commit, &file)).await
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    #[test]
+    fn skills_list_items_carry_the_library_copy_folder_for_skills_only() {
+        let base =
+            std::env::temp_dir().join(format!("pandacode-skills-folder-{}", uuid::Uuid::new_v4()));
+        let library = Library::new(base.join("library"), base.join("home"));
+        let source = |kind: &str| Source {
+            kind: kind.into(),
+            location: "/source".into(),
+            git_ref: None,
+            commit: None,
+        };
+        let skill = library
+            .import(
+                Kind::Skill,
+                vec![(
+                    "SKILL.md".into(),
+                    b"---\nname: Release\n---\nBody\n".to_vec(),
+                )],
+                "release",
+                source("folder"),
+            )
+            .unwrap();
+        let rule = library
+            .import(
+                Kind::Rule,
+                vec![(
+                    "guard.md".into(),
+                    b"---\nname: Guard\n---\nNever.\n".to_vec(),
+                )],
+                "guard",
+                source("folder"),
+            )
+            .unwrap();
+        let folder = PathBuf::from(skill.folder.as_deref().unwrap());
+        assert!(folder.is_absolute() && folder.join("SKILL.md").is_file());
+        assert!(rule.folder.is_none());
+        let listed = library.list().unwrap();
+        let value = serde_json::to_value(&listed).unwrap();
+        let by_id = |id: &str| {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            by_id(&skill.meta.id)["folder"],
+            folder.to_string_lossy().as_ref()
+        );
+        assert!(by_id(&rule.meta.id).get("folder").is_none());
+        let _ = fs::remove_dir_all(base);
+    }
+}
+#[cfg(test)]
+mod deactivate_all_tests {
+    use super::*;
+    #[test]
+    fn skills_deactivate_all_undoes_legacy_activations_everywhere_so_remove_succeeds() {
+        let base =
+            std::env::temp_dir().join(format!("pandacode-skills-off-{}", uuid::Uuid::new_v4()));
+        let home = base.join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let project = base.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let library = Library::new(base.join("library"), home.clone());
+        let source = Source {
+            kind: "folder".into(),
+            location: "/source".into(),
+            git_ref: None,
+            commit: None,
+        };
+        let item = library
+            .import(
+                Kind::Skill,
+                vec![(
+                    "SKILL.md".into(),
+                    b"---\nname: Release\n---\nBody\n".to_vec(),
+                )],
+                "release",
+                source,
+            )
+            .unwrap();
+        let id = item.meta.id.clone();
+        library
+            .activate(&id, "claude", Scope::User, None, false)
+            .unwrap();
+        library
+            .activate(&id, "codex", Scope::User, None, false)
+            .unwrap();
+        library
+            .activate(&id, "claude", Scope::Project, Some(&project), false)
+            .unwrap();
+        let user_copy = home.join(".claude/skills").join(&id).join("SKILL.md");
+        let project_copy = project.join(".claude/skills").join(&id).join("SKILL.md");
+        assert!(user_copy.is_file() && project_copy.is_file());
+        assert!(library.remove(&id).unwrap_err().contains("off everywhere"));
+        // An edited copy stays where it is and is reported.
+        fs::write(&project_copy, "my edit").unwrap();
+        let change = library.deactivate_all(&id).unwrap();
+        assert_eq!(change.kept, [project_copy.to_string_lossy().into_owned()]);
+        assert!(!user_copy.exists());
+        assert!(!home.join(".codex/skills").join(&id).exists());
+        assert_eq!(fs::read_to_string(&project_copy).unwrap(), "my edit");
+        assert!(change.items.iter().all(|i| i.meta.activations.is_empty()));
+        assert!(library.remove(&id).unwrap().is_empty());
+        assert!(library.deactivate_all("missing").is_err());
+        let _ = fs::remove_dir_all(base);
+    }
+}

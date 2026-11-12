@@ -1,4 +1,6 @@
 use super::*;
+#[path = "council_tests.rs"]
+mod council_tests;
 fn coordinate(
     state: &AppState,
     parent: &str,
@@ -897,6 +899,7 @@ fn config() -> TeamConfig {
         workspace: "shared".into(),
         summary_limit: 2000,
         lead_guidance: None,
+        council: None,
     }
 }
 fn fixture() -> (Store, TeamSnapshot) {
@@ -933,6 +936,11 @@ fn fixture() -> (Store, TeamSnapshot) {
         stalled_wakes: 0,
         wake_baseline: (0, 0),
         lead_failure: None,
+        council_since: 0,
+        changed_at: 0,
+        council_status: None,
+        council_accepted: None,
+        council_reopened: None,
     };
     (store, team)
 }
@@ -966,6 +974,10 @@ fn worker(id: &str, status: &str, files: &[&str], depends: &[&str]) -> Worker {
         nudged: false,
         reported: false,
         parent_worker: None,
+        council: None,
+        reviewer_binding: None,
+        score_nudged: false,
+        wrote_at: 0,
     }
 }
 #[test]
@@ -3069,7 +3081,7 @@ fn ranked_picks_say_their_tier() {
 fn sub_call(state: &AppState, sid: &str, caller: &str, name: &str, args: Value) -> Result<Value> {
     let team = load(&state.store.lock().unwrap(), sid)?.unwrap();
     let attempt = team.workers.iter().find(|w| w.id == caller).unwrap().attempt;
-    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default()).map(|x| x.0)
+    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None).map(|x| x.0)
 }
 fn team_of(state: &AppState, sid: &str) -> TeamSnapshot {
     load(&state.store.lock().unwrap(), sid).unwrap().unwrap()

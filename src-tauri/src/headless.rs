@@ -25,6 +25,16 @@ enum Command {
     SignOut,
     FullAccess { enabled: bool },
     ExportBots { path: PathBuf },
+    SyncBots { path: PathBuf },
+    PreviewOrchestrations { path: PathBuf },
+    ImportOrchestrations { path: PathBuf },
+    ExportOrchestrations { path: PathBuf },
+    InspectOrchestrations,
+    ListTickets,
+    InspectTicket { ticket_id: String },
+    AcceptTicket { ticket_id: String, expected_revision: i64 },
+    RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
+    StopTicket { ticket_id: String },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -55,6 +65,67 @@ pub fn handle() -> bool {
 fn serve(command: Command, import: Option<PathBuf>) -> ! {
     let app = tauri::Builder::default()
         .setup(move |app| {
+            // One-shot inspection and Ticket decisions precede setup_common:
+            // Store::open performs restart recovery and could interrupt a
+            // healthy concurrently running serve process.
+            let inspect = match &command {
+                Command::InspectOrchestrations => Some(None),
+                Command::InspectTicket { ticket_id } => Some(Some(ticket_id.as_str())),
+                _ => None,
+            };
+            if let Some(ticket_id) = inspect {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_status(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if matches!(&command, Command::ListTickets) {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_tasks(
+                        &dir.join("kingcode.sqlite3"),
+                    ));
+                match result {
+                    Ok(tasks) => { println!("{tasks}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent task listing failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            let ticket_action = matches!(&command,
+                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. });
+            if ticket_action {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        match &command {
+                            Command::AcceptTicket { ticket_id, expected_revision } =>
+                                crate::superagent::headless_accept_ticket(&database, ticket_id, *expected_revision),
+                            Command::RejectTicket { ticket_id, expected_revision, reason } =>
+                                crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
+                            Command::StopTicket { ticket_id } =>
+                                crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            _ => unreachable!(),
+                        }
+                    });
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Ticket command failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             let dir = crate::setup_common(app)?;
             // No window on a server: close the one from tauri.conf.json right away; the
             // run loop keeps the process alive (see on_run_event). Users watch from their
@@ -75,6 +146,72 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 /// Per-command startup, run from setup.
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
+        // Inspection exits before setup_common and must never reach this branch.
+        Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
+        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. } => {
+            eprintln!("SuperAgent inspection must use the read-only startup path.");
+            std::process::exit(2)
+        }
+        Command::PreviewOrchestrations { path } => {
+            match crate::superagent::manifest::run_headless_preview(app, &path) {
+                Ok(plan) => {
+                    println!("Would create disabled presets: {}", plan.would_create.join(", "));
+                    println!("Unchanged presets: {}", plan.unchanged.join(", "));
+                    std::process::exit(0)
+                }
+                Err(error) => {
+                    eprintln!("Orchestration preview failed: {error}");
+                    std::process::exit(1)
+                }
+            }
+        }
+        Command::ImportOrchestrations { path } => {
+            match crate::superagent::manifest::run_headless_import(app, &path) {
+                Ok(result) => {
+                    println!("Created {} disabled orchestration presets; {} unchanged.",
+                        result.created.len(), result.unchanged.len());
+                    if let Some(path) = result.backup_path {
+                        println!("Verified orchestration backup: {path}");
+                    }
+                    std::process::exit(0)
+                }
+                Err(error) => {
+                    eprintln!("Orchestration import failed: {error}");
+                    std::process::exit(1)
+                }
+            }
+        }
+        Command::ExportOrchestrations { path } => {
+            match crate::superagent::manifest::run_headless_export(app, &path) {
+                Ok(()) => {
+                    println!("Orchestration configuration written to {}.", path.display());
+                    std::process::exit(0)
+                }
+                Err(error) => {
+                    eprintln!("Orchestration export failed: {error}");
+                    std::process::exit(1)
+                }
+            }
+        }
+        Command::SyncBots { path } => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::extended_bot_git::run_headless(&app, &path).await {
+                    Ok(result) => {
+                        for source in &result.sources {
+                            println!("Source {} pinned at {} ({} manifest files).", source.id, source.commit, source.paths.len());
+                        }
+                        if let Some(backup) = &result.backup_path { println!("Bot configuration backup: {backup}"); }
+                        for line in &result.lines { println!("{line}"); }
+                        std::process::exit(if result.failed == 0 { 0 } else { 1 });
+                    }
+                    Err(error) => {
+                        eprintln!("Git bot sync failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
         Command::ExportBots { path } => match crate::headless_bots::run_export(app, &path) {
             Ok(()) => {
                 println!("Bot configuration written to {}.", path.display());
@@ -171,6 +308,33 @@ fn start_services(app: tauri::AppHandle) {
             if line != last {
                 println!("{line}");
                 last = line;
+            }
+        }
+    });
+    let watchdog = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let state = watchdog.state::<AppState>();
+            if state.shutdown.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            let expired = match state.store.lock() {
+                Ok(store) => crate::superagent::watchdog_expired_assignments(
+                    &store, crate::storage::now(),
+                ),
+                Err(error) => Err(error.to_string()),
+            };
+            match expired {
+                Ok(sessions) => for session_id in sessions {
+                    println!("serve: stopping expired SuperAgent assignment {session_id}");
+                    if let Err(error) = crate::stop_session(
+                        watchdog.clone(), watchdog.state::<AppState>(), session_id,
+                    ).await {
+                        eprintln!("serve: expired SuperAgent session stop failed: {error}");
+                    }
+                },
+                Err(error) => eprintln!("serve: SuperAgent watchdog failed: {error}"),
             }
         }
     });
@@ -340,6 +504,87 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--preview-orchestrations" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--preview-orchestrations needs a file path.\n\n{}", help()))?;
+                command = Command::PreviewOrchestrations { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
+            "--import-orchestrations" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--import-orchestrations needs a file path.\n\n{}", help()))?;
+                command = Command::ImportOrchestrations { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
+            "--export-orchestrations" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--export-orchestrations needs a file path.\n\n{}", help()))?;
+                command = Command::ExportOrchestrations { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
+            "--inspect-orchestrations" => {
+                command = Command::InspectOrchestrations;
+                ops += 1;
+            }
+            "--list-tickets" => {
+                command = Command::ListTickets;
+                ops += 1;
+            }
+            "--inspect-ticket" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(value)?;
+                command = Command::InspectTicket { ticket_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--accept-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--accept-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--accept-ticket needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                command = Command::AcceptTicket { ticket_id: ticket_id.clone(), expected_revision };
+                ops += 1;
+                index += 2;
+            }
+            "--reject-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--reject-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--reject-ticket needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let reason = args.get(index + 3)
+                    .ok_or_else(|| format!("--reject-ticket needs a reason.\n\n{}", help()))?;
+                if reason.trim().is_empty() || reason.starts_with("--") {
+                    return Err("Provide a nonempty rejection reason.".into());
+                }
+                command = Command::RejectTicket {
+                    ticket_id: ticket_id.clone(), expected_revision, reason: reason.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--stop-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::StopTicket { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--sync-bots" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--sync-bots needs a source registry path.\n\n{}", help()))?;
+                command = Command::SyncBots { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
             "--import-bots" => {
                 let value = args
                     .get(index + 1)
@@ -360,9 +605,15 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     }
     if ops > 1 {
         return Err(format!(
-            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots.\n\n{}",
+            "Choose one command; Ticket actions cannot be combined with serving or other commands.\n\n{}",
             help()
         ));
+    }
+    if matches!(command, Command::SyncBots { .. }) && name.is_some() {
+        return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
+    }
+    if name.is_some() && !sign_in {
+        return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
     }
     // Built at the end, so flags work in any order.
     if sign_in {
@@ -376,10 +627,28 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     Ok((command, import))
 }
 
+fn validate_ticket_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Provide a bounded alphanumeric ticket ID.".into());
+    }
+    Ok(())
+}
+
+fn parse_ticket_revision(value: &str) -> Result<i64, String> {
+    let revision = value.parse::<i64>()
+        .map_err(|_| "Provide a nonnegative expected Ticket revision.".to_string())?;
+    if revision < 0 {
+        return Err("Provide a nonnegative expected Ticket revision.".into());
+    }
+    Ok(revision)
+}
+
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -392,7 +661,25 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --device-name <name>   Name shown to your devices when signing in (default: the hostname).
   --import-bots <file>   Create/update bots, channels, schedules and rules from a JSON file
                          (docs/headless.md), then serve. Re-applying a file converges.
-  --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit."
+  --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit.
+  --sync-bots <file>     Fetch pinned GitHub manifests from a source registry, back up,
+                         import once, report results and exit (does not start serving).
+  --preview-orchestrations <file>
+                         Validate and preview disabled presets without importing or backing up.
+  --import-orchestrations <file>
+                         Explicitly import disabled SuperAgent presets after native validation
+                         and a verified config-only backup; exit without starting tasks.
+  --export-orchestrations <file>
+                         Export portable SuperAgent presets without tickets or secrets; exit.
+  --inspect-orchestrations
+                         List native orchestration status without modifying live tasks; exit.
+  --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
+  --accept-ticket <id> <revision>
+                         Accept current worker evidence at the expected Ticket revision; exit.
+  --reject-ticket <id> <revision> <reason>
+                         Reject current worker evidence with a required reason; quote it if it has spaces.
+  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit."
         .into()
 }
 
@@ -428,9 +715,51 @@ mod tests {
             parsed("--export-bots bots.json"),
             Ok(Command::ExportBots { path: PathBuf::from("bots.json") })
         );
+        assert_eq!(parsed("--preview-orchestrations presets.json"),
+            Ok(Command::PreviewOrchestrations { path: PathBuf::from("presets.json") }));
+        assert!(parsed("--preview-orchestrations").is_err());
+        assert!(parsed("--preview-orchestrations p.json --import-orchestrations p.json").is_err());
+        assert_eq!(parsed("--import-orchestrations presets.json"),
+            Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
+        assert_eq!(parsed("--export-orchestrations presets.json"),
+            Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
+        assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
+        assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--inspect-ticket ticket_123"),
+            Ok(Command::InspectTicket { ticket_id: "ticket_123".into() }));
+        assert_eq!(parsed("--accept-ticket ticket_123 4"), Ok(Command::AcceptTicket {
+            ticket_id: "ticket_123".into(), expected_revision: 4,
+        }));
+        assert_eq!(parse(&["--reject-ticket".into(), "ticket_123".into(), "7".into(), "Needs changes".into()]),
+            Ok((Command::RejectTicket {
+                ticket_id: "ticket_123".into(), expected_revision: 7, reason: "Needs changes".into(),
+            }, None)));
+        assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
+            ticket_id: "ticket_123".into(),
+        }));
+        assert!(parsed("--accept-ticket ticket_123").is_err());
+        assert!(parsed("--accept-ticket ticket_123 nope").is_err());
+        assert!(parsed("--accept-ticket ../outside 1").is_err());
+        assert!(parsed("--reject-ticket ticket_123 1").is_err());
+        assert!(parsed("--reject-ticket ticket_123 1 --sign-out").is_err());
+        assert!(parsed("--stop-ticket").is_err());
+        assert!(parsed("--stop-ticket ticket_123 --list-tickets").is_err());
+        assert!(parsed("--accept-ticket ticket_123 1 --import-bots bots.json").is_err());
+        assert!(parsed("--inspect-ticket").is_err());
+        assert!(parsed("--inspect-ticket ../outside").is_err());
+        assert!(parsed("--inspect-ticket x --inspect-orchestrations").is_err());
+        assert!(parsed("--list-tickets --inspect-ticket x").is_err());
         assert!(parsed("--wat").is_err());
+        assert!(parsed("--import-orchestrations").is_err());
+        assert!(parsed("--export-orchestrations").is_err());
+        assert!(parsed("--import-orchestrations a.json --export-bots b.json").is_err());
+        assert!(parsed("--import-orchestrations a.json --import-bots b.json").is_err());
         assert!(parsed("--device-name").is_err());
         assert!(parsed("--export-bots").is_err());
+        assert_eq!(parsed("--sync-bots sources.json"), Ok(Command::SyncBots { path: PathBuf::from("sources.json") }));
+        assert!(parsed("--sync-bots").is_err());
+        assert!(parsed("--sync-bots sources.json --import-bots bots.json").is_err());
+        assert!(parsed("--sync-bots sources.json --sign-in").is_err());
     }
 
     #[test]
@@ -455,6 +784,16 @@ mod tests {
             "--device-name",
             "--import-bots",
             "--export-bots",
+            "--preview-orchestrations",
+            "--import-orchestrations",
+            "--export-orchestrations",
+            "--inspect-orchestrations",
+            "--list-tickets",
+            "--inspect-ticket",
+            "--accept-ticket",
+            "--reject-ticket",
+            "--stop-ticket",
+            "--sync-bots",
             "xvfb-run",
         ] {
             assert!(text.contains(flag), "{flag}");

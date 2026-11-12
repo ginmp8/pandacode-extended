@@ -6,6 +6,7 @@ mod deepseek;
 mod kimi;
 mod muse;
 mod pi;
+mod skill_switches;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -290,6 +291,12 @@ fn apply_terminal_names(catalog: &mut Catalog, terminal_names: &HashSet<String>)
 
 /// No polling or filesystem watchers: refresh only when a picker opens or the harness pushes metadata.
 pub async fn catalog(provider: &str, cwd: &Path, force: bool) -> Result<Catalog, String> {
+    let catalog = unfiltered(provider, cwd, force).await?;
+    skill_switches::for_path(provider, catalog, cwd).await
+}
+
+/// The harness's catalog before switched-off skills are hidden (`skill_switches`).
+async fn unfiltered(provider: &str, cwd: &Path, force: bool) -> Result<Catalog, String> {
     validate_provider(provider)?;
     let key = catalog_key(provider, cwd);
     let started = Instant::now();
@@ -317,17 +324,31 @@ pub async fn catalog(provider: &str, cwd: &Path, force: bool) -> Result<Catalog,
 
 /// Local actions and the latest known catalog are available without starting a
 /// harness. A stale snapshot is for completion; command dispatch still validates.
-pub fn snapshot(provider: &str, cwd: &Path) -> Result<Catalog, String> {
+pub async fn snapshot(provider: &str, cwd: &Path) -> Result<Catalog, String> {
     validate_provider(provider)?;
-    CACHE.lock()
-        .map_err(|_| "Command discovery is unavailable.".into())
-        .map(|mut cache| cache.snapshot(&catalog_key(provider, cwd)))
+    let catalog = CACHE
+        .lock()
+        .map_err(|_| "Command discovery is unavailable.".to_string())?
+        .snapshot(&catalog_key(provider, cwd));
+    skill_switches::for_path(provider, catalog, cwd).await
+}
+
+/// Re-check native disabled-skill policy after adding Extended library commands.
+pub(crate) async fn filter_disabled(provider: &str, catalog: Catalog, cwd: &Path) -> Result<Catalog, String> {
+    skill_switches::for_path(provider, catalog, cwd).await
 }
 
 pub(crate) fn invalidate_provider(provider: &str) {
     if let Ok(mut cache) = CACHE.lock() {
-        let keys: Vec<_> = cache.entries.keys().filter(|key| key.0 == provider).cloned().collect();
-        for key in keys { cache.invalidate(key); }
+        let keys: Vec<_> = cache
+            .entries
+            .keys()
+            .filter(|key| key.0 == provider)
+            .cloned()
+            .collect();
+        for key in keys {
+            cache.invalidate(key);
+        }
     }
 }
 
@@ -499,6 +520,25 @@ fn normalize(catalog: &mut Catalog, provider: &str) {
         .for_each(|warning| *warning = bounded(warning, 500));
 }
 
+/// Decorate the provider catalog without changing its cache or shadowing native commands.
+pub(crate) fn append_library_skills(catalog: &mut Catalog, entries: Vec<crate::skills::SlashSkill>) {
+    let mut used: HashSet<String> = catalog.commands.iter().map(|entry| entry.name.clone()).collect();
+    for skill in entries {
+        let name = format!("/{}", skill.id);
+        if catalog.commands.len() >= 1000 || !valid_name(&name) || !used.insert(name.clone()) { continue; }
+        catalog.commands.push(SlashCommand {
+            id: format!("pandacode:skill:{}", skill.id),
+            name,
+            description: bounded(&skill.description, 500),
+            argument_hint: Some("[instructions]".into()),
+            kind: "prompt".into(),
+            source: "PandaCode skill".into(),
+            reason: None,
+            invocation: Invocation::Skill { name: skill.id, path: skill.path },
+        });
+    }
+}
+
 const LOCAL_ACTIONS: &[(&str, &str, &str, Option<&str>)] = &[
     ("/new", "Start a new task in this project", "new", None),
     (
@@ -655,8 +695,28 @@ pub async fn resolve(provider: &str, cwd: &Path, text: &str) -> Result<Resolutio
     if is_local_control(name) {
         return resolve_from_catalog(provider, text, &Catalog::default());
     }
-    let catalog = catalog(provider, cwd, false).await?;
-    resolve_from_catalog(provider, text, &catalog)
+    // A switched-off skill is hidden from the catalog; typing it says so instead of "Unknown".
+    let catalog = unfiltered(provider, cwd, false).await?;
+    skill_switches::resolve_at(provider, text, catalog, cwd).await
+}
+
+/// Rebuild the library overlay for every dispatch so disabling or updating a skill
+/// invalidates previously suggested commands without touching the harness cache.
+pub async fn resolve_with_library(
+    app: &tauri::AppHandle, provider: &str, cwd: &Path, text: &str,
+) -> Result<Resolution, String> {
+    let Some((name, _)) = split_command(text) else { return Ok(plain_resolution(text)) };
+    if is_local_control(name) { return resolve_from_catalog(provider, text, &Catalog::default()) }
+    // Add Extended library commands before applying the native skill switches.
+    // Filtering only the upstream catalog would let a disabled library skill be
+    // reintroduced by the overlay and resolved as executable prompt content.
+    let mut commands = unfiltered(provider, cwd, false).await?;
+    let app = app.clone();
+    let provider_id = provider.to_owned();
+    let cwd_for_library = cwd.to_owned();
+    let skills = crate::blocking(move || crate::skills::active_slash_skills(&app, &provider_id, &cwd_for_library)).await?;
+    append_library_skills(&mut commands, skills);
+    skill_switches::resolve_at(provider, text, commands, cwd).await
 }
 
 /// A command may be removed after the picker cached it. Claude's fresh
@@ -729,15 +789,24 @@ fn resolve_from_catalog(
             result.accepts_attachments = provider != "kimi" && !result.maintenance;
         }
         Invocation::Skill { name, path } => {
-            result.prompt = format!(
-                "${name}{}",
-                if arguments.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {arguments}")
+            if provider == "codex" {
+                result.prompt = format!(
+                    "${name}{}",
+                    if arguments.is_empty() { String::new() } else { format!(" {arguments}") }
+                );
+                result.skill = Some((name.clone(), path.clone()));
+            } else {
+                // Other harnesses cannot consume Codex skill content blocks.
+                let metadata = std::fs::symlink_metadata(path).map_err(|_| "The activated skill is unavailable. Refresh skills and reactivate it.")?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 131_072 {
+                    return Err("The activated skill is unavailable or exceeds the prompt size limit.".into());
                 }
-            );
-            result.skill = Some((name.clone(), path.clone()));
+                let content = std::fs::read_to_string(path).map_err(|_| "The activated skill is not valid UTF-8.")?;
+                result.prompt = format!(
+                    "Apply the explicitly enabled PandaCode skill \"{name}\". Its SKILL.md and reference files are located in {}. Read supporting files when needed, and do not execute skill scripts automatically.\n\n<skill_instructions>\n{content}\n</skill_instructions>\n\nUser request: {arguments}",
+                    path.parent().unwrap_or(path).display()
+                );
+            }
         }
         Invocation::Action(action) => {
             if !arguments.is_empty() && !action_accepts_arguments(action) {
@@ -820,6 +889,68 @@ mod tests {
             Commit::Ready(value) => value,
             Commit::Invalidated => panic!("Expected a catalog"),
         }
+    }
+
+    #[test]
+    fn activated_library_skills_resolve_without_overriding_harness_commands() {
+        let root = std::env::temp_dir().join(format!("pandacode-slash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let skill_path = root.join("SKILL.md");
+        std::fs::write(&skill_path, "---\nname: review\ndescription: Review code\n---\nReview carefully.").unwrap();
+        let mut commands = native_catalog(&["/review"]);
+        append_library_skills(&mut commands, vec![
+            crate::skills::SlashSkill { id: "review".into(), description: "Must not shadow native".into(), path: skill_path.clone() },
+            crate::skills::SlashSkill { id: "local-review".into(), description: "Review locally".into(), path: skill_path.clone() },
+        ]);
+        assert_eq!(commands.commands.iter().filter(|cmd| cmd.name == "/review").count(), 1);
+        let command = command(&commands, "/local-review");
+        assert_eq!(command.source, "PandaCode skill");
+        assert_eq!(command.description, "Review locally");
+        let prompt = resolve_from_catalog("claude", "/local-review check these changes", &commands).unwrap();
+        assert!(prompt.prompt.contains("Review carefully."));
+        assert!(prompt.prompt.contains("User request: check these changes"));
+        assert!(prompt.skill.is_none());
+        let codex = resolve_from_catalog("codex", "/local-review check these changes", &commands).unwrap();
+        assert_eq!(codex.skill, Some(("local-review".into(), skill_path.clone())));
+        assert_eq!(codex.prompt, "$local-review check these changes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extended_library_overlay_cannot_restore_a_skill_switched_off_in_native_manager() {
+        let root = std::env::temp_dir().join(format!("pandacode-extended-switch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("SKILL.md");
+        std::fs::write(&file, "---\nname: extended-review\ndescription: Extended reviewer\n---\nReview carefully.").unwrap();
+        let mut overlay = native_catalog(&[]);
+        append_library_skills(&mut overlay, vec![crate::skills::SlashSkill {
+            id: "extended-review".into(),
+            description: "Native switch regression".into(),
+            path: file.clone(),
+        }]);
+        let disabled = std::collections::BTreeSet::from(["extended-review".into()]);
+        for harness in ["codex", "claude", "deepseek"] {
+            let denied = skill_switches::resolve_with(
+                harness, "/extended-review now", overlay.clone(), &disabled,
+                || std::collections::BTreeSet::from(["extended-review".into()]),
+            ).err().expect("Disabled Extended skill must be denied");
+            assert_eq!(
+                denied, "extended-review is switched off in Settings → Tools → Skills.",
+                "{harness}",
+            );
+            // The source remains available when its switch is turned back on.
+            let allowed = skill_switches::resolve_with(
+                harness, "/extended-review now", overlay.clone(), &Default::default(),
+                || panic!("Enabled skills must not scan the installed list"),
+            ).unwrap();
+            if harness == "codex" {
+                assert_eq!(allowed.prompt, "$extended-review now");
+                assert_eq!(allowed.skill, Some(("extended-review".into(), file.clone())));
+            } else {
+                assert!(allowed.prompt.contains("Review carefully."), "{harness}");
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1102,12 +1233,31 @@ mod tests {
         assert_eq!(cache.entries.len(), 1);
     }
 
-    #[test]
-    fn snapshots_expose_local_controls_without_launching_a_harness() {
-        let catalog = snapshot("antigravity", Path::new("/snapshot-only-project")).unwrap();
+    #[tokio::test]
+    async fn snapshots_expose_local_controls_without_launching_a_harness() {
+        let catalog = snapshot("antigravity", Path::new("/snapshot-only-project"))
+            .await
+            .unwrap();
         assert_eq!(command(&catalog, "/model").source, "PandaCode");
         assert_eq!(command(&catalog, "/settings").kind, "action");
-        assert!(snapshot("unknown", Path::new("/snapshot-only-project")).is_err());
+        assert!(snapshot("unknown", Path::new("/snapshot-only-project"))
+            .await
+            .is_err());
+    }
+
+    /// The switch reads (settings, SQLite, SKILL.md) run on a blocking thread, never on the
+    /// async runtime's own thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slash_skill_switch_reads_run_on_a_blocking_thread_not_the_async_runtime() {
+        let runtime = std::thread::current().id();
+        let cwd = Path::new("/snapshot-only-project");
+        let shown = snapshot("claude", cwd).await.unwrap();
+        assert!(skill_switches::resolve_at("claude", "/model", shown, cwd)
+            .await
+            .is_ok());
+        let readers = skill_switches::READERS.lock().unwrap().clone();
+        assert!(!readers.is_empty());
+        assert!(!readers.contains(&runtime));
     }
 
     #[test]

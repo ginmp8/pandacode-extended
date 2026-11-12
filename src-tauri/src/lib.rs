@@ -1,3 +1,4 @@
+mod account_config;
 mod account_identity;
 mod account_pool;
 mod account_sign_in;
@@ -32,6 +33,7 @@ mod project_icon;
 mod simulator;
 mod vm;
 mod secret_store;
+mod voice;
 mod cloud;
 mod cloud_agents;
 mod feature_controls;
@@ -39,6 +41,7 @@ mod capabilities;
 mod vsix_themes;
 mod token_saver;
 mod task_usage;
+mod skill_manager;
 mod skills;
 mod goal_state;
 #[cfg(test)]
@@ -78,10 +81,14 @@ mod jj;
 mod tray;
 mod headless;
 mod headless_bots;
+mod extended_bot_manifest;
+mod extended_bot_git;
+mod superagent;
 
 pub use usage_keychain::handle_usage_keychain_helper;
 pub use cloud_agents::handle_cloud_bridge;
 pub use headless::handle as handle_serve;
+pub use voice::local::handle_speech_worker;
 
 use providers::{AgentEvent, RunConfig, RunInput};
 use serde::Serialize;
@@ -338,6 +345,32 @@ mod task_agent_tests {
         assert_eq!(listed(r#"{"status":"waiting"}"#), "waiting");
         assert_eq!(listed(r#"{"status":"paused"}"#), "idle");
         assert_eq!(listed("not json"), "idle");
+    }
+
+    #[test]
+    fn account_switch_notes_preserve_the_marker_and_body_in_message_pages() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "ask").unwrap();
+        let assistant = Mutex::new("Checking the project.".to_string());
+        let body = "Account switched\nThe default Claude account reached its usage limit, so this task continues on “Backup”.";
+        let mut switch = event(&task.id, "note", body);
+        switch.data = Some(serde_json::json!({"accountPool": {"connectionId": "b"}}));
+        save_agent_activity(&store, &assistant, &mut switch, None).unwrap();
+        let mut ordinary = event(&task.id, "note", "Waiting for a background task.");
+        save_agent_activity(&store, &assistant, &mut ordinary, None).unwrap();
+        let page = store.message_page(&task.id, None).unwrap();
+        let rows: Vec<_> = page.messages.iter().map(|message| (message.role.as_str(), message.content.as_str())).collect();
+        assert_eq!(rows, [
+            ("assistant", "Checking the project."),
+            ("system", body),
+            ("system", "Waiting for a background task."),
+        ]);
+        assert!(!page.has_older);
+        assert!(assistant.lock().unwrap().is_empty());
+        assert_eq!(switch.kind, "note");
+        assert_eq!(switch.text, body);
+        assert_eq!(switch.data.unwrap()["accountPool"]["connectionId"], "b");
     }
 
     #[test]
@@ -660,11 +693,13 @@ async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>> {
 }
 #[tauri::command]
 async fn add_project(state: State<'_, AppState>, path: String) -> Result<Project> {
-    state
+    let project = state
         .store
         .lock()
         .map_err(|e| e.to_string())?
-        .add_project(&PathBuf::from(path))
+        .add_project(&PathBuf::from(path));
+    skill_manager::projects_changed();
+    project
 }
 #[tauri::command]
 async fn remove_project(state: State<'_, AppState>, project_id: String) -> Result<()> {
@@ -679,13 +714,17 @@ async fn remove_project(state: State<'_, AppState>, project_id: String) -> Resul
     if active_team {
         return Err("Stop this project's architect teams first.".into());
     }
-    store.remove_project(&project_id)
+    let removed = store.remove_project(&project_id);
+    skill_manager::projects_changed();
+    removed
 }
 #[tauri::command]
 async fn relink_project(state: State<'_, AppState>, project_id: String, path: String) -> Result<Project> {
     let (project, worktrees) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let project = store.relink_project(&project_id, &PathBuf::from(path))?;
+        let project = store.relink_project(&project_id, &PathBuf::from(path));
+        skill_manager::projects_changed();
+        let project = project?;
         (project, store.project_worktrees(&project_id)?)
     };
     // Task worktrees stay where they are, but their `.git` files still name the old folder:
@@ -1045,13 +1084,14 @@ fn persist_turn_changes(
     store: &Mutex<Store>,
     sid: &str,
     capture: turn_changes::Captured,
+    last_write: i64,
 ) {
     let change_id = capture.summary.id.clone();
     match store
         .lock()
         .map_err(|e| e.to_string())
         .and_then(|store| {
-            let message_id = turn_changes::persist(&store, sid, capture)?;
+            let message_id = turn_changes::persist_dated(&store, sid, capture, last_write)?;
             Ok((message_id, turn_changes::summary(&store, sid, &change_id)?))
         })
     {
@@ -1288,6 +1328,7 @@ async fn recipes_dry_run(recipe: recipes::Recipe, provider: String, slash: Vec<S
 }
 #[tauri::command]
 async fn list_slash_commands(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     force: Option<bool>,
@@ -1301,16 +1342,26 @@ async fn list_slash_commands(
         } else {
             store.workspace_root(&task.project_id, Some(&session_id))?
         };
+        let main = store.workspace_root(&task.project_id, None)?;
+        skill_manager::remember_project(&cwd, &task.project_id, &main);
         (task.provider, cwd)
     };
-    if cached_only.unwrap_or(false) {
-        return slash_commands::snapshot(&provider, &cwd);
+    let mut catalog = if cached_only.unwrap_or(false) {
+        slash_commands::snapshot(&provider, &cwd).await?
+    } else {
+        slash_commands::catalog(&provider, &cwd, force.unwrap_or(false)).await?
+    };
+    let (provider_for_library, cwd_for_library) = (provider.clone(), cwd.clone());
+    match blocking(move || skills::active_slash_skills(&app, &provider_for_library, &cwd_for_library)).await {
+        Ok(entries) => slash_commands::append_library_skills(&mut catalog, entries),
+        Err(_) => catalog.warnings.push("Could not read activated PandaCode skills. Review Skills & rules.".into()),
     }
-    slash_commands::catalog(&provider, &cwd, force.unwrap_or(false)).await
+    slash_commands::filter_disabled(&provider, catalog, &cwd).await
 }
 
 #[tauri::command]
 async fn resolve_slash_command(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     text: String,
@@ -1326,9 +1377,11 @@ async fn resolve_slash_command(
         } else {
             store.workspace_root(&task.project_id, Some(&session_id))?
         };
+        let main = store.workspace_root(&task.project_id, None)?;
+        skill_manager::remember_project(&cwd, &task.project_id, &main);
         (task.provider, cwd)
     };
-    slash_commands::resolve(&provider, &cwd, &text).await
+    slash_commands::resolve_with_library(&app, &provider, &cwd, &text).await
 }
 
 struct PreparedCommand {
@@ -1354,6 +1407,7 @@ async fn prepare_command(
     state: &AppState,
     session_id: &str,
     text: Option<&str>,
+    app: Option<&tauri::AppHandle>,
 ) -> Result<Option<PreparedCommand>> {
     let (provider, cwd, original) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -1377,13 +1431,16 @@ async fn prepare_command(
         if task.provider == "codex" && name == "/compact" && task.resume_id.is_none() {
             return Err(COMPACT_NEEDS_CONVERSATION.into());
         }
-        (
-            task.provider,
-            store.workspace_root(&task.project_id, Some(session_id))?,
-            original,
-        )
+        let cwd = store.workspace_root(&task.project_id, Some(session_id))?;
+        let main = store.workspace_root(&task.project_id, None)?;
+        skill_manager::remember_project(&cwd, &task.project_id, &main);
+        (task.provider, cwd, original)
     };
-    let resolution = slash_commands::resolve(&provider, &cwd, &original).await?;
+    let resolution = if let Some(app) = app {
+        slash_commands::resolve_with_library(app, &provider, &cwd, &original).await?
+    } else {
+        slash_commands::resolve(&provider, &cwd, &original).await?
+    };
     if resolution.action.is_some() {
         return Err("This command opens a PandaCode control. Run it from the message box.".into());
     }
@@ -1410,7 +1467,7 @@ pub(crate) async fn team_maintenance_command(
     session_id: &str,
     text: &str,
 ) -> Result<Option<PreparedCommand>> {
-    team_command_gate(prepare_command(state, session_id, Some(text)).await)
+    team_command_gate(prepare_command(state, session_id, Some(text), None).await)
 }
 
 /// Where a prompt goes. A mirror goes to its host even when a team was saved on it (a
@@ -1589,6 +1646,11 @@ fn prepare_task_run_in_project(
         architect::validate_admission(&store, &session_id, admission.team.as_ref())?;
     }
     let mut session = reconcile_inactive_task(&store, &agents, store.session(&session_id)?);
+    // Both admission and registration hold agents -> Store in the same order,
+    // so a running ordinary task cannot slip between SuperAgent's early busy
+    // snapshot and this final project/lease check.
+    let running_sessions = agents.keys().cloned().collect::<Vec<_>>();
+    superagent::guard_run_admission(&store, &session_id, &running_sessions)?;
     if admission.cloud_attach {
         return prepare_cloud_attach(&store, &mut agents, session, tx, stopped);
     }
@@ -1749,20 +1811,27 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    let reviewer_policy = match superagent::read_only_policy(&store, &session_id).map_err(restore)? {
+        Some(policy) => Some(policy),
+        None => architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?,
+    };
+    let reviewer_boundary = reviewer_policy.is_some();
     let config = RunConfig {
         session_id: session_id.clone(),
         provider: session.provider,
         model: session.model,
         reasoning_effort: session.reasoning_effort,
-        mode: session.mode,
+        mode: if reviewer_boundary { "plan".into() } else { session.mode },
+        reviewer_boundary,
+        reviewer_policy,
         cwd,
         resume_id: session.resume_id,
         prompt,
         instructions: String::new(),
         images,
-        skill,
-        goal: admission.goal,
-        codex_settings: session.codex_settings,
+        skill: if reviewer_boundary { None } else { skill },
+        goal: if reviewer_boundary { None } else { admission.goal },
+        codex_settings: if reviewer_boundary { None } else { session.codex_settings },
     };
     architect::mark_started(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
     let mut agent = RunningAgent::new(tx, stopped.clone());
@@ -1812,6 +1881,8 @@ fn prepare_cloud_attach(
         model: session.model,
         reasoning_effort: session.reasoning_effort,
         mode: session.mode,
+        reviewer_boundary: false,
+        reviewer_policy: None,
         cwd,
         resume_id: session.resume_id,
         prompt: String::new(),
@@ -2029,7 +2100,7 @@ async fn launch_operation_admitted(
     let command = if prepared.is_some() {
         prepared
     } else if goal.is_none() && team_admission.is_none() && !cloud_attach && kind.is_none() {
-        prepare_command(&state, &session_id, text.as_deref()).await?
+        prepare_command(&state, &session_id, text.as_deref(), Some(&app)).await?
     } else {
         None
     };
@@ -2314,34 +2385,77 @@ async fn launch_operation_admitted(
                         tracker
                             .lock()
                             .ok()
-                            .and_then(|mut tracker| tracker.boundary())
+                            .and_then(|mut tracker| {
+                                let last_write = tracker.last_write();
+                                tracker.boundary().map(|capture| (capture, last_write))
+                            })
                     });
-                    if let Some(capture) = capture {
-                        persist_turn_changes(&app_sink, &store_sink, &changes_sid, capture);
+                    if let Some((capture, last_write)) = capture {
+                        persist_turn_changes(&app_sink, &store_sink, &changes_sid, capture, last_write);
                     }
                 }
             }
         });
-        let host = if let Some(admission) = team.as_ref() {
-            architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
-        } else {
-            (config.provider == "codex")
-                .then(|| agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
-        };
-        let team_tools_missing = team.is_some() && host.is_none();
-        let host = agent_tools::with_jev(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = bots::tools::with_bot(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
-        let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
-        // A cloud agent's checkout is on its machine, where screenshots cannot be read.
-        let host = if cloud { host } else { progress::with_progress(host, app.clone(), session_id.clone(), stopped.clone()) };
-        let host = cloud::deploy::with_deploy(host, app.clone(), session_id.clone(), stopped.clone());
-        let host = Some(agent_tools::with_preview(host, app.clone(), session_id.clone(), stopped.clone()));
-        let host = Some(turn_changes::with_host(host, tracker.clone(), stopped.clone()));
-        let host = Some(session_titles::with_host(title_run.as_ref(), host, stopped.clone()));
+        // Build host tools only when needed; a Council seat receives an exact,
+        // task-scoped filtered catalog with a second check at handler dispatch.
+        let scoped_reviewer = matches!(
+            config.reviewer_policy.as_ref(),
+            Some(architect::reviewer_security::ReviewerToolPolicy::Scoped(_))
+        );
+        let (host, team_tools_missing, reviewer_host_error) =
+            if !config.reviewer_boundary || scoped_reviewer {
+                let host = if let Some(admission) = team.as_ref() {
+                    architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
+                        .map(|host| {
+                            // Task tools are for leads; do not expand native Council reviewer authority.
+                            if admission.parent == session_id && !config.reviewer_boundary {
+                                agent_tools::with_app_host(host, agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
+                            } else {
+                                host
+                            }
+                        })
+                } else {
+                    Some(agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
+                };
+                let missing = team.is_some() && host.is_none();
+                let host = agent_tools::with_jev(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = bots::tools::with_bot(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
+                let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = if cloud { host } else { progress::with_progress(host, app.clone(), session_id.clone(), stopped.clone()) };
+                let host = cloud::deploy::with_deploy(host, app.clone(), session_id.clone(), stopped.clone());
+                let host = Some(agent_tools::with_preview(host, app.clone(), session_id.clone(), stopped.clone()));
+                let host = Some(turn_changes::with_host(host, tracker.clone(), stopped.clone()));
+                let host = Some(session_titles::with_host(title_run.as_ref(), host, stopped.clone()));
+                if config.reviewer_boundary {
+                    let result = config.reviewer_policy.as_ref()
+                        .ok_or_else(|| "policy_unsupported: reviewer policy is missing.".to_string())
+                        .and_then(|policy| policy.restrict_host(host));
+                    match result {
+                        Ok(filtered) => (filtered, missing, None),
+                        Err(error) => (None, missing, Some(error)),
+                    }
+                } else {
+                    (host, missing, None)
+                }
+            } else if matches!(
+                config.reviewer_policy.as_ref(),
+                Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+            ) {
+                // Read-only reviewers still need the two task-scoped, native skill
+                // retrieval/verification tools. Never expose Architect or bot tools.
+                let host = team.as_ref().and_then(|admission| {
+                    architect::reviewer_skill_host(
+                        app.clone(), session_id.clone(), stopped.clone(), admission,
+                    )
+                });
+                (host, false, None)
+            } else {
+                (None, false, None)
+            };
         // What the next turn's warm agent needs: this launch and the tools it listed.
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.
@@ -2355,6 +2469,8 @@ async fn launch_operation_admitted(
         let reached_harness = Arc::new(AtomicBool::new(false));
         let result = if stopped.load(Ordering::SeqCst) {
             Ok(())
+        } else if let Some(error) = reviewer_host_error {
+            Err(error)
         } else if team_tools_missing {
             Err(
                 "Team tools could not be initialized. No unrestricted tool fallback was used."
@@ -2392,12 +2508,15 @@ async fn launch_operation_admitted(
             }
         }
         if let Some(tracker) = tracker {
-            if let Ok(Some(capture)) = tauri::async_runtime::spawn_blocking(move || {
-                tracker.lock().ok().and_then(|mut tracker| tracker.finish())
+            if let Ok(Some((capture, last_write))) = tauri::async_runtime::spawn_blocking(move || {
+                tracker.lock().ok().and_then(|mut tracker| {
+                    let last_write = tracker.last_write();
+                    tracker.finish().map(|capture| (capture, last_write))
+                })
             })
             .await
             {
-                persist_turn_changes(&app, &store, &session_id, capture);
+                persist_turn_changes(&app, &store, &session_id, capture, last_write);
             }
         }
         if cloud {
@@ -2573,9 +2692,8 @@ async fn launch_operation_admitted(
         let restored = kind.is_some() && turn_message_id != 0 && store.lock().ok().is_some_and(|db| remote::orchestrate::restore_wake(&db, &session_id, turn_message_id).unwrap_or(false));
         // Settled machine threads wake this task now that it is idle.
         remote::orchestrate::parent_finished(&app, &session_id, was_stopped, restored);
-        // Bot conversations reply on their channel and send their next queued message.
+        // Schedules are independent of the bot's native Council completion gate.
         if !was_stopped {
-            bots::run_finished(&app, &session_id, successful);
             schedules::run_finished(&app, &session_id, successful);
         }
         // Serve has no window: link pull requests and send the next queued message natively.
@@ -2605,6 +2723,15 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // A turn's approval requests expire even if Council is still reviewing
+        // or the user stopped the run. This must precede deferred final callbacks.
+        bots::gateway::turn_ended(&session_id);
+        // The Architect must persist its final Council verdict before bot callbacks
+        // inspect it; otherwise an asynchronous bot finish may race the Team save
+        // and strand a genuinely completed Channel Council delivery.
+        if !was_stopped {
+            bots::run_finished(&app, &session_id, successful);
+        }
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
         if let (true, Some((mut next, (tools, approvals)))) = (successful && !was_stopped, warm_next) {
             // A turn that ended without any reply (seen after background commands) may have
@@ -2841,6 +2968,47 @@ async fn open_external_url(url: String) -> Result<()> {
     }
 }
 
+/// Settings → About → Third-party notices: opens the copy bundled with the app (a fixed
+/// resource path, never webview input) as plain text in the system's text viewer.
+#[tauri::command]
+async fn open_third_party_notices(app: tauri::AppHandle) -> Result<()> {
+    let path = app
+        .path()
+        .resource_dir()
+        .map_err(|_| "Could not find the app's bundled files.")?
+        .join("THIRD_PARTY_NOTICES.md");
+    if !path.is_file() {
+        return Err("The third-party notices are missing from this installation.".into());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-t");
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = tokio::process::Command::new("notepad.exe");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut command = tokio::process::Command::new("xdg-open");
+        child_env::sanitize(&mut command);
+        command
+    };
+    command
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().map_err(|_| "Could not open the third-party notices.")?;
+    // Notepad stays open until closed (it is left running), so only an early failure counts.
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Err(_) => Ok(()),
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(_)) => Err("Could not open the third-party notices.".into()),
+        Ok(Err(e)) => Err(e.to_string()),
+    }
+}
+
 /// A sent attachment outside the task's workspace, shown in the file manager. It is only
 /// revealed (selected), never opened, so nothing in it runs.
 #[tauri::command]
@@ -3006,6 +3174,7 @@ fn create_worktree_task_with_defaults(
         )
     })?;
     transaction.commit().map_err(|e| e.to_string())?;
+    skill_manager::projects_changed();
     Ok(created)
 }
 
@@ -3049,9 +3218,11 @@ async fn attach_worktree(
         };
         let worktree = workspace::create_worktree_with(&root, &branch, base.as_deref(), existing.unwrap_or(false))?;
         let store = store.lock().map_err(|e| e.to_string())?;
-        store.attach_worktree(&source.id, &worktree.path, &worktree.branch).map_err(|error| {
+        let attached = store.attach_worktree(&source.id, &worktree.path, &worktree.branch).map_err(|error| {
             format!("Worktree created at {}, but the task could not be updated: {error}", worktree.path.display())
-        })
+        });
+        skill_manager::projects_changed();
+        attached
     })
     .await
 }
@@ -3103,7 +3274,9 @@ async fn remove_worktree(
     let (main, path, branch) = worktree_paths(&state.store, &session_id)?;
     // A lingering agent's working directory would block the removal on Windows.
     providers::end_lingering_in(&path).await;
-    blocking(move || workspace::remove_worktree(&main, &path, branch.as_deref(), delete_branch.unwrap_or(false))).await
+    let removed = blocking(move || workspace::remove_worktree(&main, &path, branch.as_deref(), delete_branch.unwrap_or(false))).await;
+    skill_manager::projects_changed();
+    removed
 }
 
 #[tauri::command]
@@ -3112,6 +3285,7 @@ async fn recreate_worktree(state: State<'_, AppState>, session_id: String) -> Re
     blocking(move || {
         let (main, path, branch) = worktree_paths(&store, &session_id)?;
         workspace::recreate_worktree(&main, &path, branch.as_deref())?;
+        skill_manager::projects_changed();
         store.lock().map_err(|e| e.to_string())?.session(&session_id)
     })
     .await
@@ -3239,7 +3413,9 @@ async fn github_project_repos(state: State<'_, AppState>) -> Result<Vec<github_h
 #[tauri::command]
 async fn github_clone_repo(state: State<'_, AppState>, repo: String, parent: String) -> Result<Project> {
     let destination = blocking(move || github_hub::clone(&repo, std::path::Path::new(&parent))).await?;
-    state.store.lock().map_err(|e| e.to_string())?.add_project(&destination)
+    let project = state.store.lock().map_err(|e| e.to_string())?.add_project(&destination);
+    skill_manager::projects_changed();
+    project
 }
 
 #[tauri::command]
@@ -3912,6 +4088,7 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
     schedules::start(app.handle().clone());
@@ -3941,6 +4118,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         if state.shutdown.swap(1, Ordering::SeqCst) == 1 {
             return;
         }
+        if let Some(voice) = app.try_state::<voice::Voice>() { voice.shutdown(); }
         jev::shutdown();
         app.state::<file_preview::FilePreviews>().shutdown();
         // Cloud runs keep going on their machines; their bridges are killed below.
@@ -3978,6 +4156,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             handle.exit(0);
         });
     } else if matches!(event, tauri::RunEvent::Exit) {
+        if let Some(voice) = app.try_state::<voice::Voice>() { voice.shutdown(); }
         app.state::<file_preview::FilePreviews>().shutdown();
         // VMs PandaCode started release their memory when it quits.
         app.state::<vm::Vms>().shutdown();
@@ -4024,6 +4203,7 @@ pub fn run() {
                 }
             });
             let dir = setup_common(app)?;
+            app.manage(voice::Voice::new(dir.clone()));
             agents_dock::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             overlay::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             vm::watch_idle(app.handle().clone());
@@ -4034,6 +4214,20 @@ pub fn run() {
                 if let Err(error) = appearance::setup(&window) {
                     eprintln!("Native appearance setup failed: {error}");
                 }
+                let handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    // A close that only hides the window (macOS, Windows with a menu bar item)
+                    // stops recording and keeps downloads. A close that quits (tray::hide_on_close)
+                    // cancels everything at once: transcribing would upload audio only for the
+                    // exit to throw the result away.
+                    let Some(voice) = handle.try_state::<voice::Voice>() else { return };
+                    match event {
+                        tauri::WindowEvent::CloseRequested { .. } if tray::main_close_quits(&handle) => voice.shutdown(),
+                        tauri::WindowEvent::CloseRequested { .. } => voice.stop_recording(&handle),
+                        tauri::WindowEvent::Destroyed => voice.shutdown(),
+                        _ => {}
+                    }
+                });
                 tray::hide_on_close(&window);
             }
             Ok(())
@@ -4084,6 +4278,26 @@ pub fn run() {
                 return true;
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                voice::voice_configuration,
+                voice::voice_save_profile,
+                voice::voice_select_profile,
+                voice::voice_delete_profile,
+                voice::voice_start,
+                voice::voice_stop,
+                voice::voice_retry,
+                voice::voice_cancel,
+                voice::local::voice_local_catalog,
+                voice::local::voice_local_download,
+                voice::local::voice_local_cancel_download,
+                voice::local::voice_local_delete,
+                voice::local::voice_local_select,
+                voice::local::test_recordings::voice_local_test_model,
+                voice::local::test_recordings::voice_mic_devices,
+                voice::local::test_recordings::voice_mic_test_start,
+                voice::local::test_recordings::voice_mic_test_stop,
+                voice::local::test_recordings::voice_mic_test_cancel,
+                voice::local::voice_preferences,
+                voice::local::voice_update_preferences,
                 agents_dock::agents_dock_snapshot,
                 agents_dock::agents_dock_preferences,
                 agents_dock::agents_dock_save_preferences,
@@ -4197,6 +4411,14 @@ pub fn run() {
                 message_queue::queue_take,
                 message_queue::queue_restore,
                 message_queue::steer_task,
+                extended_bot_manifest::bot_manifest_import,
+                extended_bot_manifest::bot_manifest_export,
+                extended_bot_manifest::bot_manifest_export_file,
+                extended_bot_manifest::bot_manifest_export_folder,
+                extended_bot_git::bot_manifest_sources_list,
+                extended_bot_git::bot_manifest_sources_save,
+                extended_bot_git::bot_manifest_sources_check,
+                extended_bot_git::bot_manifest_sources_sync,
                 bots::bots_list,
                 bots::bot_desktop_thread,
                 bots::bot_detail,
@@ -4204,6 +4426,7 @@ pub fn run() {
                 bots::bot_update,
                 bots::extended::bot_set_fresh_context,
                 bots::extended::bot_set_channel_history,
+                bots::extended::bot_set_shared_channel_history_override,
                 bots::bot_set_mode,
                 bots::bot_set_paused,
                 bots::bot_reset,
@@ -4213,12 +4436,41 @@ pub fn run() {
                 bots::bot_activity,
                 bots::bot_project_ids,
                 bots::bot_message,
+                superagent::superagent_create,
+                superagent::events::superagent_source_create,
+                superagent::events::superagent_source_list,
+                superagent::events::superagent_source_decisions,
+                superagent::events::superagent_source_set_mode,
+                superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_link_thread,
+                superagent::events::superagent_source_thread_links,
+                superagent::superagent_list,
+                superagent::superagent_set_enabled,
+                superagent::superagent_update,
+                superagent::superagent_delete,
+                superagent::superagent_ticket,
+                superagent::superagent_mandate,
+                superagent::superagent_tickets,
+                superagent::superagent_assignments,
+                superagent::superagent_activity,
+                superagent::superagent_snapshot,
+                superagent::superagent_submit,
+                superagent::superagent_submit_coordinated,
+                superagent::superagent_dispatch_worker,
+                superagent::superagent_retry,
+                superagent::superagent_accept,
+                superagent::superagent_reject,
+                superagent::manifest::superagent_manifest_export,
+                superagent::manifest::superagent_manifest_preview,
+                superagent::manifest::superagent_manifest_import,
+                superagent::superagent_stop,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,
                 bots::shared_channels::bot_shared_channel_create,
                 bots::shared_channels::bot_shared_channel_update,
                 bots::shared_channels::bot_shared_channel_archive,
                 bots::shared_channels::bot_shared_channel_post,
+            bots::shared_channels::bot_shared_channel_council_accept,
                 bots::shared_channels::bot_shared_channel_stop,
                 bots::shared_channels::bot_shared_channel_continue,
                 bots::shared_channels::bot_shared_channel_reassign,
@@ -4280,6 +4532,9 @@ pub fn run() {
                 architect::profiles::architect_delete_profile,
                 architect::architect_get,
                 architect::architect_configure,
+                architect::architect_set_council,
+                architect::architect_council_reviewer_options,
+                architect::architect_council_accept,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,
@@ -4414,11 +4669,22 @@ pub fn run() {
                 token_saver::token_saver_tools,
                 token_saver::token_saver_install,
                 task_usage::task_token_usage,
+                skill_manager::skill_manager_list,
+                skill_manager::skill_manager_set,
+                skill_manager::skill_manager_reset,
+                skill_manager::skill_manager_restore,
+                skill_manager::skill_manager_uninstall,
+                skill_manager::skill_manager_undo_uninstall,
+                skill_manager::skill_manager_preview,
+                skill_manager::skill_manager_add,
+                skill_manager::skill_manager_add_library,
                 skills::skills_list,
+                skills::skills_icons,
                 skills::skills_import_folder,
                 skills::skills_import_github,
                 skills::skills_activate,
                 skills::skills_deactivate,
+                skills::skills_deactivate_all,
                 skills::skills_matrix,
                 skills::skills_scan,
                 skills::skills_remove,
@@ -4428,11 +4694,33 @@ pub fn run() {
                 skills::skills_catalog_state,
                 skills::skills_catalog_import,
                 skills::skills_discover,
+                skills::skills_source_preview,
+                skills::skills_source_list,
+                skills::skills_source_import,
+                skills::skills_source_import_tracked,
+                skills::skills_source_remove,
+                skills::skills_source_set_selection,
+                skills::skills_import_zip,
+                skills::skills_import_zip_tracked,
+                skills::skills_sync_tracked,
+                skills::skills_preview_file,
+                skills::skills_github_preview_file,
+                skills::skills_sync_saved_source,
+                skills::skills_sync_item,
+                skills::skills_sync_all,
+                skills::skills_sync_source,
+                skills::skills_sync_policy,
+                skills::skills_sync_set_global,
+                skills::skills_sync_trust,
+                skills::skills_sync_override,
+                skills::skills_sync_set_ref,
+                skills::skills_sync_report,
                 set_task_link,
                 import_prompt_image,
                 read_clipboard_image,
                 prompt_image,
                 reveal_path,
+                open_third_party_notices,
                 read_document,
                 dragged_file_paths,
                 describe_folder,

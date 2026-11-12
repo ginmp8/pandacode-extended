@@ -982,11 +982,22 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                         THEN 'Mandate expired, revoked or stale; no replay'
                       WHEN coordinator.id IS NULL OR coordinator.paused!=0
                         THEN 'Coordinator unavailable; no replay'
+                      -- The first coordinator attempt may be in its own
+                      -- checkout, distinct from the Ticket's worker project.
+                      -- Do not treat a different, unadmitted bot as that role.
                       WHEN worker.id IS NULL OR worker.paused!=0
-                           OR worker.project_id!=t.project_id
-                        THEN 'Worker unavailable or out of scope; no replay'
+                           OR (a.bot_id=o.coordinator_bot_id AND
+                               (a.attempt!=1 OR NOT EXISTS(
+                                  SELECT 1 FROM sa_audit admission
+                                  WHERE admission.ticket_id=t.id
+                                    AND admission.kind='admitted'
+                                    AND admission.detail='manual readonly coordinator reserved'
+                               )))
+                           OR (a.bot_id!=o.coordinator_bot_id AND
+                               (a.bot_id!=t.worker_bot_id OR worker.project_id!=t.project_id))
+                        THEN 'Assigned bot unavailable or out of scope; no replay'
                       WHEN active_session.id IS NULL
-                           OR active_session.project_id!=t.project_id
+                           OR active_session.project_id!=worker.project_id
                         THEN 'Assignment session missing or out of scope; no replay'
                       ELSE NULL
                     END
@@ -3107,6 +3118,48 @@ mod tests {
             assert!(!on_run_finished(&store, &session, true, "Late success").unwrap());
             assert_ne!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
         }
+    }
+
+    #[test]
+    fn watchdog_preserves_separate_coordinator_checkout_and_fences_session_drift() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('watchdog-coordinator-project','Coordinator','/tmp/sa-watchdog-coordinator')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='watchdog-coordinator-project' WHERE id='router'",
+            [],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &config.id, "Plan in coordinator checkout",
+            "watchdog-coordinator-workspace", false, true,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_eq!(store.session(&session).unwrap().project_id, "watchdog-coordinator-project");
+
+        // A healthy admitted coordinator is not a worker in the Ticket's
+        // project. It must survive watchdog polling until its turn completes.
+        assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap()
+            .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 0);
+
+        // A moved or relabelled native session is no longer in the original
+        // coordinator's checkout, so the same watchdog must revoke it.
+        store.db.execute(
+            "UPDATE sessions SET project_id='project' WHERE id=?1",
+            [&session],
+        ).unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(), vec![session.clone()]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(!on_run_finished(&store, &session, true, "Late coordinator advice").unwrap());
+        assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
     }
 
     #[test]

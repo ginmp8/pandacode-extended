@@ -143,6 +143,47 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
         [&message_id],|row|row.get(0),
     ).unwrap();
     assert_eq!(cycles,2,"delivery cycles must be distinct and persisted");
+    // Channel admission creates one durable native-only review request for each
+    // isolated task. Replays reuse a request; no cached label is an approval.
+    let session_for = |delivery: &str| -> String {
+        f.store.db.query_row(
+            "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+            [delivery], |row| row.get(0),
+        ).unwrap()
+    };
+    let first_session = session_for(&first_id);
+    let second_session = session_for(&second_id);
+    let first_request = crate::architect::council_requests::admit_channel(&f.store, &first_id).unwrap();
+    let second_request = crate::architect::council_requests::admit_channel(&f.store, &second_id).unwrap();
+    assert_ne!(first_request.request_id, second_request.request_id);
+    assert_ne!(first_request.delivery_cycle_id, second_request.delivery_cycle_id);
+    assert_eq!(first_request.session_id, first_session);
+    assert_eq!(second_request.session_id, second_session);
+    assert_eq!(crate::architect::council_requests::admit_channel(&f.store, &first_id).unwrap(), first_request);
+    let current = crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &first_session,
+    ).unwrap();
+    assert!(!current.native.verified_pass, "admission never fabricates native approval");
+    assert!(current.native.verified_completion.is_none());
+    assert!(crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &second_id, &second_session,
+    ).is_err(), "a sibling delivery cannot inspect another request");
+    assert!(crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &second_session,
+    ).is_err(), "a foreign task cannot inspect another request");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET objective='replaced objective' WHERE delivery_id=?1",
+        [&first_id],
+    ).unwrap();
+    assert!(crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &first_session,
+    ).unwrap_err().contains("stale"), "a changed objective invalidates task-bound inspection");
+    assert!(crate::architect::council_requests::admit_channel(&f.store, &first_id)
+        .unwrap_err().contains("conflict"), "idempotency never silently replaces a changed request");
+    let unaffected = crate::architect::council_requests::inspect_channel(
+        &f.store, &second_request.request_id, &second_id, &second_session,
+    ).unwrap();
+    assert!(!unaffected.native.verified_pass);
     let detail = shared_channels::detail(&f.store,&channel.id,100).unwrap();
     let first = detail.messages.iter().find(|item| item.id==first_id).unwrap();
     let second = detail.messages.iter().find(|item| item.id==second_id).unwrap();

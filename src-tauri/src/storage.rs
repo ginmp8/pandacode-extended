@@ -691,6 +691,14 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=43;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 44 {
+                // Immutable, per-delivery native Council request identities. A request
+                // is not a verdict, approval token or permission grant.
+                migration.execute_batch(crate::architect::council_requests::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=44;")
+                    .map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;

@@ -739,6 +739,9 @@ pub(super) fn provision_channel_delivery(
         store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7)", params![delivery_id,channel_id,message_id,bot_id,session_id,depth as i64,created_at]).map_err(|e| e.to_string())?;
         if requested.is_some() {
             store.db.execute("INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,'0',?7)", params![delivery_id,channel_id,message_id,bot_id,crate::storage::id(),text,created_at]).map_err(|e| e.to_string())?;
+            // Freeze the same task's native review request before admitting a
+            // provider turn. Failure rolls back the delivery and task together.
+            crate::architect::council_requests::admit_channel(store, delivery_id)?;
         }
         transaction.commit().map_err(|e| e.to_string())?;
         Ok((channel, bot, prompt, thread))

@@ -192,6 +192,56 @@ test('Council inspector denial remains accessible on narrow screens', async ({ p
 });
 
 
+test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const strategy = panel(page).getByLabel('Review strategy');
+  await expect(strategy).toHaveValue('parallel');
+  await expect(strategy.locator('option[value="two_phase"]')).toHaveCount(0);
+  await strategy.selectOption('escalated');
+  expect(await calls(page)).toEqual([]);
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    strategy: 'escalated', forceEscalation: true, maxRounds: 10, reviewerBotIds: undefined,
+  });
+  await expect(strategy).toHaveValue('escalated');
+  await strategy.selectOption('parallel');
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'parallel', forceEscalation: false });
+  await expect(strategy).toHaveValue('parallel');
+});
+
+test('task-scoped S2 strategy composes with M3 bot seats on a narrow keyboard-accessible modal', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'model-a', paused: false },
+    { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'model-b', paused: false },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  const strategy = panel(page).getByLabel('Review strategy');
+  await strategy.focus();
+  await strategy.selectOption('escalated');
+  await expect(strategy).toHaveValue('escalated');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    strategy: 'escalated', forceEscalation: true,
+    automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'],
+  });
+  const bounds = await panel(page).boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+});
+
 test('Council criteria editor saves task-scoped user criteria without altering legacy defaults', async ({ page }) => {
   await open(page, '/?council');
   await button(page).click();

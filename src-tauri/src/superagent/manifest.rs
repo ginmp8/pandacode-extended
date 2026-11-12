@@ -116,6 +116,12 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
         if coordinator.id == worker.id {
             return Err("Coordinator and worker must be different existing bots.".into());
         }
+        // Portable configuration is not a grant, but it must not quietly
+        // import a currently unavailable primary role. Match native Team
+        // creation and role editing before any backup or transactional write.
+        if coordinator.paused || worker.paused {
+            return Err("Paused primary Coordinator or Worker cannot be imported.".into());
+        }
         if manifest.schema_version==1
             && (!preset.extra_worker_bots.is_empty() || !preset.reviewer_bots.is_empty()) {
             return Err("Version 1 manifests cannot declare multi-member Teams.".into());
@@ -479,6 +485,43 @@ mod tests {
         for private in ["router-project","worker-project","sa_tickets","session_id","authorization_id"] {
             assert!(!serialized.contains(private),"Manifest leaked runtime identity: {private}");
         }
+    }
+
+    #[test]
+    fn portable_import_denies_paused_primary_bots_before_backup_or_mutation() {
+        let store = fixture();
+        let document = document("Paused primary Team");
+        let root = std::env::temp_dir().join(format!(
+            "sa-paused-role-backup-{}", storage::id(),
+        ));
+
+        for paused_id in ["router", "worker"] {
+            store.db.execute(
+                "UPDATE bots SET paused=1 WHERE id=?1", [paused_id],
+            ).unwrap();
+            let error = preview(&store, &document).unwrap_err();
+            assert!(error.contains("Paused primary"), "{error}");
+            assert!(apply(&store, &document, true).is_err());
+            assert!(apply_with_backup(&store, &root, &document, true).is_err());
+            let count: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_orchestrations", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "Rejected role must not partially import");
+            assert!(!root.join("bot-backups").exists(),
+                "Invalid import must not create a private backup");
+            store.db.execute(
+                "UPDATE bots SET paused=0 WHERE id=?1", [paused_id],
+            ).unwrap();
+        }
+
+        let applied = apply(&store, &document, true).unwrap();
+        assert_eq!(applied.created, vec!["Paused primary Team"]);
+        let config: (i64, String, String) = store.db.query_row(
+            "SELECT enabled,coordinator_bot_id,worker_bot_id FROM sa_orchestrations
+             WHERE name='Paused primary Team'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(config, (0, "router".into(), "worker".into()));
     }
 
     #[test]

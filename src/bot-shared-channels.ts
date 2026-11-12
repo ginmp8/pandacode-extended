@@ -270,10 +270,13 @@ function positionSharedChannelCouncilPanel(trigger: HTMLElement, panel: HTMLElem
   const placeAbove = above >= natural || above > below;
   const room = Math.max(0, placeAbove ? above : below);
   const height = Math.min(560, room);
+  const top = placeAbove ? Math.max(12, rect.top - 10 - Math.min(natural, height)) : rect.bottom + 10;
   panel.style.width = width + 'px';
-  panel.style.maxHeight = height + 'px';
   panel.style.left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2)) + 'px';
-  panel.style.top = (placeAbove ? Math.max(12, rect.top - 10 - Math.min(natural, height)) : rect.bottom + 10) + 'px';
+  panel.style.top = top + 'px';
+  // Keep the popover inside the viewport even before the resize event is delivered.
+  // The dynamic viewport cap responds to resizing independently of the JS re-anchor.
+  panel.style.maxHeight = `min(${height}px, max(0px, calc(100dvh - ${top}px - 12px)))`;
 }
 
 /** Show Council above the channel tray as a non-modal popover, like the direct-chat Council. */

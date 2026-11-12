@@ -32,12 +32,17 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '</h4><ul>' + entries + '</ul></section>';
   }).join('');
   const hidden = inspection.attempts.length - shown.length;
+  const completion = inspection.verifiedPass && inspection.status.state === 'passed' &&
+    !inspection.status.stale && inspection.verifiedCompletion
+    ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
+      escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
+      escape(String(inspection.verifiedCompletion.round)) + '</p>' : '';
   return '<div class="council-inspection-detail"><p><strong>' + escape(verdict) +
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Current native status') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p><p>' + (criteria.length ? 'Required criteria: ' +
       escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
-    (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    completion + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + '</div>';
 }
 

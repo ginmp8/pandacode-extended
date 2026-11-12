@@ -70,6 +70,36 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
+test('Council inspector only discloses a verified terminal cycle and escapes its identity', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 17,
+    status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'task-1', cycleId: '<foreign-cycle>', teamRevision: 17, round: 1, lowest: 9.4 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Completed native review cycle')).toBeVisible();
+  await expect(panel(page).getByText('<foreign-cycle>', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion foreign-cycle')).toHaveCount(0);
+});
+test('Council inspector never promotes an unverified terminal hint', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 17,
+    status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+    verifiedPass: false,
+    verifiedCompletion: { sessionId: 'task-1', cycleId: 'unverified-cycle', teamRevision: 17, round: 1, lowest: 9.4 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('Council inspector denial remains accessible on narrow screens', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 });
   await open(page, '/?council', { architect_council_inspect: 'task scope denied' });

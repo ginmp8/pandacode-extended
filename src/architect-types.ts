@@ -37,6 +37,10 @@ export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'pa
  *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
 export interface CouncilStatus { state: CouncilState; round: number; lowest: number | null; target: number; stale: boolean; notice?: string | null }
 
+/** Informational terminal projection: not a transferable authorization or artifact digest receipt. */
+export interface CouncilVerifiedCompletion {
+  sessionId: string; cycleId: string; teamRevision: number; round: number; lowest: number;
+}
 /** Read-only native Council projection, never an approval token. */
 export interface CouncilInspectionAttempt {
   workerId: string; round: number; lens: string;
@@ -51,7 +55,8 @@ export interface CouncilInspectionAttempt {
 }
 export interface CouncilInspection {
   cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
-  verifiedPass: boolean; criteria: CouncilCriterion[];
+  verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
+  criteria: CouncilCriterion[];
   attempts: CouncilInspectionAttempt[];
 }
 export interface TeamConfig {

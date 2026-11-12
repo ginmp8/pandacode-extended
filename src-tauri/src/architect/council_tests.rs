@@ -54,6 +54,35 @@ fn council_inspector_reports_native_queue_wait_and_settled_span_without_provider
     assert!(!result.verified_pass);
 }
 
+
+#[test]
+fn native_completed_council_projection_requires_a_verified_terminal_pass() {
+    let mut team = team_with(on(9.0, 3, 2), vec![
+        seat("reviewer-a", 1, Some(9.8), SINCE + 1),
+        seat("reviewer-b", 1, Some(9.4), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(council::inspection(&team, true).unwrap().verified_completion.is_none());
+
+    team.status = "completed".into();
+    assert!(council::inspection(&team, false).unwrap().verified_completion.is_none());
+    let inspected = council::inspection(&team, true).unwrap();
+    assert!(inspected.verified_pass);
+    let completed = inspected.verified_completion.unwrap();
+    assert_eq!(completed.session_id, team.session_id);
+    assert_eq!(completed.cycle_id, format!("{}:{}", team.session_id, SINCE));
+    assert_eq!(completed.team_revision, team.revision);
+    assert_eq!(completed.round, 1);
+    assert_eq!(completed.lowest, 9.4);
+
+    team.council_accepted = Some(SINCE);
+    assert_eq!(council::status(&team).unwrap().state, "accepted");
+    assert!(council::inspection(&team, true).unwrap().verified_completion.is_none());
+    team.council_accepted = None;
+    team.workers[1].council.as_mut().unwrap().score = Some(7.0);
+    assert_eq!(council::status(&team).unwrap().state, "fixing");
+    assert!(council::inspection(&team, true).unwrap().verified_completion.is_none());
+}
 #[test]
 fn council_inspector_never_uses_live_checkpoint_time_as_completed_latency() {
     let mut running = seat("live", 1, None, SINCE + 1);

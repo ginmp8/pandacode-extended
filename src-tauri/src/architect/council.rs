@@ -272,6 +272,18 @@ pub struct CouncilStatus {
     pub notice: Option<String>,
 }
 
+/** A completed native review cycle for inspection only, not an artifact-bound approval token.
+ * The caller must independently verify the persisted native Council gate. */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilVerifiedCompletion {
+    pub session_id: String,
+    pub cycle_id: String,
+    pub team_revision: u64,
+    pub round: usize,
+    pub lowest: f64,
+}
+
 /** A native read-only projection; never an approval token. */
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,6 +292,8 @@ pub struct CouncilInspection {
     pub team_revision: u64,
     pub status: CouncilStatus,
     pub verified_pass: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_completion: Option<CouncilVerifiedCompletion>,
     pub criteria: Vec<CouncilCriterion>,
     pub attempts: Vec<CouncilInspectionAttempt>,
 }
@@ -314,6 +328,17 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
     let config = team.config.council.as_ref()?;
     let status = status(team)?;
     let verified_pass = verified_pass && status.state == "passed" && !status.stale;
+    let verified_completion = if verified_pass && team.status == "completed" {
+        status.lowest.map(|lowest| CouncilVerifiedCompletion {
+            session_id: team.session_id.clone(),
+            cycle_id: format!("{}:{}", team.session_id, team.council_since),
+            team_revision: team.revision,
+            round: status.round,
+            lowest,
+        })
+    } else {
+        None
+    };
     let attempts = seats(team).map(|(worker, seat)| CouncilInspectionAttempt {
         worker_id: worker.id.clone(),
         round: seat.round,
@@ -347,7 +372,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
     }).collect();
     Some(CouncilInspection {
         cycle_started_at: team.council_since, team_revision: team.revision,
-        status, verified_pass, criteria: config.criteria.clone(), attempts,
+        status, verified_pass, verified_completion, criteria: config.criteria.clone(), attempts,
     })
 }
 

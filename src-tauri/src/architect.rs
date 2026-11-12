@@ -1589,7 +1589,7 @@ fn dispatch_tool(child: bool) -> Value {
         item["replaceReason"] = json!({"type":"string","description":"Failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
         item["councilReviewerSource"] = json!({"type":"string","enum":["automatic","direct_bot"],"description":"Mixed Council seat: automatic or selected direct bot only."});
-        "Batch dispatch; returns IDs. Router picks for profileId \"auto\" (or omitted when on); explicit models only if asked. files: repo-relative, [] reserves checkout. Disjoint/readOnly may overlap; dependsOn uses IDs.".into()
+        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\", router picks (or omitted when on). Explicit models if asked. files: relative ([] reserves all); readOnly overlaps; dependsOn IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }

@@ -18,6 +18,17 @@ pub(crate) const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS extended_council_task_requests_session ON extended_council_task_requests(session_id,created_at);
 ";
 
+/// Schema v45: receipts are written only by the winning native channel settlement.
+pub(crate) const RECEIPT_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS extended_council_task_receipts(
+      request_id TEXT PRIMARY KEY REFERENCES extended_council_task_requests(request_id) ON DELETE CASCADE,
+      delivery_id TEXT NOT NULL UNIQUE REFERENCES extended_channel_council_deliveries(delivery_id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json)),
+      created_at INTEGER NOT NULL
+    );
+";
+
 /// Immutable per-delivery scope. The digest covers the admitted *objective*;
 /// it is not a verified source-code SHA or an approval token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,4 +167,113 @@ pub(crate) fn inspect_channel(store: &Store, request_id: &str, delivery_id: &str
     let native = super::council_inspection_state(store, session_id)?
         .ok_or("council_task_denied: native task inspection is unavailable.")?;
     Ok(CouncilTaskInspection { request: recorded, native })
+}
+
+
+/// Native terminal receipt for one winning, approved Channel delivery.
+/// This is correlated evidence, not a bearer token or a substitute for the
+/// live native authorization check performed on every read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CouncilTaskTerminalReceipt {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub delivery_id: String,
+    pub session_id: String,
+    pub root_cycle_id: String,
+    pub team_revision: u64,
+    /// "passed" or "accepted_by_user"; user acceptance never invents a score.
+    pub outcome: String,
+    pub lowest_verified_score: Option<f64>,
+    /// Digest of the trusted request and current native verdict references,
+    /// not a signature, source-code hash, external execution proof or grant.
+    pub evidence_sha256: String,
+}
+
+fn current_terminal(
+    store: &Store, request_id: &str, delivery_id: &str, session_id: &str,
+) -> Result<CouncilTaskTerminalReceipt> {
+    let inspected = inspect_channel(store, request_id, delivery_id, session_id)?;
+    if !crate::bots::shared_channels::council_callback_allowed(store, delivery_id)? {
+        return Err("council_task_denied: the original native callback is not authorized.".into());
+    }
+    let native = &inspected.native;
+    if native.status.stale {
+        return Err("council_task_stale: the native Council revision changed.".into());
+    }
+    let (outcome, lowest) = match native.status.state.as_str() {
+        "passed" if native.verified_pass => {
+            let proof = native.verified_completion.as_ref()
+                .ok_or("council_task_denied: missing independently verified completion.")?;
+            ("passed", Some(proof.lowest))
+        }
+        // The callback gate independently verifies an attributed, revision-bound
+        // local-user acceptance. It must not be converted to a passing score.
+        "accepted" => ("accepted_by_user", None),
+        _ => return Err("council_task_denied: no approved terminal Council verdict.".into()),
+    };
+    let root_cycle_id = format!("{}:{}", session_id, native.cycle_started_at);
+    if native.verified_completion.as_ref().is_some_and(|proof|
+        proof.session_id != session_id || proof.cycle_id != root_cycle_id
+            || proof.team_revision != native.team_revision)
+    {
+        return Err("council_task_stale: verified completion has different root ownership.".into());
+    }
+    let evidence = serde_json::to_vec(&(
+        &inspected.request, &root_cycle_id, native.team_revision,
+        native.status.round, outcome, lowest,
+    )).map_err(|e| e.to_string())?;
+    Ok(CouncilTaskTerminalReceipt {
+        schema_version: 1,
+        request_id: request_id.to_owned(),
+        delivery_id: delivery_id.to_owned(),
+        session_id: session_id.to_owned(),
+        root_cycle_id,
+        team_revision: native.team_revision,
+        outcome: outcome.to_owned(),
+        lowest_verified_score: lowest,
+        evidence_sha256: digest(&evidence),
+    })
+}
+
+/// Called inside the existing winning channel settlement transaction, after
+/// its status is "completed" but before its single final reply can be stored.
+/// A legacy pre-v44 delivery has no native request and keeps the old gate.
+pub(crate) fn record_terminal_channel(
+    store: &Store, delivery_id: &str, session_id: &str,
+) -> Result<Option<CouncilTaskTerminalReceipt>> {
+    let issued: Option<String> = store.db.query_row(
+        "SELECT request_id FROM extended_council_task_requests WHERE delivery_id=?1 AND session_id=?2",
+        params![delivery_id,session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some(request_id) = issued else { return Ok(None) };
+    let expected = current_terminal(store, &request_id, delivery_id, session_id)?;
+    let raw = serde_json::to_string(&expected).map_err(|e| e.to_string())?;
+    store.db.execute(
+        "INSERT OR IGNORE INTO extended_council_task_receipts
+         (request_id,delivery_id,session_id,receipt_json,created_at)
+         VALUES(?1,?2,?3,?4,?5)",
+        params![request_id,delivery_id,session_id,raw,storage::now()],
+    ).map_err(|e| e.to_string())?;
+    read_terminal_channel(store, &request_id, delivery_id, session_id).map(Some)
+}
+
+/// Task-scoped read-only terminal receipt. Revalidates live native authority;
+/// a stale request or altered proof cannot become an approval by replay.
+pub(crate) fn read_terminal_channel(
+    store: &Store, request_id: &str, delivery_id: &str, session_id: &str,
+) -> Result<CouncilTaskTerminalReceipt> {
+    let raw: String = store.db.query_row(
+        "SELECT receipt_json FROM extended_council_task_receipts
+         WHERE request_id=?1 AND delivery_id=?2 AND session_id=?3",
+        params![request_id,delivery_id,session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("council_task_denied: no terminal receipt for this authorized delivery.")?;
+    let stored: CouncilTaskTerminalReceipt = serde_json::from_str(&raw)
+        .map_err(|_| "council_task_denied: stored receipt is invalid.")?;
+    let current = current_terminal(store, request_id, delivery_id, session_id)?;
+    if stored != current {
+        return Err("council_task_stale: terminal receipt no longer matches native evidence.".into());
+    }
+    Ok(stored)
 }

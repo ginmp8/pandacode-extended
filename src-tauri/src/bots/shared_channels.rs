@@ -947,6 +947,14 @@ pub(super) fn settle_channel_delivery(
         params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id],
     ).map_err(|e| e.to_string())?;
     if changed == 0 { return Ok(None); }
+    if approved && matches!(gate, super::ChannelCouncilOutcome::Approved) {
+        // Verify the same immutable native request at the winning terminal
+        // transition and persist its receipt before publishing one channel reply.
+        // A stale/tampered v44+ request rolls back the entire approval.
+        crate::architect::council_requests::record_terminal_channel(
+            store, delivery_id, session_id,
+        )?;
+    }
     // The legacy message schema accepts only user/reply, not synthetic
     // Council notices. A denied delivery is visible through its native
     // per-delivery status/notice, never as a fabricated bot response.

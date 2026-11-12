@@ -466,6 +466,8 @@ fn list_all_demands_page(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+// Retain the pre-pagination native oracle only for existing unit coverage.
+#[cfg(test)]
 fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
     list_all_demands_page(store, limit, None, None)
 }

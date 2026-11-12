@@ -412,6 +412,21 @@ fn start_services(app: tauri::AppHandle) {
                 if state.agents.lock().map(|agents| agents.contains_key(&session_id)).unwrap_or(true) {
                     continue;
                 }
+                // Generic limit recovery must not start another turn on an
+                // old SuperAgent assignment. Its mandate and the one-shot
+                // provider attempt cannot be silently renewed.
+                let ordinary_session = match state.store.lock() {
+                    Ok(store) => crate::superagent::has_task_assignment_history(&store, &session_id),
+                    Err(error) => Err(error.to_string()),
+                };
+                match ordinary_session {
+                    Ok(false) => {}
+                    Ok(true) => continue,
+                    Err(error) => {
+                        eprintln!("serve: skipping usage-limit resume after native session lookup failed: {error}");
+                        continue;
+                    }
+                }
                 println!("serve: resuming {session_id} at its usage-limit reset");
                 if let Err(error) = crate::send_message(
                     limits.clone(),
@@ -460,6 +475,14 @@ pub(crate) fn drain_queue(app: tauri::AppHandle, session_id: String) {
                 return;
             }
             let Ok(store) = state.store.lock() else { return };
+            // A settled or interrupted SuperAgent assignment remains a task
+            // forever. Never reinterpret its old session as a generic queued
+            // conversation after the native bot-thread link disappears.
+            if crate::superagent::has_task_assignment_history(&store, &session_id)
+                .unwrap_or(true)
+            {
+                return;
+            }
             // Bot conversations drain through the bot gateway.
             if crate::bots::owner_of(&store, &session_id).ok().flatten().is_some() {
                 return;

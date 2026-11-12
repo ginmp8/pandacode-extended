@@ -53,6 +53,13 @@ late provider callback cannot approve the task, and the previous session is
 stopped. This is a **stop-and-investigate** safety mechanism, not automatic
 retry or recovery of unverified external work.
 
+Headless generic usage-limit resets and message-queue drain explicitly skip
+every session recorded in native SuperAgent assignment history, including
+settled and revoked attempts after process restart. Missing assignment-history
+data fails closed. The ordinary non-SuperAgent session paths are unchanged.
+A task-owned provider turn can only run through a new explicit native admission,
+never through unattended generic resume or queue recovery.
+
 An interrupted Ticket remains durable and cannot be restarted by an inferred
 source event. On restart, existing `pending` external-effect receipts become
 `uncertain`; they require independent provider reconciliation before any

@@ -920,6 +920,18 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
 /// process can observe those revocations without taking a second writer lease,
 /// attempting a restart recovery, or stopping an unrelated ordinary bot session.
 /// This read never treats a stopped Ticket as a new dispatch/retry permission.
+/// A native SuperAgent session is never eligible for unattended queue replay or
+/// usage-limit resume, even after Stop, settlement, or process restart. Query
+/// assignment history rather than a live-only policy or a bot-thread record:
+/// those can disappear or become invalid after revocation. Ordinary sessions
+/// retain their existing automatic-resume behavior.
+pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
 pub(crate) fn headless_cancelled_assignments(
     store: &Store, active_sessions: &[String],
 ) -> Result<Vec<String>> {
@@ -2800,6 +2812,37 @@ mod tests {
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
             &store, &ordinary,
         ).is_ok(), "normal bot paths cannot inherit task revocation");
+    }
+
+    #[test]
+    fn headless_unattended_resume_rejects_task_session_after_stop_and_restart() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Do not replay this assignment",
+            "headless-no-unattended-replay", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(has_task_assignment_history(&store, &session).unwrap());
+        assert!(!has_task_assignment_history(&store, "unrelated-normal-session").unwrap());
+        stop(&store, &ticket.id).unwrap();
+        assert!(has_task_assignment_history(&store, &session).unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert!(has_task_assignment_history(&reopened, &session).unwrap());
+        assert!(!has_task_assignment_history(&reopened, "unrelated-normal-session").unwrap());
+        // Both headless automatic delivery routes consult assignment history.
+        // Neither a discarded bot-thread nor a restart can reclassify this as
+        // an ordinary session eligible for unattended provider turns.
+        let attempts: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(attempts, 1);
     }
 
     #[test]

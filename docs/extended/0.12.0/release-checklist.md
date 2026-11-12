@@ -1,5 +1,16 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — inherited 0.3.120 limitation notes
+
+Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.
+
+- [x] Confirm full, nontruncated source/Extended tree inventory and one-path upstream note delta.
+- [x] Mirror the upstream release-note bytes and update `source-baseline.json` provenance.
+- [x] Retain Extended 0.12.0 planning marker and all existing controls/dependency remediations.
+- [ ] Confirm CI for the new published SHA (previous SHA `f432b854fe2b`: 9/11 push and 10/11 PR jobs passing at inspection, macOS Clippy still in progress).
+- [ ] Validate native Settings On/Off, integrations and historical divergent-file behavior.
+
+
 ## 2026-11-12 — 0.3.120 parity checkpoint (not approval)
 
 Pinned source [`69155055e1a9`](https://github.com/ginmp8/pandacode/commit/69155055e1a962c0af4b0cf041af0b1f87291588), tree `e6dfbb33ad2d03dc51005b21ae76f873028c7a54`, app **0.3.120**; three source commits/54 changed paths, **49 byte-exact imports, 5 Extended adaptations**. Proposed structural inventory: 2,007 upstream blobs, 2,065 Extended blobs, 1,927 identical shared, 80 divergent shared and 58 Extended-only; no missing upstream files or mode/type mismatch. Previous Extended SHA `e0beb365b279` failed Rust compilation on all CI targets because `architect.rs:1436` contained an unescaped `"auto"` string; staged correction escapes the quotes without changing tool parameters. No new SHA CI, local Rust, Node, native or external On/Off results are claimed. Extended **0.12.0 remains DRAFT**.

@@ -1,5 +1,14 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — 0.3.120 source-note follow-up
+
+Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, application **0.3.120**. One unreleased upstream commit updated only the original [0.3.120 release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), Git blob `f49dba032c6236f85ee88642221c35a2a0b25275`; it introduces **no new code, package, build or control changes**. Full-source inventory remains 2,007 paths versus 2,065 Extended paths, zero upstream files missing or type/mode differences, and 80 historical shared divergences after restoring the note's exact bytes. Planned Extended **0.12.0 remains DRAFT**.
+
+Newly disclosed inherited limitations: SQL words in a neutral MCP search can trigger a false destructive badge (only the first 2,000 SQL characters are checked); tests failing on coverage can misattribute a command after `||`; Edit tool modification of startup/system files may go unflagged and `remove_*` tools may be false positives; tiny tool rows may clip short results; thumbnails from internal image tools may lack usable output paths. These are upstream disclosures, **not proven Extended regressions**.
+
+This upstream change is documentation-only. Extended Settings/Connect/bots/MCP/cloud/VM controls and dependency hardening are preserved unchanged; runtime On/Off checks remain unverified.
+
+
 ## 2026-11-12 — source 0.3.120 integration checkpoint
 
 Source [ginmp8/pandacode:main `69155055e1a9`](https://github.com/ginmp8/pandacode/commit/69155055e1a962c0af4b0cf041af0b1f87291588), Git tree `e6dfbb33ad2d03dc51005b21ae76f873028c7a54`; app version **0.3.120**. Since pinned source `b026526122c4` (0.3.119), three commits change **54 upstream paths: 49 imported byte/mode-exact, five adapted** (Extended release guidance and npm/Cargo manifests/locks). Candidate full-tree inventory: **2,007 upstream files, 2,065 Extended files, 1,927 shared identical, 80 shared divergent, 58 Extended-only, zero missing upstream paths or mode/type differences**. The other Extended code change repairs an existing Rust syntax error in `src-tauri/src/architect.rs:1436` (escaped `"auto"` in the dispatch description), independently reproduced in failed [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43266025146) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43266044987) on previous SHA `e0beb365b279`. New SHA CI and native functional equivalence remain to be checked. **Extended 0.12.0 is DRAFT**, not a published release.

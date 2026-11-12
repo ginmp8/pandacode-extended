@@ -1,5 +1,14 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — inherited 0.3.120 limitation notes
+
+Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.
+
+Upstream-disclosed limitations: false destructive flags from SQL words in neutral MCP search queries, SQL inspection limited to 2,000 characters, command-result misattribution after `||` on test coverage failures, Edit-tool modifications of startup/system files not flagged, false positives for `remove_*` MCP tools, clipped narrow rows, and unresolved paths for some internal image thumbnails. These disclosures do not prove new Extended-specific defects.
+
+The 79 shared customizations still lack exhaustive semantic and native validation. CI for the newly published SHA, installed-app behavior, Settings On/Off and external Connect/MCP/bots/cloud/VM/credentials remain unverified.
+
+
 ## 2026-11-12 — 0.3.120 candidate and prior Rust compilation failure
 
 Pinned source [`69155055e1a9`](https://github.com/ginmp8/pandacode/commit/69155055e1a962c0af4b0cf041af0b1f87291588), tree `e6dfbb33ad2d03dc51005b21ae76f873028c7a54`, app **0.3.120**; three source commits/54 changed paths, **49 byte-exact imports, 5 Extended adaptations**. Proposed structural inventory: 2,007 upstream blobs, 2,065 Extended blobs, 1,927 identical shared, 80 divergent shared and 58 Extended-only; no missing upstream files or mode/type mismatch. Previous Extended SHA `e0beb365b279` failed Rust compilation on all CI targets because `architect.rs:1436` contained an unescaped `"auto"` string; staged correction escapes the quotes without changing tool parameters. No new SHA CI, local Rust, Node, native or external On/Off results are claimed. Extended **0.12.0 remains DRAFT**.

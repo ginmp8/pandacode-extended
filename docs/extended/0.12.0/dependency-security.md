@@ -1,5 +1,12 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — inherited 0.3.120 limitation notes
+
+Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.
+
+No dependency upgrades, overrides, lockfile changes or remediation rollbacks accompany this upstream documentation amendment. The documented classifications are inherited UI heuristics, not confirmed dependency vulnerabilities; retain independent npm/RustSec and platform validation.
+
+
 ## 2026-11-12 — source 0.3.120 version-only synchronization
 
 Source [ginmp8/pandacode:main `69155055e1a9`](https://github.com/ginmp8/pandacode/commit/69155055e1a962c0af4b0cf041af0b1f87291588), Git tree `e6dfbb33ad2d03dc51005b21ae76f873028c7a54`; app version **0.3.120**. Since pinned source `b026526122c4` (0.3.119), three commits change **54 upstream paths: 49 imported byte/mode-exact, five adapted** (Extended release guidance and npm/Cargo manifests/locks). Candidate full-tree inventory: **2,007 upstream files, 2,065 Extended files, 1,927 shared identical, 80 shared divergent, 58 Extended-only, zero missing upstream paths or mode/type differences**. The other Extended code change repairs an existing Rust syntax error in `src-tauri/src/architect.rs:1436` (escaped `"auto"` in the dispatch description), independently reproduced in failed [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43266025146) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43266044987) on previous SHA `e0beb365b279`. New SHA CI and native functional equivalence remain to be checked. **Extended 0.12.0 is DRAFT**, not a published release.

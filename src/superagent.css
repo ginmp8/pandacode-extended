@@ -67,3 +67,25 @@
 #superagent-workspace [data-sa-form="roster"] label{display:grid;gap:6px}
 #superagent-workspace [data-sa-form="roster"] select[multiple]{min-height:120px;padding:8px;max-width:100%;overflow:auto}
 #superagent-workspace [data-sa-form="roster"] button{justify-self:start}
+
+/* First-class native Demand board. The same bounded Ticket index backs
+   board and list; card counts represent loaded rows, never global totals. */
+.sa-demand-layout-toggle{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sa-demand-layout-toggle button{border:1px solid var(--ds-border);border-radius:var(--radius-sm);background:var(--ds-card);color:var(--text);padding:7px 12px}
+.sa-demand-layout-toggle button[aria-pressed="true"]{font-weight:600;background:var(--ds-raised);border-color:var(--ds-border-strong)}
+.sa-demand-layout-toggle button:focus-visible,
+.sa-demand-card button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+.sa-demand-board{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
+.sa-demand-column{min-width:0;border:1px solid var(--ds-border);border-radius:var(--radius-sm);padding:12px;background:var(--ds-card)}
+.sa-demand-column h4{display:flex;gap:8px;justify-content:space-between;align-items:baseline;margin:0 0 12px;font-size:var(--text-sm);font-weight:650}
+.sa-demand-count{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
+.sa-demand-board .sa-demand-card{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:10px 0}
+.sa-demand-board .sa-demand-card strong{white-space:normal;overflow-wrap:anywhere}
+.sa-demand-board .sa-demand-card button{align-self:flex-start}
+.sa-demand-column .sa-empty{padding:8px 0}
+.sa-assignment-inspector{border:1px solid var(--ds-border);border-radius:var(--radius-sm);background:var(--ds-card);padding:12px;max-width:100%;overflow-wrap:anywhere}
+.sa-assignment-inspector dl{display:grid;grid-template-columns:minmax(100px,1fr) minmax(0,2fr);gap:8px 14px;font-size:var(--text-sm)}
+.sa-assignment-inspector dt{color:var(--muted)}
+.sa-assignment-inspector dd{min-width:0;margin:0;overflow-wrap:anywhere}
+@media(min-width:1400px){.sa-demand-board{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:700px){.sa-demand-board{grid-template-columns:minmax(0,1fr)}.sa-assignment-inspector dl{grid-template-columns:minmax(0,1fr)}}

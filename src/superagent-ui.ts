@@ -57,6 +57,7 @@ interface SourceDecision {
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false;
+  let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
   let preview: Preview | null = null, inspected: unknown = null;
@@ -244,20 +245,49 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               safe(d.subjectKey) + ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
+    // One native read of the bounded cross-Team Demand index powers both
+    // accessible presentations. A board column is not a scheduler state.
+    const demandCard = (demand: DemandIndex) =>
+      '<li class="sa-demand-card"><div><strong>' + safe(demand.objective) +
+      '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
+        'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
+      demand.revision + ' · Updated ' + safe(activityTime(demand.updatedAt)) +
+      '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
+      '">Open demand</button></li>';
+    const demandGroups = [
+      {label:'Working',states:['queued','running']},
+      {label:'Awaiting decision',states:['waiting_approval','waiting_review']},
+      {label:'Needs attention',states:['blocked','failed','interrupted','inconclusive']},
+      {label:'Finished or stopped',states:['completed','stopped']},
+    ];
+    const unmatchedDemands = allDemands.filter(demand =>
+      !demandGroups.some(group => group.states.includes(demand.state)));
+    const demandBoard = '<div class="sa-demand-board" role="group" aria-label="Demand status board">' +
+      demandGroups.concat(unmatchedDemands.length ? [{label:'Other states',states:[]}] : [])
+        .map(group => {
+          const entries = group.states.length ? allDemands.filter(demand =>
+            group.states.includes(demand.state)) : unmatchedDemands;
+          return '<section class="sa-demand-column" aria-label="' + safe(group.label) + ' Demands">' +
+            '<h4>' + safe(group.label) + ' <span class="sa-demand-count">' +
+            entries.length + '</span></h4><ul class="sa-tickets">' +
+            (entries.map(demandCard).join('') || '<li class="sa-empty">No Demands in this state.</li>') +
+            '</ul></section>';
+        }).join('') + '</div>';
     const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
       '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
       'Refresh all Teams</button></header>' +
-      '<p>Read-only index of up to 200 most recently updated native Tickets. ' +
-      'Open a demand to inspect and act through its original Team.</p>' +
+      '<p>Up to 200 most recently updated native Tickets across Teams. Board counts cover only this loaded page; ' +
+      'they do not represent totals or launch work. Open a Demand to act within its Team.</p>' +
       (!allDemandsLoaded ? '<p role="status">Load all Teams to see cross-Team demands.</p>' :
-        '<ul class="sa-tickets">' +
-        (allDemands.map(demand => '<li><div><strong>' + safe(demand.objective) +
-          '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
-            'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
-          demand.revision + ' · Updated ' + safe(activityTime(demand.updatedAt)) +
-          '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
-          '">Open demand</button></li>').join('') ||
-          '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>') +
+        '<div class="sa-demand-layout-toggle" role="group" aria-label="Demand presentation">' +
+        (['board','list'] as const).map(layout =>
+          '<button type="button" data-sa-global-demand-layout="' + layout +
+          '" aria-pressed="' + (globalDemandLayout === layout) + '">' +
+          (layout === 'board' ? 'Board' : 'List') + '</button>').join('') + '</div>' +
+        (globalDemandLayout === 'board' ? demandBoard :
+          '<ul class="sa-tickets sa-global-demand-list">' +
+          (allDemands.map(demandCard).join('') ||
+          '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>')) +
       '</section>';
     const nativePreflight = demandPreflight && demandPreflight.orchestrationId === selected &&
       preflightObjective === demandObjective.trim() && preflightMode === demandMode
@@ -558,6 +588,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       activityMode = mode as typeof activityMode;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-activity-mode="' + mode + '"]')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.dataset.saGlobalDemandLayout) {
+      const layout = target.dataset.saGlobalDemandLayout;
+      if (layout !== 'board' && layout !== 'list') return;
+      globalDemandLayout = layout;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-global-demand-layout="' + layout + '"]')
+        ?.focus({preventScroll:true});
       return;
     }
     if (target.dataset.saView) {

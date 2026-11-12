@@ -596,6 +596,15 @@ test('cross-Team Demands index is native-backed and opens only the original Team
   await global.getByRole('button',{name:'Refresh all Teams'}).click();
   await expect(global).toContainText('Performance');
   await expect(global).toContainText('Inspect build logs');
+  const board=global.getByRole('group',{name:'Demand status board'});
+  await expect(board).toBeVisible();
+  await expect(board.getByRole('region',{name:'Awaiting decision Demands'})).toContainText('Inspect build logs');
+  await expect(board.getByRole('region',{name:'Working Demands'})).toContainText('No Demands in this state.');
+  await global.getByRole('button',{name:'List',exact:true}).click();
+  await expect(board).toHaveCount(0);
+  await expect(global.locator('.sa-global-demand-list')).toContainText('Performance');
+  await global.getByRole('button',{name:'Board',exact:true}).click();
+  await expect(board).toBeVisible();
   await global.getByRole('button',{name:'Open demand'}).click();
   await expect(host.getByRole('region',{name:'Selected orchestration'}))
     .toContainText('Performance');

@@ -2468,15 +2468,12 @@ fn prepare_coordinated_worker(
     if !mandate_ok {
         return Err("Coordinator plan cannot extend an expired or revised mandate.".into());
     }
-    let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           JOIN sa_tickets previous ON previous.id=a.ticket_id
-           WHERE a.state='running' AND
-                 (a.bot_id=?1 OR previous.project_id=?2)
-         )",
-        params![worker.id,config.project_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
+    // A running coordinator may own a different checkout from the project
+    // stored on its Ticket. Use the same native lease probe as manual admission
+    // and retry, including missing sessions (which must fail closed).
+    let occupied = manual_candidate_occupied(
+        store, &worker.id, &config.project_id, &worker.project_id,
+    )?;
     if busy || occupied {
         return Err("Worker is occupied; coordinated ticket stays queued.".into());
     }
@@ -5364,6 +5361,76 @@ mod tests {
         let (retried, _, worker) = retry_blocked(&mut store, &blocked.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_eq!(worker, "other-worker");
+    }
+
+    #[test]
+    fn coordinated_worker_preflight_reserves_other_coordinator_checkout() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-worker-project','Other worker','/tmp/sa-coordinated-preflight')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-coordinator','Other coordinator','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Other worker','other-worker-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+
+        let config = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &config.id, "Plan a worker change",
+            "coordinated-preflight-target", false, true,
+        ).unwrap();
+        assert!(started);
+        let plan_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &plan_session, true, "Current plan").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+
+        // The unrelated Team's Ticket targets another project, but its
+        // coordinator session is actively using this Team's worker checkout.
+        let foreign = create_configuration(&store, NewOrchestration {
+            name: "Unrelated coordinated Team".into(),
+            coordinator_bot_id: "other-coordinator".into(),
+            worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        let foreign = change_enabled(
+            &store, &foreign.id, foreign.policy_revision, true,
+        ).unwrap();
+        let (foreign_ticket, foreign_started) = admit_role(
+            &mut store, &foreign.id, "Plan in first worker checkout",
+            "coordinated-preflight-foreign", false, true,
+        ).unwrap();
+        assert!(foreign_started);
+        assert_eq!(get_ticket(&store, &foreign_ticket.id).unwrap().state, "running");
+        assert!(manual_candidate_occupied(
+            &store, "worker", &config.project_id, &config.project_id,
+        ).unwrap());
+
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let error = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap_err();
+        assert!(error.contains("occupied"), "Unexpected preflight error: {error}");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        let after: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(before, after, "Denied admission must not create an assignment");
+
+        fail_launch(&store, &foreign_ticket.id, "Coordinator cancelled").unwrap();
+        let (dispatched, _, worker_id, _) = prepare_coordinated_worker(
+            &mut store, &ticket.id, false,
+        ).unwrap();
+        assert_eq!(dispatched.state, "running");
+        assert_eq!(worker_id, "worker");
     }
 
     #[test]

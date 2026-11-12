@@ -1,5 +1,10 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — unchanged dependency manifests
+
+[fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50), tree `bd360c6d9d3d6f8bd209a8408914c4e1b80f85ef`, retains native app **0.3.112** across npm, Cargo and Tauri metadata. No package manifests or lockfiles changed in these two source commits. CI installs Linux `libasound2-plugins` for JACK smoke coverage, retains Extended npm/RustSec audits and requires a genuinely executed audio test. This does not establish a newly fixed vulnerability or new-SHA CI success. Previous Extended `c2c3789c` push CI passed 11/11 jobs.
+
+
 **Status:** Opening baseline inherited from [0.11.0](../0.11.0/dependency-security.md); no new remediation is claimed for the 0.12.0 cycle.
 
 Preserve the existing security remediations and compatible overrides, including the previously documented Rust `zip` 9.0.5 update (first applied in the 0.10.0 cycle). Do not describe inherited patches as new security fixes. The fork's native application version is 0.3.101 at opening; this is independent of Extended 0.12.0 documentation.

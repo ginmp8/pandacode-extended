@@ -1,5 +1,13 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — source 9aa88776 reconciliation
+
+- [x] Pin fork `main` source SHA `9aa88776f07c2274134e4a952ffcd7da71e70e50`, tree `bd360c6d9d3d6f8bd209a8408914c4e1b80f85ef`, and native version `0.3.112`.
+- [x] Import four changed upstream files byte/mode-exact, reconcile CI without dropping Extended jobs and strengthen `tests/ci-audio-smoke.test.mjs`.
+- [x] Preserve the planned Extended `0.12.0` DRAFT marker and original upstream notes.
+- [ ] Verify published candidate against complete Git trees, exact new-SHA CI, real microphone fallback and native Settings On/Off independently.
+
+
 **Status:** New development cycle (opened 2026-11-07). No 0.12.0 source release approval, tag, GitHub Release, installer, npm publication or deployment.
 
 ## Opening baseline

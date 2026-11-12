@@ -1,5 +1,10 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — release-smoke false-positive prevention
+
+[fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50) fixes the possibility that an overly narrow Rust `--exact` filter silently passes with zero tests; the smoke now verifies exactly one passing test, and an Extended regression assertion covers both jobs. The JACK/OSS fallback test distinguishes dictation from microphone-probe errors. This is inherited behavior and stronger test coverage, not proof of native acceptance or a verified Extended product defect. Final CI for the newly integrated Extended SHA, real Linux microphone/JACK/OSS and Settings On/Off/external integration flows remain outstanding.
+
+
 **Status:** Initial register inherited from [0.11.0](../0.11.0/known-issues.md). An unverified scenario is **not** a confirmed bug. Do not silently declare prior gaps fixed or regressions present.
 
 | Area | Opening classification | Evidence needed before 0.12.0 release |

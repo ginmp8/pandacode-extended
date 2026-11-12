@@ -1,5 +1,12 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — JACK/OSS fallback and no-empty-smoke CI import
+
+The current unreleased [fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50) (Git tree `bd360c6d9d3d6f8bd209a8408914c4e1b80f85ef`, application **0.3.112**) advances two source commits since `eb78ef90`. Five upstream paths changed: Linux JACK/OSS dictation-versus-microphone-probe documentation, the original `releases/0.3.112.md`, a test-only recording helper in `voice/capture.rs`, real-audio fallback and latency assertions, and release-profile CI. Four paths are imported byte/mode-exact; `.github/workflows/ci.yml` is reconciled to require one passing ignored release-audio smoke test, install ALSA plugins for JACK fallback, and cancel only superseded PR runs. Existing Extended security checks, Expo, Windows ARM64, APT recovery and macOS timeouts remain. The Extended CI test now validates the new smoke contract. Source application manifests remain 0.3.112.
+
+Previous Extended `c2c3789c` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43182030651) passed 11/11 jobs; [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43182038440) had 10/11 completed successfully and macOS ARM64 in progress at inspection. The new publication SHA needs independent CI; native Settings On/Off, real devices, cloud/VM, MCP and Connect integrations are not proven by static inventory. Planned Extended **0.12.0 remains DRAFT**.
+
+
 **Status (opened 2026-11-07):** Planned documentation and integration cycle, not a released, approved, tagged or distributed build.
 
 Extended 0.12.0 starts from the completed [0.11.0 source baseline](../0.11.0/README.md). The opening `base/development` commit has `base/hardened` `642b25777b5a3d1600107ff4b9b23604ea90e8a2` as its sole parent. The 0.11.0 `main` has an equivalent Git tree but different rebase commit history. This new cycle introduces documentation scaffolding, **not an upstream source-version bump**.

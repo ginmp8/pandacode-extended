@@ -1,5 +1,10 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — inherited audio and CI update
+
+[fork `9aa88776`](https://github.com/ginmp8/pandacode/commit/9aa88776f07c2274134e4a952ffcd7da71e70e50) changes only voice-test helpers/tests, voice documentation, upstream notes and CI. No Extended Settings behavior is modified, suppressed or made more restrictive. The inherited JACK/OSS **dictation** path falls back to the default input when a saved JACK/OSS backend fails; **Test microphone** reports the error. Native hardware acceptance remains outstanding. Existing Extended On/Off controls for bots, updates, Connect, MCP, cloud/VM and credential transfer remain untouched and are not verified by this import.
+
+
 **Status:** Inherited control surface at the 0.11.0 baseline. No new 0.12.0 control or native acceptance is claimed.
 
 Start from the [0.11.0 feature-controls record](../0.11.0/feature-controls.md) and the [full upstream parity contract](../upstream/parity-contract.md). Preserve existing Extended controls for automatic updates, Connect/remote access, paused bots, external MCP, cloud credentials and cloud/VM operations. Keep upstream code paths functional when the corresponding feature is enabled and authorized.

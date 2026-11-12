@@ -544,10 +544,14 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     }
     let sequence: i64 = raw_id.parse().map_err(|_| "GitHub delivery identity exceeded native cursor range.")?;
     if sequence <= 0 { return Err("Invalid authenticated GitHub delivery identity.".into()); }
-    let number = match kind {
-        "pull_request.opened" | "pull_request_review.submitted" =>
-            raw.pointer("/payload/pull_request/number").and_then(|v| v.as_u64()),
-        _ => raw.pointer("/payload/issue/number").and_then(|v| v.as_u64()),
+    // Every recognized PR lifecycle/review/diff-comment event is keyed by
+    // payload.pull_request.number. Only Issues/IssueComment Events have an
+    // issue object. Never fall back across types: that would misassociate an
+    // event with a different thread supplied in untrusted payload fields.
+    let number = if kind.starts_with("pull_request") {
+        raw.pointer("/payload/pull_request/number").and_then(|v| v.as_u64())
+    } else {
+        raw.pointer("/payload/issue/number").and_then(|v| v.as_u64())
     }.ok_or("Authenticated GitHub event has no exact issue/PR number.")?;
     if number == 0 || number > 999_999_999_999 {
         return Err("Authenticated GitHub thread number is outside the supported range.".into());
@@ -1060,6 +1064,23 @@ mod tests {
         let mut missing_pr = valid.clone();
         missing_pr["payload"]["pull_request"] = serde_json::json!({});
         assert!(authenticated_event(&src, &missing_pr).is_err());
+        // A forged issue number must never become a fallback identity when
+        // the declared event type is a review or pull-request event.
+        for (event_type, action) in [
+            ("PullRequestEvent", "closed"),
+            ("PullRequestReviewEvent", "updated"),
+            ("PullRequestReviewCommentEvent", "created"),
+        ] {
+            let mut malformed = valid.clone();
+            malformed["type"] = serde_json::json!(event_type);
+            malformed["payload"]["action"] = serde_json::json!(action);
+            malformed["payload"]["pull_request"] = serde_json::json!({});
+            malformed["payload"]["issue"] = serde_json::json!({"number": 99});
+            let configured = create_source(&store, "orch", "owner/repo", "trusted-bot",
+                github_kind(&malformed).unwrap()).unwrap();
+            let source_for_kind = set_mode(&store, &configured.id, configured.policy_revision, "observe").unwrap();
+            assert!(authenticated_event(&source_for_kind, &malformed).is_err());
+        }
         let mut wrong_repo = valid.clone();
         wrong_repo["repo"]["name"] = serde_json::json!("other/repo");
         assert!(authenticated_event(&src, &wrong_repo).is_err());

@@ -1869,6 +1869,10 @@ fn prepare_cloud_attach(
     stopped: Arc<AtomicBool>,
 ) -> Result<PreparedRun> {
     let session_id = session.id.clone();
+    // Cloud reattachment is a separate provider entrypoint from normal run
+    // preparation. Never let a task-owned SuperAgent session reattach through
+    // this unrestricted path (reviewer_boundary=false, reviewer_policy=None).
+    superagent::guard_cloud_attach(store, &session_id)?;
     let cloud = cloud_agents::load(store, &session_id)?
         .filter(|cloud| cloud.active())
         .ok_or("This cloud run already ended.")?;

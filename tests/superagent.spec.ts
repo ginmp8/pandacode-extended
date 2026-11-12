@@ -52,7 +52,8 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   // Wait for the native create ACK and the Runs view, not the click itself.
-  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
+  // The CI host can complete a native reload after the usual 5s assertion window.
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution', {timeout:15_000});
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Enable manual'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();

@@ -1403,6 +1403,18 @@ pub(crate) fn read_only_policy(
     Ok(None)
 }
 
+/// Cloud reattachment skips the normal native provider policy preparation.
+/// Even a currently valid read-only assignment must fail closed here until a
+/// cloud adapter can enforce its mandate at every provider/tool admission.
+/// A settled, revoked or detached task also fails; ordinary cloud sessions
+/// retain the original attach behavior.
+pub(crate) fn guard_cloud_attach(store: &Store, session_id: &str) -> Result<()> {
+    if read_only_policy(store, session_id)?.is_some() {
+        return Err("policy_unsupported: SuperAgent task cannot attach through an unrestricted cloud provider.".into());
+    }
+    Ok(())
+}
+
 /// Require a pre-existing, active native assignment before a message may enter
 /// the internal SuperAgent gateway channel. This check runs before the gateway
 /// creates a bot thread or parses commands, so an external sender or a stale
@@ -3463,6 +3475,27 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn superagent_cloud_reconnect_is_denied_before_unrestricted_provider_admission() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Inspect disposable fixture",
+            "cloud-reconnect-guard", false,
+        ).unwrap();
+        assert!(launched);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let active_error = guard_cloud_attach(&store, &sid).unwrap_err();
+        assert!(active_error.contains("policy_unsupported"));
+        assert!(active_error.contains("unrestricted cloud"));
+        // An unrelated ordinary cloud session is not affected by this
+        // SuperAgent-specific gate.
+        assert!(guard_cloud_attach(&store, "unrelated-session").is_ok());
+        stop(&store, &ticket.id).unwrap();
+        assert!(guard_cloud_attach(&store, &sid).is_err(),
+            "A revoked task must never reattach with ambient cloud permissions");
     }
 
     #[test]

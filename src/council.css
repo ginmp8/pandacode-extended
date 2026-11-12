@@ -129,6 +129,19 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-review-permissions input[type="text"]{width:100%;min-width:0;border:1px solid var(--border);border-radius:var(--ds-radius-control);padding:6px;background:var(--bg);color:var(--text)}
 .council-review-permissions small{color:var(--muted);font-size:var(--ds-text-meta)}
 
+/* The task strategy is compact on short viewports; keep the original Council controls visible. */
+.council-strategy-field{display:grid;gap:4px;min-width:0}
+.council-strategy-field label{display:grid;gap:3px;color:var(--text);font-size:var(--ds-text-meta)}
+.council-strategy-field select{width:100%;min-width:0;min-height:28px;padding:3px 7px;border:1px solid var(--border);border-radius:var(--ds-radius-control);background:var(--bg);color:var(--text)}
+.council-strategy-field small{font-size:var(--ds-text-meta);color:var(--muted)}
+@media(max-height:480px){
+  .council-panel:not([data-compact]) .council-strategy-field{gap:0}
+  .council-panel:not([data-compact]) .council-strategy-field label{display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .council-panel:not([data-compact]) .council-strategy-field select{flex:0 1 155px;width:155px}
+  .council-panel:not([data-compact]) .council-strategy-field small{display:none}
+}
+.council-strategy-field select:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
 /* #147: a collapsible task-criteria editor in the existing Council modal. */
 .council-criteria{border-top:1px solid var(--border);padding-top:7px}
 /* A closed disclosure shares the title row instead of adding an extra row.

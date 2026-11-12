@@ -624,7 +624,7 @@ export function createCouncil(host: CouncilHost) {
       // Tab and Shift+Tab always move inside the panel, in document order (the switch, each row's stop, the footer
       // checkbox), wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
       if (event.key !== 'Tab' || !panel?.contains(document.activeElement)) return;
-      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled), details > summary')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement), dir = event.shiftKey ? -1 : 1;

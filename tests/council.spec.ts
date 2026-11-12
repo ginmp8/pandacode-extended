@@ -193,7 +193,8 @@ test('Council inspector denial remains accessible on narrow screens', async ({ p
 
 
 test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {
-  await open(page, '/?council');
+  // Start without a Council: strategy selection remains staged until the explicit enable.
+  await open(page, '/');
   await button(page).click();
   const strategy = panel(page).getByLabel('Review strategy');
   await expect(strategy).toHaveValue('parallel');
@@ -966,8 +967,8 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
   await open(page, '/?council');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();
-  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.classList.contains('council-criteria-toggle') ? 'criteria' : active.closest<HTMLElement>('[data-field]')!.dataset.field!) : `outside:${active.tagName}`; });
-  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'criteria', 'new'];
+  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.classList.contains('council-criteria-toggle') ? 'criteria' : active.matches('.council-inspection > summary') ? 'inspector' : active.matches('[data-council-strategy]') ? 'strategy' : active.closest<HTMLElement>('[data-field]')?.dataset.field ?? 'unmapped') : `outside:${active.tagName}`; });
+  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'strategy', 'criteria', ...(await panel(page).locator('.council-inspection > summary').count() ? ['inspector'] : []), 'new'];
   const seen: string[] = [];
   for (let step = 0; step < order.length; step++) { seen.push(await where()); await page.keyboard.press('Tab'); }
   expect(seen).toEqual(order);
@@ -983,6 +984,8 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
         : active.classList.contains('council-switch') ? 'switch'
         : active.classList.contains('council-new-threads') ? 'new'
         : active.classList.contains('council-criteria-toggle') ? 'criteria'
+        : active.matches('.council-inspection > summary') ? 'inspector'
+        : active.matches('[data-council-strategy]') ? 'strategy'
         : field?.dataset.field ?? 'unmapped';
       (window as any).__councilFocusTrail.push(location);
     }, true);

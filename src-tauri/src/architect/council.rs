@@ -1165,7 +1165,7 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
         {
             continue;
         }
-        for (worker, seat) in in_round(team, round)
+        for (worker, _) in in_round(team, round)
             .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
         {
             if !seen.insert(worker.id.as_str()) {

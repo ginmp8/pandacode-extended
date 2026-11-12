@@ -119,3 +119,16 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-review-permissions label:has([data-council-path]){align-items:flex-start;flex-direction:column}
 .council-review-permissions input[type="text"]{width:100%;min-width:0;border:1px solid var(--border);border-radius:var(--ds-radius-control);padding:6px;background:var(--bg);color:var(--text)}
 .council-review-permissions small{color:var(--muted);font-size:var(--ds-text-meta)}
+
+/* #147: a collapsible task-criteria editor in the existing Council modal. */
+.council-criteria{border-top:1px solid var(--border);padding-top:7px}
+.council-criteria [hidden]{display:none}
+.council-criteria-toggle{width:100%;min-height:28px;text-align:left;color:var(--text)}
+.council-criteria-editor,.council-criteria-fields,.council-criteria-rows{display:grid;gap:8px;padding-top:7px}
+.council-criteria-editor>label,.council-criterion-row label{display:grid;gap:3px;color:var(--text);font-size:var(--ds-text-meta)}
+.council-criterion-row{display:grid;gap:6px;min-width:0;margin:0;padding:8px;border:1px solid var(--border);border-radius:var(--ds-radius-control)}
+.council-criterion-row legend{padding:0 4px;color:var(--muted);font-size:var(--ds-text-meta)}
+.council-criteria :is(input:not([type="checkbox"]),select){width:100%;min-width:0;max-width:100%;padding:6px;border:1px solid var(--border);border-radius:var(--ds-radius-control);background:var(--bg);color:var(--text)}
+.council-criterion-row label:has(input[type="checkbox"]){display:flex;align-items:center;gap:6px}
+.council-criterion-row input[type="checkbox"]{width:14px;height:14px;margin:0;accent-color:var(--ds-primary-bg)}
+.council-criteria :is(button,input,select):focus-visible{outline:2px solid var(--focus);outline-offset:2px}

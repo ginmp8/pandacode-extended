@@ -3,6 +3,7 @@ import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type CouncilConfig, type TeamSnapshot } from './architect-types';
 import type { ProviderId } from './types';
+import { createCouncilCriteriaEditor } from './council-criteria-editor';
 import { COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilDefaults, councilForNewThreads, setCouncilForNewThreads, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
@@ -414,6 +415,15 @@ export function createCouncil(host: CouncilHost) {
     panel.setAttribute('aria-labelledby', 'council-title');
     panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
     document.body.append(panel);
+    if (!panel.dataset.compact) {
+      const editor = createCouncilCriteriaEditor(
+        shownConfig(sessionId) ?? councilDefaults(),
+        () => shownConfig(sessionId),
+        config => { void apply(sessionId, config, !anchor.closest('.council-strip')); },
+        reason => selectedError(sessionId, reason),
+      );
+      panel.querySelector<HTMLElement>('.council-foot')!.before(editor);
+    }
     // Compact (from the strip): only the row it opened on, titled by what it does (a heading, no longer the switch's label).
     if (panel.dataset.compact) {
       for (const row of panel.querySelectorAll<HTMLElement>('[data-field-row]')) row.hidden = row.dataset.fieldRow !== panel.dataset.compact;
@@ -552,7 +562,7 @@ export function createCouncil(host: CouncilHost) {
       // Tab and Shift+Tab always move inside the panel, in document order (the switch, each row's stop, the footer
       // checkbox), wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
       if (event.key !== 'Tab' || !panel?.contains(document.activeElement)) return;
-      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement), dir = event.shiftKey ? -1 : 1;

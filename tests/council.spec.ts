@@ -45,6 +45,67 @@ const settle = async (page: Page) => { await expect(button(page)).toBeVisible();
 
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
+
+test('Council criteria editor saves task-scoped user criteria without altering legacy defaults', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await expect(criteria.getByLabel('Criteria source')).toBeHidden();
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await criteria.getByLabel('Criterion ID').fill('security');
+  await criteria.getByLabel('Review lens').fill('Security');
+  await criteria.getByLabel('Minimum score').fill('9.8');
+  await criteria.getByLabel('Require native evidence (blocks until verified)').check();
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].criteriaSource).toBe('user');
+  expect((await calls(page))[0].criteria).toEqual([{ id: 'security', lens: 'Security', target: 9.8, required: true, evidenceRequired: true }]);
+});
+
+test('Council criteria editor rejects duplicate lenses atomically and supports hybrid anchors', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await criteria.getByLabel('Criteria source').selectOption('hybrid');
+  await criteria.getByLabel('Criterion ID').fill('security');
+  await criteria.getByLabel('Review lens').fill('Security');
+  await criteria.getByRole('button', { name: 'Add criterion' }).click();
+  await criteria.getByLabel('Criterion ID').nth(1).fill('quality');
+  await criteria.getByLabel('Review lens').nth(1).fill('Security');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('unique criterion IDs and lenses');
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByLabel('Review lens').nth(1).fill('Reliability');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].criteriaSource).toBe('hybrid');
+  expect((await calls(page))[0].criteria).toHaveLength(2);
+});
+
+test('Council criterion editor remains keyboard accessible on a narrow viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await expect(criteria.getByLabel('Criterion ID')).toBeVisible();
+  const bounds = await panel(page).boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await expect(button(page)).toBeFocused();
+});
+
 test('selected configured bots are task-scoped, attributed by ID, and automatic reviewers remain the default', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();

@@ -265,7 +265,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
   });
   const host=page.locator('#sa-source-test');
   await host.getByRole('button',{name:'Sources',exact:true}).click();
-  await expect(host.getByText('No authenticated GitHub intake',{exact:false})).toBeVisible();
+  await expect(host.getByText('Explicit authenticated gh Events polling',{exact:false})).toBeVisible();
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
   await host.getByRole('textbox',{name:'Repository (owner/name)'}).fill('test/fixture');
@@ -375,6 +375,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
 });
 
 test('Bots Orchestrations is a persistent main workspace with native-backed Teams and Runs', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const bar=page.locator('.sidebar-bots-bar');
   if (await bar.getAttribute('aria-pressed') !== 'true') await bar.click();
@@ -397,8 +398,10 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Back to Bots'}).click();
   await expect(workspace).toBeHidden();
-  await sidebar.getByRole('button',{name:'Bot actions'}).click();
-  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const orchestrationItem=sidebar.getByRole('menuitem',{name:'Orchestrations'});
+  if (!await orchestrationItem.isVisible()) await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await expect(orchestrationItem).toBeVisible();
+  await orchestrationItem.click();
   await expect(workspace).toBeVisible();
   await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();

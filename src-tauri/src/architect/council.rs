@@ -1190,6 +1190,31 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     passing_rounds >= 2
 }
 
+/// An S2 score/required-criterion failure is a deterministic escalation
+/// trigger. A later passing round must use distinct native worker identities:
+/// reusing a scored reviewer is not an independent on-demand review. This
+/// does not add reviewer sources or relax the normal stale/evidence gates.
+fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
+    if config.strategy != CouncilExecutionStrategy::Escalated || config.force_escalation {
+        return true;
+    }
+    let last_trigger = (1..=view.latest).rev().find(|&round| {
+        in_round(team, round).any(|(worker, seat)| counts(worker, seat)
+            && seat.score.is_some_and(|score| score < config.target))
+            || !criterion_blockers(team, config, round).is_empty()
+    });
+    let Some(trigger_round) = last_trigger else { return true };
+    if view.latest <= trigger_round || !view.complete(view.latest) {
+        return false;
+    }
+    let prior_ids: std::collections::HashSet<&str> = (1..=trigger_round)
+        .flat_map(|round| in_round(team, round).map(|(worker, _)| worker.id.as_str()))
+        .collect();
+    in_round(team, view.latest)
+        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
+        .all(|(worker, _)| !prior_ids.contains(worker.id.as_str()))
+}
+
 /// The verdict from a view the caller already computed.
 fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Option<(String, bool)> {
     if !config.nested_bot_reviewers.is_empty() {
@@ -1212,6 +1237,12 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
         && !forced_escalation_satisfied(team, config, view)
     {
         return Some(("S2 forced escalation reached the round limit without two fresh passing rounds on the same artifact; only an attributed user exception may close it.".into(), false));
+    }
+    if config.strategy == CouncilExecutionStrategy::Escalated && !config.force_escalation
+        && view.at_limit(config) && !live(team, round) && view.complete(round)
+        && !automatic_escalation_satisfied(team, config, view)
+    {
+        return Some(("S2 escalation reached the round limit without a fresh independent native review after a failing score or required criterion; only explicit user acceptance can close this exception.".into(), false));
     }
     // The limit is the user's brake: no further round can open. The lead finishes once nothing is live
     // and the last round is complete, out of date, or full; a current round it can still fill comes first.
@@ -1256,6 +1287,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     if low >= config.target {
         if !forced_escalation_satisfied(team, config, view) {
             return Some(("S2 forced escalation requires a fresh second native Council round from the same enabled reviewer sources; earlier or stale scores are not approval.".into(), false));
+        }
+        if !automatic_escalation_satisfied(team, config, view) {
+            return Some(("S2 automatic escalation requires a fresh independent native reviewer round from the same enabled sources after a failing score or required criterion.".into(), false));
         }
         return None;
     }
@@ -1305,13 +1339,14 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
     } else if live(team, round) {
         "reviewing"
     } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && low.is_some_and(|low| low >= config.target)
-        && forced_escalation_satisfied(team, config, view) {
+        && forced_escalation_satisfied(team, config, view)
+        && automatic_escalation_satisfied(team, config, view) {
         "passed"
     } else if view.at_limit(config) {
         "limit"
-    } else if !view.complete(round) || (config.force_escalation
-        && config.strategy == CouncilExecutionStrategy::Escalated
-        && !forced_escalation_satisfied(team, config, view)
+    } else if !view.complete(round) || (config.strategy == CouncilExecutionStrategy::Escalated
+        && (!forced_escalation_satisfied(team, config, view)
+            || !automatic_escalation_satisfied(team, config, view))
         && low.is_some_and(|score| score >= config.target) && !stale) {
         "dispatch"
     } else {

@@ -560,6 +560,35 @@ fn native_user_forced_s2_requires_two_fresh_independent_rounds_before_pass() {
 }
 
 #[test]
+fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_source() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    assert!(!config.force_escalation);
+    let mut team = team_with(config.clone(), vec![
+        seat("original-a", 1, Some(9.4), SINCE + 1),
+        seat("original-b", 1, Some(9.5), SINCE + 2),
+    ]);
+    // S2 does not require a second round without a deterministic trigger.
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    team.workers[0].council.as_mut().unwrap().score = Some(8.0);
+    assert_eq!(council::status(&team).unwrap().state, "fixing");
+    team.changed_at = SINCE + 3; // Work was corrected after the low score.
+    let mut first = seat("fresh-a", 2, Some(9.6), SINCE + 4);
+    first.council.as_mut().unwrap().lens = "lens original-a".into();
+    let mut second = seat("fresh-b", 2, Some(9.7), SINCE + 5);
+    second.council.as_mut().unwrap().lens = "lens original-b".into();
+    team.workers.extend([first, second]);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+    let mut replay = team.clone();
+    replay.workers[2].id = "original-a".into();
+    assert_ne!(council::status(&replay).unwrap().state, "passed");
+    assert!(finish_refusal(&replay).unwrap().contains("S2 automatic escalation"));
+    replay.config.council.as_mut().unwrap().max_rounds = 2;
+    assert!(finish_refusal(&replay).unwrap().contains("S2 escalation reached the round limit"));
+}
+
+#[test]
 fn escalated_native_source_policy_preserves_legacy_modes_and_denies_unimplemented_phase_two() {
     let original = on(9.0, 4, 2);
     assert_eq!(serde_json::to_value(&original).unwrap(),

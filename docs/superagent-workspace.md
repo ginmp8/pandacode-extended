@@ -67,3 +67,17 @@ comment bodies are not included in decision receipts. Off performs no network
 polling, and linked source events remain context only, not task grants or tool
 instructions. This intentionally reuses the existing policy-denial receipt
 schema without a destructive migration.
+
+
+### Native execution graph (bounded ownership view)
+
+In the Demand inspector, **Inspect graph** reads `superagent_graph`
+from the same native Ticket/Assignment storage and displays a revision-bound
+Ticket root, its latest 50 real assignment attempts and any explicitly
+pending human or Council decision state. Edges mean **Ticket owns attempt**
+or **Ticket awaits decision**, not proof of agent-to-agent delegation or
+Council approval. The response omits objectives, authorization tokens,
+worker results and private transcripts. The graph is loaded on demand,
+fails closed when the Ticket revision has changed, and creates no work or
+grants. Keyboard users and screen readers receive a semantic ordered
+list; a non-SVG layout keeps narrow and high-contrast modes legible.

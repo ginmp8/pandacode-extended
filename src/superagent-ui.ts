@@ -53,6 +53,15 @@ interface EventSource {
 interface ThreadLink {
   sourceId: string; ticketId: string; repository: string; subjectKey: string; createdAt: number;
 }
+interface RunGraphNode {
+  id: string; kind: string; state: string; label: string;
+  botId: string | null; attempt: number | null; active: boolean;
+}
+interface RunGraphEdge { from: string; to: string; relation: string }
+interface RunGraph {
+  ticketId: string; ticketRevision: number; truncatedAttempts: boolean;
+  nodes: RunGraphNode[]; edges: RunGraphEdge[];
+}
 interface SourceDecision {
   sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
   decision: string; sequence: number; policyRevision: number; at: number;
@@ -79,6 +88,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
+  let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let roleRoster: TeamRoster | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -176,6 +186,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '">Inspect attempt ' + item.attempt + '</button></li>').join('') ||
           '<li>No worker assigned.</li>') +
         '</ul>' + attemptDetails +
+        '<section class="sa-run-graph" role="region" aria-label="Native run graph">' +
+        '<h5>Execution graph</h5><p>Native Ticket ownership edges only. ' +
+        'No inferred collaboration, child delegation or Council approval.</p>' +
+        '<button type="button" data-sa-load-run-graph>Inspect graph</button>' +
+        (runGraphLoaded && runGraph && runGraph.ticketId === inspected.id &&
+         runGraph.ticketRevision === ticketDetails.ticket.revision
+          ? '<ol class="sa-run-graph-nodes">' +
+            (runGraph.nodes.map(node => '<li><strong>' + safe(node.label) + '</strong>' +
+              ' · ' + safe(node.state) +
+              (node.botId ? ' · Bot ' + safe(botName(node.botId)) : '') +
+              (node.active ? ' · Active native assignment' : '') +
+              '<small>' + (node.kind === 'ticket' ? 'Root Ticket' :
+                runGraph!.edges.find(edge => edge.to === node.id)?.relation === 'owns_attempt'
+                  ? 'Ticket owns attempt' : 'Ticket awaits decision') +
+              '</small></li>').join('') || '<li>No durable nodes.</li>') +
+            '</ol>' + (runGraph.truncatedAttempts
+              ? '<p>Only the latest 50 attempts are shown.</p>' : '') :
+            '<p>Graph not loaded.</p>') + '</section>' +
         '<section class="sa-effect-receipts" role="region" aria-label="Native effect receipts">' +
         '<h5>External effect receipts</h5><p>Read-only native identity and state. ' +
         'Pending may still be running; uncertain requires independent provider reconciliation. ' +
@@ -501,6 +529,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
+    runGraph = null; runGraphLoaded = false;
     const [snapshot, links] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
@@ -659,6 +688,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandObjective = objective;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-run-graph')) {
+      const ticketId = inspectedTicket;
+      if (ticketId && ticketDetails) void work(async () => {
+        const graph = await call<RunGraph>('superagent_graph',{ticketId});
+        if (inspectedTicket !== ticketId) return;
+        if (graph.ticketRevision !== ticketDetails?.ticket.revision) {
+          throw new Error('Native Ticket revision changed; refresh the Inspector before viewing its graph.');
+        }
+        runGraph = graph; runGraphLoaded = true;
       });
       return;
     }

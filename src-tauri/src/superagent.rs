@@ -592,6 +592,86 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     Ok(result)
 }
 
+
+/// Native, bounded Ticket execution graph. Every edge is a durable
+/// Ticket->Assignment ownership relation, not inferred agent delegation.
+/// Review is a status node only; this does not fabricate Council approval.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraphNode {
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    pub label: String,
+    pub bot_id: Option<String>,
+    pub attempt: Option<i64>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraphEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraph {
+    pub ticket_id: String,
+    pub ticket_revision: i64,
+    pub truncated_attempts: bool,
+    pub nodes: Vec<RunGraphNode>,
+    pub edges: Vec<RunGraphEdge>,
+}
+
+fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
+    // Same native snapshot transaction as the Inspector, not a client-side
+    // graph built from unrelated Ticket and Assignment revisions.
+    let snapshot = ticket_snapshot(store, ticket_id, 50)?;
+    let ticket = snapshot.ticket;
+    let root_id = format!("ticket:{}", ticket.id);
+    let mut nodes = vec![RunGraphNode {
+        id: root_id.clone(), kind: "ticket".into(),
+        state: ticket.state.clone(), label: "Demand / Ticket".into(),
+        bot_id: None, attempt: None, active: false,
+    }];
+    let mut edges = Vec::new();
+    for assignment in snapshot.assignments.iter().rev() {
+        let id = format!("assignment:{}", assignment.id);
+        nodes.push(RunGraphNode {
+            id: id.clone(), kind: "assignment".into(),
+            state: assignment.state.clone(), label: format!("Attempt {}", assignment.attempt),
+            bot_id: Some(assignment.bot_id.clone()), attempt: Some(assignment.attempt),
+            active: ticket.state == "running" && assignment.state == "running"
+                && ticket.active_assignment_id.as_deref() == Some(assignment.id.as_str()),
+        });
+        edges.push(RunGraphEdge {
+            from: root_id.clone(), to: id, relation: "owns_attempt".into(),
+        });
+    }
+    if ticket.state == "waiting_approval" || ticket.state == "waiting_review" {
+        let id = format!("decision:{}", ticket.id);
+        nodes.push(RunGraphNode {
+            id: id.clone(), kind: "pending_decision".into(),
+            state: ticket.state.clone(),
+            label: if ticket.state == "waiting_review" {
+                "Native Council verification required".into()
+            } else { "Human decision pending".into() },
+            bot_id: None, attempt: None, active: false,
+        });
+        edges.push(RunGraphEdge {
+            from: root_id, to: id, relation: "awaits_decision".into(),
+        });
+    }
+    Ok(RunGraph {
+        ticket_id: ticket.id, ticket_revision: ticket.revision,
+        truncated_attempts: snapshot.assignments.len() == 50,
+        nodes, edges,
+    })
+}
+
 /// A one-shot local CLI inspector is deliberately read-only: it must not run
 /// Store::open's migration/restart settlement behind a live serve process.
 /// Return bounded operational metadata, never the task objective, worker result,
@@ -1948,6 +2028,15 @@ pub async fn superagent_effect_receipts(
 }
 
 #[tauri::command]
+pub async fn superagent_graph(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
+) -> Result<RunGraph> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    run_graph(&store, &ticket_id)
+}
+
+#[tauri::command]
 pub async fn superagent_snapshot(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
     ticket_id: String, limit: Option<i64>,
@@ -2418,6 +2507,39 @@ mod tests {
         assert!(!stopped.attempt_insights[0].current_assignment);
         assert!(stopped.attempt_insights[0].mandate_revoked);
         assert_eq!(stopped.attempt_insights[0].remaining_run_budget_ms, None);
+    }
+
+
+    #[test]
+    fn native_run_graph_uses_only_durable_ticket_attempt_edges_and_is_redacted() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &config.id,
+            "Private graph objective", "graph-1", false).unwrap();
+        assert!(launched);
+        let graph = run_graph(&store, &ticket.id).unwrap();
+        assert_eq!(graph.ticket_id, ticket.id);
+        assert_eq!(graph.ticket_revision, ticket.revision);
+        assert!(!graph.truncated_attempts);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].relation, "owns_attempt");
+        assert_eq!(graph.edges[0].from, format!("ticket:{}", ticket.id));
+        assert_eq!(graph.nodes[1].kind, "assignment");
+        assert_eq!(graph.nodes[1].attempt, Some(1));
+        assert!(graph.nodes[1].active);
+        let serialized = serde_json::to_string(&graph).unwrap();
+        assert!(!serialized.contains("Private graph objective"));
+        assert!(!serialized.contains("authorizationId"));
+        assert!(run_graph(&store, "another-ticket").is_err());
+        stop(&store, &ticket.id).unwrap();
+        let after = run_graph(&store, &ticket.id).unwrap();
+        assert!(!after.nodes[1].active);
+        assert_eq!(after.nodes[0].state, "stopped");
+        let total: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(total,1,"Graph inspection must not launch another demand");
     }
 
     #[test]

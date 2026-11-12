@@ -89,3 +89,13 @@
 .sa-assignment-inspector dd{min-width:0;margin:0;overflow-wrap:anywhere}
 @media(min-width:1400px){.sa-demand-board{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:700px){.sa-demand-board{grid-template-columns:minmax(0,1fr)}.sa-assignment-inspector dl{grid-template-columns:minmax(0,1fr)}}
+
+/* Native Ticket->Assignment ownership graph: text-first, accessible and legible
+   at compact width, without inventing topology not present in SQLite. */
+.sa-run-graph{border:1px solid var(--ds-border);background:var(--ds-card);border-radius:var(--radius-sm);padding:12px;max-width:100%;min-width:0}
+.sa-run-graph-nodes{list-style:none;display:grid;gap:12px;padding:0;margin:12px 0}
+.sa-run-graph-nodes li{border-left:3px solid var(--ds-border-strong);padding:8px 12px;background:var(--ds-raised);overflow-wrap:anywhere}
+.sa-run-graph-nodes li:first-child{border-left-width:5px}
+.sa-run-graph-nodes small{display:block;font-size:var(--text-xs);color:var(--muted)}
+.sa-run-graph button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+@media(prefers-contrast:more){.sa-run-graph-nodes li{border-left-color:var(--text)}}

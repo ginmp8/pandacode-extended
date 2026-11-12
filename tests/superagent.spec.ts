@@ -825,3 +825,61 @@ test('native cross-Team review inbox exposes pending states without synthetic Co
   expect(commands.filter(c=>c==='superagent_review_inbox')).toHaveLength(1);
   expect(commands.some(c=>/submit|dispatch|accept|reserve/.test(c))).toBe(false);
 });
+
+test('native Run graph is lazy, revision-bound and read-only', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-run-graph-test'; document.body.appendChild(host);
+    const seen:string[]=[];
+    mountSuperagent(host, async command => {
+      seen.push(command);
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Graph Team',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:2
+      }] as never;
+      if(command==='superagent_tickets') return [{
+        id:'ticket',orchestrationId:'team',objective:'View actual assignment',
+        state:'running',revision:4,evidence:null
+      }] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket:{id:'ticket',orchestrationId:'team',objective:'View actual assignment',
+          state:'running',revision:4,evidence:null},
+        mandate:{actor:'operator',authorizationId:'manual',policyRevision:2,
+          projectId:'project',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[{id:'asgn',botId:'worker',sessionId:'session',attempt:1,
+          state:'running'}],activity:[]
+      } as never;
+      if(command==='superagent_graph') return {
+        ticketId:'ticket',ticketRevision:4,truncatedAttempts:false,
+        nodes:[
+          {id:'ticket:ticket',kind:'ticket',state:'running',label:'Demand / Ticket',botId:null,attempt:null,active:false},
+          {id:'assignment:asgn',kind:'assignment',state:'running',label:'Attempt 1',botId:'worker',attempt:1,active:true}
+        ],
+        edges:[{from:'ticket:ticket',to:'assignment:asgn',relation:'owns_attempt'}]
+      } as never;
+      throw Error('Unexpected command: '+command);
+    });
+    (window as unknown as {saGraphCalls:()=>string[]}).saGraphCalls=()=>seen;
+  });
+  const host=page.locator('#sa-run-graph-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const graph=host.getByRole('region',{name:'Native run graph'});
+  await expect(graph).toContainText('Graph not loaded.');
+  await graph.getByRole('button',{name:'Inspect graph'}).click();
+  await expect(graph).toContainText('Ticket owns attempt');
+  await expect(graph).toContainText('Active native assignment');
+  await expect(graph.getByRole('listitem')).toHaveCount(2);
+  await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saGraphCalls:()=>string[]}).saGraphCalls());
+  expect(calls.filter(c=>c==='superagent_graph')).toHaveLength(1);
+  expect(calls.some(c=>/submit|dispatch|accept|reserve/.test(c))).toBe(false);
+});

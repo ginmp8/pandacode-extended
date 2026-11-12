@@ -7,7 +7,7 @@ use crate::{bots, storage::{self, Store}, AppState, Result};
 pub(crate) mod manifest;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
-pub(crate) mod effects;
+pub mod effects;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};

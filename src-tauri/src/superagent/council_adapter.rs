@@ -46,6 +46,21 @@ struct FrozenTarget {
     bound_at: i64,
 }
 
+/// A full unique round must be newer than the frozen artifact.
+fn reviewers_started_after_binding<'a>(
+    required: usize, seats: impl Iterator<Item = (&'a str, i64)>, bound_at: i64,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_usize;
+    for (id, started_at) in seats {
+        if id.is_empty() || started_at < bound_at || !seen.insert(id) {
+            return false;
+        }
+        total += 1;
+    }
+    required > 0 && total == required
+}
+
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -165,12 +180,21 @@ pub(super) fn inspect(store: &Store, ticket: &Ticket) -> Result<Option<CouncilOb
             && target.council_config_sha256 == sha256(&config)).then_some(target.bound_at)
     });
     let review_started_after_binding = bound_at.is_some_and(|frozen_at| {
-        let mut seats = team.workers.iter()
-            .filter(|w| w.created_at >= team.council_since)
-            .filter_map(|w| w.council.as_ref())
-            .filter(|seat| seat.round == status.round);
-        status.round > 0 && seats.next().is_some_and(|s| s.started_at >= frozen_at)
-            && seats.all(|s| s.started_at >= frozen_at)
+        let Some(config) = team.config.council.as_ref() else { return false };
+        let required = if config.reviewer_bot_ids.is_empty() {
+            config.reviewers.max(2)
+        } else {
+            config.reviewer_bot_ids.len()
+        };
+        status.round > 0 && reviewers_started_after_binding(
+            required,
+            team.workers.iter()
+                .filter(|worker| worker.created_at >= team.council_since)
+                .filter_map(|worker| worker.council.as_ref()
+                    .filter(|seat| seat.round == status.round)
+                    .map(|seat| (worker.session_id.as_str(), seat.started_at))),
+            frozen_at,
+        )
     });
     Ok(Some(CouncilObservation {
         native_status,
@@ -190,6 +214,15 @@ mod tests {
     use crate::{bots, storage::{self, Store}, superagent::{self, NewOrchestration}};
     use rusqlite::params;
     use serde_json::json;
+
+    #[test]
+    fn partial_duplicate_and_stale_rounds_cannot_claim_fresh_review() {
+        assert!(!reviewers_started_after_binding(2, [("a",10)].into_iter(), 10));
+        assert!(!reviewers_started_after_binding(2, [("a",10),("a",11)].into_iter(), 10));
+        assert!(!reviewers_started_after_binding(2, [("a",9),("b",11)].into_iter(), 10));
+        assert!(!reviewers_started_after_binding(2, [("a",10),("b",11),("c",12)].into_iter(), 10));
+        assert!(reviewers_started_after_binding(2, [("a",10),("b",11)].into_iter(), 10));
+    }
 
     fn fixture() -> Store {
         let path = std::env::temp_dir().join(format!("sa-council-{}.sqlite3",storage::id()));

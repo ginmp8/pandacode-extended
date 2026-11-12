@@ -21,14 +21,14 @@ pub(crate) const RECOVER: &str =
     "UPDATE sa_effect_receipts SET state='uncertain',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';";
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Reservation {
+pub enum Reservation {
     Reserved,
     AlreadyPending,
     RequiresReconciliation,
     AlreadyApplied,
 }
 
-pub(crate) fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Result<Reservation> {
+pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Result<Reservation> {
     if key.is_empty() || key.len()>128 || !key.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'|b'.'|b':'))
         || payload.is_empty() || payload.len()>1_048_576 {
         return Err("Invalid or oversized effect identity.".into());
@@ -74,7 +74,7 @@ pub(crate) fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8])
     Ok(result)
 }
 
-pub(crate) fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
+pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?3
          WHERE ticket_id=?1 AND effect_key=?2 AND state IN ('pending','uncertain')",
@@ -86,7 +86,7 @@ pub(crate) fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
 
 /// Caller must verify the external provider result independently: this
 /// primitive neither executes an action nor infers success from a timeout.
-pub(crate) fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->Result<()>{
+pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->Result<()>{
     let digest=format!("{:x}",Sha256::digest(payload));
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='applied',updated_at=?4

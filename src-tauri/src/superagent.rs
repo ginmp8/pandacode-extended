@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS sa_assignments (
 CREATE UNIQUE INDEX IF NOT EXISTS sa_one_live_assignment_per_bot
   ON sa_assignments(bot_id) WHERE state='running';
 CREATE INDEX IF NOT EXISTS sa_assignment_ticket ON sa_assignments(ticket_id,created_at);
+
+-- A frozen review target is not a verdict: only the existing native Council
+-- can produce a verified review, and no target grants task-completion authority.
+CREATE TABLE IF NOT EXISTS sa_council_targets (
+  ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+  assignment_id TEXT NOT NULL REFERENCES sa_assignments(id) ON DELETE RESTRICT,
+  session_id TEXT NOT NULL,
+  ticket_revision INTEGER NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  artifact_sha256 TEXT NOT NULL,
+  council_since INTEGER NOT NULL,
+  council_generation INTEGER NOT NULL,
+  council_config_sha256 TEXT NOT NULL,
+  bound_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sa_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
@@ -1070,6 +1085,12 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,next,trimmed,now,assignment_id],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
+    // Atomically pin the native Council cycle and exact finished artifact,
+    // when this worker session already has a Council team. This is advisory:
+    // an unrelated or previously completed Council round never approves it.
+    if next == "waiting_approval" {
+        council_adapter::bind_finished(store, &task_id, &assignment_id, session_id)?;
+    }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,?2,?3,?4)",

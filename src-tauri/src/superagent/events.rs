@@ -1,8 +1,8 @@
 //! S4 native Off/Observe decisions and explicit local thread-to-task links.
 //! No inbound GitHub authentication, automatic subscription delivery,
 //! inferred worker admission or Auto tool effects exist here.
-//! Only the trusted local main-window preview can submit an envelope; external
-//! transports must authenticate independently before using these decisions.
+//! The public IPC intake refuses caller-supplied envelopes; the private
+//! decision logic is exercised only with synthetic unit-test events.
 use super::require_main_window;
 use crate::{storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
@@ -431,11 +431,14 @@ pub async fn superagent_source_set_mode(
 
 #[tauri::command]
 pub async fn superagent_source_observe(
-    window: tauri::WebviewWindow, state: State<'_,AppState>, event: EventEnvelope,
+    window: tauri::WebviewWindow, _state: State<'_,AppState>, _event: EventEnvelope,
 ) -> Result<EventDecision> {
     require_main_window(&window)?;
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    observe(&store,&event)
+    superagent_source_delivery_unavailable()
+}
+
+fn superagent_source_delivery_unavailable() -> Result<EventDecision> {
+    Err("GitHub event delivery is unavailable: no authenticated delivery adapter is configured.".into())
 }
 
 
@@ -530,6 +533,18 @@ mod tests {
         assert_eq!(valid.decision,"observed_permitted");
         let count: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|r|r.get(0)).unwrap();
         assert_eq!(count,0);
+    }
+    #[test]
+    fn caller_supplied_event_intake_fails_closed_without_authenticated_adapter() {
+        let (store,_) = fixture();
+        let cfg = create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        assert!(superagent_source_delivery_unavailable().is_err());
+        assert_eq!(source(&store,&cfg.id).unwrap().last_sequence, 0);
+        let receipts: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions WHERE source_id=?1",
+            [&cfg.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(receipts, 0);
     }
     #[test]
     fn failed_receipt_insert_rolls_back_cursor_and_is_safe_to_retry() {

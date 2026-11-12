@@ -558,6 +558,84 @@ pub(crate) fn inspect_headless_status(
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
+/// Bounded local task index for a one-shot CLI. Keep this read-only so it can
+/// run beside a healthy serve process without invoking Store::open recovery.
+/// Ticket objectives, evidence, assignment results and mandate identities are
+/// intentionally excluded from this operational listing.
+pub(crate) fn list_headless_tasks(database_path: &std::path::Path) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let mut stmt = store.db.prepare(
+        "SELECT t.id,t.orchestration_id,t.state,t.revision,t.active_assignment_id,
+                t.created_at,t.updated_at,
+                (SELECT COUNT(*) FROM sa_effect_receipts r
+                 WHERE r.ticket_id=t.id AND r.state!='applied')
+         FROM sa_tickets t ORDER BY t.updated_at DESC,t.id DESC LIMIT 200",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |r| Ok(serde_json::json!({
+        "ticketId": r.get::<_, String>(0)?,
+        "orchestrationId": r.get::<_, String>(1)?,
+        "state": r.get::<_, String>(2)?,
+        "revision": r.get::<_, i64>(3)?,
+        "activeAssignmentId": r.get::<_, Option<String>>(4)?,
+        "createdAt": r.get::<_, i64>(5)?,
+        "updatedAt": r.get::<_, i64>(6)?,
+        "unresolvedExternalEffects": r.get::<_, i64>(7)?,
+    }))).map_err(|e| e.to_string())?;
+    let tickets = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&tickets).map_err(|e| e.to_string())
+}
+
+/// Revoke and interrupt assignments that exceeded the same native attempt
+/// budget used by tool admission. This is called only by the owning serve
+/// process; callers must stop the returned sessions after the transaction.
+/// No attempt is replayed and unresolved effect receipts stay unresolved.
+pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
+    let expired = {
+        let mut stmt = store.db.prepare(
+            "SELECT a.id,a.ticket_id,a.session_id,t.revision
+             FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
+             WHERE a.state='running' AND t.state='running'
+               AND t.active_assignment_id=a.id AND a.created_at>0 AND ?1>=a.created_at
+               AND (?1-a.created_at)>=?2
+             ORDER BY a.created_at,a.id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![now,MAX_ASSIGNMENT_RUN_MS], |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
+        ))).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    let mut sessions = Vec::new();
+    for (assignment_id,ticket_id,session_id,revision) in expired {
+        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let changed = tx.execute(
+            "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+             revision=revision+1,updated_at=?3
+             WHERE id=?1 AND state='running' AND active_assignment_id=?2 AND revision=?4",
+            params![ticket_id,assignment_id,now,revision],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
+            tx.rollback().map_err(|e| e.to_string())?;
+            continue;
+        }
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket_id])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+             WHERE id=?1 AND state='running'",
+            params![assignment_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'watchdog_interrupted','Assignment exceeded its bounded run time; no replay',?2)",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        sessions.push(session_id);
+    }
+    Ok(sessions)
+}
+
 fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
     store.db.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
@@ -1985,6 +2063,48 @@ mod tests {
         assert!(read_only_policy(&store, &sid).is_err());
         assert!(!on_run_finished(&store, &sid, true, "late worker success").unwrap_or(false)
             || get_ticket(&store, &ticket.id).unwrap().state != "waiting_approval");
+    }
+
+    #[test]
+    fn headless_task_list_is_bounded_redacted_and_read_only() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, _) = admit(
+            &mut store, &config.id, "Private task objective", "headless-list", false,
+        ).unwrap();
+        let before = get_ticket(&store, &ticket.id).unwrap();
+        let listed = list_headless_tasks(&store.path).unwrap();
+        assert!(listed.contains(&ticket.id));
+        assert!(listed.contains("running"));
+        assert!(!listed.contains("Private task objective"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, before.revision);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+    }
+
+    #[test]
+    fn watchdog_revokes_and_interrupts_an_expired_assignment_once_without_replay() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Bounded watchdog work", "watchdog-expired", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let started_at = 10_000_i64;
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+            params![ticket.id,started_at],
+        ).unwrap();
+        let now = started_at + MAX_ASSIGNMENT_RUN_MS;
+        assert_eq!(watchdog_expired_assignments(&store, now).unwrap(), vec![session]);
+        assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty());
+        let interrupted = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(interrupted.state, "interrupted");
+        assert!(interrupted.active_assignment_id.is_none());
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert_eq!(history(&store, &ticket.id, 10).unwrap()
+            .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
     }
 
     #[test]

@@ -37,14 +37,24 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
     }
     let digest=format!("{:x}",Sha256::digest(payload));
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
-    // This is not a grant: only independently authorized active mandates
-    // may reserve effects. Current production mandates are read-only.
+    // A receipt is not a grant. Require the live worker assignment and every
+    // immutable scope field to still agree before allowing a caller to attempt
+    // an effect. Current production mandates are read-only.
     let authorized: bool=tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets t
          JOIN sa_mandates m ON m.ticket_id=t.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         JOIN sa_assignments a ON a.id=t.active_assignment_id
+           AND a.ticket_id=t.id AND a.state='running'
+           AND a.bot_id=t.worker_bot_id
+         JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.state='running' AND m.revoked=0
-           AND m.expires_at>?2 AND m.policy_revision=o.policy_revision
+           AND m.expires_at>?2
+           AND t.policy_revision=m.policy_revision
+           AND m.policy_revision=o.policy_revision
+           AND t.project_id=m.project_id AND m.project_id=o.project_id
+           AND t.actor=m.actor AND m.authorization_id<>''
+           AND b.project_id=t.project_id AND b.paused=0
            AND m.allowed_side_effects=1 AND o.enabled=1)",
         params![ticket_id,storage::now()],|r|r.get(0)
     ).map_err(|e|e.to_string())?;
@@ -152,6 +162,28 @@ mod tests{
         assert_eq!(unresolved_count(&store,&id).unwrap(),0);
         store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&id]).unwrap();
         assert!(reserve(&store,&id,"github:comment:8",b"payload").is_err());
+    }
+
+    #[test]
+    fn effect_reservation_denies_stale_or_mismatched_mandate_scope(){
+        for (change, expected) in [
+            ("UPDATE sa_mandates SET actor='other' WHERE ticket_id=?1", "actor"),
+            ("UPDATE sa_mandates SET project_id='other' WHERE ticket_id=?1", "project"),
+            ("UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1", "revision"),
+            ("UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=(SELECT orchestration_id FROM sa_tickets WHERE id=?1)", "policy"),
+        ] {
+            let (store,id)=fixture();
+            store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id]).unwrap();
+            store.db.execute(change,[&id]).unwrap();
+            assert!(reserve(&store,&id,"github:issue:stale",b"body").is_err(), "stale {expected} must deny effect reservation");
+            assert_eq!(unresolved_count(&store,&id).unwrap(),0, "denial must not persist a receipt");
+        }
+
+        let (store,id)=fixture();
+        store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id]).unwrap();
+        store.db.execute("UPDATE sa_assignments SET state='finished' WHERE ticket_id=?1",[&id]).unwrap();
+        assert!(reserve(&store,&id,"github:issue:finished",b"body").is_err());
+        assert_eq!(unresolved_count(&store,&id).unwrap(),0);
     }
 
     #[test]

@@ -90,3 +90,7 @@ The source [`961b43fa`](https://github.com/ginmp8/pandacode/commit/961b43fa88ad1
 ## Source 106b3852 continuity — 2026-11-11
 
 Upstream microphone selection, Windows x64/Linux ARM64 release audio smoke and APT time bounds are incorporated without changing Extended feature-control semantics. Existing manual/automatic updates, global bot pause, Connect master/direct routing, external MCP, cloud/VM management, credential transfer and other Settings controls remain present and optional; no stricter default or blanket feature ban was introduced. This does not establish runtime acceptance: independent enabled/disabled tests and native integration checks are still pending.
+
+## Phone-access clarification from source a2ba4b43 — 2026-11-12
+
+The [upstream release-note correction](https://github.com/ginmp8/pandacode/commit/a2ba4b430951ee2995bdfda140d4f516cb493a78) distinguishes a phone's **Full access level** from the separate desktop **Full access for remote tasks** switch. It changes no permission enforcement code or Extended configuration; current auto/manual updates, Connect master/direct routes, bot pause, external MCP, cloud/VM, credential forwarding and fresh-context Settings remain unchanged. Do not treat upstream release-note wording as proof of successful runtime authorization or native On/Off verification; those tests remain pending.

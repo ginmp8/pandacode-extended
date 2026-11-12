@@ -315,3 +315,12 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [ ] Review every shared divergence in context, including control-dependent callers, error/edge cases and native Settings On/Off transitions; resolve any independently reproduced regression without removing upstream features.
 - [ ] Perform native Voice, Connect/MCP, bots, cloud/VM, credential, SQLite migration/rollback and installer acceptance before any Extended `0.12.0` release approval.
 - [ ] Check CI for the separate documentation-only SHA after publication; passing code-SHA checks do not transfer to the new SHA.
+
+## Fork a2ba4b43 source-documentation checkpoint — 2026-11-12
+
+- [x] Pin [source `a2ba4b43`](https://github.com/ginmp8/pandacode/commit/a2ba4b430951ee2995bdfda140d4f516cb493a78) and initial Extended `base/development` `1c9fcc3e`; verify complete nontruncated recursive Git trees.
+- [x] Mirror the only changed source path, `releases/0.3.111.md`, with exact blob `ce5842359a33679869b8843565b467d8d438266a` and original `100644` mode.
+- [x] Keep all six native application-version fields at **0.3.111** and the marker at planned **Extended 0.12.0 DRAFT**.
+- [x] Record prior SHA `1c9fcc3e` [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43093250270) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43093260565) CI success, 11/11 jobs each; these results do not validate the new commit.
+- [ ] Check all CI jobs at the exact new published SHA.
+- [ ] Finish contextual review of 81 shared Extended differences and native Settings On/Off, phone access, retry, photo, audio, Connect/MCP, bots, cloud/VM, credentials and installers before release approval.

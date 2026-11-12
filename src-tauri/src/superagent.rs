@@ -1046,6 +1046,26 @@ fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
 
 /// One native read of checkout/bot contention used both by the real admit
 /// transition and the non-authoritative preview. Admission always repeats it.
+/// Native admission must account for ordinary running chats/direct tasks,
+/// not just persisted SuperAgent leases. Unknown live sessions fail closed.
+fn active_manual_conflict(
+    store: &Store, active: &[String], candidate_id: &str, project_id: &str,
+) -> Result<bool> {
+    for session_id in active {
+        let session = store.session(session_id)
+            .map_err(|_| "Active provider session is unavailable; checkout admission denied.".to_string())?;
+        if session.project_id == project_id {
+            return Ok(true);
+        }
+        if bots::owner_of(store, session_id)?
+            .is_some_and(|(bot, _)| bot.id == candidate_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn manual_candidate_occupied(
     store: &Store, candidate_id: &str, team_project: &str, candidate_project: &str,
 ) -> Result<bool> {
@@ -2239,8 +2259,7 @@ pub async fn superagent_preflight(
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let config = configuration(&store, &orchestration_id)?;
     let bot_id = if coordinated { &config.coordinator_bot_id } else { &config.worker_bot_id };
-    let busy = active.iter().any(|sid| bots::owner_of(&store, sid).ok().flatten()
-        .is_some_and(|(bot, _)| bot.id == *bot_id));
+    let busy = active_manual_conflict(&store, &active, bot_id, &config.project_id)?;
     manual_preflight(&store, &orchestration_id, &objective, coordinated, busy)
 }
 
@@ -2270,8 +2289,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
         let cfg=configuration(&store,&orchestration_id)?;
-        let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==cfg.worker_bot_id));
+        let busy=active_manual_conflict(&store,&active,&cfg.worker_bot_id,&cfg.project_id)?;
         let (ticket,launch)=admit(&mut store,&orchestration_id,&objective,&request_key,busy)?;
         (ticket,launch,cfg.worker_bot_id)
     };
@@ -2494,8 +2512,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let cfg = configuration(&store, &orchestration_id)?;
-        let busy = active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==cfg.coordinator_bot_id));
+        let busy = active_manual_conflict(&store,&active,&cfg.coordinator_bot_id,&cfg.project_id)?;
         let (ticket,launch) = admit_role(&mut store,&orchestration_id,&objective,&request_key,busy,true)?;
         (ticket,launch,cfg.coordinator_bot_id)
     };
@@ -2527,8 +2544,9 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e|e.to_string())?;
         let worker = ticket_worker(&store,&ticket_id)?;
-        let busy = active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==worker));
+        let ticket = get_ticket(&store, &ticket_id)?;
+        let cfg = configuration(&store, &ticket.orchestration_id)?;
+        let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
         prepare_coordinated_worker(&mut store,&ticket_id,busy)?
     };
     let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
@@ -2558,8 +2576,9 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
         let bot_id=ticket_worker(&store,&ticket_id)?;
-        let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==bot_id));
+        let ticket = get_ticket(&store, &ticket_id)?;
+        let cfg = configuration(&store, &ticket.orchestration_id)?;
+        let busy=active_manual_conflict(&store,&active,&bot_id,&cfg.project_id)?;
         retry_blocked(&mut store,&ticket_id,busy)?
     };
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
@@ -3606,6 +3625,32 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn ordinary_running_session_blocks_same_project_manual_team_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        let active = vec![ordinary.id.clone()];
+        assert!(active_manual_conflict(&store, &active, "worker", "project").unwrap());
+        assert!(!manual_preflight(&store, &cfg.id, "Inspect the checkout", false,
+            active_manual_conflict(&store, &active, "worker", "project").unwrap())
+            .unwrap().eligible);
+        let (blocked, launched) = admit(&mut store, &cfg.id, "Inspect the checkout",
+            "occupied-by-direct-chat", true).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        assert!(assignment_session(&store, &blocked.id).unwrap().is_none());
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-project','Other','/tmp/disposable-superagent-other')", [],
+        ).unwrap();
+        let unrelated = store.create_session("other-project", "codex", "default", "ask").unwrap();
+        assert!(!active_manual_conflict(&store, &[unrelated.id], "worker", "project").unwrap(),
+            "Unrelated projects must remain independently executable");
+        assert!(active_manual_conflict(&store, &["missing-live-session".to_owned()],
+            "worker", "project").is_err(), "Missing live metadata must fail closed");
     }
 
     #[test]

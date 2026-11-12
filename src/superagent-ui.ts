@@ -201,7 +201,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 runGraph!.edges.find(edge => edge.to === node.id)?.relation === 'owns_attempt'
                   ? 'Ticket owns attempt' : 'Ticket awaits decision') +
               '</small>' +
-              (node.kind === 'assignment' && ticketDetails.assignments.some(item =>
+              (node.kind === 'assignment' && ticketDetails?.assignments.some(item =>
                 node.id === 'assignment:' + item.id &&
                 node.botId === item.botId && node.attempt === item.attempt)
                 ? ' <button type="button" data-sa-graph-inspect-assignment="' +
@@ -879,8 +879,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const node = runGraph?.nodes.find(item =>
         item.kind === 'assignment' && item.id === 'assignment:' + assignmentId);
       const assignment = snapshot?.assignments.find(item => item.id === assignmentId);
-      if (!runGraphLoaded || !snapshot || !assignment || !node ||
-          runGraph?.ticketId !== inspectedTicket ||
+      if (!runGraphLoaded || !snapshot || !assignment || !node || !runGraph ||
+          runGraph.ticketId !== inspectedTicket ||
           runGraph.ticketRevision !== snapshot.ticket.revision ||
           snapshot.ticket.id !== inspectedTicket ||
           node.botId !== assignment.botId || node.attempt !== assignment.attempt) return;

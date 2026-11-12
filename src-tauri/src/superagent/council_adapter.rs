@@ -17,8 +17,8 @@ pub struct CouncilObservation {
     pub native_round: usize,
     pub native_stale: bool,
     pub native_pass_verified: bool,
-    /// No frozen ticket-artifact digest/cycle binding exists yet; S3 must
-    /// never make a task completion decision from this observation.
+    /// A frozen task artifact is only a review target, never proof that the
+    /// native Council saw, approved or completed this ticket.
     pub ticket_artifact_bound: bool,
     /// Exact immutable assignment and ticket revision that were pinned.
     /// A pin does not certify that reviewers saw or accepted the artifact.
@@ -31,6 +31,20 @@ pub struct CouncilObservation {
     pub review_started_after_binding: bool,
 }
 
+
+/// A task's frozen native review target. Named fields keep cycle, policy and
+/// artifact identity distinct instead of silently mixing tuple indices.
+struct FrozenTarget {
+    assignment_id: String,
+    session_id: String,
+    ticket_revision: i64,
+    policy_revision: i64,
+    artifact_sha256: String,
+    council_since: i64,
+    council_generation: i64,
+    council_config_sha256: String,
+    bound_at: i64,
+}
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -126,26 +140,29 @@ pub(super) fn inspect(store: &Store, ticket: &Ticket) -> Result<Option<CouncilOb
         status.state.clone()
     };
 
-    let target: Option<(String, String, i64, i64, String, i64, i64, String, i64)> =
-        store.db.query_row(
+    let target: Option<FrozenTarget> = store.db.query_row(
         "SELECT assignment_id,session_id,ticket_revision,policy_revision,
                 artifact_sha256,council_since,council_generation,council_config_sha256,bound_at
          FROM sa_council_targets WHERE ticket_id=?1",
-        [&ticket.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,
-                              r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)),
+        [&ticket.id], |r| Ok(FrozenTarget {
+            assignment_id: r.get(0)?, session_id: r.get(1)?,
+            ticket_revision: r.get(2)?, policy_revision: r.get(3)?,
+            artifact_sha256: r.get(4)?, council_since: r.get(5)?,
+            council_generation: r.get(6)?, council_config_sha256: r.get(7)?,
+            bound_at: r.get(8)?,
+        }),
     ).optional().map_err(|e| e.to_string())?;
-    let bound_at = target.as_ref().and_then(|(frozen_assignment,frozen_session,revision,policy,
-            digest,cycle,generation,config_digest,bound_at)| {
+    let bound_at = target.as_ref().and_then(|target| {
         let council = team.config.council.as_ref()?;
         let config = serde_json::to_vec(council).ok()?;
-        (frozen_assignment == &assignment_id
-            && frozen_session == &session
-            && *revision == ticket.revision
-            && *policy == grant.policy_revision
-            && *digest == sha256(ticket.evidence.as_deref()?.as_bytes())
-            && *cycle == team.council_since
-            && i64::try_from(team.generation).ok() == Some(*generation)
-            && *config_digest == sha256(&config)).then_some(*bound_at)
+        (target.assignment_id == assignment_id
+            && target.session_id == session
+            && target.ticket_revision == ticket.revision
+            && target.policy_revision == grant.policy_revision
+            && target.artifact_sha256 == sha256(ticket.evidence.as_deref()?.as_bytes())
+            && target.council_since == team.council_since
+            && i64::try_from(team.generation).ok() == Some(target.council_generation)
+            && target.council_config_sha256 == sha256(&config)).then_some(target.bound_at)
     });
     let review_started_after_binding = bound_at.is_some_and(|frozen_at| {
         let mut seats = team.workers.iter()

@@ -4454,6 +4454,7 @@ pub fn run() {
                 superagent::superagent_list,
                 superagent::roster::superagent_roster,
                 superagent::roster::superagent_roster_update,
+                superagent::roster::superagent_effective_team,
                 superagent::superagent_set_enabled,
                 superagent::superagent_update,
                 superagent::superagent_delete,

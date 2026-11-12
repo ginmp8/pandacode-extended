@@ -1061,3 +1061,62 @@ test('native Run graph is lazy, revision-bound and read-only', async ({page}) =>
   expect(calls.filter(c=>c==='superagent_graph')).toHaveLength(1);
   expect(calls.some(c=>/submit|dispatch|accept|reserve/.test(c))).toBe(false);
 });
+
+
+test('Team effective policy view is native-backed and never grants or launches tasks', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-effective-test'; document.body.appendChild(host);
+    const seen:string[]=[];
+    (window as unknown as {effectiveCalls:()=>string[]}).effectiveCalls=()=>seen;
+    const config={id:'team',name:'Effective policy',coordinatorBotId:'lead',
+      workerBotId:'worker',enabled:false,policyRevision:3,ticketCount:0};
+    mountSuperagent(host,async(command) => {
+      seen.push(command);
+      if(command==='bots_list') return [
+        {id:'lead',name:'Lead',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+        {id:'second',name:'Second',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [config] as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_roster') return {
+        orchestrationId:'team',policyRevision:3,coordinatorBotId:'lead',
+        workerBotIds:['worker','second'],reviewerBotIds:[],executionReady:false
+      } as never;
+      if(command==='superagent_effective_team') return {
+        orchestrationId:'team',policyRevision:3,enabled:false,executionReady:false,
+        grantsIssued:false,members:[
+          {role:'coordinator',position:0,botId:'lead',name:'Lead',provider:'codex',
+            model:'gpt-main',mode:'plan',projectId:'p',paused:false,skills:[]},
+          {role:'worker',position:0,botId:'worker',name:'Worker',provider:'claude',
+            model:'sonnet',mode:'plan',projectId:'p',paused:false,skills:[
+              {id:'quality',libraryStatus:'installed',safetyStatus:'clean',
+                harnessEligibility:'not_verified',invocationEvidence:'not_verified'},
+              {id:'removed',libraryStatus:'missing',safetyStatus:'unknown',
+                harnessEligibility:'not_verified',invocationEvidence:'not_verified'}
+            ]}
+        ]
+      } as never;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-effective-test');
+  const roles=host.getByRole('region',{name:'Configured Team roles'});
+  await roles.getByRole('button',{name:'Load native members'}).click();
+  await roles.getByRole('button',{name:'Inspect effective policy and Skills'}).click();
+  const view=roles.getByRole('region',{name:'Native effective Team policy'});
+  await expect(view).toContainText('Harness claude');
+  await expect(view).toContainText('Model sonnet');
+  await expect(view).toContainText('Skill quality · Library installed · Safety clean');
+  await expect(view).toContainText('Skill removed · Library missing');
+  await expect(view).toContainText('Harness eligibility not_verified');
+  await expect(view).toContainText('Multi-role execution unavailable');
+  await expect(view).toContainText('No task grant issued');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {effectiveCalls:()=>string[]}).effectiveCalls());
+  expect(calls.filter(c=>c==='superagent_effective_team')).toHaveLength(1);
+  expect(calls.some(c=>/submit|dispatch|accept|reserve|enable|activate/.test(c))).toBe(false);
+});

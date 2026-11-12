@@ -12,6 +12,19 @@ interface Config {
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
+interface EffectiveSkill {
+  id:string; libraryStatus:string; safetyStatus:string;
+  harnessEligibility:string; invocationEvidence:string;
+}
+interface EffectiveMember {
+  role:string; position:number; botId:string; name:string;
+  provider:string; model:string; mode:string; projectId:string;
+  paused:boolean; skills:EffectiveSkill[];
+}
+interface EffectiveTeam {
+  orchestrationId:string; policyRevision:number; enabled:boolean;
+  executionReady:boolean; grantsIssued:boolean; members:EffectiveMember[];
+}
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
@@ -93,6 +106,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let roleRoster: TeamRoster | null = null;
+  let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
@@ -438,6 +452,30 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (selectedRoles.includes(bot.id) ? ' selected' : '') +
         (bot.paused ? ' disabled' : '') + '>' + safe(bot.name) +
         (bot.paused ? ' (paused)' : '') + '</option>').join('');
+    const effectivePolicy = chosen && effectiveTeam &&
+      effectiveTeam.orchestrationId === chosen.id &&
+      effectiveTeam.policyRevision === chosen.policyRevision
+      ? '<section role="region" aria-label="Native effective Team policy">' +
+        '<h4>Effective Team roles and Skills</h4><p>Native configuration snapshot, not admission. ' +
+        'Library status is distinct from provider eligibility and verified invocation. ' +
+        'No role, model or Skill grants tools.</p>' +
+        '<p>Policy revision ' + effectiveTeam.policyRevision + ' · ' +
+        (effectiveTeam.enabled ? 'Team enabled for manual checks' : 'Team Off') + ' · ' +
+        (effectiveTeam.executionReady ? 'Single-worker topology' : 'Multi-role execution unavailable') +
+        ' · No task grant issued</p><ol>' +
+        effectiveTeam.members.map(member =>
+          '<li><strong>' + safe(member.role) + ' ' + (member.position + 1) +
+          ': ' + safe(member.name) + '</strong>' +
+          ' · Harness ' + safe(member.provider) + ' · Model ' + safe(member.model) +
+          ' · Bot mode ' + safe(member.mode) + ' · Project ' + safe(member.projectId) +
+          (member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
+          '<ul>' + (member.skills.map(skill =>
+            '<li>Skill ' + safe(skill.id) + ' · Library ' + safe(skill.libraryStatus) +
+            ' · Safety ' + safe(skill.safetyStatus) +
+            ' · Harness eligibility ' + safe(skill.harnessEligibility) +
+            ' · Invocation/evidence ' + safe(skill.invocationEvidence) + '</li>').join('') ||
+            '<li>No bot-assigned Skills</li>') + '</ul></li>').join('') + '</ol></section>'
+      : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
         '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers and optional Reviewers are configuration only until native role admission is implemented.</p>' +
@@ -457,7 +495,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 '>Save configured roles</button></form>' +
               '<p role="status">' + (roleRoster.executionReady ?
                 'Single-worker manual execution available after explicit enable.' :
-                'Multi-member execution is disabled until native scoped admission is available.') + '</p>') +
+                'Multi-member execution is disabled until native scoped admission is available.') + '</p>' +
+            '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
+            effectivePolicy) +
         '</section>' : '';
     const overview = chosen
       ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
@@ -608,7 +648,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
-        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null;
+        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
@@ -620,6 +660,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
       }
+      // Any native refresh invalidates this non-authoritative, time-bound scan.
+      effectiveTeam = null;
       if (sourcesLoaded && selected) {
         sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
         if (!sources.some(item => item.id === decisionSourceId)) {
@@ -799,7 +841,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = demand.orchestrationId;
       workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null;
+      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{
@@ -828,6 +870,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-effective-load')) {
+      const cfg=current();
+      if (cfg && roleRoster?.orchestrationId===cfg.id) void work(async () => {
+        const snapshot=await call<EffectiveTeam>('superagent_effective_team',
+          {orchestrationId:cfg.id});
+        if (snapshot.orchestrationId!==cfg.id ||
+            snapshot.policyRevision!==cfg.policyRevision) {
+          effectiveTeam=null;
+          throw new Error('Team policy changed during inspection; reload before using this view.');
+        }
+        effectiveTeam=snapshot;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-open-runs')) {
       workspaceView = 'runs'; render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="runs"]')?.focus({preventScroll:true});
@@ -841,7 +897,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = next;
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null;
+      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });

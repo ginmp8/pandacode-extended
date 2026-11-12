@@ -81,3 +81,26 @@ worker results and private transcripts. The graph is loaded on demand,
 fails closed when the Ticket revision has changed, and creates no work or
 grants. Keyboard users and screen readers receive a semantic ordered
 list; a non-SVG layout keeps narrow and high-contrast modes legible.
+
+
+## Effective Team policy and Skills inspection (partial S2 / AC-10)
+
+From **Configure Team roles**, load the existing native roster and select **Inspect
+effective policy and Skills**. The main-window-only `superagent_effective_team`
+command reads the Team's policy revision and actual existing bot profiles
+(Coordinator, ordered Workers and optional Reviewers), including the bot's
+configured harness/provider, model, mode, project and paused state.
+
+The command inspects the **existing PandaCode Skills Library** and each bot's
+assigned skill IDs without importing, installing, activating, executing or granting
+anything. It reports library presence and native package-scan safety state
+(`clean`, `findings_acknowledged` or `review_required`) separately. Missing
+assigned IDs remain visible. **Harness eligibility and actual invocation/evidence
+are explicitly `not_verified`** until a task-bound provider and evidence contract
+can establish them; a known package is not a verified reviewer skill.
+
+The UI rejects mismatched Team/policy revisions and clears the snapshot when
+refreshing or switching Teams. This is a **read-only configuration inspection**,
+not an admission, task-effective immutable policy snapshot, provider liveness
+proof, positive permission grant, or completed S2-UX wizard. Multi-role execution
+remains disabled until native scoped role admission is implemented.

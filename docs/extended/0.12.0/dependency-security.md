@@ -1,5 +1,14 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — pinned 0.3.119 dependency and schema compatibility
+
+Pinned source: [ginmp8/pandacode:main at `b026526122c4`](https://github.com/ginmp8/pandacode/commit/b026526122c45264f389c04f91a4e96010948926), Git tree `ba8cfd56d9eb91fe433abc1e9377cb069a8f848e`, native application version **0.3.119**. Compared with the last synchronized 0.3.117 source, 44 commits changed 132 paths; the reconciled candidate incorporates 109 source-exact paths and 23 Extended-aware adaptations, with zero upstream paths absent or type/mode discrepancies. Its full inventory is 2,002 upstream files, 2,060 Extended files, 1,922 shared byte-exact, 80 shared divergent and 58 Extended-only. Historical shared differences are not yet all behaviorally proven. The Extended distribution stays **0.12.0 DRAFT**; no release, tag or public package is authorized.
+
+The upstream and Extended branches independently used SQLite schema version 37 for different changes. The candidate advances the effective schema to **38** and runs both the existing Extended cloud/bot compatibility work and upstream saved-remotely schedule provenance migration for databases from either v37 lineage. A regression test for the Extended-v37 upgrade path was added; **Rust migration tests have not yet executed**. This is a required compatibility adaptation, not an upstream feature removal.
+
+Upstream npm/Cargo/Tauri application version metadata is synchronized to 0.3.119 independently of this Extended distribution version. Existing Extended dependency patches, lockfile remediations and their consumers are retained rather than overwritten by upstream lock versions. No new dependency-vulnerability clearance, npm audit or RustSec audit is claimed for this candidate; review the exact published-SHA CI results. Full bot/MCP/cloud behavior and migration execution need native verification.
+
+
 ## 2026-11-12 — application metadata 0.3.117 and storage compatibility
 
 The [pinned source](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4) advances six app-version fields in root npm manifest/lockfile, Cargo manifest/application lock entry and Tauri config to **0.3.117**. Only source version hunks were applied to the four Extended-customized npm/Cargo files; Extended dependency overrides, remediations and security audit workflows were retained. The original Tauri version update is byte-exact. No new vulnerability remediation is claimed.

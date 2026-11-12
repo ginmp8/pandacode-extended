@@ -1,5 +1,16 @@
 # PandaCode Extended documentation
 
+## 2026-11-12 — upstream 0.3.119 full-tree synchronization candidate
+
+Pinned source: [ginmp8/pandacode:main at `b026526122c4`](https://github.com/ginmp8/pandacode/commit/b026526122c45264f389c04f91a4e96010948926), Git tree `ba8cfd56d9eb91fe433abc1e9377cb069a8f848e`, native application version **0.3.119**. Compared with the last synchronized 0.3.117 source, 44 commits changed 132 paths; the reconciled candidate incorporates 109 source-exact paths and 23 Extended-aware adaptations, with zero upstream paths absent or type/mode discrepancies. Its full inventory is 2,002 upstream files, 2,060 Extended files, 1,922 shared byte-exact, 80 shared divergent and 58 Extended-only. Historical shared differences are not yet all behaviorally proven. The Extended distribution stays **0.12.0 DRAFT**; no release, tag or public package is authorized.
+
+Newly inherited since the prior Extended 0.3.117 candidate: team workers handle approvals and input under their lead's full-access authority, model-specific per-worker reasoning effort, a compact Workers panel, and remote/bot/schedule permission gates around team leads (0.3.118). Claude Code usage now has an opt-in, bounded CLI fallback and saved reading behavior (0.3.119). Existing 0.3.115–0.3.117 Skills, tool activity, image viewer and error controls are carried forward but are **not** new Extended-only features. Upstream release notes under `releases/` remain source-exact.
+
+The upstream and Extended branches independently used SQLite schema version 37 for different changes. The candidate advances the effective schema to **38** and runs both the existing Extended cloud/bot compatibility work and upstream saved-remotely schedule provenance migration for databases from either v37 lineage. A regression test for the Extended-v37 upgrade path was added; **Rust migration tests have not yet executed**. This is a required compatibility adaptation, not an upstream feature removal.
+
+Validation for this candidate: full Git path/blob/mode tree inventory and source delta reconciliation; no complete local Node, Rust, Clippy, Expo, native desktop or external-service test suite was executed in this environment. Both CI workflows on the **preceding** Extended SHA `f7197e67f4d1d9d0362f7597f6e34447ac23f0b1` passed ([push](https://github.com/ginmp8/pandacode-extended/actions/runs/43236804107), [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43236826490)); that does **not** validate this integration. The new published SHA's checks must be judged separately. Native acceptance and behavior-level audit of 80 divergent shared files remain open.
+
+
 ## 2026-11-12 — PandaCode 0.3.117 error visibility parity
 
 Pinned fork [`9648d1c4c9e6`](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4), tree `597285f6e291294cd230c4f09befa578fa87bd54`, declares app **0.3.117**. All 90 source-changed paths since 0.3.116 were integrated: 79 byte/mode-exact files and 11 Extended-aware patch reconciliations. Full recursive inventory: 1,971 upstream files, 2,029 Extended files, 1,888 shared identical, 83 shared customized, 58 Extended-only, **zero missing or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**.

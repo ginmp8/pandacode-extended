@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
 /// Most error rows one dismiss call may remove; the same limit as `DISMISS_BATCH` in src/thread-errors.ts (keep the two equal).
 pub const MAX_DISMISS_ERROR_IDS: usize = 500;
 
@@ -623,7 +623,10 @@ impl Store {
                 migration.execute_batch("CREATE INDEX IF NOT EXISTS machine_threads_reported_by ON machine_threads(reported_by) WHERE reported_by IS NOT NULL;
                   PRAGMA user_version=36;").map_err(|e| e.to_string())?;
             }
-            if version < 37 {
+            if version < 38 {
+                // Two independent v37 layouts exist: Extended's bot/cloud compatibility repair
+                // and upstream's remotely-saved schedule provenance. Recheck the idempotent
+                // compatibility repairs for both v37 variants before recording v38.
                 // Extended main and upstream 0.3.85 used versions 27-32 for
                 // different schema changes. An existing Extended DB skips
                 // upstream cloud, mirror and bot migrations on that basis.
@@ -648,6 +651,23 @@ impl Store {
                 crate::bots::migrate_capabilities(&migration)?;
                 crate::bots::upgrade(&migration)?;
                 migration.execute_batch("PRAGMA user_version=37;").map_err(|e| e.to_string())?;
+            }
+            if version < 38 {
+                // Whether a remote device last saved each schedule, so the team gate is checked
+                // again when it fires (`schedules::remote_team_gate`). Version 35's schema already
+                // carries the column on databases created since; ids an unreleased build kept in
+                // the settings row's `remoteSaved` list move into it (malformed settings JSON is skipped,
+                // never failing startup). Released version 36 recorded nothing, so a schedule saved from a
+                // phone there is indistinguishable: fail closed and mark every user-made schedule (agents'
+                // own wakeups stay unmarked); a skipped run tells the user to save it on the desktop.
+                let exists: bool = migration.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_schedules') WHERE name='saved_remotely')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+                if !exists {
+                    migration.execute_batch("ALTER TABLE task_schedules ADD COLUMN saved_remotely INTEGER NOT NULL DEFAULT 0;").map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("UPDATE task_schedules SET saved_remotely=1 WHERE created_by='user';
+                  UPDATE task_schedules SET saved_remotely=1 WHERE id IN (SELECT j.value FROM scheduler_settings s, json_each(CASE WHEN json_valid(s.content) THEN s.content ELSE '{}' END,'$.remoteSaved') j WHERE s.id=1);
+                  UPDATE scheduler_settings SET content=json_remove(content,'$.remoteSaved') WHERE id=1 AND json_valid(content);
+                  PRAGMA user_version=38;").map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

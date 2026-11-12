@@ -1,5 +1,16 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — upstream team and provider behavior, Extended gates
+
+Pinned source: [ginmp8/pandacode:main at `b026526122c4`](https://github.com/ginmp8/pandacode/commit/b026526122c45264f389c04f91a4e96010948926), Git tree `ba8cfd56d9eb91fe433abc1e9377cb069a8f848e`, native application version **0.3.119**. Compared with the last synchronized 0.3.117 source, 44 commits changed 132 paths; the reconciled candidate incorporates 109 source-exact paths and 23 Extended-aware adaptations, with zero upstream paths absent or type/mode discrepancies. Its full inventory is 2,002 upstream files, 2,060 Extended files, 1,922 shared byte-exact, 80 shared divergent and 58 Extended-only. Historical shared differences are not yet all behaviorally proven. The Extended distribution stays **0.12.0 DRAFT**; no release, tag or public package is authorized.
+
+Newly inherited since the prior Extended 0.3.117 candidate: team workers handle approvals and input under their lead's full-access authority, model-specific per-worker reasoning effort, a compact Workers panel, and remote/bot/schedule permission gates around team leads (0.3.118). Claude Code usage now has an opt-in, bounded CLI fallback and saved reading behavior (0.3.119). Existing 0.3.115–0.3.117 Skills, tool activity, image viewer and error controls are carried forward but are **not** new Extended-only features. Upstream release notes under `releases/` remain source-exact.
+
+The Extended global bot pause, Connect master/direct-route switch, optional external MCP servers, cloud credential transfer and VM/agent management controls, and manual/automatic update preferences remain in the candidate. The source's team-lead Full-access checks are inherited and coexist with these controls. Static source reconciliation alone does not certify actual On/Off, old/new process, device, approval or external integration behavior.
+
+The new upstream Full-access team-lead restriction applies to remote devices, bot-driven turns, and schedules saved remotely. It is independent of Extended's global bot pause and Connect master gates; enabling Extended's relevant options must retain the normal upstream path. Preserve Extended fresh-context routing and channel behavior where configured. Native permission scenarios and On/Off checks are still unverified in this candidate.
+
+
 ## 2026-11-12 — 0.3.117 error reporting and existing controls
 
 The [0.3.117 source](https://github.com/ginmp8/pandacode/commit/9648d1c4c9e68f86265b9be04dfb1a8c1f960fb4) changes error presentation and dismissal, not the intended scope of Extended feature switches. Upstream changes were applied to the Extended bot UI, main thread, app update feedback and Connect settings. The Connect master switch is still required before remote functions can be reached; the source's error-row UI was reconciled around that Extended gate and failed master-switch operations now focus the related banner. No new restrictive default or global MCP/bot/cloud/VM/credential block was introduced. The underlying On/Off behavior and external integrations still require native regression evidence.

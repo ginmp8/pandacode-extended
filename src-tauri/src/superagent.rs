@@ -2622,6 +2622,39 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_bot_tools_cannot_escape_an_active_or_revoked_superagent_mandate() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, "desktop", "independent-normal", "Normal bot chat",
+        ).unwrap().0;
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(&store, &ordinary).is_ok());
+
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "No ambient tool rights", "ambient-tool-fence", false,
+        ).unwrap();
+        assert!(launched);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let error = crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &session_id,
+        ).unwrap_err();
+        assert!(error.contains("cannot invoke ambient bot tools"));
+
+        // A stopped assignment is denied by the same effect-time check even
+        // if the native session and its original bot binding still exist.
+        let (stopped, _) = stop(&store, &ticket.id).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &session_id,
+        ).is_err());
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "ordinary direct bot conversations must not inherit the task fence");
+    }
+
+    #[test]
     fn desktop_superagent_commands_require_a_trusted_main_window() {
         assert!(require_main_window_label("main").is_ok());
         for window in ["", "overlay", "mini", "bot", "main-secondary"] {

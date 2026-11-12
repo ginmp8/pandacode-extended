@@ -43,6 +43,22 @@ fn assignment_within_budget(started_at: i64, now: i64) -> bool {
         && now.saturating_sub(started_at) < MAX_ASSIGNMENT_RUN_MS
 }
 
+/// A redacted headless lease diagnostic uses exactly the same native expiry
+/// rule as tool admission and callback settlement. This is observation only:
+/// inspecting a live database must neither reap a session nor grant a new one.
+fn headless_assignment_budget(assignment: &Assignment, now: i64) -> (bool, Option<i64>) {
+    if assignment.state != "running" {
+        return (false, None);
+    }
+    let valid_start = assignment.created_at > 0 && now >= assignment.created_at;
+    let remaining = if valid_start {
+        MAX_ASSIGNMENT_RUN_MS.saturating_sub(now.saturating_sub(assignment.created_at)).max(0)
+    } else {
+        0
+    };
+    (!assignment_within_budget(assignment.created_at, now), Some(remaining))
+}
+
 /// Global pause is an immediate native revocation of execution authority,
 /// even for an already-running read-only assignment. It never modifies the
 /// original user-issued mandate or silently renews it on resume.
@@ -501,6 +517,7 @@ pub(crate) fn inspect_headless_status(
     database_path: &std::path::Path, ticket_id: Option<&str>,
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
+    let observed_at = storage::now();
     let value = if let Some(ticket_id) = ticket_id {
         let snapshot = ticket_snapshot(&store, ticket_id, 50)?;
         serde_json::json!({
@@ -517,11 +534,17 @@ pub(crate) fn inspect_headless_status(
                 "allowedSideEffects": snapshot.mandate.allowed_side_effects,
                 "allowedToolCount": snapshot.mandate.allowed_tools.len()
             },
-            "assignments": snapshot.assignments.iter().map(|a| serde_json::json!({
-                "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
-                "state": &a.state, "attempt": a.attempt,
-                "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty())
-            })).collect::<Vec<_>>(),
+            "assignments": snapshot.assignments.iter().map(|a| {
+                let (run_budget_expired, remaining_run_budget_ms) =
+                    headless_assignment_budget(a, observed_at);
+                serde_json::json!({
+                    "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
+                    "state": &a.state, "attempt": a.attempt,
+                    "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty()),
+                    "runBudgetExpired": run_budget_expired,
+                    "remainingRunBudgetMs": remaining_run_budget_ms,
+                })
+            }).collect::<Vec<_>>(),
             "activity": snapshot.activity.iter().map(|a| serde_json::json!({
                 "kind": &a.kind, "at": a.at
             })).collect::<Vec<_>>()
@@ -1925,6 +1948,42 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_run_budget_diagnostic_is_native_redacted_and_nonmutating() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Secret headless objective",
+            "headless-budget", false,
+        ).unwrap();
+        assert!(launched);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(original["assignments"][0]["runBudgetExpired"], false);
+        assert!(original["assignments"][0]["remainingRunBudgetMs"].as_i64().unwrap() > 0);
+        // Simulate a silent provider past the native maximum assignment run.
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE session_id=?1",
+            params![sid, storage::now() - MAX_ASSIGNMENT_RUN_MS - 1000],
+        ).unwrap();
+        let overdue_text = inspect_headless_status(&store.path, Some(&ticket.id)).unwrap();
+        let overdue: serde_json::Value = serde_json::from_str(&overdue_text).unwrap();
+        assert_eq!(overdue["assignments"][0]["runBudgetExpired"], true);
+        assert_eq!(overdue["assignments"][0]["remainingRunBudgetMs"], 0);
+        assert!(!overdue_text.contains("Secret headless objective"));
+        // Inspection itself cannot terminate a native session, release its
+        // project lease or rewrite audit. An expired run is denied execution
+        // by the same native policy, while its owner must stop/reconcile it.
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), 1);
+        assert!(read_only_policy(&store, &sid).is_err());
+        assert!(!on_run_finished(&store, &sid, true, "late worker success").unwrap_or(false)
+            || get_ticket(&store, &ticket.id).unwrap().state != "waiting_approval");
+    }
 
     #[test]
     fn headless_inspection_is_read_only_redacted_and_safe_during_live_work() {

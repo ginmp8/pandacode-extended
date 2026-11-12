@@ -19,6 +19,9 @@ struct FrozenChildReservation {
     objective_sha256: String,
     policy_sha256: String,
     child_config_sha256: String,
+    /// Digest of the immutable task session's project, checkout and harness identity.
+    #[serde(default)]
+    session_scope_sha256: String,
 }
 
 /// Inspection reveals a pending native child, never a synthetic leaf result.
@@ -65,12 +68,23 @@ fn child_config(root: &CouncilConfig, child: &CouncilNestedReviewer) -> Result<T
 }
 
 fn frozen(
-    root: &TeamSnapshot, child: &CouncilNestedReviewer,
+    store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer,
     session_id: &str, child_config: &TeamConfig,
 ) -> Result<FrozenChildReservation> {
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
+    let parent = store.session(&root.session_id)?;
+    let session = store.session(session_id)?;
+    if session.project_id != parent.project_id || session.worktree_path != parent.worktree_path
+        || session.mode != "plan"
+    {
+        return Err("child_council_stale: child project, checkout or permission mode changed.".into());
+    }
+    let scope = serde_json::to_vec(&(
+        &session.project_id, &session.worktree_path, &session.provider,
+        &session.model, &session.reasoning_effort,
+    )).map_err(|e| e.to_string())?;
     Ok(FrozenChildReservation {
-        schema_version: 1,
+        schema_version: 2,
         root_session_id: root.session_id.clone(),
         root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
         bot_id: child.bot_id.clone(),
@@ -78,6 +92,7 @@ fn frozen(
         objective_sha256: digest(root.objective.as_bytes()),
         policy_sha256: digest(&serde_json::to_vec(council).map_err(|e| e.to_string())?),
         child_config_sha256: digest(&serde_json::to_vec(child_config).map_err(|e| e.to_string())?),
+        session_scope_sha256: digest(&scope),
     })
 }
 
@@ -96,7 +111,7 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
         return Err("child_council_stale: native child owner or session changed.".into());
     }
     let config = child_config(root.config.council.as_ref().ok_or("Council is off.")?, child)?;
-    if record != frozen(root, child, &child_session_id, &config)? {
+    if record != frozen(store, root, child, &child_session_id, &config)? {
         return Err("child_council_stale: child policy, objective or parent cycle changed.".into());
     }
     let stored = super::load(store, &child_session_id)?
@@ -150,7 +165,7 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
         let mut team = super::new_team(session.id.clone(), config.clone());
         team.status = "blocked".into();
         super::save(store, &mut team)?;
-        let record = frozen(root, child, &session.id, &config)?;
+        let record = frozen(store, root, child, &session.id, &config)?;
         super::record_request(store, &root.session_id, &key(root, &child.bot_id),
             "council_child", &serde_json::to_string(&record).map_err(|e| e.to_string())?, &session.id)?;
     }

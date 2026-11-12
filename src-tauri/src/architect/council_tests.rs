@@ -2083,6 +2083,15 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     }
     let store = state.store.lock().unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    let child_id = child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone();
+    store.db.execute("UPDATE sessions SET model='altered' WHERE id=?1", [&child_id]).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
+    store.db.execute("UPDATE sessions SET model='default' WHERE id=?1", [&child_id]).unwrap();
+    store.db.execute("UPDATE sessions SET worktree_path='foreign-checkout' WHERE id=?1", [&child_id]).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
+    let parent_checkout = store.session(&sid).unwrap().worktree_path;
+    store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1", rusqlite::params![child_id, parent_checkout]).unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
          WHERE parent_session_id=?1 AND kind='council_child'
